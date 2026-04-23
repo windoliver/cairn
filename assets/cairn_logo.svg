@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1024" height="1024" role="img" aria-label="Cairn logo">
+  <title>Cairn logo</title>
+  <g fill="#1f2937">
+    <ellipse cx="256" cy="104" rx="34" ry="16"/>
+    <ellipse cx="256" cy="164" rx="70" ry="24"/>
+    <ellipse cx="256" cy="234" rx="98" ry="34"/>
+    <ellipse cx="256" cy="324" rx="126" ry="46"/>
+    <path d="M98 408 C162 386, 350 386, 414 408 C344 402, 168 402, 98 408 Z"/>
+  </g>
+</svg>
