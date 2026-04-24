@@ -85,8 +85,12 @@ the offline-install promise — a new ADR, not an in-place revision.
   list moves over time. **Cairn does not hard-code a per-provider feature
   matrix in the binary.** Instead, the `LLMProvider` adapter probes at
   runtime (capabilities endpoint where available, otherwise a single
-  dry-call per feature) and advertises the result under `capabilities.llm.*`
-  (§8.0.a). Observed divergences at the time of writing — useful for
+  dry-call per feature) and advertises the result by including or omitting
+  the `cairn.mcp.v1.llm.chat` / `.embed` / `.json_mode` / `.tools` strings
+  in `status.capabilities` — the flat-array surface defined by §8.0.a (see
+  the "`cairn status` capability advertisement" section below for the full
+  shape; there is no second `capabilities.llm.*` map and no `detected.*`
+  field). Observed divergences at the time of writing — useful for
   implementers to sanity-check their probes against, not a contract:
   - **Ollama**: historically rejected or ignored several OpenAI chat-request
     fields (including `logit_bias`, `n > 1`, image URLs, logprobs, and
@@ -128,8 +132,9 @@ per-verb flag
   > OPENAI_BASE_URL  (preferred — matches async-openai's own env name)
   > OPENAI_API_BASE  (legacy alias — community convention in aider, the `llm`
                      CLI, older OpenAI SDKs; read by Cairn explicitly)
-  > OPENAI_API_KEY
-  > OLLAMA_HOST     (if set and `llm.provider: ollama`, resolved into base_url)
+  > OPENAI_API_KEY  (credential only — never an explicit-intent signal; see below)
+  > OLLAMA_HOST     (explicit-intent signal: implies `provider: ollama`,
+                     resolved into `base_url = http://$OLLAMA_HOST/v1`)
   > .cairn/config.yaml   (repo-local)
   > ~/.config/cairn/config.yaml
   > compiled defaults (= no provider)
@@ -166,6 +171,25 @@ A bare `OPENAI_API_KEY` with none of the above yields `llm.not_configured`
 closed with exit `78`). Cairn logs a one-time `warn` at startup:
 `OPENAI_API_KEY detected but no LLM provider configured — ignoring key;
 set llm.provider or CAIRN_LLM_BASE_URL to enable LLM features`.
+
+**Explicit-intent signals that name a base URL win over `OLLAMA_HOST`.** If
+both `OPENAI_BASE_URL` (or `OPENAI_API_BASE`) and `OLLAMA_HOST` are set,
+the OpenAI-style URL wins and `provider` resolves to `openai-compatible`;
+`OLLAMA_HOST` is ignored with a one-time `warn`. `OLLAMA_HOST` alone is
+sufficient — it both fixes the provider and resolves the base URL.
+
+**Test matrix to commit alongside the adapter** (golden cases for
+`cairn-cli` config resolution):
+
+| `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_API_BASE` | `OLLAMA_HOST` | `llm.provider` (yaml) | Expected outcome |
+|---|---|---|---|---|---|
+| set | unset | unset | unset | unset | `llm.not_configured`, warn-log, exit `78` on LLM verbs |
+| unset | unset | unset | `localhost:11434` | unset | configured, `provider: ollama`, `base_url: http://localhost:11434/v1` |
+| set | `http://localhost:1234/v1` | unset | unset | unset | configured, OpenAI-compat to LM Studio |
+| set | `https://api.openai.com/v1` | unset | `localhost:11434` | unset | configured to OpenAI; `OLLAMA_HOST` ignored, warn-log |
+| set | unset | `http://gateway/v1` | unset | unset | configured, OpenAI-compat to gateway via legacy alias |
+| set | `http://a/v1` | `http://b/v1` | unset | unset | configured to `a/v1`; `OPENAI_API_BASE` ignored, warn-log |
+| unset | unset | unset | unset | `ollama` (no base_url) | configured if `model` set; otherwise `llm.not_configured` |
 
 ### `cairn status` capability advertisement
 

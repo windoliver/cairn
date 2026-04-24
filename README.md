@@ -86,6 +86,34 @@ The first shippable version is scoped to the smallest useful memory substrate:
 - Five harness hooks plus opt-in local sensors for IDE, terminal, clipboard, voice, screen, and recording-to-text capture.
 - Record-level `forget` with index drains and physical purge.
 - Capability-gated search behavior: semantic and hybrid are advertised by default; if `search.local_embeddings: false` is set and no P1 provider is configured, those modes are removed from capabilities and rejected with `CapabilityUnavailable`.
+- **No bundled LLM runtime.** The `LLMProvider` is optional at P0 and operator-configured. With no provider set, `ingest`, `retrieve`, keyword/semantic/hybrid `search`, `forget`, `capture_trace`, and `lint` all keep working; `LLMExtractor`, `LLMDreamWorker`, `summarize`, and `assemble_hot` fail closed with `CapabilityUnavailable { code: "llm.not_configured" }` (CLI exit `78`). See [ADR 0001](docs/design/decisions/0001-llm-default.md).
+
+## LLM provider (optional)
+
+Cairn works offline with zero credentials and zero LLM. Enable LLM-backed enrichment with any OpenAI-compatible endpoint — local or cloud — via `.cairn/config.yaml`:
+
+```yaml
+llm:
+  provider: openai-compatible    # one in-tree adapter (cairn-llm-openai-compat) covers them all
+  base_url: http://localhost:11434/v1   # Ollama default; LM Studio uses :1234/v1
+  model:    llama3.2                    # any model the endpoint serves
+  api_key:  ollama                      # Ollama requires any non-empty string; cloud providers use a real key
+```
+
+**Local quickstart with Ollama** (no cloud, no key required):
+
+```bash
+brew install ollama && ollama serve &        # one-time install
+ollama pull llama3.2                         # one-time model fetch
+# then add the llm: block above to .cairn/config.yaml, or:
+export CAIRN_LLM_PROVIDER=ollama
+export CAIRN_LLM_BASE_URL=http://localhost:11434/v1
+export CAIRN_LLM_MODEL=llama3.2
+cairn status --json | jq '.capabilities[] | select(startswith("cairn.mcp.v1.llm"))'
+# → "cairn.mcp.v1.llm.chat", "cairn.mcp.v1.llm.embed", …  (whatever the model supports)
+```
+
+**Cloud providers** (OpenAI, Groq, Together, OpenRouter, vLLM, LiteLLM, etc.) drop in by setting `base_url` to their `/v1` endpoint and providing an API key. A bare `OPENAI_API_KEY` in your shell does **not** silently route Cairn to OpenAI's cloud — Cairn requires an explicit-intent signal (`llm.provider` in config, or one of `CAIRN_LLM_*`, `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `OLLAMA_HOST` in the environment) before honouring the key. Full precedence rules in [ADR 0001](docs/design/decisions/0001-llm-default.md#config-precedence-pins-cairn-cli-behavior).
 
 ## Roadmap
 
