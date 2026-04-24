@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/prelude/status.json",
+  "title": "Cairn status response",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "server_info", "capabilities", "extensions"],
+  "properties": {
+    "contract": { "const": "cairn.mcp.v1" },
+    "server_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "build", "started_at", "incarnation"],
+      "properties": {
+        "version":     { "type": "string" },
+        "build":       { "type": "string" },
+        "started_at":  { "type": "string", "format": "date-time" },
+        "incarnation": { "type": "string", "description": "ULID minted at daemon start." }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "../capabilities/capabilities.json" }
+    },
+    "extensions": {
+      "type": "array",
+      "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    }
+  }
+}

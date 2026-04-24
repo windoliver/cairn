@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/prelude/handshake.json",
+  "title": "Cairn handshake response",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "challenge"],
+  "properties": {
+    "contract": { "const": "cairn.mcp.v1" },
+    "challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nonce", "expires_at"],
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Fresh 16-byte nonce; single-use; stored in outstanding_challenges."
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unix epoch milliseconds; default TTL 60 s."
+        }
+      }
+    }
+  }
+}
