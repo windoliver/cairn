@@ -49,9 +49,9 @@ Every capability in Cairn is tagged P0 / P1 / P2 / P3. Readers skimming for "wha
 
 **The contract surface is stable at P0.** MCP verb set, vault layout invariants, record schema, WAL state machines — all defined at P0 and never broken by higher tiers. What changes between tiers is which **backends, workers, and workflows** are active; the wire format, file format, and audit trail never change.
 
-**Rule of thumb:** if a feature requires a **Python sidecar or a cloud credential**, it is at least P1. **P0 is pure Rust + pure SQLite + markdown + an `LLMProvider` of the operator's choice.** An `LLMProvider` at P0 can be any local model (Ollama, llama.cpp, vLLM) or any OpenAI-compatible endpoint — the operator configures it at `cairn init` time. **No LLM call leaves the laptop unless the operator configured a cloud endpoint.**
+**Rule of thumb:** if a feature requires a **Python sidecar or a cloud credential**, it is at least P1. **P0 is pure Rust + pure SQLite + markdown + an `LLMProvider` of the operator's choice.** An `LLMProvider` at P0 can be any local model (Ollama, llama.cpp, vLLM) or any OpenAI-compatible endpoint — the operator configures it at `cairn init` time. **No LLM call leaves the laptop unless the operator configured a cloud endpoint.** The in-tree P0 adapter is `cairn-llm-openai-compat`, built on `async-openai` with a configurable `base_url`; **no LLM runtime is bundled with the binary** and no LLM network call is made at install time. (Local semantic search uses a separate ~25 MB `candle` embedding model fetched on first run per §3 — an `embedding.*` concern, not `llm.*`. Fully offline vaults opt out with `search.local_embeddings: false`.) See [ADR 0001](decisions/0001-llm-default.md) for the decision record.
 
-**P0 degrades cleanly when no LLM is configured** — `LLMExtractor` and `LLMDreamWorker` report `llm_unavailable` at startup; the `RegexExtractor` fallback chain still captures hook events + "tell it directly" triggers; rolling-summary `ConsolidationWorkflow` skips with a `consolidation_deferred` status in `lint-report.md`. The vault keeps accepting writes; only LLM-backed enrichment pauses. This is intentional: P0 guarantees the substrate works on a fresh offline laptop; LLM-backed extraction is an optional enrichment, not a structural dependency.
+**P0 degrades cleanly when no LLM is configured** — `LLMExtractor` and `LLMDreamWorker` return `CapabilityUnavailable { code: "llm.not_configured" }` at invocation (CLI exits `78` `EX_CONFIG`; MCP returns `CallToolResult { isError: true, … }`); the `RegexExtractor` fallback chain still captures hook events + "tell it directly" triggers; rolling-summary `ConsolidationWorkflow` skips with a `consolidation_deferred` status in `lint-report.md`. The vault keeps accepting writes; only LLM-backed enrichment pauses. This is intentional: P0 guarantees the substrate works on a fresh offline laptop; LLM-backed extraction is an optional enrichment, not a structural dependency. Stable error codes for every failure mode (`llm.not_configured`, `llm.provider_unreachable` → `69` `EX_UNAVAILABLE`, `llm.auth_denied` → `77` `EX_NOPERM`, `llm.capability_missing` → `69`) are pinned in ADR 0001. The presence of `cairn.mcp.v1.llm.chat` / `.embed` / `.json_mode` / `.tools` in `status.capabilities` (§8.0.a flat array) is the wire-stable signal callers gate on; error `code` strings are the remediation-facing signal when a verb fails closed. Callers never have to parse human error messages.
 
 | Concept | P0 position | P1+ upgrade path |
 |---------|-------------|-------------------|
@@ -600,10 +600,17 @@ store:
   # At P1:  kind: nexus-sandbox — Nexus sidecar adds nexus-data/ directory alongside .cairn/cairn.db
   # At P2:  kind: nexus-full   — federates to a remote Nexus hub (Postgres+pgvector)
 llm:
-  provider: openai-compatible
-  base_url: https://…
+  # P0 compiled default: no provider. LLM-dependent verbs fail closed with
+  # CapabilityUnavailable { code: "llm.not_configured" } until the operator
+  # configures one. See ADR 0001 (docs/design/decisions/0001-llm-default.md).
+  # provider: openai-compatible       # openai-compatible | custom:<name>
+  # base_url: http://localhost:11434/v1
+  # model:    llama3.2
+  # api_key:  ${OPENAI_API_KEY}       # Ollama requires any non-empty string
 workflows:
-  orchestrator: temporal      # temporal | local
+  orchestrator: local           # local | temporal — P0 default is the in-process
+                                # tokio + SQLite job table (brief §4.0 row 3);
+                                # `temporal` is opt-in and requires a Temporal host.
 ```
 
 A new vault inherits the default config. Teams fork a config as a shareable template (e.g. `cairn init --template research`, `--template engineering`, `--template personal`).
@@ -1069,7 +1076,7 @@ Everything in Cairn is a pure function over data, except these seven interfaces.
 | # | Contract | Priority | Purpose | Default implementation |
 |---|----------|----------|---------|------------------------|
 | 1 | `MemoryStore` | P0 | typed CRUD + ANN + FTS + graph over `MemoryRecord` | **P0 default = pure SQLite** (`.cairn/cairn.db`, FTS5 keyword search, no sidecar, ~15 MB binary, zero deps); **P1 default = Nexus `sandbox` profile** (Python sidecar — BM25S lexical index + `sqlite-vec` ANN + `litellm` embeddings + ReDB metastore + CAS blob store, all under `nexus-data/` alongside the unchanged `.cairn/cairn.db`; ~300–400 MB RSS, <5 s warm boot). **Scale‑up path = federation**, not adapter swap — sandbox instances delegate to a **Nexus `full`** hub zone (PostgreSQL + pgvector + Dragonfly) over HTTP. Every tier talks to its backend through the same `MemoryStore` trait; the P0→P1 jump is a config line (`store.kind: sqlite` → `store.kind: nexus-sandbox`), not a code change. |
-| 2 | `LLMProvider` | P0 | one function — `complete(prompt, schema?) → text \| json` | OpenAI‑compatible (local Ollama, any cloud) |
+| 2 | `LLMProvider` | P0 | one function — `complete(prompt, schema?) → text \| json` | **`cairn-llm-openai-compat`** — one in-tree adapter over `async-openai` with a configurable `base_url`, serving OpenAI, Ollama (`:11434/v1`), LM Studio (`:1234/v1`), vLLM, LiteLLM, Groq, Together, OpenRouter, etc. **No LLM runtime bundled with the binary**; operator configures at `cairn init`. `cairn status` probes `GET :11434/api/tags` (≤300 ms) and reports any running local Ollama under `detected.ollama` without auto-configuring it. When unconfigured, LLM-dependent verbs fail closed (`CapabilityUnavailable { code: "llm.not_configured", … }`, exit `78`). See [ADR 0001](decisions/0001-llm-default.md). |
 | 3 | `WorkflowOrchestrator` | P0 | durable scheduling + execution for background loops | **Rust‑native default**: `tokio` + a SQLite‑backed job table (durable, crash‑safe, single binary, zero services). **Optional Temporal adapter**: `temporalio-sdk` + `temporalio-client` (both published on crates.io, currently prerelease) when GA; a TypeScript Temporal worker sidecar as the safe path today |
 | 4 | `SensorIngress` | P0 | push raw observations into the pipeline | hook sensors (P0); IDE, clipboard, screen (opt‑in), web clip (P1); Slack/email/GitHub (P2) |
 | 5 | `MCPServer` | P0 | harness‑facing tools | stdio + SSE; eight core verbs + opt‑in extensions (§8) |
@@ -1080,7 +1087,7 @@ Everything else — Extractor, Filter, Classifier, Scope, Matcher, Ranker, Conso
 
 ### 4.1 Plugin architecture
 
-Cairn is plugin‑first end to end. "Plugin" means exactly one thing: a crate or package that **implements a Cairn contract trait** and registers itself through the shared loader. There is no distinction between "built‑in" and "third‑party" at runtime — Cairn's own `cairn-store-nexus`, `cairn-llm-openai`, and `cairn-sensors-local` crates use the same registration path a third‑party `cairn-store-qdrant` crate would.
+Cairn is plugin‑first end to end. "Plugin" means exactly one thing: a crate or package that **implements a Cairn contract trait** and registers itself through the shared loader. There is no distinction between "built‑in" and "third‑party" at runtime — Cairn's own `cairn-store-nexus`, `cairn-llm-openai-compat` (see [ADR 0001](decisions/0001-llm-default.md)), and `cairn-sensors-local` crates use the same registration path a third‑party `cairn-store-qdrant` crate would.
 
 **Registry rules:**
 
@@ -1698,9 +1705,9 @@ pipeline:
     chain:
       - worker: regex              # P0 always
         kinds: [trace, sensor_observation, user_signal]
-      - worker: llm                # P0 default for turn capture
+      - worker: llm                # P0 default for turn capture (runs iff an LLMProvider is configured; skipped with llm.not_configured otherwise — ADR 0001)
         kinds: [user, feedback, rule, playbook, reasoning, strategy_success]
-        model: ${LLM_MODEL:-gpt-4o-mini}
+        model: ${CAIRN_LLM_MODEL}    # no compiled default; operator sets this (e.g. "llama3.2" for local Ollama, "gpt-4o-mini" for OpenAI)
         budget: { max_tokens: 2000, max_wall_ms: 500 }
       - worker: agent              # P2 opt-in, only for flagged events
         trigger: confidence_below  # 0.6 threshold
@@ -4121,7 +4128,7 @@ Every user story below maps to existing Cairn sections. Where a story asked for 
 ### P3 stories
 
 **US7 — Search across prior conversations and memories (SRE + Developer).** *Version‑scoped; matches the sequencing matrix, not a single "P3" box.*
-- **v0.1 (keyword only, capability-gated rejection — no silent fallback).** `search(mode: "keyword")` runs SQLite **FTS5** over the local `.cairn/cairn.db` — no Python, no embedding key, no network. `mode: "semantic"` or `"hybrid"` is **rejected with `CapabilityUnavailable`** on v0.1 runtimes, per the §8.0 verb 2 capability gate — clients must inspect `status.capabilities` for `cairn.mcp.v1.search.semantic` / `.hybrid` before issuing those modes. There is no silent FTS5 fallback; fail-closed is the only behavior. A wire-compat CI test (§15) asserts that a v0.1 runtime rejects unadvertised search modes. (The `semantic_degraded` flag still exists on read responses but is only set when a v0.2+ runtime has a *transient* embedding-provider outage, not as a v0.1 degraded mode.)
+- **v0.1 (all three modes at P0 via local embeddings; capability-gated, no silent fallback).** Per §3 / §3.0 / §8.0.a, v0.1 advertises `cairn.mcp.v1.search.keyword` always and `cairn.mcp.v1.search.semantic` / `.hybrid` whenever local embeddings are available — the default P0 config ships a pure-Rust `candle` runtime and a small model (`bge-small-en-v1.5` or `all-MiniLM-L6-v2`, ~25 MB, fetched to `.cairn/models/` on first run). `search(mode: "keyword")` runs SQLite **FTS5** over the local `.cairn/cairn.db`. `mode: "semantic"` runs `sqlite-vec` ANN over local candle embeddings; `mode: "hybrid"` blends both locally. When an operator opts out with `search.local_embeddings: false` **and** has no P1+ provider, the runtime drops `cairn.mcp.v1.search.semantic` / `.hybrid` from `status.capabilities` and rejects those modes with `CapabilityUnavailable` — per the §8.0 verb 2 capability gate, clients MUST inspect `status.capabilities` before issuing a mode. There is no silent FTS5 fallback; fail-closed is the only behavior. A wire-compat CI test (§15) asserts that a runtime rejects any un-advertised search mode. (The `semantic_degraded` flag is set only when a v0.2+ runtime has a *transient* embedding-provider outage.)
 - **v0.2 (semantic + hybrid via Nexus sandbox).** `cairn-store-nexus` (§13) is enabled; `mode: "semantic"` now uses `sqlite-vec` ANN with `litellm` embeddings (OpenAI / local Ollama / Cohere) inside the Nexus `sandbox` sidecar, and `mode: "hybrid"` blends **BM25S** keyword scores with semantic scores via Nexus's `search` brick. `semantic_degraded` flips to `false`.
 - **v0.3 (cross‑tenant federation, true P3).** `search(federation: "on")` fans out to other Cairn vaults the caller has been granted `ShareLinkGrant` for; results merge across vaults with per‑source provenance. Requires the `cairn.federation.v1` extension namespace (§8.0.a).
 - Results shape (all versions): every hit returns `{record_id, snippet, timestamp, session_id, score, actor_chain, vault_id?}` so SRE audits and developer reuse both have full provenance.
@@ -4420,7 +4427,7 @@ Every capability above is derivable from these seven invariants — if you viola
 ## 20. Open Questions
 
 1. Governance: single‑repo vs. monorepo organization; maintainer model.
-2. Default LLM for local tier: ship Ollama bootstrap, or require user install?
+2. ~~Default LLM for local tier: ship Ollama bootstrap, or require user install?~~ — **Resolved 2026-04-24 ([ADR 0001](decisions/0001-llm-default.md)):** no bundled runtime; ship one OpenAI-compatible adapter and detect local providers in `cairn status`.
 3. Desktop GUI: ship in v0.2 or defer to v0.3?
 4. Skill distillation format: adopt an existing spec, or define Cairn‑native?
 5. Propagation transport: direct `MemoryStore` write, or a thin publish/subscribe layer?
