@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/forget.json",
+  "title": "Cairn verb: forget",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "forget",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "forget_capability",
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use when the user asks to delete or forget a specific record / session / scope",
+      "use as part of a compliance-driven forget-me flow"
+    ],
+    "negative": [
+      "do NOT use to 'mark as resolved' — that belongs to an ingest with kind:feedback",
+      "do NOT use on a draft the user wants to edit — that belongs to ingest with version bump"
+    ],
+    "exclusivity": "this is the single delete surface — there is no other delete path"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "oneOf": [
+        { "$ref": "#/$defs/ArgsRecord" },
+        { "$ref": "#/$defs/ArgsSession" },
+        { "$ref": "#/$defs/ArgsScope" }
+      ]
+    },
+    "ArgsRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "record_id"],
+      "x-cairn-capability": "cairn.mcp.v1.forget.record",
+      "x-cairn-since": "v0.1",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          { "name": "record_id", "long": "record", "value_source": "string" }
+        ]
+      },
+      "properties": {
+        "mode":      { "const": "record" },
+        "record_id": { "type": "string" }
+      }
+    },
+    "ArgsSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "session_id"],
+      "x-cairn-capability": "cairn.mcp.v1.forget.session",
+      "x-cairn-since": "v0.2",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          { "name": "session_id", "long": "session", "value_source": "string" }
+        ]
+      },
+      "properties": {
+        "mode":       { "const": "session" },
+        "session_id": { "type": "string" }
+      }
+    },
+    "ArgsScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "scope"],
+      "x-cairn-capability": "cairn.mcp.v1.forget.scope",
+      "x-cairn-since": "v0.3",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          { "name": "scope", "long": "scope", "value_source": "json" }
+        ]
+      },
+      "properties": {
+        "mode":  { "const": "scope" },
+        "scope": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deleted_count"],
+      "properties": {
+        "deleted_count": { "type": "integer", "minimum": 0 },
+        "tombstones":    { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
