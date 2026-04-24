@@ -69,8 +69,8 @@
       "additionalProperties": false,
       "required": ["record_id", "session_id"],
       "properties": {
-        "record_id":  { "type": "string", "description": "ULID of the newly stored record." },
-        "session_id": { "type": "string", "description": "Resolved session (created if absent — see §8.1)." }
+        "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
       }
     }
   }

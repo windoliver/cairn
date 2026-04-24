@@ -58,12 +58,12 @@
             "required": ["kind", "message"],
             "properties": {
               "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap"] },
-              "message":   { "type": "string" },
-              "record_id": { "type": "string" }
+              "message":   { "type": "string", "minLength": 1 },
+              "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
             }
           }
         },
-        "report_path": { "type": "string" }
+        "report_path": { "type": "string", "minLength": 1 }
       }
     }
   }

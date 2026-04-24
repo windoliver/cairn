@@ -270,6 +270,68 @@ fn ref_resolves(source_path: &Path, reference: &str) -> bool {
     resolve_fragment(&target_doc, fragment).is_some()
 }
 
+fn error_code_enum() -> BTreeSet<String> {
+    let err = read_json(&schema_dir().join("errors/error.json"));
+    let arr = err
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("errors/error.json: oneOf must be an array");
+    arr.iter()
+        .map(|branch| {
+            branch
+                .get("properties")
+                .and_then(|p| p.get("code"))
+                .and_then(|c| c.get("const"))
+                .and_then(Value::as_str)
+                .expect("every error.oneOf branch must pin properties.code.const")
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn every_error_code_is_in_exactly_one_response_status_family() {
+    let resp = read_json(&schema_dir().join("envelope/response.json"));
+    let families = resp
+        .get("x-cairn-error-code-families")
+        .and_then(Value::as_object)
+        .expect("response.json: x-cairn-error-code-families must be an object");
+
+    let mut seen: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (family, codes) in families {
+        let codes = codes
+            .as_array()
+            .unwrap_or_else(|| panic!("family {family} must be an array"));
+        for code in codes {
+            let code = code
+                .as_str()
+                .unwrap_or_else(|| panic!("family {family} entries must be strings"))
+                .to_string();
+            seen.entry(code).or_default().push(family.clone());
+        }
+    }
+
+    let defined = error_code_enum();
+    // Every defined error code appears in exactly one family.
+    for code in &defined {
+        let families_for = seen.get(code);
+        match families_for {
+            None => panic!("error code {code:?} has no response status family"),
+            Some(fs) if fs.len() != 1 => {
+                panic!("error code {code:?} appears in multiple families: {fs:?}")
+            }
+            _ => {}
+        }
+    }
+    // Every family entry is a real error code.
+    for code in seen.keys() {
+        assert!(
+            defined.contains(code),
+            "family lists {code:?} but errors/error.json does not define it"
+        );
+    }
+}
+
 fn mandatory_surface_set() -> BTreeSet<String> {
     let caps = read_json(&schema_dir().join("capabilities/capabilities.json"));
     let arr = caps
@@ -318,9 +380,167 @@ fn every_verb_and_prelude_surface_is_in_capabilities_or_mandatory_list() {
         }
     }
 
+    // Extension namespaces: each registered triple must carry an
+    // x-cairn-capability that exists in the capability enum. This ties
+    // status.extensions advertisement to the capability registry so the
+    // two cannot drift.
+    let reg = read_json(&schema_dir().join("extensions/registry.json"));
+    let branches = reg
+        .get("$defs")
+        .and_then(|d| d.get("namespace"))
+        .and_then(|n| n.get("oneOf"))
+        .and_then(Value::as_array)
+        .expect("extensions/registry.json $defs.namespace.oneOf must exist");
+    for branch in branches {
+        let props = branch
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("namespace branch must have properties");
+        let name = props
+            .get("name")
+            .and_then(|n| n.get("const"))
+            .and_then(Value::as_str)
+            .expect("namespace branch must pin name.const")
+            .to_string();
+        let cap = props
+            .get("x-cairn-capability")
+            .and_then(|c| c.get("const"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        match cap {
+            None => missing.push(format!("extension.{name} (no x-cairn-capability)")),
+            Some(c) if !enum_set.contains(&c) => {
+                missing.push(format!("extension.{name} -> {c} (not in capability enum)"))
+            }
+            _ => {}
+        }
+    }
+
     assert!(
         missing.is_empty(),
         "surfaces not covered by capability enum or mandatory allowlist: {missing:?}"
+    );
+}
+
+fn is_string_constrained(node: &serde_json::Map<String, Value>) -> bool {
+    for key in [
+        "minLength",
+        "pattern",
+        "enum",
+        "format",
+        "const",
+        "contentEncoding",
+        "oneOf",
+        "anyOf",
+    ] {
+        if node.contains_key(key) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_array_constrained(node: &serde_json::Map<String, Value>) -> bool {
+    if node.contains_key("minItems") || node.contains_key("const") || node.contains_key("enum") {
+        return true;
+    }
+    if let Some(items) = node.get("items").and_then(Value::as_object) {
+        if items.contains_key("$ref")
+            || items.contains_key("const")
+            || items.contains_key("enum")
+            || items.contains_key("oneOf")
+            || items.contains_key("anyOf")
+        {
+            return true;
+        }
+        if let Some(ty) = items.get("type").and_then(Value::as_str) {
+            if ty == "object" {
+                return true;
+            }
+            if ty == "string" && is_string_constrained(items) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_integer_constrained(node: &serde_json::Map<String, Value>) -> bool {
+    for key in ["minimum", "maximum", "enum", "const", "exclusiveMinimum", "exclusiveMaximum"] {
+        if node.contains_key(key) {
+            return true;
+        }
+    }
+    false
+}
+
+fn walk_unguarded(
+    doc: &Value,
+    pointer: String,
+    file: &str,
+    allowlist: &BTreeSet<(String, String)>,
+    out: &mut Vec<String>,
+) {
+    match doc {
+        Value::Object(map) => {
+            if let Some(ty) = map.get("type").and_then(Value::as_str) {
+                let ok = match ty {
+                    "string" => is_string_constrained(map),
+                    "array" => is_array_constrained(map),
+                    "integer" => is_integer_constrained(map),
+                    _ => true,
+                };
+                if !ok {
+                    let key = (file.to_string(), pointer.clone());
+                    if !allowlist.contains(&key) {
+                        out.push(format!("{file}#{pointer} (unguarded {ty})"));
+                    }
+                }
+            }
+            for (k, v) in map {
+                let escaped = k.replace('~', "~0").replace('/', "~1");
+                walk_unguarded(v, format!("{pointer}/{escaped}"), file, allowlist, out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                walk_unguarded(item, format!("{pointer}/{i}"), file, allowlist, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_typed_field_asserts_bounds_or_is_allowlisted() {
+    // Open fields with no assertion must be explicitly allowlisted with a
+    // reason; a bare `"type": "string"` anywhere else is a policy failure.
+    let allow: BTreeSet<(String, String)> = [
+        ("verbs/search.json",       "/$defs/Hit/properties/snippet"),
+        ("verbs/search.json",       "/$defs/Hit/properties/citation"),
+        ("verbs/assemble_hot.json", "/$defs/Data/properties/prefix"),
+        ("verbs/retrieve.json",     "/$defs/DataRecord/properties/body"),
+        ("verbs/ingest.json",       "/$defs/Args/properties/kind"),
+        // kind has minLength:1 — guarded by parent fallback; skip
+    ]
+        .iter()
+        .map(|(f, p)| (f.to_string(), p.to_string()))
+        .collect();
+
+    let mut findings: Vec<String> = Vec::new();
+    for path in manifest_paths() {
+        let rel = path
+            .strip_prefix(schema_dir())
+            .expect("path under schema dir")
+            .to_string_lossy()
+            .into_owned();
+        let v = read_json(&path);
+        walk_unguarded(&v, String::new(), &rel, &allow, &mut findings);
+    }
+    assert!(
+        findings.is_empty(),
+        "unguarded typed fields found (add a minLength/minItems/minimum or allowlist the pointer):\n  {}",
+        findings.join("\n  ")
     );
 }
 

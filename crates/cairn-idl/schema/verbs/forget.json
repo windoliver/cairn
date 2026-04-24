@@ -40,7 +40,7 @@
       },
       "properties": {
         "mode":      { "const": "record" },
-        "record_id": { "type": "string", "minLength": 1 }
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
       }
     },
     "ArgsSession": {
@@ -83,7 +83,7 @@
       "required": ["deleted_count"],
       "properties": {
         "deleted_count": { "type": "integer", "minimum": 0 },
-        "tombstones":    { "type": "array", "items": { "type": "string" } }
+        "tombstones":    { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } }
       }
     }
   }

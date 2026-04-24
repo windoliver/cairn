@@ -34,14 +34,14 @@
         "record_ids": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string" }
+          "items": { "$ref": "../common/primitives.json#/$defs/Ulid" }
         },
         "persist": {
           "type": "boolean",
           "x-cairn-auth": "write_capability",
           "description": "When true, files the synthesis as a new reference or strategy_success memory."
         },
-        "kind":      { "type": "string", "description": "Kind to file under if persist is true." },
+        "kind":      { "type": "string", "minLength": 1, "description": "Kind to file under if persist is true." },
         "citations": { "type": "string", "enum": ["on", "compact", "off"] }
       }
     },
@@ -50,8 +50,8 @@
       "additionalProperties": false,
       "required": ["summary"],
       "properties": {
-        "summary":            { "type": "string" },
-        "persisted_record_id":{ "type": "string", "description": "Present when persist was true." }
+        "summary":            { "type": "string", "minLength": 1 },
+        "persisted_record_id":{ "$ref": "../common/primitives.json#/$defs/Ulid", "description": "Present when persist was true." }
       }
     }
   }

@@ -40,12 +40,12 @@
         "additionalProperties": false,
         "required": ["gate", "result"],
         "properties": {
-          "gate": { "type": "string" },
+          "gate": { "type": "string", "minLength": 1 },
           "result": {
             "type": "string",
             "enum": ["pass", "deny", "error"]
           },
-          "detail": { "type": "string" }
+          "detail": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -71,8 +71,74 @@
     { "if":   { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
       "then": { "required": ["data"], "not": { "required": ["error"] } } },
     { "if":   { "properties": { "status": { "const": "rejected" } },  "required": ["status"] },
-      "then": { "required": ["error"], "not": { "required": ["data"] } } },
+      "then": {
+        "required": ["error"],
+        "not": { "required": ["data"] },
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "InvalidArgs",
+                  "InvalidFilter",
+                  "CapabilityUnavailable",
+                  "UnknownVerb",
+                  "ExpiredIntent",
+                  "ReplayDetected",
+                  "OutOfOrderSequence",
+                  "RevokedKey",
+                  "MissingSignature",
+                  "Unauthorized"
+                ]
+              }
+            },
+            "required": ["code"]
+          }
+        }
+      }
+    },
     { "if":   { "properties": { "status": { "const": "aborted" } },   "required": ["status"] },
-      "then": { "required": ["error"], "not": { "required": ["data"] } } }
-  ]
+      "then": {
+        "required": ["error"],
+        "not": { "required": ["data"] },
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "NotFound",
+                  "ConflictVersion",
+                  "QuarantineRequired",
+                  "PluginSuspended",
+                  "Internal"
+                ]
+              }
+            },
+            "required": ["code"]
+          }
+        }
+      }
+    }
+  ],
+  "x-cairn-error-code-families": {
+    "rejected": [
+      "InvalidArgs",
+      "InvalidFilter",
+      "CapabilityUnavailable",
+      "UnknownVerb",
+      "ExpiredIntent",
+      "ReplayDetected",
+      "OutOfOrderSequence",
+      "RevokedKey",
+      "MissingSignature",
+      "Unauthorized"
+    ],
+    "aborted": [
+      "NotFound",
+      "ConflictVersion",
+      "QuarantineRequired",
+      "PluginSuspended",
+      "Internal"
+    ]
+  }
 }

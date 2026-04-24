@@ -17,7 +17,11 @@
     { "const": "cairn.mcp.v1.retrieve.profile",  "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.forget.record",     "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.forget.session",    "x-cairn-since": "v0.2" },
-    { "const": "cairn.mcp.v1.forget.scope",      "x-cairn-since": "v0.3" }
+    { "const": "cairn.mcp.v1.forget.scope",      "x-cairn-since": "v0.3" },
+    { "const": "cairn.mcp.v1.extension.aggregate",   "x-cairn-since": "v0.2" },
+    { "const": "cairn.mcp.v1.extension.admin",       "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.extension.federation",  "x-cairn-since": "v0.3" },
+    { "const": "cairn.mcp.v1.extension.sessiontree", "x-cairn-since": "v0.3" }
   ],
   "x-cairn-mandatory-surfaces": [
     { "surface": "prelude.status",        "since": "v0.1", "reason": "Required for version / incarnation probe before any signed intent." },

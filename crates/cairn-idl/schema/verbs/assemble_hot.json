@@ -28,8 +28,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "session_id": { "type": "string" },
-        "budget":     { "type": "integer", "minimum": 0, "description": "Byte budget for the assembled prefix (default 25000)." }
+        "session_id": { "type": "string", "minLength": 1 },
+        "budget":     { "type": "integer", "minimum": 0, "maximum": 4194304, "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB)." }
       }
     },
     "Data": {
@@ -37,8 +37,8 @@
       "additionalProperties": false,
       "required": ["prefix", "bytes"],
       "properties": {
-        "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt." },
-        "bytes":  { "type": "integer", "minimum": 0 }
+        "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available." },
+        "bytes":  { "type": "integer", "minimum": 0, "maximum": 4194304 }
       }
     }
   }

@@ -14,46 +14,50 @@
   },
   "$defs": {
     "namespace": {
-      "description": "One of the four registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole triple.",
+      "description": "One of the four registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole quadruple (name + since + enabler + capability). The capability string ties negotiation to the shared capabilities enum so status.extensions and status.capabilities cannot drift.",
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "x-cairn-since", "enabler"],
+          "required": ["name", "x-cairn-since", "enabler", "x-cairn-capability"],
           "properties": {
-            "name":          { "const": "cairn.aggregate.v1" },
-            "x-cairn-since": { "const": "v0.2" },
-            "enabler":       { "const": "agent.enable_aggregate" }
+            "name":                { "const": "cairn.aggregate.v1" },
+            "x-cairn-since":       { "const": "v0.2" },
+            "enabler":             { "const": "agent.enable_aggregate" },
+            "x-cairn-capability":  { "const": "cairn.mcp.v1.extension.aggregate" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "x-cairn-since", "enabler"],
+          "required": ["name", "x-cairn-since", "enabler", "x-cairn-capability"],
           "properties": {
-            "name":          { "const": "cairn.admin.v1" },
-            "x-cairn-since": { "const": "v0.1" },
-            "enabler":       { "const": "operator role" }
+            "name":                { "const": "cairn.admin.v1" },
+            "x-cairn-since":       { "const": "v0.1" },
+            "enabler":             { "const": "operator role" },
+            "x-cairn-capability":  { "const": "cairn.mcp.v1.extension.admin" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "x-cairn-since", "enabler"],
+          "required": ["name", "x-cairn-since", "enabler", "x-cairn-capability"],
           "properties": {
-            "name":          { "const": "cairn.federation.v1" },
-            "x-cairn-since": { "const": "v0.3" },
-            "enabler":       { "const": "enterprise deployment" }
+            "name":                { "const": "cairn.federation.v1" },
+            "x-cairn-since":       { "const": "v0.3" },
+            "enabler":             { "const": "enterprise deployment" },
+            "x-cairn-capability":  { "const": "cairn.mcp.v1.extension.federation" }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["name", "x-cairn-since", "enabler"],
+          "required": ["name", "x-cairn-since", "enabler", "x-cairn-capability"],
           "properties": {
-            "name":          { "const": "cairn.sessiontree.v1" },
-            "x-cairn-since": { "const": "v0.3" },
-            "enabler":       { "const": "session.enable_tree" }
+            "name":                { "const": "cairn.sessiontree.v1" },
+            "x-cairn-since":       { "const": "v0.3" },
+            "enabler":             { "const": "session.enable_tree" },
+            "x-cairn-capability":  { "const": "cairn.mcp.v1.extension.sessiontree" }
           }
         }
       ]
@@ -63,10 +67,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/namespace" },
       "x-cairn-values": [
-        { "name": "cairn.aggregate.v1",   "x-cairn-since": "v0.2", "enabler": "agent.enable_aggregate" },
-        { "name": "cairn.admin.v1",       "x-cairn-since": "v0.1", "enabler": "operator role" },
-        { "name": "cairn.federation.v1",  "x-cairn-since": "v0.3", "enabler": "enterprise deployment" },
-        { "name": "cairn.sessiontree.v1", "x-cairn-since": "v0.3", "enabler": "session.enable_tree" }
+        { "name": "cairn.aggregate.v1",   "x-cairn-since": "v0.2", "enabler": "agent.enable_aggregate",  "x-cairn-capability": "cairn.mcp.v1.extension.aggregate" },
+        { "name": "cairn.admin.v1",       "x-cairn-since": "v0.1", "enabler": "operator role",           "x-cairn-capability": "cairn.mcp.v1.extension.admin" },
+        { "name": "cairn.federation.v1",  "x-cairn-since": "v0.3", "enabler": "enterprise deployment",   "x-cairn-capability": "cairn.mcp.v1.extension.federation" },
+        { "name": "cairn.sessiontree.v1", "x-cairn-since": "v0.3", "enabler": "session.enable_tree",     "x-cairn-capability": "cairn.mcp.v1.extension.sessiontree" }
       ]
     }
   }

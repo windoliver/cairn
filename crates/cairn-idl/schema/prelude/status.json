@@ -13,8 +13,8 @@
       "additionalProperties": false,
       "required": ["version", "build", "started_at", "incarnation"],
       "properties": {
-        "version":     { "type": "string" },
-        "build":       { "type": "string" },
+        "version":     { "type": "string", "minLength": 1 },
+        "build":       { "type": "string", "minLength": 1 },
         "started_at":  { "type": "string", "format": "date-time" },
         "incarnation": {
           "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
