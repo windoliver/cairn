@@ -11,6 +11,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-test-fixtures"
+version = "0.0.1"
+dependencies = [
+ "cairn-core",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

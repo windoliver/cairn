@@ -1,0 +1,17 @@
+[package]
+name = "cairn-test-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Shared test helpers and fixture loaders for Cairn crates."
+
+[dependencies]
+cairn-core = { workspace = true }
+
+[lints]
+workspace = true
