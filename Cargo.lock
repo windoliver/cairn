@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-idl"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cairn-mcp"
 version = "0.0.1"
 dependencies = [

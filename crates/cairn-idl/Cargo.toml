@@ -1,0 +1,22 @@
+[package]
+name = "cairn-idl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Cairn canonical IDL source and codegen driver. Standalone — no core dep."
+
+[[bin]]
+name = "cairn-codegen"
+path = "src/bin/cairn-codegen.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
