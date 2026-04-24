@@ -6,7 +6,7 @@
 
 **Architecture:** Virtual Cargo workspace under `crates/*`. `cairn-core` is a leaf (no internal deps). Adapter/app crates depend on core only. `cairn-idl` is standalone. `cairn-test-fixtures` is consumed as a dev-dep by adapters + app, never by core. Toolchain pinned via `rust-toolchain.toml` to 1.95.0. Boundary enforced by (a) core's own `Cargo.toml` and (b) `scripts/check-core-boundary.sh`.
 
-**Tech Stack:** Rust 1.95.0, Edition 2024, Cargo resolver 3, `serde`, `thiserror`, `tokio`, `rusqlite`, `tracing`, `anyhow`, `cargo-deny`, bash+jq for the boundary check.
+**Tech Stack:** Rust 1.95.0, Edition 2024, Cargo resolver 3, `serde`, `thiserror`, `tokio`, `tracing`, `anyhow`, `cargo-deny`, bash+jq for the boundary check. (`rusqlite` is intentionally held out of P0 and lands with the storage implementation in issue #6.)
 
 **Spec:** `docs/design/2026-04-23-rust-workspace-scaffold-design.md`
 
@@ -64,9 +64,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = "1"
-rusqlite = "0.31"
 tracing = "0.1"
 anyhow = "1"
+# NOTE: rusqlite is intentionally held out of the P0 workspace deps. It lands
+# with the storage implementation in issue #6.
 
 cairn-core = { path = "crates/cairn-core" }
 cairn-mcp = { path = "crates/cairn-mcp" }
@@ -348,8 +349,11 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 
 [dependencies]
 cairn-core = { workspace = true }
-rusqlite = { workspace = true, features = ["bundled"] }
 thiserror = { workspace = true }
+# NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
+# scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
+# native-compilation surface before any storage code uses it. The real dep
+# lands with the storage implementation in issue #6.
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
@@ -358,7 +362,7 @@ cairn-test-fixtures = { workspace = true }
 workspace = true
 ```
 
-The `bundled` feature pulls SQLite in statically so the P0 binary ships without a system SQLite dependency.
+Storage code and the `rusqlite`/`sqlite-vec` dependency join the crate in issue #6.
 
 - [ ] **Step 4.4: Write `cairn-store-sqlite/src/lib.rs`**
 
@@ -377,7 +381,7 @@ Create `crates/cairn-store-sqlite/src/lib.rs`:
 
 Run: `cargo test -p cairn-store-sqlite`
 
-Expected: 1 passed. (First compile may be slow — `rusqlite` with `bundled` compiles SQLite from C; allow a few minutes.)
+Expected: 1 passed. (Compile is fast — the P0 scaffold has no native deps.)
 
 - [ ] **Step 4.6: Commit**
 
@@ -999,7 +1003,7 @@ flowchart LR
 
 This is enforced by two mechanisms:
 1. **Structural** — `cairn-core/Cargo.toml` lists no internal workspace crate as a dependency.
-2. **Script** — `scripts/check-core-boundary.sh` runs `cargo metadata` and asserts the resolved dependency graph of `cairn-core` contains no other `cairn-*` crate (dev-deps excluded).
+2. **Script** — `scripts/check-core-boundary.sh` runs `cargo metadata` and asserts that `cairn-core`'s declared dependencies contain no other `cairn-*` crate, **regardless of kind** (normal, build, or dev).
 
 ## Deferred Non-Rust Surfaces
 
@@ -1045,9 +1049,10 @@ Create `scripts/check-core-boundary.sh`:
 ```bash
 #!/usr/bin/env bash
 #
-# Fail if cairn-core's resolved dependency graph contains any cairn-* package.
-# Dev-deps are ignored (fixtures can be consumed in tests); runtime and
-# build-script deps are checked.
+# Fail if cairn-core declares any cairn-* package as a dependency of any kind
+# (normal, build, or dev). Core must stay a leaf: adapter crates never reach
+# back into core, and core's own tests stay pure to keep this invariant
+# trivially checkable.
 
 set -euo pipefail
 
@@ -1058,15 +1063,14 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-# Emit every dep of cairn-core whose kind is normal (null) or build, filtered
-# to names that start with `cairn-`. An empty result means clean.
+# Emit every dep declared by cairn-core whose name starts with `cairn-`,
+# regardless of kind. An empty result means clean.
 violations=$(
   cargo metadata --format-version 1 --locked \
     | jq -r '
         .packages[]
         | select(.name == "cairn-core")
         | .dependencies[]
-        | select((.kind // "normal") == "normal" or .kind == "build")
         | .name
         | select(startswith("cairn-"))
       '
@@ -1081,7 +1085,7 @@ fi
 echo "cairn-core boundary OK"
 ```
 
-Why `.packages[]` instead of `.resolve.nodes[]`: the `packages` array lists **declared** dependencies with their `kind` (`"normal"` via `null`, `"build"`, `"dev"`), which is exactly what we want — we care about what core *asked for*, not the transitive closure. This makes the check robust to fixture crates being pulled in transitively by other crates.
+Why `.packages[]` instead of `.resolve.nodes[]`: the `packages` array lists **declared** dependencies, which is what we care about — we want to know what core asked for, not the transitive closure. Why accept every kind (no dev-dep exemption): the script is already scoped to `cairn-core` only, so declaring a forbidden dev-dep on core would silently pass an exemption-based check. Since core's tests are kept pure by policy, there is no legitimate reason for core to dev-depend on any other workspace crate.
 
 - [ ] **Step 11.2: Make the script executable**
 
