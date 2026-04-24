@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/search.json",
+  "title": "Cairn verb: search",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "search",
+  "x-cairn-cli": {
+    "command": "search",
+    "flags": [
+      { "name": "mode",       "long": "mode",       "value_source": "enum(keyword,semantic,hybrid)" },
+      { "name": "limit",      "long": "limit",      "value_source": "u32" },
+      { "name": "filters",    "long": "filters",    "value_source": "json" },
+      { "name": "citations",  "long": "citations",  "value_source": "enum(on,compact,off)" }
+    ],
+    "positional": {
+      "name": "query",
+      "description": "Free-text query string."
+    }
+  },
+  "x-cairn-capability": null,
+  "x-cairn-auth": "rebac",
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use when you need to recall prior memories by topic, speaker, or time",
+      "use to ground an answer in stored evidence instead of parametric guessing"
+    ],
+    "negative": [
+      "do NOT use when the user just asked a computation question",
+      "do NOT use to fetch a known record id — call retrieve instead"
+    ],
+    "exclusivity": "this is the canonical search surface for the active vault"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query"],
+      "properties": {
+        "query": { "type": "string" },
+        "mode": {
+          "oneOf": [
+            { "const": "keyword",  "x-cairn-capability": "cairn.mcp.v1.search.keyword" },
+            { "const": "semantic", "x-cairn-capability": "cairn.mcp.v1.search.semantic" },
+            { "const": "hybrid",   "x-cairn-capability": "cairn.mcp.v1.search.hybrid" }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "description": "Optional scope narrowing (user / agent / tenant / workspace).",
+          "additionalProperties": true,
+          "properties": {
+            "user": { "type": "string" },
+            "agent": { "type": "string" },
+            "tenant": { "type": "string" },
+            "workspace": { "type": "string" }
+          }
+        },
+        "filters": { "$ref": "#/$defs/filter" },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "citations": {
+          "type": "string",
+          "enum": ["on", "compact", "off"]
+        }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hits"],
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Hit" }
+        },
+        "next_cursor": { "type": "string" }
+      }
+    },
+    "Hit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "score"],
+      "properties": {
+        "record_id": { "type": "string" },
+        "score":     { "type": "number" },
+        "snippet":   { "type": "string" },
+        "citation":  { "type": "string" },
+        "trust":     { "type": "string", "enum": ["verified", "unverified"] }
+      }
+    },
+    "filter": {
+      "oneOf": [
+        { "$ref": "#/$defs/filter_and" },
+        { "$ref": "#/$defs/filter_or" },
+        { "$ref": "#/$defs/filter_not" },
+        { "$ref": "#/$defs/filter_leaf" }
+      ]
+    },
+    "filter_and": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["and"],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filter" }
+        }
+      }
+    },
+    "filter_or": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["or"],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/filter" }
+        }
+      }
+    },
+    "filter_not": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": {
+        "not": { "$ref": "#/$defs/filter" }
+      }
+    },
+    "filter_leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op": {
+          "type": "string",
+          "enum": [
+            "eq", "neq", "in", "nin",
+            "string_contains", "string_starts_with", "string_ends_with",
+            "lt", "lte", "gt", "gte", "between",
+            "array_contains", "array_contains_any", "array_contains_all", "array_size_eq"
+          ]
+        },
+        "value": {}
+      }
+    }
+  }
+}
