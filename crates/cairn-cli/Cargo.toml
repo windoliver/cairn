@@ -1,0 +1,29 @@
+[package]
+name = "cairn-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Cairn terminal entry point. Wires adapters into the verb layer."
+
+[[bin]]
+name = "cairn"
+path = "src/main.rs"
+
+[dependencies]
+cairn-core = { workspace = true }
+cairn-mcp = { workspace = true }
+cairn-store-sqlite = { workspace = true }
+cairn-sensors-local = { workspace = true }
+cairn-workflows = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true
