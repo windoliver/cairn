@@ -12,9 +12,9 @@
     },
     "Nonce16Base64": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9+/]{22}(==)?$",
+      "pattern": "^[A-Za-z0-9+/]{21}[AQgw](==)?$",
       "contentEncoding": "base64",
-      "description": "16 random bytes, base64-encoded. 22 chars unpadded or 24 chars with `==` padding."
+      "description": "16 random bytes, base64-encoded. 22 significant chars + optional `==` padding; the 22nd significant char is constrained to [AQgw] so the trailing 4 bits are zero — this is the unique canonical encoding of exactly 16 bytes, rejecting non-canonical variants that strict decoders would refuse."
     },
     "Ed25519Signature": {
       "type": "string",

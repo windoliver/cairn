@@ -29,7 +29,8 @@
     "sequence": {
       "type": "integer",
       "minimum": 0,
-      "description": "Monotonic per-issuer counter; strictly increasing. Mutually exclusive with server_challenge."
+      "maximum": 9007199254740991,
+      "description": "Monotonic per-issuer counter; strictly increasing. Bounded by JSON's safe integer range (2^53 − 1) so validators and JSON decoders cannot disagree on the represented value. Mutually exclusive with server_challenge."
     },
     "target_hash": {
       "type": "string",
@@ -63,8 +64,10 @@
     },
     "chain_parents": {
       "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
       "items": { "$ref": "../common/primitives.json#/$defs/Ulid" },
-      "description": "operation_id ULIDs of prior operations this one depends on."
+      "description": "operation_id ULIDs of prior operations this one depends on. Bounded and deduplicated so a malformed intent cannot push a pathologically large DAG fan-in at WAL dependency processing time."
     },
     "signature": {
       "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ed25519Signature" }],

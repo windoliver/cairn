@@ -157,10 +157,17 @@
       "oneOf": [
         { "$ref": "#/$defs/DataRecord" },
         { "$ref": "#/$defs/DataProfile" },
-        { "$ref": "#/$defs/DataItemList" }
+        { "$ref": "#/$defs/DataSession" },
+        { "$ref": "#/$defs/DataTurn" },
+        { "$ref": "#/$defs/DataFolder" },
+        { "$ref": "#/$defs/DataScope" }
       ],
-      "description": "Shape depends on the matched Args branch. Record / profile variants return an object; session / folder / scope variants return an ordered array of items. Codegen (#35) narrows which branch applies per call from the Args branch."
+      "description": "Shape depends on the matched Args target. The response envelope echoes target so validators can bind Data to the exact branch."
     },
+    "DataSession": { "$ref": "#/$defs/DataItemList" },
+    "DataTurn":    { "$ref": "#/$defs/DataItemList" },
+    "DataFolder":  { "$ref": "#/$defs/DataItemList" },
+    "DataScope":   { "$ref": "#/$defs/DataItemList" },
     "DataRecord": {
       "type": "object",
       "additionalProperties": true,

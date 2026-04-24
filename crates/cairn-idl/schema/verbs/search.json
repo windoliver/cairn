@@ -86,6 +86,9 @@
       }
     },
     "filter": {
+      "x-cairn-max-depth": 8,
+      "x-cairn-max-fanout": 32,
+      "description": "Boolean filter grammar. JSON Schema cannot directly bound recursion, so codegen and the runtime enforce the depth (8) and fanout (32) limits via x-cairn-max-depth / x-cairn-max-fanout. Over-limit filters reject at ingest before query planning.",
       "oneOf": [
         { "$ref": "#/$defs/filter_and" },
         { "$ref": "#/$defs/filter_or" },
@@ -101,6 +104,7 @@
         "and": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 32,
           "items": { "$ref": "#/$defs/filter" }
         }
       }
@@ -113,6 +117,7 @@
         "or": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 32,
           "items": { "$ref": "#/$defs/filter" }
         }
       }

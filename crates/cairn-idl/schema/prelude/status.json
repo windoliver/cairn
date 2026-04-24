@@ -24,11 +24,147 @@
     },
     "capabilities": {
       "type": "array",
+      "uniqueItems": true,
       "items": { "$ref": "../capabilities/capabilities.json" }
     },
     "extensions": {
       "type": "array",
+      "uniqueItems": true,
       "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
     }
-  }
+  },
+  "allOf": [
+    {
+      "$comment": "aggregate extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "admin extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "federation extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "sessiontree extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    }
+  ]
 }

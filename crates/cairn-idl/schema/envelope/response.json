@@ -33,6 +33,11 @@
       "description": "Per-verb data payload on committed responses. Shape defined by verbs/<verb>.json $defs/Data. Object for most verbs; array for session / folder / scope retrieve variants. The field is absent on rejected / aborted responses.",
       "type": ["object", "array"]
     },
+    "target": {
+      "type": "string",
+      "enum": ["record", "session", "turn", "folder", "scope", "profile"],
+      "description": "Retrieve-only discriminator echoing the requested target. Required when verb=retrieve; forbidden otherwise. Lets validators bind the per-target retrieve Data shape to the caller's request."
+    },
     "policy_trace": {
       "type": "array",
       "items": {
@@ -56,8 +61,40 @@
       "then": { "properties": { "data": { "$ref": "../verbs/ingest.json#/$defs/Data" } } } },
     { "if": { "properties": { "verb": { "const": "search" } },        "required": ["verb"] },
       "then": { "properties": { "data": { "$ref": "../verbs/search.json#/$defs/Data" } } } },
-    { "if": { "properties": { "verb": { "const": "retrieve" } },      "required": ["verb"] },
-      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/Data" } } } },
+    { "if":   { "properties": { "verb": { "const": "retrieve" } }, "required": ["verb"] },
+      "then": { "required": ["target"] } },
+    { "if":   { "properties": { "verb": { "not": { "const": "retrieve" } } }, "required": ["verb"] },
+      "then": { "not": { "required": ["target"] } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "record" } },   "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataRecord" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "profile" } },  "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataProfile" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "session" } },  "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataSession" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "turn" } },     "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataTurn" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "folder" } },   "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataFolder" } } } },
+    { "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
+                  { "properties": { "target": { "const": "scope" } },    "required": ["target"] }
+                ]},
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataScope" } } } },
     { "if": { "properties": { "verb": { "const": "summarize" } },     "required": ["verb"] },
       "then": { "properties": { "data": { "$ref": "../verbs/summarize.json#/$defs/Data" } } } },
     { "if": { "properties": { "verb": { "const": "assemble_hot" } },  "required": ["verb"] },
