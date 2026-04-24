@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/envelope/signed_intent.json",
+  "title": "Cairn signed intent envelope",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation_id",
+    "nonce",
+    "target_hash",
+    "scope",
+    "issuer",
+    "issued_at",
+    "expires_at",
+    "key_version",
+    "chain_parents",
+    "signature"
+  ],
+  "properties": {
+    "operation_id": {
+      "type": "string",
+      "description": "ULID; unique per issuer within expires_at window."
+    },
+    "nonce": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Fresh per message; 16 bytes base64-encoded."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per-issuer counter; strictly increasing. Mutually exclusive with server_challenge."
+    },
+    "target_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256 of the record / plan / receipt this signature authorizes."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant", "workspace", "entity", "tier"],
+      "properties": {
+        "tenant": { "type": "string" },
+        "workspace": { "type": "string" },
+        "entity": { "type": "string" },
+        "tier": {
+          "type": "string",
+          "enum": ["private", "session", "project", "team", "org", "public"]
+        }
+      }
+    },
+    "issuer": {
+      "type": "string",
+      "description": "e.g. agt:claude-code:opus-4-7:reviewer:v1 (AgentIdentity) or usr:<id> (HumanIdentity)."
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "key_version": { "type": "integer", "minimum": 1 },
+    "server_challenge": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Fresh nonce obtained from `cairn handshake`; required when sequence is absent."
+    },
+    "chain_parents": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "operation_id of a prior operation this one depends on."
+      }
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^ed25519:[0-9a-f]+$"
+    }
+  },
+  "oneOf": [
+    { "required": ["sequence"], "not": { "required": ["server_challenge"] } },
+    { "required": ["server_challenge"], "not": { "required": ["sequence"] } }
+  ]
+}
