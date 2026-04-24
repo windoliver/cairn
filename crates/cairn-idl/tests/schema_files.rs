@@ -154,3 +154,55 @@ fn walk_json(dir: &Path, out: &mut BTreeSet<PathBuf>) {
         }
     }
 }
+
+fn capabilities_enum() -> BTreeSet<String> {
+    let caps = read_json(&schema_dir().join("capabilities/capabilities.json"));
+    let arr = caps
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .expect("capabilities.json: oneOf must be an array");
+    arr.iter()
+        .map(|entry| {
+            entry
+                .get("const")
+                .and_then(Value::as_str)
+                .expect("capabilities.json oneOf entries must have a const string")
+                .to_string()
+        })
+        .collect()
+}
+
+fn collect_capability_refs(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            if let Some(cap) = map.get("x-cairn-capability").and_then(Value::as_str) {
+                out.push(cap.to_string());
+            }
+            for (_, child) in map {
+                collect_capability_refs(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_capability_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_x_cairn_capability_is_in_capabilities_enum() {
+    let enum_set = capabilities_enum();
+    for path in manifest_paths() {
+        let v = read_json(&path);
+        let mut refs: Vec<String> = Vec::new();
+        collect_capability_refs(&v, &mut refs);
+        for cap in refs {
+            assert!(
+                enum_set.contains(&cap),
+                "{path:?} references capability {cap:?} that is not in capabilities.json"
+            );
+        }
+    }
+}
