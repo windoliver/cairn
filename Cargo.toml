@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95.0"
+license = "Apache-2.0"
+authors = ["Cairn contributors"]
+repository = "https://github.com/windoliver/cairn"
+homepage = "https://github.com/windoliver/cairn"
+readme = "README.md"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = "1"
+rusqlite = "0.31"
+tracing = "0.1"
+anyhow = "1"
+
+cairn-core = { path = "crates/cairn-core" }
+cairn-mcp = { path = "crates/cairn-mcp" }
+cairn-store-sqlite = { path = "crates/cairn-store-sqlite" }
+cairn-sensors-local = { path = "crates/cairn-sensors-local" }
+cairn-workflows = { path = "crates/cairn-workflows" }
+cairn-idl = { path = "crates/cairn-idl" }
+cairn-test-fixtures = { path = "crates/cairn-test-fixtures" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2024_compatibility = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
