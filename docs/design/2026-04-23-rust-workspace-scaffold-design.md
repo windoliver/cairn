@@ -306,15 +306,24 @@ fn main() -> ExitCode {
 
 Gives `cargo run -p cairn-cli -- --version` a working smoke path while every verb invocation (`cairn ingest ...`) exits `2` with a not-implemented message on stderr.
 
-`cairn-idl/src/bin/cairn-codegen.rs`:
+`cairn-idl/src/bin/cairn-codegen.rs` — also fails closed, so any build script or CI step that shells out to it cannot silently treat missing generation as complete:
 
 ```rust
-//! Codegen entry point (P0 scaffold). Real IDL loading lands in #34.
-fn main() {
-    eprintln!("cairn-codegen: IDL source and generation land in issues #34 and #35.");
-    std::process::exit(0);
+//! Codegen entry point (P0 scaffold). Real IDL loading lands in #34, #35.
+//! Fails closed until real generation exists.
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    eprintln!(
+        "cairn-codegen: not yet implemented. IDL source and generation land \
+         in issues #34 and #35; no files were loaded or emitted."
+    );
+    ExitCode::from(2)
 }
 ```
+
+`cairn-idl/tests/smoke.rs` includes a `codegen_binary_fails_closed` integration test that spawns `env!("CARGO_BIN_EXE_cairn-codegen")`, asserts exit code `2`, stderr contains `"not yet implemented"`, stdout is empty.
 
 `cairn-test-fixtures/src/lib.rs` exports a single `pub fn fixtures_dir() -> &'static std::path::Path` that resolves `CARGO_MANIFEST_DIR/../../fixtures`. Consumed only as a `dev-dependency` by adapter and app crates (`cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`, `cairn-sensors-local`, `cairn-workflows`). **`cairn-core` does not depend on it** — core tests stay pure to keep the boundary check trivially sound.
 

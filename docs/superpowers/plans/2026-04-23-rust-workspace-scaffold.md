@@ -622,29 +622,56 @@ Create `crates/cairn-idl/src/lib.rs`:
 
 - [ ] **Step 7.5: Write `cairn-idl/src/bin/cairn-codegen.rs`**
 
+The codegen binary **must fail closed** until real generation exists. Any build script, CI step, or release automation that shells out to it cannot be allowed to treat missing schema generation as complete.
+
 Create `crates/cairn-idl/src/bin/cairn-codegen.rs`:
 
 ```rust
 //! Codegen entry point (P0 scaffold). IDL load + emit land in #34, #35.
+//!
+//! Fails closed — exits with a not-implemented status so any build script,
+//! CI step, or release automation that shells out to `cairn-codegen` cannot
+//! silently treat schema generation as complete.
 
-fn main() {
-    eprintln!("cairn-codegen: IDL source and generation land in issues #34 and #35.");
-    std::process::exit(0);
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    eprintln!(
+        "cairn-codegen: not yet implemented. IDL source and generation land \
+         in issues #34 and #35; no files were loaded or emitted."
+    );
+    ExitCode::from(2)
 }
 ```
 
-- [ ] **Step 7.6: Run the test to verify it passes**
+Extend `crates/cairn-idl/tests/smoke.rs` with a fail-closed assertion:
+
+```rust
+#[test]
+fn codegen_binary_fails_closed() {
+    let bin = env!("CARGO_BIN_EXE_cairn-codegen");
+    let out = std::process::Command::new(bin).output().expect("cairn-codegen");
+    assert!(!out.status.success(), "cairn-codegen exited OK — should fail closed");
+    assert_eq!(out.status.code(), Some(2), "wrong exit code");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("not yet implemented"), "stderr: {stderr:?}");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.is_empty(), "scaffold must not print to stdout: {stdout:?}");
+}
+```
+
+- [ ] **Step 7.6: Run the tests to verify they pass**
 
 Run: `cargo test -p cairn-idl`
 
-Expected: 1 passed.
+Expected: 2 passed (`crate_name_matches` + `codegen_binary_fails_closed`).
 
-- [ ] **Step 7.7: Verify the binary builds**
+- [ ] **Step 7.7: Verify the binary fails closed**
 
-Run: `cargo run -p cairn-idl --bin cairn-codegen`
+Run: `cargo run -p cairn-idl --bin cairn-codegen; echo "exit=$?"`
 
-Expected stderr: `cairn-codegen: IDL source and generation land in issues #34 and #35.`
-Expected exit code: 0.
+Expected stderr: `cairn-codegen: not yet implemented. ...`
+Expected exit code: **2** (not 0).
 
 - [ ] **Step 7.8: Commit**
 
