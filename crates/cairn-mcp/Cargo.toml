@@ -1,0 +1,22 @@
+[package]
+name = "cairn-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "MCP adapter surface for the Cairn verb layer."
+
+[dependencies]
+cairn-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true
