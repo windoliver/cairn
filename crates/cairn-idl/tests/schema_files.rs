@@ -206,3 +206,49 @@ fn every_x_cairn_capability_is_in_capabilities_enum() {
         }
     }
 }
+
+fn collect_refs(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            if let Some(r) = map.get("$ref").and_then(Value::as_str) {
+                out.push(r.to_string());
+            }
+            for (_, child) in map {
+                collect_refs(child, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ref_points_at_existing_file(source_path: &Path, reference: &str) -> bool {
+    let (file_part, _fragment) = reference
+        .split_once('#')
+        .unwrap_or((reference, ""));
+    if file_part.is_empty() {
+        return true; // local #/... ref — resolution deferred to #35 validator
+    }
+    let source_dir = source_path.parent().expect("schema file has parent");
+    let target = source_dir.join(file_part);
+    target.is_file()
+}
+
+#[test]
+fn every_ref_resolves_to_a_real_file_or_local_fragment() {
+    for path in manifest_paths() {
+        let v = read_json(&path);
+        let mut refs: Vec<String> = Vec::new();
+        collect_refs(&v, &mut refs);
+        for r in refs {
+            assert!(
+                ref_points_at_existing_file(&path, &r),
+                "{path:?} references {r:?} which does not resolve to a sibling schema file"
+            );
+        }
+    }
+}
