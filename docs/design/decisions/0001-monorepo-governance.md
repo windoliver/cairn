@@ -55,15 +55,25 @@ own repository until an explicit trigger fires (see "Split triggers" below).
    lives at [`.github/CODEOWNERS`](../../../.github/CODEOWNERS).
 3. **Governance doc.** Adopt the CNCF `GOVERNANCE-maintainer.md` template
    as [`GOVERNANCE.md`](../../../GOVERNANCE.md) with one documented
-   deviation: while `|maintainers| == 1`, self-approve is permitted on
-   non-load-bearing changes (the load-bearing list in `CLAUDE.md` §9 still
-   requires external review). Maintain a parallel
-   [`MAINTAINERS.md`](../../../MAINTAINERS.md) listing humans with
-   **contract-area annotations** mirroring the seven contracts — this is
-   zero-cost forward compatibility with a future SME/domain-lead ladder.
-4. **Branch protection.** Require CODEOWNERS review on `main`; allow
-   self-approve only while the team size is 1; flip the self-approve
-   allowance off on the first PR after a second maintainer is added.
+   deviation: while `|maintainers| == 1`, required-reviewer branch
+   protection is **not** enabled (GitHub blocks self-approval, so the
+   rule would deadlock); load-bearing PRs (as listed in `CLAUDE.md` §9)
+   must obtain an external review and record it via a `Reviewed-by:`
+   trailer in the PR description. Admin-bypass is not authorised.
+   Maintain a parallel [`MAINTAINERS.md`](../../../MAINTAINERS.md)
+   listing humans with **contract-area annotations** mirroring the seven
+   contracts — this is zero-cost forward compatibility with a future
+   SME/domain-lead ladder.
+4. **Branch protection.** During the single-maintainer period
+   (`GOVERNANCE.md` §5) `main` requires passing CI and blocks force-push,
+   but does **not** require a CODEOWNERS / approving review — GitHub
+   disallows PR authors from approving their own PRs, so a required-review
+   rule would deadlock the repository or force an admin-bypass habit.
+   Load-bearing PRs (as listed in `CLAUDE.md` §9 and `GOVERNANCE.md` §5)
+   must obtain and record an external review in a `Reviewed-by:` trailer.
+   Enable required CODEOWNERS review in branch protection on the first PR
+   after a second maintainer joins; that same PR removes `GOVERNANCE.md`
+   §5.
 5. **Release tooling.** Adopt `release-plz` + `git-cliff` for Rust
    publishing (per-crate independent versioning, conventional commits,
    `cargo-semver-checks` in the Release PR). Non-Rust SDK publishing
@@ -74,8 +84,9 @@ own repository until an explicit trigger fires (see "Split triggers" below).
 ### Maintainer boundaries (satisfies AC 2)
 
 Named boundaries used as the seed ownership map. Each maps to a contract in
-brief §4; all route to `@cairn-project/maintainers` today and will gain a
-dedicated team as reviewer depth grows.
+brief §4; all route to the sole maintainer today (per the seed
+`.github/CODEOWNERS`) and will gain a dedicated team as reviewer depth
+grows and the repository converts to an organisation.
 
 | Area | Paths | Contract |
 | --- | --- | --- |
@@ -89,37 +100,55 @@ dedicated team as reviewer depth grows.
 
 ### Split triggers (satisfies AC 3 — reversibility)
 
-Re-open this ADR and consider extracting a crate or package into its own
-repository when **two or more** of the following fire simultaneously:
+Triggers are partitioned into **hard** and **soft**. Any single hard
+trigger is sufficient cause to open an extraction ADR immediately; soft
+triggers reflect operational discomfort, so a single one opens discussion
+and two concurrent soft triggers open an extraction ADR.
 
-1. Release cadence for one crate has permanently diverged (one ships weekly
-   for 6+ months while another ships quarterly, and the Release PR is
-   routinely stale).
-2. A dedicated maintainer team has formed for one crate with no overlap
-   with the core reviewer pool.
-3. An external consumer depends on a single crate with SLAs materially
-   distinct from Cairn itself (e.g., `cairn-idl` used by a vendor that
-   cannot tolerate Cairn's release cadence).
-4. CI wall-clock on the monorepo exceeds the team's tolerance despite
-   `cargo nextest` partitioning, sccache, and target-aware caching.
-5. Licensing or contribution-policy pressure (one crate needs a different
-   licence, a CLA, or a vendor-only contribution path).
-6. Security boundary — an adapter must ship on a stricter release gate
-   (signed-only releases, different maintainers).
-7. Binary-size or dependency bloat in downstream consumers such that
-   vendoring or forking is becoming routine.
+**Hard triggers — any one fires, open extraction ADR immediately:**
 
-Reaching any single trigger is cause for discussion; reaching two is cause
-for a new ADR proposing extraction.
+H1. **Licensing or contribution-policy pressure.** One crate needs a
+    different licence, a CLA, or a vendor-only contribution path that
+    cannot be satisfied in-repo.
+H2. **Security release boundary.** An adapter must ship on a stricter
+    release gate (signed-only releases, different maintainers, disclosure
+    embargoes) that the monorepo release pipeline cannot enforce without
+    compromising the rest.
+H3. **External consumer SLA conflict.** An external project depends on a
+    single crate with release-cadence, support-window, or stability
+    guarantees materially distinct from Cairn itself, and keeping the
+    crate in-repo forces us to either break their SLA or over-stabilise
+    the rest of the workspace.
+
+**Soft triggers — one opens discussion, two concurrent open extraction ADR:**
+
+S1. Release cadence for one crate has permanently diverged (one ships
+    weekly for 6+ months while another ships quarterly, and the Release
+    PR is routinely stale).
+S2. A dedicated maintainer team has formed for one crate with no overlap
+    with the core reviewer pool.
+S3. CI wall-clock on the monorepo exceeds the team's tolerance despite
+    `cargo nextest` partitioning, sccache, and target-aware caching.
+S4. Binary-size or dependency bloat in downstream consumers such that
+    vendoring or forking is becoming routine.
 
 ### Revisit triggers (scheduled review)
 
 Revisit this ADR when any of the following happens, regardless of the
 split-trigger list:
 
-- A third maintainer joins (flip self-approve off; seed per-contract teams).
-- The first non-Rust SDK ships (activate `packages/`, pick SDK release tool).
-- Any split trigger fires.
+- **Second maintainer joins** — end the single-maintainer deviation in
+  `GOVERNANCE.md` §5, enable required CODEOWNERS review in branch
+  protection, and update `MAINTAINERS.md`.
+- **Third maintainer joins** — consider seeding per-contract ownership
+  teams (one team per area in `GOVERNANCE.md` §2). This is optional and
+  governed by reviewer depth per area, not by the headcount alone.
+- **Repository converts to a GitHub organisation** — migrate CODEOWNERS
+  from `@windoliver` to `@cairn-project/maintainers`; this may happen at
+  or after the second-maintainer transition.
+- **First non-Rust SDK ships** — activate `packages/`, pick an SDK release
+  tool (Changesets or Sampo) in a follow-up ADR.
+- Any hard or soft split trigger fires.
 
 ## Consequences
 
@@ -142,9 +171,11 @@ split-trigger list:
   every crate. Mitigation: per-crate test partitioning and the existing
   `check-core-boundary.sh` gate; acceptable at v0.1 scale.
 - **Coarse ownership until more reviewers exist.** Every path resolves to
-  `@cairn-project/maintainers` initially — CODEOWNERS cannot enforce
-  contract-specific review while the team is one entry deep. Mitigation:
-  revisit on the third maintainer.
+  the sole maintainer initially — CODEOWNERS is informational during the
+  single-maintainer period (see `GOVERNANCE.md` §5) and cannot enforce
+  contract-specific review until at least two maintainers exist. Mitigation:
+  end the single-maintainer period on the second maintainer; seed
+  per-contract teams on the third.
 - **Repository size grows monotonically.** Accepted; rust-analyzer,
   wasmtime, tauri, and biome all operate comfortably at 10× our expected
   v1 size.

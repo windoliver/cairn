@@ -3,9 +3,20 @@
 # Governance: see GOVERNANCE.md. Decision: docs/design/decisions/0001-monorepo-governance.md.
 #
 # Seed model: every path routes to the sole maintainer while the roster is one
-# entry deep. When the repo converts to an organisation and a second maintainer
-# joins, replace `@windoliver` with `@cairn-project/maintainers` and begin
-# splitting per-contract ownership (one team per contract area from brief §4).
+# entry deep. CODEOWNERS is informational during the single-maintainer period
+# (GOVERNANCE.md §5) — branch protection does NOT require a CODEOWNERS review
+# until a second maintainer exists, because GitHub disallows self-approval and
+# the rule would otherwise deadlock the repo.
+#
+# Transition points:
+#   - Second maintainer joins  → end the single-maintainer deviation, enable
+#                                required-review branch protection, optionally
+#                                migrate from `@windoliver` to a
+#                                `@cairn-project/maintainers` team if the repo
+#                                has converted to an organisation.
+#   - Third maintainer joins   → consider seeding per-contract teams (one team
+#                                per area in GOVERNANCE.md §2). Optional; tied
+#                                to reviewer depth per area, not headcount alone.
 #
 # Syntax: GitHub CODEOWNERS. The LAST matching pattern wins per path.
 

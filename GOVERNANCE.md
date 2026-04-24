@@ -33,8 +33,10 @@ Maintainers are expected to:
 A nomination opens as a PR that adds the candidate to `MAINTAINERS.md` and
 updates `CODEOWNERS` to grant the relevant ownership. The PR requires approval
 by a simple majority of the current maintainers (lazy consensus: no objection
-within seven days counts as approval). A single maintainer may self-approve
-only while the clause in §5 applies.
+within seven days counts as approval). During the single-maintainer period
+(§5), the sole maintainer solicits and records an external `Reviewed-by:` on
+the nomination PR — an explicit reviewer rather than a self-approval — and
+the merge of that PR is itself the event that ends §5.
 
 ### Removing a maintainer
 
@@ -107,20 +109,35 @@ touches both.
 
 ## 5. Time-limited deviation — single-maintainer period
 
-While the repository has **exactly one** maintainer in `MAINTAINERS.md`:
+While the repository has **exactly one** maintainer in `MAINTAINERS.md`,
+required-reviewer branch protection cannot be satisfied by the sole
+maintainer on their own PRs (GitHub disallows PR authors from approving
+their own pull requests). The deviation resolves this without relying on an
+admin bypass:
 
-- The sole maintainer **may** self-approve PRs that are not load-bearing
-  under `CLAUDE.md` §9 (i.e., not touching core traits, WAL, consent journal,
-  or config schema).
-- Load-bearing PRs still require **external** review — solicit it from the
-  community or a trusted reviewer on the relevant issue.
-- On the **first PR** after a second maintainer joins, flip branch
-  protection to require a second approver and remove this deviation clause
-  from this document.
+- **Branch protection does not require a CODEOWNERS or approving review**
+  during this period. CODEOWNERS remains in place as a reviewer-request
+  hint and an informational ownership map, not an enforcement gate.
+- **Required status checks remain on** (CI must pass) and **force-push to
+  `main` stays blocked**; the deviation is scoped narrowly to the "require
+  N approvals" rule.
+- **Load-bearing PRs** (as listed in `CLAUDE.md` §9 — core traits, WAL,
+  consent journal, config schema; plus any change to this document or to
+  `docs/design/decisions/`) **must** solicit and obtain at least one
+  external review before merge. The sole maintainer records the reviewer
+  (GitHub handle or email) in the PR description under a `Reviewed-by:`
+  trailer. Merging a load-bearing PR without a recorded external review is
+  a governance breach.
+- **On the first PR after a second maintainer joins**, enable required
+  CODEOWNERS review in branch protection, remove this §5 from the document
+  by PR (that PR itself benefits from the newly-available second
+  approver), and update `MAINTAINERS.md` to note the end of the
+  single-maintainer period in its change log.
 
-This deviation exists because CODEOWNERS review becomes a deadlock with one
-owner and no escape valve; the load-bearing carve-out prevents the deviation
-from being a bypass.
+No admin-bypass or ruleset-bypass path is authorised for the single
+maintainer during this period. The hard floor is the `Reviewed-by:` trailer
+for load-bearing changes; everything else relies on community scrutiny of
+the public commit log.
 
 ---
 
