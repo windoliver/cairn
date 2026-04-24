@@ -54,7 +54,8 @@
           { "name": "limit",      "long": "limit",     "value_source": "u32" },
           { "name": "order",      "long": "order",     "value_source": "enum(asc,desc)" },
           { "name": "rehydrate",  "long": "rehydrate", "value_source": "bool" },
-          { "name": "include",    "long": "include",   "value_source": "list<enum(tool_calls,reasoning)>" }
+          { "name": "include",    "long": "include",   "value_source": "list<enum(tool_calls,reasoning)>" },
+          { "name": "cursor",     "long": "cursor",    "value_source": "string" }
         ]
       },
       "properties": {
@@ -68,6 +69,12 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string", "enum": ["tool_calls", "reasoning"] }
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Opaque continuation token from a prior DataSession.next_cursor."
         }
       }
     },
@@ -122,12 +129,19 @@
       "x-cairn-cli": {
         "command": "retrieve",
         "flags": [
-          { "name": "scope", "long": "scope", "value_source": "json" }
+          { "name": "scope",  "long": "scope",  "value_source": "json" },
+          { "name": "cursor", "long": "cursor", "value_source": "string" }
         ]
       },
       "properties": {
         "target": { "const": "scope" },
-        "scope":  { "$ref": "../common/scope_filter.json" }
+        "scope":  { "$ref": "../common/scope_filter.json" },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Opaque continuation token from a prior DataScope.next_cursor."
+        }
       }
     },
     "ArgsProfile": {

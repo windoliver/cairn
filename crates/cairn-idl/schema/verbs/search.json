@@ -10,7 +10,8 @@
       { "name": "mode",       "long": "mode",       "value_source": "enum(keyword,semantic,hybrid)" },
       { "name": "limit",      "long": "limit",      "value_source": "u32" },
       { "name": "filters",    "long": "filters",    "value_source": "json" },
-      { "name": "citations",  "long": "citations",  "value_source": "enum(on,compact,off)" }
+      { "name": "citations",  "long": "citations",  "value_source": "enum(on,compact,off)" },
+      { "name": "cursor",     "long": "cursor",     "value_source": "string" }
     ],
     "positional": {
       "name": "query",
@@ -35,7 +36,7 @@
     "Args": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["query"],
+      "required": ["query", "mode"],
       "properties": {
         "query": { "type": "string", "minLength": 1 },
         "mode": {
@@ -58,6 +59,12 @@
         "citations": {
           "type": "string",
           "enum": ["on", "compact", "off"]
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Opaque continuation token from a prior search Data.next_cursor."
         }
       }
     },

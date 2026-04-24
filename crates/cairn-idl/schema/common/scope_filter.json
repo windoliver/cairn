@@ -3,7 +3,7 @@
   "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/scope_filter.json",
   "title": "Cairn scope filter",
   "x-cairn-contract": "cairn.mcp.v1",
-  "description": "Shared narrowing grammar used by retrieve.ArgsScope and forget.ArgsScope. At least one recognized predicate MUST be present. Value types are constrained per-key so empty strings, empty arrays, and null payloads all reject at schema validation — preventing unbounded reads or deletes. Unknown keys are rejected.",
+  "description": "Shared narrowing grammar used by search.scope, retrieve.ArgsScope, and forget.ArgsScope. At least one recognized predicate MUST be present. Covers every signed-intent scope dimension (tenant/workspace/entity/tier) plus identity (user/agent), session, kind, tags, and record-ids so scoped reads and deletes can narrow across the same dimensions the signed intent was authorized against. Value types are constrained per-key so empty strings, empty arrays, and null payloads all reject at schema validation — preventing unbounded reads or deletes. Unknown keys are rejected.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -11,6 +11,12 @@
     "agent":      { "type": "string", "minLength": 1 },
     "tenant":     { "type": "string", "minLength": 1 },
     "workspace":  { "type": "string", "minLength": 1 },
+    "entity":     { "type": "string", "minLength": 1 },
+    "tier": {
+      "type": "string",
+      "enum": ["private", "session", "project", "team", "org", "public"],
+      "description": "Matches the tier enum in signed_intent.scope so callers can echo the signed-intent tier in scoped reads/deletes."
+    },
     "session_id": { "type": "string", "minLength": 1 },
     "kind": {
       "type": "array",
@@ -33,6 +39,8 @@
     { "required": ["agent"] },
     { "required": ["tenant"] },
     { "required": ["workspace"] },
+    { "required": ["entity"] },
+    { "required": ["tier"] },
     { "required": ["session_id"] },
     { "required": ["kind"] },
     { "required": ["tags"] },
