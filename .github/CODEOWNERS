@@ -1,0 +1,42 @@
+# CODEOWNERS for Cairn
+#
+# Governance: see GOVERNANCE.md. Decision: docs/design/decisions/0001-monorepo-governance.md.
+#
+# Seed model: every path routes to the sole maintainer while the roster is one
+# entry deep. When the repo converts to an organisation and a second maintainer
+# joins, replace `@windoliver` with `@cairn-project/maintainers` and begin
+# splitting per-contract ownership (one team per contract area from brief §4).
+#
+# Syntax: GitHub CODEOWNERS. The LAST matching pattern wins per path.
+
+* @windoliver
+
+# Core traits, pure pipeline, IDL — the plugin boundary (brief §4, §4.1)
+/crates/cairn-core/                 @windoliver
+/crates/cairn-idl/                  @windoliver
+
+# Adapters — one team per contract in the future
+/crates/cairn-cli/                  @windoliver
+/crates/cairn-mcp/                  @windoliver
+/crates/cairn-store-sqlite/         @windoliver
+/crates/cairn-sensors-local/        @windoliver
+/crates/cairn-workflows/            @windoliver
+/crates/cairn-test-fixtures/        @windoliver
+
+# Non-Rust SDKs / skill packages (brief §16)
+/packages/                          @windoliver
+
+# Design + governance
+/docs/design/                       @windoliver
+/docs/design/decisions/             @windoliver
+/GOVERNANCE.md                      @windoliver
+/MAINTAINERS.md                     @windoliver
+/CLAUDE.md                          @windoliver
+
+# CI, release tooling, supply chain
+/.github/                           @windoliver
+/scripts/                           @windoliver
+/deny.toml                          @windoliver
+/rust-toolchain.toml                @windoliver
+/Cargo.toml                         @windoliver
+/Cargo.lock                         @windoliver
