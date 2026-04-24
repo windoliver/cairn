@@ -1,4 +1,4 @@
-//! SQLite record store for Cairn.
+//! `SQLite` record store for Cairn.
 //!
 //! P0 scaffold. Schema, migrations, FTS5 and sqlite-vec integration arrive in
 //! follow-up issues (#6 and later).

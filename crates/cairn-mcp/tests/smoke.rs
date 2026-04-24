@@ -1,3 +1,6 @@
+// Integration test files are not public API; doc-comments are not required.
+#![allow(missing_docs)]
+
 #[test]
 fn depends_on_core() {
     // If this compiles, the dep graph is wired correctly.

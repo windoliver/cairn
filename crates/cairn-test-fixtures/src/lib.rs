@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 /// Resolves at runtime from `CARGO_MANIFEST_DIR` (this crate's dir) and walks
 /// up to the workspace root. Cached after first call.
 #[must_use]
+// `expect` is appropriate here: a broken project layout (crate not two levels
+// below the workspace root) is a programmer error that should panic loudly.
+#[allow(clippy::expect_used)]
 pub fn fixtures_dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
