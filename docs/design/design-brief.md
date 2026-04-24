@@ -49,7 +49,7 @@ Every capability in Cairn is tagged P0 / P1 / P2 / P3. Readers skimming for "wha
 
 **The contract surface is stable at P0.** MCP verb set, vault layout invariants, record schema, WAL state machines — all defined at P0 and never broken by higher tiers. What changes between tiers is which **backends, workers, and workflows** are active; the wire format, file format, and audit trail never change.
 
-**Rule of thumb:** if a feature requires a **Python sidecar or a cloud credential**, it is at least P1. **P0 is pure Rust + pure SQLite + markdown + an `LLMProvider` of the operator's choice.** An `LLMProvider` at P0 can be any local model (Ollama, llama.cpp, vLLM) or any OpenAI-compatible endpoint — the operator configures it at `cairn init` time. **No LLM call leaves the laptop unless the operator configured a cloud endpoint.** The in-tree P0 adapter is `cairn-llm-openai-compat`, built on `async-openai` with a configurable `base_url`; **no LLM runtime is bundled with the binary**, no installer download, no network call at install time. See [ADR 0001](decisions/0001-llm-default.md) for the decision record.
+**Rule of thumb:** if a feature requires a **Python sidecar or a cloud credential**, it is at least P1. **P0 is pure Rust + pure SQLite + markdown + an `LLMProvider` of the operator's choice.** An `LLMProvider` at P0 can be any local model (Ollama, llama.cpp, vLLM) or any OpenAI-compatible endpoint — the operator configures it at `cairn init` time. **No LLM call leaves the laptop unless the operator configured a cloud endpoint.** The in-tree P0 adapter is `cairn-llm-openai-compat`, built on `async-openai` with a configurable `base_url`; **no LLM runtime is bundled with the binary** and no LLM network call is made at install time. (Local semantic search uses a separate ~25 MB `candle` embedding model fetched on first run per §3 — an `embedding.*` concern, not `llm.*`. Fully offline vaults opt out with `search.local_embeddings: false`.) See [ADR 0001](decisions/0001-llm-default.md) for the decision record.
 
 **P0 degrades cleanly when no LLM is configured** — `LLMExtractor` and `LLMDreamWorker` return `CapabilityUnavailable { code: "llm.not_configured" }` at invocation (CLI exits `78` `EX_CONFIG`; MCP returns `CallToolResult { isError: true, … }`); the `RegexExtractor` fallback chain still captures hook events + "tell it directly" triggers; rolling-summary `ConsolidationWorkflow` skips with a `consolidation_deferred` status in `lint-report.md`. The vault keeps accepting writes; only LLM-backed enrichment pauses. This is intentional: P0 guarantees the substrate works on a fresh offline laptop; LLM-backed extraction is an optional enrichment, not a structural dependency. Stable error codes for every failure mode (`llm.not_configured`, `llm.provider_unreachable` → `69` `EX_UNAVAILABLE`, `llm.auth_denied` → `77` `EX_NOPERM`, `llm.capability_missing` → `69`) are pinned in ADR 0001 and surfaced by `cairn status` under `capabilities.llm.*` so callers never have to parse error messages.
 
@@ -600,10 +600,17 @@ store:
   # At P1:  kind: nexus-sandbox — Nexus sidecar adds nexus-data/ directory alongside .cairn/cairn.db
   # At P2:  kind: nexus-full   — federates to a remote Nexus hub (Postgres+pgvector)
 llm:
-  provider: openai-compatible
-  base_url: https://…
+  # P0 compiled default: no provider. LLM-dependent verbs fail closed with
+  # CapabilityUnavailable { code: "llm.not_configured" } until the operator
+  # configures one. See ADR 0001 (docs/design/decisions/0001-llm-default.md).
+  # provider: openai-compatible       # openai-compatible | custom:<name>
+  # base_url: http://localhost:11434/v1
+  # model:    llama3.2
+  # api_key:  ${OPENAI_API_KEY}       # Ollama requires any non-empty string
 workflows:
-  orchestrator: temporal      # temporal | local
+  orchestrator: local           # local | temporal — P0 default is the in-process
+                                # tokio + SQLite job table (brief §4.0 row 3);
+                                # `temporal` is opt-in and requires a Temporal host.
 ```
 
 A new vault inherits the default config. Teams fork a config as a shareable template (e.g. `cairn init --template research`, `--template engineering`, `--template personal`).
@@ -1080,7 +1087,7 @@ Everything else — Extractor, Filter, Classifier, Scope, Matcher, Ranker, Conso
 
 ### 4.1 Plugin architecture
 
-Cairn is plugin‑first end to end. "Plugin" means exactly one thing: a crate or package that **implements a Cairn contract trait** and registers itself through the shared loader. There is no distinction between "built‑in" and "third‑party" at runtime — Cairn's own `cairn-store-nexus`, `cairn-llm-openai`, and `cairn-sensors-local` crates use the same registration path a third‑party `cairn-store-qdrant` crate would.
+Cairn is plugin‑first end to end. "Plugin" means exactly one thing: a crate or package that **implements a Cairn contract trait** and registers itself through the shared loader. There is no distinction between "built‑in" and "third‑party" at runtime — Cairn's own `cairn-store-nexus`, `cairn-llm-openai-compat` (see [ADR 0001](decisions/0001-llm-default.md)), and `cairn-sensors-local` crates use the same registration path a third‑party `cairn-store-qdrant` crate would.
 
 **Registry rules:**
 

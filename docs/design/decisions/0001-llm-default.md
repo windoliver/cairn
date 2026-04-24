@@ -36,8 +36,14 @@ Two candidate defaults were on the table:
   LiteLLM, Groq, Together, and OpenRouter. If strict deserialization rejects
   a non-compliant payload in practice, fall back to the drop-in
   [`async-openai-compat`](https://lib.rs/crates/async-openai-compat) fork.
-- **No bundled Ollama, no installer download, no network call at install
-  time.** `cairn init` completes with zero credentials.
+- **No bundled Ollama, no LLM runtime shipped with the binary, no LLM
+  network call at install time.** `cairn init` completes with zero LLM
+  credentials. (Note: this ADR scopes only the `LLMProvider`. The local
+  embedding model path documented in brief §3/§1.a — a ~25 MB `candle`
+  model fetched on first run for `sqlite-vec` semantic search — is a
+  separate concern tracked by `store.*` / `embedding.*` capabilities, not
+  by `llm.*`. A fully offline P0 operator opts out via
+  `search.local_embeddings: false` per brief §3.)
 - **Detection, not adoption.** `cairn status` probes
   `GET http://localhost:11434/api/tags` with a ≤300 ms timeout and reports
   the result under `detected.ollama`. It never auto-configures the provider
@@ -75,16 +81,26 @@ the offline-install promise — a new ADR, not an in-place revision.
 - New users who want LLM enrichment must install Ollama (or configure a
   cloud key) before the `llm`-mode extractor chain engages. The onboarding
   docs bear the burden of making this frictionless.
-- OpenAI-compat is not 100% uniform across providers. Known divergences we
-  accept and document:
-  - **Ollama**: no `tool_choice`, `logit_bias`, `user`, `n`, or logprobs;
-    images are base64-only; auth field required-but-ignored. Source:
+- OpenAI-compat is not 100% uniform across providers, and the divergence
+  list moves over time. **Cairn does not hard-code a per-provider feature
+  matrix in the binary.** Instead, the `LLMProvider` adapter probes at
+  runtime (capabilities endpoint where available, otherwise a single
+  dry-call per feature) and advertises the result under `capabilities.llm.*`
+  (§8.0.a). Observed divergences at the time of writing — useful for
+  implementers to sanity-check their probes against, not a contract:
+  - **Ollama**: historically rejected or ignored several OpenAI chat-request
+    fields (including `logit_bias`, `n > 1`, image URLs, logprobs, and
+    parts of the tool-call protocol); auth field required-but-ignored
+    (send any non-empty string). Behaviour has been evolving — verify
+    against the installed Ollama version, do not trust a static list.
+    Source to re-check at implementation time:
     `docs.ollama.com/api/openai-compatibility`.
-  - **vLLM**: streaming tool-call deltas omit `"type":"function"` on the
-    first chunk (vllm-project/vllm#16340). If encountered, swap the base
-    client for `async-openai-compat`.
+  - **vLLM**: streaming tool-call deltas have been observed omitting
+    `"type":"function"` on the first chunk (vllm-project/vllm#16340),
+    breaking strict `async-openai` deserialization. If encountered, swap
+    the base client for `async-openai-compat`.
   - **llama.cpp server**: `response_format` JSON mode present; tool-calling
-    quality varies by model.
+    quality varies sharply by model.
 - Verbs that depend on an LLM will hit new users as `CapabilityUnavailable`
   until configured. The error message and `cairn status` output must make
   the remediation obvious.
@@ -108,15 +124,27 @@ Returned as the `code` field of `CapabilityUnavailable`; also written to
 ```
 per-verb flag
   > global flag
-  > CAIRN_LLM_PROVIDER / CAIRN_LLM_MODEL / CAIRN_LLM_BASE_URL
-  > OPENAI_BASE_URL / OPENAI_API_KEY / OLLAMA_HOST
-  > .cairn/config.yaml
+  > CAIRN_LLM_PROVIDER / CAIRN_LLM_MODEL / CAIRN_LLM_BASE_URL / CAIRN_LLM_API_KEY
+  > OPENAI_BASE_URL  (preferred — matches async-openai's own env name)
+  > OPENAI_API_BASE  (legacy alias — community convention in aider, the `llm`
+                     CLI, older OpenAI SDKs; read by Cairn explicitly)
+  > OPENAI_API_KEY
+  > OLLAMA_HOST     (if set and `llm.provider: ollama`, resolved into base_url)
+  > .cairn/config.yaml   (repo-local)
   > ~/.config/cairn/config.yaml
   > compiled defaults (= no provider)
 ```
 
-Both `OPENAI_API_BASE` and `OPENAI_BASE_URL` are accepted (community
-convention: aider + the `llm` CLI + `async-openai` honour both).
+**Cairn reads every env var above explicitly** and normalises the resolved
+value into `OpenAIConfig::with_api_base()` before constructing the
+`async-openai` client. The CLI never delegates base-URL resolution to the
+upstream crate's implicit env handling: `async-openai` 0.36 only reads
+`OPENAI_BASE_URL` implicitly, so relying on upstream behaviour for
+`OPENAI_API_BASE` would silently fall back to
+`https://api.openai.com/v1` whenever `OPENAI_API_KEY` is present, breaking
+the "no LLM call leaves the laptop unless configured" invariant. Conflict
+resolution: when both `OPENAI_BASE_URL` and `OPENAI_API_BASE` are set,
+`OPENAI_BASE_URL` wins; Cairn logs a `warn` once per run.
 
 ### `cairn status` capability advertisement (wire-stable, brief §8.0.a)
 
@@ -164,11 +192,23 @@ error: cairn assemble_hot requires an LLM provider, but none is configured
 
 ### MCP adapter
 
-`CapabilityUnavailable` surfaces as
-`CallToolResult { isError: true, content: [...] }` with the same `code`
-and `remediation` fields. Reserve the JSON-RPC `error` object (server
-range `-32000..-32099`) for malformed calls only. Matches MCP
-specification 2025-11-25.
+`CapabilityUnavailable` is a **tool execution error**, not a protocol
+error: it surfaces as `CallToolResult { isError: true, content: [...] }`
+with the same `code` and `remediation` fields that the CLI returns.
+Protocol-level JSON-RPC errors (MCP specification 2025-11-25) follow the
+standard JSON-RPC mapping:
+
+- `-32600` *Invalid Request* — malformed JSON-RPC envelope.
+- `-32601` *Method Not Found* — unknown MCP method.
+- `-32602` *Invalid Params* — tool invoked with schema-invalid arguments.
+- `-32603` *Internal Error* — unexpected Cairn-internal failure while
+  handling the request (panic, WAL corruption, unhandled error variant).
+- `-32000..-32099` *server-defined range* — reserved for Cairn-specific
+  protocol-level failures only (e.g. capability negotiation mismatch).
+
+"Configured feature currently unavailable" never lands here — it is a
+domain outcome of a well-formed tool call and belongs in
+`CallToolResult.isError`.
 
 ## Alternatives considered
 
