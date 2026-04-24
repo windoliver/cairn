@@ -30,8 +30,8 @@
       "enum": ["committed", "aborted", "rejected"]
     },
     "data": {
-      "description": "Per-verb data payload. Shape defined by verbs/<verb>.json $defs/Data. Null on rejected/aborted calls.",
-      "type": ["object", "null"]
+      "description": "Per-verb data payload. Shape defined by verbs/<verb>.json $defs/Data. Object for most verbs; array for session / folder / scope retrieve variants; null on rejected / aborted calls.",
+      "type": ["object", "array", "null"]
     },
     "policy_trace": {
       "type": "array",

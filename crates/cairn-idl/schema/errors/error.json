@@ -4,35 +4,24 @@
   "title": "Cairn error",
   "x-cairn-contract": "cairn.mcp.v1",
   "type": "object",
-  "additionalProperties": false,
   "required": ["code", "message"],
-  "properties": {
-    "code": {
-      "type": "string",
-      "enum": [
-        "InvalidArgs",
-        "InvalidFilter",
-        "CapabilityUnavailable",
-        "UnknownVerb",
-        "ExpiredIntent",
-        "ReplayDetected",
-        "OutOfOrderSequence",
-        "RevokedKey",
-        "MissingSignature",
-        "Unauthorized",
-        "NotFound",
-        "ConflictVersion",
-        "QuarantineRequired",
-        "PluginSuspended",
-        "Internal"
-      ]
-    },
-    "message": { "type": "string" },
-    "data": {
-      "type": "object",
-      "description": "Per-code payload. See $defs for typed shapes consumed by codegen."
-    }
-  },
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "const": "InvalidArgs" },           "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidArgsData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "const": "InvalidFilter" },         "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidFilterData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "CapabilityUnavailable" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/CapabilityUnavailableData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "UnknownVerb" },   "message": { "type": "string" }, "data": { "$ref": "#/$defs/UnknownVerbData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ExpiredIntent" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/ExpiredIntentData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ReplayDetected" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/ReplayDetectedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "OutOfOrderSequence" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/OutOfOrderSequenceData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "RevokedKey" },    "message": { "type": "string" }, "data": { "$ref": "#/$defs/RevokedKeyData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"],         "properties": { "code": { "const": "MissingSignature" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/MissingSignatureData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "Unauthorized" },  "message": { "type": "string" }, "data": { "$ref": "#/$defs/UnauthorizedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "NotFound" },      "message": { "type": "string" }, "data": { "$ref": "#/$defs/NotFoundData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ConflictVersion" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/ConflictVersionData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "QuarantineRequired" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/QuarantineRequiredData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "PluginSuspended" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/PluginSuspendedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"],         "properties": { "code": { "const": "Internal" },      "message": { "type": "string" }, "data": { "$ref": "#/$defs/InternalData" } } }
+  ],
   "$defs": {
     "InvalidArgsData": {
       "type": "object",

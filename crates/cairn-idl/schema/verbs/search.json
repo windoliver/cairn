@@ -133,6 +133,17 @@
       }
     },
     "filter_leaf": {
+      "oneOf": [
+        { "$ref": "#/$defs/filter_leaf_string" },
+        { "$ref": "#/$defs/filter_leaf_string_set" },
+        { "$ref": "#/$defs/filter_leaf_number" },
+        { "$ref": "#/$defs/filter_leaf_number_set" },
+        { "$ref": "#/$defs/filter_leaf_number_between" },
+        { "$ref": "#/$defs/filter_leaf_boolean" },
+        { "$ref": "#/$defs/filter_leaf_array" }
+      ]
+    },
+    "filter_leaf_string": {
       "type": "object",
       "additionalProperties": false,
       "required": ["field", "op", "value"],
@@ -140,14 +151,90 @@
         "field": { "type": "string" },
         "op": {
           "type": "string",
-          "enum": [
-            "eq", "neq", "in", "nin",
-            "string_contains", "string_starts_with", "string_ends_with",
-            "lt", "lte", "gt", "gte", "between",
-            "array_contains", "array_contains_any", "array_contains_all", "array_size_eq"
-          ]
+          "enum": ["eq", "neq", "string_contains", "string_starts_with", "string_ends_with"]
         },
-        "value": {}
+        "value": { "type": "string" }
+      }
+    },
+    "filter_leaf_string_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op":    { "type": "string", "enum": ["in", "nin"] },
+        "value": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "filter_leaf_number": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op":    { "type": "string", "enum": ["eq", "neq", "lt", "lte", "gt", "gte"] },
+        "value": { "type": "number" }
+      }
+    },
+    "filter_leaf_number_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op":    { "type": "string", "enum": ["in", "nin"] },
+        "value": {
+          "type": "array",
+          "items": { "type": "number" }
+        }
+      }
+    },
+    "filter_leaf_number_between": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op":    { "const": "between" },
+        "value": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "filter_leaf_boolean": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op":    { "const": "eq" },
+        "value": { "type": "boolean" }
+      }
+    },
+    "filter_leaf_array": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string" },
+        "op": {
+          "type": "string",
+          "enum": ["array_contains", "array_contains_any", "array_contains_all", "array_size_eq"]
+        },
+        "value": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "number" },
+            { "type": "integer" },
+            { "type": "array", "items": { "type": ["string", "number"] } }
+          ]
+        }
       }
     }
   }

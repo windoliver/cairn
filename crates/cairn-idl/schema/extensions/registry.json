@@ -14,28 +14,49 @@
   },
   "$defs": {
     "namespace": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["name", "x-cairn-since", "enabler"],
-      "properties": {
-        "name": {
-          "type": "string",
-          "enum": [
-            "cairn.aggregate.v1",
-            "cairn.admin.v1",
-            "cairn.federation.v1",
-            "cairn.sessiontree.v1"
-          ]
+      "description": "One of the four registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole triple.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "x-cairn-since", "enabler"],
+          "properties": {
+            "name":          { "const": "cairn.aggregate.v1" },
+            "x-cairn-since": { "const": "v0.2" },
+            "enabler":       { "const": "agent.enable_aggregate" }
+          }
         },
-        "x-cairn-since": {
-          "type": "string",
-          "enum": ["v0.1", "v0.2", "v0.3"]
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "x-cairn-since", "enabler"],
+          "properties": {
+            "name":          { "const": "cairn.admin.v1" },
+            "x-cairn-since": { "const": "v0.1" },
+            "enabler":       { "const": "operator role" }
+          }
         },
-        "enabler": {
-          "type": "string",
-          "description": "Config flag or role that activates this namespace."
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "x-cairn-since", "enabler"],
+          "properties": {
+            "name":          { "const": "cairn.federation.v1" },
+            "x-cairn-since": { "const": "v0.3" },
+            "enabler":       { "const": "enterprise deployment" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "x-cairn-since", "enabler"],
+          "properties": {
+            "name":          { "const": "cairn.sessiontree.v1" },
+            "x-cairn-since": { "const": "v0.3" },
+            "enabler":       { "const": "session.enable_tree" }
+          }
         }
-      }
+      ]
     },
     "known": {
       "description": "The four planned extensions at P0 — carried as literal values so codegen can emit an enum without re-walking the $defs.namespace schema.",

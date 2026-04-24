@@ -226,16 +226,48 @@ fn collect_refs(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-fn ref_points_at_existing_file(source_path: &Path, reference: &str) -> bool {
-    let (file_part, _fragment) = reference
+fn resolve_fragment<'a>(doc: &'a Value, fragment: &str) -> Option<&'a Value> {
+    // Fragment per RFC 6901 JSON Pointer. Empty fragment ⇒ root.
+    if fragment.is_empty() {
+        return Some(doc);
+    }
+    if !fragment.starts_with('/') {
+        return None;
+    }
+    let mut current = doc;
+    for raw in fragment.split('/').skip(1) {
+        // Decode JSON Pointer escapes: ~1 → /, ~0 → ~. Order matters (~1 first).
+        let seg = raw.replace("~1", "/").replace("~0", "~");
+        match current {
+            Value::Object(m) => {
+                current = m.get(&seg)?;
+            }
+            Value::Array(a) => {
+                let idx: usize = seg.parse().ok()?;
+                current = a.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
+}
+
+fn ref_resolves(source_path: &Path, reference: &str) -> bool {
+    let (file_part, fragment) = reference
         .split_once('#')
         .unwrap_or((reference, ""));
-    if file_part.is_empty() {
-        return true; // local #/... ref — resolution deferred to #35 validator
-    }
-    let source_dir = source_path.parent().expect("schema file has parent");
-    let target = source_dir.join(file_part);
-    target.is_file()
+    let target_doc: Value = if file_part.is_empty() {
+        // Local fragment — resolve against the source document itself.
+        read_json(source_path)
+    } else {
+        let source_dir = source_path.parent().expect("schema file has parent");
+        let target = source_dir.join(file_part);
+        if !target.is_file() {
+            return false;
+        }
+        read_json(&target)
+    };
+    resolve_fragment(&target_doc, fragment).is_some()
 }
 
 #[test]
@@ -246,8 +278,8 @@ fn every_ref_resolves_to_a_real_file_or_local_fragment() {
         collect_refs(&v, &mut refs);
         for r in refs {
             assert!(
-                ref_points_at_existing_file(&path, &r),
-                "{path:?} references {r:?} which does not resolve to a sibling schema file"
+                ref_resolves(&path, &r),
+                "{path:?} references {r:?} which does not resolve to a real target (file and/or JSON Pointer fragment missing)"
             );
         }
     }

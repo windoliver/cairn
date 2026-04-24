@@ -163,7 +163,7 @@ MissingSignature, Unauthorized, NotFound, ConflictVersion,
 QuarantineRequired, PluginSuspended, Internal
 ```
 
-Shape: `{ code: enum, message: string, data: object }`. The per-code `data` payload shapes (e.g. `CapabilityUnavailable` carries `{ capability: string }`) ship as named `$defs` entries — `<Code>Data` per code — for codegen (#35) to emit typed Rust variants. The wire-level `data` field is deliberately an unconstrained object at P0: a full `oneOf` + `const code` discriminator chain with 15 branches is deferred to #35's validator pipeline, where the discriminator is applied *after* `data` has been parsed into the matching typed variant. At P0 the schema validates the code is one of the closed 15 values; the per-code shape is a codegen-only contract.
+Shape: `{ code: enum, message: string, data: object }` framed as a 15-branch `oneOf`: each branch pins `code: const "<Code>"` and constrains `data` to the matching `$defs/<Code>Data` schema. Variants that carry no structured data (`MissingSignature`, `Internal`) declare an empty `$defs` object. Codegen (#35) lowers the `oneOf` directly to a Rust `enum Error` with per-variant typed payloads; a JSON Schema validator rejects a `code: "InvalidArgs"` paired with data missing `field` or `reason`.
 
 Every variant listed above is referenced somewhere in the design brief (§4.2, §8.0.c, §8.0.d, §13.5.c). Adding a new variant in a later PR is a compatible minor revision; removing one breaks `cairn.mcp.v1`.
 
