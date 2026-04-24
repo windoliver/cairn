@@ -262,33 +262,44 @@ Every lib crate ships with:
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 ```
 
-`cairn-cli/src/main.rs`:
+`cairn-cli/src/main.rs` — fails closed on every argv shape other than the three known-good ones (`[]`, `[--help|-h]`, `[--version|-V]`), so any wrapper that keys off exit status cannot mistake the scaffold for a real memory operation:
 
 ```rust
-//! Cairn CLI entry point (P0 scaffold).
+//! Cairn CLI entry point (P0 scaffold). Fails closed on every advertised
+//! verb, unknown argument, and any trailing junk after `--help`/`--version`.
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("--version") | Some("-V") => {
+use std::process::ExitCode;
+
+const VERBS: &[&str] = &[
+    "ingest", "search", "retrieve", "summarize",
+    "assemble_hot", "capture_trace", "lint", "forget",
+];
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => { print_help(); ExitCode::SUCCESS }
+        [f] if f == "--help" || f == "-h" => { print_help(); ExitCode::SUCCESS }
+        [f] if f == "--version" || f == "-V" => {
             println!("cairn {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        [verb, rest @ ..] if VERBS.contains(&verb.as_str()) => {
+            eprintln!("cairn {verb}: not yet implemented in this P0 scaffold. ...");
+            if !rest.is_empty() {
+                eprintln!("cairn: ignored {n} trailing argument(s) — ...", n = rest.len());
+            }
+            ExitCode::from(2)
         }
         _ => {
-            println!("cairn {} — P0 scaffold", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("Verbs (not yet implemented):");
-            for v in [
-                "ingest", "search", "retrieve", "summarize",
-                "assemble_hot", "capture_trace", "lint", "forget",
-            ] {
-                println!("  cairn {v}");
-            }
+            eprintln!("cairn: unrecognised argv {args:?}. Run `cairn --help` ...");
+            ExitCode::from(2)
         }
     }
 }
 ```
 
-Gives `cargo run -p cairn-cli -- --version` a working smoke path.
+Gives `cargo run -p cairn-cli -- --version` a working smoke path while every verb invocation (`cairn ingest ...`) exits `2` with a not-implemented message on stderr.
 
 `cairn-idl/src/bin/cairn-codegen.rs`:
 

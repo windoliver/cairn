@@ -1,9 +1,10 @@
 //! Cairn CLI entry point (P0 scaffold).
 //!
 //! Real command dispatch lands when the verb layer does. Until then the
-//! binary fails closed on every advertised verb and on unknown arguments:
-//! any caller relying on exit status cannot mistake a scaffold for a real
-//! memory operation. `--help`/`--version`/no-args continue to succeed.
+//! binary fails closed on every advertised verb, unknown argument, and any
+//! malformed argv — including trailing junk after `--help` or `--version`.
+//! Any caller relying on exit status cannot mistake a scaffold for a real
+//! memory operation.
 
 use std::process::ExitCode;
 
@@ -19,28 +20,41 @@ const VERBS: &[&str] = &[
 ];
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        None | Some("--help" | "-h") => {
+    // Skip argv[0] (the program name). Everything after that must match one
+    // of the expected shapes exactly.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => {
             print_help();
             ExitCode::SUCCESS
         }
-        Some("--version" | "-V") => {
+        [flag] if flag == "--help" || flag == "-h" => {
+            print_help();
+            ExitCode::SUCCESS
+        }
+        [flag] if flag == "--version" || flag == "-V" => {
             println!("cairn {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some(arg) if VERBS.contains(&arg) => {
+        [verb, rest @ ..] if VERBS.contains(&verb.as_str()) => {
             eprintln!(
-                "cairn {arg}: not yet implemented in this P0 scaffold. \
+                "cairn {verb}: not yet implemented in this P0 scaffold. \
                  The verb layer lands in follow-up issues; no memory \
                  operation was performed."
             );
+            if !rest.is_empty() {
+                eprintln!(
+                    "cairn: ignored {n} trailing argument(s) — argv parsing \
+                     arrives with the verb layer.",
+                    n = rest.len()
+                );
+            }
             ExitCode::from(2)
         }
-        Some(arg) => {
+        _ => {
             eprintln!(
-                "cairn: unknown argument {arg:?}. Run `cairn --help` for the \
-                 list of verbs this scaffold advertises (all currently \
+                "cairn: unrecognised argv {args:?}. Run `cairn --help` for \
+                 the list of verbs this scaffold advertises (all currently \
                  return a not-implemented error)."
             );
             ExitCode::from(2)

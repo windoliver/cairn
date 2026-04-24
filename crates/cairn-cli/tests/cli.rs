@@ -70,5 +70,49 @@ fn unknown_argument_fails_closed() {
     assert!(!out.status.success(), "exit: {:?}", out.status);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(stderr.contains("unknown argument"), "got: {stderr:?}");
+    assert!(stderr.contains("unrecognised argv"), "got: {stderr:?}");
+}
+
+#[test]
+fn trailing_arg_after_help_or_version_fails_closed() {
+    // Regression: argv validation must cover the WHOLE vector, not just
+    // argv[1]. `cairn --version --bad` used to exit 0.
+    for (a, b) in [
+        ("--version", "--definitely-not-a-flag"),
+        ("-V", "--definitely-not-a-flag"),
+        ("--help", "--definitely-not-a-flag"),
+        ("-h", "ingest"),
+        ("-V", "ingest"),
+    ] {
+        let out = cli().arg(a).arg(b).output().expect("cairn");
+        assert!(
+            !out.status.success(),
+            "`cairn {a} {b}` must fail closed, got exit: {:?}",
+            out.status,
+        );
+        assert_eq!(out.status.code(), Some(2), "`cairn {a} {b}` wrong exit");
+        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+        assert!(
+            stderr.contains("unrecognised argv"),
+            "`cairn {a} {b}` missing unrecognised marker: {stderr:?}",
+        );
+    }
+}
+
+#[test]
+fn trailing_arg_after_verb_still_fails_closed() {
+    // Extra tokens after a verb must not flip the scaffold into a success
+    // path. The verb itself is still a not-implemented error.
+    let out = cli().args(["ingest", "payload"]).output().expect("cairn");
+    assert!(!out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("not yet implemented"),
+        "got: {stderr:?}",
+    );
+    assert!(
+        stderr.contains("trailing"),
+        "trailing-args hint should mention the extra tokens: {stderr:?}",
+    );
 }

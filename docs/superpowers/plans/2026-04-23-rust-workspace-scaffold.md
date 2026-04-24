@@ -798,13 +798,15 @@ git commit -m "Add cairn-test-fixtures crate and fixtures/ dir"
 - Create: `crates/cairn-cli/src/main.rs`
 - Create: `crates/cairn-cli/tests/cli.rs`
 
-- [ ] **Step 9.1: Write the failing CLI behaviour test**
+- [ ] **Step 9.1: Write the failing CLI behaviour tests**
+
+The scaffold CLI **must fail closed**: any advertised verb, any unknown argument, and any trailing junk after `--help`/`--version` must exit with code `2` and leave `stdout` empty. Only `[]`, `[--help|-h]`, and `[--version|-V]` succeed.
 
 Create `crates/cairn-cli/tests/cli.rs`:
 
 ```rust
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub output.
+//! the P0 stub behaviour: help/version succeed, verbs fail closed.
 
 use std::process::Command;
 
@@ -837,6 +839,79 @@ fn default_prints_help_listing_all_eight_verbs() {
             "help output missing verb {verb}, got:\n{stdout}",
         );
     }
+}
+
+#[test]
+fn help_flag_matches_default() {
+    let out = cli().arg("--help").output().expect("cairn --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.contains("ingest"), "got:\n{stdout}");
+}
+
+#[test]
+fn known_verb_fails_closed() {
+    for verb in [
+        "ingest", "search", "retrieve", "summarize",
+        "assemble_hot", "capture_trace", "lint", "forget",
+    ] {
+        let out = cli().arg(verb).output().expect("cairn <verb>");
+        assert!(!out.status.success(), "verb {verb} exited OK — should fail closed");
+        assert_eq!(out.status.code(), Some(2), "verb {verb} wrong exit code");
+        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+        assert!(
+            stderr.contains("not yet implemented"),
+            "verb {verb} stderr missing not-implemented marker: {stderr:?}",
+        );
+        let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+        assert!(
+            stdout.is_empty(),
+            "verb {verb} printed to stdout (caller might swallow stderr): {stdout:?}",
+        );
+    }
+}
+
+#[test]
+fn unknown_argument_fails_closed() {
+    let out = cli().arg("--definitely-not-a-flag").output().expect("cairn");
+    assert!(!out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("unrecognised argv"), "got: {stderr:?}");
+}
+
+#[test]
+fn trailing_arg_after_help_or_version_fails_closed() {
+    for (a, b) in [
+        ("--version", "--definitely-not-a-flag"),
+        ("-V", "--definitely-not-a-flag"),
+        ("--help", "--definitely-not-a-flag"),
+        ("-h", "ingest"),
+        ("-V", "ingest"),
+    ] {
+        let out = cli().arg(a).arg(b).output().expect("cairn");
+        assert!(
+            !out.status.success(),
+            "`cairn {a} {b}` must fail closed, got exit: {:?}",
+            out.status,
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+        assert!(
+            stderr.contains("unrecognised argv"),
+            "`cairn {a} {b}` missing unrecognised marker: {stderr:?}",
+        );
+    }
+}
+
+#[test]
+fn trailing_arg_after_verb_still_fails_closed() {
+    let out = cli().args(["ingest", "payload"]).output().expect("cairn");
+    assert!(!out.status.success(), "exit: {:?}", out.status);
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(stderr.contains("not yet implemented"), "got: {stderr:?}");
+    assert!(stderr.contains("trailing"), "got: {stderr:?}");
 }
 ```
 
@@ -889,27 +964,74 @@ Create `crates/cairn-cli/src/main.rs`:
 ```rust
 //! Cairn CLI entry point (P0 scaffold).
 //!
-//! Real command dispatch lands when the verb layer does. For now the binary
-//! prints its version or a help listing so smoke tests have something to
-//! exercise.
+//! Real command dispatch lands when the verb layer does. Until then the
+//! binary fails closed on every advertised verb, unknown argument, and any
+//! malformed argv — including trailing junk after `--help` or `--version`.
+//! Any caller relying on exit status cannot mistake a scaffold for a real
+//! memory operation.
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("--version") | Some("-V") => {
+use std::process::ExitCode;
+
+const VERBS: &[&str] = &[
+    "ingest",
+    "search",
+    "retrieve",
+    "summarize",
+    "assemble_hot",
+    "capture_trace",
+    "lint",
+    "forget",
+];
+
+fn main() -> ExitCode {
+    // Skip argv[0] (the program name). Everything after that must match one
+    // of the expected shapes exactly.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => {
+            print_help();
+            ExitCode::SUCCESS
+        }
+        [flag] if flag == "--help" || flag == "-h" => {
+            print_help();
+            ExitCode::SUCCESS
+        }
+        [flag] if flag == "--version" || flag == "-V" => {
             println!("cairn {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
+        [verb, rest @ ..] if VERBS.contains(&verb.as_str()) => {
+            eprintln!(
+                "cairn {verb}: not yet implemented in this P0 scaffold. \
+                 The verb layer lands in follow-up issues; no memory \
+                 operation was performed."
+            );
+            if !rest.is_empty() {
+                eprintln!(
+                    "cairn: ignored {n} trailing argument(s) — argv parsing \
+                     arrives with the verb layer.",
+                    n = rest.len()
+                );
+            }
+            ExitCode::from(2)
         }
         _ => {
-            println!("cairn {} — P0 scaffold", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("Verbs (not yet implemented):");
-            for v in [
-                "ingest", "search", "retrieve", "summarize",
-                "assemble_hot", "capture_trace", "lint", "forget",
-            ] {
-                println!("  cairn {v}");
-            }
+            eprintln!(
+                "cairn: unrecognised argv {args:?}. Run `cairn --help` for \
+                 the list of verbs this scaffold advertises (all currently \
+                 return a not-implemented error)."
+            );
+            ExitCode::from(2)
         }
+    }
+}
+
+fn print_help() {
+    println!("cairn {} — P0 scaffold", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Verbs (not yet implemented — every verb exits 2):");
+    for v in VERBS {
+        println!("  cairn {v}");
     }
 }
 ```
@@ -918,11 +1040,7 @@ fn main() {
 
 Run: `cargo test -p cairn-cli`
 
-Expected:
-```
-test prints_version_with_flag ... ok
-test default_prints_help_listing_all_eight_verbs ... ok
-```
+Expected: 7 tests pass (`prints_version_with_flag`, `default_prints_help_listing_all_eight_verbs`, `help_flag_matches_default`, `known_verb_fails_closed`, `unknown_argument_fails_closed`, `trailing_arg_after_help_or_version_fails_closed`, `trailing_arg_after_verb_still_fails_closed`).
 
 - [ ] **Step 9.6: Smoke-run the binary**
 
