@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/capture_trace.json",
+  "title": "Cairn verb: capture_trace",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "capture_trace",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-cli": {
+    "command": "capture_trace",
+    "flags": [
+      { "name": "from",       "long": "from",    "value_source": "path" },
+      { "name": "session_id", "long": "session", "value_source": "string" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use to persist a reasoning trajectory / transcript for later ACE distillation"
+    ],
+    "negative": [
+      "do NOT use for durable facts about the user or world — call ingest"
+    ],
+    "exclusivity": "this is the canonical trace-capture surface"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from"],
+      "properties": {
+        "from":       { "type": "string", "description": "Path to the trace log or transcript file." },
+        "session_id": { "type": "string" }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trace_id"],
+      "properties": {
+        "trace_id": { "type": "string" }
+      }
+    }
+  }
+}

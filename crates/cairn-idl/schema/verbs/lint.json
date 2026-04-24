@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/lint.json",
+  "title": "Cairn verb: lint",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "lint",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "read_only",
+  "x-cairn-cli": {
+    "command": "lint",
+    "flags": [
+      { "name": "write_report", "long": "write-report", "value_source": "bool" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use to check vault health — contradictions, orphans, stale claims, missing concept pages"
+    ],
+    "negative": [
+      "do NOT call per turn — run on a cadence (daily / on PR)"
+    ],
+    "exclusivity": "this is the canonical vault-health surface"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "write_report": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, writes .cairn/lint-report.md."
+        }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "findings"],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["total"],
+          "properties": {
+            "total":          { "type": "integer", "minimum": 0 },
+            "contradictions": { "type": "integer", "minimum": 0 },
+            "orphans":        { "type": "integer", "minimum": 0 },
+            "stale":          { "type": "integer", "minimum": 0 }
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "message"],
+            "properties": {
+              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap"] },
+              "message":   { "type": "string" },
+              "record_id": { "type": "string" }
+            }
+          }
+        },
+        "report_path": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/assemble_hot.json",
+  "title": "Cairn verb: assemble_hot",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "assemble_hot",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "rebac",
+  "x-cairn-cli": {
+    "command": "assemble_hot",
+    "flags": [
+      { "name": "session_id", "long": "session", "value_source": "string" },
+      { "name": "budget",     "long": "budget",  "value_source": "u32" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use at the start of every turn to load the hot-memory prefix for this agent/session"
+    ],
+    "negative": [
+      "do NOT call in a tight inner loop — one call per turn"
+    ],
+    "exclusivity": "this is the canonical hot-prefix surface"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string" },
+        "budget":     { "type": "integer", "minimum": 0, "description": "Byte budget for the assembled prefix (default 25000)." }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prefix", "bytes"],
+      "properties": {
+        "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt." },
+        "bytes":  { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
