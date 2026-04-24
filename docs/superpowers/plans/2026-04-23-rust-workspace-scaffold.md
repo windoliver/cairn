@@ -1173,13 +1173,12 @@ This task performs the checks in the issue's **Verification** section. No code c
 Run:
 
 ```bash
-cargo metadata --format-version 1 --no-deps \
-  | jq -r '.workspace_members[]' \
-  | awk '{print $1}' \
+cargo metadata --format-version 1 --no-deps --locked \
+  | jq -r '.packages[].name' \
   | sort
 ```
 
-Expected output (eight lines):
+Expected output (eight lines, bare crate names):
 ```
 cairn-cli
 cairn-core
@@ -1190,6 +1189,8 @@ cairn-store-sqlite
 cairn-test-fixtures
 cairn-workflows
 ```
+
+With `--no-deps`, `.packages[]` is exactly the workspace members. Do not read `.workspace_members[]` directly — on Cargo 1.95 that emits package IDs like `path+file:///.../crates/cairn-cli#0.0.1`, not the bare name.
 
 If the count is wrong or a name is missing, the corresponding task's Cargo.toml did not commit — go back and fix.
 
