@@ -110,34 +110,97 @@ touches both.
 ## 5. Time-limited deviation — single-maintainer period
 
 While the repository has **exactly one** maintainer in `MAINTAINERS.md`,
-required-reviewer branch protection cannot be satisfied by the sole
+required-approval branch protection cannot be satisfied by the sole
 maintainer on their own PRs (GitHub disallows PR authors from approving
 their own pull requests). The deviation resolves this without relying on an
-admin bypass:
+admin bypass, and keeps a **mechanically-enforced gate** on load-bearing
+changes.
 
-- **Branch protection does not require a CODEOWNERS or approving review**
-  during this period. CODEOWNERS remains in place as a reviewer-request
-  hint and an informational ownership map, not an enforcement gate.
-- **Required status checks remain on** (CI must pass) and **force-push to
-  `main` stays blocked**; the deviation is scoped narrowly to the "require
-  N approvals" rule.
-- **Load-bearing PRs** (as listed in `CLAUDE.md` §9 — core traits, WAL,
-  consent journal, config schema; plus any change to this document or to
-  `docs/design/decisions/`) **must** solicit and obtain at least one
-  external review before merge. The sole maintainer records the reviewer
-  (GitHub handle or email) in the PR description under a `Reviewed-by:`
-  trailer. Merging a load-bearing PR without a recorded external review is
-  a governance breach.
-- **On the first PR after a second maintainer joins**, enable required
-  CODEOWNERS review in branch protection, remove this §5 from the document
-  by PR (that PR itself benefits from the newly-available second
-  approver), and update `MAINTAINERS.md` to note the end of the
-  single-maintainer period in its change log.
+### 5.1. Branch-protection settings during this period
 
-No admin-bypass or ruleset-bypass path is authorised for the single
-maintainer during this period. The hard floor is the `Reviewed-by:` trailer
-for load-bearing changes; everything else relies on community scrutiny of
-the public commit log.
+- **Required status checks remain on** (CI must pass — including the
+  `governance / reviewed-by` check defined in §5.3).
+- **Force-push to `main` is blocked.**
+- **Signed commits are recommended** but not required.
+- **"Required approvals = 1" is disabled** — see rationale above; this is
+  the narrow scope of the deviation.
+- **Admin / ruleset bypass is NOT granted** to the sole maintainer. The
+  `governance / reviewed-by` required status check is the hard gate.
+
+### 5.2. Load-bearing paths
+
+A PR is **load-bearing** if its diff touches any of the following (kept in
+sync with `CLAUDE.md` §9 and `scripts/check-reviewed-by.sh`):
+
+- `crates/cairn-core/src/` or `crates/cairn-core/Cargo.toml`
+- `crates/cairn-idl/` (IDL source and generated artefacts)
+- `crates/cairn-store-sqlite/migrations/` (append-only migrations)
+- `docs/design/design-brief.md`
+- `docs/design/decisions/` (any ADR)
+- `GOVERNANCE.md`, `MAINTAINERS.md`, `.github/CODEOWNERS`
+- `.github/workflows/governance.yml`, `scripts/check-reviewed-by.sh`
+
+### 5.3. Enforceable external-review rule
+
+For every load-bearing PR during this period:
+
+1. An **external reviewer** (GitHub account other than the PR author) must
+   leave an **Approved** review on the PR before merge. The review is
+   permanently recorded in the PR timeline and is queryable via the
+   GitHub API.
+2. The PR must carry a `Reviewed-by:` trailer naming the external
+   reviewer, either in the **merge commit body** or in the **PR
+   description**:
+
+   ```
+   Reviewed-by: Jane Doe <@janedoe>
+   ```
+
+3. The `governance / reviewed-by` CI job
+   (`.github/workflows/governance.yml` + `scripts/check-reviewed-by.sh`)
+   inspects the PR diff; if it touches load-bearing paths and no valid
+   `Reviewed-by:` trailer is present (or the trailer names the author),
+   the check fails and the PR cannot merge. This check is listed in
+   branch protection as a required status check.
+
+The combination of the GitHub Approved review (social + auditable), the
+commit trailer (audit artefact surviving in `git log`), and the required
+status check (mechanical gate) makes the rule enforceable without relying
+on the 1-approval branch-protection rule that GitHub's self-approval ban
+would otherwise deadlock.
+
+Merging a load-bearing PR without the above is a governance breach and
+must be reverted and re-submitted under the proper process.
+
+### 5.4. Transition off the deviation — atomic runbook
+
+The deviation is removed atomically when the second maintainer is added.
+The single nomination PR must contain **all** of the following and must be
+merged as one unit; no other PR may merge between the branch-protection
+update and the nomination PR:
+
+1. Add the new maintainer to `MAINTAINERS.md` (with contract-area
+   annotations per §2).
+2. Update `.github/CODEOWNERS` to include the new maintainer wherever
+   relevant; at minimum every path gains them as an owner.
+3. Remove this §5 from `GOVERNANCE.md` and update any cross-references
+   (ADR 0001, brief §20.1, CODEOWNERS comment header).
+4. Update `MAINTAINERS.md`'s change log to record the end of the
+   single-maintainer period with its date.
+5. Include the external `Reviewed-by:` trailer from the nominated
+   maintainer themselves (they are not the author of their own nomination
+   if §1 procedure is followed) or from another external reviewer.
+
+Before this PR merges, the maintainer opening it also completes the
+GitHub branch-protection configuration change: enable "Require
+approvals = 1" and "Require review from Code Owners" on `main`. The PR
+then merges under the new rule. No intermediate state exists in which
+neither §5 nor the CODEOWNERS-required-approval rule governs the
+repository.
+
+If the second-maintainer PR has to be split across multiple commits for
+review clarity, all commits must land in one merge; squashing is the
+default merge strategy for this specific transition PR.
 
 ---
 

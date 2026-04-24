@@ -120,6 +120,35 @@ H3. **External consumer SLA conflict.** An external project depends on a
     crate in-repo forces us to either break their SLA or over-stabilise
     the rest of the workspace.
 
+**Immediate containment when a hard trigger fires.** Opening the
+extraction ADR is the long-running workstream; a discussion cannot be the
+only response while risk is outstanding. Within **24 hours** of the
+trigger being declared on-repo (issue labelled `governance:hard-trigger`),
+the maintainers must:
+
+1. **Assign an owner** — one maintainer takes point, named in the issue.
+2. **Set a decision deadline** — no longer than 14 days for the
+   extraction ADR to reach `Accepted` or the trigger to be explicitly
+   ruled not-applicable, with a written rationale.
+3. **Apply interim controls** scoped to the trigger:
+   - **H1 (licensing/CLA):** pause merges to the affected crate path
+     (CODEOWNERS self-lock or `concurrency: governance-freeze` workflow
+     guard) until the licence question is resolved in writing.
+   - **H2 (security gate):** freeze releases of the affected crate
+     immediately — tag `release-plz` skip on the crate, open a P0 issue
+     for interim signed-release tooling, and document the reduced
+     release surface in `README.md` until extraction or equivalent
+     in-repo mitigation lands.
+   - **H3 (SLA conflict):** pin the affected crate's semver at its
+     current minor, notify the external consumer of the freeze in
+     writing, and open an issue tracking either SLA alignment or
+     extraction — whichever the external consumer selects.
+4. **Record** the containment steps in the extraction-ADR issue thread;
+   the ADR's `Context` section must cite them when it lands.
+
+Soft triggers do **not** require immediate containment — they are
+operational-discomfort signals, handled through the normal ADR lifecycle.
+
 **Soft triggers — one opens discussion, two concurrent open extraction ADR:**
 
 S1. Release cadence for one crate has permanently diverged (one ships
