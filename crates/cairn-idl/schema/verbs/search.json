@@ -231,7 +231,6 @@
           "oneOf": [
             { "type": "string" },
             { "type": "number" },
-            { "type": "integer" },
             { "type": "array", "items": { "type": ["string", "number"] } }
           ]
         }

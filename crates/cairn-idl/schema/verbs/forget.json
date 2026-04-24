@@ -77,8 +77,17 @@
         "scope": {
           "type": "object",
           "additionalProperties": true,
-          "minProperties": 1,
-          "description": "Scope filter grammar — must include at least one narrowing predicate. An empty object is rejected at schema validation to prevent unbounded destructive forgets."
+          "description": "Scope filter grammar — must include at least one recognized narrowing predicate from the enumerated keys below. Empty objects and payloads carrying only unknown keys are rejected at schema validation to prevent unbounded destructive forgets.",
+          "anyOf": [
+            { "required": ["user"] },
+            { "required": ["agent"] },
+            { "required": ["tenant"] },
+            { "required": ["workspace"] },
+            { "required": ["kind"] },
+            { "required": ["tags"] },
+            { "required": ["session_id"] },
+            { "required": ["record_ids"] }
+          ]
         }
       }
     },

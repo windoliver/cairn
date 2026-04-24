@@ -23,8 +23,18 @@
     },
     "signed_intent": { "$ref": "signed_intent.json" },
     "args": {
-      "description": "Per-verb argument payload. The exact shape is defined by the matching verbs/<verb>.json $defs/Args schema.",
-      "type": "object"
+      "description": "Per-verb argument payload. The concrete shape is dispatched by the allOf / if-then arms below, each binding args to verbs/<verb>.json#/$defs/Args for the matching verb.",
+      "type": ["object", "array"]
     }
-  }
+  },
+  "allOf": [
+    { "if": { "properties": { "verb": { "const": "ingest" } } },         "then": { "properties": { "args": { "$ref": "../verbs/ingest.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "search" } } },         "then": { "properties": { "args": { "$ref": "../verbs/search.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "retrieve" } } },       "then": { "properties": { "args": { "$ref": "../verbs/retrieve.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "summarize" } } },      "then": { "properties": { "args": { "$ref": "../verbs/summarize.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "assemble_hot" } } },   "then": { "properties": { "args": { "$ref": "../verbs/assemble_hot.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "capture_trace" } } },  "then": { "properties": { "args": { "$ref": "../verbs/capture_trace.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "lint" } } },           "then": { "properties": { "args": { "$ref": "../verbs/lint.json#/$defs/Args" } } } },
+    { "if": { "properties": { "verb": { "const": "forget" } } },         "then": { "properties": { "args": { "$ref": "../verbs/forget.json#/$defs/Args" } } } }
+  ]
 }

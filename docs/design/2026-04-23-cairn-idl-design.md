@@ -123,7 +123,7 @@ Authoring rules:
   args: object (per-verb — the verb file supplies the concrete args schema) }
 ```
 
-The `verb` enum is closed to the eight core verbs at #34; each extension issue extends it additively when its verb schemas land. At P0 the `args` field is declared as an untyped `object` — per-verb argument shapes live in `verbs/<verb>.json`'s `$defs/Args`, and codegen (#35) loads the matching verb file to resolve the concrete shape rather than reading a dispatch table from `request.json`. A full `oneOf` + `if/then` dispatch table inside `request.json` is deliberately deferred; encoding 8 `if/then` arms with cross-file `$ref` buys no expressiveness over the per-verb-file form and triples the review surface.
+The `verb` enum is closed to the eight core verbs at #34; each extension issue extends it additively when its verb schemas land. `args` is constrained by an `allOf` of eight `if/then` arms — each arm matches `verb: const "<v>"` and binds `args` to `../verbs/<v>.json#/$defs/Args`. A JSON Schema validator rejects a request whose `verb` and `args` shapes disagree (e.g. `verb: "forget"` paired with an `ingest`-shaped payload). Codegen (#35) either resolves the `allOf` arms directly or loads each verb file separately — both forms converge on the same per-verb typed shape.
 
 **`envelope/response.json`.**
 
