@@ -20,7 +20,7 @@ The core idea is simple: memory should be portable, inspectable, and independent
 Most agent memory systems are tied to one app, one model provider, or one remote service. Cairn is designed around a different set of invariants:
 
 - **Harness-agnostic:** Any agent loop can call Cairn through the CLI, MCP adapter, SDK, or installable skill.
-- **Local-first:** The P0 substrate is a Rust binary plus a local SQLite vault and markdown projections.
+- **Local-first:** The P0 substrate is a Rust binary plus a local SQLite vault, local embeddings, and markdown projections.
 - **Audit-friendly:** Writes, promotions, consent decisions, and forget operations move through explicit records instead of hidden state.
 - **Human-inspectable:** The vault exports to plain markdown that works with editors, `grep`, Git, Obsidian, VS Code, and Logseq-style workflows.
 - **Progressively scalable:** Semantic search, richer parsers, desktop UI, and team federation are layered on top without changing the core contract.
@@ -62,7 +62,7 @@ flowchart LR
     C -. "P1+" .-> NX
 ```
 
-At P0, Cairn should work on a fresh laptop with no service dependency. SQLite is the authoritative store; markdown is a repairable projection for humans and editors. Higher tiers add richer search backends, source parsers, GUI surfaces, workflow engines, and team federation while keeping `.cairn/cairn.db` as the local source of truth.
+At P0, Cairn should work on a fresh laptop with no service dependency. SQLite is the authoritative store; markdown is a repairable projection for humans and editors; local `sqlite-vec` plus `candle` provide semantic and hybrid search without Python or an embedding API key. Higher tiers add richer search backends, source parsers, GUI surfaces, workflow engines, and team federation while keeping `.cairn/cairn.db` as the local source of truth.
 
 ## Progressive Adoption
 
@@ -80,18 +80,19 @@ The first shippable version is scoped to the smallest useful memory substrate:
 
 - Single Rust binary with no required runtime service.
 - One local `.cairn/cairn.db` SQLite file for records, WAL state, consent journal, locks, and replay metadata.
+- Keyword, semantic, and hybrid search in v0.1: FTS5 for keyword, `sqlite-vec` plus local `candle` embeddings for semantic, and a local blend for hybrid.
 - Plain markdown projection under the vault for inspection and editor workflows.
 - Core CLI plus MCP adapter, SDK surface, and installable skill.
-- Hook capture for sessions, prompts, tool calls, and stop events.
+- Five harness hooks plus opt-in local sensors for IDE, terminal, clipboard, voice, screen, and recording-to-text capture.
 - Record-level `forget` with index drains and physical purge.
-- Capability-gated `search` modes: keyword is baseline; semantic and hybrid are available only when the runtime advertises local embedding support.
+- Capability-gated search behavior: semantic and hybrid are advertised by default; if `search.local_embeddings: false` is set and no P1 provider is configured, those modes are removed from capabilities and rejected with `CapabilityUnavailable`.
 
 ## Roadmap
 
 | Version | Focus |
 | --- | --- |
-| `v0.1` | Minimum local substrate: eight verbs, SQLite vault, markdown projection, hooks, hot-memory assembly, record-level forget, and capability-gated search. |
-| `v0.2` | Richer search and operations: optional sidecar indexes, source parsers, session-level forget, cold rehydration, observability, and early desktop UI. |
+| `v0.1` | Minimum local substrate: eight verbs, SQLite vault, markdown projection, hooks and local sensors, hot-memory assembly, record-level forget, and local keyword/semantic/hybrid search. |
+| `v0.2` | Richer search and operations: optional sidecar indexes, BM25S/cloud embedding providers, source parsers, session-level forget, cold rehydration, observability, and early desktop UI. |
 | `v0.3` | Power and collaboration: federation, team/org visibility, advanced workflows, aggregate search, and canary rollout tools. |
 | `v1.0` | Stable production surface: frozen MCP contract, cross-platform desktop distribution, replay benchmarks, coherence tests, and semver guarantees. |
 
@@ -101,10 +102,10 @@ The final CLI is expected to feel like this:
 
 ```bash
 cairn init
-cairn ingest --kind user --text "I prefer concise technical answers"
+cairn ingest --kind user --body "I prefer concise technical answers"
 cairn search "answer style" --limit 5
-cairn retrieve --record rec_...
-cairn assemble-hot --budget 25000
+cairn retrieve rec_...
+cairn assemble_hot --budget 25000
 cairn forget --record rec_...
 ```
 
@@ -132,7 +133,7 @@ Sources are immutable inputs. Raw records are private working memory. Wiki pages
 
 ## Design Notes
 
-The design brief is coherent around the product thesis and the core contract. One decision still needs to be finalized before implementation: whether v0.1 requires local semantic/hybrid search by default or treats those modes as optional advertised capabilities. This README uses the capability-gated model because it preserves the contract while allowing the implementation to ship incrementally.
+This README follows the latest design brief rule: v0.1 ships keyword, semantic, and hybrid search locally by default using SQLite FTS5, statically linked `sqlite-vec`, and a pure-Rust `candle` embedding runtime. The capability surface still fails closed: runtimes only execute modes they advertise, and semantic/hybrid calls are rejected rather than silently downgraded when local embeddings are explicitly disabled.
 
 ## Contributing
 
