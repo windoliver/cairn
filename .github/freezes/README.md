@@ -33,6 +33,21 @@ paths:
   - crates/cairn-store-sqlite/Cargo.toml
 ```
 
+A special sentinel entry `**` means "freeze every path in the
+repository." It is used by the second-maintainer transition freeze
+documented in `GOVERNANCE.md` §5.4, where the `governance:transition`
+and `governance:freeze-removal` label exemptions are the only way for
+PRs to land until the freeze is lifted.
+
+```yaml
+trigger: transition
+issue: https://github.com/windoliver/cairn/issues/NNN
+opened: 2026-04-24
+deadline: 2026-04-28
+paths:
+  - "**"
+```
+
 ## Removing a freeze
 
 Open a PR that deletes the file. Label it `governance:freeze-removal`

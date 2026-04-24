@@ -55,58 +55,163 @@ changed_name_status=$(git diff --name-status "${BASE_SHA}" "${HEAD_SHA}")
 #   - every changed path is under .github/freezes/, AND
 #   - every changed path is a deletion (status 'D').
 # Otherwise the freeze check runs normally.
-exempt=0
+# Parse PR_LABELS as a strict JSON array once. Any malformed input
+# fail-closes the check — do not fall through treating PR_LABELS as
+# absent, since that would skip the mandatory label exemption logic.
+parsed_labels=""
 if [[ -n "${PR_LABELS:-}" ]]; then
     set +e
-    PR_LABELS="${PR_LABELS}" python3 -c '
+    parsed_labels=$(
+        PR_LABELS="${PR_LABELS}" python3 -c '
 import json, os, sys
 raw = os.environ.get("PR_LABELS", "")
 try:
     labels = json.loads(raw)
 except Exception:
     sys.exit(2)
-if not isinstance(labels, list):
+if not isinstance(labels, list) or not all(isinstance(x, str) for x in labels):
     sys.exit(2)
-sys.exit(0 if "governance:freeze-removal" in labels else 3)
+for label in labels:
+    print(label)
 '
+    )
     label_rc=$?
     set -e
-
-    if [[ "${label_rc}" -eq 2 ]]; then
-        echo "check-freeze: PR_LABELS is not a valid JSON array — fail-closed." >&2
+    if [[ "${label_rc}" -ne 0 ]]; then
+        echo "check-freeze: PR_LABELS is not a valid JSON array of strings — fail-closed." >&2
         exit 1
-    fi
-
-    if [[ "${label_rc}" -eq 0 ]]; then
-        diff_only_freeze_deletes=1
-        while IFS=$'\t' read -r status path rest; do
-            [[ -z "${status}" ]] && continue
-            # Rename/copy statuses are prefixed 'R'/'C' with a similarity score.
-            case "${status}" in
-                D) ;;
-                *) diff_only_freeze_deletes=0 ;;
-            esac
-            case "${path}" in
-                .github/freezes/*) ;;
-                *) diff_only_freeze_deletes=0 ;;
-            esac
-            [[ "${diff_only_freeze_deletes}" -eq 0 ]] && break
-        done <<<"${changed_name_status}"
-
-        if [[ "${diff_only_freeze_deletes}" -eq 1 ]]; then
-            exempt=1
-        else
-            echo "check-freeze: governance:freeze-removal label present but diff is not purely freeze-file deletions — exemption denied." >&2
-            echo "Changed files:" >&2
-            printf '%s\n' "${changed_name_status}" >&2
-            exit 1
-        fi
     fi
 fi
 
-if [[ "${exempt}" -eq 1 ]]; then
-    echo "check-freeze: governance:freeze-removal label + diff matches freeze-only deletions — exempt."
-    exit 0
+has_label() {
+    local needle="$1"
+    [[ -z "${parsed_labels}" ]] && return 1
+    printf '%s\n' "${parsed_labels}" | grep -qxF "${needle}"
+}
+
+# --- 2a. Freeze-removal exemption ----------------------------------------
+# Applies iff:
+#   - PR is labelled exactly 'governance:freeze-removal', AND
+#   - every changed path is a pure deletion under .github/freezes/.
+if has_label "governance:freeze-removal"; then
+    diff_only_freeze_deletes=1
+    while IFS=$'\t' read -r status path rest; do
+        [[ -z "${status}" ]] && continue
+        # Strip similarity score from rename/copy statuses (e.g. R100).
+        short_status="${status:0:1}"
+        case "${short_status}" in
+            D) ;;
+            *) diff_only_freeze_deletes=0 ;;
+        esac
+        case "${path}" in
+            .github/freezes/*) ;;
+            *) diff_only_freeze_deletes=0 ;;
+        esac
+        [[ "${diff_only_freeze_deletes}" -eq 0 ]] && break
+    done <<<"${changed_name_status}"
+
+    if [[ "${diff_only_freeze_deletes}" -eq 1 ]]; then
+        echo "check-freeze: governance:freeze-removal label + diff matches freeze-only deletions — exempt."
+        exit 0
+    fi
+
+    echo "check-freeze: governance:freeze-removal label present but diff is not purely freeze-file deletions — exemption denied." >&2
+    echo "Changed files:" >&2
+    printf '%s\n' "${changed_name_status}" >&2
+    exit 1
+fi
+
+# --- 2b. Transition exemption (GOVERNANCE §5.4) --------------------------
+# The second-maintainer transition PR needs to touch load-bearing
+# governance + doc paths while an all-paths transition freeze is active.
+# Applies iff:
+#   - PR is labelled exactly 'governance:transition', AND
+#   - the diff touches ONLY the explicitly-permitted transition scope:
+#       MAINTAINERS.md
+#       GOVERNANCE.md
+#       .github/CODEOWNERS
+#       docs/design/decisions/
+#       docs/design/design-brief.md
+#       scripts/check-reviewed-by.sh
+#   - and does NOT modify any freeze file (the tamper guard below
+#     still runs after this block).
+if has_label "governance:transition"; then
+    allowed_prefixes=(
+        'MAINTAINERS.md'
+        'GOVERNANCE.md'
+        '.github/CODEOWNERS'
+        'docs/design/decisions/'
+        'docs/design/design-brief.md'
+        'scripts/check-reviewed-by.sh'
+    )
+    in_scope=1
+    while IFS= read -r file; do
+        [[ -z "${file}" ]] && continue
+        ok=0
+        for allowed in "${allowed_prefixes[@]}"; do
+            case "${file}" in
+                "${allowed}"*) ok=1; break ;;
+            esac
+        done
+        if [[ "${ok}" -eq 0 ]]; then
+            in_scope=0
+            echo "check-freeze: governance:transition exemption denied — path '${file}' is outside the permitted transition scope." >&2
+            break
+        fi
+    done <<<"${changed_files}"
+
+    if [[ "${in_scope}" -eq 1 ]]; then
+        echo "check-freeze: governance:transition label + diff within permitted transition scope — exempt."
+        exit 0
+    fi
+    echo "Changed files:" >&2
+    printf '%s\n' "${changed_files}" >&2
+    exit 1
+fi
+
+# --- 2a. Freeze-file tamper guard. ---------------------------------------
+# A PR that is NOT the exempt freeze-removal path must not edit, rename,
+# or delete existing `.github/freezes/*.y?ml` files. New-file additions
+# (status 'A') are allowed — that is how a maintainer opens a new freeze.
+# Everything else (M, D, R, C, T) on those paths fails closed, because
+# the fallthrough freeze-path check can only detect diffs touching the
+# TARGET of a freeze, not the freeze file itself.
+#
+# This is the final gate before normal freeze evaluation, so an un-
+# labelled PR that silently deletes an active freeze file is caught
+# here even if it doesn't also touch the (now-unfrozen) target path.
+tamper_hit=""
+while IFS=$'\t' read -r status path rest; do
+    [[ -z "${status}" ]] && continue
+    case "${path}" in
+        .github/freezes/*.yaml|.github/freezes/*.yml) ;;
+        *) continue ;;
+    esac
+    # Strip similarity score from rename/copy statuses (e.g. R100).
+    short_status="${status:0:1}"
+    case "${short_status}" in
+        A) ;;
+        *) tamper_hit="${status}	${path}"; break ;;
+    esac
+done <<<"${changed_name_status}"
+
+if [[ -n "${tamper_hit}" ]]; then
+    cat >&2 <<EOF
+check-freeze: FAIL — PR modifies or deletes an existing freeze file
+without the exempt freeze-removal protocol.
+
+Offending change: ${tamper_hit}
+
+Freeze files under .github/freezes/*.yaml may only be:
+  - added (status A) — to declare a new freeze, OR
+  - deleted (status D) as the ENTIRE diff, with the PR labelled
+    'governance:freeze-removal'.
+
+Editing, renaming, or partially deleting an existing freeze file is not
+permitted; open a freeze-removal PR then a separate freeze-addition PR
+if the freeze needs to change.
+EOF
+    exit 1
 fi
 
 # --- 3. Load active freezes; fail closed on any malformed file. ----------
@@ -165,9 +270,21 @@ PY
 }
 
 # --- 4. Check PR diff against frozen paths. ------------------------------
+# Path semantics: a `paths:` entry is a prefix match on the repository-
+# relative path. The single entry `**` is a sentinel meaning "match
+# every path" (used by the transition freeze in GOVERNANCE.md §5.4).
 hit=""
 while IFS=$'\t' read -r tag src pattern; do
     [[ "${tag}" != "PATH" ]] && continue
+    if [[ "${pattern}" == "**" ]]; then
+        # Any changed file is a hit.
+        first_file=$(printf '%s\n' "${changed_files}" | sed -n '1p')
+        if [[ -n "${first_file}" ]]; then
+            hit="${first_file} (frozen by ** sentinel in ${src})"
+            break
+        fi
+        continue
+    fi
     while IFS= read -r file; do
         [[ -z "${file}" ]] && continue
         case "${file}" in

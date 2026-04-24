@@ -151,12 +151,16 @@ For every load-bearing PR during this period:
    permanently recorded in the PR timeline and is queryable via the
    GitHub API.
 2. The PR must carry a `Reviewed-by:` trailer naming the external
-   reviewer, either in the **merge commit body** or in the **PR
-   description**:
+   reviewer in a **commit message** on the PR branch (not the PR
+   description — the gate deliberately ignores PR-body text so the
+   audit artefact survives squash-merge in `git log`):
 
    ```
    Reviewed-by: Jane Doe <@janedoe>
    ```
+
+   Amend or add a commit whose message body includes this trailer
+   before the gate runs (or after, then push again).
 
 3. The `governance / reviewed-by` CI job
    (`.github/workflows/governance.yml` + `scripts/check-reviewed-by.sh`)
@@ -166,13 +170,29 @@ For every load-bearing PR during this period:
    branch protection as a required status check.
 
 The combination of the GitHub Approved review (social + auditable), the
-commit trailer (audit artefact surviving in `git log`), and the required
-status check (mechanical gate) makes the rule enforceable without relying
-on the 1-approval branch-protection rule that GitHub's self-approval ban
-would otherwise deadlock.
+commit-message trailer (audit artefact surviving in `git log`), and the
+required status check (mechanical gate) makes the rule enforceable
+without relying on the 1-approval branch-protection rule that GitHub's
+self-approval ban would otherwise deadlock.
 
-Merging a load-bearing PR without the above is a governance breach and
-must be reverted and re-submitted under the proper process.
+**Dismissal / CHANGES_REQUESTED refresh.** The required status check
+deliberately does **not** register for `pull_request_review` events:
+that trigger runs on the PR's merge ref, which PR-controlled YAML can
+mutate, so accepting it would let a PR modify the workflow and emit the
+same required-check names from an untrusted context. The consequence is
+that if a reviewer dismisses an earlier Approved review or submits
+`CHANGES_REQUESTED`, the green required check does not automatically
+re-run. The sole maintainer must, before merging, push an empty commit
+to force `synchronize` to fire:
+
+```
+git commit --allow-empty -m "Re-request governance check after review refresh"
+git push
+```
+
+Merging a load-bearing PR while a previously-Approved review has been
+dismissed or changed — without the empty-commit refresh — is a
+governance breach and the PR must be reverted.
 
 ### 5.4. Transition off the deviation — ordered runbook
 
@@ -194,28 +214,35 @@ nor the required-approvals rule in force:
    Collaborators). This lets them leave a non-stale Approved review on
    later PRs but does **not** make them a code owner yet.
 2. **Open the pre-transition freeze PR** — adds
-   `.github/freezes/<date>-transition.yaml` whose `paths:` list covers
-   every code path that is **not** modified by the nomination PR:
-   `crates/`, `packages/`, `fixtures/`, `assets/`, `Cargo.toml`,
-   `Cargo.lock`. Governance/doc paths (`MAINTAINERS.md`,
-   `.github/CODEOWNERS`, `GOVERNANCE.md`, `docs/`,
-   `scripts/check-reviewed-by.sh`) are deliberately **not** frozen so
-   the nomination PR can land normally without needing a special
-   exemption label. The freeze PR itself is load-bearing, goes through
-   §5.3, and the nominee leaves the Approved review + `Reviewed-by:`
-   trailer.
-3. **Open the nomination PR** containing, in one squash-destined commit
-   with a durable commit-message body that carries the `Reviewed-by:`
-   trailer: (a) `MAINTAINERS.md` addition with contract-area
-   annotations, (b) `.github/CODEOWNERS` update adding the nominee to
-   every affected path, (c) removal of this §5 (and update of every
+   `.github/freezes/<date>-transition.yaml` whose `paths:` list freezes
+   **every** path in the repository (single entry: `""` or `/`, which
+   `scripts/check-freeze.sh` matches against all files). Non-transition
+   PRs merging into `main` during the window are blocked mechanically
+   regardless of which load-bearing area they touch — this closes the
+   intermediate-state gap that a code-only freeze would leave for
+   doc/workflow PRs. The nomination PR and the freeze-removal PR rely
+   on the `governance:transition` and `governance:freeze-removal`
+   labels (both machine-checked by `scripts/check-freeze.sh`) to land
+   despite the blanket freeze. The freeze PR itself is load-bearing,
+   goes through §5.3, and the nominee leaves the Approved review +
+   commit-message `Reviewed-by:` trailer.
+3. **Open the nomination PR**, labelled `governance:transition` so the
+   freeze check exempts it. The diff must stay within the
+   machine-checked transition scope enforced by
+   `scripts/check-freeze.sh` (MAINTAINERS.md, GOVERNANCE.md,
+   .github/CODEOWNERS, docs/design/decisions/, docs/design/design-brief.md,
+   scripts/check-reviewed-by.sh). In one squash-destined commit with a
+   durable commit-message body carrying the `Reviewed-by:` trailer:
+   (a) `MAINTAINERS.md` addition with contract-area annotations,
+   (b) `.github/CODEOWNERS` update adding the nominee to every
+   affected path, (c) removal of this §5 (and update of every
    cross-reference: ADR 0001, brief §20.1, CODEOWNERS comment header,
    `scripts/check-reviewed-by.sh` load-bearing path list if obsolete),
    (d) `MAINTAINERS.md` change-log entry recording the date and PR
    number that ended the single-maintainer period. The transition
    freeze file from step 2 is **not** deleted here — it stays in place
-   until step 6 so that code work remains blocked through the branch-
-   protection update.
+   until step 6 so that non-transition work remains blocked through the
+   branch-protection update.
 4. **Merge the nomination PR** (squash). `main` now has the new
    CODEOWNERS but the transition freeze is still active, so no other
    PR can land until step 6.

@@ -11,23 +11,33 @@ name: governance
 # `scripts/check-freeze.sh` gate, both installed on `main` first.
 
 on:
+  # Only pull_request_target — deliberately NOT pull_request_review.
+  # `pull_request_review` runs on the PR merge ref (PR-controlled YAML
+  # can emit the same required-check names from a modified workflow),
+  # so adding it would undermine the trusted-base enforcement model.
+  # `synchronize` fires on any new commit to the PR branch, which is
+  # enough to re-run the gate in the normal case; stale approvals
+  # between a dismissal and a new push are addressed via the dismissal-
+  # refresh runbook below rather than by adding an untrusted trigger.
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, edited, ready_for_review, review_requested, review_request_removed, labeled, unlabeled]
-  # Re-run the gate when review state changes (submitted / edited /
-  # dismissed). Without this, a dismissed or CHANGES_REQUESTED review
-  # would not invalidate a previously-green required check for the same
-  # HEAD during the single-maintainer period, where the reviewed-by job
-  # is the only mechanical approval gate.
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - edited
+      - ready_for_review
+      - review_requested
+      - review_request_removed
+      - labeled
+      - unlabeled
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: governance-${{ github.event.pull_request.number || github.event.review.pull_request.number }}
+  group: governance-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:

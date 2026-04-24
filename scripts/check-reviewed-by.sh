@@ -80,34 +80,66 @@ fi
 
 echo "check-reviewed-by: load-bearing paths touched; verifying Approved review + Reviewed-by trailer."
 
-# --- 1. Fetch reviews via GitHub REST API ---------------------------------
+# --- 1. Fetch ALL review pages via GitHub REST API ------------------------
+# GitHub paginates reviews at 100 per page. A PR with >100 reviews (active
+# debates, many re-requests) would otherwise leave later CHANGES_REQUESTED
+# or dismissed states invisible and a stale APPROVED could remain green.
 api_base="https://api.github.com/repos/${GITHUB_REPOSITORY}"
-reviews_json=$(
-    curl --silent --show-error --fail \
-        --header "Authorization: Bearer ${GH_TOKEN}" \
-        --header "Accept: application/vnd.github+json" \
-        --header "X-GitHub-Api-Version: 2022-11-28" \
-        "${api_base}/pulls/${PR_NUMBER}/reviews?per_page=100"
-)
+reviews_dir=$(mktemp -d)
+trap 'rm -rf "${reviews_dir}"' EXIT
 
-# Collect the LATEST review state per reviewer (GitHub returns reviews in
-# chronological order). We want: login lowercased, state, commit_id.
+page=1
+while :; do
+    page_file="${reviews_dir}/page-${page}.json"
+    http_code=$(
+        curl --silent --show-error --output "${page_file}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_base}/pulls/${PR_NUMBER}/reviews?per_page=100&page=${page}"
+    )
+    if [[ "${http_code}" != "200" ]]; then
+        echo "check-reviewed-by: FAIL — GitHub reviews API returned HTTP ${http_code} on page ${page}" >&2
+        [[ -s "${page_file}" ]] && cat "${page_file}" >&2
+        exit 1
+    fi
+    count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "${page_file}")
+    if [[ "${count}" -eq 0 ]]; then
+        break
+    fi
+    if [[ "${count}" -lt 100 ]]; then
+        page=$((page + 1))
+        break
+    fi
+    page=$((page + 1))
+    if [[ "${page}" -gt 50 ]]; then
+        echo "check-reviewed-by: FAIL — review pagination exceeded 50 pages (5000 reviews); aborting." >&2
+        exit 1
+    fi
+done
+
+# Compute latest review state per reviewer across ALL pages, ordered by
+# submission time (GitHub returns reviews in chronological order both
+# within and across pages).
 latest_reviews=$(
-    printf '%s' "${reviews_json}" | python3 -c '
-import json, sys
-reviews = json.load(sys.stdin)
+    python3 - "${reviews_dir}" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+files = sorted(root.glob("page-*.json"), key=lambda p: int(p.stem.split("-")[1]))
 latest = {}
-for r in reviews:
-    user = (r.get("user") or {}).get("login") or ""
-    if not user:
-        continue
-    latest[user.lower()] = {
-        "state": r.get("state") or "",
-        "commit_id": r.get("commit_id") or "",
-    }
+for f in files:
+    for r in json.loads(f.read_text()):
+        user = (r.get("user") or {}).get("login") or ""
+        if not user:
+            continue
+        latest[user.lower()] = {
+            "state": r.get("state") or "",
+            "commit_id": r.get("commit_id") or "",
+            "submitted_at": r.get("submitted_at") or "",
+        }
 for login, data in latest.items():
-    print(f"{login}\t{data[\"state\"]}\t{data[\"commit_id\"]}")
-'
+    print(f"{login}\t{data['state']}\t{data['commit_id']}")
+PY
 )
 
 author_lc=$(printf '%s' "${PR_AUTHOR}" | tr '[:upper:]' '[:lower:]')
