@@ -1,0 +1,22 @@
+[package]
+name = "cairn-store-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
+
+[dependencies]
+cairn-core = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true
