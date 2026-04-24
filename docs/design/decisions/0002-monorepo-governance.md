@@ -8,6 +8,18 @@
 - **Supersedes:** —
 - **Superseded by:** —
 
+> **Amendment — 2026-04-24.** The external-reviewer + `Reviewed-by:`
+> trailer gate described in §"Governance doc" item 3 and §"Branch
+> protection" item 4 below is **removed**. It created a hard deadlock
+> for the sole maintainer and added ceremony without proportionate
+> benefit during the single-maintainer period. `GOVERNANCE.md` §5 now
+> documents a solo-author workflow (admin-merge on green CI) and a
+> lightweight transition runbook that relies on GitHub's native
+> required-review branch protection once a second maintainer joins.
+> The `scripts/check-reviewed-by.sh` script and the
+> `reviewed-by-load-bearing` CI job were deleted. The claims below are
+> preserved as the original decision record; treat them as historical.
+
 ## Context
 
 The design brief leaves "single-repo vs. monorepo organisation; maintainer

@@ -23,7 +23,7 @@ Every capability in Cairn is tagged P0 / P1 / P2 / P3. Readers skimming for "wha
                 Rust binary + SQLite + markdown + local models  candle local embeddings
                 must cover US1-US5, US7 all 3 modes, US8 rec    keyword+semantic+hybrid
                 every P0 path works on a fresh laptop offline   voice (sherpa-onnx)
-                local sensors bundled: hooks/IDE/term/clip       screen (screenpipe subproc)
+                local sensors bundled: hooks/IDE/term/clip       screen (xcap + native OCR)
                 voice / screen / recording-to-text              recording-to-text pipeline
                                                                  WAL upsert+forget
 
@@ -62,7 +62,7 @@ Every capability in Cairn is tagged P0 / P1 / P2 / P3. Readers skimming for "wha
 | Identity | single‑actor `author` key — Ed25519 keypair in platform keychain | full `actor_chain` delegation + countersignatures (P2) |
 | Visibility | `private` + `session` tiers only | + `project`/`team`/`org`/`public` via PropagationWorkflow (P2) |
 | Orchestrator | `tokio` + SQLite job table | Temporal adapter (P1 opt‑in); DBOS / Inngest / Hatchet (P2) |
-| Sensors | 5 hooks (`SessionStart`/`UserPromptSubmit`/`PreToolUse`/`PostToolUse`/`Stop`) | IDE + clipboard + screen (opt‑in) + Slack/email/GitHub (P2) |
+| Sensors | 5 hooks + IDE + terminal + clipboard + voice + screen (always compiled; screen runtime off by default, `xcap` + native OCR backend — see [ADR 0003](decisions/0003-screen-sensor-packaging.md)) | optional heavy screen path via `--features screenpipe-runtime`; Slack / email / GitHub / calendar / Notion / Obsidian / document / transcript / web / RSS source connectors (P2) |
 | Frontend | raw `wiki/` markdown in any editor | Obsidian / VS Code / Logseq adapters (P1); Tauri GUI (P1 alpha, P3 GA) |
 | Consolidation | rolling‑summary pass only | Light Sleep / REM Sleep / Deep Dreaming (P1–P2) |
 | Forget | record‑level (`forget --record`) | session‑level fan‑out + reader fence (P1) |
@@ -2705,7 +2705,7 @@ All sources produce the same `CaptureEvent` schema, signed with the sensor's `Se
 | Terminal sensor | P0 | captured commands + outputs | shell integration scripts | opt‑in, secret‑scrubbed |
 | Clipboard sensor | P0 | clipboard snapshots | [`arboard`](https://github.com/1Password/arboard) (Apache-2) | opt‑in |
 | **Voice sensor** | **P0** | continuous mic capture → VAD-gated utterances → ASR transcript + **speaker embeddings** (attaches `HumanIdentity` via enrollment — §4.2). Streams `{speaker_id, text, ts_start, ts_end, confidence}` as `CaptureEvent`s. | [`cpal`](https://github.com/RustAudio/cpal) (Apache-2, mic I/O) + [**sherpa-onnx**](https://github.com/k2-fsa/sherpa-onnx) (Apache-2, one ONNX Runtime running VAD + ASR + diarization + speaker-embedding models — ~50 MB runtime + ~50 MB models). Bound via direct C FFI from Rust core (thin ~600 LOC adapter); models downloaded on first run into `.cairn/models/`. | opt‑in; per-app / per-process allowlist; PII-scrub pass before Store |
-| **Screen sensor** | **P0** (via subprocess) | continuous screen frames + active-window + URL + accessibility tree → OCR'd text + app-activity events. Streams `{app, window_title, text, url?, bbox}` as `CaptureEvent`s. On-demand snapshot mode also supported for hotkey-driven capture. | Primary: [**screenpipe**](https://github.com/screenpipe/screenpipe) (MIT main tree — pin; never import `ee/`) spawned as subprocess by `cairn daemon start`; Cairn subscribes to its HTTP `/events` SSE and `/search` API. Fallback (when screenpipe unavailable / policy-blocked): in-process [`xcap`](https://github.com/nashaofu/xcap) (Apache-2) + [`tesseract`](https://github.com/tesseract-ocr/tesseract) via `leptess` — pure Rust, no subprocess, ~250 MB total working set. | opt‑in, per‑app allow‑list, password fields blurred, PII-scrub pass before Store |
+| **Screen sensor** | **P0** (always compiled; runtime off by default) | continuous screen frames + active-window + URL → OCR'd text + app-activity events. Streams `{app, window_title, text, url?, bbox}` as `CaptureEvent`s. On-demand snapshot mode also supported for hotkey-driven capture. | **Default backend (always compiled into the P0 binary):** in-process [`xcap`](https://github.com/nashaofu/xcap) 0.9 (Apache-2) for frame capture + OS-native OCR (Apple `Vision` on macOS, `Windows.Media.Ocr` on Windows, [`tesseract`](https://github.com/tesseract-ocr/tesseract) via `leptess` on Linux). Pure Rust + OS APIs, ~20 MB incremental working set. **Optional heavy path (build with `--features screenpipe-runtime`):** [**screenpipe**](https://github.com/screenpipe/screenpipe) (MIT main tree — pin; never import `ee/`) spawned as subprocess by `cairn daemon start`, Cairn subscribing to its HTTP `/events` SSE and `/search` API for accessibility-tree extraction + bundled VLM captions (~500 MB). Backend selected via `sensors.screen.backend: {xcap\|screenpipe}` at runtime. See [ADR 0003](decisions/0003-screen-sensor-packaging.md). | runtime off by default (`sensors.screen.enabled: false`); first enable triggers OS permission prompt + consent-journal entry (§14); per‑app allow‑list, password fields blurred, PII-scrub pass before Store |
 | Neuroskill sensor | P0 | structured agent tool‑call traces emitted by the harness itself | harness neuroskill protocol | always on when harness cooperates |
 
 **Source sensors** — pull from external systems on a schedule or on `ingest` command. Each is a separate L2 adapter package; install only what you need. All require explicit auth + consent:
@@ -4180,7 +4180,7 @@ Every user story below maps to existing Cairn sections. Where a story asked for 
 | SRE observability (OTel dashboards, tier‑migration metrics, rehydration gates) | basic lint + health | full SRE surface | unchanged |
 | Extension namespaces | `cairn.admin.v1` (operator verbs) | + `cairn.aggregate.v1` (anonymized agent insights) | + `cairn.federation.v1` (share / accept / revoke — folder-scoped via `subject.path_prefix`) + `cairn.sessiontree.v1` (fork / clone / switch / merge — §5.7) |
 
-**Therefore:** P0 (US1–US3), US4 rolling‑summary, US5, **US7 all three search modes (keyword + semantic + hybrid via local `sqlite-vec` + `candle`)**, and US8 record‑level forget all land in v0.1 — plus local sensors (voice via sherpa-onnx, screen via screenpipe subprocess + xcap fallback, recording-to-text batch pipeline). US6 cold‑rehydration, US8 session fan‑out, BM25S + cloud embedding providers, and the full reflection/evolution surface land in v0.2.
+**Therefore:** P0 (US1–US3), US4 rolling‑summary, US5, **US7 all three search modes (keyword + semantic + hybrid via local `sqlite-vec` + `candle`)**, and US8 record‑level forget all land in v0.1 — plus local sensors (voice via sherpa-onnx, screen via `xcap` + OS-native OCR compiled in by default with `sensors.screen.enabled: false`; optional screenpipe subprocess via `--features screenpipe-runtime` per [ADR 0003](decisions/0003-screen-sensor-packaging.md); recording-to-text batch pipeline). US6 cold‑rehydration, US8 session fan‑out, BM25S + cloud embedding providers, and the full reflection/evolution surface land in v0.2.
 
 ## 18.d The Cairn skill — install once, use anywhere [P0]
 
@@ -4295,7 +4295,7 @@ The MCP server is still available (`cairn mcp`) for harnesses that prefer the wi
 ## 19. Sequencing
 
 **v0.1 — Minimum substrate (all P0).** Covers US1, US2 active‑session reload, US3, US4 rolling‑summary path, US5, US7 **all three search modes** (keyword + semantic + hybrid via local embeddings), and US8 record‑level delete (see §18.c capability matrix for the authoritative mapping).
-Headless only. **SQLite + statically-linked `sqlite-vec` + pure-Rust `candle` embedding runtime** — `.cairn/cairn.db` with FTS5 for keyword + `sqlite-vec` ANN for semantic over locally-computed vectors (default model `bge-small-en-v1.5` or `all-MiniLM-L6-v2`, ~25 MB, downloaded to `.cairn/models/` on first run). **Zero Python, zero Nexus, zero embedding key, zero external services**; single Rust binary installs via `brew install cairn` or `cargo install cairn` and runs offline after the one-time model fetch. Eight core MCP verbs (`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`, `forget`) with the full §8.0.b envelope; `forget` advertises `mode: "record"` capability only; `search` advertises `keyword` + `semantic` + `hybrid` by default (droppable via `search.local_embeddings: false` — then only keyword, rejecting the others with `CapabilityUnavailable`). **Local sensors bundled in the P0 binary: hooks, IDE, terminal, clipboard, voice (sherpa-onnx direct C FFI + cpal mic), screen (screenpipe subprocess primary + xcap/tesseract in-process fallback), neuroskill — plus the §9.1.a recording-to-text batch pipeline** (`cairn ingest --recording <path>`). `DreamWorkflow` (LLMDreamWorker only) + `ExpirationWorkflow` + `EvaluationWorkflow` + `ConsolidationWorkflow` (rolling‑summary path only). §5.6 WAL with `upsert`, `forget_record`, and `expire` state machines. Five hooks. Vault on disk. `cairn bootstrap`. **Working set budget:** Rust core ~15 MB + embedding model ~25 MB + sherpa-onnx runtime+models ~100 MB + optional screenpipe subprocess ~500 MB (opt-in per sensor) → **~140 MB for the always-on default**, ~640 MB with full screen capture. Smaller than Chrome; one static install artifact.
+Headless only. **SQLite + statically-linked `sqlite-vec` + pure-Rust `candle` embedding runtime** — `.cairn/cairn.db` with FTS5 for keyword + `sqlite-vec` ANN for semantic over locally-computed vectors (default model `bge-small-en-v1.5` or `all-MiniLM-L6-v2`, ~25 MB, downloaded to `.cairn/models/` on first run). **Zero Python, zero Nexus, zero embedding key, zero external services**; single Rust binary installs via `brew install cairn` or `cargo install cairn` and runs offline after the one-time model fetch. Eight core MCP verbs (`ingest`, `search`, `retrieve`, `summarize`, `assemble_hot`, `capture_trace`, `lint`, `forget`) with the full §8.0.b envelope; `forget` advertises `mode: "record"` capability only; `search` advertises `keyword` + `semantic` + `hybrid` by default (droppable via `search.local_embeddings: false` — then only keyword, rejecting the others with `CapabilityUnavailable`). **Local sensors bundled in the P0 binary: hooks, IDE, terminal, clipboard, voice (sherpa-onnx direct C FFI + cpal mic), screen (`xcap` + OS-native OCR, runtime off by default — see [ADR 0003](decisions/0003-screen-sensor-packaging.md)), neuroskill — plus the §9.1.a recording-to-text batch pipeline** (`cairn ingest --recording <path>`). `DreamWorkflow` (LLMDreamWorker only) + `ExpirationWorkflow` + `EvaluationWorkflow` + `ConsolidationWorkflow` (rolling‑summary path only). §5.6 WAL with `upsert`, `forget_record`, and `expire` state machines. Five hooks. Vault on disk. `cairn bootstrap`. **Working set budget:** Rust core ~15 MB + embedding model ~25 MB + sherpa-onnx runtime+models ~100 MB + default screen backend (`xcap` + OS OCR) ~20 MB + optional screenpipe subprocess ~500 MB (opt-in via `--features screenpipe-runtime`) → **~160 MB for the always-on default** (all P0 sensors present, screen runtime off until enabled), ~660 MB with the heavy screenpipe build. Smaller than Chrome; one static install artifact.
 
 **Reference consumer for v0.1: Claude Code.** Chosen because (a) it is the first harness with a stable hook surface in shipping form, (b) Cairn's five hooks map 1:1 to CC's native events, (c) the primary maintainer already uses CC daily so dogfood signal is immediate, and (d) the CC MCP registration format is a documented reference every other harness (Codex, Gemini) can adapt. Codex integration ships in v0.2 as the second consumer.
 
@@ -4430,19 +4430,24 @@ Every capability above is derivable from these seven invariants — if you viola
    **Resolved 2026-04-24** — one public monorepo (Cargo workspace in `crates/`,
    sibling `packages/` reserved for non-Rust SDKs); CODEOWNERS-style team
    review seeded by contract area; CNCF maintainer-template governance.
-   While the maintainer roster is one deep, required-approval branch
-   protection is narrowly disabled (GitHub disallows self-approval) and
-   load-bearing changes are gated by an **enforceable external-review
-   rule**: an Approved non-author GitHub review + a `Reviewed-by:` trailer
-   + a required `governance / reviewed-by` status check. See
-   [ADR 0002](decisions/0002-monorepo-governance.md) and `GOVERNANCE.md`
-   §5 for the enforcement mechanism, hard-vs-soft split triggers,
-   revisit triggers, and release-tooling commitments. Closes #145.
+   While the maintainer roster is one deep, `main` runs a **solo-author
+   workflow**: required status checks + blocked force-push + admin-merge
+   authorised strictly for the sole maintainer on their own PRs (see
+   `GOVERNANCE.md` §5). Standard GitHub required-review branch protection
+   flips on in the PR that adds the second maintainer. See
+   [ADR 0002](decisions/0002-monorepo-governance.md) (with the
+   2026-04-24 amendment removing the original `Reviewed-by:` trailer
+   gate) for split triggers, revisit triggers, and release-tooling
+   commitments. Closes #145.
 2. ~~Default LLM for local tier: ship Ollama bootstrap, or require user install?~~ — **Resolved 2026-04-24 ([ADR 0001](decisions/0001-llm-default.md)):** no bundled runtime; ship one OpenAI-compatible adapter and detect local providers in `cairn status`.
 3. Desktop GUI: ship in v0.2 or defer to v0.3?
 4. Skill distillation format: adopt an existing spec, or define Cairn‑native?
 5. Propagation transport: direct `MemoryStore` write, or a thin publish/subscribe layer?
-6. Screen sensor: separate opt‑in build, or always‑present‑but‑off‑by‑default toggle?
+6. ~~Screen sensor: separate opt‑in build, or always‑present‑but‑off‑by‑default toggle?~~
+   **Resolved 2026-04-24 ([ADR 0003](decisions/0003-screen-sensor-packaging.md)):**
+   always-present capability in the default P0 binary (`xcap` + OS-native OCR,
+   ~20 MB), runtime off by default; heavier screenpipe subprocess path is
+   opt-in behind `--features screenpipe-runtime`. Closes #150.
 
 ---
 
