@@ -28,7 +28,7 @@ Rationale:
 - **Single parser dep (`serde_json`) — already in the workspace.** No YAML / TOML / DSL parser added at P0.
 - **`x-*` vendor keys are the documented escape hatch.** They keep Cairn-specific semantics (CLI flags, Rust enum tags, capability gates, skill triggers) out of the spec-compliant core while staying in a reviewable single file per concept.
 - **Reviewable diffs in PR.** One file per verb / envelope / extension registration; changes show exactly which surface moved.
-- **YAML's comment advantage does not pay off here.** Schema files are mechanical truth. Human rationale lives in this design doc and in sibling `README.md` files under `crates/cairn-idl/schema/`, never inside schema files.
+- **YAML's comment advantage does not pay off here.** Schema files are mechanical truth. Human rationale lives in this design doc and in a sibling `README.md` at `crates/cairn-idl/schema/README.md`, never inside schema files.
 
 ## Filesystem Layout
 
@@ -69,7 +69,7 @@ crates/cairn-idl/
 
 ## Manifest Contract (`schema/index.json`)
 
-Single source of truth for "what files compose `cairn.mcp.v1`". Codegen (#35) reads this file first; CI (#15) diffs its contents against the filesystem.
+Single source of truth for "what files compose `cairn.mcp.v1`". Codegen (issue #35) reads this file first; the §15 CI wire-compat tests diff its contents against the filesystem.
 
 ```json
 {
@@ -118,12 +118,12 @@ Authoring rules:
 
 ```
 { contract: const "cairn.mcp.v1",
-  verb: enum(8 core verb ids ∪ extension verb ids — see §8.0.a),
+  verb: enum of the eight core verb ids at P0,
   signed_intent: $ref signed_intent.json,
   args: object (per-verb — the verb file supplies the concrete args schema) }
 ```
 
-Uses `oneOf` on `verb` + `if/then` to bind `args` to the right per-verb `$ref`. Codegen in #35 either resolves the whole `oneOf` or loads per-verb files directly — both forms work from this file.
+The `verb` enum is closed to the eight core verbs at #34; each extension issue extends it additively when its verb schemas land. Uses `oneOf` on `verb` + `if/then` to bind `args` to the right per-verb `$ref`. Codegen in #35 either resolves the whole `oneOf` or loads per-verb files directly — both forms work from this file.
 
 **`envelope/response.json`.**
 
