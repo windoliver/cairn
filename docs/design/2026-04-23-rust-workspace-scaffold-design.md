@@ -191,7 +191,10 @@ Minimal P0 policy — tightened in later issues.
 
 ```toml
 [licenses]
-allow = ["Apache-2.0", "MIT", "BSD-3-Clause", "BSD-2-Clause", "ISC", "Unicode-DFS-2016", "Zlib"]
+allow = [
+    "Apache-2.0", "MIT", "BSD-3-Clause", "BSD-2-Clause", "ISC",
+    "Unicode-DFS-2016", "Unicode-3.0", "MPL-2.0", "CC0-1.0", "Zlib",
+]
 confidence-threshold = 0.93
 
 [bans]
@@ -200,6 +203,8 @@ multiple-versions = "warn"
 [advisories]
 yanked = "deny"
 ```
+
+Note the non-obvious inclusions: `Unicode-3.0` (current license of `unicode-ident`, transitively pulled in by most proc-macro users), `MPL-2.0` (Mozilla-authored crates like `webpki-roots`), and `CC0-1.0` (e.g. `tiny-keccak`). Missing any of these breaks `cargo deny check licenses` on a routine Rust workspace; the allowlist is deliberately permissive at P0 and tightens in issue #158.
 
 Not wired into CI by this issue; enablement tracked in #158.
 

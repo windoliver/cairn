@@ -1262,6 +1262,9 @@ allow = [
     "BSD-2-Clause",
     "ISC",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "CC0-1.0",
     "Zlib",
 ]
 confidence-threshold = 0.93
