@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/errors/error.json",
+  "title": "Cairn error",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "message"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "InvalidArgs",
+        "InvalidFilter",
+        "CapabilityUnavailable",
+        "UnknownVerb",
+        "ExpiredIntent",
+        "ReplayDetected",
+        "OutOfOrderSequence",
+        "RevokedKey",
+        "MissingSignature",
+        "Unauthorized",
+        "NotFound",
+        "ConflictVersion",
+        "QuarantineRequired",
+        "PluginSuspended",
+        "Internal"
+      ]
+    },
+    "message": { "type": "string" },
+    "data": {
+      "type": "object",
+      "description": "Per-code payload. See $defs for typed shapes consumed by codegen."
+    }
+  },
+  "$defs": {
+    "InvalidArgsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "reason"],
+      "properties": {
+        "field": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "InvalidFilterData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "CapabilityUnavailableData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability"],
+      "properties": {
+        "capability": { "type": "string" }
+      }
+    },
+    "UnknownVerbData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verb"],
+      "properties": {
+        "verb": { "type": "string" }
+      }
+    },
+    "ExpiredIntentData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issued_at", "expires_at", "now"],
+      "properties": {
+        "issued_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "now": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayDetectedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id"],
+      "properties": {
+        "operation_id": { "type": "string" }
+      }
+    },
+    "OutOfOrderSequenceData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "high_water", "attempted"],
+      "properties": {
+        "issuer": { "type": "string" },
+        "high_water": { "type": "integer" },
+        "attempted": { "type": "integer" }
+      }
+    },
+    "RevokedKeyData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "key_version"],
+      "properties": {
+        "issuer": { "type": "string" },
+        "key_version": { "type": "integer" }
+      }
+    },
+    "MissingSignatureData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "UnauthorizedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "string" }
+      }
+    },
+    "NotFoundData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": { "type": "string" }
+      }
+    },
+    "ConflictVersionData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "actual"],
+      "properties": {
+        "expected": { "type": "integer" },
+        "actual": { "type": "integer" }
+      }
+    },
+    "QuarantineRequiredData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string" },
+        "quarantine_id": { "type": "string" }
+      }
+    },
+    "PluginSuspendedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_id"],
+      "properties": {
+        "plugin_id": { "type": "string" }
+      }
+    },
+    "InternalData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": { "type": "string" }
+      }
+    }
+  }
+}
