@@ -162,32 +162,23 @@
         { "$ref": "#/$defs/DataFolder" },
         { "$ref": "#/$defs/DataScope" }
       ],
-      "description": "Shape depends on the matched Args target. The response envelope echoes target so validators can bind Data to the exact branch."
+      "description": "Shape depends on the matched Args target. The response envelope echoes target so validators can bind Data to the exact branch. Each branch requires its target metadata so a session response can never be mistaken for a folder response even outside the envelope."
     },
-    "DataSession": { "$ref": "#/$defs/DataItemList" },
-    "DataTurn":    { "$ref": "#/$defs/DataItemList" },
-    "DataFolder":  { "$ref": "#/$defs/DataItemList" },
-    "DataScope":   { "$ref": "#/$defs/DataItemList" },
     "DataRecord": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": ["record_id", "kind"],
-      "not": { "required": ["subject"] },
       "properties": {
-        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
-        "kind":      { "type": "string", "minLength": 1 },
-        "body":      { "type": "string" },
+        "record_id":   { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "kind":        { "type": "string", "minLength": 1 },
+        "body":        { "type": "string" },
         "frontmatter": { "type": "object" }
       }
     },
     "DataProfile": {
       "type": "object",
-      "additionalProperties": true,
-      "required": ["subject"],
-      "allOf": [
-        { "not": { "required": ["record_id"] } },
-        { "not": { "required": ["kind"] } }
-      ],
+      "additionalProperties": false,
+      "required": ["subject", "profile"],
       "properties": {
         "subject": {
           "type": "object",
@@ -201,18 +192,81 @@
             { "required": ["agent"] }
           ]
         },
-        "profile": { "type": "object" }
+        "profile": {
+          "type": "object",
+          "description": "Free-form profile payload — typed in a later increment once the profile taxonomy lands."
+        }
       }
     },
-    "DataItemList": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": true,
-        "required": ["record_id"],
-        "properties": {
-          "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+    "DataSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "items"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TurnItem" }
+        },
+        "next_cursor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "DataTurn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "turn_id", "turn"],
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "turn_id":    { "type": "integer", "minimum": 0 },
+        "turn":       { "$ref": "#/$defs/TurnItem" }
+      }
+    },
+    "DataFolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "items"],
+      "properties": {
+        "path":  { "type": "string", "minLength": 1 },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RecordRef" }
         }
+      }
+    },
+    "DataScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "items"],
+      "properties": {
+        "scope": { "$ref": "../common/scope_filter.json" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RecordRef" }
+        },
+        "next_cursor": { "type": "string", "minLength": 1 }
+      }
+    },
+    "TurnItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turn_id", "role"],
+      "properties": {
+        "turn_id": { "type": "integer", "minimum": 0 },
+        "role":    { "type": "string", "enum": ["user", "assistant", "tool", "system"] },
+        "content": { "type": "string" },
+        "tool_calls": { "type": "array", "items": { "type": "object" } },
+        "reasoning":  { "type": "string" }
+      }
+    },
+    "RecordRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "kind"],
+      "properties": {
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "kind":      { "type": "string", "minLength": 1 },
+        "snippet":   { "type": "string" }
       }
     }
   }

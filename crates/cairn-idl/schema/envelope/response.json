@@ -18,8 +18,10 @@
         "assemble_hot",
         "capture_trace",
         "lint",
-        "forget"
-      ]
+        "forget",
+        "unknown"
+      ],
+      "description": "Echo of the request verb. The `unknown` sentinel is the canonical placeholder when the server could not parse or dispatch the request verb; it is only permitted with status=rejected and error.code=UnknownVerb. The actual attempted verb is then carried in error.data.verb."
     },
     "operation_id": {
       "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
@@ -61,40 +63,68 @@
       "then": { "properties": { "data": { "$ref": "../verbs/ingest.json#/$defs/Data" } } } },
     { "if": { "properties": { "verb": { "const": "search" } },        "required": ["verb"] },
       "then": { "properties": { "data": { "$ref": "../verbs/search.json#/$defs/Data" } } } },
-    { "if":   { "properties": { "verb": { "const": "retrieve" } }, "required": ["verb"] },
+    { "$comment": "Retrieve target echo is required only on committed responses. Rejected/aborted retrieve paths may legitimately omit target (e.g. InvalidArgs before target was parsed, or UnknownVerb).",
+      "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] }
+                ]},
       "then": { "required": ["target"] } },
-    { "if":   { "properties": { "verb": { "not": { "const": "retrieve" } } }, "required": ["verb"] },
+    { "$comment": "target is retrieve-only — forbidden for every other verb.",
+      "if":   { "properties": { "verb": { "not": { "const": "retrieve" } } }, "required": ["verb"] },
       "then": { "not": { "required": ["target"] } } },
-    { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "record" } },   "required": ["target"] }
+    { "$comment": "Per-target retrieve Data dispatch — only active on committed responses.",
+      "if":   { "allOf": [
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "record" } },    "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataRecord" } } } },
     { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "profile" } },  "required": ["target"] }
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "profile" } },   "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataProfile" } } } },
     { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "session" } },  "required": ["target"] }
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "session" } },   "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataSession" } } } },
     { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "turn" } },     "required": ["target"] }
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "turn" } },      "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataTurn" } } } },
     { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "folder" } },   "required": ["target"] }
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "folder" } },    "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataFolder" } } } },
     { "if":   { "allOf": [
-                  { "properties": { "verb":   { "const": "retrieve" } }, "required": ["verb"] },
-                  { "properties": { "target": { "const": "scope" } },    "required": ["target"] }
+                  { "properties": { "verb":   { "const": "retrieve" } },  "required": ["verb"] },
+                  { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+                  { "properties": { "target": { "const": "scope" } },     "required": ["target"] }
                 ]},
       "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/DataScope" } } } },
+    { "$comment": "UnknownVerb bidirectional binding — verb=unknown iff status=rejected AND error.code=UnknownVerb.",
+      "if":   { "properties": { "verb": { "const": "unknown" } }, "required": ["verb"] },
+      "then": {
+        "properties": {
+          "status": { "const": "rejected" },
+          "error":  { "properties": { "code": { "const": "UnknownVerb" } }, "required": ["code"] }
+        },
+        "required": ["status", "error"]
+      }
+    },
+    { "if":   { "allOf": [
+                  { "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
+                  { "properties": { "error": { "properties": { "code": { "const": "UnknownVerb" } }, "required": ["code"] } }, "required": ["error"] }
+                ]},
+      "then": { "properties": { "verb": { "const": "unknown" } }, "required": ["verb"] }
+    },
     { "if": { "properties": { "verb": { "const": "summarize" } },     "required": ["verb"] },
       "then": { "properties": { "data": { "$ref": "../verbs/summarize.json#/$defs/Data" } } } },
     { "if": { "properties": { "verb": { "const": "assemble_hot" } },  "required": ["verb"] },

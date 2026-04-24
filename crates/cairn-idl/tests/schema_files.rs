@@ -289,6 +289,82 @@ fn error_code_enum() -> BTreeSet<String> {
         .collect()
 }
 
+fn response_inline_family_enums() -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    // Extract the rejected/aborted code enums from the if/then dispatch
+    // arms in envelope/response.json. These are what JSON Schema validators
+    // actually enforce and must agree with the x-cairn-error-code-families
+    // vendor key codegen will consume.
+    let resp = read_json(&schema_dir().join("envelope/response.json"));
+    let all_of = resp
+        .get("allOf")
+        .and_then(Value::as_array)
+        .expect("response.json allOf must be an array");
+
+    let mut map: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    for arm in all_of {
+        let Some(if_obj) = arm.get("if").and_then(Value::as_object) else {
+            continue;
+        };
+        let Some(status_const) = if_obj
+            .get("properties")
+            .and_then(|p| p.get("status"))
+            .and_then(|s| s.get("const"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        if status_const != "rejected" && status_const != "aborted" {
+            continue;
+        }
+        let Some(code_enum) = arm
+            .get("then")
+            .and_then(|t| t.get("properties"))
+            .and_then(|p| p.get("error"))
+            .and_then(|e| e.get("properties"))
+            .and_then(|p| p.get("code"))
+            .and_then(|c| c.get("enum"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        let set: BTreeSet<String> = code_enum
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        map.insert(status_const.to_string(), set);
+    }
+    map
+}
+
+#[test]
+fn response_inline_enums_match_x_cairn_error_code_families_vendor_key() {
+    let resp = read_json(&schema_dir().join("envelope/response.json"));
+    let vendor = resp
+        .get("x-cairn-error-code-families")
+        .and_then(Value::as_object)
+        .expect("response.json must carry x-cairn-error-code-families");
+    let vendor_map: std::collections::BTreeMap<String, BTreeSet<String>> = vendor
+        .iter()
+        .map(|(family, codes)| {
+            let set: BTreeSet<String> = codes
+                .as_array()
+                .unwrap_or_else(|| panic!("family {family} must be an array"))
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            (family.clone(), set)
+        })
+        .collect();
+
+    let inline = response_inline_family_enums();
+    assert_eq!(
+        vendor_map, inline,
+        "x-cairn-error-code-families must exactly match the rejected/aborted if/then enum arms in response.json — otherwise codegen (reading the vendor key) and validators (enforcing the inline arms) will disagree"
+    );
+}
+
 #[test]
 fn every_error_code_is_in_exactly_one_response_status_family() {
     let resp = read_json(&schema_dir().join("envelope/response.json"));
@@ -520,6 +596,9 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
         ("verbs/search.json",       "/$defs/Hit/properties/citation"),
         ("verbs/assemble_hot.json", "/$defs/Data/properties/prefix"),
         ("verbs/retrieve.json",     "/$defs/DataRecord/properties/body"),
+        ("verbs/retrieve.json",     "/$defs/RecordRef/properties/snippet"),
+        ("verbs/retrieve.json",     "/$defs/TurnItem/properties/content"),
+        ("verbs/retrieve.json",     "/$defs/TurnItem/properties/reasoning"),
         ("verbs/ingest.json",       "/$defs/Args/properties/kind"),
         // kind has minLength:1 — guarded by parent fallback; skip
     ]
