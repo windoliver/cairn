@@ -1,0 +1,25 @@
+[package]
+name = "cairn-store-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
+
+[dependencies]
+cairn-core = { workspace = true }
+thiserror = { workspace = true }
+# NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
+# scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
+# native-compilation surface before any storage code uses it. The real dep
+# lands with the storage implementation in issue #6.
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "cairn-workflows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Background workflows host (consolidate, promote, expire, evaluate) for Cairn."
+
+[dependencies]
+cairn-core = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+cairn-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true
