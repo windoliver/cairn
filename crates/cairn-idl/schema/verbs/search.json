@@ -46,15 +46,8 @@
           ]
         },
         "scope": {
-          "type": "object",
-          "description": "Optional scope narrowing (user / agent / tenant / workspace).",
-          "additionalProperties": true,
-          "properties": {
-            "user": { "type": "string" },
-            "agent": { "type": "string" },
-            "tenant": { "type": "string" },
-            "workspace": { "type": "string" }
-          }
+          "$ref": "../common/scope_filter.json",
+          "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
         },
         "filters": { "$ref": "#/$defs/filter" },
         "limit": {

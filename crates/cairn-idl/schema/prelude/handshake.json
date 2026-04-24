@@ -14,9 +14,8 @@
       "required": ["nonce", "expires_at"],
       "properties": {
         "nonce": {
-          "type": "string",
-          "contentEncoding": "base64",
-          "description": "Fresh 16-byte nonce; single-use; stored in outstanding_challenges."
+          "allOf": [{ "$ref": "../common/primitives.json#/$defs/Nonce16Base64" }],
+          "description": "Fresh 16-byte nonce; single-use; stored in outstanding_challenges. This is the same shape clients later place into signed_intent.server_challenge."
         },
         "expires_at": {
           "type": "integer",

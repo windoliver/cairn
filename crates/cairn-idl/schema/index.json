@@ -20,6 +20,7 @@
       "extensions/registry.json"
     ],
     "common": [
+      "common/primitives.json",
       "common/scope_filter.json"
     ],
     "prelude": [

@@ -6,8 +6,8 @@
   "type": "object",
   "required": ["code", "message"],
   "oneOf": [
-    { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "const": "InvalidArgs" },           "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidArgsData" } } },
-    { "type": "object", "additionalProperties": false, "required": ["code", "message"], "properties": { "code": { "const": "InvalidFilter" },         "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidFilterData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "InvalidArgs" },           "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidArgsData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "InvalidFilter" },         "message": { "type": "string" }, "data": { "$ref": "#/$defs/InvalidFilterData" } } },
     { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "CapabilityUnavailable" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/CapabilityUnavailableData" } } },
     { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "UnknownVerb" },   "message": { "type": "string" }, "data": { "$ref": "#/$defs/UnknownVerbData" } } },
     { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ExpiredIntent" }, "message": { "type": "string" }, "data": { "$ref": "#/$defs/ExpiredIntentData" } } },
@@ -72,7 +72,7 @@
       "additionalProperties": false,
       "required": ["operation_id"],
       "properties": {
-        "operation_id": { "type": "string" }
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
       }
     },
     "OutOfOrderSequenceData": {

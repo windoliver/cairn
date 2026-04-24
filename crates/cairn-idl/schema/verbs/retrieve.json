@@ -161,6 +161,7 @@
       "type": "object",
       "additionalProperties": true,
       "required": ["record_id", "kind"],
+      "not": { "required": ["subject"] },
       "properties": {
         "record_id": { "type": "string", "minLength": 1 },
         "kind":      { "type": "string", "minLength": 1 },
@@ -172,6 +173,10 @@
       "type": "object",
       "additionalProperties": true,
       "required": ["subject"],
+      "allOf": [
+        { "not": { "required": ["record_id"] } },
+        { "not": { "required": ["kind"] } }
+      ],
       "properties": {
         "subject": {
           "type": "object",

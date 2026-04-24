@@ -22,8 +22,8 @@
       ]
     },
     "operation_id": {
-      "type": "string",
-      "description": "ULID matching the replay-ledger + WAL op for this call."
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
+      "description": "ULID matching the replay-ledger + WAL op for this call. Same shape as signed_intent.operation_id."
     },
     "status": {
       "type": "string",

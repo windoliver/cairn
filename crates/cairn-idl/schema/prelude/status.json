@@ -16,7 +16,10 @@
         "version":     { "type": "string" },
         "build":       { "type": "string" },
         "started_at":  { "type": "string", "format": "date-time" },
-        "incarnation": { "type": "string", "description": "ULID minted at daemon start." }
+        "incarnation": {
+          "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
+          "description": "ULID minted at daemon start."
+        }
       }
     },
     "capabilities": {

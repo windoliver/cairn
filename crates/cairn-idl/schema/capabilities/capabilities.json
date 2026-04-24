@@ -3,6 +3,7 @@
   "$id": "https://cairn.dev/schema/cairn.mcp.v1/capabilities/capabilities.json",
   "title": "Cairn capability strings (P0)",
   "x-cairn-contract": "cairn.mcp.v1",
+  "description": "Negotiable capability strings advertised on status.capabilities. A surface that is NOT in this enum is instead enumerated in x-cairn-mandatory-surfaces below — those are always present whenever the server speaks cairn.mcp.v1 and do not require advertisement. Every verb root, prelude response, hook, and sensor surface MUST appear in exactly one of the two lists.",
   "type": "string",
   "oneOf": [
     { "const": "cairn.mcp.v1.search.keyword",    "x-cairn-since": "v0.1" },
@@ -17,5 +18,17 @@
     { "const": "cairn.mcp.v1.forget.record",     "x-cairn-since": "v0.1" },
     { "const": "cairn.mcp.v1.forget.session",    "x-cairn-since": "v0.2" },
     { "const": "cairn.mcp.v1.forget.scope",      "x-cairn-since": "v0.3" }
+  ],
+  "x-cairn-mandatory-surfaces": [
+    { "surface": "prelude.status",        "since": "v0.1", "reason": "Required for version / incarnation probe before any signed intent." },
+    { "surface": "prelude.handshake",     "since": "v0.1", "reason": "Required to mint server_challenge nonces for signed intents." },
+    { "surface": "verb.ingest",           "since": "v0.1", "reason": "Core write verb; gating is per-auth, not per-capability." },
+    { "surface": "verb.search",           "since": "v0.1", "reason": "Root verb is always present; individual modes (keyword/semantic/hybrid) are negotiable." },
+    { "surface": "verb.retrieve",         "since": "v0.1", "reason": "Root verb is always present; individual targets are negotiable." },
+    { "surface": "verb.summarize",        "since": "v0.1", "reason": "Core synthesis verb; rebac-authorized, not capability-gated." },
+    { "surface": "verb.assemble_hot",     "since": "v0.1", "reason": "Core turn-start verb; rebac-authorized, not capability-gated." },
+    { "surface": "verb.capture_trace",    "since": "v0.1", "reason": "Core trace persistence; signed-chain-authorized, not capability-gated." },
+    { "surface": "verb.lint",             "since": "v0.1", "reason": "Core read-only vault-health verb." },
+    { "surface": "verb.forget",           "since": "v0.1", "reason": "Root verb is always present; individual modes are negotiable." }
   ]
 }

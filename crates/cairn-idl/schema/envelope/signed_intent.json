@@ -19,14 +19,11 @@
   ],
   "properties": {
     "operation_id": {
-      "type": "string",
-      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
       "description": "ULID (Crockford base32, 26 chars); unique per issuer within expires_at window."
     },
     "nonce": {
-      "type": "string",
-      "contentEncoding": "base64",
-      "pattern": "^[A-Za-z0-9+/]{22}(==)?$",
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Nonce16Base64" }],
       "description": "Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding)."
     },
     "sequence": {
@@ -54,31 +51,23 @@
       }
     },
     "issuer": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "^(agt|usr|snr):[A-Za-z0-9._:-]+$",
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Identity" }],
       "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
     },
     "issued_at": { "type": "string", "format": "date-time", "minLength": 20 },
     "expires_at": { "type": "string", "format": "date-time", "minLength": 20 },
     "key_version": { "type": "integer", "minimum": 1 },
     "server_challenge": {
-      "type": "string",
-      "contentEncoding": "base64",
-      "pattern": "^[A-Za-z0-9+/]{22}(==)?$",
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Nonce16Base64" }],
       "description": "Fresh nonce obtained from `cairn handshake`; required when sequence is absent. Same 16-byte base64 shape as nonce."
     },
     "chain_parents": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
-        "description": "operation_id ULID of a prior operation this one depends on."
-      }
+      "items": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+      "description": "operation_id ULIDs of prior operations this one depends on."
     },
     "signature": {
-      "type": "string",
-      "pattern": "^ed25519:[0-9a-f]{128}$",
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ed25519Signature" }],
       "description": "Ed25519 signature over the canonical JSON of every other field. 64 raw bytes = 128 lowercase hex chars."
     }
   },

@@ -270,6 +270,60 @@ fn ref_resolves(source_path: &Path, reference: &str) -> bool {
     resolve_fragment(&target_doc, fragment).is_some()
 }
 
+fn mandatory_surface_set() -> BTreeSet<String> {
+    let caps = read_json(&schema_dir().join("capabilities/capabilities.json"));
+    let arr = caps
+        .get("x-cairn-mandatory-surfaces")
+        .and_then(Value::as_array)
+        .expect("capabilities.json: x-cairn-mandatory-surfaces must be an array");
+    arr.iter()
+        .map(|entry| {
+            entry
+                .get("surface")
+                .and_then(Value::as_str)
+                .expect("x-cairn-mandatory-surfaces entries must have a 'surface' string")
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn every_verb_and_prelude_surface_is_in_capabilities_or_mandatory_list() {
+    let enum_set = capabilities_enum();
+    let mandatory = mandatory_surface_set();
+    let mut missing: Vec<String> = Vec::new();
+
+    // Verb roots: surface id is "verb.<id>". Must appear in mandatory OR
+    // have an x-cairn-capability already covered elsewhere.
+    for verb in EXPECTED_VERB_IDS {
+        let surface = format!("verb.{verb}");
+        let path = schema_dir().join(format!("verbs/{verb}.json"));
+        let v = read_json(&path);
+        let root_cap = v.get("x-cairn-capability");
+        let is_mandatory = mandatory.contains(&surface);
+        let has_root_cap = root_cap
+            .and_then(Value::as_str)
+            .map(|c| enum_set.contains(c))
+            .unwrap_or(false);
+        if !is_mandatory && !has_root_cap {
+            missing.push(surface);
+        }
+    }
+
+    // Preludes: "prelude.<name>".
+    for prelude in ["status", "handshake"] {
+        let surface = format!("prelude.{prelude}");
+        if !mandatory.contains(&surface) {
+            missing.push(surface);
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "surfaces not covered by capability enum or mandatory allowlist: {missing:?}"
+    );
+}
+
 #[test]
 fn every_ref_resolves_to_a_real_file_or_local_fragment() {
     for path in manifest_paths() {
