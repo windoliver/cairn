@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/envelope/response.json",
+  "title": "Cairn response envelope",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "verb", "operation_id", "status", "policy_trace"],
+  "properties": {
+    "contract": { "const": "cairn.mcp.v1" },
+    "verb": {
+      "type": "string",
+      "enum": [
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget"
+      ]
+    },
+    "operation_id": {
+      "type": "string",
+      "description": "ULID matching the replay-ledger + WAL op for this call."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["committed", "aborted", "rejected"]
+    },
+    "data": {
+      "description": "Per-verb data payload. Shape defined by verbs/<verb>.json $defs/Data. Null on rejected/aborted calls.",
+      "type": ["object", "null"]
+    },
+    "policy_trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate", "result"],
+        "properties": {
+          "gate": { "type": "string" },
+          "result": {
+            "type": "string",
+            "enum": ["pass", "deny", "error"]
+          },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "error": { "$ref": "../errors/error.json" }
+  }
+}
