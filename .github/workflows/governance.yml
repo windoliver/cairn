@@ -13,19 +13,27 @@ name: governance
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, edited, ready_for_review, review_requested, review_request_removed]
+    types: [opened, synchronize, reopened, edited, ready_for_review, review_requested, review_request_removed, labeled, unlabeled]
+  # Re-run the gate when review state changes (submitted / edited /
+  # dismissed). Without this, a dismissed or CHANGES_REQUESTED review
+  # would not invalidate a previously-green required check for the same
+  # HEAD during the single-maintainer period, where the reviewed-by job
+  # is the only mechanical approval gate.
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: governance-${{ github.event.pull_request.number }}
+  group: governance-${{ github.event.pull_request.number || github.event.review.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   reviewed-by-load-bearing:
     name: reviewed-by / load-bearing paths
+    if: github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - name: Check out BASE ref (trusted)
@@ -48,11 +56,11 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_BODY: ${{ github.event.pull_request.body }}
         run: bash scripts/check-reviewed-by.sh
 
   freeze-check:
     name: freeze / active path freezes
+    if: github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
       - name: Check out BASE ref (trusted)
@@ -60,6 +68,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet --disable-pip-version-check pyyaml
 
       - name: Fetch PR head SHA (metadata only)
         run: |

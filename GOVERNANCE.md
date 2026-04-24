@@ -139,7 +139,8 @@ sync with `CLAUDE.md` §9 and `scripts/check-reviewed-by.sh`):
 - `docs/design/decisions/` (any ADR)
 - `GOVERNANCE.md`, `MAINTAINERS.md`, `.github/CODEOWNERS`
 - `.github/workflows/governance.yml`, `.github/freezes/`
-- `scripts/check-reviewed-by.sh`, `scripts/check-freeze.sh`
+- `scripts/check-reviewed-by.sh`, `scripts/check-freeze.sh`,
+  `scripts/check-core-boundary.sh`
 
 ### 5.3. Enforceable external-review rule
 
@@ -184,49 +185,58 @@ changes branch-protection rules **after** the nomination PR merges, not
 before, and prevents an intermediate-state gap with a merge freeze plus a
 transition-specific active path freeze.
 
-Steps (executed in order, by the sole maintainer unless stated):
+Steps (executed in order, by the sole maintainer unless stated). The
+transition freeze stays active from step 2 through step 6 so that at no
+point does `main` sit with the new CODEOWNERS but neither the deviation
+nor the required-approvals rule in force:
 
 1. **Grant the nominee write access** to the repository (Settings →
-   Collaborators). This allows them to leave a non-stale Approved review
-   on the nomination PR but does **not** make them a code owner yet.
-2. **Open a pre-transition freeze PR** that adds
-   `.github/freezes/<date>-transition.yaml` freezing every path except
-   `MAINTAINERS.md`, `.github/CODEOWNERS`, `GOVERNANCE.md`, and
-   `docs/design/decisions/`. This prevents any non-transition work
-   merging during the window. The freeze PR is itself load-bearing and
-   goes through the §5.3 Approved-review + `Reviewed-by:` gate, with the
-   nominee as the approving reviewer.
-3. **Open the nomination PR** containing, in one commit or squashed:
-   (a) `MAINTAINERS.md` addition with contract-area annotations,
-   (b) `.github/CODEOWNERS` update adding the nominee to every affected
-   path, (c) removal of this §5 (and update of every cross-reference:
-   ADR 0001, brief §20.1, CODEOWNERS comment header,
+   Collaborators). This lets them leave a non-stale Approved review on
+   later PRs but does **not** make them a code owner yet.
+2. **Open the pre-transition freeze PR** — adds
+   `.github/freezes/<date>-transition.yaml` whose `paths:` list covers
+   every code path that is **not** modified by the nomination PR:
+   `crates/`, `packages/`, `fixtures/`, `assets/`, `Cargo.toml`,
+   `Cargo.lock`. Governance/doc paths (`MAINTAINERS.md`,
+   `.github/CODEOWNERS`, `GOVERNANCE.md`, `docs/`,
+   `scripts/check-reviewed-by.sh`) are deliberately **not** frozen so
+   the nomination PR can land normally without needing a special
+   exemption label. The freeze PR itself is load-bearing, goes through
+   §5.3, and the nominee leaves the Approved review + `Reviewed-by:`
+   trailer.
+3. **Open the nomination PR** containing, in one squash-destined commit
+   with a durable commit-message body that carries the `Reviewed-by:`
+   trailer: (a) `MAINTAINERS.md` addition with contract-area
+   annotations, (b) `.github/CODEOWNERS` update adding the nominee to
+   every affected path, (c) removal of this §5 (and update of every
+   cross-reference: ADR 0001, brief §20.1, CODEOWNERS comment header,
    `scripts/check-reviewed-by.sh` load-bearing path list if obsolete),
    (d) `MAINTAINERS.md` change-log entry recording the date and PR
-   number that ended the single-maintainer period,
-   (e) removal of the transition freeze file from
-   `.github/freezes/`. The PR is labelled `governance:freeze-removal`
-   so the freeze gate exempts it. The nominee leaves an Approved
-   review; a `Reviewed-by:` trailer names them.
-4. **Merge the nomination PR** (squash). The new CODEOWNERS is now on
-   `main`.
-5. **Update branch protection** (Settings → Branches): enable
+   number that ended the single-maintainer period. The transition
+   freeze file from step 2 is **not** deleted here — it stays in place
+   until step 6 so that code work remains blocked through the branch-
+   protection update.
+4. **Merge the nomination PR** (squash). `main` now has the new
+   CODEOWNERS but the transition freeze is still active, so no other
+   PR can land until step 6.
+5. **Update branch protection** (Settings → Branches → `main`): enable
    `Require a pull request before merging`, `Required approvals = 1`,
    `Dismiss stale pull request approvals when new commits are pushed`,
-   `Require review from Code Owners`, and keep the `governance /
-   reviewed-by` required status check active (the script's load-bearing
-   gate now overlaps with CODEOWNERS but the redundancy is cheap and
-   fails closed). Remove the `governance / freeze` requirement only if
-   there are no active freezes.
-6. **Announce the transition** in the `MAINTAINERS.md` change-log entry
-   (already committed in step 3) and, if the project has any external
-   communication channel, there as well.
+   `Require review from Code Owners`, and keep `governance /
+   reviewed-by` and `governance / freeze` as required status checks.
+6. **Open the freeze-removal PR** deleting
+   `.github/freezes/<date>-transition.yaml`. The diff is purely freeze
+   deletions, and the label `governance:freeze-removal` exempts the PR
+   from `check-freeze.sh`. Under the new branch protection it requires
+   a code-owner approval — which either existing maintainer can now
+   satisfy. Merge it.
+7. **Announce the transition** and close any related issues.
 
-Until step 5 completes, no PR other than the transition PR may merge
-(enforced by the freeze file committed in step 2). If any of the steps
-fail or stall, the fallback is to reopen the freeze and re-run from the
-last successful step — the transition is resumable because every step
-leaves a committed artefact.
+Between step 4 and step 6 the repository is in a safe intermediate
+state: `main` is up-to-date, the transition freeze blocks non-transition
+merges, and branch protection has been tightened. If any step between 4
+and 6 stalls, the repository remains in that safe state indefinitely
+because the freeze continues to fail-close non-transition PRs.
 
 A future "third maintainer joins" transition is not gated by
 `GOVERNANCE.md` at all — it triggers a separate, optional per-contract

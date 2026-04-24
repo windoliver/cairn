@@ -19,7 +19,10 @@
 #   PR_NUMBER          — pull request number.
 #   BASE_SHA, HEAD_SHA — commit SHAs (base = merge-base ancestor, head = PR tip).
 #   PR_AUTHOR          — login of the PR author.
-#   PR_BODY            — pull request description (unverified; text only).
+#
+# Trailers are read only from commit messages (`git log --format=%B`) so
+# the audit artefact survives squash-merge. PR body text is deliberately
+# not accepted as a substitute.
 
 set -euo pipefail
 
@@ -34,6 +37,7 @@ require_env() {
 }
 
 require_env GH_TOKEN GITHUB_REPOSITORY PR_NUMBER BASE_SHA HEAD_SHA PR_AUTHOR
+# PR_BODY is intentionally ignored; leaving any value unused is fine.
 
 # Load-bearing path globs — keep in sync with GOVERNANCE.md §5.2.
 load_bearing_patterns=(
@@ -50,6 +54,7 @@ load_bearing_patterns=(
     '.github/freezes/'
     'scripts/check-reviewed-by.sh'
     'scripts/check-freeze.sh'
+    'scripts/check-core-boundary.sh'
 )
 
 # Ensure we have both SHAs locally (pull_request_target starts from base).
@@ -130,16 +135,25 @@ EOF
     exit 1
 fi
 
-# --- 2. Verify Reviewed-by trailer names an approving reviewer -----------
+# --- 2. Verify Reviewed-by trailer in COMMIT HISTORY (durable only) ------
+# PR body text is mutable after merge and may not survive a squash-merge's
+# generated commit body; we accept only commit-message trailers so the
+# audit artefact is durable in `git log`.
 trailers=$(
-    {
-        git log "${BASE_SHA}..${HEAD_SHA}" --format=%B
-        printf '\n%s\n' "${PR_BODY:-}"
-    } | grep -iE '^[[:space:]]*Reviewed-by:' || true
+    git log "${BASE_SHA}..${HEAD_SHA}" --format=%B \
+        | grep -iE '^[[:space:]]*Reviewed-by:' || true
 )
 
 if [[ -z "${trailers}" ]]; then
-    echo "check-reviewed-by: FAIL — no 'Reviewed-by:' trailer found on commits or in PR body." >&2
+    cat >&2 <<EOF
+check-reviewed-by: FAIL — no 'Reviewed-by:' trailer found in commits
+between ${BASE_SHA}..${HEAD_SHA}.
+
+Add the trailer to a commit message (amend or new commit) so it survives
+squash-merge in the durable git history. Example footer:
+
+    Reviewed-by: Jane Doe <@janedoe>
+EOF
     exit 1
 fi
 
