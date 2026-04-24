@@ -33,10 +33,9 @@ Maintainers are expected to:
 A nomination opens as a PR that adds the candidate to `MAINTAINERS.md` and
 updates `CODEOWNERS` to grant the relevant ownership. The PR requires approval
 by a simple majority of the current maintainers (lazy consensus: no objection
-within seven days counts as approval). During the single-maintainer period
-(§5), the sole maintainer solicits and records an external `Reviewed-by:` on
-the nomination PR — an explicit reviewer rather than a self-approval — and
-the merge of that PR is itself the event that ends §5.
+within seven days counts as approval). While the project has a single
+maintainer, the nomination PR merges under the solo-author workflow described
+in §5.
 
 ### Removing a maintainer
 
@@ -107,30 +106,36 @@ touches both.
 
 ---
 
-## 5. Time-limited deviation — single-maintainer period
+## 5. Single-maintainer workflow
 
 While the repository has **exactly one** maintainer in `MAINTAINERS.md`,
-required-approval branch protection cannot be satisfied by the sole
-maintainer on their own PRs (GitHub disallows PR authors from approving
-their own pull requests). The deviation resolves this without relying on an
-admin bypass, and keeps a **mechanically-enforced gate** on load-bearing
-changes.
+GitHub cannot mechanically enforce an external-reviewer rule without
+deadlocking the sole maintainer's own PRs. Rather than build a bespoke
+substitute, the project operates on a **solo-author workflow** for this
+period and relies on the same controls CNCF projects typically use at
+comparable scale: CI-as-gate, append-only history on load-bearing docs,
+and ADR review *after the fact* when a second maintainer arrives.
 
-### 5.1. Branch-protection settings during this period
+### 5.1. Branch protection during this period
 
 - **Required status checks remain on** (CI must pass — including the
-  `governance / reviewed-by` check defined in §5.3).
+  `governance / freeze` check).
 - **Force-push to `main` is blocked.**
 - **Signed commits are recommended** but not required.
-- **"Required approvals = 1" is disabled** — see rationale above; this is
-  the narrow scope of the deviation.
-- **Admin / ruleset bypass is NOT granted** to the sole maintainer. The
-  `governance / reviewed-by` required status check is the hard gate.
+- **Required approvals is 0** — GitHub disallows PR authors from
+  approving their own PRs, so any non-zero value deadlocks a solo
+  maintainer.
+- **Admin merge is authorised for the sole maintainer** strictly to
+  merge their own PRs that have passed required CI. Every such merge is
+  automatically recorded in the PR timeline; the `git log` is the audit
+  artefact.
 
 ### 5.2. Load-bearing paths
 
-A PR is **load-bearing** if its diff touches any of the following (kept in
-sync with `CLAUDE.md` §9 and `scripts/check-reviewed-by.sh`):
+A PR is **load-bearing** if its diff touches any of the following (kept
+in sync with `CLAUDE.md` §9). These paths receive extra scrutiny when a
+second maintainer joins (§5.3 transition), but during the
+single-maintainer period they carry no automated review gate:
 
 - `crates/cairn-core/src/` or `crates/cairn-core/Cargo.toml`
 - `crates/cairn-idl/` (IDL source and generated artefacts)
@@ -139,136 +144,27 @@ sync with `CLAUDE.md` §9 and `scripts/check-reviewed-by.sh`):
 - `docs/design/decisions/` (any ADR)
 - `GOVERNANCE.md`, `MAINTAINERS.md`, `.github/CODEOWNERS`
 - `.github/workflows/governance.yml`, `.github/freezes/`
-- `scripts/check-reviewed-by.sh`, `scripts/check-freeze.sh`,
-  `scripts/check-core-boundary.sh`
+- `scripts/check-freeze.sh`, `scripts/check-core-boundary.sh`
 
-### 5.3. Enforceable external-review rule
+### 5.3. Transition when a second maintainer joins
 
-For every load-bearing PR during this period:
+The enforceable-external-review gate that previously lived here was
+removed in ADR 0003. When a second maintainer joins:
 
-1. An **external reviewer** (GitHub account other than the PR author) must
-   leave an **Approved** review on the PR before merge. The review is
-   permanently recorded in the PR timeline and is queryable via the
-   GitHub API.
-2. The PR must carry a `Reviewed-by:` trailer naming the external
-   reviewer in a **commit message** on the PR branch (not the PR
-   description — the gate deliberately ignores PR-body text so the
-   audit artefact survives squash-merge in `git log`):
-
-   ```
-   Reviewed-by: Jane Doe <@janedoe>
-   ```
-
-   Amend or add a commit whose message body includes this trailer
-   before the gate runs (or after, then push again).
-
-3. The `governance / reviewed-by` CI job
-   (`.github/workflows/governance.yml` + `scripts/check-reviewed-by.sh`)
-   inspects the PR diff; if it touches load-bearing paths and no valid
-   `Reviewed-by:` trailer is present (or the trailer names the author),
-   the check fails and the PR cannot merge. This check is listed in
-   branch protection as a required status check.
-
-The combination of the GitHub Approved review (social + auditable), the
-commit-message trailer (audit artefact surviving in `git log`), and the
-required status check (mechanical gate) makes the rule enforceable
-without relying on the 1-approval branch-protection rule that GitHub's
-self-approval ban would otherwise deadlock.
-
-**Dismissal / CHANGES_REQUESTED refresh.** The required status check
-deliberately does **not** register for `pull_request_review` events:
-that trigger runs on the PR's merge ref, which PR-controlled YAML can
-mutate, so accepting it would let a PR modify the workflow and emit the
-same required-check names from an untrusted context. The consequence is
-that if a reviewer dismisses an earlier Approved review or submits
-`CHANGES_REQUESTED`, the green required check does not automatically
-re-run. The sole maintainer must, before merging, push an empty commit
-to force `synchronize` to fire:
-
-```
-git commit --allow-empty -m "Re-request governance check after review refresh"
-git push
-```
-
-Merging a load-bearing PR while a previously-Approved review has been
-dismissed or changed — without the empty-commit refresh — is a
-governance breach and the PR must be reverted.
-
-### 5.4. Transition off the deviation — ordered runbook
-
-GitHub evaluates `CODEOWNERS` and branch-protection rules against the
-**base branch** at PR-review time, so enabling "Require review from Code
-Owners" **before** the nominee is written into `main`'s CODEOWNERS would
-lock the repository: the sole existing owner can't self-approve, and the
-nominee isn't yet a code owner on base. The runbook therefore deliberately
-changes branch-protection rules **after** the nomination PR merges, not
-before, and prevents an intermediate-state gap with a merge freeze plus a
-transition-specific active path freeze.
-
-Steps (executed in order, by the sole maintainer unless stated). The
-transition freeze stays active from step 2 through step 6 so that at no
-point does `main` sit with the new CODEOWNERS but neither the deviation
-nor the required-approvals rule in force:
-
-1. **Grant the nominee write access** to the repository (Settings →
-   Collaborators). This lets them leave a non-stale Approved review on
-   later PRs but does **not** make them a code owner yet.
-2. **Open the pre-transition freeze PR** — adds
-   `.github/freezes/<date>-transition.yaml` whose `paths:` list freezes
-   **every** path in the repository (single entry: `""` or `/`, which
-   `scripts/check-freeze.sh` matches against all files). Non-transition
-   PRs merging into `main` during the window are blocked mechanically
-   regardless of which load-bearing area they touch — this closes the
-   intermediate-state gap that a code-only freeze would leave for
-   doc/workflow PRs. The nomination PR and the freeze-removal PR rely
-   on the `governance:transition` and `governance:freeze-removal`
-   labels (both machine-checked by `scripts/check-freeze.sh`) to land
-   despite the blanket freeze. The freeze PR itself is load-bearing,
-   goes through §5.3, and the nominee leaves the Approved review +
-   commit-message `Reviewed-by:` trailer.
-3. **Open the nomination PR**, labelled `governance:transition` so the
-   freeze check exempts it. The diff must stay within the
-   machine-checked transition scope enforced by
-   `scripts/check-freeze.sh` (MAINTAINERS.md, GOVERNANCE.md,
-   .github/CODEOWNERS, docs/design/decisions/, docs/design/design-brief.md,
-   scripts/check-reviewed-by.sh). In one squash-destined commit with a
-   durable commit-message body carrying the `Reviewed-by:` trailer:
-   (a) `MAINTAINERS.md` addition with contract-area annotations,
-   (b) `.github/CODEOWNERS` update adding the nominee to every
-   affected path, (c) removal of this §5 (and update of every
-   cross-reference: ADR 0002, brief §20.1, CODEOWNERS comment header,
-   `scripts/check-reviewed-by.sh` load-bearing path list if obsolete),
-   (d) `MAINTAINERS.md` change-log entry recording the date and PR
-   number that ended the single-maintainer period. The transition
-   freeze file from step 2 is **not** deleted here — it stays in place
-   until step 6 so that non-transition work remains blocked through the
-   branch-protection update.
-4. **Merge the nomination PR** (squash). `main` now has the new
-   CODEOWNERS but the transition freeze is still active, so no other
-   PR can land until step 6.
-5. **Update branch protection** (Settings → Branches → `main`): enable
+1. **Grant the nominee write access** and land the nomination PR that
+   adds them to `MAINTAINERS.md` and `.github/CODEOWNERS`.
+2. **Update branch protection** (Settings → Branches → `main`): enable
    `Require a pull request before merging`, `Required approvals = 1`,
    `Dismiss stale pull request approvals when new commits are pushed`,
-   `Require review from Code Owners`, and keep `governance /
-   reviewed-by` and `governance / freeze` as required status checks.
-6. **Open the freeze-removal PR** deleting
-   `.github/freezes/<date>-transition.yaml`. The diff is purely freeze
-   deletions, and the label `governance:freeze-removal` exempts the PR
-   from `check-freeze.sh`. Under the new branch protection it requires
-   a code-owner approval — which either existing maintainer can now
-   satisfy. Merge it.
-7. **Announce the transition** and close any related issues.
+   `Require review from Code Owners`, and revoke the sole-maintainer
+   admin-merge allowance from §5.1.
+3. **Open a follow-up PR** replacing §5 of this document with the
+   post-deviation governance text that matches the new state, and
+   record the transition in `MAINTAINERS.md`'s change log.
 
-Between step 4 and step 6 the repository is in a safe intermediate
-state: `main` is up-to-date, the transition freeze blocks non-transition
-merges, and branch protection has been tightened. If any step between 4
-and 6 stalls, the repository remains in that safe state indefinitely
-because the freeze continues to fail-close non-transition PRs.
-
-A future "third maintainer joins" transition is not gated by
-`GOVERNANCE.md` at all — it triggers a separate, optional per-contract
-team seed under §2 without touching §5 (by then removed) or branch
-protection.
+No bespoke `Reviewed-by:` trailer gate is re-introduced at that
+transition — standard GitHub required-review branch protection is the
+mechanical gate from that point on.
 
 ---
 

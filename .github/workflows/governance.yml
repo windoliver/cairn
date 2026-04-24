@@ -1,24 +1,15 @@
 name: governance
 
 # Uses `pull_request_target` so the job runs in the trusted base-branch
-# context, not the PR's workspace. This prevents a PR from modifying the
-# enforcement logic (script or workflow) to bypass the gate. The checkout
-# step ALWAYS checks out the PR's base ref; the PR head is fetched only
-# as a bare SHA for diffing, never checked out or executed.
+# context, not the PR's workspace. The checkout step ALWAYS checks out the
+# PR's base ref; the PR head is fetched only as a bare SHA for diffing,
+# never checked out or executed.
 #
 # SECURITY: this workflow must not execute any file contributed by the PR.
-# It runs only `scripts/check-reviewed-by.sh` from the base ref and the
-# `scripts/check-freeze.sh` gate, both installed on `main` first.
+# It runs only `scripts/check-freeze.sh` from the base ref, installed on
+# `main` first.
 
 on:
-  # Only pull_request_target — deliberately NOT pull_request_review.
-  # `pull_request_review` runs on the PR merge ref (PR-controlled YAML
-  # can emit the same required-check names from a modified workflow),
-  # so adding it would undermine the trusted-base enforcement model.
-  # `synchronize` fires on any new commit to the PR branch, which is
-  # enough to re-run the gate in the normal case; stale approvals
-  # between a dismissal and a new push are addressed via the dismissal-
-  # refresh runbook below rather than by adding an untrusted trigger.
   pull_request_target:
     branches: [main]
     types:
@@ -27,8 +18,6 @@ on:
       - reopened
       - edited
       - ready_for_review
-      - review_requested
-      - review_request_removed
       - labeled
       - unlabeled
 
@@ -41,33 +30,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  reviewed-by-load-bearing:
-    name: reviewed-by / load-bearing paths
-    if: github.event.pull_request.base.ref == 'main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out BASE ref (trusted)
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-          fetch-depth: 0
-
-      - name: Fetch PR head SHA (metadata only; not checked out)
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=200 origin \
-            "+${{ github.event.pull_request.head.sha }}:refs/pr-head"
-
-      - name: Enforce Reviewed-by rule on load-bearing paths
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: bash scripts/check-reviewed-by.sh
-
   freeze-check:
     name: freeze / active path freezes
     if: github.event.pull_request.base.ref == 'main'

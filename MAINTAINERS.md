@@ -30,5 +30,10 @@ project grows a second maintainer, every area routes to the sole maintainer.
 
 - **2026-04-24** — Initial file created alongside `GOVERNANCE.md` and
   `.github/CODEOWNERS`, closing the governance open question recorded in ADR
-  0001 and design brief §20.1. Single-maintainer period begins under
-  `GOVERNANCE.md` §5.
+  0002 and design brief §20.1. Single-maintainer period begins.
+- **2026-04-24** — `GOVERNANCE.md` §5 amended: removed the
+  external-reviewer + `Reviewed-by:` trailer gate (created a hard deadlock
+  for the sole maintainer); adopted solo-author workflow with admin-merge
+  on green CI until a second maintainer joins. `scripts/check-reviewed-by.sh`
+  and the `reviewed-by-load-bearing` CI job deleted. See amendment note
+  at the top of ADR 0002.

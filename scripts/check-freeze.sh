@@ -132,7 +132,6 @@ fi
 #       .github/CODEOWNERS
 #       docs/design/decisions/
 #       docs/design/design-brief.md
-#       scripts/check-reviewed-by.sh
 #   - and does NOT modify any freeze file (the tamper guard below
 #     still runs after this block).
 if has_label "governance:transition"; then
@@ -142,7 +141,6 @@ if has_label "governance:transition"; then
         '.github/CODEOWNERS'
         'docs/design/decisions/'
         'docs/design/design-brief.md'
-        'scripts/check-reviewed-by.sh'
     )
     in_scope=1
     while IFS= read -r file; do
