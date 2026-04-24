@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/index.json",
+  "title": "Cairn contract manifest",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-files": {
+    "envelope": [
+      "envelope/request.json",
+      "envelope/response.json",
+      "envelope/signed_intent.json"
+    ],
+    "errors": [
+      "errors/error.json"
+    ],
+    "capabilities": [
+      "capabilities/capabilities.json"
+    ],
+    "extensions": [
+      "extensions/registry.json"
+    ],
+    "prelude": [
+      "prelude/status.json",
+      "prelude/handshake.json"
+    ],
+    "verbs": [
+      "verbs/ingest.json",
+      "verbs/search.json",
+      "verbs/retrieve.json",
+      "verbs/summarize.json",
+      "verbs/assemble_hot.json",
+      "verbs/capture_trace.json",
+      "verbs/lint.json",
+      "verbs/forget.json"
+    ]
+  },
+  "x-cairn-verb-ids": [
+    "ingest",
+    "search",
+    "retrieve",
+    "summarize",
+    "assemble_hot",
+    "capture_trace",
+    "lint",
+    "forget"
+  ]
+}
