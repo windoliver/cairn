@@ -20,12 +20,14 @@
   "properties": {
     "operation_id": {
       "type": "string",
-      "description": "ULID; unique per issuer within expires_at window."
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID (Crockford base32, 26 chars); unique per issuer within expires_at window."
     },
     "nonce": {
       "type": "string",
       "contentEncoding": "base64",
-      "description": "Fresh per message; 16 bytes base64-encoded."
+      "pattern": "^[A-Za-z0-9+/]{22}(==)?$",
+      "description": "Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding)."
     },
     "sequence": {
       "type": "integer",
@@ -42,9 +44,9 @@
       "additionalProperties": false,
       "required": ["tenant", "workspace", "entity", "tier"],
       "properties": {
-        "tenant": { "type": "string" },
-        "workspace": { "type": "string" },
-        "entity": { "type": "string" },
+        "tenant":    { "type": "string", "minLength": 1 },
+        "workspace": { "type": "string", "minLength": 1 },
+        "entity":    { "type": "string", "minLength": 1 },
         "tier": {
           "type": "string",
           "enum": ["private", "session", "project", "team", "org", "public"]
@@ -53,26 +55,31 @@
     },
     "issuer": {
       "type": "string",
-      "description": "e.g. agt:claude-code:opus-4-7:reviewer:v1 (AgentIdentity) or usr:<id> (HumanIdentity)."
+      "minLength": 1,
+      "pattern": "^(agt|usr|snr):[A-Za-z0-9._:-]+$",
+      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
     },
-    "issued_at": { "type": "string", "format": "date-time" },
-    "expires_at": { "type": "string", "format": "date-time" },
+    "issued_at": { "type": "string", "format": "date-time", "minLength": 20 },
+    "expires_at": { "type": "string", "format": "date-time", "minLength": 20 },
     "key_version": { "type": "integer", "minimum": 1 },
     "server_challenge": {
       "type": "string",
       "contentEncoding": "base64",
-      "description": "Fresh nonce obtained from `cairn handshake`; required when sequence is absent."
+      "pattern": "^[A-Za-z0-9+/]{22}(==)?$",
+      "description": "Fresh nonce obtained from `cairn handshake`; required when sequence is absent. Same 16-byte base64 shape as nonce."
     },
     "chain_parents": {
       "type": "array",
       "items": {
         "type": "string",
-        "description": "operation_id of a prior operation this one depends on."
+        "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+        "description": "operation_id ULID of a prior operation this one depends on."
       }
     },
     "signature": {
       "type": "string",
-      "pattern": "^ed25519:[0-9a-f]+$"
+      "pattern": "^ed25519:[0-9a-f]{128}$",
+      "description": "Ed25519 signature over the canonical JSON of every other field. 64 raw bytes = 128 lowercase hex chars."
     }
   },
   "oneOf": [

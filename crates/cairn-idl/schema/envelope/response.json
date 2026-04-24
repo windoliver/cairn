@@ -30,8 +30,8 @@
       "enum": ["committed", "aborted", "rejected"]
     },
     "data": {
-      "description": "Per-verb data payload. Shape defined by verbs/<verb>.json $defs/Data. Object for most verbs; array for session / folder / scope retrieve variants; null on rejected / aborted calls.",
-      "type": ["object", "array", "null"]
+      "description": "Per-verb data payload on committed responses. Shape defined by verbs/<verb>.json $defs/Data. Object for most verbs; array for session / folder / scope retrieve variants. The field is absent on rejected / aborted responses.",
+      "type": ["object", "array"]
     },
     "policy_trace": {
       "type": "array",
@@ -52,27 +52,27 @@
     "error": { "$ref": "../errors/error.json" }
   },
   "allOf": [
-    { "if": { "properties": { "verb": { "const": "ingest" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/ingest.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "search" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/search.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "retrieve" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/retrieve.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "summarize" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/summarize.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "assemble_hot" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/assemble_hot.json#/$defs/Data" }, { "type": "null" }] } } } },
+    { "if": { "properties": { "verb": { "const": "ingest" } },        "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/ingest.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "search" } },        "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/search.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "retrieve" } },      "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/retrieve.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "summarize" } },     "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/summarize.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "assemble_hot" } },  "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/assemble_hot.json#/$defs/Data" } } } },
     { "if": { "properties": { "verb": { "const": "capture_trace" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/capture_trace.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "lint" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/lint.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "verb": { "const": "forget" } }, "required": ["verb"] },
-      "then": { "properties": { "data": { "anyOf": [{ "$ref": "../verbs/forget.json#/$defs/Data" }, { "type": "null" }] } } } },
-    { "if": { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/capture_trace.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "lint" } },          "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/lint.json#/$defs/Data" } } } },
+    { "if": { "properties": { "verb": { "const": "forget" } },        "required": ["verb"] },
+      "then": { "properties": { "data": { "$ref": "../verbs/forget.json#/$defs/Data" } } } },
+    { "if":   { "properties": { "status": { "const": "committed" } }, "required": ["status"] },
       "then": { "required": ["data"], "not": { "required": ["error"] } } },
-    { "if": { "properties": { "status": { "const": "rejected" } }, "required": ["status"] },
-      "then": { "required": ["error"] } },
-    { "if": { "properties": { "status": { "const": "aborted" } }, "required": ["status"] },
-      "then": { "required": ["error"] } }
+    { "if":   { "properties": { "status": { "const": "rejected" } },  "required": ["status"] },
+      "then": { "required": ["error"], "not": { "required": ["data"] } } },
+    { "if":   { "properties": { "status": { "const": "aborted" } },   "required": ["status"] },
+      "then": { "required": ["error"], "not": { "required": ["data"] } } }
   ]
 }

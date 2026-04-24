@@ -150,8 +150,54 @@
       ]
     },
     "Data": {
-      "type": ["object", "array"],
-      "description": "Shape depends on the matched Args branch. Record / profile variants return an object; session / folder / scope variants return an ordered array of items. The per-branch Data shape is resolved by codegen (#35) from the Args branch, not discriminated here."
+      "oneOf": [
+        { "$ref": "#/$defs/DataRecord" },
+        { "$ref": "#/$defs/DataProfile" },
+        { "$ref": "#/$defs/DataItemList" }
+      ],
+      "description": "Shape depends on the matched Args branch. Record / profile variants return an object; session / folder / scope variants return an ordered array of items. Codegen (#35) narrows which branch applies per call from the Args branch."
+    },
+    "DataRecord": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["record_id", "kind"],
+      "properties": {
+        "record_id": { "type": "string", "minLength": 1 },
+        "kind":      { "type": "string", "minLength": 1 },
+        "body":      { "type": "string" },
+        "frontmatter": { "type": "object" }
+      }
+    },
+    "DataProfile": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["subject"],
+      "properties": {
+        "subject": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "user":  { "type": "string", "minLength": 1 },
+            "agent": { "type": "string", "minLength": 1 }
+          },
+          "anyOf": [
+            { "required": ["user"] },
+            { "required": ["agent"] }
+          ]
+        },
+        "profile": { "type": "object" }
+      }
+    },
+    "DataItemList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["record_id"],
+        "properties": {
+          "record_id": { "type": "string", "minLength": 1 }
+        }
+      }
     }
   }
 }

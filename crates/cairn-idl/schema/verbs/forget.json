@@ -40,7 +40,7 @@
       },
       "properties": {
         "mode":      { "const": "record" },
-        "record_id": { "type": "string" }
+        "record_id": { "type": "string", "minLength": 1 }
       }
     },
     "ArgsSession": {
@@ -57,7 +57,7 @@
       },
       "properties": {
         "mode":       { "const": "session" },
-        "session_id": { "type": "string" }
+        "session_id": { "type": "string", "minLength": 1 }
       }
     },
     "ArgsScope": {
