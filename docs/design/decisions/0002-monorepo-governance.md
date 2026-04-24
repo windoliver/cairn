@@ -1,4 +1,4 @@
-# ADR 0001 — Monorepo shape and maintainer governance model
+# ADR 0002 — Monorepo shape and maintainer governance model
 
 - **Status:** Accepted
 - **Date:** 2026-04-24

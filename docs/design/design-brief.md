@@ -4435,7 +4435,7 @@ Every capability above is derivable from these seven invariants — if you viola
    load-bearing changes are gated by an **enforceable external-review
    rule**: an Approved non-author GitHub review + a `Reviewed-by:` trailer
    + a required `governance / reviewed-by` status check. See
-   [ADR 0001-monorepo](decisions/0001-monorepo-governance.md) and `GOVERNANCE.md`
+   [ADR 0002](decisions/0002-monorepo-governance.md) and `GOVERNANCE.md`
    §5 for the enforcement mechanism, hard-vs-soft split triggers,
    revisit triggers, and release-tooling commitments. Closes #145.
 2. ~~Default LLM for local tier: ship Ollama bootstrap, or require user install?~~ — **Resolved 2026-04-24 ([ADR 0001](decisions/0001-llm-default.md)):** no bundled runtime; ship one OpenAI-compatible adapter and detect local providers in `cairn status`.

@@ -2,7 +2,7 @@
 # check-freeze.sh
 #
 # Enforces path freezes declared under .github/freezes/*.yaml. Freezes are
-# set by maintainers when a hard split trigger fires (ADR 0001
+# set by maintainers when a hard split trigger fires (ADR 0002
 # "Immediate containment when a hard trigger fires"). Any PR whose diff
 # touches a frozen path fails this required status check.
 #
@@ -305,7 +305,7 @@ Match: ${hit}
 Active freeze files:
 $(printf '  %s\n' "${freeze_files[@]}")
 
-Freezes are declared under ADR 0001 hard-trigger containment. Resolve the
+Freezes are declared under ADR 0002 hard-trigger containment. Resolve the
 underlying hard trigger and remove the freeze file via a PR whose diff is
 exclusively freeze-file deletions, labelled governance:freeze-removal.
 EOF

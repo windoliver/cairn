@@ -1,6 +1,6 @@
 # CODEOWNERS for Cairn
 #
-# Governance: see GOVERNANCE.md. Decision: docs/design/decisions/0001-monorepo-governance.md.
+# Governance: see GOVERNANCE.md. Decision: docs/design/decisions/0002-monorepo-governance.md.
 #
 # Seed model: every path routes to the sole maintainer while the roster is one
 # entry deep. CODEOWNERS is informational during the single-maintainer period

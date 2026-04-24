@@ -5,8 +5,8 @@ the [CNCF maintainer-template governance model][cncf-template] with a small,
 time-limited deviation called out below. Governance evolves by PR against this
 file.
 
-**Decision record:** [ADR 0001 — Monorepo shape and maintainer governance
-model](docs/design/decisions/0001-monorepo-governance.md). Close any proposed
+**Decision record:** [ADR 0002 — Monorepo shape and maintainer governance
+model](docs/design/decisions/0002-monorepo-governance.md). Close any proposed
 governance change by updating both this file and the ADR.
 
 ---
@@ -85,7 +85,7 @@ currently-active maintainers wins; the proposer does not get a tiebreaker.
   §4).
 - Changing the project licence.
 - Reorganising the repository (e.g., splitting a crate into its own repo — see
-  ADR 0001 split triggers).
+  ADR 0002 split triggers).
 
 ---
 
@@ -236,7 +236,7 @@ nor the required-approvals rule in force:
    (a) `MAINTAINERS.md` addition with contract-area annotations,
    (b) `.github/CODEOWNERS` update adding the nominee to every
    affected path, (c) removal of this §5 (and update of every
-   cross-reference: ADR 0001, brief §20.1, CODEOWNERS comment header,
+   cross-reference: ADR 0002, brief §20.1, CODEOWNERS comment header,
    `scripts/check-reviewed-by.sh` load-bearing path list if obsolete),
    (d) `MAINTAINERS.md` change-log entry recording the date and PR
    number that ended the single-maintainer period. The transition
@@ -275,13 +275,13 @@ protection.
 ## 6. Repository shape
 
 The project is one public monorepo (Cargo workspace + sibling `packages/`
-for non-Rust SDKs) per ADR 0001. The conditions for splitting a crate or
-package into its own repository are enumerated in ADR 0001 §"Split triggers".
+for non-Rust SDKs) per ADR 0002. The conditions for splitting a crate or
+package into its own repository are enumerated in ADR 0002 §"Split triggers".
 Any split proposal requires a super-majority vote (§3).
 
 The repository is currently **user-owned** (`windoliver/cairn`). Conversion to
 a GitHub organisation and migration of CODEOWNERS from `@windoliver` to a
-`@cairn-project/maintainers` team is a scheduled revisit trigger in ADR 0001;
+`@cairn-project/maintainers` team is a scheduled revisit trigger in ADR 0002;
 it fires when a second maintainer joins.
 
 ---
@@ -298,7 +298,7 @@ the maintainers listed in `MAINTAINERS.md`.
 ## 8. Amendments
 
 Any change to this file requires a super-majority (§3) of current
-maintainers. PRs that touch this file should also update ADR 0001 when the
+maintainers. PRs that touch this file should also update ADR 0002 when the
 change affects the decisions recorded there.
 
 [cncf-template]: https://github.com/cncf/project-template/blob/main/GOVERNANCE-maintainer.md

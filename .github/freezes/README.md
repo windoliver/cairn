@@ -7,8 +7,8 @@ Freeze files in this directory are consumed by
 diff touches a path listed under `paths:` fails the check and cannot
 merge.
 
-Freezes are created under ADR 0001 "Immediate containment when a hard
-trigger fires" (`docs/design/decisions/0001-monorepo-governance.md`).
+Freezes are created under ADR 0002 "Immediate containment when a hard
+trigger fires" (`docs/design/decisions/0002-monorepo-governance.md`).
 They are **not** a routine mechanism — they exist to halt merges on a
 specific crate or path while a licensing, security, or external-SLA
 hard trigger is being resolved.
@@ -20,11 +20,11 @@ One YAML file per active freeze; filename convention
 parsed; every other field is human audit context.
 
 ```yaml
-trigger: H2                # hard-trigger ID from ADR 0001
+trigger: H2                # hard-trigger ID from ADR 0002
 issue: https://github.com/windoliver/cairn/issues/NNN
 owner: "@windoliver"
 opened: 2026-04-24
-deadline: 2026-05-08       # 14 days max per ADR 0001 containment rule
+deadline: 2026-05-08       # 14 days max per ADR 0002 containment rule
 reason: |
   One-paragraph rationale. Summary of the hard trigger and interim
   mitigation in place.
