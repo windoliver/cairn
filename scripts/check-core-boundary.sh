@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# Fail if cairn-core's resolved dependency graph contains any cairn-* package.
-# Dev-deps are ignored (fixtures can be consumed in tests); runtime and
-# build-script deps are checked.
+# Fail if cairn-core declares any cairn-* package as a dependency of any kind
+# (normal, build, or dev). Core must stay a leaf: adapter crates never reach
+# back into core, and core's own tests stay pure to keep this invariant
+# trivially checkable.
 
 set -euo pipefail
 
@@ -13,15 +14,14 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-# Emit every dep of cairn-core whose kind is normal (null) or build, filtered
-# to names that start with `cairn-`. An empty result means clean.
+# Emit every dep declared by cairn-core whose name starts with `cairn-`,
+# regardless of kind. An empty result means clean.
 violations=$(
   cargo metadata --format-version 1 --locked \
     | jq -r '
         .packages[]
         | select(.name == "cairn-core")
         | .dependencies[]
-        | select((.kind // "normal") == "normal" or .kind == "build")
         | .name
         | select(startswith("cairn-"))
       '
