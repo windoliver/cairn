@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/errors/error.json",
+  "title": "Cairn error",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "required": ["code", "message"],
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "InvalidArgs" },           "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/InvalidArgsData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "InvalidFilter" },         "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/InvalidFilterData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "CapabilityUnavailable" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/CapabilityUnavailableData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "UnknownVerb" },   "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/UnknownVerbData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ExpiredIntent" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/ExpiredIntentData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ReplayDetected" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/ReplayDetectedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "OutOfOrderSequence" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/OutOfOrderSequenceData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "RevokedKey" },    "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/RevokedKeyData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"],         "properties": { "code": { "const": "MissingSignature" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/MissingSignatureData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "Unauthorized" },  "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/UnauthorizedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "NotFound" },      "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/NotFoundData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "ConflictVersion" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/ConflictVersionData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "QuarantineRequired" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/QuarantineRequiredData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message", "data"], "properties": { "code": { "const": "PluginSuspended" }, "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/PluginSuspendedData" } } },
+    { "type": "object", "additionalProperties": false, "required": ["code", "message"],         "properties": { "code": { "const": "Internal" },      "message": { "type": "string", "minLength": 1 }, "data": { "$ref": "#/$defs/InternalData" } } }
+  ],
+  "$defs": {
+    "InvalidArgsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "reason"],
+      "properties": {
+        "field": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "InvalidFilterData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "CapabilityUnavailableData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability"],
+      "properties": {
+        "capability": { "$ref": "../capabilities/capabilities.json" }
+      }
+    },
+    "UnknownVerbData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verb"],
+      "properties": {
+        "verb": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ExpiredIntentData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issued_at", "expires_at", "now"],
+      "properties": {
+        "issued_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "now": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReplayDetectedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id"],
+      "properties": {
+        "operation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+      }
+    },
+    "OutOfOrderSequenceData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "high_water", "attempted"],
+      "properties": {
+        "issuer":      { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "high_water": { "type": "integer", "minimum": 0 },
+        "attempted":  { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RevokedKeyData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "key_version"],
+      "properties": {
+        "issuer":      { "$ref": "../common/primitives.json#/$defs/Identity" },
+        "key_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "MissingSignatureData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "UnauthorizedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "string", "minLength": 1 }
+      }
+    },
+    "NotFoundData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ConflictVersionData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected", "actual"],
+      "properties": {
+        "expected": { "type": "integer", "minimum": 0 },
+        "actual":   { "type": "integer", "minimum": 0 }
+      }
+    },
+    "QuarantineRequiredData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason":        { "type": "string", "minLength": 1 },
+        "quarantine_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+      }
+    },
+    "PluginSuspendedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_id"],
+      "properties": {
+        "plugin_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "InternalData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+      }
+    }
+  }
+}

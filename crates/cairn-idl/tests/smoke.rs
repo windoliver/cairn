@@ -24,3 +24,14 @@ fn codegen_binary_fails_closed() {
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
     assert!(stdout.is_empty(), "scaffold must not print to stdout: {stdout:?}");
 }
+
+#[test]
+fn schema_dir_constant_points_at_crate_schema_dir() {
+    let dir = std::path::Path::new(cairn_idl::SCHEMA_DIR);
+    let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema");
+    assert_eq!(
+        dir, expected,
+        "SCHEMA_DIR should resolve to <crate>/schema, got {dir:?}"
+    );
+    assert!(dir.is_dir(), "SCHEMA_DIR must exist on disk: {dir:?}");
+}

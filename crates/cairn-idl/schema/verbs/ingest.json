@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/ingest.json",
+  "title": "Cairn verb: ingest",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "ingest",
+  "x-cairn-cli": {
+    "command": "ingest",
+    "flags": [
+      { "name": "kind",        "long": "kind",        "value_source": "string" },
+      { "name": "body",        "long": "body",        "value_source": "string" },
+      { "name": "file",        "long": "file",        "value_source": "path" },
+      { "name": "url",         "long": "url",         "value_source": "string" },
+      { "name": "session_id",  "long": "session",     "value_source": "string" },
+      { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
+    ],
+    "positional": {
+      "name": "source",
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url."
+    }
+  },
+  "x-cairn-capability": null,
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use when the user says 'remember that...', 'from now on...', or you detect a correction",
+      "use after a tool call that yields a durable fact worth keeping",
+      "use to file a clipped article, transcript, or manual note"
+    ],
+    "negative": [
+      "do NOT use for one-off computation results the user can re-derive",
+      "do NOT use for raw chat transcripts (those flow through capture_trace)"
+    ],
+    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier."
+        },
+        "body":  { "type": "string", "minLength": 1 },
+        "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
+        "url":   { "type": "string", "format": "uri", "minLength": 1 },
+        "session_id": { "type": "string", "minLength": 1 },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "frontmatter": {
+          "type": "object",
+          "description": "Extra YAML frontmatter fields to store alongside the body."
+        }
+      },
+      "oneOf": [
+        { "required": ["body"] },
+        { "required": ["file"] },
+        { "required": ["url"] }
+      ]
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "session_id"],
+      "properties": {
+        "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
+      }
+    }
+  }
+}

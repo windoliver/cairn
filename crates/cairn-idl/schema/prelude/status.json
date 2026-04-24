@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/prelude/status.json",
+  "title": "Cairn status response",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "server_info", "capabilities", "extensions"],
+  "properties": {
+    "contract": { "const": "cairn.mcp.v1" },
+    "server_info": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "build", "started_at", "incarnation"],
+      "properties": {
+        "version":     { "type": "string", "minLength": 1 },
+        "build":       { "type": "string", "minLength": 1 },
+        "started_at":  { "type": "string", "format": "date-time" },
+        "incarnation": {
+          "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
+          "description": "ULID minted at daemon start."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "../capabilities/capabilities.json" }
+    },
+    "extensions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "../extensions/registry.json#/$defs/namespace" }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "aggregate extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.aggregate" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.aggregate.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "admin extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.admin" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.admin.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "federation extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.federation" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.federation.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    },
+    {
+      "$comment": "sessiontree extension ↔ capability binding",
+      "if": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      },
+      "then": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": { "contains": { "const": "cairn.mcp.v1.extension.sessiontree" } }
+        },
+        "required": ["capabilities"]
+      },
+      "then": {
+        "properties": {
+          "extensions": {
+            "contains": { "properties": { "name": { "const": "cairn.sessiontree.v1" } }, "required": ["name"] }
+          }
+        },
+        "required": ["extensions"]
+      }
+    }
+  ]
+}

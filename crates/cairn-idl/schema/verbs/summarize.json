@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/summarize.json",
+  "title": "Cairn verb: summarize",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-verb-id": "summarize",
+  "x-cairn-capability": null,
+  "x-cairn-auth": "rebac",
+  "x-cairn-cli": {
+    "command": "summarize",
+    "positional": { "name": "record_ids", "description": "One or more record ULIDs.", "repeatable": true },
+    "flags": [
+      { "name": "persist",   "long": "persist",   "value_source": "bool" },
+      { "name": "kind",      "long": "kind",      "value_source": "string" },
+      { "name": "citations", "long": "citations", "value_source": "enum(on,compact,off)" }
+    ]
+  },
+  "x-cairn-skill-triggers": {
+    "positive": [
+      "use to roll up a list of known record ids into a single synthesis"
+    ],
+    "negative": [
+      "do NOT use to answer a general question — call search first"
+    ],
+    "exclusivity": "this is the canonical summarize surface"
+  },
+  "type": "object",
+  "$defs": {
+    "Args": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_ids"],
+      "properties": {
+        "record_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+        },
+        "persist": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, files the synthesis as a new reference or strategy_success memory."
+        },
+        "kind":      { "type": "string", "minLength": 1, "description": "Kind to file under if persist is true." },
+        "citations": { "type": "string", "enum": ["on", "compact", "off"] }
+      }
+    },
+    "Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "summary":            { "type": "string", "minLength": 1 },
+        "persisted_record_id":{ "$ref": "../common/primitives.json#/$defs/Ulid", "description": "Present when persist was true." }
+      }
+    }
+  }
+}

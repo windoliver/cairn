@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/envelope/signed_intent.json",
+  "title": "Cairn signed intent envelope",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation_id",
+    "nonce",
+    "target_hash",
+    "scope",
+    "issuer",
+    "issued_at",
+    "expires_at",
+    "key_version",
+    "chain_parents",
+    "signature"
+  ],
+  "properties": {
+    "operation_id": {
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ulid" }],
+      "description": "ULID (Crockford base32, 26 chars); unique per issuer within expires_at window."
+    },
+    "nonce": {
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Nonce16Base64" }],
+      "description": "Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding)."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Monotonic per-issuer counter; strictly increasing. Bounded by JSON's safe integer range (2^53 − 1) so validators and JSON decoders cannot disagree on the represented value. Mutually exclusive with server_challenge."
+    },
+    "target_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256 of the record / plan / receipt this signature authorizes."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant", "workspace", "entity", "tier"],
+      "properties": {
+        "tenant":    { "type": "string", "minLength": 1 },
+        "workspace": { "type": "string", "minLength": 1 },
+        "entity":    { "type": "string", "minLength": 1 },
+        "tier": {
+          "type": "string",
+          "enum": ["private", "session", "project", "team", "org", "public"]
+        }
+      }
+    },
+    "issuer": {
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Identity" }],
+      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
+    },
+    "issued_at": { "type": "string", "format": "date-time", "minLength": 20 },
+    "expires_at": { "type": "string", "format": "date-time", "minLength": 20 },
+    "key_version": { "type": "integer", "minimum": 1 },
+    "server_challenge": {
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Nonce16Base64" }],
+      "description": "Fresh nonce obtained from `cairn handshake`; required when sequence is absent. Same 16-byte base64 shape as nonce."
+    },
+    "chain_parents": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+      "description": "operation_id ULIDs of prior operations this one depends on. Bounded and deduplicated so a malformed intent cannot push a pathologically large DAG fan-in at WAL dependency processing time."
+    },
+    "signature": {
+      "allOf": [{ "$ref": "../common/primitives.json#/$defs/Ed25519Signature" }],
+      "description": "Ed25519 signature over the canonical JSON of every other field. 64 raw bytes = 128 lowercase hex chars."
+    }
+  },
+  "oneOf": [
+    { "required": ["sequence"], "not": { "required": ["server_challenge"] } },
+    { "required": ["server_challenge"], "not": { "required": ["sequence"] } }
+  ]
+}
