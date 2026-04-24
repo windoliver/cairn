@@ -26,6 +26,12 @@
       "minLength": 1,
       "pattern": "^(agt|usr|snr):[A-Za-z0-9._:-]+$",
       "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
+    },
+    "Cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Opaque continuation token. Shared by every request cursor input and every response next_cursor so the pagination round-trip is validator-symmetric — a server cannot emit a cursor the next request cannot carry."
     }
   }
 }

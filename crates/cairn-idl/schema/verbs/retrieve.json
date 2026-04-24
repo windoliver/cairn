@@ -71,9 +71,7 @@
           "items": { "type": "string", "enum": ["tool_calls", "reasoning"] }
         },
         "cursor": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512,
+          "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior DataSession.next_cursor."
         }
       }
@@ -222,7 +220,7 @@
           "type": "array",
           "items": { "$ref": "#/$defs/TurnItem" }
         },
-        "next_cursor": { "type": "string", "minLength": 1 }
+        "next_cursor": { "$ref": "../common/primitives.json#/$defs/Cursor" }
       }
     },
     "DataTurn": {
@@ -258,7 +256,7 @@
           "type": "array",
           "items": { "$ref": "#/$defs/RecordRef" }
         },
-        "next_cursor": { "type": "string", "minLength": 1 }
+        "next_cursor": { "$ref": "../common/primitives.json#/$defs/Cursor" }
       }
     },
     "TurnItem": {

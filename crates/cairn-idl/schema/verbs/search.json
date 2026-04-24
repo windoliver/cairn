@@ -7,11 +7,31 @@
   "x-cairn-cli": {
     "command": "search",
     "flags": [
-      { "name": "mode",       "long": "mode",       "value_source": "enum(keyword,semantic,hybrid)" },
-      { "name": "limit",      "long": "limit",      "value_source": "u32" },
-      { "name": "filters",    "long": "filters",    "value_source": "json" },
-      { "name": "citations",  "long": "citations",  "value_source": "enum(on,compact,off)" },
-      { "name": "cursor",     "long": "cursor",     "value_source": "string" }
+      {
+        "name": "mode",
+        "long": "mode",
+        "value_source": "enum(keyword,semantic,hybrid)"
+      },
+      {
+        "name": "limit",
+        "long": "limit",
+        "value_source": "u32"
+      },
+      {
+        "name": "filters",
+        "long": "filters",
+        "value_source": "json"
+      },
+      {
+        "name": "citations",
+        "long": "citations",
+        "value_source": "enum(on,compact,off)"
+      },
+      {
+        "name": "cursor",
+        "long": "cursor",
+        "value_source": "string"
+      }
     ],
     "positional": {
       "name": "query",
@@ -27,7 +47,7 @@
     ],
     "negative": [
       "do NOT use when the user just asked a computation question",
-      "do NOT use to fetch a known record id — call retrieve instead"
+      "do NOT use to fetch a known record id \u2014 call retrieve instead"
     ],
     "exclusivity": "this is the canonical search surface for the active vault"
   },
@@ -36,21 +56,38 @@
     "Args": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["query", "mode"],
+      "required": [
+        "query",
+        "mode"
+      ],
       "properties": {
-        "query": { "type": "string", "minLength": 1 },
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
         "mode": {
           "oneOf": [
-            { "const": "keyword",  "x-cairn-capability": "cairn.mcp.v1.search.keyword" },
-            { "const": "semantic", "x-cairn-capability": "cairn.mcp.v1.search.semantic" },
-            { "const": "hybrid",   "x-cairn-capability": "cairn.mcp.v1.search.hybrid" }
+            {
+              "const": "keyword",
+              "x-cairn-capability": "cairn.mcp.v1.search.keyword"
+            },
+            {
+              "const": "semantic",
+              "x-cairn-capability": "cairn.mcp.v1.search.semantic"
+            },
+            {
+              "const": "hybrid",
+              "x-cairn-capability": "cairn.mcp.v1.search.hybrid"
+            }
           ]
         },
         "scope": {
           "$ref": "../common/scope_filter.json",
-          "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
+          "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar \u2014 unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
         },
-        "filters": { "$ref": "#/$defs/filter" },
+        "filters": {
+          "$ref": "#/$defs/filter"
+        },
         "limit": {
           "type": "integer",
           "minimum": 1,
@@ -58,12 +95,14 @@
         },
         "citations": {
           "type": "string",
-          "enum": ["on", "compact", "off"]
+          "enum": [
+            "on",
+            "compact",
+            "off"
+          ]
         },
         "cursor": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 512,
+          "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
         }
       }
@@ -71,146 +110,227 @@
     "Data": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["hits"],
+      "required": [
+        "hits"
+      ],
       "properties": {
         "hits": {
           "type": "array",
-          "items": { "$ref": "#/$defs/Hit" }
+          "items": {
+            "$ref": "#/$defs/Hit"
+          }
         },
-        "next_cursor": { "type": "string", "minLength": 1 }
+        "next_cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor"
+        }
       }
     },
     "Hit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["record_id", "score", "trust"],
+      "required": [
+        "record_id",
+        "score",
+        "trust"
+      ],
       "properties": {
-        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
-        "score":     { "type": "number" },
-        "snippet":   { "type": "string" },
-        "citation":  { "type": "string" },
-        "trust":     { "type": "string", "enum": ["verified", "unverified", "unknown"] }
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "score": {
+          "type": "number"
+        },
+        "snippet": {
+          "type": "string"
+        },
+        "citation": {
+          "type": "string"
+        },
+        "trust": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unverified",
+            "unknown"
+          ]
+        }
       }
     },
     "filter": {
       "x-cairn-max-depth": 8,
       "x-cairn-max-fanout": 32,
-      "description": "Boolean filter grammar. JSON Schema cannot directly bound recursion, so codegen and the runtime enforce the depth (8) and fanout (32) limits via x-cairn-max-depth / x-cairn-max-fanout. Over-limit filters reject at ingest before query planning.",
-      "oneOf": [
-        { "$ref": "#/$defs/filter_and" },
-        { "$ref": "#/$defs/filter_or" },
-        { "$ref": "#/$defs/filter_not" },
-        { "$ref": "#/$defs/filter_leaf" }
-      ]
-    },
-    "filter_and": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["and"],
-      "properties": {
-        "and": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "items": { "$ref": "#/$defs/filter" }
-        }
-      }
-    },
-    "filter_or": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["or"],
-      "properties": {
-        "or": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "items": { "$ref": "#/$defs/filter" }
-        }
-      }
-    },
-    "filter_not": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["not"],
-      "properties": {
-        "not": { "$ref": "#/$defs/filter" }
-      }
+      "description": "Boolean filter grammar, unrolled to depth 8 so the recursion cap is a schema assertion, not runtime-only metadata. and/or fanout capped at 32 per node.",
+      "$ref": "#/$defs/filter_L8"
     },
     "filter_leaf": {
       "oneOf": [
-        { "$ref": "#/$defs/filter_leaf_string" },
-        { "$ref": "#/$defs/filter_leaf_string_set" },
-        { "$ref": "#/$defs/filter_leaf_number" },
-        { "$ref": "#/$defs/filter_leaf_number_set" },
-        { "$ref": "#/$defs/filter_leaf_number_between" },
-        { "$ref": "#/$defs/filter_leaf_boolean" },
-        { "$ref": "#/$defs/filter_leaf_array_contains" },
-        { "$ref": "#/$defs/filter_leaf_array_contains_set" },
-        { "$ref": "#/$defs/filter_leaf_array_size" }
+        {
+          "$ref": "#/$defs/filter_leaf_string"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_string_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_number_between"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_boolean"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_contains"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_contains_set"
+        },
+        {
+          "$ref": "#/$defs/filter_leaf_array_size"
+        }
       ]
     },
     "filter_leaf_string": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
         "op": {
           "type": "string",
-          "enum": ["eq", "neq", "string_contains", "string_starts_with", "string_ends_with"]
+          "enum": [
+            "eq",
+            "neq",
+            "string_contains",
+            "string_starts_with",
+            "string_ends_with"
+          ]
         },
-        "value": { "type": "string", "minLength": 1 }
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "filter_leaf_string_set": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "type": "string", "enum": ["in", "nin"] },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "in",
+            "nin"
+          ]
+        },
         "value": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
     "filter_leaf_number": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "type": "string", "enum": ["eq", "neq", "lt", "lte", "gt", "gte"] },
-        "value": { "type": "number" }
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "eq",
+            "neq",
+            "lt",
+            "lte",
+            "gt",
+            "gte"
+          ]
+        },
+        "value": {
+          "type": "number"
+        }
       }
     },
     "filter_leaf_number_set": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "type": "string", "enum": ["in", "nin"] },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "in",
+            "nin"
+          ]
+        },
         "value": {
           "type": "array",
           "minItems": 1,
-          "items": { "type": "number" }
+          "items": {
+            "type": "number"
+          }
         }
       }
     },
     "filter_leaf_number_between": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "const": "between" },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "const": "between"
+        },
         "value": {
           "type": "array",
-          "items": { "type": "number" },
+          "items": {
+            "type": "number"
+          },
           "minItems": 2,
           "maxItems": 2
         }
@@ -219,24 +339,49 @@
     "filter_leaf_boolean": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "const": "eq" },
-        "value": { "type": "boolean" }
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "const": "eq"
+        },
+        "value": {
+          "type": "boolean"
+        }
       }
     },
     "filter_leaf_array_contains": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "const": "array_contains" },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "const": "array_contains"
+        },
         "value": {
           "oneOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "number" }
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "number"
+            }
           ]
         }
       }
@@ -244,17 +389,35 @@
     "filter_leaf_array_contains_set": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "type": "string", "enum": ["array_contains_any", "array_contains_all"] },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "array_contains_any",
+            "array_contains_all"
+          ]
+        },
         "value": {
           "type": "array",
           "minItems": 1,
           "items": {
             "oneOf": [
-              { "type": "string", "minLength": 1 },
-              { "type": "number" }
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "number"
+              }
             ]
           }
         }
@@ -263,11 +426,530 @@
     "filter_leaf_array_size": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["field", "op", "value"],
+      "required": [
+        "field",
+        "op",
+        "value"
+      ],
       "properties": {
-        "field": { "type": "string", "minLength": 1 },
-        "op":    { "const": "array_size_eq" },
-        "value": { "type": "integer", "minimum": 0 }
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "const": "array_size_eq"
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "filter_L0": {
+      "$ref": "#/$defs/filter_leaf"
+    },
+    "filter_L1": {
+      "description": "Filter at boolean depth 1: either a leaf predicate, or and/or/not composing operands at depth \u2264 0.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L1"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L1"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L1"
+        }
+      ]
+    },
+    "filter_and_L1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L0"
+          }
+        }
+      }
+    },
+    "filter_or_L1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L0"
+          }
+        }
+      }
+    },
+    "filter_not_L1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L0"
+        }
+      }
+    },
+    "filter_L2": {
+      "description": "Filter at boolean depth 2: either a leaf predicate, or and/or/not composing operands at depth \u2264 1.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L2"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L2"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L2"
+        }
+      ]
+    },
+    "filter_and_L2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L1"
+          }
+        }
+      }
+    },
+    "filter_or_L2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L1"
+          }
+        }
+      }
+    },
+    "filter_not_L2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L1"
+        }
+      }
+    },
+    "filter_L3": {
+      "description": "Filter at boolean depth 3: either a leaf predicate, or and/or/not composing operands at depth \u2264 2.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L3"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L3"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L3"
+        }
+      ]
+    },
+    "filter_and_L3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L2"
+          }
+        }
+      }
+    },
+    "filter_or_L3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L2"
+          }
+        }
+      }
+    },
+    "filter_not_L3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L2"
+        }
+      }
+    },
+    "filter_L4": {
+      "description": "Filter at boolean depth 4: either a leaf predicate, or and/or/not composing operands at depth \u2264 3.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L4"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L4"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L4"
+        }
+      ]
+    },
+    "filter_and_L4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L3"
+          }
+        }
+      }
+    },
+    "filter_or_L4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L3"
+          }
+        }
+      }
+    },
+    "filter_not_L4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L3"
+        }
+      }
+    },
+    "filter_L5": {
+      "description": "Filter at boolean depth 5: either a leaf predicate, or and/or/not composing operands at depth \u2264 4.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L5"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L5"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L5"
+        }
+      ]
+    },
+    "filter_and_L5": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L4"
+          }
+        }
+      }
+    },
+    "filter_or_L5": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L4"
+          }
+        }
+      }
+    },
+    "filter_not_L5": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L4"
+        }
+      }
+    },
+    "filter_L6": {
+      "description": "Filter at boolean depth 6: either a leaf predicate, or and/or/not composing operands at depth \u2264 5.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L6"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L6"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L6"
+        }
+      ]
+    },
+    "filter_and_L6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L5"
+          }
+        }
+      }
+    },
+    "filter_or_L6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L5"
+          }
+        }
+      }
+    },
+    "filter_not_L6": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L5"
+        }
+      }
+    },
+    "filter_L7": {
+      "description": "Filter at boolean depth 7: either a leaf predicate, or and/or/not composing operands at depth \u2264 6.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L7"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L7"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L7"
+        }
+      ]
+    },
+    "filter_and_L7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L6"
+          }
+        }
+      }
+    },
+    "filter_or_L7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L6"
+          }
+        }
+      }
+    },
+    "filter_not_L7": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L6"
+        }
+      }
+    },
+    "filter_L8": {
+      "description": "Filter at boolean depth 8: either a leaf predicate, or and/or/not composing operands at depth \u2264 7.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/filter_leaf"
+        },
+        {
+          "$ref": "#/$defs/filter_and_L8"
+        },
+        {
+          "$ref": "#/$defs/filter_or_L8"
+        },
+        {
+          "$ref": "#/$defs/filter_not_L8"
+        }
+      ]
+    },
+    "filter_and_L8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "and"
+      ],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L7"
+          }
+        }
+      }
+    },
+    "filter_or_L8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "or"
+      ],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/filter_L7"
+          }
+        }
+      }
+    },
+    "filter_not_L8": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "not"
+      ],
+      "properties": {
+        "not": {
+          "$ref": "#/$defs/filter_L7"
+        }
       }
     }
   }
