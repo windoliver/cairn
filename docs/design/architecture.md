@@ -52,6 +52,8 @@ This is enforced by two mechanisms:
 1. **Structural** — `cairn-core/Cargo.toml` lists no internal workspace crate as a dependency.
 2. **Script** — `scripts/check-core-boundary.sh` runs `cargo metadata` and asserts the resolved dependency graph of `cairn-core` contains no other `cairn-*` crate (dev-deps excluded).
 
+Dev-deps are intentionally excluded from the script: adapter crates and the CLI consume `cairn-test-fixtures` (which itself depends on `cairn-core`) as a `[dev-dependencies]` entry. `cairn-core` must not consume `cairn-test-fixtures` in return — which is why its tests stay pure and avoid the fixture helper.
+
 ## Deferred Non-Rust Surfaces
 
 Not present in P0. Each will be activated by its own issue.
