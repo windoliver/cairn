@@ -123,11 +123,7 @@
       },
       "properties": {
         "target": { "const": "scope" },
-        "scope": {
-          "type": "object",
-          "additionalProperties": true,
-          "description": "ScopeFilter — same grammar as SearchArgs.filters."
-        }
+        "scope":  { "$ref": "../common/scope_filter.json" }
       }
     },
     "ArgsProfile": {

@@ -74,21 +74,7 @@
       },
       "properties": {
         "mode":  { "const": "scope" },
-        "scope": {
-          "type": "object",
-          "additionalProperties": true,
-          "description": "Scope filter grammar — must include at least one recognized narrowing predicate from the enumerated keys below. Empty objects and payloads carrying only unknown keys are rejected at schema validation to prevent unbounded destructive forgets.",
-          "anyOf": [
-            { "required": ["user"] },
-            { "required": ["agent"] },
-            { "required": ["tenant"] },
-            { "required": ["workspace"] },
-            { "required": ["kind"] },
-            { "required": ["tags"] },
-            { "required": ["session_id"] },
-            { "required": ["record_ids"] }
-          ]
-        }
+        "scope": { "$ref": "../common/scope_filter.json" }
       }
     },
     "Data": {

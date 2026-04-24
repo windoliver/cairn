@@ -19,6 +19,9 @@
     "extensions": [
       "extensions/registry.json"
     ],
+    "common": [
+      "common/scope_filter.json"
+    ],
     "prelude": [
       "prelude/status.json",
       "prelude/handshake.json"
