@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/capabilities/capabilities.json",
+  "title": "Cairn capability strings (P0)",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "type": "string",
+  "oneOf": [
+    { "const": "cairn.mcp.v1.search.keyword",    "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.search.semantic",   "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.search.hybrid",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.record",   "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.session",  "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.turn",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.folder",   "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.scope",    "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.retrieve.profile",  "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.forget.record",     "x-cairn-since": "v0.1" },
+    { "const": "cairn.mcp.v1.forget.session",    "x-cairn-since": "v0.2" },
+    { "const": "cairn.mcp.v1.forget.scope",      "x-cairn-since": "v0.3" }
+  ]
+}
