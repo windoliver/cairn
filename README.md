@@ -9,7 +9,7 @@
 
 ---
 
-> **Status:** Design-stage project. This repository currently contains the project overview and contract; implementation is not yet present.
+> **Status:** Pre-v0.1. The P0 Rust workspace scaffold is in place (eight crates: `cairn-core`, `cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`, `cairn-sensors-local`, `cairn-workflows`, `cairn-idl`, `cairn-test-fixtures`). No verb behaviour or storage code is implemented yet — the scaffold exists to accept the eight-verb implementation in follow-up issues. See `docs/design/architecture.md`.
 
 Cairn is a memory framework for agent loops. It gives local and cloud agents a shared substrate for per-turn capture, search, retrieval, rolling summaries, trace learning, hot-memory assembly, promotion to reusable playbooks, and auditable forget-me flows.
 
@@ -147,4 +147,4 @@ Cairn is still at the design stage. The highest-value contributions right now ar
 
 ## License
 
-License TBD.
+Licensed under the [Apache License, Version 2.0](./LICENSE).
