@@ -138,7 +138,8 @@ sync with `CLAUDE.md` §9 and `scripts/check-reviewed-by.sh`):
 - `docs/design/design-brief.md`
 - `docs/design/decisions/` (any ADR)
 - `GOVERNANCE.md`, `MAINTAINERS.md`, `.github/CODEOWNERS`
-- `.github/workflows/governance.yml`, `scripts/check-reviewed-by.sh`
+- `.github/workflows/governance.yml`, `.github/freezes/`
+- `scripts/check-reviewed-by.sh`, `scripts/check-freeze.sh`
 
 ### 5.3. Enforceable external-review rule
 
@@ -172,35 +173,65 @@ would otherwise deadlock.
 Merging a load-bearing PR without the above is a governance breach and
 must be reverted and re-submitted under the proper process.
 
-### 5.4. Transition off the deviation — atomic runbook
+### 5.4. Transition off the deviation — ordered runbook
 
-The deviation is removed atomically when the second maintainer is added.
-The single nomination PR must contain **all** of the following and must be
-merged as one unit; no other PR may merge between the branch-protection
-update and the nomination PR:
+GitHub evaluates `CODEOWNERS` and branch-protection rules against the
+**base branch** at PR-review time, so enabling "Require review from Code
+Owners" **before** the nominee is written into `main`'s CODEOWNERS would
+lock the repository: the sole existing owner can't self-approve, and the
+nominee isn't yet a code owner on base. The runbook therefore deliberately
+changes branch-protection rules **after** the nomination PR merges, not
+before, and prevents an intermediate-state gap with a merge freeze plus a
+transition-specific active path freeze.
 
-1. Add the new maintainer to `MAINTAINERS.md` (with contract-area
-   annotations per §2).
-2. Update `.github/CODEOWNERS` to include the new maintainer wherever
-   relevant; at minimum every path gains them as an owner.
-3. Remove this §5 from `GOVERNANCE.md` and update any cross-references
-   (ADR 0001, brief §20.1, CODEOWNERS comment header).
-4. Update `MAINTAINERS.md`'s change log to record the end of the
-   single-maintainer period with its date.
-5. Include the external `Reviewed-by:` trailer from the nominated
-   maintainer themselves (they are not the author of their own nomination
-   if §1 procedure is followed) or from another external reviewer.
+Steps (executed in order, by the sole maintainer unless stated):
 
-Before this PR merges, the maintainer opening it also completes the
-GitHub branch-protection configuration change: enable "Require
-approvals = 1" and "Require review from Code Owners" on `main`. The PR
-then merges under the new rule. No intermediate state exists in which
-neither §5 nor the CODEOWNERS-required-approval rule governs the
-repository.
+1. **Grant the nominee write access** to the repository (Settings →
+   Collaborators). This allows them to leave a non-stale Approved review
+   on the nomination PR but does **not** make them a code owner yet.
+2. **Open a pre-transition freeze PR** that adds
+   `.github/freezes/<date>-transition.yaml` freezing every path except
+   `MAINTAINERS.md`, `.github/CODEOWNERS`, `GOVERNANCE.md`, and
+   `docs/design/decisions/`. This prevents any non-transition work
+   merging during the window. The freeze PR is itself load-bearing and
+   goes through the §5.3 Approved-review + `Reviewed-by:` gate, with the
+   nominee as the approving reviewer.
+3. **Open the nomination PR** containing, in one commit or squashed:
+   (a) `MAINTAINERS.md` addition with contract-area annotations,
+   (b) `.github/CODEOWNERS` update adding the nominee to every affected
+   path, (c) removal of this §5 (and update of every cross-reference:
+   ADR 0001, brief §20.1, CODEOWNERS comment header,
+   `scripts/check-reviewed-by.sh` load-bearing path list if obsolete),
+   (d) `MAINTAINERS.md` change-log entry recording the date and PR
+   number that ended the single-maintainer period,
+   (e) removal of the transition freeze file from
+   `.github/freezes/`. The PR is labelled `governance:freeze-removal`
+   so the freeze gate exempts it. The nominee leaves an Approved
+   review; a `Reviewed-by:` trailer names them.
+4. **Merge the nomination PR** (squash). The new CODEOWNERS is now on
+   `main`.
+5. **Update branch protection** (Settings → Branches): enable
+   `Require a pull request before merging`, `Required approvals = 1`,
+   `Dismiss stale pull request approvals when new commits are pushed`,
+   `Require review from Code Owners`, and keep the `governance /
+   reviewed-by` required status check active (the script's load-bearing
+   gate now overlaps with CODEOWNERS but the redundancy is cheap and
+   fails closed). Remove the `governance / freeze` requirement only if
+   there are no active freezes.
+6. **Announce the transition** in the `MAINTAINERS.md` change-log entry
+   (already committed in step 3) and, if the project has any external
+   communication channel, there as well.
 
-If the second-maintainer PR has to be split across multiple commits for
-review clarity, all commits must land in one merge; squashing is the
-default merge strategy for this specific transition PR.
+Until step 5 completes, no PR other than the transition PR may merge
+(enforced by the freeze file committed in step 2). If any of the steps
+fail or stall, the fallback is to reopen the freeze and re-run from the
+last successful step — the transition is resumable because every step
+leaves a committed artefact.
+
+A future "third maintainer joins" transition is not gated by
+`GOVERNANCE.md` at all — it triggers a separate, optional per-contract
+team seed under §2 without touching §5 (by then removed) or branch
+protection.
 
 ---
 

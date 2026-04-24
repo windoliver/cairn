@@ -129,22 +129,37 @@ the maintainers must:
 1. **Assign an owner** — one maintainer takes point, named in the issue.
 2. **Set a decision deadline** — no longer than 14 days for the
    extraction ADR to reach `Accepted` or the trigger to be explicitly
-   ruled not-applicable, with a written rationale.
-3. **Apply interim controls** scoped to the trigger:
-   - **H1 (licensing/CLA):** pause merges to the affected crate path
-     (CODEOWNERS self-lock or `concurrency: governance-freeze` workflow
-     guard) until the licence question is resolved in writing.
-   - **H2 (security gate):** freeze releases of the affected crate
-     immediately — tag `release-plz` skip on the crate, open a P0 issue
-     for interim signed-release tooling, and document the reduced
-     release surface in `README.md` until extraction or equivalent
+   ruled not-applicable with a written rationale.
+3. **Apply an enforced path freeze** by committing a file to
+   `.github/freezes/YYYY-MM-DD-<trigger>-<slug>.yaml` (see
+   `.github/freezes/README.md` for the schema). The required
+   `governance / freeze` status check
+   (`.github/workflows/governance.yml` + `scripts/check-freeze.sh`) then
+   fails any PR whose diff touches a path listed in the freeze,
+   including direct merges by the sole maintainer — this is a
+   mechanical gate, not a documentation claim.
+4. **Apply trigger-specific interim controls on top of the freeze:**
+   - **H1 (licensing / CLA):** the freeze alone is sufficient; add a
+     note in the freeze file's `reason:` stating the licence question
+     and the external counter-party.
+   - **H2 (security gate):** additionally disable releases of the
+     affected crate — set `publish = false` in its `Cargo.toml` and
+     remove it from any active `release-plz` configuration. Open a P0
+     issue tracking interim signed-release tooling. Note the reduced
+     release surface in `README.md` until extraction or an equivalent
      in-repo mitigation lands.
-   - **H3 (SLA conflict):** pin the affected crate's semver at its
-     current minor, notify the external consumer of the freeze in
-     writing, and open an issue tracking either SLA alignment or
-     extraction — whichever the external consumer selects.
-4. **Record** the containment steps in the extraction-ADR issue thread;
-   the ADR's `Context` section must cite them when it lands.
+   - **H3 (SLA conflict):** additionally pin the affected crate's
+     semver at its current minor (do not bump while the freeze is
+     active), notify the external consumer in writing, and open an
+     issue tracking either SLA alignment or extraction — whichever the
+     external consumer selects.
+5. **Record** the containment steps and the freeze file path in the
+   extraction-ADR issue thread; the ADR's `Context` section must cite
+   them when it lands.
+
+The freeze is lifted by a PR that deletes the freeze file, labelled
+`governance:freeze-removal`; `scripts/check-freeze.sh` exempts that
+label from the gate (see `.github/freezes/README.md`).
 
 Soft triggers do **not** require immediate containment — they are
 operational-discomfort signals, handled through the normal ADR lifecycle.
