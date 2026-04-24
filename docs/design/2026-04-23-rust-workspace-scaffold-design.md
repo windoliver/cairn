@@ -120,11 +120,14 @@ readme = "README.md"
 
 [workspace.dependencies]
 # Shared, pinned. No features at the workspace level — features opt in per crate.
+# NOTE: rusqlite is intentionally held out of the P0 scaffold and lands with the
+# storage implementation in issue #6. Pulling native SQLite into every workspace
+# build before any code uses it widens the compilation and license surface
+# unnecessarily.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = "1"
-rusqlite = "0.31"
 tracing = "0.1"
 anyhow = "1"
 
@@ -214,18 +217,19 @@ Two checks. Both must pass.
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fail if cairn-core's resolved dependency graph contains any cairn-* package.
-# Dev-deps are ignored (tests can use fixtures); runtime and build deps are checked.
+# Fail if cairn-core declares any cairn-* package as a dependency of any kind
+# (normal, build, or dev). Core must stay a leaf: adapter crates never reach
+# back into core, and core's own tests stay pure to keep the invariant
+# trivially checkable.
 
 cd "$(dirname "$0")/.."
 
 violations=$(
   cargo metadata --format-version 1 --locked \
     | jq -r '
-        .resolve.nodes[]
-        | select(.id | test("^(path\\+)?file://.*#cairn-core@"))
-        | .deps[]
-        | select(.dep_kinds[] | .kind == null or .kind == "build")
+        .packages[]
+        | select(.name == "cairn-core")
+        | .dependencies[]
         | .name
         | select(startswith("cairn-"))
       '
@@ -240,7 +244,8 @@ fi
 echo "cairn-core boundary OK"
 ```
 
-- `.dep_kinds[].kind` is `null` for normal deps, `"dev"` for dev-only, `"build"` for build-script. We ignore `"dev"`.
+- Queries the `packages` array (declared deps), not `resolve.nodes` (transitive closure). We care about what core asked for, not what it gets through others.
+- **Every declared dependency kind is forbidden for `cairn-core`.** Adapter and app crates may dev-depend on `cairn-test-fixtures` (which itself depends on `cairn-core`); the script only scopes its check to `cairn-core`, so that downstream dev-dep usage is unaffected.
 - `--locked` avoids rewriting `Cargo.lock` in CI.
 - Script exit code drives the CI gate wired up in #158.
 
