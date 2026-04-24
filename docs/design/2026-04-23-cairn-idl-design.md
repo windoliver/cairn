@@ -123,7 +123,7 @@ Authoring rules:
   args: object (per-verb — the verb file supplies the concrete args schema) }
 ```
 
-The `verb` enum is closed to the eight core verbs at #34; each extension issue extends it additively when its verb schemas land. Uses `oneOf` on `verb` + `if/then` to bind `args` to the right per-verb `$ref`. Codegen in #35 either resolves the whole `oneOf` or loads per-verb files directly — both forms work from this file.
+The `verb` enum is closed to the eight core verbs at #34; each extension issue extends it additively when its verb schemas land. At P0 the `args` field is declared as an untyped `object` — per-verb argument shapes live in `verbs/<verb>.json`'s `$defs/Args`, and codegen (#35) loads the matching verb file to resolve the concrete shape rather than reading a dispatch table from `request.json`. A full `oneOf` + `if/then` dispatch table inside `request.json` is deliberately deferred; encoding 8 `if/then` arms with cross-file `$ref` buys no expressiveness over the per-verb-file form and triples the review surface.
 
 **`envelope/response.json`.**
 
@@ -137,7 +137,7 @@ The `verb` enum is closed to the eight core verbs at #34; each extension issue e
   error?: $ref errors/error.json }
 ```
 
-`policy_trace` is required on mutating verbs per §8.0.b; the schema marks it `required` and codegen emits a non-`Option` field for those verbs.
+`policy_trace` is required on every response for a uniform wire shape — the field is always present and may be an empty array on read-only verbs. Codegen emits a `Vec<PolicyGate>` field (never `Option`) so consumers do not have to branch per verb.
 
 **`envelope/signed_intent.json`.** Exact §4.2 shape:
 
@@ -163,7 +163,7 @@ MissingSignature, Unauthorized, NotFound, ConflictVersion,
 QuarantineRequired, PluginSuspended, Internal
 ```
 
-Shape: `{ code: enum, message: string, data: object }`. Per-code `data` payload schemas (e.g. `CapabilityUnavailable` carries `{ capability: string }`) are declared with `oneOf` + `const code` discriminator.
+Shape: `{ code: enum, message: string, data: object }`. The per-code `data` payload shapes (e.g. `CapabilityUnavailable` carries `{ capability: string }`) ship as named `$defs` entries — `<Code>Data` per code — for codegen (#35) to emit typed Rust variants. The wire-level `data` field is deliberately an unconstrained object at P0: a full `oneOf` + `const code` discriminator chain with 15 branches is deferred to #35's validator pipeline, where the discriminator is applied *after* `data` has been parsed into the matching typed variant. At P0 the schema validates the code is one of the closed 15 values; the per-code shape is a codegen-only contract.
 
 Every variant listed above is referenced somewhere in the design brief (§4.2, §8.0.c, §8.0.d, §13.5.c). Adding a new variant in a later PR is a compatible minor revision; removing one breaks `cairn.mcp.v1`.
 

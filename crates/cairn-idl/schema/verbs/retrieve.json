@@ -154,11 +154,8 @@
       ]
     },
     "Data": {
-      "oneOf": [
-        { "type": "object", "description": "Record response — see cairn-core MemoryRecord shape." },
-        { "type": "array",  "description": "Session / folder / scope responses return ordered item lists." },
-        { "type": "object", "description": "Profile response: { static: {...}, dynamic: {...}, updated_at }." }
-      ]
+      "type": ["object", "array"],
+      "description": "Shape depends on the matched Args branch. Record / profile variants return an object; session / folder / scope variants return an ordered array of items. The per-branch Data shape is resolved by codegen (#35) from the Args branch, not discriminated here."
     }
   }
 }

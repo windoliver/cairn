@@ -30,6 +30,14 @@ file is a draft-2020-12 JSON Schema. Cairn-specific metadata rides on
   spec for the full table.
 - No comments inside JSON. Human rationale belongs in this README or in
   `docs/design/`.
+- Every object schema sets `additionalProperties: false` by default. The
+  only allowed exceptions are payloads that carry user-defined open maps —
+  specifically `ingest.frontmatter` (arbitrary user-authored frontmatter),
+  `search.scope`, `retrieve.ArgsScope.scope`, and `forget.ArgsScope.scope`
+  (scope filter grammar is open and mirrors `SearchArgs.filters` — §8.0.d).
+  These fields set `additionalProperties: true` explicitly so the intent
+  is reviewable in diff. Any new open-object exception must be justified
+  in this list before merge.
 
 ## Validation
 
