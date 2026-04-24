@@ -146,28 +146,81 @@ the "no LLM call leaves the laptop unless configured" invariant. Conflict
 resolution: when both `OPENAI_BASE_URL` and `OPENAI_API_BASE` are set,
 `OPENAI_BASE_URL` wins; Cairn logs a `warn` once per run.
 
-### `cairn status` capability advertisement (wire-stable, brief §8.0.a)
+**Ambient `OPENAI_API_KEY` alone does NOT count as "configured".** A
+common operator state is having `OPENAI_API_KEY` exported in the shell for
+other tooling (aider, `llm`, OpenAI SDKs) while **not** intending Cairn to
+dial OpenAI's cloud. To preserve the §52 invariant that no LLM call
+leaves the laptop unless the operator configured a cloud endpoint, Cairn
+treats `llm` as configured **only when at least one of the following
+explicit-intent signals is present**:
 
-```json
+- `--llm-provider` / `--llm-base-url` CLI flag on the verb, or
+- `CAIRN_LLM_PROVIDER` or `CAIRN_LLM_BASE_URL` env var set, or
+- `OPENAI_BASE_URL` or `OPENAI_API_BASE` env var set, or
+- `OLLAMA_HOST` env var set (implies `provider: ollama`), or
+- `llm.provider` key present (non-null) in `.cairn/config.yaml` or the
+  user config.
+
+A bare `OPENAI_API_KEY` with none of the above yields `llm.not_configured`
+(`status.capabilities` omits the `cairn.mcp.v1.llm.*` strings; verbs fail
+closed with exit `78`). Cairn logs a one-time `warn` at startup:
+`OPENAI_API_KEY detected but no LLM provider configured — ignoring key;
+set llm.provider or CAIRN_LLM_BASE_URL to enable LLM features`.
+
+### `cairn status` capability advertisement
+
+The existing §8.0.a contract is honoured **unchanged**: `status.capabilities`
+is a flat array of `cairn.mcp.v1.*` strings, byte-identical across a daemon
+incarnation, compared by CI wire-compat tests. This ADR extends the
+vocabulary with four LLM-feature strings, advertised only when the
+corresponding feature is actually executable:
+
+```
+cairn.mcp.v1.llm.chat         — provider configured, reachable, chat usable
+cairn.mcp.v1.llm.embed        — embeddings endpoint reachable + usable
+cairn.mcp.v1.llm.json_mode    — provider accepts response_format: json_schema
+cairn.mcp.v1.llm.tools        — provider accepts tool_choice / tools array
+```
+
+Inclusion rules (enforced by the §8.0.a invariant "`status.capabilities`
+matches the verbs/modes the runtime will actually execute"):
+
+- String absent from the array ⇒ any verb relying on that capability returns
+  `CapabilityUnavailable` with a `code` from the table above.
+- No second capability surface, no `providers.*` field, no object-shaped
+  capability map. Operator-facing detail (detected local Ollama, current
+  `base_url`, remediation hints, error-code strings) is out-of-band:
+  returned under a separate **non-wire-stable** `provider_hints` field in
+  `cairn status --json` (explicitly not part of the `capabilities` contract
+  and not snapshot-tested), and under the `error.*` payload of
+  `CapabilityUnavailable` when a verb fails closed:
+
+```jsonc
+// cairn status --json  (non-wire-stable hints, for humans and --verbose)
 {
-  "capabilities": {
-    "llm.provider":  {"available": false, "reason": "not_configured",
-                      "remediation": ["cairn config set llm.provider ollama"]},
-    "llm.chat":      {"available": false},
-    "llm.embed":     {"available": false},
-    "llm.json_mode": {"available": false},
-    "llm.tools":     {"available": false}
-  },
-  "detected": {
-    "ollama": {"base_url": "http://localhost:11434/v1",
-               "reachable": true,
-               "models": ["qwen2.5:7b", "nomic-embed-text"]}
+  "contract": "cairn.mcp.v1",
+  "server_info": { "version": "0.1.0", …, "incarnation": "01HQZ…" },
+  "capabilities": [
+    "cairn.mcp.v1.search.keyword",
+    "cairn.mcp.v1.search.semantic",
+    "cairn.mcp.v1.retrieve.record",
+    /* cairn.mcp.v1.llm.*  absent — no provider configured */
+    …
+  ],
+  "extensions": [],
+  "provider_hints": {               // NOT wire-stable. Advisory only.
+    "llm":   { "configured": false, "code": "llm.not_configured",
+               "remediation": ["cairn config set llm.provider ollama"] },
+    "ollama_local": { "reachable": true, "base_url": "http://localhost:11434/v1",
+                      "models": ["qwen2.5:7b","nomic-embed-text"] }
   }
 }
 ```
 
-Snapshot-tested byte-for-byte (brief §8.0.a). Verbs inspect
-`capabilities.llm.*` before running; absent or `false` → fail closed.
+CI wire-compat (§8.0.a tests a–c) asserts byte-identity only over the
+`contract` + `server_info.incarnation`-stripped + `capabilities` +
+`extensions` fields. `provider_hints` is deliberately mutable: it can
+evolve per release.
 
 ### Human error format (stderr, `IsTerminal`-aware colors, `NO_COLOR` honored)
 
