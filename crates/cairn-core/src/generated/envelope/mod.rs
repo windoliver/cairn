@@ -19,14 +19,80 @@ pub enum RequestVerb {
     Forget,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Per-verb request payload, dispatched on `Request.verb` at deserialize time.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum RequestArgs {
+    Ingest(crate::generated::verbs::ingest::IngestArgs),
+    Search(crate::generated::verbs::search::SearchArgs),
+    Retrieve(crate::generated::verbs::retrieve::RetrieveArgs),
+    Summarize(crate::generated::verbs::summarize::SummarizeArgs),
+    AssembleHot(crate::generated::verbs::assemble_hot::AssembleHotArgs),
+    CaptureTrace(crate::generated::verbs::capture_trace::CaptureTraceArgs),
+    Lint(crate::generated::verbs::lint::LintArgs),
+    Forget(crate::generated::verbs::forget::ForgetArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     /// Per-verb argument payload. The concrete shape is dispatched by the allOf / if-then arms below, each binding args to verbs/<verb>.json#/$defs/Args for the matching verb.
-    pub args: serde_json::Value,
+    pub args: RequestArgs,
     pub contract: String,
     pub signed_intent: SignedIntent,
     pub verb: RequestVerb,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRequest {
+    args: serde_json::Value,
+    contract: String,
+    signed_intent: SignedIntent,
+    verb: RequestVerb,
+}
+
+impl<'de> ::serde::Deserialize<'de> for Request {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawRequest::deserialize(deserializer)?;
+        if raw.contract != "cairn.mcp.v1" {
+            return Err(::serde::de::Error::custom(format!("contract: expected \"cairn.mcp.v1\", got {:?}", raw.contract)));
+        }
+        let args = match raw.verb {
+            RequestVerb::Ingest => RequestArgs::Ingest(
+                <crate::generated::verbs::ingest::IngestArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::Search => RequestArgs::Search(
+                <crate::generated::verbs::search::SearchArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::Retrieve => RequestArgs::Retrieve(
+                <crate::generated::verbs::retrieve::RetrieveArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::Summarize => RequestArgs::Summarize(
+                <crate::generated::verbs::summarize::SummarizeArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::AssembleHot => RequestArgs::AssembleHot(
+                <crate::generated::verbs::assemble_hot::AssembleHotArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::CaptureTrace => RequestArgs::CaptureTrace(
+                <crate::generated::verbs::capture_trace::CaptureTraceArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::Lint => RequestArgs::Lint(
+                <crate::generated::verbs::lint::LintArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+            RequestVerb::Forget => RequestArgs::Forget(
+                <crate::generated::verbs::forget::ForgetArgs as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?
+            ),
+        };
+        Ok(Self {
+            args,
+            contract: raw.contract,
+            signed_intent: raw.signed_intent,
+            verb: raw.verb,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -392,14 +392,173 @@ fn emit_envelope(
     w.blank();
     w.line("use serde::{Deserialize, Serialize};");
     w.blank();
-    for ty in doc.envelope.values() {
-        write_type_decl(&mut w, ty, common_names)?;
+    for (name, ty) in &doc.envelope {
+        if name.0 == "Request" {
+            write_request_envelope(&mut w, doc, ty, common_names)?;
+        } else {
+            write_type_decl(&mut w, ty, common_names)?;
+        }
         w.blank();
     }
     Ok(GeneratedFile {
         path: PathBuf::from(ROOT).join("envelope/mod.rs"),
         bytes: w.finish().into_bytes(),
     })
+}
+
+/// Bespoke emitter for the `Request` envelope.
+///
+/// The IDL request schema declares `args: object|array` and binds the
+/// concrete shape via `allOf` if/then arms keyed off `verb`. The default
+/// struct lowering drops those arms and types `args` as
+/// `serde_json::Value`, so any wrong-shape payload would silently round-trip.
+///
+/// To restore the contract on the wire we emit:
+///   * a typed `RequestArgs` enum (one variant per verb, holding the verb's
+///     concrete `Args` type),
+///   * the public `Request` struct using `RequestArgs` (Serialize-only),
+///   * a hand-rolled `Deserialize` that goes through a `RawRequest` shim,
+///     enforces the `contract` literal, then dispatches `args` by `verb`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single-pass emission keeps the bespoke envelope dispatch in one place"
+)]
+fn write_request_envelope(
+    w: &mut RustWriter,
+    doc: &Document,
+    ty: &RustType,
+    common: &BTreeSet<String>,
+) -> Result<(), CodegenError> {
+    // Pull the field list out of the lowered Request struct so any future
+    // schema additions (signed_intent, contract, ...) flow through without a
+    // bespoke field list to maintain.
+    let RustType::Struct(s) = ty else {
+        return Err(CodegenError::Emit(
+            "envelope/Request expected to lower to a Struct".to_string(),
+        ));
+    };
+
+    // Emit nested structured types in the fields first (e.g. the `RequestVerb`
+    // enum hoisted from the `verb` field). Same convention `write_struct` uses.
+    let mut nested = Vec::new();
+    collect_nested_from_fields(&s.fields, "Request", &mut nested);
+    for (sub_name, sub_ty) in &nested {
+        let renamed = renamed_to(sub_ty, TypeName::new(sub_name));
+        write_type_decl(w, &renamed, common)?;
+        w.blank();
+    }
+
+    // Variants enumerate every verb in IDL order — same order the IR carries.
+    // Each variant wraps `crate::generated::verbs::<id>::<Pascal>Args`.
+    w.line("/// Per-verb request payload, dispatched on `Request.verb` at deserialize time.");
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    w.line("#[serde(untagged)]");
+    w.line("#[non_exhaustive]");
+    w.line("pub enum RequestArgs {");
+    w.indent();
+    for verb in &doc.verbs {
+        let pascal = pascal_case(&verb.id);
+        w.line(&format!(
+            "{pascal}(crate::generated::verbs::{}::{pascal}Args),",
+            verb.id
+        ));
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Public struct — Serialize only; Deserialize is hand-rolled below.
+    if let Some(doc_str) = &s.doc {
+        write_doc(w, doc_str);
+    }
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line("pub struct Request {");
+    w.indent();
+    for field in &s.fields {
+        if field.name == "args" {
+            // Override `args` to the typed enum.
+            if let Some(d) = &field.doc {
+                write_doc(w, d);
+            }
+            w.line("pub args: RequestArgs,");
+        } else {
+            write_field(w, field, "Request", common, true);
+        }
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Private raw shim — same fields as the public struct, but `args` is an
+    // opaque `serde_json::Value` so the dispatch happens after the verb has
+    // been parsed.
+    w.line("#[derive(Deserialize)]");
+    w.line("#[serde(deny_unknown_fields)]");
+    w.line("struct RawRequest {");
+    w.indent();
+    for field in &s.fields {
+        if field.name == "args" {
+            w.line("args: serde_json::Value,");
+        } else {
+            // Raw shim is Deserialize-only; pass `serializing = false`.
+            write_field_inner(w, field, "Request", common, false, false);
+        }
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Hand-rolled Deserialize: parse the shim, enforce contract literal,
+    // then dispatch args by verb.
+    w.line("impl<'de> ::serde::Deserialize<'de> for Request {");
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("let raw = RawRequest::deserialize(deserializer)?;");
+    w.line(&format!("if raw.contract != \"{}\" {{", doc.contract));
+    w.indent();
+    w.line(&format!(
+        "return Err(::serde::de::Error::custom(format!(\"contract: expected \\\"{}\\\", got {{:?}}\", raw.contract)));",
+        doc.contract
+    ));
+    w.dedent();
+    w.line("}");
+    w.line("let args = match raw.verb {");
+    w.indent();
+    for verb in &doc.verbs {
+        let pascal = pascal_case(&verb.id);
+        w.line(&format!("RequestVerb::{pascal} => RequestArgs::{pascal}("));
+        w.indent();
+        w.line(&format!(
+            "<crate::generated::verbs::{}::{pascal}Args as ::serde::Deserialize>::deserialize(raw.args).map_err(::serde::de::Error::custom)?",
+            verb.id
+        ));
+        w.dedent();
+        w.line("),");
+    }
+    w.dedent();
+    w.line("};");
+    w.line("Ok(Self {");
+    w.indent();
+    for field in &s.fields {
+        let ident = sanitise_ident(&field.name);
+        if field.name == "args" {
+            w.line("args,");
+        } else {
+            w.line(&format!("{ident}: raw.{ident},"));
+        }
+    }
+    w.dedent();
+    w.line("})");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    Ok(())
 }
 
 // ── Preludes ─────────────────────────────────────────────────────────────────
@@ -541,7 +700,15 @@ fn write_struct(
     if let Some(doc) = &s.doc {
         write_doc(w, doc);
     }
-    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    // When the struct carries a presence-of-anyOf constraint, derive only
+    // Serialize on the public type and hand-roll Deserialize via a private
+    // Raw companion so the constraint becomes a wire-level invariant.
+    let derive_deserialize = s.any_of_required.is_none();
+    if derive_deserialize {
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    } else {
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    }
     if s.deny_unknown_fields {
         w.line("#[serde(deny_unknown_fields)]");
     }
@@ -552,7 +719,89 @@ fn write_struct(
     }
     w.dedent();
     w.line("}");
+
+    if let Some(any_of) = &s.any_of_required {
+        w.blank();
+        write_struct_any_of_companion(w, s, common, any_of);
+    }
     Ok(())
+}
+
+/// Emit the `Raw<Name>` companion + `TryFrom` + hand-rolled `Deserialize`
+/// for a struct with an `any_of_required` presence constraint. The shape
+/// mirrors the untagged-union path: a private deserialise-only mirror, a
+/// `TryFrom` that runs the presence check, and a `Deserialize` that funnels
+/// every parse through `TryFrom`.
+fn write_struct_any_of_companion(
+    w: &mut RustWriter,
+    s: &StructDef,
+    common: &BTreeSet<String>,
+    any_of: &[String],
+) {
+    let raw_name = format!("Raw{}", s.name.0);
+
+    w.line("#[derive(Deserialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line(&format!("struct {raw_name} {{"));
+    w.indent();
+    for field in &s.fields {
+        write_field_inner(w, field, &s.name.0, common, false, false);
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(&format!(
+        "impl ::core::convert::TryFrom<{raw_name}> for {} {{",
+        s.name.0
+    ));
+    w.indent();
+    w.line("type Error = &'static str;");
+    w.line(&format!(
+        "fn try_from(raw: {raw_name}) -> Result<Self, Self::Error> {{"
+    ));
+    w.indent();
+    let presence_checks = any_of
+        .iter()
+        .map(|n| format!("raw.{}.is_some()", sanitise_ident(n)))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    let names = any_of.join(", ");
+    w.line(&format!(
+        "if !({presence_checks}) {{ return Err(\"at least one of [{names}] is required\"); }}"
+    ));
+    w.line("Ok(Self {");
+    w.indent();
+    for field in &s.fields {
+        let ident = sanitise_ident(&field.name);
+        w.line(&format!("{ident}: raw.{ident},"));
+    }
+    w.dedent();
+    w.line("})");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {} {{",
+        s.name.0
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line(&format!(
+        "let raw = {raw_name}::deserialize(deserializer)?;"
+    ));
+    w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
 }
 
 fn write_field(

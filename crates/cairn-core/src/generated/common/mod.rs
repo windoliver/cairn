@@ -78,7 +78,7 @@ pub enum ScopeFilterTier {
 }
 
 /// Shared narrowing grammar used by search.scope, retrieve.ArgsScope, and forget.ArgsScope. At least one recognized predicate MUST be present. Covers every signed-intent scope dimension (tenant/workspace/entity/tier) plus identity (user/agent), session, kind, tags, and record-ids so scoped reads and deletes can narrow across the same dimensions the signed intent was authorized against. Value types are constrained per-key so empty strings, empty arrays, and null payloads all reject at schema validation — preventing unbounded reads or deletes. Unknown keys are rejected.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +102,59 @@ pub struct ScopeFilter {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScopeFilter {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    entity: Option<String>,
+    #[serde(default)]
+    kind: Option<Vec<String>>,
+    #[serde(default)]
+    record_ids: Option<Vec<crate::generated::common::Ulid>>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    tenant: Option<String>,
+    /// Matches the tier enum in signed_intent.scope so callers can echo the signed-intent tier in scoped reads/deletes.
+    #[serde(default)]
+    tier: Option<ScopeFilterTier>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawScopeFilter> for ScopeFilter {
+    type Error = &'static str;
+    fn try_from(raw: RawScopeFilter) -> Result<Self, Self::Error> {
+        if !(raw.user.is_some() || raw.agent.is_some() || raw.tenant.is_some() || raw.workspace.is_some() || raw.entity.is_some() || raw.tier.is_some() || raw.session_id.is_some() || raw.kind.is_some() || raw.tags.is_some() || raw.record_ids.is_some()) { return Err("at least one of [user, agent, tenant, workspace, entity, tier, session_id, kind, tags, record_ids] is required"); }
+        Ok(Self {
+            agent: raw.agent,
+            entity: raw.entity,
+            kind: raw.kind,
+            record_ids: raw.record_ids,
+            session_id: raw.session_id,
+            tags: raw.tags,
+            tenant: raw.tenant,
+            tier: raw.tier,
+            user: raw.user,
+            workspace: raw.workspace,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for ScopeFilter {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawScopeFilter::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

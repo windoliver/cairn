@@ -179,6 +179,11 @@ pub struct StructDef {
     pub fields: Vec<StructField>,
     pub deny_unknown_fields: bool,
     pub doc: Option<String>,
+    /// Field names captured from a sibling top-level `anyOf` whose every
+    /// branch is a single-element `required: [<field>]` predicate. The struct
+    /// must surface "at least one of these fields present" at deserialise
+    /// time. None when no such anyOf was attached.
+    pub any_of_required: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -435,6 +440,17 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             doc,
         });
     }
+    // Detect a sibling top-level `anyOf` whose every branch is a single-
+    // element `required: [<field>]` predicate (no other keys). When present,
+    // the struct must enforce "at least one of these fields" at deserialise
+    // time — see emit_sdk's struct emitter. JSON Schema `required` is a
+    // presence check, so we honour presence semantics here; per-field
+    // `minLength: 1`/`minItems: 1` already enforce non-emptiness.
+    let any_of_required = value
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .and_then(|arr| extract_required_only_anyof(arr));
+
     Ok(RustType::Struct(StructDef {
         name: target_name,
         fields,
@@ -443,7 +459,36 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             .get("description")
             .and_then(Value::as_str)
             .map(String::from),
+        any_of_required,
     }))
+}
+
+/// If every entry in `arr` is an object whose only key is `required` (a
+/// single-string array), return the union of those required field names in
+/// declaration order. Returns `None` for any other shape — multi-required
+/// branches, branches with extra keys, or empty arrays — so we don't enforce
+/// a constraint we can't faithfully reproduce.
+fn extract_required_only_anyof(arr: &[Value]) -> Option<Vec<String>> {
+    if arr.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in arr {
+        let map = entry.as_object()?;
+        if map.len() != 1 {
+            return None;
+        }
+        let req = map.get("required")?.as_array()?;
+        if req.len() != 1 {
+            return None;
+        }
+        let name = req[0].as_str()?.to_string();
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    Some(out)
 }
 
 fn lower_string_enum(values: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
