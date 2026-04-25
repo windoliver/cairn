@@ -2130,7 +2130,7 @@ fn write_tagged_union_raw_companion(
 
 /// Per-variant validators for `RetrieveArgs`, lifted from `verbs/retrieve.json`.
 /// Local bindings (`session_id`, `limit`, `include`, ...) come from the TryFrom
-/// match arm above. Nested types (Vec<RetrieveArgsSessionInclude> etc.) live
+/// match arm above. Nested types (`Vec<RetrieveArgsSessionInclude>` etc.) live
 /// in the same module so we can call methods on them directly.
 fn write_retrieve_args_variant_checks(w: &mut RustWriter, variant: &str) {
     // Record / wildcard share an empty body — Record's id is a Ulid (newtype)
