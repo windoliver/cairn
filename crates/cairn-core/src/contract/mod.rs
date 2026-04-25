@@ -7,3 +7,4 @@ pub mod llm_provider;
 pub mod memory_store;
 pub mod registry;
 pub mod version;
+pub mod workflow_orchestrator;
