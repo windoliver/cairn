@@ -14,7 +14,8 @@ use cairn_core::generated::envelope::{
     Request, RequestArgs, Response, ResponseData, RetrieveData, SignedIntent,
 };
 use cairn_core::generated::verbs::ingest::IngestArgs;
-use cairn_core::generated::verbs::search::SearchArgsFilters;
+use cairn_core::generated::verbs::retrieve::RetrieveArgs;
+use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsFilters};
 
 // ── Finding 1: XOR enforced at Deserialize ───────────────────────────────────
 
@@ -985,3 +986,246 @@ fn scope_filter_rejects_unknown_only_keys() {
         "expected unknown-field rejection, got: {err}"
     );
 }
+
+// ── F1 (round 6): SearchArgs limit + filter depth/fanout/minItems ────────────
+
+fn search_args_minimal() -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("mode".into(), serde_json::json!("keyword"));
+    m.insert("query".into(), serde_json::json!("hello"));
+    m
+}
+
+#[test]
+fn search_args_rejects_limit_zero() {
+    let mut m = search_args_minimal();
+    m.insert("limit".into(), serde_json::json!(0_i64));
+    let err = serde_json::from_value::<SearchArgs>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("limit"),
+        "expected limit-out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn search_args_rejects_limit_above_max() {
+    let mut m = search_args_minimal();
+    m.insert("limit".into(), serde_json::json!(1001_i64));
+    let err = serde_json::from_value::<SearchArgs>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("limit"),
+        "expected limit-out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn search_args_accepts_limit_in_range() {
+    let mut m = search_args_minimal();
+    m.insert("limit".into(), serde_json::json!(50_i64));
+    let parsed: SearchArgs = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert_eq!(parsed.limit, Some(50));
+}
+
+#[test]
+fn search_args_rejects_empty_query() {
+    let mut m = search_args_minimal();
+    m.insert("query".into(), serde_json::json!(""));
+    let err = serde_json::from_value::<SearchArgs>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("query"),
+        "expected empty-query error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_empty_and() {
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": []})).unwrap_err();
+    assert!(
+        err.to_string().contains("and") && err.to_string().contains("at least one"),
+        "expected empty-and error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_empty_or() {
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"or": []})).unwrap_err();
+    assert!(
+        err.to_string().contains("or") && err.to_string().contains("at least one"),
+        "expected empty-or error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_depth_above_max() {
+    // Build nested `not` chain of depth 9 — IDL caps at 8.
+    let leaf = serde_json::json!({"field": "kind", "op": "eq", "value": "note"});
+    let mut node = leaf;
+    for _ in 0..9 {
+        node = serde_json::json!({"not": node});
+    }
+    let err = serde_json::from_value::<SearchArgsFilters>(node).unwrap_err();
+    assert!(
+        err.to_string().contains("depth"),
+        "expected max-depth error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_accepts_depth_at_max() {
+    // Depth-8 nested `not` chain — exactly at the cap.
+    let leaf = serde_json::json!({"field": "kind", "op": "eq", "value": "note"});
+    let mut node = leaf;
+    for _ in 0..8 {
+        node = serde_json::json!({"not": node});
+    }
+    let parsed: SearchArgsFilters = serde_json::from_value(node).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Not { .. }));
+}
+
+#[test]
+fn filter_rejects_fanout_above_max() {
+    // and-array with 33 leaf items — IDL caps fanout at 32.
+    let leaf = serde_json::json!({"field": "kind", "op": "eq", "value": "note"});
+    let items: Vec<_> = (0..33).map(|_| leaf.clone()).collect();
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": items})).unwrap_err();
+    assert!(
+        err.to_string().contains("fanout"),
+        "expected fanout-exceeded error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_accepts_fanout_at_max() {
+    let leaf = serde_json::json!({"field": "kind", "op": "eq", "value": "note"});
+    let items: Vec<_> = (0..32).map(|_| leaf.clone()).collect();
+    let parsed: SearchArgsFilters =
+        serde_json::from_value(serde_json::json!({"and": items})).unwrap();
+    if let SearchArgsFilters::And { and } = parsed {
+        assert_eq!(and.len(), 32);
+    } else {
+        panic!("expected And variant");
+    }
+}
+
+// ── F1 (round 6): RetrieveArgs per-variant constraints ───────────────────────
+
+#[test]
+fn retrieve_session_rejects_limit_zero() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "limit": 0,
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("limit"),
+        "expected limit-out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_session_rejects_limit_above_max() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "limit": 10001,
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("limit"),
+        "expected limit-out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_session_rejects_empty_include() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "include": [],
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("include"),
+        "expected empty-include error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_session_rejects_duplicate_include() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "include": ["tool_calls", "tool_calls"],
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unique"),
+        "expected uniqueItems error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_session_accepts_valid() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "limit": 100,
+        "include": ["tool_calls", "reasoning"],
+    });
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::Session { .. }));
+}
+
+#[test]
+fn retrieve_folder_rejects_depth_above_max() {
+    let json = serde_json::json!({
+        "target": "folder",
+        "path": "/x",
+        "depth": 17,
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("depth"),
+        "expected depth-out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_folder_accepts_depth_at_max() {
+    let json = serde_json::json!({
+        "target": "folder",
+        "path": "/x",
+        "depth": 16,
+    });
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::Folder { .. }));
+}
+
+#[test]
+fn retrieve_profile_rejects_no_subject() {
+    let json = serde_json::json!({"target": "profile"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("at least one"),
+        "expected anyOf error, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_scope_rejects_long_cursor() {
+    let json = serde_json::json!({
+        "target": "scope",
+        "scope": {"user": "u1"},
+        "cursor": "x".repeat(513),
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("cursor"),
+        "expected cursor-too-long error, got: {err}"
+    );
+}
+

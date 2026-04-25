@@ -1027,14 +1027,15 @@ fn write_struct(
     if let Some(doc) = &s.doc {
         write_doc(w, doc);
     }
-    // When the struct carries a presence-of-anyOf constraint, derive only
-    // Serialize on the public type and hand-roll Deserialize via a private
-    // Raw companion so the constraint becomes a wire-level invariant.
-    let derive_deserialize = s.any_of_required.is_none();
-    if derive_deserialize {
-        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
-    } else {
+    // When the struct carries a presence-of-anyOf constraint OR is on the
+    // bespoke-validators allow-list, derive only Serialize on the public type
+    // and hand-roll Deserialize via a private Raw companion so the constraint
+    // becomes a wire-level invariant.
+    let needs_raw_companion = s.any_of_required.is_some() || struct_has_extra_validators(&s.name.0);
+    if needs_raw_companion {
         w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    } else {
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
     }
     if s.deny_unknown_fields {
         w.line("#[serde(deny_unknown_fields)]");
@@ -1047,24 +1048,26 @@ fn write_struct(
     w.dedent();
     w.line("}");
 
-    if let Some(any_of) = &s.any_of_required {
+    if needs_raw_companion {
         w.blank();
-        write_struct_any_of_companion(w, s, common, any_of);
+        write_struct_raw_companion(w, s, common);
     }
     Ok(())
 }
 
+/// Bespoke-validator allow-list: structs whose Deserialize must run extra
+/// IDL constraints the generic IR doesn't carry (numeric bounds, array
+/// minItems, uniqueItems). Listed by Rust type name.
+fn struct_has_extra_validators(name: &str) -> bool {
+    matches!(name, "SearchArgs")
+}
+
 /// Emit the `Raw<Name>` companion + `TryFrom` + hand-rolled `Deserialize`
-/// for a struct with an `any_of_required` presence constraint. The shape
-/// mirrors the untagged-union path: a private deserialise-only mirror, a
-/// `TryFrom` that runs the presence check, and a `Deserialize` that funnels
-/// every parse through `TryFrom`.
-fn write_struct_any_of_companion(
-    w: &mut RustWriter,
-    s: &StructDef,
-    common: &BTreeSet<String>,
-    any_of: &[String],
-) {
+/// for a struct that needs anyOf-presence enforcement, type-specific extra
+/// validators, or both. The shape mirrors the untagged-union path: a private
+/// deserialise-only mirror, a `TryFrom` that runs every check, and a
+/// `Deserialize` that funnels every parse through `TryFrom`.
+fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeSet<String>) {
     let raw_name = format!("Raw{}", s.name.0);
 
     w.line("#[derive(Deserialize)]");
@@ -1090,21 +1093,26 @@ fn write_struct_any_of_companion(
         "fn try_from(raw: {raw_name}) -> Result<Self, Self::Error> {{"
     ));
     w.indent();
-    let presence_checks = any_of
-        .iter()
-        .map(|n| format!("raw.{}.is_some()", sanitise_ident(n)))
-        .collect::<Vec<_>>()
-        .join(" || ");
-    let names = any_of.join(", ");
-    w.line(&format!(
-        "if !({presence_checks}) {{ return Err(\"at least one of [{names}] is required\"); }}"
-    ));
-    // Type-specific extra invariants. The IDL annotates ScopeFilter's
-    // string fields with `minLength: 1` and array fields with `minItems: 1`.
-    // The generic IR strips those, so without this hook
-    // `{"tags": []}` and `{"user": ""}` slip through the presence check.
+    if let Some(any_of) = &s.any_of_required {
+        let presence_checks = any_of
+            .iter()
+            .map(|n| format!("raw.{}.is_some()", sanitise_ident(n)))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let names = any_of.join(", ");
+        w.line(&format!(
+            "if !({presence_checks}) {{ return Err(\"at least one of [{names}] is required\"); }}"
+        ));
+    }
+    // Type-specific extra invariants. The IDL annotates ScopeFilter's string
+    // fields with `minLength: 1` and array fields with `minItems: 1`; SearchArgs
+    // bounds `limit` to [1, 1000]. The generic IR strips these, so without the
+    // hook `{"tags": []}`, `{"user": ""}`, and `{"limit": 0}` slip through.
     if s.name.0 == "ScopeFilter" {
         write_scope_filter_extra_checks(w);
+    }
+    if s.name.0 == "SearchArgs" {
+        write_search_args_extra_checks(w);
     }
     w.line("Ok(Self {");
     w.indent();
@@ -1263,7 +1271,12 @@ fn write_tagged_union(
     if let Some(doc) = &t.doc {
         write_doc(w, doc);
     }
-    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    let needs_raw_companion = tagged_union_has_extra_validators(&t.name.0);
+    if needs_raw_companion {
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    } else {
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    }
     w.line(&format!(
         "#[serde(tag = \"{}\", rename_all = \"snake_case\")]",
         t.discriminator
@@ -1276,6 +1289,10 @@ fn write_tagged_union(
     }
     w.dedent();
     w.line("}");
+    if needs_raw_companion {
+        w.blank();
+        write_tagged_union_raw_companion(w, t, common);
+    }
     if t.variants.iter().any(|v| v.capability.is_some()) {
         w.blank();
         w.line(&format!("impl {} {{", t.name.0));
@@ -1306,6 +1323,202 @@ fn write_tagged_union(
         w.line("}");
     }
     Ok(())
+}
+
+/// Bespoke-validator allow-list for tagged unions: enums whose variants need
+/// extra IDL constraints (numeric bounds, array minItems, uniqueItems) the
+/// generic IR doesn't carry. Listed by Rust type name.
+fn tagged_union_has_extra_validators(name: &str) -> bool {
+    matches!(name, "RetrieveArgs")
+}
+
+/// Emit the `Raw<Name>` companion + `TryFrom` + hand-rolled `Deserialize` for
+/// a tagged union with type-specific extra validators (currently RetrieveArgs).
+/// The Raw mirror reuses serde's tagged-enum dispatch, then per-variant TryFrom
+/// arms enforce the IDL constraints (limit ranges, include uniqueItems, etc.).
+fn write_tagged_union_raw_companion(
+    w: &mut RustWriter,
+    t: &TaggedUnionDef,
+    common: &BTreeSet<String>,
+) {
+    let raw_name = format!("Raw{}", t.name.0);
+
+    // Raw enum mirrors the public shape (same tag + rename_all + variants).
+    w.line("#[derive(Deserialize)]");
+    w.line(&format!(
+        "#[serde(tag = \"{}\", rename_all = \"snake_case\")]",
+        t.discriminator
+    ));
+    w.line(&format!("enum {raw_name} {{"));
+    w.indent();
+    for variant in &t.variants {
+        if !wire_matches_rename(&variant.wire, &variant.rust_ident) {
+            w.line(&format!("#[serde(rename = \"{}\")]", variant.wire));
+        }
+        if variant.fields.is_empty() {
+            w.line(&format!("{},", variant.rust_ident));
+            continue;
+        }
+        w.line(&format!("{} {{", variant.rust_ident));
+        w.indent();
+        let nested_parent = format!("{}{}", t.name.0, variant.rust_ident);
+        for field in &variant.fields {
+            write_field_inner(w, field, &nested_parent, common, false, false);
+        }
+        w.dedent();
+        w.line("},");
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // TryFrom: per-variant constraint enforcement, then convert to public.
+    w.line(&format!(
+        "impl ::core::convert::TryFrom<{raw_name}> for {} {{",
+        t.name.0
+    ));
+    w.indent();
+    w.line("type Error = &'static str;");
+    w.line(&format!(
+        "fn try_from(raw: {raw_name}) -> Result<Self, Self::Error> {{"
+    ));
+    w.indent();
+    w.line("match raw {");
+    w.indent();
+    for variant in &t.variants {
+        let dest = &variant.rust_ident;
+        if variant.fields.is_empty() {
+            w.line(&format!("{raw_name}::{dest} => Ok(Self::{dest}),"));
+            continue;
+        }
+        let bind: Vec<String> = variant
+            .fields
+            .iter()
+            .map(|f| sanitise_ident(&f.name))
+            .collect();
+        let bind_list = bind.join(", ");
+        w.line(&format!("{raw_name}::{dest} {{ {bind_list} }} => {{"));
+        w.indent();
+        // Type-specific per-variant checks for RetrieveArgs.
+        if t.name.0 == "RetrieveArgs" {
+            write_retrieve_args_variant_checks(w, &variant.rust_ident);
+        }
+        w.line(&format!("Ok(Self::{dest} {{ {bind_list} }})"));
+        w.dedent();
+        w.line("},");
+    }
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {} {{",
+        t.name.0
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line(&format!(
+        "let raw = {raw_name}::deserialize(deserializer)?;"
+    ));
+    w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Per-variant validators for `RetrieveArgs`, lifted from `verbs/retrieve.json`.
+/// Local bindings (`session_id`, `limit`, `include`, ...) come from the TryFrom
+/// match arm above. Nested types (Vec<RetrieveArgsSessionInclude> etc.) live
+/// in the same module so we can call methods on them directly.
+fn write_retrieve_args_variant_checks(w: &mut RustWriter, variant: &str) {
+    match variant {
+        "Record" => {
+            // id is a Ulid (newtype) — shape already enforced if present.
+        }
+        "Session" => {
+            w.line("if session_id.is_empty() { return Err(\"session_id: must not be empty\"); }");
+            w.line("if let Some(lim) = limit {");
+            w.indent();
+            w.line(
+                "if !(1..=10000).contains(&lim) { return Err(\"limit: must be in [1, 10000]\"); }",
+            );
+            w.dedent();
+            w.line("}");
+            w.line("if let Some(inc) = &include {");
+            w.indent();
+            w.line(
+                "if inc.is_empty() { return Err(\"include: must contain at least one item\"); }",
+            );
+            // uniqueItems
+            w.line("let mut seen = ::std::collections::BTreeSet::new();");
+            w.line("for item in inc {");
+            w.indent();
+            w.line(
+                "if !seen.insert(*item as u8) { return Err(\"include: items must be unique\"); }",
+            );
+            w.dedent();
+            w.line("}");
+            w.dedent();
+            w.line("}");
+        }
+        "Turn" => {
+            w.line("if session_id.is_empty() { return Err(\"session_id: must not be empty\"); }");
+            w.line("if let Some(inc) = &include {");
+            w.indent();
+            w.line(
+                "if inc.is_empty() { return Err(\"include: must contain at least one item\"); }",
+            );
+            w.line("let mut seen = ::std::collections::BTreeSet::new();");
+            w.line("for item in inc {");
+            w.indent();
+            w.line(
+                "if !seen.insert(*item as u8) { return Err(\"include: items must be unique\"); }",
+            );
+            w.dedent();
+            w.line("}");
+            w.dedent();
+            w.line("}");
+        }
+        "Folder" => {
+            w.line("if path.is_empty() { return Err(\"path: must not be empty\"); }");
+            w.line("if let Some(d) = depth {");
+            w.indent();
+            w.line("if d > 16 { return Err(\"depth: must be in [0, 16]\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        "Scope" => {
+            w.line("if let Some(c) = &cursor {");
+            w.indent();
+            w.line("if c.is_empty() { return Err(\"cursor: must not be empty\"); }");
+            w.line("if c.len() > 512 { return Err(\"cursor: must be <= 512 chars\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        "Profile" => {
+            // anyOf [user, agent] required — IR currently doesn't enforce this
+            // at the variant level. Defend it here.
+            w.line("if user.is_none() && agent.is_none() { return Err(\"at least one of [user, agent] is required\"); }");
+            w.line("if let Some(u) = &user {");
+            w.indent();
+            w.line("if u.is_empty() { return Err(\"user: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+            w.line("if let Some(a) = &agent {");
+            w.indent();
+            w.line("if a.is_empty() { return Err(\"agent: must not be empty\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        _ => {}
+    }
 }
 
 fn write_tagged_variant(
@@ -1547,6 +1760,21 @@ fn write_scope_filter_extra_checks(w: &mut RustWriter) {
     w.line("if let Some(v) = &raw.record_ids {");
     w.indent();
     w.line("if v.is_empty() { return Err(\"record_ids: must contain at least one item\"); }");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit bespoke field-level validation for `SearchArgs`.
+///
+/// The IDL bounds `limit` ∈ [1, 1000] (search.json `Args.limit.minimum/maximum`).
+/// Filter depth/fanout/minItems are enforced by the recursive enum's own
+/// hand-rolled Deserialize, so the only struct-level check here is the limit
+/// range. `query.minLength: 1` is also enforced.
+fn write_search_args_extra_checks(w: &mut RustWriter) {
+    w.line("if raw.query.is_empty() { return Err(\"query: must not be empty\"); }");
+    w.line("if let Some(lim) = raw.limit {");
+    w.indent();
+    w.line("if !(1..=1000).contains(&lim) { return Err(\"limit: must be in [1, 1000]\"); }");
     w.dedent();
     w.line("}");
 }
@@ -1820,7 +2048,11 @@ fn write_recursive(
     if let Some(doc) = &r.doc {
         write_doc(w, doc);
     }
-    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    // Public enum derives Serialize only; Deserialize is hand-rolled through
+    // a Raw mirror so the IDL's `x-cairn-max-depth` / `x-cairn-max-fanout` /
+    // `minItems` constraints become wire-level invariants — recursive serde
+    // derives strip them otherwise.
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
     w.line("#[serde(untagged)]");
     w.line("#[non_exhaustive]");
     w.line(&format!("pub enum {} {{", r.name.0));
@@ -1840,7 +2072,145 @@ fn write_recursive(
     w.line(&format!("Leaf({leaf_render}),"));
     w.dedent();
     w.line("}");
+    w.blank();
+
+    // Raw mirror — same wire shape, derives Deserialize directly.
+    let raw_name = format!("Raw{}", r.name.0);
+    w.line("#[derive(Deserialize)]");
+    w.line("#[serde(untagged)]");
+    w.line(&format!("enum {raw_name} {{"));
+    w.indent();
+    w.line(&format!("And {{ and: Vec<{raw_name}> }},"));
+    w.line(&format!("Or {{ or: Vec<{raw_name}> }},"));
+    w.line(&format!("Not {{ not: Box<{raw_name}> }},"));
+    w.line(&format!("Leaf({leaf_render}),"));
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Recursive validator: enforce depth ≤ max_depth, and/or fanout in [1, max_fanout].
+    // `depth` is the *remaining* budget; we decrement on operator descent and reject when
+    // it underflows. minItems=1 (rejecting empty `and: []` / `or: []`) is the same path.
+    w.line("#[allow(clippy::result_unit_err)]");
+    w.line(&format!(
+        "fn validate_{}_depth(node: &{raw_name}, depth: u32, max_fanout: u32) -> Result<(), &'static str> {{",
+        snake_case(&r.name.0)
+    ));
+    w.indent();
+    w.line(&format!("match node {{"));
+    w.indent();
+    w.line(&format!("{raw_name}::And {{ and }} => {{"));
+    w.indent();
+    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
+    w.line("if and.is_empty() { return Err(\"filter.and: must contain at least one item\"); }");
+    w.line("if and.len() as u32 > max_fanout { return Err(\"filter.and: exceeds max fanout\"); }");
+    w.line(&format!(
+        "for child in and {{ validate_{}_depth(child, depth - 1, max_fanout)?; }}",
+        snake_case(&r.name.0)
+    ));
+    w.line("Ok(())");
+    w.dedent();
+    w.line("},");
+    w.line(&format!("{raw_name}::Or {{ or }} => {{"));
+    w.indent();
+    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
+    w.line("if or.is_empty() { return Err(\"filter.or: must contain at least one item\"); }");
+    w.line("if or.len() as u32 > max_fanout { return Err(\"filter.or: exceeds max fanout\"); }");
+    w.line(&format!(
+        "for child in or {{ validate_{}_depth(child, depth - 1, max_fanout)?; }}",
+        snake_case(&r.name.0)
+    ));
+    w.line("Ok(())");
+    w.dedent();
+    w.line("},");
+    w.line(&format!("{raw_name}::Not {{ not }} => {{"));
+    w.indent();
+    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
+    w.line(&format!(
+        "validate_{}_depth(not, depth - 1, max_fanout)",
+        snake_case(&r.name.0)
+    ));
+    w.dedent();
+    w.line("},");
+    w.line(&format!("{raw_name}::Leaf(_) => Ok(()),"));
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Lower Raw → public, preserving the structural shape and unwrapping leaves.
+    w.line(&format!(
+        "fn lower_{0}(node: {raw_name}) -> {1} {{",
+        snake_case(&r.name.0),
+        r.name.0
+    ));
+    w.indent();
+    w.line("match node {");
+    w.indent();
+    w.line(&format!(
+        "{raw_name}::And {{ and }} => {}::And {{ and: and.into_iter().map(lower_{}).collect() }},",
+        r.name.0,
+        snake_case(&r.name.0)
+    ));
+    w.line(&format!(
+        "{raw_name}::Or {{ or }} => {}::Or {{ or: or.into_iter().map(lower_{}).collect() }},",
+        r.name.0,
+        snake_case(&r.name.0)
+    ));
+    w.line(&format!(
+        "{raw_name}::Not {{ not }} => {}::Not {{ not: Box::new(lower_{}(*not)) }},",
+        r.name.0,
+        snake_case(&r.name.0)
+    ));
+    w.line(&format!("{raw_name}::Leaf(v) => {}::Leaf(v),", r.name.0));
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Hand-rolled Deserialize: parse into Raw, validate depth + fanout +
+    // minItems against the IDL bounds, then lower into the public enum.
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {} {{",
+        r.name.0
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line(&format!(
+        "let raw = {raw_name}::deserialize(deserializer)?;"
+    ));
+    w.line(&format!(
+        "validate_{}_depth(&raw, {}, {}).map_err(::serde::de::Error::custom)?;",
+        snake_case(&r.name.0),
+        r.max_depth,
+        r.max_fanout
+    ));
+    w.line(&format!("Ok(lower_{}(raw))", snake_case(&r.name.0)));
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
     Ok(())
+}
+
+/// Convert PascalCase / camelCase to snake_case for fn ident generation.
+fn snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ── Field type rendering ─────────────────────────────────────────────────────

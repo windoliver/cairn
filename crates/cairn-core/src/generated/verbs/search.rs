@@ -36,7 +36,7 @@ pub enum SearchArgsCitations {
 }
 
 /// Boolean filter grammar, unrolled to depth 8 so the recursion cap is a schema assertion, not runtime-only metadata. and/or fanout capped at 32 per node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum SearchArgsFilters {
@@ -44,6 +44,58 @@ pub enum SearchArgsFilters {
     Or { or: Vec<Self> },
     Not { not: Box<Self> },
     Leaf(serde_json::Value),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSearchArgsFilters {
+    And { and: Vec<RawSearchArgsFilters> },
+    Or { or: Vec<RawSearchArgsFilters> },
+    Not { not: Box<RawSearchArgsFilters> },
+    Leaf(serde_json::Value),
+}
+
+#[allow(clippy::result_unit_err)]
+fn validate_search_args_filters_depth(node: &RawSearchArgsFilters, depth: u32, max_fanout: u32) -> Result<(), &'static str> {
+    match node {
+        RawSearchArgsFilters::And { and } => {
+            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
+            if and.is_empty() { return Err("filter.and: must contain at least one item"); }
+            if and.len() as u32 > max_fanout { return Err("filter.and: exceeds max fanout"); }
+            for child in and { validate_search_args_filters_depth(child, depth - 1, max_fanout)?; }
+            Ok(())
+        },
+        RawSearchArgsFilters::Or { or } => {
+            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
+            if or.is_empty() { return Err("filter.or: must contain at least one item"); }
+            if or.len() as u32 > max_fanout { return Err("filter.or: exceeds max fanout"); }
+            for child in or { validate_search_args_filters_depth(child, depth - 1, max_fanout)?; }
+            Ok(())
+        },
+        RawSearchArgsFilters::Not { not } => {
+            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
+            validate_search_args_filters_depth(not, depth - 1, max_fanout)
+        },
+        RawSearchArgsFilters::Leaf(_) => Ok(()),
+    }
+}
+
+fn lower_search_args_filters(node: RawSearchArgsFilters) -> SearchArgsFilters {
+    match node {
+        RawSearchArgsFilters::And { and } => SearchArgsFilters::And { and: and.into_iter().map(lower_search_args_filters).collect() },
+        RawSearchArgsFilters::Or { or } => SearchArgsFilters::Or { or: or.into_iter().map(lower_search_args_filters).collect() },
+        RawSearchArgsFilters::Not { not } => SearchArgsFilters::Not { not: Box::new(lower_search_args_filters(*not)) },
+        RawSearchArgsFilters::Leaf(v) => SearchArgsFilters::Leaf(v),
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for SearchArgsFilters {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawSearchArgsFilters::deserialize(deserializer)?;
+        validate_search_args_filters_depth(&raw, 8, 32).map_err(::serde::de::Error::custom)?;
+        Ok(lower_search_args_filters(raw))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,7 +119,7 @@ impl SearchArgsMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +136,52 @@ pub struct SearchArgs {
     /// Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<crate::generated::common::ScopeFilter>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSearchArgs {
+    #[serde(default)]
+    citations: Option<SearchArgsCitations>,
+    /// Opaque continuation token from a prior search Data.next_cursor.
+    #[serde(default)]
+    cursor: Option<crate::generated::common::Cursor>,
+    #[serde(default)]
+    filters: Option<SearchArgsFilters>,
+    #[serde(default)]
+    limit: Option<i64>,
+    mode: SearchArgsMode,
+    query: String,
+    /// Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads.
+    #[serde(default)]
+    scope: Option<crate::generated::common::ScopeFilter>,
+}
+
+impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawSearchArgs) -> Result<Self, Self::Error> {
+        if raw.query.is_empty() { return Err("query: must not be empty"); }
+        if let Some(lim) = raw.limit {
+            if !(1..=1000).contains(&lim) { return Err("limit: must be in [1, 1000]"); }
+        }
+        Ok(Self {
+            citations: raw.citations,
+            cursor: raw.cursor,
+            filters: raw.filters,
+            limit: raw.limit,
+            mode: raw.mode,
+            query: raw.query,
+            scope: raw.scope,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for SearchArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawSearchArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -152,7 +152,7 @@ pub enum RetrieveArgsTurnInclude {
     Reasoning,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "target", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RetrieveArgs {
@@ -196,6 +196,119 @@ pub enum RetrieveArgs {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user: Option<String>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case")]
+enum RawRetrieveArgs {
+    Record {
+        id: crate::generated::common::Ulid,
+    },
+    Session {
+        /// Opaque continuation token from a prior DataSession.next_cursor.
+        #[serde(default)]
+        cursor: Option<crate::generated::common::Cursor>,
+        #[serde(default)]
+        include: Option<Vec<RetrieveArgsSessionInclude>>,
+        #[serde(default)]
+        limit: Option<i64>,
+        #[serde(default)]
+        order: Option<RetrieveArgsSessionOrder>,
+        #[serde(default)]
+        rehydrate: Option<bool>,
+        session_id: String,
+    },
+    Turn {
+        #[serde(default)]
+        include: Option<Vec<RetrieveArgsTurnInclude>>,
+        session_id: String,
+        turn_id: u64,
+    },
+    Folder {
+        #[serde(default)]
+        depth: Option<u64>,
+        path: String,
+    },
+    Scope {
+        /// Opaque continuation token from a prior DataScope.next_cursor.
+        #[serde(default)]
+        cursor: Option<String>,
+        scope: crate::generated::common::ScopeFilter,
+    },
+    Profile {
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        user: Option<String>,
+    },
+}
+
+impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawRetrieveArgs) -> Result<Self, Self::Error> {
+        match raw {
+            RawRetrieveArgs::Record { id } => {
+                Ok(Self::Record { id })
+            },
+            RawRetrieveArgs::Session { cursor, include, limit, order, rehydrate, session_id } => {
+                if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if let Some(lim) = limit {
+                    if !(1..=10000).contains(&lim) { return Err("limit: must be in [1, 10000]"); }
+                }
+                if let Some(inc) = &include {
+                    if inc.is_empty() { return Err("include: must contain at least one item"); }
+                    let mut seen = ::std::collections::BTreeSet::new();
+                    for item in inc {
+                        if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
+                    }
+                }
+                Ok(Self::Session { cursor, include, limit, order, rehydrate, session_id })
+            },
+            RawRetrieveArgs::Turn { include, session_id, turn_id } => {
+                if session_id.is_empty() { return Err("session_id: must not be empty"); }
+                if let Some(inc) = &include {
+                    if inc.is_empty() { return Err("include: must contain at least one item"); }
+                    let mut seen = ::std::collections::BTreeSet::new();
+                    for item in inc {
+                        if !seen.insert(*item as u8) { return Err("include: items must be unique"); }
+                    }
+                }
+                Ok(Self::Turn { include, session_id, turn_id })
+            },
+            RawRetrieveArgs::Folder { depth, path } => {
+                if path.is_empty() { return Err("path: must not be empty"); }
+                if let Some(d) = depth {
+                    if d > 16 { return Err("depth: must be in [0, 16]"); }
+                }
+                Ok(Self::Folder { depth, path })
+            },
+            RawRetrieveArgs::Scope { cursor, scope } => {
+                if let Some(c) = &cursor {
+                    if c.is_empty() { return Err("cursor: must not be empty"); }
+                    if c.len() > 512 { return Err("cursor: must be <= 512 chars"); }
+                }
+                Ok(Self::Scope { cursor, scope })
+            },
+            RawRetrieveArgs::Profile { agent, user } => {
+                if user.is_none() && agent.is_none() { return Err("at least one of [user, agent] is required"); }
+                if let Some(u) = &user {
+                    if u.is_empty() { return Err("user: must not be empty"); }
+                }
+                if let Some(a) = &agent {
+                    if a.is_empty() { return Err("agent: must not be empty"); }
+                }
+                Ok(Self::Profile { agent, user })
+            },
+        }
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for RetrieveArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawRetrieveArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 impl RetrieveArgs {
