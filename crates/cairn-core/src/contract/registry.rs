@@ -131,6 +131,27 @@ use crate::contract::{
 /// plugin crate's `register(&mut PluginRegistry)` (emitted by
 /// `register_plugin!`). After all `register` calls, the host queries the
 /// active impl per contract from `.cairn/config.yaml` (brief §4.1).
+///
+/// # Trust model
+///
+/// Plugins are **compile-time dependencies** of the host binary — every
+/// `register_plugin!` call lives in a Cargo dependency the host author
+/// explicitly added. The registry is therefore **not** a sandbox: a
+/// plugin's generated `register` receives `&mut PluginRegistry` and can,
+/// in principle, call any `register_*` method or register under any
+/// `PluginName`. This is intentional. Rust crate trust is established at
+/// the build, not at the registry mutation. A single plugin may also
+/// register multiple contracts in one `register` call (e.g., a vendor
+/// suite that ships both a `MemoryStore` and a `SensorIngress` impl).
+///
+/// For deployments that want a manifest-driven gate before invoking each
+/// plugin's `register`, see [`super::manifest::PluginManifest::verify_compatible_with`].
+/// That helper validates a manifest's name + contract kind + accepted
+/// version range against the host before activation, but it is advisory:
+/// the host still calls the plugin's `register` with a full `&mut
+/// PluginRegistry`. Atomic / transactional registrars are out of P0 scope
+/// and would conflict with multi-contract plugins; revisit if a future
+/// threat model demands sandboxing (likely via WASM, not the registry).
 #[derive(Default)]
 pub struct PluginRegistry {
     memory_stores: HashMap<PluginName, Arc<dyn MemoryStore>>,
