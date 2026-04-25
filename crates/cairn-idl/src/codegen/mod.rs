@@ -70,9 +70,62 @@ pub struct Report {
     pub drift: Vec<PathBuf>,
 }
 
-/// Run the full pipeline. Stub — implementation lands in later tasks.
-pub fn run(_opts: &RunOpts) -> Result<Report, CodegenError> {
-    Err(CodegenError::Emit(
-        "codegen::run is not yet implemented".to_string(),
-    ))
+/// Run the full pipeline.
+///
+/// Stages:
+/// 1. Load and validate every IDL file under [`crate::SCHEMA_DIR`].
+/// 2. Lower the raw JSON into the typed [`ir::Document`].
+/// 3. Invoke every emitter; collect [`GeneratedFile`] outputs.
+/// 4. Sort outputs by path (deterministic report order).
+/// 5. In [`RunMode::Write`]: write each file atomically via
+///    [`tempfile::NamedTempFile::persist`] so a mid-run crash cannot leave
+///    partially-written artefacts.
+///    In [`RunMode::Check`]: compare emitter bytes against on-disk bytes;
+///    populate [`Report::drift`] with any mismatches.
+pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
+    use std::io::Write as _;
+
+    let schema_root = std::path::PathBuf::from(crate::SCHEMA_DIR);
+    let raw = loader::load(&schema_root)?;
+    let doc = ir::build(&raw)?;
+
+    let mut all = Vec::new();
+    all.extend(emit_sdk::emit(&doc)?);
+    all.extend(emit_cli::emit(&doc)?);
+    all.extend(emit_mcp::emit(&doc)?);
+    all.extend(emit_skill::emit(&doc)?);
+
+    // Stable-sort outputs so reports are deterministic.
+    all.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let mut report = Report { files_emitted: all.len(), drift: Vec::new() };
+
+    match opts.mode {
+        RunMode::Write => {
+            for file in &all {
+                let abs = opts.workspace_root.join(&file.path);
+                if let Some(parent) = abs.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // Atomic write via tempfile + persist.
+                let dir = abs.parent().unwrap_or(std::path::Path::new("."));
+                let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+                tmp.write_all(&file.bytes)?;
+                tmp.persist(&abs).map_err(|e| CodegenError::Io(e.error))?;
+            }
+        }
+        RunMode::Check => {
+            for file in &all {
+                let abs = opts.workspace_root.join(&file.path);
+                let Ok(on_disk) = std::fs::read(&abs) else {
+                    report.drift.push(file.path.clone());
+                    continue;
+                };
+                if on_disk != file.bytes {
+                    report.drift.push(file.path.clone());
+                }
+            }
+        }
+    }
+    Ok(report)
 }
