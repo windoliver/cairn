@@ -6,6 +6,7 @@
 pub mod agent_provider;
 pub mod frontend_adapter;
 pub mod llm_provider;
+pub mod macros;
 pub mod mcp_server;
 pub mod memory_store;
 pub mod registry;
