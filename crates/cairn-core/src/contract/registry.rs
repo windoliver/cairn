@@ -161,6 +161,10 @@ pub struct PluginRegistry {
     mcp_servers: HashMap<PluginName, Arc<dyn MCPServer>>,
     frontend_adapters: HashMap<PluginName, Arc<dyn FrontendAdapter>>,
     agent_providers: HashMap<PluginName, Arc<dyn AgentProvider>>,
+    /// Per-name manifest, populated by `register_*_with_manifest`. Global
+    /// across contracts: a single `PluginName` cannot have two manifests
+    /// even if the impl side allows reusing the name across contracts.
+    manifests: HashMap<PluginName, crate::contract::manifest::PluginManifest>,
 }
 
 impl std::fmt::Debug for PluginRegistry {
@@ -191,6 +195,7 @@ impl std::fmt::Debug for PluginRegistry {
                 "agent_providers",
                 &self.agent_providers.keys().collect::<Vec<_>>(),
             )
+            .field("manifests", &self.manifests.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -232,6 +237,41 @@ macro_rules! register_method {
                 });
             }
             self.$field.insert(name, plugin);
+            Ok(())
+        }
+    };
+}
+
+// Manifest-aware sibling. Verifies the manifest matches the contract kind
+// and host version, enforces global manifest-name uniqueness, then delegates
+// to the bare `register_<contract>` method.
+macro_rules! register_method_with_manifest {
+    ($method:ident, $bare:ident, $trait_:path, $contract:literal, $kind:expr, $host_version:expr) => {
+        /// Manifest-aware registration.
+        ///
+        /// # Errors
+        /// - [`PluginError::ContractMismatch`] / [`PluginError::ManifestNameMismatch`] /
+        ///   [`PluginError::UnsupportedContractVersion`] from
+        ///   [`crate::contract::manifest::PluginManifest::verify_compatible_with`].
+        /// - [`PluginError::DuplicateName`] when another plugin already
+        ///   holds this name globally (across all contracts).
+        /// - Plus any error returned by the bare `register_<contract>`
+        ///   method (identity / per-contract duplicate / version).
+        pub fn $method(
+            &mut self,
+            name: PluginName,
+            manifest: crate::contract::manifest::PluginManifest,
+            plugin: Arc<dyn $trait_>,
+        ) -> Result<(), PluginError> {
+            manifest.verify_compatible_with(&name, $kind, $host_version)?;
+            if self.manifests.contains_key(&name) {
+                return Err(PluginError::DuplicateName {
+                    contract: $contract,
+                    name,
+                });
+            }
+            self.$bare(name.clone(), plugin)?;
+            self.manifests.insert(name, manifest);
             Ok(())
         }
     };
@@ -293,6 +333,83 @@ impl PluginRegistry {
         "AgentProvider",
         crate::contract::agent_provider::CONTRACT_VERSION
     );
+
+    register_method_with_manifest!(
+        register_memory_store_with_manifest,
+        register_memory_store,
+        crate::contract::memory_store::MemoryStore,
+        "MemoryStore",
+        crate::contract::manifest::ContractKind::MemoryStore,
+        crate::contract::memory_store::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_llm_provider_with_manifest,
+        register_llm_provider,
+        crate::contract::llm_provider::LLMProvider,
+        "LLMProvider",
+        crate::contract::manifest::ContractKind::LLMProvider,
+        crate::contract::llm_provider::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_workflow_orchestrator_with_manifest,
+        register_workflow_orchestrator,
+        crate::contract::workflow_orchestrator::WorkflowOrchestrator,
+        "WorkflowOrchestrator",
+        crate::contract::manifest::ContractKind::WorkflowOrchestrator,
+        crate::contract::workflow_orchestrator::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_sensor_ingress_with_manifest,
+        register_sensor_ingress,
+        crate::contract::sensor_ingress::SensorIngress,
+        "SensorIngress",
+        crate::contract::manifest::ContractKind::SensorIngress,
+        crate::contract::sensor_ingress::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_mcp_server_with_manifest,
+        register_mcp_server,
+        crate::contract::mcp_server::MCPServer,
+        "MCPServer",
+        crate::contract::manifest::ContractKind::MCPServer,
+        crate::contract::mcp_server::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_frontend_adapter_with_manifest,
+        register_frontend_adapter,
+        crate::contract::frontend_adapter::FrontendAdapter,
+        "FrontendAdapter",
+        crate::contract::manifest::ContractKind::FrontendAdapter,
+        crate::contract::frontend_adapter::CONTRACT_VERSION
+    );
+    register_method_with_manifest!(
+        register_agent_provider_with_manifest,
+        register_agent_provider,
+        crate::contract::agent_provider::AgentProvider,
+        "AgentProvider",
+        crate::contract::manifest::ContractKind::AgentProvider,
+        crate::contract::agent_provider::CONTRACT_VERSION
+    );
+
+    /// Look up the parsed manifest for a registered plugin by name.
+    #[must_use]
+    pub fn parsed_manifest(
+        &self,
+        name: &PluginName,
+    ) -> Option<&crate::contract::manifest::PluginManifest> {
+        self.manifests.get(name)
+    }
+
+    /// Iterate every parsed manifest in alphabetical order by plugin name.
+    /// Used by `cairn plugins list`/`verify` for stable output.
+    #[must_use]
+    pub fn parsed_manifests_sorted(
+        &self,
+    ) -> Vec<(&PluginName, &crate::contract::manifest::PluginManifest)> {
+        let mut v: Vec<_> = self.manifests.iter().collect();
+        v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        v
+    }
 
     /// Look up a registered `MemoryStore` by plugin name.
     #[must_use]
@@ -503,5 +620,124 @@ mod tests {
         let reg = PluginRegistry::new();
         let name = PluginName::new("unknown").expect("valid");
         assert!(reg.memory_store(&name).is_none());
+    }
+
+    use crate::contract::manifest::{ContractKind, PluginManifest};
+
+    fn store_manifest_text() -> &'static str {
+        r#"
+name = "cairn-store-sqlite"
+contract = "MemoryStore"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+"#
+    }
+
+    #[test]
+    fn register_with_manifest_inserts_into_both_maps() {
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        let manifest =
+            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        reg.register_memory_store_with_manifest(
+            name.clone(),
+            manifest,
+            Arc::new(StubStore {
+                name: "cairn-store-sqlite",
+                range: compatible(),
+            }),
+        )
+        .expect("manifest-aware registration succeeds");
+
+        assert!(reg.memory_store(&name).is_some(), "store registered");
+        assert!(
+            reg.parsed_manifest(&name).is_some(),
+            "manifest registered"
+        );
+        assert_eq!(
+            reg.parsed_manifest(&name).unwrap().contract(),
+            ContractKind::MemoryStore
+        );
+    }
+
+    #[test]
+    fn register_with_manifest_rejects_kind_mismatch() {
+        // Manifest declares MemoryStore; we try to register through the
+        // LLMProvider sibling — verify_compatible_with must trip.
+        struct StubLlm {
+            name: &'static str,
+            range: VersionRange,
+        }
+        #[async_trait::async_trait]
+        impl crate::contract::llm_provider::LLMProvider for StubLlm {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn capabilities(&self) -> &crate::contract::llm_provider::LLMProviderCapabilities {
+                static CAPS: crate::contract::llm_provider::LLMProviderCapabilities =
+                    crate::contract::llm_provider::LLMProviderCapabilities {
+                        json_mode: false,
+                        streaming: false,
+                        tool_calls: false,
+                    };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                self.range
+            }
+        }
+
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        let manifest =
+            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        let err = reg
+            .register_llm_provider_with_manifest(
+                name,
+                manifest,
+                Arc::new(StubLlm {
+                    name: "cairn-store-sqlite",
+                    range: compatible(),
+                }),
+            )
+            .expect_err("kind mismatch must fail closed");
+        assert!(matches!(err, PluginError::ContractMismatch { .. }));
+    }
+
+    #[test]
+    fn register_with_manifest_rejects_global_duplicate_name() {
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        let manifest =
+            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        reg.register_memory_store_with_manifest(
+            name.clone(),
+            manifest.clone(),
+            Arc::new(StubStore {
+                name: "cairn-store-sqlite",
+                range: compatible(),
+            }),
+        )
+        .expect("first registration succeeds");
+
+        let err = reg
+            .register_memory_store_with_manifest(
+                name,
+                manifest,
+                Arc::new(StubStore {
+                    name: "cairn-store-sqlite",
+                    range: compatible(),
+                }),
+            )
+            .expect_err("global duplicate must fail");
+        assert!(matches!(err, PluginError::DuplicateName { .. }));
     }
 }
