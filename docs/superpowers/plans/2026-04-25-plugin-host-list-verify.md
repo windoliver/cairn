@@ -2384,11 +2384,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ```
 
-Replace the machete-ignored block with the empty one (drop all entries — every dep has a real call site after this PR):
+Drop the four bundled-adapter-crate names (`cairn-mcp`, `cairn-sensors-local`, `cairn-store-sqlite`, `cairn-workflows`) from the machete-ignored block — they become real call sites in `plugins/host.rs` this task. Keep `anyhow`, `clap`, `serde`, `serde_json` ignored until Tasks 11–13 wire their call sites:
 
 ```toml
+# Forward-declared scaffold deps. anyhow + clap wired by Task 13's main.rs.
+# serde + serde_json wired by Tasks 11/12's list/verify renderers.
 [package.metadata.cargo-machete]
-ignored = []
+ignored = ["anyhow", "clap", "serde", "serde_json"]
 ```
 
 - [ ] **Step 2: Create the `plugins` module skeleton** — `crates/cairn-cli/src/plugins/mod.rs`:
