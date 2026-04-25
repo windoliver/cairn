@@ -97,6 +97,28 @@ fn emit_mod(doc: &Document) -> GeneratedFile {
     w.raw(FILE_LINTS);
     w.line("//! Generated MCP tool declarations for cairn.mcp.v1.");
     w.blank();
+    w.line("/// One field- / mode-level auth override surfaced from the IDL's");
+    w.line("/// `x-cairn-auth` annotations on Args properties or Args sub-types.");
+    w.line("///");
+    w.line("/// The MCP transport / verb dispatcher checks these BEFORE running a");
+    w.line("/// verb when the matching path is present in the request payload, so a");
+    w.line("/// caller cannot reach a write-producing mode (`lint.write_report=true`,");
+    w.line("/// `summarize.persist=true`, `forget.mode=record`) under the verb-level");
+    w.line("/// auth alone.");
+    w.line("pub struct AuthOverride {");
+    w.indent();
+    w.line("/// Dot-path inside Args identifying the trigger.");
+    w.line("/// * Boolean / property triggers: bare property name");
+    w.line("///   (`\"write_report\"`, `\"persist\"`).");
+    w.line("/// * Tagged-union sub-type triggers:");
+    w.line("///   `\"<discriminator>=<wire>\"` (`\"mode=record\"`,");
+    w.line("///   `\"target=session\"`).");
+    w.line("pub path: &'static str,");
+    w.line("/// Auth model required when `path` matches.");
+    w.line("pub auth: &'static str,");
+    w.dedent();
+    w.line("}");
+    w.blank();
     w.line("/// Static tool declaration the MCP transport layer registers at startup.");
     w.line("pub struct ToolDecl {");
     w.indent();
@@ -105,6 +127,9 @@ fn emit_mod(doc: &Document) -> GeneratedFile {
     w.line("pub input_schema: &'static [u8],");
     w.line("pub capability: Option<&'static str>,");
     w.line("pub auth: &'static str,");
+    w.line("/// Field- / mode-level auth overrides. Empty when the verb's");
+    w.line("/// declared `auth` covers every reachable Args shape.");
+    w.line("pub auth_overrides: &'static [AuthOverride],");
     w.dedent();
     w.line("}");
     w.blank();
@@ -137,6 +162,21 @@ fn emit_tool_decl(w: &mut RustWriter, verb: &VerbDef) {
         None => w.line("capability: None,"),
     }
     w.line(&format!("auth: \"{}\",", verb.auth.as_str()));
+    if verb.auth_overrides.is_empty() {
+        w.line("auth_overrides: &[],");
+    } else {
+        w.line("auth_overrides: &[");
+        w.indent();
+        for ov in &verb.auth_overrides {
+            w.line(&format!(
+                "AuthOverride {{ path: \"{}\", auth: \"{}\" }},",
+                ov.path,
+                ov.auth.as_str()
+            ));
+        }
+        w.dedent();
+        w.line("],");
+    }
     w.dedent();
     w.line("},");
 }

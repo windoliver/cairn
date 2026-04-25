@@ -753,9 +753,13 @@ fn write_response_envelope(
         let pascal = pascal_case(&verb.id);
         if verb.id == "retrieve" {
             // Retrieve sub-dispatch deferred — accept opaque JSON.
-            w.line(&format!("ResponseVerb::{pascal} => ResponseData::{pascal}(payload),"));
+            w.line(&format!(
+                "ResponseVerb::{pascal} => ResponseData::{pascal}(payload),"
+            ));
         } else {
-            w.line(&format!("ResponseVerb::{pascal} => ResponseData::{pascal}("));
+            w.line(&format!(
+                "ResponseVerb::{pascal} => ResponseData::{pascal}("
+            ));
             w.indent();
             w.line(&format!(
                 "<crate::generated::verbs::{}::{pascal}Data as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?",
@@ -1488,7 +1492,9 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     // key_version >= 1.
     w.line("if raw.key_version < 1 { return Err(\"key_version: must be >= 1\"); }");
     // chain_parents: bounded and unique.
-    w.line("if raw.chain_parents.len() > 64 { return Err(\"chain_parents: exceeds maxItems (64)\"); }");
+    w.line(
+        "if raw.chain_parents.len() > 64 { return Err(\"chain_parents: exceeds maxItems (64)\"); }",
+    );
     w.line("{");
     w.indent();
     w.line("let mut seen = ::std::collections::BTreeSet::new();");

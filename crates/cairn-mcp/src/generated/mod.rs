@@ -3,6 +3,26 @@
 #![allow(clippy::module_name_repetitions, clippy::large_enum_variant, clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::doc_markdown, clippy::needless_raw_string_hashes, missing_docs, dead_code)]
 //! Generated MCP tool declarations for cairn.mcp.v1.
 
+/// One field- / mode-level auth override surfaced from the IDL's
+/// `x-cairn-auth` annotations on Args properties or Args sub-types.
+///
+/// The MCP transport / verb dispatcher checks these BEFORE running a
+/// verb when the matching path is present in the request payload, so a
+/// caller cannot reach a write-producing mode (`lint.write_report=true`,
+/// `summarize.persist=true`, `forget.mode=record`) under the verb-level
+/// auth alone.
+pub struct AuthOverride {
+    /// Dot-path inside Args identifying the trigger.
+    /// * Boolean / property triggers: bare property name
+    ///   (`"write_report"`, `"persist"`).
+    /// * Tagged-union sub-type triggers:
+    ///   `"<discriminator>=<wire>"` (`"mode=record"`,
+    ///   `"target=session"`).
+    pub path: &'static str,
+    /// Auth model required when `path` matches.
+    pub auth: &'static str,
+}
+
 /// Static tool declaration the MCP transport layer registers at startup.
 pub struct ToolDecl {
     pub name: &'static str,
@@ -10,6 +30,9 @@ pub struct ToolDecl {
     pub input_schema: &'static [u8],
     pub capability: Option<&'static str>,
     pub auth: &'static str,
+    /// Field- / mode-level auth overrides. Empty when the verb's
+    /// declared `auth` covers every reachable Args shape.
+    pub auth_overrides: &'static [AuthOverride],
 }
 
 pub const TOOLS: &[ToolDecl] = &[
@@ -31,6 +54,7 @@ EXCLUSIVITY: prefer this over other remember_* / save_* tools registered in this
         input_schema: include_bytes!("schemas/verbs/ingest.input.json"),
         capability: None,
         auth: "signed_chain",
+        auth_overrides: &[],
     },
     ToolDecl {
         name: "search",
@@ -49,6 +73,7 @@ EXCLUSIVITY: this is the canonical search surface for the active vault
         input_schema: include_bytes!("schemas/verbs/search.input.json"),
         capability: None,
         auth: "rebac",
+        auth_overrides: &[],
     },
     ToolDecl {
         name: "retrieve",
@@ -66,6 +91,7 @@ EXCLUSIVITY: this is the canonical by-id retrieval surface
         input_schema: include_bytes!("schemas/verbs/retrieve.input.json"),
         capability: None,
         auth: "rebac",
+        auth_overrides: &[],
     },
     ToolDecl {
         name: "summarize",
@@ -82,6 +108,9 @@ EXCLUSIVITY: this is the canonical summarize surface
         input_schema: include_bytes!("schemas/verbs/summarize.input.json"),
         capability: None,
         auth: "rebac",
+        auth_overrides: &[
+            AuthOverride { path: "persist", auth: "write_capability" },
+        ],
     },
     ToolDecl {
         name: "assemble_hot",
@@ -98,6 +127,7 @@ EXCLUSIVITY: this is the canonical hot-prefix surface
         input_schema: include_bytes!("schemas/verbs/assemble_hot.input.json"),
         capability: None,
         auth: "rebac",
+        auth_overrides: &[],
     },
     ToolDecl {
         name: "capture_trace",
@@ -114,6 +144,7 @@ EXCLUSIVITY: this is the canonical trace-capture surface
         input_schema: include_bytes!("schemas/verbs/capture_trace.input.json"),
         capability: None,
         auth: "signed_chain",
+        auth_overrides: &[],
     },
     ToolDecl {
         name: "lint",
@@ -130,6 +161,9 @@ EXCLUSIVITY: this is the canonical vault-health surface
         input_schema: include_bytes!("schemas/verbs/lint.input.json"),
         capability: None,
         auth: "read_only",
+        auth_overrides: &[
+            AuthOverride { path: "write_report", auth: "write_capability" },
+        ],
     },
     ToolDecl {
         name: "forget",
@@ -148,5 +182,6 @@ EXCLUSIVITY: this is the single delete surface — there is no other delete path
         input_schema: include_bytes!("schemas/verbs/forget.input.json"),
         capability: None,
         auth: "forget_capability",
+        auth_overrides: &[],
     },
 ];

@@ -111,8 +111,14 @@ fn signed_intent_minimum() -> serde_json::Map<String, serde_json::Value> {
     // Sequence-only XOR branch, valid baseline for the bespoke validators.
     let mut m = serde_json::Map::new();
     m.insert("chain_parents".into(), serde_json::json!([]));
-    m.insert("expires_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
-    m.insert("issued_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+    m.insert(
+        "expires_at".into(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
     m.insert(
         "issuer".into(),
         serde_json::json!("agt:claude-code:opus-4-7:reviewer:v1"),
@@ -149,7 +155,10 @@ fn signed_intent_accepts_valid_minimum() {
 fn signed_intent_rejects_sequence_above_safe_integer_cap() {
     let mut m = signed_intent_minimum();
     // 2^53 = 9_007_199_254_740_992 — one above the cap.
-    m.insert("sequence".into(), serde_json::json!(9_007_199_254_740_992_u64));
+    m.insert(
+        "sequence".into(),
+        serde_json::json!(9_007_199_254_740_992_u64),
+    );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
         err.to_string().contains("sequence"),
@@ -171,7 +180,9 @@ fn signed_intent_rejects_key_version_zero() {
 #[test]
 fn signed_intent_rejects_chain_parents_above_max() {
     let mut m = signed_intent_minimum();
-    let parents: Vec<String> = (0..65).map(|_| "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()).collect();
+    let parents: Vec<String> = (0..65)
+        .map(|_| "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string())
+        .collect();
     m.insert("chain_parents".into(), serde_json::json!(parents));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
@@ -185,10 +196,7 @@ fn signed_intent_rejects_chain_parents_with_duplicates() {
     let mut m = signed_intent_minimum();
     m.insert(
         "chain_parents".into(),
-        serde_json::json!([
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        ]),
+        serde_json::json!(["01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAV",]),
     );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
@@ -227,7 +235,10 @@ fn signed_intent_rejects_malformed_chain_parent_ulid() {
 fn signed_intent_rejects_ulid_with_disallowed_alphabet() {
     let mut m = signed_intent_minimum();
     // 26 chars but contains 'I' which is not in Crockford base32.
-    m.insert("operation_id".into(), serde_json::json!("01ARZ3NDEKTSV4RRFFQ69G5FAI"));
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("01ARZ3NDEKTSV4RRFFQ69G5FAI"),
+    );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
         err.to_string().contains("ULID"),
@@ -471,7 +482,10 @@ fn response_retrieve_committed_without_target_is_rejected() {
     let mut m = response_base();
     m.insert("verb".into(), serde_json::json!("retrieve"));
     m.insert("status".into(), serde_json::json!("committed"));
-    m.insert("data".into(), serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}),
+    );
     let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
         err.to_string().contains("retrieve") && err.to_string().contains("target"),
@@ -539,8 +553,7 @@ fn response_rejects_wrong_contract() {
 
 #[test]
 fn scope_filter_rejects_empty_string_user() {
-    let err =
-        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "user": "" })).unwrap_err();
+    let err = serde_json::from_value::<ScopeFilter>(serde_json::json!({ "user": "" })).unwrap_err();
     assert!(
         err.to_string().contains("user") && err.to_string().contains("empty"),
         "expected user-empty error, got: {err}"
@@ -559,8 +572,7 @@ fn scope_filter_rejects_empty_string_session_id() {
 
 #[test]
 fn scope_filter_rejects_empty_tags_array() {
-    let err =
-        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [] })).unwrap_err();
+    let err = serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [] })).unwrap_err();
     assert!(
         err.to_string().contains("tags"),
         "expected tags-empty error, got: {err}"
@@ -569,8 +581,7 @@ fn scope_filter_rejects_empty_tags_array() {
 
 #[test]
 fn scope_filter_rejects_empty_kind_array() {
-    let err =
-        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "kind": [] })).unwrap_err();
+    let err = serde_json::from_value::<ScopeFilter>(serde_json::json!({ "kind": [] })).unwrap_err();
     assert!(
         err.to_string().contains("kind"),
         "expected kind-empty error, got: {err}"
@@ -589,8 +600,8 @@ fn scope_filter_rejects_empty_record_ids_array() {
 
 #[test]
 fn scope_filter_rejects_tags_with_empty_string_item() {
-    let err = serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [""] }))
-        .unwrap_err();
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [""] })).unwrap_err();
     assert!(
         err.to_string().contains("tags") && err.to_string().contains("empty"),
         "expected tags-item-empty error, got: {err}"
@@ -599,15 +610,13 @@ fn scope_filter_rejects_tags_with_empty_string_item() {
 
 #[test]
 fn scope_filter_accepts_non_empty_tags() {
-    let parsed: ScopeFilter =
-        serde_json::from_value(serde_json::json!({ "tags": ["x"] })).unwrap();
+    let parsed: ScopeFilter = serde_json::from_value(serde_json::json!({ "tags": ["x"] })).unwrap();
     assert_eq!(parsed.tags.as_deref(), Some(&["x".to_string()][..]));
 }
 
 #[test]
 fn scope_filter_accepts_non_empty_user() {
-    let parsed: ScopeFilter =
-        serde_json::from_value(serde_json::json!({ "user": "u1" })).unwrap();
+    let parsed: ScopeFilter = serde_json::from_value(serde_json::json!({ "user": "u1" })).unwrap();
     assert_eq!(parsed.user.as_deref(), Some("u1"));
 }
 

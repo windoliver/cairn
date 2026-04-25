@@ -148,9 +148,7 @@ fn input_schema_root_delegates_to_args() {
         "lint",
         "forget",
     ] {
-        let suffix = format!(
-            "crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json"
-        );
+        let suffix = format!("crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json");
         let f = files
             .iter()
             .find(|f| f.path.ends_with(&suffix))
@@ -183,13 +181,8 @@ fn input_schema_args_for_required_verbs_advertises_required() {
         ("summarize", "record_ids"),
         ("capture_trace", "from"),
     ] {
-        let suffix = format!(
-            "crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json"
-        );
-        let f = files
-            .iter()
-            .find(|f| f.path.ends_with(&suffix))
-            .unwrap();
+        let suffix = format!("crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json");
+        let f = files.iter().find(|f| f.path.ends_with(&suffix)).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
         let args = parsed
             .pointer("/$defs/Args")
@@ -197,7 +190,10 @@ fn input_schema_args_for_required_verbs_advertises_required() {
         let required = args
             .get("required")
             .and_then(serde_json::Value::as_array)
-            .map(|a| a.iter().any(|v| v.as_str() == Some(expected_required_or_one_of)))
+            .map(|a| {
+                a.iter()
+                    .any(|v| v.as_str() == Some(expected_required_or_one_of))
+            })
             .unwrap_or(false);
         assert!(
             required,

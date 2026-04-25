@@ -33,8 +33,28 @@ pub struct VerbDef {
     pub skill: SkillBlock,
     pub capability: Option<String>,
     pub auth: AuthModel,
+    /// Field- / mode-level auth overrides lifted from `x-cairn-auth`
+    /// annotations attached to Args properties or Args sub-types. Surfaced
+    /// in the MCP tool declarations so callers know `lint.write_report=true`
+    /// and `summarize.persist=true` need `write_capability` even though the
+    /// verb-level auth is `read_only` / `rebac`.
+    pub auth_overrides: Vec<AuthOverride>,
     pub args_schema_bytes: Vec<u8>,
     pub data_schema_bytes: Vec<u8>,
+}
+
+/// One field-level / mode-level `x-cairn-auth` annotation lifted from the IDL.
+/// Surfaced in MCP tool declarations so MCP clients can require the stronger
+/// auth before calling a write-producing verb mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthOverride {
+    /// Dot-path inside Args identifying which property triggers the override.
+    /// Examples: `write_report`, `persist`. For tagged-union sub-types,
+    /// `mode=record` style equality is encoded as `<discriminator>=<wire>`.
+    pub path: String,
+    /// Auth model required when the path is present (or set to true for
+    /// boolean flags).
+    pub auth: AuthModel,
 }
 
 /// One protocol prelude (status, handshake).
@@ -96,6 +116,9 @@ pub enum AuthModel {
     HardwareKey,
     /// Capability-token auth used by the `forget` verb.
     ForgetCapability,
+    /// Generic write-capability auth used by field-level overrides
+    /// (`lint.write_report`, `summarize.persist`).
+    WriteCapability,
     /// Read-only auth model (no mutation capability required).
     ReadOnly,
 }
@@ -111,6 +134,7 @@ impl AuthModel {
             "signed_principal" => Some(Self::SignedPrincipal),
             "hardware_key" => Some(Self::HardwareKey),
             "forget_capability" => Some(Self::ForgetCapability),
+            "write_capability" => Some(Self::WriteCapability),
             "read_only" => Some(Self::ReadOnly),
             _ => None,
         }
@@ -125,6 +149,7 @@ impl AuthModel {
             Self::SignedPrincipal => "signed_principal",
             Self::HardwareKey => "hardware_key",
             Self::ForgetCapability => "forget_capability",
+            Self::WriteCapability => "write_capability",
             Self::ReadOnly => "read_only",
         }
     }
@@ -1088,6 +1113,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
             "{path_str}: unknown x-cairn-auth value {auth_str:?}"
         ))
     })?;
+    let auth_overrides = collect_auth_overrides(args_schema, &defs, &path_str)?;
 
     Ok(VerbDef {
         id,
@@ -1098,6 +1124,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         skill,
         capability,
         auth,
+        auth_overrides,
         // Capture the *entire* verb file so any `#/$defs/...` reference inside
         // Args/Data resolves against siblings present in the same on-disk JSON.
         // Cross-file `$ref`s like `../common/scope_filter.json` resolve via the
@@ -1109,6 +1136,84 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         data_schema_bytes: serde_json::to_vec(data_schema)
             .map_err(|e| CodegenError::Ir(e.to_string()))?,
     })
+}
+
+/// Walk the verb's `$defs/Args` schema and harvest every `x-cairn-auth`
+/// annotation found below the root. Two shapes are supported:
+///
+/// * Property-level — `Args.properties.<name>.x-cairn-auth: "<auth>"`.
+///   Yields an [`AuthOverride`] with `path: <name>` (e.g. `write_report`).
+///
+/// * Sub-type-level — `Args` is a `oneOf` over `#/$defs/Args*` entries
+///   (forget, retrieve), each carrying `x-cairn-auth`. Yields an
+///   [`AuthOverride`] with `path: <discriminator>=<wire-const>`.
+fn collect_auth_overrides(
+    args_schema: &Value,
+    defs: &BTreeMap<String, Value>,
+    where_: &str,
+) -> Result<Vec<AuthOverride>, CodegenError> {
+    let mut out = Vec::new();
+
+    // Sub-type dispatch (forget, retrieve): each oneOf branch refs an
+    // ArgsXxx $defs entry whose discriminator value identifies the mode.
+    if let Some(arr) = args_schema.get("oneOf").and_then(Value::as_array) {
+        let discriminator = args_schema
+            .get("x-cairn-discriminator")
+            .and_then(Value::as_str);
+        for entry in arr {
+            let Some(reference) = entry.get("$ref").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(def_name) = reference.strip_prefix("#/$defs/") else {
+                continue;
+            };
+            let Some(def) = defs.get(def_name) else {
+                continue;
+            };
+            let Some(auth_str) = def.get("x-cairn-auth").and_then(Value::as_str) else {
+                continue;
+            };
+            let auth = AuthModel::from_str(auth_str).ok_or_else(|| {
+                CodegenError::Ir(format!(
+                    "{where_}: $defs.{def_name}.x-cairn-auth = {auth_str:?} is not a known AuthModel"
+                ))
+            })?;
+            // Try to extract the discriminator wire value to build a stable path.
+            let path = if let Some(disc) = discriminator
+                && let Some(wire) = def
+                    .pointer(&format!("/properties/{disc}/const"))
+                    .and_then(Value::as_str)
+            {
+                format!("{disc}={wire}")
+            } else {
+                def_name.to_string()
+            };
+            out.push(AuthOverride { path, auth });
+        }
+    }
+
+    // Property-level: walk Args.properties and pick up `x-cairn-auth`.
+    if let Some(props) = args_schema.get("properties").and_then(Value::as_object) {
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        for k in keys {
+            let prop = &props[k];
+            let Some(auth_str) = prop.get("x-cairn-auth").and_then(Value::as_str) else {
+                continue;
+            };
+            let auth = AuthModel::from_str(auth_str).ok_or_else(|| {
+                CodegenError::Ir(format!(
+                    "{where_}: Args.properties.{k}.x-cairn-auth = {auth_str:?} is not a known AuthModel"
+                ))
+            })?;
+            out.push(AuthOverride {
+                path: k.clone(),
+                auth,
+            });
+        }
+    }
+
+    Ok(out)
 }
 
 /// Walk a [`RustType`] and accumulate every `Ref` target name into `out`.
