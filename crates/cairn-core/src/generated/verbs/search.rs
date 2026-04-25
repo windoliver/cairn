@@ -76,7 +76,7 @@ fn validate_search_args_filters_depth(node: &RawSearchArgsFilters, depth: u32, m
             if depth == 0 { return Err("filter: exceeds max boolean depth"); }
             validate_search_args_filters_depth(not, depth - 1, max_fanout)
         },
-        RawSearchArgsFilters::Leaf(_) => Ok(()),
+        RawSearchArgsFilters::Leaf(v) => validate_filter_leaf_shape(v),
     }
 }
 
@@ -96,6 +96,78 @@ impl<'de> ::serde::Deserialize<'de> for SearchArgsFilters {
         validate_search_args_filters_depth(&raw, 8, 32).map_err(::serde::de::Error::custom)?;
         Ok(lower_search_args_filters(raw))
     }
+}
+
+/// Structural validator for `filter_leaf` JSON values. See the IDL
+/// `verbs/search.json#/$defs/filter_leaf` oneOf for the shape contract.
+#[allow(clippy::result_unit_err)]
+fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static str> {
+    let obj = v.as_object().ok_or("filter leaf: must be a JSON object")?;
+    for k in obj.keys() {
+        if !matches!(k.as_str(), "field" | "op" | "value") { return Err("filter leaf: unknown key"); }
+    }
+    let field = obj.get("field").and_then(::serde_json::Value::as_str).ok_or("filter leaf: field must be a string")?;
+    if field.is_empty() { return Err("filter leaf: field must not be empty"); }
+    let op = obj.get("op").and_then(::serde_json::Value::as_str).ok_or("filter leaf: op must be a string")?;
+    let value = obj.get("value").ok_or("filter leaf: value missing")?;
+    match op {
+        "string_contains" | "string_starts_with" | "string_ends_with" => {
+            let s = value.as_str().ok_or("filter leaf: value must be a non-empty string")?;
+            if s.is_empty() { return Err("filter leaf: value must be a non-empty string"); }
+        },
+        "eq" | "neq" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() { return Err("filter leaf: value must be a non-empty string"); }
+            } else if !(value.is_number() || value.is_boolean()) {
+                return Err("filter leaf: eq/neq value must be string, number, or boolean");
+            }
+        },
+        "lt" | "lte" | "gt" | "gte" => {
+            if !value.is_number() { return Err("filter leaf: value must be a number"); }
+        },
+        "in" | "nin" => {
+            let arr = value.as_array().ok_or("filter leaf: value must be a non-empty array")?;
+            if arr.is_empty() { return Err("filter leaf: value must be a non-empty array"); }
+            for item in arr {
+                if item.is_string() {
+                    if item.as_str().unwrap_or("").is_empty() { return Err("filter leaf: array items must be non-empty strings"); }
+                } else if !item.is_number() {
+                    return Err("filter leaf: array items must be strings or numbers");
+                }
+            }
+        },
+        "between" => {
+            let arr = value.as_array().ok_or("filter leaf: between value must be a 2-element number array")?;
+            if arr.len() != 2 { return Err("filter leaf: between value must be a 2-element number array"); }
+            for item in arr {
+                if !item.is_number() { return Err("filter leaf: between value items must be numbers"); }
+            }
+        },
+        "array_contains" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() { return Err("filter leaf: array_contains value must be a non-empty string or number"); }
+            } else if !value.is_number() {
+                return Err("filter leaf: array_contains value must be a non-empty string or number");
+            }
+        },
+        "array_contains_any" | "array_contains_all" => {
+            let arr = value.as_array().ok_or("filter leaf: array_contains_* value must be a non-empty array")?;
+            if arr.is_empty() { return Err("filter leaf: array_contains_* value must be a non-empty array"); }
+            for item in arr {
+                if item.is_string() {
+                    if item.as_str().unwrap_or("").is_empty() { return Err("filter leaf: array items must be non-empty strings or numbers"); }
+                } else if !item.is_number() {
+                    return Err("filter leaf: array items must be non-empty strings or numbers");
+                }
+            }
+        },
+        "array_size_eq" => {
+            let n = value.as_i64().ok_or("filter leaf: array_size_eq value must be a non-negative integer")?;
+            if n < 0 { return Err("filter leaf: array_size_eq value must be a non-negative integer"); }
+        },
+        _ => return Err("filter leaf: unknown op"),
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

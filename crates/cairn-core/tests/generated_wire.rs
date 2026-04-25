@@ -1487,3 +1487,94 @@ fn forget_record_accepts_canonical_payload() {
     let parsed: ForgetArgs = serde_json::from_value(json).unwrap();
     assert!(matches!(parsed, ForgetArgs::Record { .. }));
 }
+
+// ── F2 (round 7): filter leaf wire shape ─────────────────────────────────────
+
+#[test]
+fn filter_rejects_empty_object_leaf() {
+    // The leaf must be a closed `{field, op, value}` object — `{}` has none of
+    // those required fields and previously slipped through as `Leaf(Value)`.
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [{}]}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("filter leaf"),
+        "expected leaf-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_null_leaf() {
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [null]}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("filter leaf") || err.to_string().contains("did not match"),
+        "expected null-leaf rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_leaf_with_empty_field() {
+    let leaf = serde_json::json!({"field": "", "op": "eq", "value": 1});
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    assert!(
+        err.to_string().contains("field") && err.to_string().contains("empty"),
+        "expected empty-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_leaf_with_unknown_op() {
+    let leaf = serde_json::json!({"field": "x", "op": "unknown_op", "value": 1});
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown op") || err.to_string().contains("op"),
+        "expected unknown-op rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_leaf_with_extra_key() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1, "extra": true});
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown key") || err.to_string().contains("filter leaf"),
+        "expected extra-key rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_accepts_canonical_string_leaf() {
+    let leaf = serde_json::json!({"field": "kind", "op": "eq", "value": "note"});
+    let parsed: SearchArgsFilters = serde_json::from_value(leaf).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Leaf(_)));
+}
+
+#[test]
+fn filter_accepts_between_leaf() {
+    let leaf = serde_json::json!({"field": "score", "op": "between", "value": [0.1, 0.9]});
+    let parsed: SearchArgsFilters = serde_json::from_value(leaf).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Leaf(_)));
+}
+
+#[test]
+fn filter_rejects_between_with_wrong_arity() {
+    let leaf = serde_json::json!({"field": "score", "op": "between", "value": [0.1]});
+    let err = serde_json::from_value::<SearchArgsFilters>(leaf).unwrap_err();
+    assert!(
+        err.to_string().contains("between"),
+        "expected between-arity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_in_with_empty_array() {
+    let leaf = serde_json::json!({"field": "tag", "op": "in", "value": []});
+    let err = serde_json::from_value::<SearchArgsFilters>(leaf).unwrap_err();
+    assert!(
+        err.to_string().contains("non-empty array") || err.to_string().contains("array"),
+        "expected empty-in-array rejection, got: {err}"
+    );
+}

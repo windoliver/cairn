@@ -2251,7 +2251,18 @@ fn write_recursive(
     ));
     w.dedent();
     w.line("},");
-    w.line(&format!("{raw_name}::Leaf(_) => Ok(()),"));
+    // The leaf type lowers to `serde_json::Value` because `filter_leaf` is a
+    // oneOf-of-$refs without a discriminator. Without a structural check the
+    // arm would accept any JSON shape — `{}`, `null`, wrong-typed `value`, or
+    // arbitrary extra keys. We special-case the known recursive enums whose
+    // leaves are filter leaves and call a hand-rolled validator.
+    if recursive_has_filter_leaf(&r.name.0) {
+        w.line(&format!(
+            "{raw_name}::Leaf(v) => validate_filter_leaf_shape(v),"
+        ));
+    } else {
+        w.line(&format!("{raw_name}::Leaf(_) => Ok(()),"));
+    }
     w.dedent();
     w.line("}");
     w.dedent();
@@ -2313,7 +2324,177 @@ fn write_recursive(
     w.line("}");
     w.dedent();
     w.line("}");
+    if recursive_has_filter_leaf(&r.name.0) {
+        w.blank();
+        write_filter_leaf_validator(w);
+    }
     Ok(())
+}
+
+/// Recursive enums whose leaf type lowers from `filter_leaf` (the boolean
+/// filter family declared in `verbs/search.json`). The leaf is a oneOf of
+/// nine closed leaf shapes — without a structural validator the leaf arm of
+/// the recursive Raw enum accepts any JSON value (`{}`, `null`, `[]`,
+/// wrong-typed `value`, unknown keys), so the IDL's `additionalProperties:
+/// false` and per-shape `op` enums are bypassed. Listed by Rust enum name.
+fn recursive_has_filter_leaf(name: &str) -> bool {
+    matches!(name, "SearchArgsFilters")
+}
+
+/// Emit a hand-rolled validator for a `filter_leaf` JSON value. Mirrors the
+/// closed `oneOf` in `verbs/search.json#/$defs/filter_leaf`:
+///
+/// * leaf is an object with exactly the keys `field`, `op`, `value`.
+/// * `field` is a non-empty string.
+/// * `op` is one of the closed enum across the nine leaf variants.
+/// * `value` shape is constrained per `op` (string / number / boolean / array
+///   of strings or numbers / number-pair for `between` / non-negative integer
+///   for `array_size_eq`).
+///
+/// Unknown keys reject. The check is structural rather than typed because the
+/// recursive enum's leaf type lowers to `serde_json::Value` (no discriminator
+/// in the IDL oneOf). When the leaf gains a discriminator the typed lowering
+/// supersedes this validator.
+fn write_filter_leaf_validator(w: &mut RustWriter) {
+    w.line("/// Structural validator for `filter_leaf` JSON values. See the IDL");
+    w.line("/// `verbs/search.json#/$defs/filter_leaf` oneOf for the shape contract.");
+    w.line("#[allow(clippy::result_unit_err)]");
+    w.line(
+        "fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static str> {",
+    );
+    w.indent();
+    w.line(
+        "let obj = v.as_object().ok_or(\"filter leaf: must be a JSON object\")?;",
+    );
+    // Reject unknown keys. The closed shape is exactly {field, op, value}.
+    w.line("for k in obj.keys() {");
+    w.indent();
+    w.line(
+        "if !matches!(k.as_str(), \"field\" | \"op\" | \"value\") { return Err(\"filter leaf: unknown key\"); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.line(
+        "let field = obj.get(\"field\").and_then(::serde_json::Value::as_str).ok_or(\"filter leaf: field must be a string\")?;",
+    );
+    w.line("if field.is_empty() { return Err(\"filter leaf: field must not be empty\"); }");
+    w.line(
+        "let op = obj.get(\"op\").and_then(::serde_json::Value::as_str).ok_or(\"filter leaf: op must be a string\")?;",
+    );
+    w.line(
+        "let value = obj.get(\"value\").ok_or(\"filter leaf: value missing\")?;",
+    );
+    // Operator-shape dispatch — mirrors each filter_leaf_* variant in search.json.
+    w.line("match op {");
+    w.indent();
+    // string ops
+    w.line("\"string_contains\" | \"string_starts_with\" | \"string_ends_with\" => {");
+    w.indent();
+    w.line("let s = value.as_str().ok_or(\"filter leaf: value must be a non-empty string\")?;");
+    w.line("if s.is_empty() { return Err(\"filter leaf: value must be a non-empty string\"); }");
+    w.dedent();
+    w.line("},");
+    // eq / neq accept string OR number OR boolean (across filter_leaf_string,
+    // filter_leaf_number, filter_leaf_boolean). The closed shape is per-leaf
+    // typed, but at the structural layer we accept any of those scalar shapes.
+    w.line("\"eq\" | \"neq\" => {");
+    w.indent();
+    w.line("if value.is_string() {");
+    w.indent();
+    w.line("if value.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: value must be a non-empty string\"); }");
+    w.dedent();
+    w.line("} else if !(value.is_number() || value.is_boolean()) {");
+    w.indent();
+    w.line("return Err(\"filter leaf: eq/neq value must be string, number, or boolean\");");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    // numeric scalar comparators
+    w.line("\"lt\" | \"lte\" | \"gt\" | \"gte\" => {");
+    w.indent();
+    w.line("if !value.is_number() { return Err(\"filter leaf: value must be a number\"); }");
+    w.dedent();
+    w.line("},");
+    // set membership — array of strings (non-empty) OR numbers
+    w.line("\"in\" | \"nin\" => {");
+    w.indent();
+    w.line("let arr = value.as_array().ok_or(\"filter leaf: value must be a non-empty array\")?;");
+    w.line("if arr.is_empty() { return Err(\"filter leaf: value must be a non-empty array\"); }");
+    w.line("for item in arr {");
+    w.indent();
+    w.line("if item.is_string() {");
+    w.indent();
+    w.line("if item.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: array items must be non-empty strings\"); }");
+    w.dedent();
+    w.line("} else if !item.is_number() {");
+    w.indent();
+    w.line("return Err(\"filter leaf: array items must be strings or numbers\");");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    // between — pair of numbers
+    w.line("\"between\" => {");
+    w.indent();
+    w.line("let arr = value.as_array().ok_or(\"filter leaf: between value must be a 2-element number array\")?;");
+    w.line("if arr.len() != 2 { return Err(\"filter leaf: between value must be a 2-element number array\"); }");
+    w.line("for item in arr {");
+    w.indent();
+    w.line("if !item.is_number() { return Err(\"filter leaf: between value items must be numbers\"); }");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    // array_contains — single string OR number
+    w.line("\"array_contains\" => {");
+    w.indent();
+    w.line("if value.is_string() {");
+    w.indent();
+    w.line("if value.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: array_contains value must be a non-empty string or number\"); }");
+    w.dedent();
+    w.line("} else if !value.is_number() {");
+    w.indent();
+    w.line("return Err(\"filter leaf: array_contains value must be a non-empty string or number\");");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    // array_contains_any / array_contains_all — array of (non-empty string OR number)
+    w.line("\"array_contains_any\" | \"array_contains_all\" => {");
+    w.indent();
+    w.line("let arr = value.as_array().ok_or(\"filter leaf: array_contains_* value must be a non-empty array\")?;");
+    w.line("if arr.is_empty() { return Err(\"filter leaf: array_contains_* value must be a non-empty array\"); }");
+    w.line("for item in arr {");
+    w.indent();
+    w.line("if item.is_string() {");
+    w.indent();
+    w.line("if item.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: array items must be non-empty strings or numbers\"); }");
+    w.dedent();
+    w.line("} else if !item.is_number() {");
+    w.indent();
+    w.line("return Err(\"filter leaf: array items must be non-empty strings or numbers\");");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    // array_size_eq — non-negative integer
+    w.line("\"array_size_eq\" => {");
+    w.indent();
+    w.line("let n = value.as_i64().ok_or(\"filter leaf: array_size_eq value must be a non-negative integer\")?;");
+    w.line("if n < 0 { return Err(\"filter leaf: array_size_eq value must be a non-negative integer\"); }");
+    w.dedent();
+    w.line("},");
+    w.line("_ => return Err(\"filter leaf: unknown op\"),");
+    w.dedent();
+    w.line("}");
+    w.line("Ok(())");
+    w.dedent();
+    w.line("}");
 }
 
 /// Convert PascalCase / camelCase to snake_case for fn ident generation.
