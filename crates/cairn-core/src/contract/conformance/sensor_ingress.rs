@@ -20,7 +20,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     vec![
         // Tier 1
         tier1_manifest_matches_host(registry, name, CONTRACT_VERSION),
-        tier1_register_round_trip(registry, name, &plugin),
+        tier1_arc_pointer_stable(registry, name, &plugin),
         tier1_capability_self_consistency_floor(&*plugin),
         // Tier 2 (stub)
         CaseOutcome {
@@ -33,14 +33,14 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     ]
 }
 
-fn tier1_register_round_trip(
+fn tier1_arc_pointer_stable(
     registry: &PluginRegistry,
     name: &PluginName,
     plugin: &std::sync::Arc<dyn crate::contract::sensor_ingress::SensorIngress>,
 ) -> CaseOutcome {
     let Some(resolved) = registry.sensor_ingress_plugin(name) else {
         return CaseOutcome {
-            id: "register_round_trip",
+            id: "arc_pointer_stable",
             tier: Tier::One,
             status: CaseStatus::Failed {
                 message: "lookup returned None for registered plugin".to_string(),
@@ -55,7 +55,7 @@ fn tier1_register_round_trip(
         }
     };
     CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status,
     }
@@ -66,6 +66,9 @@ fn tier1_capability_self_consistency_floor(
 ) -> CaseOutcome {
     // Floor: capabilities() must return without panic, name() non-empty,
     // supported_contract_versions() must accept the host CONTRACT_VERSION.
+    // The panic-vs-typed-error half of the spec §4.3 floor (verb methods
+    // returning `CapabilityUnavailable` for un-advertised capabilities) is
+    // deferred to per-impl PRs (#46 et al) where verb methods land.
     let caps = plugin.capabilities();
     if plugin.name().is_empty() {
         return CaseOutcome {

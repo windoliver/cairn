@@ -705,11 +705,11 @@ fn case_outcome_constructs_pending() {
 #[test]
 fn case_outcome_constructs_ok() {
     let outcome = CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status: CaseStatus::Ok,
     };
-    assert_eq!(outcome.id, "register_round_trip");
+    assert_eq!(outcome.id, "arc_pointer_stable");
     assert_eq!(outcome.tier, Tier::One);
     assert!(matches!(outcome.status, CaseStatus::Ok));
 }
@@ -1126,7 +1126,7 @@ fn tier1_cases_pass_for_well_formed_memory_store() {
 
     let ids: Vec<_> = tier1.iter().map(|o| o.id).collect();
     assert!(ids.contains(&"manifest_matches_host"));
-    assert!(ids.contains(&"register_round_trip"));
+    assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
 }
 ```
@@ -1168,7 +1168,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
 
     // Tier 1
     out.push(tier1_manifest_matches_host(registry, name, CONTRACT_VERSION));
-    out.push(tier1_register_round_trip(registry, name, &plugin));
+    out.push(tier1_arc_pointer_stable(registry, name, &plugin));
     out.push(tier1_capability_self_consistency_floor(&*plugin));
 
     // Tier 2 (stubs)
@@ -1197,7 +1197,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     out
 }
 
-fn tier1_register_round_trip(
+fn tier1_arc_pointer_stable(
     registry: &PluginRegistry,
     name: &PluginName,
     plugin: &std::sync::Arc<dyn crate::contract::memory_store::MemoryStore>,
@@ -1206,7 +1206,7 @@ fn tier1_register_round_trip(
         Some(p) => p,
         None => {
             return CaseOutcome {
-                id: "register_round_trip",
+                id: "arc_pointer_stable",
                 tier: Tier::One,
                 status: CaseStatus::Failed {
                     message: "lookup returned None for registered plugin".to_string(),
@@ -1222,7 +1222,7 @@ fn tier1_register_round_trip(
         }
     };
     CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status,
     }
@@ -1287,7 +1287,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
 
     let mut out = Vec::with_capacity(4);
     out.push(tier1_manifest_matches_host(registry, name, CONTRACT_VERSION));
-    out.push(tier1_register_round_trip(registry, name, &plugin));
+    out.push(tier1_arc_pointer_stable(registry, name, &plugin));
     out.push(tier1_capability_self_consistency_floor(&*plugin));
     out.push(CaseOutcome {
         id: "initialize_and_list_tools",
@@ -1299,7 +1299,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     out
 }
 
-fn tier1_register_round_trip(
+fn tier1_arc_pointer_stable(
     registry: &PluginRegistry,
     name: &PluginName,
     plugin: &std::sync::Arc<dyn crate::contract::mcp_server::MCPServer>,
@@ -1308,7 +1308,7 @@ fn tier1_register_round_trip(
         Some(p) => p,
         None => {
             return CaseOutcome {
-                id: "register_round_trip",
+                id: "arc_pointer_stable",
                 tier: Tier::One,
                 status: CaseStatus::Failed {
                     message: "lookup returned None for registered plugin".to_string(),
@@ -1324,7 +1324,7 @@ fn tier1_register_round_trip(
         }
     };
     CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status,
     }
@@ -1385,7 +1385,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
 
     let mut out = Vec::with_capacity(4);
     out.push(tier1_manifest_matches_host(registry, name, CONTRACT_VERSION));
-    out.push(tier1_register_round_trip(registry, name, &plugin));
+    out.push(tier1_arc_pointer_stable(registry, name, &plugin));
     out.push(tier1_capability_self_consistency_floor(&*plugin));
     out.push(CaseOutcome {
         id: "emits_envelope_when_poked",
@@ -1397,7 +1397,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     out
 }
 
-fn tier1_register_round_trip(
+fn tier1_arc_pointer_stable(
     registry: &PluginRegistry,
     name: &PluginName,
     plugin: &std::sync::Arc<dyn crate::contract::sensor_ingress::SensorIngress>,
@@ -1406,7 +1406,7 @@ fn tier1_register_round_trip(
         Some(p) => p,
         None => {
             return CaseOutcome {
-                id: "register_round_trip",
+                id: "arc_pointer_stable",
                 tier: Tier::One,
                 status: CaseStatus::Failed {
                     message: "lookup returned None for registered plugin".to_string(),
@@ -1422,7 +1422,7 @@ fn tier1_register_round_trip(
         }
     };
     CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status,
     }
@@ -1483,7 +1483,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
 
     let mut out = Vec::with_capacity(4);
     out.push(tier1_manifest_matches_host(registry, name, CONTRACT_VERSION));
-    out.push(tier1_register_round_trip(registry, name, &plugin));
+    out.push(tier1_arc_pointer_stable(registry, name, &plugin));
     out.push(tier1_capability_self_consistency_floor(&*plugin));
     out.push(CaseOutcome {
         id: "enqueue_then_complete",
@@ -1495,7 +1495,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     out
 }
 
-fn tier1_register_round_trip(
+fn tier1_arc_pointer_stable(
     registry: &PluginRegistry,
     name: &PluginName,
     plugin: &std::sync::Arc<dyn crate::contract::workflow_orchestrator::WorkflowOrchestrator>,
@@ -1504,7 +1504,7 @@ fn tier1_register_round_trip(
         Some(p) => p,
         None => {
             return CaseOutcome {
-                id: "register_round_trip",
+                id: "arc_pointer_stable",
                 tier: Tier::One,
                 status: CaseStatus::Failed {
                     message: "lookup returned None for registered plugin".to_string(),
@@ -1520,7 +1520,7 @@ fn tier1_register_round_trip(
         }
     };
     CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status,
     }
@@ -1580,7 +1580,7 @@ Each of the four bundled-plugin contracts (MemoryStore, MCPServer,
 SensorIngress, WorkflowOrchestrator) gets:
 
   - tier-1 manifest_matches_host    (delegates to verify_compatible_with)
-  - tier-1 register_round_trip      (Arc::ptr_eq across two lookups)
+  - tier-1 arc_pointer_stable      (Arc::ptr_eq across two lookups)
   - tier-1 capability_self_consistency_floor (name non-empty, version
                                               accepts host, all cap
                                               fields readable)

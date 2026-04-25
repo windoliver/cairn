@@ -226,7 +226,7 @@ generic helpers); tier-2 cases are contract-specific function stubs.
 
 | Contract | Tier-1 (always run) | Tier-2 (`Pending` until impl) |
 |---|---|---|
-| `MemoryStore` | `manifest_matches_host`, `register_round_trip`, `capability_self_consistency_floor` | `put_get_roundtrip`, `fts_query_returns_doc`, `vector_search_when_advertised` |
+| `MemoryStore` | `manifest_matches_host`, `arc_pointer_stable`, `capability_self_consistency_floor` | `put_get_roundtrip`, `fts_query_returns_doc`, `vector_search_when_advertised` |
 | `WorkflowOrchestrator` | (same three) | `enqueue_then_complete` |
 | `SensorIngress` | (same three) | `emits_envelope_when_poked` |
 | `MCPServer` | (same three) | `initialize_and_list_tools` |
@@ -236,9 +236,10 @@ Tier-1 specifics:
 - `manifest_matches_host` — call `PluginManifest::verify_compatible_with`
   with the plugin's runtime `name()`, contract kind, and host
   `CONTRACT_VERSION`.
-- `register_round_trip` — instantiate a fresh `PluginRegistry`, call the
-  plugin's `register()`, look up by name, assert `Arc::ptr_eq` against
-  the original.
+- `arc_pointer_stable` — after registration, look up the plugin by name
+  twice and assert `Arc::ptr_eq` between the two results. Verifies the
+  registry returns a stable pointer to the same plugin instance across
+  lookups (the underlying `HashMap::get(name).cloned()` invariant).
 - `capability_self_consistency_floor` — every public field of the
   capability struct is readable; the trait's runtime methods do not panic
   when called for a capability the plugin does **not** advertise (they
@@ -318,7 +319,7 @@ Default output (one block per plugin):
 ```
 cairn-store-sqlite (MemoryStore)
   tier-1 manifest_matches_host                    ok
-  tier-1 register_round_trip                      ok
+  tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
   tier-2 put_get_roundtrip                        pending (real impl pending)
   tier-2 fts_query_returns_doc                    pending (real impl pending)
