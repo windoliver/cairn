@@ -150,11 +150,18 @@ fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static st
             let s = value.as_str().ok_or("filter leaf: value must be a non-empty string")?;
             if s.is_empty() { return Err("filter leaf: value must be a non-empty string"); }
         },
-        "eq" | "neq" => {
+        "eq" => {
             if value.is_string() {
                 if value.as_str().unwrap_or("").is_empty() { return Err("filter leaf: value must be a non-empty string"); }
             } else if !(value.is_number() || value.is_boolean()) {
-                return Err("filter leaf: eq/neq value must be string, number, or boolean");
+                return Err("filter leaf: eq value must be string, number, or boolean");
+            }
+        },
+        "neq" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() { return Err("filter leaf: value must be a non-empty string"); }
+            } else if !value.is_number() {
+                return Err("filter leaf: neq value must be string or number — booleans only support eq");
             }
         },
         "lt" | "lte" | "gt" | "gte" => {
@@ -163,12 +170,18 @@ fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static st
         "in" | "nin" => {
             let arr = value.as_array().ok_or("filter leaf: value must be a non-empty array")?;
             if arr.is_empty() { return Err("filter leaf: value must be a non-empty array"); }
-            for item in arr {
-                if item.is_string() {
-                    if item.as_str().unwrap_or("").is_empty() { return Err("filter leaf: array items must be non-empty strings"); }
-                } else if !item.is_number() {
-                    return Err("filter leaf: array items must be strings or numbers");
+            let first = &arr[0];
+            if first.is_string() {
+                for item in arr {
+                    let s = item.as_str().ok_or("filter leaf: in/nin array must be all strings or all numbers")?;
+                    if s.is_empty() { return Err("filter leaf: array items must be non-empty strings"); }
                 }
+            } else if first.is_number() {
+                for item in arr {
+                    if !item.is_number() { return Err("filter leaf: in/nin array must be all strings or all numbers"); }
+                }
+            } else {
+                return Err("filter leaf: in/nin array items must be strings or numbers");
             }
         },
         "between" => {

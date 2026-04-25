@@ -1870,6 +1870,66 @@ fn retrieve_scope_rejects_overlong_cursor_via_newtype() {
     );
 }
 
+// ── F4 (round 8): filter_leaf validator matches per-shape oneOf branches ────
+
+#[test]
+fn filter_leaf_rejects_boolean_neq() {
+    // filter_leaf_boolean only permits op=eq.
+    let leaf = serde_json::json!({"field": "x", "op": "neq", "value": true});
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("boolean") || err.to_string().contains("eq"),
+        "expected boolean-neq rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_leaf_accepts_boolean_eq() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": true});
+    let parsed: SearchArgsFilters =
+        serde_json::from_value(serde_json::json!({"and": [leaf]})).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::And { .. }));
+}
+
+#[test]
+fn filter_leaf_rejects_in_with_mixed_types() {
+    let leaf = serde_json::json!({"field": "x", "op": "in", "value": ["a", 1]});
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("all strings or all numbers"),
+        "expected mixed-types rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_leaf_rejects_nin_with_mixed_types() {
+    let leaf = serde_json::json!({"field": "x", "op": "nin", "value": [1, "a"]});
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("all strings or all numbers"),
+        "expected mixed-types rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_leaf_accepts_in_all_strings() {
+    let leaf = serde_json::json!({"field": "x", "op": "in", "value": ["a", "b"]});
+    let parsed: SearchArgsFilters =
+        serde_json::from_value(serde_json::json!({"and": [leaf]})).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::And { .. }));
+}
+
+#[test]
+fn filter_leaf_accepts_in_all_numbers() {
+    let leaf = serde_json::json!({"field": "x", "op": "in", "value": [1, 2]});
+    let parsed: SearchArgsFilters =
+        serde_json::from_value(serde_json::json!({"and": [leaf]})).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::And { .. }));
+}
+
 // ── F3 (round 8): Filter operator nodes deny extra keys ─────────────────────
 
 #[test]

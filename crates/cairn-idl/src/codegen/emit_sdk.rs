@@ -2797,10 +2797,10 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.line("if s.is_empty() { return Err(\"filter leaf: value must be a non-empty string\"); }");
     w.dedent();
     w.line("},");
-    // eq / neq accept string OR number OR boolean (across filter_leaf_string,
-    // filter_leaf_number, filter_leaf_boolean). The closed shape is per-leaf
-    // typed, but at the structural layer we accept any of those scalar shapes.
-    w.line("\"eq\" | \"neq\" => {");
+    // eq accepts string / number / boolean (across filter_leaf_string,
+    // filter_leaf_number, filter_leaf_boolean); neq accepts only string /
+    // number — `filter_leaf_boolean` only permits `op: eq` per the IDL.
+    w.line("\"eq\" => {");
     w.indent();
     w.line("if value.is_string() {");
     w.indent();
@@ -2808,7 +2808,20 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.dedent();
     w.line("} else if !(value.is_number() || value.is_boolean()) {");
     w.indent();
-    w.line("return Err(\"filter leaf: eq/neq value must be string, number, or boolean\");");
+    w.line("return Err(\"filter leaf: eq value must be string, number, or boolean\");");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    w.line("\"neq\" => {");
+    w.indent();
+    w.line("if value.is_string() {");
+    w.indent();
+    w.line("if value.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: value must be a non-empty string\"); }");
+    w.dedent();
+    w.line("} else if !value.is_number() {");
+    w.indent();
+    w.line("return Err(\"filter leaf: neq value must be string or number — booleans only support eq\");");
     w.dedent();
     w.line("}");
     w.dedent();
@@ -2819,22 +2832,34 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.line("if !value.is_number() { return Err(\"filter leaf: value must be a number\"); }");
     w.dedent();
     w.line("},");
-    // set membership — array of strings (non-empty) OR numbers
+    // set membership — non-empty homogeneous array (all strings OR all
+    // numbers). `filter_leaf_string_set` and `filter_leaf_number_set` are
+    // separate IDL branches; mixed arrays don't satisfy either.
     w.line("\"in\" | \"nin\" => {");
     w.indent();
     w.line("let arr = value.as_array().ok_or(\"filter leaf: value must be a non-empty array\")?;");
     w.line("if arr.is_empty() { return Err(\"filter leaf: value must be a non-empty array\"); }");
+    w.line("let first = &arr[0];");
+    w.line("if first.is_string() {");
+    w.indent();
     w.line("for item in arr {");
     w.indent();
-    w.line("if item.is_string() {");
-    w.indent();
-    w.line("if item.as_str().unwrap_or(\"\").is_empty() { return Err(\"filter leaf: array items must be non-empty strings\"); }");
-    w.dedent();
-    w.line("} else if !item.is_number() {");
-    w.indent();
-    w.line("return Err(\"filter leaf: array items must be strings or numbers\");");
+    w.line("let s = item.as_str().ok_or(\"filter leaf: in/nin array must be all strings or all numbers\")?;");
+    w.line("if s.is_empty() { return Err(\"filter leaf: array items must be non-empty strings\"); }");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("} else if first.is_number() {");
+    w.indent();
+    w.line("for item in arr {");
+    w.indent();
+    w.line("if !item.is_number() { return Err(\"filter leaf: in/nin array must be all strings or all numbers\"); }");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("} else {");
+    w.indent();
+    w.line("return Err(\"filter leaf: in/nin array items must be strings or numbers\");");
     w.dedent();
     w.line("}");
     w.dedent();
