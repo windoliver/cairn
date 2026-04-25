@@ -72,16 +72,16 @@ struct PluginManifestWire {
 ///
 /// Produced by [`PluginManifest::parse_toml`] from a TOML source string.
 /// Hosts use this to gate activation before calling `register`.
+///
+/// Fields are private to ensure that every `PluginManifest` value has passed
+/// `parse_toml`'s semantic validation (range ordering, feature-key grammar,
+/// name pattern). Use the accessor methods to read individual fields.
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
-    /// Stable plugin identifier, validated by [`PluginName`] rules.
-    pub name: PluginName,
-    /// Which contract this plugin implements.
-    pub contract: ContractKind,
-    /// Half-open version range `[min, max_exclusive)` this plugin supports.
-    pub contract_version_range: VersionRange,
-    /// Boolean feature flags this plugin advertises (may be empty).
-    pub features: BTreeMap<String, bool>,
+    name: PluginName,
+    contract: ContractKind,
+    contract_version_range: VersionRange,
+    features: BTreeMap<String, bool>,
 }
 
 /// Returns `true` when `range.min < range.max_exclusive` (strictly ordered).
@@ -109,6 +109,31 @@ fn is_valid_feature_key(key: &str) -> bool {
 }
 
 impl PluginManifest {
+    /// Stable plugin identifier as parsed from the manifest.
+    #[must_use]
+    pub fn name(&self) -> &PluginName {
+        &self.name
+    }
+
+    /// Contract kind this plugin implements.
+    #[must_use]
+    pub fn contract(&self) -> ContractKind {
+        self.contract
+    }
+
+    /// Half-open version range `[min, max_exclusive)` of host `CONTRACT_VERSION`
+    /// values this plugin accepts.
+    #[must_use]
+    pub fn contract_version_range(&self) -> VersionRange {
+        self.contract_version_range
+    }
+
+    /// Free-form boolean feature flags this plugin advertises (may be empty).
+    #[must_use]
+    pub fn features(&self) -> &BTreeMap<String, bool> {
+        &self.features
+    }
+
     /// Parse a manifest from its TOML source.
     ///
     /// # Errors
@@ -508,5 +533,18 @@ graph_edges = false
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn accessors_expose_parsed_values() {
+        let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        assert_eq!(m.name().as_str(), "cairn-store-sqlite");
+        assert_eq!(m.contract(), ContractKind::MemoryStore);
+        assert_eq!(
+            m.contract_version_range(),
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0),)
+        );
+        assert_eq!(m.features().get("fts"), Some(&true));
+        assert_eq!(m.features().len(), 3);
     }
 }
