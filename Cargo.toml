@@ -19,6 +19,11 @@ thiserror = "2"
 tokio = "1"
 tracing = "0.1"
 anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+tempfile = "3"
+rstest = "0.23"
+insta = { version = "1", features = ["json", "yaml"] }
+proptest = "1"
 
 cairn-core = { path = "crates/cairn-core" }
 cairn-mcp = { path = "crates/cairn-mcp" }
