@@ -49,9 +49,15 @@ jobs:
         run: cargo doc --workspace --no-deps --document-private-items --locked
 
   links:
-    # Cron-only by default; PRs that touch markdown can opt in via paths.
+    # Advisory at v0.1: external hosts (lib.rs, medium, GitHub blob redirects)
+    # commonly return 403 to bot user-agents even when the URL is valid, and
+    # transient flake from third-party sites should not block merges. Run on
+    # cron + manual + PR (non-fork), but `continue-on-error: true` so the
+    # check reports as success even on third-party flake; reviewers can still
+    # eyeball the run.
     name: docs / markdown links (lychee)
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: |
       github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
@@ -62,10 +68,13 @@ jobs:
       - name: Lychee
         uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
         with:
+          # Accept 403 because lib.rs / medium / similar hosts block bot UAs
+          # even when the URL is valid; 429 is rate-limiting; 999 is
+          # LinkedIn's anti-bot status. We still flag 4xx-other / 5xx / dead.
           args: >-
             --no-progress
             --max-concurrency 4
-            --accept '200,206,429'
+            --accept '200,206,403,429,999'
             --exclude-path target
             --exclude-path '.git'
             './**/*.md'

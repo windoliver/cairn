@@ -38,7 +38,7 @@ must be updated in the same PR.
 | `docs / cargo doc` (`docs.yml`) | ✅ required | Broken intra-doc links fail. |
 | `deny / licenses + bans + sources` (`supply-chain.yml`) | ✅ required | Runs on every PR — workflow-level path filtering would leave the required check Pending on non-manifest PRs and either deadlock merges or silently miss manifest-only changes. Cache makes this cheap. |
 | `audit / RUSTSEC advisories` (`supply-chain.yml`) | ✅ required | Same reasoning as `deny`. Daily cron catches advisories disclosed after merge. |
-| `machete / unused dependencies` (`supply-chain.yml`) | 🟡 advisory at v0.1 | Will be promoted to required once the workspace has substantive code. False-positives on feature-gated deps are tracked at [bnjbvr/cargo-machete](https://github.com/bnjbvr/cargo-machete). |
+| `machete / unused dependencies` (`supply-chain.yml`) | ✅ required | Forward-declared scaffold deps are tracked per-crate via `[package.metadata.cargo-machete] ignored = [...]`; drop entries as their first call site lands. |
 | `docs / markdown links (lychee)` (`docs.yml`) | 🟡 advisory | Cron-only by default; flaky external hosts make hard-fail too noisy at v0.1. |
 | `freeze / active path freezes` (`governance.yml`) | ✅ required | See `.github/freezes/` and `scripts/check-freeze.sh`. |
 | `publish / cargo publish --dry-run` (`release-dry-run.yml`) | ❌ tag-only | Runs on `v*` tags + manual; not part of PR gating. |
@@ -176,6 +176,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    docs / cargo doc
    deny / licenses + bans + sources
    audit / RUSTSEC advisories
+   machete / unused dependencies
    freeze / active path freezes
    ```
 5. **Require branches to be up to date before merging** ✅
