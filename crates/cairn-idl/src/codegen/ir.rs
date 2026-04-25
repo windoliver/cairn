@@ -13,6 +13,12 @@ pub struct Document {
     pub contract: String,
     pub capabilities: Vec<String>,
     pub error_codes: Vec<ErrorVariant>,
+    /// Error codes legal on `status=rejected` responses, per
+    /// `envelope/response.json#x-cairn-error-code-families.rejected`.
+    pub rejected_error_codes: Vec<String>,
+    /// Error codes legal on `status=aborted` responses, per
+    /// `envelope/response.json#x-cairn-error-code-families.aborted`.
+    pub aborted_error_codes: Vec<String>,
     pub common: BTreeMap<TypeName, RustType>,
     pub envelope: BTreeMap<TypeName, RustType>,
     pub verbs: Vec<VerbDef>,
@@ -906,6 +912,9 @@ pub fn build(raw: &RawDocument) -> Result<Document, CodegenError> {
     // Errors → flat list of (code, data-typename) pairs.
     let error_codes = build_error_codes(&raw.errors)?;
 
+    // Per-status code families lifted from response.json.
+    let (rejected_error_codes, aborted_error_codes) = build_error_code_families(&raw.envelope)?;
+
     // Common types — lower every entry under common/*.json#/$defs/*, plus the
     // capabilities and extensions registries (their types are addressable from
     // the same `crate::generated::common::*` module).
@@ -959,11 +968,53 @@ pub fn build(raw: &RawDocument) -> Result<Document, CodegenError> {
         contract,
         capabilities,
         error_codes,
+        rejected_error_codes,
+        aborted_error_codes,
         common,
         envelope,
         verbs,
         preludes,
     })
+}
+
+/// Lift `x-cairn-error-code-families.{rejected,aborted}` arrays from
+/// `envelope/response.json`. Returns `(rejected, aborted)` in IDL declaration
+/// order so codegen output is stable across builds.
+fn build_error_code_families(
+    envelope: &BTreeMap<String, RawFile>,
+) -> Result<(Vec<String>, Vec<String>), CodegenError> {
+    let response = envelope.get("response").ok_or_else(|| {
+        CodegenError::Ir("envelope/response.json missing — required for error-code families".into())
+    })?;
+    let families = response
+        .value
+        .get("x-cairn-error-code-families")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            CodegenError::Ir(
+                "envelope/response.json missing x-cairn-error-code-families".into(),
+            )
+        })?;
+    let collect = |key: &str| -> Result<Vec<String>, CodegenError> {
+        families
+            .get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CodegenError::Ir(format!(
+                    "x-cairn-error-code-families.{key} must be an array"
+                ))
+            })?
+            .iter()
+            .map(|v| {
+                v.as_str().map(String::from).ok_or_else(|| {
+                    CodegenError::Ir(format!(
+                        "x-cairn-error-code-families.{key}: items must be strings"
+                    ))
+                })
+            })
+            .collect()
+    };
+    Ok((collect("rejected")?, collect("aborted")?))
 }
 
 /// Ingest type definitions from a single IDL file into `out`.

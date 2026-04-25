@@ -246,6 +246,21 @@ impl<'de> ::serde::Deserialize<'de> for Response {
         if !matches!(raw.verb, ResponseVerb::Unknown) && error_code == Some("UnknownVerb") {
             return Err(::serde::de::Error::custom("error.code=UnknownVerb is paired with verb=unknown only"));
         }
+        if let Some(code) = error_code {
+            match raw.status {
+                ResponseStatus::Rejected => {
+                    if !matches!(code, "InvalidArgs" | "InvalidFilter" | "CapabilityUnavailable" | "UnknownVerb" | "ExpiredIntent" | "ReplayDetected" | "OutOfOrderSequence" | "RevokedKey" | "MissingSignature" | "Unauthorized") {
+                        return Err(::serde::de::Error::custom(format!("status=rejected: error.code={code:?} not in rejected family")));
+                    }
+                },
+                ResponseStatus::Aborted => {
+                    if !matches!(code, "NotFound" | "ConflictVersion" | "QuarantineRequired" | "PluginSuspended" | "Internal") {
+                        return Err(::serde::de::Error::custom(format!("status=aborted: error.code={code:?} not in aborted family")));
+                    }
+                },
+                ResponseStatus::Committed => {},
+            }
+        }
         if let Some(err) = raw.error.as_ref() {
             validate_error_envelope(err).map_err(::serde::de::Error::custom)?;
         }

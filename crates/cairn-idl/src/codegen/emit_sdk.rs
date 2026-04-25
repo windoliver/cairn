@@ -1028,6 +1028,54 @@ fn write_response_envelope(
     );
     w.dedent();
     w.line("}");
+    // Bind the per-status code family from response.json. A status=rejected
+    // response carrying an aborted-family code (or vice versa) is a real wire
+    // bug — downstream callers branch on family/status, not just code.
+    // Validate against the closed lists lifted from
+    // `envelope/response.json#x-cairn-error-code-families`.
+    w.line("if let Some(code) = error_code {");
+    w.indent();
+    w.line("match raw.status {");
+    w.indent();
+    let rejected_alts = doc
+        .rejected_error_codes
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    w.line("ResponseStatus::Rejected => {");
+    w.indent();
+    w.line(&format!("if !matches!(code, {rejected_alts}) {{"));
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(format!(\"status=rejected: error.code={code:?} not in rejected family\")));",
+    );
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    let aborted_alts = doc
+        .aborted_error_codes
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    w.line("ResponseStatus::Aborted => {");
+    w.indent();
+    w.line(&format!("if !matches!(code, {aborted_alts}) {{"));
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(format!(\"status=aborted: error.code={code:?} not in aborted family\")));",
+    );
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    w.line("ResponseStatus::Committed => {},");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
     // Generic error envelope shape per errors/error.json (until the typed
     // Error envelope ships in #62). For every present error we enforce:
     //   * `code` is one of the closed enum (rejecting typo'd / synthetic codes

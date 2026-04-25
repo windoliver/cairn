@@ -1588,10 +1588,11 @@ fn filter_rejects_in_with_empty_array() {
 // ── F3 (round 7): Response error envelope shape ──────────────────────────────
 
 #[test]
-fn response_rejected_with_notfound_full_data_round_trips() {
+fn response_aborted_with_notfound_full_data_round_trips() {
+    // NotFound is in the aborted family per response.json#x-cairn-error-code-families.
     let mut m = response_base();
     m.insert("verb".into(), serde_json::json!("retrieve"));
-    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert("status".into(), serde_json::json!("aborted"));
     m.insert(
         "error".into(),
         serde_json::json!({"code": "NotFound", "message": "missing", "data": {"target": "record:01"}}),
@@ -1601,10 +1602,10 @@ fn response_rejected_with_notfound_full_data_round_trips() {
 }
 
 #[test]
-fn response_rejected_notfound_without_message_is_rejected() {
+fn response_aborted_notfound_without_message_is_rejected() {
     let mut m = response_base();
     m.insert("verb".into(), serde_json::json!("retrieve"));
-    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert("status".into(), serde_json::json!("aborted"));
     m.insert(
         "error".into(),
         serde_json::json!({"code": "NotFound", "data": {"target": "record:01"}}),
@@ -1864,4 +1865,81 @@ fn retrieve_scope_rejects_overlong_cursor_via_newtype() {
         err.to_string().contains("Cursor") || err.to_string().contains("cursor"),
         "expected cursor cap rejection, got: {err}"
     );
+}
+
+// ── F2 (round 8): Response status bound to error-code family ─────────────────
+
+#[test]
+fn response_rejected_with_aborted_family_code_is_rejected() {
+    // NotFound is in the aborted family — illegal on status=rejected.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "NotFound", "message": "x", "data": {"target": "t"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rejected") && msg.contains("rejected family"),
+        "expected rejected-family-mismatch error, got: {err}"
+    );
+}
+
+#[test]
+fn response_aborted_with_rejected_family_code_is_rejected() {
+    // UnknownVerb is in the rejected family — illegal on status=aborted. Use a
+    // non-unknown verb so the bidirectional UnknownVerb⟺verb=unknown rule fires
+    // first; that gates on verb pairing, not on family. To exercise the family
+    // check use a different rejected-family code (e.g. ExpiredIntent).
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "ExpiredIntent", "message": "x", "data": {
+            "issued_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T00:00:00Z",
+            "now": "2026-01-01T00:00:00Z",
+        }}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("aborted") && msg.contains("aborted family"),
+        "expected aborted-family-mismatch error, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_with_rejected_family_code_round_trips() {
+    // ExpiredIntent is in the rejected family — accepted on status=rejected.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "ExpiredIntent", "message": "x", "data": {
+            "issued_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T00:00:00Z",
+            "now": "2026-01-01T00:00:00Z",
+        }}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+
+#[test]
+fn response_aborted_with_aborted_family_code_round_trips() {
+    // PluginSuspended is in the aborted family — accepted on status=aborted.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "PluginSuspended", "message": "x", "data": {"plugin_id": "p1"}}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
 }
