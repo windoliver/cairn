@@ -131,13 +131,6 @@ pub fn run_conformance_for_plugin(
 /// and the host's `CONTRACT_VERSION` for that contract. The host version
 /// is supplied by callers (per-contract `run` functions) so this helper
 /// stays generic over contract kind.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by per-contract `run` functions added in Task 4"
-    )
-)]
 pub(super) fn tier1_manifest_matches_host(
     registry: &PluginRegistry,
     name: &PluginName,
