@@ -12,8 +12,13 @@ fn case_outcome_constructs_pending() {
         },
     };
     assert_eq!(outcome.id, "put_get_roundtrip");
-    matches!(outcome.tier, Tier::Two);
-    matches!(outcome.status, CaseStatus::Pending { .. });
+    assert_eq!(outcome.tier, Tier::Two);
+    assert!(matches!(
+        outcome.status,
+        CaseStatus::Pending {
+            reason: "real impl pending"
+        }
+    ));
 }
 
 #[test]
@@ -23,8 +28,9 @@ fn case_outcome_constructs_ok() {
         tier: Tier::One,
         status: CaseStatus::Ok,
     };
-    matches!(outcome.tier, Tier::One);
-    matches!(outcome.status, CaseStatus::Ok);
+    assert_eq!(outcome.id, "register_round_trip");
+    assert_eq!(outcome.tier, Tier::One);
+    assert!(matches!(outcome.status, CaseStatus::Ok));
 }
 
 #[test]
@@ -36,5 +42,9 @@ fn case_outcome_constructs_failed() {
             message: "version mismatch".to_string(),
         },
     };
-    matches!(outcome.status, CaseStatus::Failed { .. });
+    assert_eq!(outcome.id, "manifest_matches_host");
+    assert_eq!(outcome.tier, Tier::One);
+    assert!(
+        matches!(&outcome.status, CaseStatus::Failed { message } if message == "version mismatch")
+    );
 }

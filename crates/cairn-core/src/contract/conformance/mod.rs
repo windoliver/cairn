@@ -131,9 +131,12 @@ pub fn run_conformance_for_plugin(
 /// and the host's `CONTRACT_VERSION` for that contract. The host version
 /// is supplied by callers (per-contract `run` functions) so this helper
 /// stays generic over contract kind.
-#[expect(
-    dead_code,
-    reason = "consumed by per-contract `run` functions added in Task 4"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "consumed by per-contract `run` functions added in Task 4"
+    )
 )]
 pub(super) fn tier1_manifest_matches_host(
     registry: &PluginRegistry,
@@ -204,5 +207,23 @@ mod tests {
         let reg = PluginRegistry::new();
         let name = PluginName::new("does-not-exist").expect("valid");
         assert!(run_conformance_for_plugin(&reg, &name).is_empty());
+    }
+
+    #[test]
+    fn tier1_manifest_matches_host_returns_failed_when_no_manifest() {
+        use crate::contract::version::ContractVersion;
+
+        let reg = PluginRegistry::new();
+        let name = PluginName::new("missing-plugin").expect("valid");
+        let outcome = tier1_manifest_matches_host(&reg, &name, ContractVersion::new(0, 1, 0));
+        assert_eq!(outcome.id, "manifest_matches_host");
+        assert_eq!(outcome.tier, Tier::One);
+        let CaseStatus::Failed { message } = &outcome.status else {
+            panic!("expected Failed status, got {:?}", outcome.status);
+        };
+        assert!(
+            message.contains("missing-plugin"),
+            "message should mention plugin name: {message}"
+        );
     }
 }
