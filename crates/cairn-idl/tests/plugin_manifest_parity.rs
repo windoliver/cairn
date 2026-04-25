@@ -62,7 +62,7 @@ fn contract_enum_lists_all_seven_kinds() {
         "AgentProvider",
         "FrontendAdapter",
         "LLMProvider",
-        "McpServer",
+        "MCPServer",
         "MemoryStore",
         "SensorIngress",
         "WorkflowOrchestrator",

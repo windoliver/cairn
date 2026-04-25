@@ -108,11 +108,20 @@ pub enum PluginError {
         /// The contract kind the manifest actually declares.
         actual: crate::contract::manifest::ContractKind,
     },
+
+    /// Plugin manifest declares a different name than the host expects.
+    #[error("plugin manifest declares name {manifest:?} but host expected {expected:?}")]
+    ManifestNameMismatch {
+        /// The name the host was trying to verify against.
+        expected: PluginName,
+        /// The name the manifest actually declares.
+        manifest: PluginName,
+    },
 }
 
 use crate::contract::{
     agent_provider::AgentProvider, frontend_adapter::FrontendAdapter, llm_provider::LLMProvider,
-    mcp_server::McpServer, memory_store::MemoryStore, sensor_ingress::SensorIngress,
+    mcp_server::MCPServer, memory_store::MemoryStore, sensor_ingress::SensorIngress,
     workflow_orchestrator::WorkflowOrchestrator,
 };
 
@@ -128,7 +137,7 @@ pub struct PluginRegistry {
     llm_providers: HashMap<PluginName, Arc<dyn LLMProvider>>,
     workflow_orchestrators: HashMap<PluginName, Arc<dyn WorkflowOrchestrator>>,
     sensor_ingress: HashMap<PluginName, Arc<dyn SensorIngress>>,
-    mcp_servers: HashMap<PluginName, Arc<dyn McpServer>>,
+    mcp_servers: HashMap<PluginName, Arc<dyn MCPServer>>,
     frontend_adapters: HashMap<PluginName, Arc<dyn FrontendAdapter>>,
     agent_providers: HashMap<PluginName, Arc<dyn AgentProvider>>,
 }
@@ -245,8 +254,8 @@ impl PluginRegistry {
     register_method!(
         register_mcp_server,
         mcp_servers,
-        crate::contract::mcp_server::McpServer,
-        "McpServer",
+        crate::contract::mcp_server::MCPServer,
+        "MCPServer",
         crate::contract::mcp_server::CONTRACT_VERSION
     );
     register_method!(
@@ -291,9 +300,9 @@ impl PluginRegistry {
         self.sensor_ingress.get(name).cloned()
     }
 
-    /// Look up a registered `McpServer` by plugin name.
+    /// Look up a registered `MCPServer` by plugin name.
     #[must_use]
-    pub fn mcp_server(&self, name: &PluginName) -> Option<Arc<dyn McpServer>> {
+    pub fn mcp_server(&self, name: &PluginName) -> Option<Arc<dyn MCPServer>> {
         self.mcp_servers.get(name).cloned()
     }
 

@@ -6,8 +6,8 @@
 
 use cairn_core::contract::{
     AgentProvider, AgentProviderCapabilities, ContractKind, ContractVersion, FrontendAdapter,
-    FrontendAdapterCapabilities, LLMProvider, LLMProviderCapabilities, McpServer,
-    McpServerCapabilities, MemoryStore, MemoryStoreCapabilities, PluginError, PluginManifest,
+    FrontendAdapterCapabilities, LLMProvider, LLMProviderCapabilities, MCPServer,
+    MCPServerCapabilities, MemoryStore, MemoryStoreCapabilities, PluginError, PluginManifest,
     PluginName, PluginRegistry, SensorIngress, SensorIngressCapabilities, VersionRange,
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
@@ -30,7 +30,7 @@ fn capability_structs_default() {
     let _: LLMProviderCapabilities = LLMProviderCapabilities::default();
     let _: WorkflowOrchestratorCapabilities = WorkflowOrchestratorCapabilities::default();
     let _: SensorIngressCapabilities = SensorIngressCapabilities::default();
-    let _: McpServerCapabilities = McpServerCapabilities::default();
+    let _: MCPServerCapabilities = MCPServerCapabilities::default();
     let _: FrontendAdapterCapabilities = FrontendAdapterCapabilities::default();
     let _: AgentProviderCapabilities = AgentProviderCapabilities::default();
 }
@@ -42,7 +42,7 @@ mod compile_only {
     pub fn accepts_dyn_llm_provider(_: &dyn LLMProvider) {}
     pub fn accepts_dyn_workflow_orchestrator(_: &dyn WorkflowOrchestrator) {}
     pub fn accepts_dyn_sensor_ingress(_: &dyn SensorIngress) {}
-    pub fn accepts_dyn_mcp_server(_: &dyn McpServer) {}
+    pub fn accepts_dyn_mcp_server(_: &dyn MCPServer) {}
     pub fn accepts_dyn_frontend_adapter(_: &dyn FrontendAdapter) {}
     pub fn accepts_dyn_agent_provider(_: &dyn AgentProvider) {}
 }
@@ -68,7 +68,7 @@ fn manifest_kinds_are_complete() {
         ContractKind::LLMProvider,
         ContractKind::WorkflowOrchestrator,
         ContractKind::SensorIngress,
-        ContractKind::McpServer,
+        ContractKind::MCPServer,
         ContractKind::FrontendAdapter,
         ContractKind::AgentProvider,
     ];

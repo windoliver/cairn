@@ -13,7 +13,7 @@
 //!   [`LLMProvider`] / [`LLMProviderCapabilities`],
 //!   [`WorkflowOrchestrator`] / [`WorkflowOrchestratorCapabilities`],
 //!   [`SensorIngress`] / [`SensorIngressCapabilities`],
-//!   [`McpServer`] / [`McpServerCapabilities`].
+//!   [`MCPServer`] / [`MCPServerCapabilities`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
@@ -39,7 +39,7 @@ pub use version::{ContractVersion, VersionRange};
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
-pub use mcp_server::{McpServer, McpServerCapabilities};
+pub use mcp_server::{MCPServer, MCPServerCapabilities};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 pub use workflow_orchestrator::{WorkflowOrchestrator, WorkflowOrchestratorCapabilities};

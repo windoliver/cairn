@@ -44,7 +44,7 @@ macro_rules! register_plugin {
     (SensorIngress, $impl:ty, $name:literal) => {
         $crate::__register_plugin_helper!(register_sensor_ingress, $impl, $name);
     };
-    (McpServer, $impl:ty, $name:literal) => {
+    (MCPServer, $impl:ty, $name:literal) => {
         $crate::__register_plugin_helper!(register_mcp_server, $impl, $name);
     };
     (FrontendAdapter, $impl:ty, $name:literal) => {

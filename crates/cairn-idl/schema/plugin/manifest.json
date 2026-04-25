@@ -20,7 +20,7 @@
         "LLMProvider",
         "WorkflowOrchestrator",
         "SensorIngress",
-        "McpServer",
+        "MCPServer",
         "FrontendAdapter",
         "AgentProvider"
       ]

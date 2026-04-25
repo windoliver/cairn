@@ -14,7 +14,7 @@ use crate::contract::version::{ContractVersion, VersionRange};
 /// Contract enum mirroring `cairn-idl/schema/plugin/manifest.json#contract`.
 ///
 /// `#[allow(clippy::upper_case_acronyms)]` — variant names match the trait
-/// names from §4.1 exactly (`LLMProvider`, `McpServer`, etc.).
+/// names from §4.1 exactly (`LLMProvider`, `MCPServer`, etc.).
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -27,8 +27,8 @@ pub enum ContractKind {
     WorkflowOrchestrator,
     /// Implements `SensorIngress` contract.
     SensorIngress,
-    /// Implements `McpServer` contract.
-    McpServer,
+    /// Implements `MCPServer` contract.
+    MCPServer,
     /// Implements `FrontendAdapter` contract.
     FrontendAdapter,
     /// Implements `AgentProvider` contract.
@@ -49,7 +49,7 @@ impl ContractKind {
             ContractKind::LLMProvider => "LLMProvider",
             ContractKind::WorkflowOrchestrator => "WorkflowOrchestrator",
             ContractKind::SensorIngress => "SensorIngress",
-            ContractKind::McpServer => "McpServer",
+            ContractKind::MCPServer => "MCPServer",
             ContractKind::FrontendAdapter => "FrontendAdapter",
             ContractKind::AgentProvider => "AgentProvider",
         }
@@ -148,31 +148,39 @@ impl PluginManifest {
         })
     }
 
-    /// Verify the manifest declares `expected` contract and that
-    /// `contract_version_range` accepts the supplied host `CONTRACT_VERSION`.
+    /// Verify the manifest declares `expected_name`, the `expected_kind` contract,
+    /// and that `contract_version_range` accepts the supplied host `host_version`.
     ///
     /// Hosts call this before invoking a plugin's `register(&mut PluginRegistry)`
-    /// to fail closed on both contract-kind and version mismatches — independent
+    /// to fail closed on name, contract-kind, and version mismatches — independent
     /// of the runtime check the registry itself performs.
     ///
     /// # Errors
-    /// - [`PluginError::ContractMismatch`] when `self.contract != expected`.
+    /// - [`PluginError::ManifestNameMismatch`] when `self.name != expected_name`.
+    /// - [`PluginError::ContractMismatch`] when `self.contract != expected_kind`.
     /// - [`PluginError::UnsupportedContractVersion`] when `host_version` is
     ///   outside `self.contract_version_range`.
     pub fn verify_compatible_with(
         &self,
-        expected: ContractKind,
+        expected_name: &PluginName,
+        expected_kind: ContractKind,
         host_version: ContractVersion,
     ) -> Result<(), PluginError> {
-        if self.contract != expected {
+        if &self.name != expected_name {
+            return Err(PluginError::ManifestNameMismatch {
+                expected: expected_name.clone(),
+                manifest: self.name.clone(),
+            });
+        }
+        if self.contract != expected_kind {
             return Err(PluginError::ContractMismatch {
-                expected,
+                expected: expected_kind,
                 actual: self.contract,
             });
         }
         if !self.contract_version_range.accepts(host_version) {
             return Err(PluginError::UnsupportedContractVersion {
-                contract: expected.as_static_str(),
+                contract: expected_kind.as_static_str(),
                 plugin: self.name.clone(),
                 plugin_range: self.contract_version_range,
                 host: host_version,
@@ -399,21 +407,35 @@ mod tests {
     #[test]
     fn verify_compatible_with_accepts_host_in_range() {
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        let expected = PluginName::new("cairn-store-sqlite").expect("valid");
         assert!(
-            m.verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 1, 0))
-                .is_ok()
+            m.verify_compatible_with(
+                &expected,
+                ContractKind::MemoryStore,
+                ContractVersion::new(0, 1, 0)
+            )
+            .is_ok()
         );
         assert!(
-            m.verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 1, 9))
-                .is_ok()
+            m.verify_compatible_with(
+                &expected,
+                ContractKind::MemoryStore,
+                ContractVersion::new(0, 1, 9)
+            )
+            .is_ok()
         );
     }
 
     #[test]
     fn verify_compatible_with_rejects_host_outside_range() {
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        let expected = PluginName::new("cairn-store-sqlite").expect("valid");
         let err = m
-            .verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 2, 0))
+            .verify_compatible_with(
+                &expected,
+                ContractKind::MemoryStore,
+                ContractVersion::new(0, 2, 0),
+            )
             .expect_err("host outside range must fail");
         match err {
             PluginError::UnsupportedContractVersion { contract, host, .. } => {
@@ -427,14 +449,39 @@ mod tests {
     #[test]
     fn verify_compatible_with_rejects_contract_mismatch() {
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        let expected = PluginName::new("cairn-store-sqlite").expect("valid");
         // Fixture is a MemoryStore manifest; verify against LLMProvider must fail.
         let err = m
-            .verify_compatible_with(ContractKind::LLMProvider, ContractVersion::new(0, 1, 0))
+            .verify_compatible_with(
+                &expected,
+                ContractKind::LLMProvider,
+                ContractVersion::new(0, 1, 0),
+            )
             .expect_err("contract kind mismatch must fail");
         match err {
             PluginError::ContractMismatch { expected, actual } => {
                 assert_eq!(expected, ContractKind::LLMProvider);
                 assert_eq!(actual, ContractKind::MemoryStore);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_compatible_with_rejects_name_mismatch() {
+        let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        let wrong = PluginName::new("acme-other-name").expect("valid");
+        let err = m
+            .verify_compatible_with(
+                &wrong,
+                ContractKind::MemoryStore,
+                ContractVersion::new(0, 1, 0),
+            )
+            .expect_err("manifest name mismatch must fail");
+        match err {
+            PluginError::ManifestNameMismatch { expected, manifest } => {
+                assert_eq!(expected.as_str(), "acme-other-name");
+                assert_eq!(manifest.as_str(), "cairn-store-sqlite");
             }
             other => panic!("wrong variant: {other:?}"),
         }
