@@ -1,6 +1,6 @@
 //! Wire-level checks for the generated MCP `ToolDecl` registry.
 //!
-//! Round-4 finding F5: ToolDecl carried only the verb-level `x-cairn-auth`,
+//! Round-4 finding F5: `ToolDecl` carried only the verb-level `x-cairn-auth`,
 //! so a caller could request `lint.write_report=true` (a write-producing
 //! mode whose IDL annotation requires `write_capability`) under the verb's
 //! `read_only` root auth. Field- / mode-level overrides now ship in
@@ -102,20 +102,20 @@ fn capabilities_for(name: &str) -> Vec<(&'static str, &'static str)> {
 #[test]
 fn forget_surfaces_capability_per_mode() {
     let mut got = capabilities_for("forget");
-    got.sort();
+    got.sort_unstable();
     let mut want = vec![
         ("mode=record", "cairn.mcp.v1.forget.record"),
         ("mode=session", "cairn.mcp.v1.forget.session"),
         ("mode=scope", "cairn.mcp.v1.forget.scope"),
     ];
-    want.sort();
+    want.sort_unstable();
     assert_eq!(got, want);
 }
 
 #[test]
 fn retrieve_surfaces_capability_per_target() {
     let mut got = capabilities_for("retrieve");
-    got.sort();
+    got.sort_unstable();
     let mut want = vec![
         ("target=record", "cairn.mcp.v1.retrieve.record"),
         ("target=session", "cairn.mcp.v1.retrieve.session"),
@@ -124,20 +124,20 @@ fn retrieve_surfaces_capability_per_target() {
         ("target=scope", "cairn.mcp.v1.retrieve.scope"),
         ("target=profile", "cairn.mcp.v1.retrieve.profile"),
     ];
-    want.sort();
+    want.sort_unstable();
     assert_eq!(got, want);
 }
 
 #[test]
 fn search_surfaces_capability_per_mode() {
     let mut got = capabilities_for("search");
-    got.sort();
+    got.sort_unstable();
     let mut want = vec![
         ("mode=keyword", "cairn.mcp.v1.search.keyword"),
         ("mode=semantic", "cairn.mcp.v1.search.semantic"),
         ("mode=hybrid", "cairn.mcp.v1.search.hybrid"),
     ];
-    want.sort();
+    want.sort_unstable();
     assert_eq!(got, want);
 }
 

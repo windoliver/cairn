@@ -1334,6 +1334,10 @@ fn collect_auth_overrides(
 ///   Yields a [`CapabilityOverride`] with `path: <name>`. (Currently
 ///   unused by any verb; kept for symmetry so future IDL annotations
 ///   land without re-plumbing.)
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "mirrors collect_auth_overrides signature; future IDL constructs may surface errors"
+)]
 fn collect_capability_overrides(
     args_schema: &Value,
     defs: &BTreeMap<String, Value>,

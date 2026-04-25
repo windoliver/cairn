@@ -190,11 +190,10 @@ fn input_schema_args_for_required_verbs_advertises_required() {
         let required = args
             .get("required")
             .and_then(serde_json::Value::as_array)
-            .map(|a| {
+            .is_some_and(|a| {
                 a.iter()
                     .any(|v| v.as_str() == Some(expected_required_or_one_of))
-            })
-            .unwrap_or(false);
+            });
         assert!(
             required,
             "{verb}: Args must require {expected_required_or_one_of}"
@@ -226,10 +225,7 @@ fn input_schema_for_oneof_verbs_keeps_dispatch() {
     for verb in ["forget", "retrieve"] {
         let f = files
             .iter()
-            .find(|f| {
-                f.path
-                    .ends_with(&format!("schemas/verbs/{verb}.input.json"))
-            })
+            .find(|f| f.path.ends_with(format!("schemas/verbs/{verb}.input.json")))
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
         let args = parsed.pointer("/$defs/Args").unwrap();
