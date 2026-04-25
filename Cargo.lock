@@ -207,6 +207,7 @@ dependencies = [
 name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "thiserror",

@@ -12,6 +12,7 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 
 [dependencies]
 cairn-core = { workspace = true }
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 # NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
 # scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
@@ -26,4 +27,4 @@ workspace = true
 
 # Forward-declared scaffold deps. Drop entries as their first call site lands.
 [package.metadata.cargo-machete]
-ignored = ["cairn-core", "thiserror"]
+ignored = ["thiserror"]
