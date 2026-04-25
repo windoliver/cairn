@@ -105,6 +105,7 @@ dependencies = [
  "cairn-store-sqlite",
  "cairn-test-fixtures",
  "cairn-workflows",
+ "clap",
 ]
 
 [[package]]
