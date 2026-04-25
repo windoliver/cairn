@@ -6,16 +6,16 @@ update this file in the same PR — branch protection references job names
 verbatim.
 
 > **Scope.** This is the v0.1 (P0) automation surface only. Specific gates
-> (contract drift, wire compatibility / capability matrix, package smoke
-> tests) are tracked under separate issues — see [§ Deferred gates](#deferred-gates)
-> below. v1.0 release-channel hardening lives under issue #141.
+> (wire compatibility / capability matrix, package smoke tests) are tracked
+> under separate issues — see [§ Deferred gates](#deferred-gates) below.
+> v1.0 release-channel hardening lives under issue #141.
 
 ## Workflows
 
 | File | Purpose | Trigger |
 |---|---|---|
 | `governance.yml` | Active path freezes (the bespoke reviewed-by gate was removed in ADR 0003 — see `GOVERNANCE.md` §5). | `pull_request_target` against `main`. |
-| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant. | PRs + pushes to `main`, merge queue, manual. |
+| `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift. | PRs + pushes to `main`, merge queue, manual. |
 | `supply-chain.yml` | `cargo-deny` (licenses + bans + sources), `cargo-audit` (RUSTSEC), `cargo-machete` (unused deps). | Manifest/lockfile-touching PRs, pushes to `main`, daily cron, manual. |
 | `docs.yml` | `cargo doc` with `-D warnings`; lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
 | `release-dry-run.yml` | tag-version validation; `cargo package --workspace --no-verify` for all crates; full `cargo publish --dry-run` for the two pure-leaf crates; release-mode binary build on Ubuntu + macOS; uploaded artifacts. Downstream-crate publish dry-run is a known v0.1 gap (→ #141). | `v*` tags, manual. |
@@ -34,7 +34,8 @@ must be updated in the same PR.
 | `test / macos-latest` (`ci.yml`) | ✅ required | Same on macOS. |
 | `build / ubuntu-latest` (`ci.yml`) | ✅ required | `cargo check --workspace --all-targets`. |
 | `build / macos-latest` (`ci.yml`) | ✅ required | Same on macOS. |
-| `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. |
+| `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
+| `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
 | `docs / cargo doc` (`docs.yml`) | ✅ required | Broken intra-doc links fail. |
 | `deny / licenses + bans + sources` (`supply-chain.yml`) | ✅ required | Runs on every PR — workflow-level path filtering would leave the required check Pending on non-manifest PRs and either deadlock merges or silently miss manifest-only changes. Cache makes this cheap. |
 | `audit / RUSTSEC advisories` (`supply-chain.yml`) | ✅ required | Same reasoning as `deny`. Daily cron catches advisories disclosed after merge. |
@@ -66,8 +67,12 @@ cargo test --doc --workspace --locked
 # build (cheap parity with the `build` matrix)
 cargo check --workspace --all-targets --locked
 
-# core boundary invariant
+# core boundary invariant — fails if cairn-core takes a workspace dep
 ./scripts/check-core-boundary.sh
+
+# IDL codegen drift — fails if generated CLI/MCP/SDK/skill artefacts disagree
+# with the IDL. To regenerate, drop `-- --check` and commit the diff.
+cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 # rustdoc — same flags as docs.yml
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
@@ -127,20 +132,47 @@ CI is split so the failed job tells you which kind of bug you have:
 | `lint` | New clippy warning. Fix the lint or document the `#[allow]` per CLAUDE.md §6.8. |
 | `test` (Ubuntu or macOS) | Behaviour regression. Reproduce with `cargo nextest run --workspace`. |
 | `build` (Ubuntu or macOS) | Compile failure on a target you didn't test. Build matrix exists exactly for this. |
-| `invariant / cairn-core dep-freeness` | Adapter dep crept into core. Move it to the right crate; see CLAUDE.md §3. |
+| `invariant / cairn-core dep-freeness` | Adapter or runtime crate crept into core. Move it to the right crate; see CLAUDE.md §3. |
+| `codegen / no drift` | IDL changed without re-running codegen, or a generated file was hand-edited. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the diff. |
 | `docs / cargo doc` | Broken intra-doc link or missing-docs lint. |
 | `deny` | License or banned crate. Update the manifest or `deny.toml` (with a justification in the PR). |
 | `audit` | RUSTSEC advisory on a transitive dep. Update the lockfile or pin a patched version. |
 | `machete` | Unused dep declaration. Drop it or add to machete ignore list with a comment. |
 | `links (lychee)` | Dead external URL or broken intra-repo link. |
 
+## Contract invariants
+
+Three gates protect the core/plugin boundary defined in brief §4. They are
+documented together so a reviewer can audit them as a set:
+
+1. **IDL codegen drift** — `codegen / no drift` (`ci.yml`). Re-emits the
+   generated CLI / MCP / SDK / skill artefacts from the IDL and fails if any
+   byte differs. The emitter prunes stale files inside owned roots, so an
+   IDL deletion that leaves an orphan generated file also surfaces as drift.
+   Tested at unit level by
+   `crates/cairn-idl/tests/codegen_check_mode.rs` (clean tree, hand-edit, and
+   stale-file scenarios).
+2. **Core dependency freeness** — `invariant / cairn-core dep-freeness`
+   (`ci.yml`). `scripts/check-core-boundary.sh` reads `cargo metadata` and
+   fails when `cairn-core` declares any `cairn-*` workspace dependency
+   (normal, build, or dev). Importing a runtime / adapter crate is therefore
+   impossible without first changing this manifest, which the script
+   catches.
+3. **Contract version compatibility** — enforced by the `register_method!`
+   macro in `cairn-core::contract::registry`. Plugins declare their
+   accepted host range via `supported_contract_versions()`; the registry
+   rejects with `PluginError::UnsupportedContractVersion` whenever a
+   plugin's range does not include the host's `CONTRACT_VERSION`. Covered
+   by `crates/cairn-core/tests/contract_registry.rs::incompatible_plugin_fails_closed`.
+
+All three are exercised by the standard `cargo nextest run --workspace`
+plus the boundary script and codegen `--check` invocation listed under
+[§ Local equivalents](#local-equivalents).
+
 ## Deferred gates
 
 Tracked under their own issues; named here so the gap is explicit:
 
-- **Generated-artifact drift** — issue #36. Once codegen lands (issue #35),
-  add a job that runs `cargo run -p cairn-idl --bin cairn-codegen` and fails
-  on a non-empty `git diff`.
 - **Wire compatibility / schema drift / capability matrix** — issue #98. Add
   snapshot tests for MCP frames + `status` response.
 - **`cargo install` and Homebrew formula smoke** — issue #100. Hook into
@@ -173,6 +205,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    build / ubuntu-latest
    build / macos-latest
    invariant / cairn-core dep-freeness
+   codegen / no drift
    docs / cargo doc
    deny / licenses + bans + sources
    audit / RUSTSEC advisories
