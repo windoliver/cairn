@@ -149,13 +149,31 @@ pub enum ResponseVerb {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Per-verb response payload, dispatched on `Response.verb` at deserialize time.
+///
+/// Retrieve currently lands as opaque JSON; per-target sub-dispatch
+/// (`DataRecord` vs `DataSession` vs ...) is a follow-up.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum ResponseData {
+    Ingest(crate::generated::verbs::ingest::IngestData),
+    Search(crate::generated::verbs::search::SearchData),
+    Retrieve(serde_json::Value),
+    Summarize(crate::generated::verbs::summarize::SummarizeData),
+    AssembleHot(crate::generated::verbs::assemble_hot::AssembleHotData),
+    CaptureTrace(crate::generated::verbs::capture_trace::CaptureTraceData),
+    Lint(crate::generated::verbs::lint::LintData),
+    Forget(crate::generated::verbs::forget::ForgetData),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
     pub contract: String,
     /// Per-verb data payload on committed responses. Shape defined by verbs/<verb>.json $defs/Data. Object for most verbs; array for session / folder / scope retrieve variants. The field is absent on rejected / aborted responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+    pub data: Option<ResponseData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::generated::common::Error>,
     /// ULID matching the replay-ledger + WAL op for this call. Same shape as signed_intent.operation_id.
@@ -167,6 +185,86 @@ pub struct Response {
     pub target: Option<ResponseTarget>,
     /// Echo of the request verb. The `unknown` sentinel is the canonical placeholder when the server could not parse or dispatch the request verb; it is only permitted with status=rejected and error.code=UnknownVerb. The actual attempted verb is then carried in error.data.verb.
     pub verb: ResponseVerb,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResponse {
+    contract: String,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<crate::generated::common::Error>,
+    /// ULID matching the replay-ledger + WAL op for this call. Same shape as signed_intent.operation_id.
+    operation_id: crate::generated::common::Ulid,
+    policy_trace: Vec<ResponsePolicyTrace>,
+    status: ResponseStatus,
+    /// Retrieve-only discriminator echoing the requested target. Required when verb=retrieve; forbidden otherwise. Lets validators bind the per-target retrieve Data shape to the caller's request.
+    #[serde(default)]
+    target: Option<ResponseTarget>,
+    /// Echo of the request verb. The `unknown` sentinel is the canonical placeholder when the server could not parse or dispatch the request verb; it is only permitted with status=rejected and error.code=UnknownVerb. The actual attempted verb is then carried in error.data.verb.
+    verb: ResponseVerb,
+}
+
+impl<'de> ::serde::Deserialize<'de> for Response {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawResponse::deserialize(deserializer)?;
+        if raw.contract != "cairn.mcp.v1" {
+            return Err(::serde::de::Error::custom(format!("contract: expected \"cairn.mcp.v1\", got {:?}", raw.contract)));
+        }
+        if matches!(raw.status, ResponseStatus::Committed) {
+            if raw.data.is_none() { return Err(::serde::de::Error::custom("status=committed requires data")); }
+            if raw.error.is_some() { return Err(::serde::de::Error::custom("status=committed forbids error")); }
+        }
+        if matches!(raw.status, ResponseStatus::Rejected | ResponseStatus::Aborted) {
+            if raw.error.is_none() { return Err(::serde::de::Error::custom("status=rejected|aborted requires error")); }
+            if raw.data.is_some() { return Err(::serde::de::Error::custom("status=rejected|aborted forbids data")); }
+        }
+        if matches!(raw.verb, ResponseVerb::Retrieve) && matches!(raw.status, ResponseStatus::Committed) && raw.target.is_none() {
+            return Err(::serde::de::Error::custom("verb=retrieve + status=committed requires target"));
+        }
+        if !matches!(raw.verb, ResponseVerb::Retrieve) && raw.target.is_some() {
+            return Err(::serde::de::Error::custom("target is retrieve-only — forbidden for other verbs"));
+        }
+        let data = if let Some(payload) = raw.data {
+            Some(match raw.verb {
+                ResponseVerb::Ingest => ResponseData::Ingest(
+                    <crate::generated::verbs::ingest::IngestData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::Search => ResponseData::Search(
+                    <crate::generated::verbs::search::SearchData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::Retrieve => ResponseData::Retrieve(payload),
+                ResponseVerb::Summarize => ResponseData::Summarize(
+                    <crate::generated::verbs::summarize::SummarizeData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::AssembleHot => ResponseData::AssembleHot(
+                    <crate::generated::verbs::assemble_hot::AssembleHotData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::CaptureTrace => ResponseData::CaptureTrace(
+                    <crate::generated::verbs::capture_trace::CaptureTraceData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::Lint => ResponseData::Lint(
+                    <crate::generated::verbs::lint::LintData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::Forget => ResponseData::Forget(
+                    <crate::generated::verbs::forget::ForgetData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                ),
+                ResponseVerb::Unknown => return Err(::serde::de::Error::custom("verb=unknown is rejected-only and cannot carry data")),
+            })
+        } else { None };
+        Ok(Self {
+            contract: raw.contract,
+            data,
+            error: raw.error,
+            operation_id: raw.operation_id,
+            policy_trace: raw.policy_trace,
+            status: raw.status,
+            target: raw.target,
+            verb: raw.verb,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

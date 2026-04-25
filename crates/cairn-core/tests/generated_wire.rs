@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use cairn_core::generated::common::ScopeFilter;
-use cairn_core::generated::envelope::{Request, RequestArgs, SignedIntent};
+use cairn_core::generated::envelope::{Request, RequestArgs, Response, ResponseData, SignedIntent};
 use cairn_core::generated::verbs::ingest::IngestArgs;
 use cairn_core::generated::verbs::search::SearchArgsFilters;
 
@@ -386,6 +386,153 @@ fn scope_filter_rejects_empty_object() {
 fn scope_filter_accepts_single_predicate() {
     let parsed: ScopeFilter = serde_json::from_value(serde_json::json!({ "user": "u1" })).unwrap();
     assert_eq!(parsed.user.as_deref(), Some("u1"));
+}
+
+// ── Finding F3: Response envelope status/data/target invariants ──────────────
+
+fn response_base() -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("contract".into(), serde_json::json!("cairn.mcp.v1"));
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+    );
+    m.insert("policy_trace".into(), serde_json::json!([]));
+    m
+}
+
+#[test]
+fn response_committed_search_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"hits": [], "next_cursor": null}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(matches!(parsed.data, Some(ResponseData::Search(_))));
+}
+
+#[test]
+fn response_committed_without_data_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("committed requires data"),
+        "expected committed-requires-data error, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_with_data_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert("error".into(), serde_json::json!({"code": "InvalidArgs"}));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("forbids data"),
+        "expected rejected-forbids-data error, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_without_error_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("requires error"),
+        "expected rejected-requires-error error, got: {err}"
+    );
+}
+
+#[test]
+fn response_aborted_with_data_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert("error".into(), serde_json::json!({"code": "Internal"}));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("forbids data"),
+        "expected aborted-forbids-data error, got: {err}"
+    );
+}
+
+#[test]
+fn response_retrieve_committed_without_target_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("data".into(), serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("retrieve") && err.to_string().contains("target"),
+        "expected retrieve-requires-target error, got: {err}"
+    );
+}
+
+#[test]
+fn response_non_retrieve_with_target_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    m.insert("target".into(), serde_json::json!("record"));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("retrieve-only") || err.to_string().contains("target"),
+        "expected target-forbidden error, got: {err}"
+    );
+}
+
+#[test]
+fn response_retrieve_committed_with_target_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("record"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    // Retrieve sub-dispatch is deferred — just assert it lands in the
+    // Retrieve(opaque JSON) variant.
+    assert!(matches!(parsed.data, Some(ResponseData::Retrieve(_))));
+}
+
+#[test]
+fn response_committed_data_dispatched_by_verb() {
+    // Verb=ingest with search-shaped data → IngestData deserialize fails.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("ingest"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing field") || msg.contains("unknown field"),
+        "expected dispatched-data error, got: {msg}"
+    );
+}
+
+#[test]
+fn response_rejects_wrong_contract() {
+    let mut m = response_base();
+    m.insert("contract".into(), serde_json::json!("cairn.mcp.v2"));
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(err.to_string().contains("contract"));
 }
 
 #[test]

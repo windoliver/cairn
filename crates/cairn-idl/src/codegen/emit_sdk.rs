@@ -395,6 +395,8 @@ fn emit_envelope(
     for (name, ty) in &doc.envelope {
         if name.0 == "Request" {
             write_request_envelope(&mut w, doc, ty, common_names)?;
+        } else if name.0 == "Response" {
+            write_response_envelope(&mut w, doc, ty, common_names)?;
         } else {
             write_type_decl(&mut w, ty, common_names)?;
         }
@@ -551,6 +553,235 @@ fn write_request_envelope(
         let ident = sanitise_ident(&field.name);
         if field.name == "args" {
             w.line("args,");
+        } else {
+            w.line(&format!("{ident}: raw.{ident},"));
+        }
+    }
+    w.dedent();
+    w.line("})");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    Ok(())
+}
+
+/// Bespoke emitter for the `Response` envelope.
+///
+/// The IDL response schema declares `data: object|array` and binds the
+/// concrete shape per-verb via allOf if/then arms, plus four cross-cutting
+/// invariants:
+///   * status=committed ⟹ data present, error absent
+///   * status∈{rejected,aborted} ⟹ error present, data absent
+///   * verb=retrieve + status=committed ⟹ target present
+///   * verb≠retrieve ⟹ target absent
+///
+/// The default Struct lowering drops every arm, so a malformed response
+/// (e.g. `status=committed` without data, or non-retrieve with a stray
+/// `target`) silently round-trips. We dispatch `data` by verb (typed) and
+/// enforce the four invariants in a hand-rolled Deserialize.
+///
+/// Retrieve sub-dispatch by target (DataRecord vs DataSession vs ...) is
+/// deferred — the per-target Data variants live in `verbs/retrieve.rs` as
+/// untyped Json today, and pulling them through here would add 6 more
+/// variants and a second discriminator. Tracked as a follow-up; the four
+/// invariants below catch the load-bearing structural mistakes the
+/// adversarial review surfaced.
+#[allow(
+    clippy::too_many_lines,
+    reason = "single-pass emission keeps the bespoke envelope dispatch in one place"
+)]
+fn write_response_envelope(
+    w: &mut RustWriter,
+    doc: &Document,
+    ty: &RustType,
+    common: &BTreeSet<String>,
+) -> Result<(), CodegenError> {
+    let RustType::Struct(s) = ty else {
+        return Err(CodegenError::Emit(
+            "envelope/Response expected to lower to a Struct".to_string(),
+        ));
+    };
+
+    // Hoist nested types (ResponseStatus, ResponseTarget, ResponseVerb,
+    // ResponsePolicyTrace, ...) the same way `write_struct` does.
+    let mut nested = Vec::new();
+    collect_nested_from_fields(&s.fields, "Response", &mut nested);
+    for (sub_name, sub_ty) in &nested {
+        let renamed = renamed_to(sub_ty, TypeName::new(sub_name));
+        write_type_decl(w, &renamed, common)?;
+        w.blank();
+    }
+
+    // Typed per-verb data dispatch. Each variant wraps the verb's Data type
+    // (`crate::generated::verbs::<id>::<Pascal>Data`). The `unknown` verb
+    // (UnknownVerb sentinel) carries no data — there is no `verbs/unknown.rs`.
+    w.line("/// Per-verb response payload, dispatched on `Response.verb` at deserialize time.");
+    w.line("///");
+    w.line("/// Retrieve currently lands as opaque JSON; per-target sub-dispatch");
+    w.line("/// (`DataRecord` vs `DataSession` vs ...) is a follow-up.");
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    w.line("#[serde(untagged)]");
+    w.line("#[non_exhaustive]");
+    w.line("pub enum ResponseData {");
+    w.indent();
+    for verb in &doc.verbs {
+        let pascal = pascal_case(&verb.id);
+        if verb.id == "retrieve" {
+            // Retrieve's `Data` is itself a oneOf over six sub-types. Until
+            // the sub-dispatch lands, surface it as raw JSON so the verb
+            // layer can route on `target` after the structural checks pass.
+            w.line(&format!("{pascal}(serde_json::Value),"));
+        } else {
+            w.line(&format!(
+                "{pascal}(crate::generated::verbs::{}::{pascal}Data),",
+                verb.id
+            ));
+        }
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Public struct — Serialize-derived, Deserialize hand-rolled below.
+    if let Some(doc_str) = &s.doc {
+        write_doc(w, doc_str);
+    }
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line("pub struct Response {");
+    w.indent();
+    for field in &s.fields {
+        if field.name == "data" {
+            if let Some(d) = &field.doc {
+                write_doc(w, d);
+            }
+            w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
+            w.line("pub data: Option<ResponseData>,");
+        } else {
+            write_field(w, field, "Response", common, true);
+        }
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Private raw shim mirrors the public struct but keeps `data` as
+    // serde_json::Value so dispatch happens after `verb` and the four
+    // structural invariants are checked.
+    w.line("#[derive(Deserialize)]");
+    w.line("#[serde(deny_unknown_fields)]");
+    w.line("struct RawResponse {");
+    w.indent();
+    for field in &s.fields {
+        if field.name == "data" {
+            w.line("#[serde(default)]");
+            w.line("data: Option<serde_json::Value>,");
+        } else {
+            write_field_inner(w, field, "Response", common, false, false);
+        }
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Hand-rolled Deserialize: contract literal, status/data/error/target
+    // invariants, then per-verb data dispatch.
+    w.line("impl<'de> ::serde::Deserialize<'de> for Response {");
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("let raw = RawResponse::deserialize(deserializer)?;");
+    w.line(&format!("if raw.contract != \"{}\" {{", doc.contract));
+    w.indent();
+    w.line(&format!(
+        "return Err(::serde::de::Error::custom(format!(\"contract: expected \\\"{}\\\", got {{:?}}\", raw.contract)));",
+        doc.contract
+    ));
+    w.dedent();
+    w.line("}");
+    // Invariant: committed ⟹ data present, error absent.
+    w.line("if matches!(raw.status, ResponseStatus::Committed) {");
+    w.indent();
+    w.line(
+        "if raw.data.is_none() { return Err(::serde::de::Error::custom(\"status=committed requires data\")); }",
+    );
+    w.line(
+        "if raw.error.is_some() { return Err(::serde::de::Error::custom(\"status=committed forbids error\")); }",
+    );
+    w.dedent();
+    w.line("}");
+    // Invariant: rejected/aborted ⟹ error present, data absent.
+    w.line("if matches!(raw.status, ResponseStatus::Rejected | ResponseStatus::Aborted) {");
+    w.indent();
+    w.line(
+        "if raw.error.is_none() { return Err(::serde::de::Error::custom(\"status=rejected|aborted requires error\")); }",
+    );
+    w.line(
+        "if raw.data.is_some() { return Err(::serde::de::Error::custom(\"status=rejected|aborted forbids data\")); }",
+    );
+    w.dedent();
+    w.line("}");
+    // Invariant: verb=retrieve + committed ⟹ target present.
+    w.line(
+        "if matches!(raw.verb, ResponseVerb::Retrieve) && matches!(raw.status, ResponseStatus::Committed) && raw.target.is_none() {",
+    );
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(\"verb=retrieve + status=committed requires target\"));",
+    );
+    w.dedent();
+    w.line("}");
+    // Invariant: verb≠retrieve ⟹ target absent.
+    w.line("if !matches!(raw.verb, ResponseVerb::Retrieve) && raw.target.is_some() {");
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(\"target is retrieve-only — forbidden for other verbs\"));",
+    );
+    w.dedent();
+    w.line("}");
+    // Per-verb data dispatch. Skipped on rejected/aborted (data was just
+    // proven None above).
+    w.line("let data = if let Some(payload) = raw.data {");
+    w.indent();
+    w.line("Some(match raw.verb {");
+    w.indent();
+    for verb in &doc.verbs {
+        let pascal = pascal_case(&verb.id);
+        if verb.id == "retrieve" {
+            // Retrieve sub-dispatch deferred — accept opaque JSON.
+            w.line(&format!("ResponseVerb::{pascal} => ResponseData::{pascal}(payload),"));
+        } else {
+            w.line(&format!("ResponseVerb::{pascal} => ResponseData::{pascal}("));
+            w.indent();
+            w.line(&format!(
+                "<crate::generated::verbs::{}::{pascal}Data as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?",
+                verb.id
+            ));
+            w.dedent();
+            w.line("),");
+        }
+    }
+    // The `unknown` sentinel verb only appears on rejected responses (per
+    // the IDL UnknownVerb binding); the rejected path above already proved
+    // data is None, so this match arm is unreachable. Reject defensively in
+    // case the caller violates that invariant on the wire.
+    w.line(
+        "ResponseVerb::Unknown => return Err(::serde::de::Error::custom(\"verb=unknown is rejected-only and cannot carry data\")),",
+    );
+    w.dedent();
+    w.line("})");
+    w.dedent();
+    w.line("} else { None };");
+    w.line("Ok(Self {");
+    w.indent();
+    for field in &s.fields {
+        let ident = sanitise_ident(&field.name);
+        if field.name == "data" {
+            w.line("data,");
         } else {
             w.line(&format!("{ident}: raw.{ident},"));
         }
