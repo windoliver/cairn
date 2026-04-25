@@ -72,7 +72,7 @@ fn cli_subcommand_tree_lists_eight_verbs_plus_two_preludes() {
             (i, *v)
         })
         .collect();
-    idx_per_verb.sort();
+    idx_per_verb.sort_unstable();
     let order: Vec<&str> = idx_per_verb.into_iter().map(|(_, v)| v).collect();
     assert_eq!(order, EXPECTED_VERBS, "CLI verb subcommand order != IDL order");
     // Preludes present.
@@ -97,7 +97,7 @@ fn mcp_tools_array_lists_eight_verbs_in_idl_order() {
             (i, *v)
         })
         .collect();
-    idx_per_verb.sort();
+    idx_per_verb.sort_unstable();
     let order: Vec<&str> = idx_per_verb.into_iter().map(|(_, v)| v).collect();
     assert_eq!(order, EXPECTED_VERBS, "MCP TOOLS order != IDL order");
     // Preludes are NOT in TOOLS — they're protocol preludes, not tools.

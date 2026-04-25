@@ -1,5 +1,5 @@
 //! Running codegen 5 times in fresh tempdirs yields byte-equal output trees.
-//! Catches accidental hash-iteration leaks (HashMap, HashSet, etc.).
+//! Catches accidental hash-iteration leaks (`HashMap`, `HashSet`, etc.).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
