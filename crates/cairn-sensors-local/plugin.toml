@@ -1,0 +1,17 @@
+name = "cairn-sensors-local"
+contract = "SensorIngress"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+
+[features]
+batches = false
+streaming = false
+consent_aware = false

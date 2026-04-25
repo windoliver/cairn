@@ -199,6 +199,7 @@ dependencies = [
 name = "cairn-sensors-local"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "tracing",
