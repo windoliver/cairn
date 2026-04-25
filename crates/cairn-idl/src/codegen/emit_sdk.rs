@@ -405,10 +405,186 @@ fn emit_envelope(
     // SignedIntent's bespoke TryFrom uses `is_ulid_shape`. Emit the helper
     // once, at module scope, so any TryFrom validation can reference it.
     write_ulid_shape_helper(&mut w);
+    w.blank();
+    write_error_envelope_validator(&mut w, doc);
     Ok(GeneratedFile {
         path: PathBuf::from(ROOT).join("envelope/mod.rs"),
         bytes: w.finish().into_bytes(),
     })
+}
+
+/// Emit `validate_error_envelope`, used by the Response Deserialize impl to
+/// enforce the error.json shape contract on every present `error` payload:
+/// `code` is in the closed enum, `message` is a non-empty string, and for
+/// codes whose IDL `data` schema requires named fields, those fields are
+/// present and (where the schema marks them strings) non-empty.
+///
+/// The per-code data requirements are enumerated below — they mirror
+/// `errors/error.json` and would be lifted into a typed Error envelope in #62.
+fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
+    w.line("/// Structural validator for the error envelope payload. Mirrors the");
+    w.line("/// closed `oneOf` in `errors/error.json` until the typed Error envelope");
+    w.line("/// lands (#62). See `write_error_envelope_validator` in emit_sdk.rs for");
+    w.line("/// the per-code data requirements.");
+    w.line("#[allow(clippy::result_unit_err)]");
+    w.line("fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str> {");
+    w.indent();
+    w.line(
+        "let obj = err.as_object().ok_or(\"error: must be a JSON object\")?;",
+    );
+    w.line(
+        "let code = obj.get(\"code\").and_then(::serde_json::Value::as_str).ok_or(\"error: code must be a string\")?;",
+    );
+    w.line("match code {");
+    w.indent();
+    let known: Vec<&str> = doc.error_codes.iter().map(|e| e.code.as_str()).collect();
+    let alts = known
+        .iter()
+        .map(|c| format!("\"{c}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    w.line(&format!("{alts} => {{}},"));
+    w.line("_ => return Err(\"error: code not in closed enum\"),");
+    w.dedent();
+    w.line("}");
+    // Message: required + minLength: 1 on every variant.
+    w.line(
+        "let message = obj.get(\"message\").and_then(::serde_json::Value::as_str).ok_or(\"error: message must be a string\")?;",
+    );
+    w.line(
+        "if message.is_empty() { return Err(\"error: message must not be empty\"); }",
+    );
+    // Per-code data requirements. Codes without required `data` (Internal,
+    // MissingSignature) are tolerated — the IDL marks `data` optional or its
+    // sub-schema empty.
+    w.line("match code {");
+    w.indent();
+    // Each arm: required field name(s) + value-shape predicate(s).
+    // Strings are checked non-empty, integers checked >= 0 / >= 1.
+    write_error_data_arm(
+        w,
+        "InvalidArgs",
+        &[("field", FieldShape::NonEmptyString), ("reason", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(
+        w,
+        "InvalidFilter",
+        &[("reason", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(
+        w,
+        "CapabilityUnavailable",
+        &[("capability", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(w, "UnknownVerb", &[("verb", FieldShape::NonEmptyString)]);
+    write_error_data_arm(
+        w,
+        "ExpiredIntent",
+        &[
+            ("issued_at", FieldShape::NonEmptyString),
+            ("expires_at", FieldShape::NonEmptyString),
+            ("now", FieldShape::NonEmptyString),
+        ],
+    );
+    write_error_data_arm(
+        w,
+        "ReplayDetected",
+        &[("operation_id", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(
+        w,
+        "OutOfOrderSequence",
+        &[
+            ("issuer", FieldShape::NonEmptyString),
+            ("high_water", FieldShape::NonNegativeInt),
+            ("attempted", FieldShape::NonNegativeInt),
+        ],
+    );
+    write_error_data_arm(
+        w,
+        "RevokedKey",
+        &[
+            ("issuer", FieldShape::NonEmptyString),
+            ("key_version", FieldShape::PositiveInt),
+        ],
+    );
+    write_error_data_arm(
+        w,
+        "Unauthorized",
+        &[("required", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(w, "NotFound", &[("target", FieldShape::NonEmptyString)]);
+    write_error_data_arm(
+        w,
+        "ConflictVersion",
+        &[
+            ("expected", FieldShape::NonNegativeInt),
+            ("actual", FieldShape::NonNegativeInt),
+        ],
+    );
+    write_error_data_arm(
+        w,
+        "QuarantineRequired",
+        &[("reason", FieldShape::NonEmptyString)],
+    );
+    write_error_data_arm(
+        w,
+        "PluginSuspended",
+        &[("plugin_id", FieldShape::NonEmptyString)],
+    );
+    // Internal and MissingSignature have no required data fields.
+    w.line("\"Internal\" | \"MissingSignature\" => {},");
+    w.line("_ => {},");
+    w.dedent();
+    w.line("}");
+    w.line("Ok(())");
+    w.dedent();
+    w.line("}");
+}
+
+#[derive(Clone, Copy)]
+enum FieldShape {
+    NonEmptyString,
+    NonNegativeInt,
+    PositiveInt,
+}
+
+fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldShape)]) {
+    w.line(&format!("\"{code}\" => {{"));
+    w.indent();
+    w.line(&format!(
+        "let data = obj.get(\"data\").and_then(::serde_json::Value::as_object).ok_or(\"error.code={code}: data object required\")?;"
+    ));
+    for (name, shape) in fields {
+        match shape {
+            FieldShape::NonEmptyString => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_str).ok_or(\"error.code={code}: data.{name} must be a string\")?;"
+                ));
+                w.line(&format!(
+                    "if v.is_empty() {{ return Err(\"error.code={code}: data.{name} must not be empty\"); }}"
+                ));
+            }
+            FieldShape::NonNegativeInt => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_i64).ok_or(\"error.code={code}: data.{name} must be a non-negative integer\")?;"
+                ));
+                w.line(&format!(
+                    "if v < 0 {{ return Err(\"error.code={code}: data.{name} must be a non-negative integer\"); }}"
+                ));
+            }
+            FieldShape::PositiveInt => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_i64).ok_or(\"error.code={code}: data.{name} must be a positive integer\")?;"
+                ));
+                w.line(&format!(
+                    "if v < 1 {{ return Err(\"error.code={code}: data.{name} must be a positive integer\"); }}"
+                ));
+            }
+        }
+    }
+    w.dedent();
+    w.line("},");
 }
 
 /// Bespoke emitter for the `Request` envelope.
@@ -785,22 +961,20 @@ fn write_response_envelope(
     );
     w.dedent();
     w.line("}");
-    // UnknownVerb shape per errors/error.json: every error variant requires a
-    // non-empty `message`, and the UnknownVerb variant requires `data.verb` as
-    // a non-empty string. Until the typed Error envelope ships (#62), defend
-    // these invariants here so a malformed UnknownVerb response cannot pass.
-    w.line("if error_code == Some(\"UnknownVerb\") {");
+    // Generic error envelope shape per errors/error.json (until the typed
+    // Error envelope ships in #62). For every present error we enforce:
+    //   * `code` is one of the closed enum (rejecting typo'd / synthetic codes
+    //     that callers might smuggle past dispatch),
+    //   * `message` is a non-empty string (the IDL marks `message` required +
+    //     `minLength: 1` on every variant),
+    //   * for variants whose IDL `data` schema requires a field, that field is
+    //     present and non-empty.
+    // The set of valid codes and their per-variant data requirements is
+    // enumerated in `validate_error_envelope` below.
+    w.line("if let Some(err) = raw.error.as_ref() {");
     w.indent();
-    w.line("let err = raw.error.as_ref().expect(\"error_code Some implies error present\");");
-    w.line("let message = err.get(\"message\").and_then(|m| m.as_str()).unwrap_or(\"\");");
     w.line(
-        "if message.is_empty() { return Err(::serde::de::Error::custom(\"error.code=UnknownVerb requires non-empty message\")); }",
-    );
-    w.line(
-        "let attempted_verb = err.get(\"data\").and_then(|d| d.get(\"verb\")).and_then(|v| v.as_str()).unwrap_or(\"\");",
-    );
-    w.line(
-        "if attempted_verb.is_empty() { return Err(::serde::de::Error::custom(\"error.code=UnknownVerb requires non-empty error.data.verb\")); }",
+        "validate_error_envelope(err).map_err(::serde::de::Error::custom)?;",
     );
     w.dedent();
     w.line("}");

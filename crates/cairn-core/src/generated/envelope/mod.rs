@@ -246,12 +246,8 @@ impl<'de> ::serde::Deserialize<'de> for Response {
         if !matches!(raw.verb, ResponseVerb::Unknown) && error_code == Some("UnknownVerb") {
             return Err(::serde::de::Error::custom("error.code=UnknownVerb is paired with verb=unknown only"));
         }
-        if error_code == Some("UnknownVerb") {
-            let err = raw.error.as_ref().expect("error_code Some implies error present");
-            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            if message.is_empty() { return Err(::serde::de::Error::custom("error.code=UnknownVerb requires non-empty message")); }
-            let attempted_verb = err.get("data").and_then(|d| d.get("verb")).and_then(|v| v.as_str()).unwrap_or("");
-            if attempted_verb.is_empty() { return Err(::serde::de::Error::custom("error.code=UnknownVerb requires non-empty error.data.verb")); }
+        if let Some(err) = raw.error.as_ref() {
+            validate_error_envelope(err).map_err(::serde::de::Error::custom)?;
         }
         let data = if let Some(payload) = raw.data {
             Some(match raw.verb {
@@ -559,4 +555,104 @@ fn is_rfc3339_datetime(s: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Structural validator for the error envelope payload. Mirrors the
+/// closed `oneOf` in `errors/error.json` until the typed Error envelope
+/// lands (#62). See `write_error_envelope_validator` in emit_sdk.rs for
+/// the per-code data requirements.
+#[allow(clippy::result_unit_err)]
+fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str> {
+    let obj = err.as_object().ok_or("error: must be a JSON object")?;
+    let code = obj.get("code").and_then(::serde_json::Value::as_str).ok_or("error: code must be a string")?;
+    match code {
+        "InvalidArgs" | "InvalidFilter" | "CapabilityUnavailable" | "UnknownVerb" | "ExpiredIntent" | "ReplayDetected" | "OutOfOrderSequence" | "RevokedKey" | "MissingSignature" | "Unauthorized" | "NotFound" | "ConflictVersion" | "QuarantineRequired" | "PluginSuspended" | "Internal" => {},
+        _ => return Err("error: code not in closed enum"),
+    }
+    let message = obj.get("message").and_then(::serde_json::Value::as_str).ok_or("error: message must be a string")?;
+    if message.is_empty() { return Err("error: message must not be empty"); }
+    match code {
+        "InvalidArgs" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=InvalidArgs: data object required")?;
+            let v = data.get("field").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidArgs: data.field must be a string")?;
+            if v.is_empty() { return Err("error.code=InvalidArgs: data.field must not be empty"); }
+            let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidArgs: data.reason must be a string")?;
+            if v.is_empty() { return Err("error.code=InvalidArgs: data.reason must not be empty"); }
+        },
+        "InvalidFilter" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=InvalidFilter: data object required")?;
+            let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidFilter: data.reason must be a string")?;
+            if v.is_empty() { return Err("error.code=InvalidFilter: data.reason must not be empty"); }
+        },
+        "CapabilityUnavailable" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=CapabilityUnavailable: data object required")?;
+            let v = data.get("capability").and_then(::serde_json::Value::as_str).ok_or("error.code=CapabilityUnavailable: data.capability must be a string")?;
+            if v.is_empty() { return Err("error.code=CapabilityUnavailable: data.capability must not be empty"); }
+        },
+        "UnknownVerb" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=UnknownVerb: data object required")?;
+            let v = data.get("verb").and_then(::serde_json::Value::as_str).ok_or("error.code=UnknownVerb: data.verb must be a string")?;
+            if v.is_empty() { return Err("error.code=UnknownVerb: data.verb must not be empty"); }
+        },
+        "ExpiredIntent" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ExpiredIntent: data object required")?;
+            let v = data.get("issued_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.issued_at must be a string")?;
+            if v.is_empty() { return Err("error.code=ExpiredIntent: data.issued_at must not be empty"); }
+            let v = data.get("expires_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.expires_at must be a string")?;
+            if v.is_empty() { return Err("error.code=ExpiredIntent: data.expires_at must not be empty"); }
+            let v = data.get("now").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.now must be a string")?;
+            if v.is_empty() { return Err("error.code=ExpiredIntent: data.now must not be empty"); }
+        },
+        "ReplayDetected" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ReplayDetected: data object required")?;
+            let v = data.get("operation_id").and_then(::serde_json::Value::as_str).ok_or("error.code=ReplayDetected: data.operation_id must be a string")?;
+            if v.is_empty() { return Err("error.code=ReplayDetected: data.operation_id must not be empty"); }
+        },
+        "OutOfOrderSequence" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=OutOfOrderSequence: data object required")?;
+            let v = data.get("issuer").and_then(::serde_json::Value::as_str).ok_or("error.code=OutOfOrderSequence: data.issuer must be a string")?;
+            if v.is_empty() { return Err("error.code=OutOfOrderSequence: data.issuer must not be empty"); }
+            let v = data.get("high_water").and_then(::serde_json::Value::as_i64).ok_or("error.code=OutOfOrderSequence: data.high_water must be a non-negative integer")?;
+            if v < 0 { return Err("error.code=OutOfOrderSequence: data.high_water must be a non-negative integer"); }
+            let v = data.get("attempted").and_then(::serde_json::Value::as_i64).ok_or("error.code=OutOfOrderSequence: data.attempted must be a non-negative integer")?;
+            if v < 0 { return Err("error.code=OutOfOrderSequence: data.attempted must be a non-negative integer"); }
+        },
+        "RevokedKey" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=RevokedKey: data object required")?;
+            let v = data.get("issuer").and_then(::serde_json::Value::as_str).ok_or("error.code=RevokedKey: data.issuer must be a string")?;
+            if v.is_empty() { return Err("error.code=RevokedKey: data.issuer must not be empty"); }
+            let v = data.get("key_version").and_then(::serde_json::Value::as_i64).ok_or("error.code=RevokedKey: data.key_version must be a positive integer")?;
+            if v < 1 { return Err("error.code=RevokedKey: data.key_version must be a positive integer"); }
+        },
+        "Unauthorized" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=Unauthorized: data object required")?;
+            let v = data.get("required").and_then(::serde_json::Value::as_str).ok_or("error.code=Unauthorized: data.required must be a string")?;
+            if v.is_empty() { return Err("error.code=Unauthorized: data.required must not be empty"); }
+        },
+        "NotFound" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=NotFound: data object required")?;
+            let v = data.get("target").and_then(::serde_json::Value::as_str).ok_or("error.code=NotFound: data.target must be a string")?;
+            if v.is_empty() { return Err("error.code=NotFound: data.target must not be empty"); }
+        },
+        "ConflictVersion" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ConflictVersion: data object required")?;
+            let v = data.get("expected").and_then(::serde_json::Value::as_i64).ok_or("error.code=ConflictVersion: data.expected must be a non-negative integer")?;
+            if v < 0 { return Err("error.code=ConflictVersion: data.expected must be a non-negative integer"); }
+            let v = data.get("actual").and_then(::serde_json::Value::as_i64).ok_or("error.code=ConflictVersion: data.actual must be a non-negative integer")?;
+            if v < 0 { return Err("error.code=ConflictVersion: data.actual must be a non-negative integer"); }
+        },
+        "QuarantineRequired" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=QuarantineRequired: data object required")?;
+            let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=QuarantineRequired: data.reason must be a string")?;
+            if v.is_empty() { return Err("error.code=QuarantineRequired: data.reason must not be empty"); }
+        },
+        "PluginSuspended" => {
+            let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=PluginSuspended: data object required")?;
+            let v = data.get("plugin_id").and_then(::serde_json::Value::as_str).ok_or("error.code=PluginSuspended: data.plugin_id must be a string")?;
+            if v.is_empty() { return Err("error.code=PluginSuspended: data.plugin_id must not be empty"); }
+        },
+        "Internal" | "MissingSignature" => {},
+        _ => {},
+    }
+    Ok(())
 }

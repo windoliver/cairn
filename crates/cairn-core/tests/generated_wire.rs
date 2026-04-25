@@ -1274,8 +1274,9 @@ fn response_unknown_verb_without_data_verb_is_rejected() {
         serde_json::json!({"code": "UnknownVerb", "message": "boom"}),
     );
     let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("data.verb") || err.to_string().contains("verb"),
+        msg.contains("data.verb") || msg.contains("data object"),
         "expected non-empty-data.verb error, got: {err}"
     );
 }
@@ -1577,4 +1578,114 @@ fn filter_rejects_in_with_empty_array() {
         err.to_string().contains("non-empty array") || err.to_string().contains("array"),
         "expected empty-in-array rejection, got: {err}"
     );
+}
+
+// ── F3 (round 7): Response error envelope shape ──────────────────────────────
+
+#[test]
+fn response_rejected_with_notfound_full_data_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "NotFound", "message": "missing", "data": {"target": "record:01"}}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+
+#[test]
+fn response_rejected_notfound_without_message_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "NotFound", "data": {"target": "record:01"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("message"),
+        "expected missing-message rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_with_unknown_code_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "unknownInvalidCode", "message": "x"}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("closed enum") || err.to_string().contains("code"),
+        "expected unknown-code rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_aborted_with_empty_message_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "Internal", "message": ""}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("message"),
+        "expected empty-message rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_invalidargs_without_data_is_rejected() {
+    // InvalidArgs requires data.field + data.reason — payload omits data entirely.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "InvalidArgs", "message": "boom"}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("data"),
+        "expected missing-data rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_invalidargs_with_empty_field_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "InvalidArgs", "message": "boom", "data": {"field": "", "reason": "x"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("field") && err.to_string().contains("empty"),
+        "expected empty-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_rejected_internal_without_data_round_trips() {
+    // Internal has no required data fields — payload may omit data.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "Internal", "message": "boom"}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
 }
