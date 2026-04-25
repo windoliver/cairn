@@ -506,9 +506,11 @@ fn is_identity(s: &str) -> bool {
 /// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,
 /// length >= 20, separators at fixed positions, digits everywhere else,
 /// and each numeric field within its RFC-3339 range:
-/// month 01-12, day 01-31, hour 00-23, minute 00-59, second 00-60
-/// (leap second), offset hour 00-23, offset minute 00-59. Day-of-month
-/// is not month-aware — a dedicated parser owns calendar correctness.
+/// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,
+/// minute 00-59, second 00-60 (leap second), offset hour 00-23,
+/// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is
+/// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)
+/// || year % 400 == 0`).
 fn is_rfc3339_datetime(s: &str) -> bool {
     if !s.is_ascii() { return false; }
     let b = s.as_bytes();
@@ -521,10 +523,21 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     if b[13] != b':' || b[16] != b':' { return false; }
     // Field-range checks. `two_digit` reads ASCII digits at b[i],b[i+1].
     let two_digit = |i: usize| -> u32 { (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32 };
+    let year = (b[0] - b'0') as u32 * 1000 + (b[1] - b'0') as u32 * 100 + (b[2] - b'0') as u32 * 10 + (b[3] - b'0') as u32;
     let month = two_digit(5);
     if !(1..=12).contains(&month) { return false; }
     let day = two_digit(8);
-    if !(1..=31).contains(&day) { return false; }
+    if day < 1 { return false; }
+    let max_day: u32 = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            if leap { 29 } else { 28 }
+        },
+        _ => return false,
+    };
+    if day > max_day { return false; }
     let hour = two_digit(11);
     if hour > 23 { return false; }
     let minute = two_digit(14);

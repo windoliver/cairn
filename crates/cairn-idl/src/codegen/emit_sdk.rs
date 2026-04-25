@@ -2224,16 +2224,20 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     //   YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|±HH:MM)
     // Hand-rolled byte-level check with explicit field-range validation so
     // obviously-out-of-range values (month=99, hour=25, offset=+99:99) are
-    // rejected at the wire boundary. We avoid pulling chrono into cairn-core.
-    // Day-of-month is bounded at 01..=31 only (not month-aware) — leap-year /
-    // month-length validation belongs to a dedicated parser.
+    // rejected at the wire boundary. Day-of-month is calendar-aware —
+    // 30-/31-day months and leap-year February resolve here, including the
+    // 100/400-year leap-year rule. Leap-second `60` is accepted on any day
+    // (a true leap-second table belongs to a dedicated parser; the IDL
+    // doesn't carry that data). We avoid pulling chrono into cairn-core.
     w.line("/// Return true iff `s` is an RFC-3339 date-time:");
     w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
     w.line("/// length >= 20, separators at fixed positions, digits everywhere else,");
     w.line("/// and each numeric field within its RFC-3339 range:");
-    w.line("/// month 01-12, day 01-31, hour 00-23, minute 00-59, second 00-60");
-    w.line("/// (leap second), offset hour 00-23, offset minute 00-59. Day-of-month");
-    w.line("/// is not month-aware — a dedicated parser owns calendar correctness.");
+    w.line("/// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,");
+    w.line("/// minute 00-59, second 00-60 (leap second), offset hour 00-23,");
+    w.line("/// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is");
+    w.line("/// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)");
+    w.line("/// || year % 400 == 0`).");
     w.line("fn is_rfc3339_datetime(s: &str) -> bool {");
     w.indent();
     w.line("if !s.is_ascii() { return false; }");
@@ -2247,10 +2251,28 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("if b[13] != b':' || b[16] != b':' { return false; }");
     w.line("// Field-range checks. `two_digit` reads ASCII digits at b[i],b[i+1].");
     w.line("let two_digit = |i: usize| -> u32 { (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32 };");
+    w.line("let year = (b[0] - b'0') as u32 * 1000 + (b[1] - b'0') as u32 * 100 + (b[2] - b'0') as u32 * 10 + (b[3] - b'0') as u32;");
     w.line("let month = two_digit(5);");
     w.line("if !(1..=12).contains(&month) { return false; }");
     w.line("let day = two_digit(8);");
-    w.line("if !(1..=31).contains(&day) { return false; }");
+    w.line("if day < 1 { return false; }");
+    // Calendar-aware month-length check. Leap-second 60 still permitted on
+    // any timestamp (RFC-3339 §5.6); calendar correctness here is
+    // independent of leap-second handling.
+    w.line("let max_day: u32 = match month {");
+    w.indent();
+    w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
+    w.line("4 | 6 | 9 | 11 => 30,");
+    w.line("2 => {");
+    w.indent();
+    w.line("let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;");
+    w.line("if leap { 29 } else { 28 }");
+    w.dedent();
+    w.line("},");
+    w.line("_ => return false,");
+    w.dedent();
+    w.line("};");
+    w.line("if day > max_day { return false; }");
     w.line("let hour = two_digit(11);");
     w.line("if hour > 23 { return false; }");
     w.line("let minute = two_digit(14);");

@@ -1689,3 +1689,87 @@ fn response_rejected_internal_without_data_round_trips() {
     let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
     assert!(parsed.data.is_none());
 }
+
+// ── F4 (round 7): RFC-3339 calendar-aware month/day validation ───────────────
+
+#[test]
+fn signed_intent_rejects_february_31() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-02-31T00:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected feb-31 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_april_31() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2025-04-31T00:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected april-31 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_leap_day_div_by_4_not_100() {
+    // 2024 is divisible by 4 but not by 100 — leap year.
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2024-02-29T00:00:00Z"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert_eq!(parsed.issued_at, "2024-02-29T00:00:00Z");
+}
+
+#[test]
+fn signed_intent_rejects_feb_29_non_leap_year() {
+    // 2025 is not divisible by 4 — Feb 29 invalid.
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2025-02-29T00:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected non-leap feb-29 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_leap_day_div_by_400() {
+    // 2000 is divisible by 400 — leap year despite being divisible by 100.
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2000-02-29T00:00:00Z"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert_eq!(parsed.issued_at, "2000-02-29T00:00:00Z");
+}
+
+#[test]
+fn signed_intent_rejects_feb_29_div_by_100_not_400() {
+    // 1900 is divisible by 100 but not by 400 — not a leap year.
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("1900-02-29T00:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected century non-leap feb-29 rejection, got: {err}"
+    );
+}
