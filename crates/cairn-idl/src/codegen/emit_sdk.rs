@@ -653,10 +653,11 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
             ("reason", FieldShape::NonEmptyString),
         ],
     );
-    write_error_data_arm(
+    write_error_data_arm_with_optional(
         w,
         "InvalidFilter",
         &[("reason", FieldShape::NonEmptyString)],
+        &[("path", FieldShape::NonEmptyString)],
     );
     write_error_data_arm(
         w,
@@ -705,10 +706,11 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
             ("actual", FieldShape::NonNegativeInt),
         ],
     );
-    write_error_data_arm(
+    write_error_data_arm_with_optional(
         w,
         "QuarantineRequired",
         &[("reason", FieldShape::NonEmptyString)],
+        &[("quarantine_id", FieldShape::Ulid)],
     );
     write_error_data_arm(
         w,
@@ -787,15 +789,27 @@ enum FieldShape {
 }
 
 fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldShape)]) {
+    write_error_data_arm_with_optional(w, code, fields, &[]);
+}
+
+fn write_error_data_arm_with_optional(
+    w: &mut RustWriter,
+    code: &str,
+    required: &[(&str, FieldShape)],
+    optional: &[(&str, FieldShape)],
+) {
     w.line(&format!("\"{code}\" => {{"));
     w.indent();
     w.line(&format!(
         "let data = obj.get(\"data\").and_then(::serde_json::Value::as_object).ok_or(\"error.code={code}: data object required\")?;"
     ));
     // Reject unknown keys on the data object — every error.json $defs subtype
-    // declares `additionalProperties: false`. Build the closed allow-list
-    // from the field list.
-    let allow: Vec<String> = fields.iter().map(|(n, _)| format!("\"{n}\"")).collect();
+    // declares `additionalProperties: false`. Allow-list = required ∪ optional.
+    let allow: Vec<String> = required
+        .iter()
+        .chain(optional.iter())
+        .map(|(n, _)| format!("\"{n}\""))
+        .collect();
     let allow_pat = allow.join(" | ");
     w.line("for k in data.keys() {");
     w.indent();
@@ -804,7 +818,7 @@ fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldSh
     ));
     w.dedent();
     w.line("}");
-    for (name, shape) in fields {
+    for (name, shape) in required {
         match shape {
             FieldShape::NonEmptyString => {
                 w.line(&format!(
@@ -855,6 +869,63 @@ fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldSh
                 ));
             }
         }
+    }
+    // Optional fields: only validate when present.
+    for (name, shape) in optional {
+        w.line(&format!("if let Some(v) = data.get(\"{name}\") {{"));
+        w.indent();
+        match shape {
+            FieldShape::NonEmptyString => {
+                w.line(&format!(
+                    "let v = v.as_str().ok_or(\"error.code={code}: data.{name} must be a string\")?;"
+                ));
+                w.line(&format!(
+                    "if v.is_empty() {{ return Err(\"error.code={code}: data.{name} must not be empty\"); }}"
+                ));
+            }
+            FieldShape::NonNegativeInt => {
+                w.line(&format!(
+                    "let v = v.as_i64().ok_or(\"error.code={code}: data.{name} must be a non-negative integer\")?;"
+                ));
+                w.line(&format!(
+                    "if v < 0 {{ return Err(\"error.code={code}: data.{name} must be a non-negative integer\"); }}"
+                ));
+            }
+            FieldShape::PositiveInt => {
+                w.line(&format!(
+                    "let v = v.as_i64().ok_or(\"error.code={code}: data.{name} must be a positive integer\")?;"
+                ));
+                w.line(&format!(
+                    "if v < 1 {{ return Err(\"error.code={code}: data.{name} must be a positive integer\"); }}"
+                ));
+            }
+            FieldShape::Ulid => {
+                w.line(&format!(
+                    "let v = v.as_str().ok_or(\"error.code={code}: data.{name} must be a ULID string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_ulid_shape(v) {{ return Err(\"error.code={code}: data.{name} must be a Crockford base32 ULID\"); }}"
+                ));
+            }
+            FieldShape::Rfc3339Datetime => {
+                w.line(&format!(
+                    "let v = v.as_str().ok_or(\"error.code={code}: data.{name} must be an RFC-3339 date-time string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_rfc3339_datetime(v) {{ return Err(\"error.code={code}: data.{name} must be an RFC-3339 date-time\"); }}"
+                ));
+            }
+            FieldShape::Capability => {
+                w.line(&format!(
+                    "let v = v.as_str().ok_or(\"error.code={code}: data.{name} must be a capability string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_known_capability(v) {{ return Err(\"error.code={code}: data.{name} must be a known capability\"); }}"
+                ));
+            }
+        }
+        w.dedent();
+        w.line("}");
     }
     w.dedent();
     w.line("},");

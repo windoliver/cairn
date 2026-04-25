@@ -2482,3 +2482,99 @@ fn retrieve_data_session_rejects_empty_session_id() {
         "expected DataSession.session_id rejection, got: {err}"
     );
 }
+
+// ── F4 (round 9): allow optional error-data fields with primitive validation ──
+
+#[test]
+fn error_invalid_filter_with_optional_path_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "InvalidFilter",
+            "message": "invalid filter shape",
+            "data": {"reason": "leaf op unknown", "path": "filters.and[0]"}
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("InvalidFilter with optional path should accept");
+}
+
+#[test]
+fn error_invalid_filter_optional_path_rejects_empty_string() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "InvalidFilter",
+            "message": "invalid filter shape",
+            "data": {"reason": "x", "path": ""}
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("path"),
+        "expected InvalidFilter.path empty rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_quarantine_required_with_optional_quarantine_id_accepts() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("ingest"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "QuarantineRequired",
+            "message": "quarantine triggered",
+            "data": {"reason": "policy", "quarantine_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+        }),
+    );
+    let _: Response = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("QuarantineRequired with optional Ulid quarantine_id should accept");
+}
+
+#[test]
+fn error_quarantine_required_optional_quarantine_id_rejects_non_ulid() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("ingest"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "QuarantineRequired",
+            "message": "quarantine triggered",
+            "data": {"reason": "policy", "quarantine_id": "not-a-ulid"}
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("quarantine_id"),
+        "expected non-ULID quarantine_id rejection, got: {err}"
+    );
+}
+
+#[test]
+fn error_invalid_filter_rejects_unknown_data_key() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "InvalidFilter",
+            "message": "x",
+            "data": {"reason": "x", "unknown_key": 1}
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown key"),
+        "expected unknown-key rejection, got: {err}"
+    );
+}

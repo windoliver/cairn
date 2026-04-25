@@ -622,10 +622,14 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         "InvalidFilter" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=InvalidFilter: data object required")?;
             for k in data.keys() {
-                if !matches!(k.as_str(), "reason") { return Err("error.code=InvalidFilter: data has unknown key"); }
+                if !matches!(k.as_str(), "reason" | "path") { return Err("error.code=InvalidFilter: data has unknown key"); }
             }
             let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidFilter: data.reason must be a string")?;
             if v.is_empty() { return Err("error.code=InvalidFilter: data.reason must not be empty"); }
+            if let Some(v) = data.get("path") {
+                let v = v.as_str().ok_or("error.code=InvalidFilter: data.path must be a string")?;
+                if v.is_empty() { return Err("error.code=InvalidFilter: data.path must not be empty"); }
+            }
         },
         "CapabilityUnavailable" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=CapabilityUnavailable: data object required")?;
@@ -714,10 +718,14 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         "QuarantineRequired" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=QuarantineRequired: data object required")?;
             for k in data.keys() {
-                if !matches!(k.as_str(), "reason") { return Err("error.code=QuarantineRequired: data has unknown key"); }
+                if !matches!(k.as_str(), "reason" | "quarantine_id") { return Err("error.code=QuarantineRequired: data has unknown key"); }
             }
             let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=QuarantineRequired: data.reason must be a string")?;
             if v.is_empty() { return Err("error.code=QuarantineRequired: data.reason must not be empty"); }
+            if let Some(v) = data.get("quarantine_id") {
+                let v = v.as_str().ok_or("error.code=QuarantineRequired: data.quarantine_id must be a ULID string")?;
+                if !is_ulid_shape(v) { return Err("error.code=QuarantineRequired: data.quarantine_id must be a Crockford base32 ULID"); }
+            }
         },
         "PluginSuspended" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=PluginSuspended: data object required")?;
