@@ -1308,3 +1308,97 @@ fn response_unknown_verb_with_message_and_data_verb_round_trips() {
     assert!(parsed.data.is_none());
 }
 
+// ── F3 (round 6): RFC-3339 field-range checks ────────────────────────────────
+
+#[test]
+fn signed_intent_rejects_out_of_range_month() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-13-15T12:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_out_of_range_hour() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-04-25T25:00:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_garbage_field_ranges() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-99-99T99:99:99+99:99"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_offset_hour_above_max() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-04-25T12:00:00+24:00"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_minute_above_max() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-04-25T12:60:00Z"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_fractional_offset_datetime() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-04-25T12:00:00.123456789+05:30"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert_eq!(parsed.issued_at, "2026-04-25T12:00:00.123456789+05:30");
+}
+
+#[test]
+fn signed_intent_accepts_leap_second() {
+    // RFC-3339 §5.6 allows seconds=60.
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-12-31T23:59:60Z"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+}

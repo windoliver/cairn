@@ -1965,17 +1965,20 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.dedent();
     w.line("}");
     w.blank();
-    // RFC-3339 date-time minimal shape:
-    // YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|±HH:MM)
-    // We don't validate field ranges (month <= 12 etc.) — that belongs to a
-    // dedicated parser. We catch the obvious shape mistakes (wrong separators,
-    // non-ASCII, missing offset) which is what the IDL `format: date-time`
-    // hint protects against in practice.
-    w.line("/// Return true iff `s` looks like an RFC-3339 date-time:");
+    // RFC-3339 date-time:
+    //   YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|±HH:MM)
+    // Hand-rolled byte-level check with explicit field-range validation so
+    // obviously-out-of-range values (month=99, hour=25, offset=+99:99) are
+    // rejected at the wire boundary. We avoid pulling chrono into cairn-core.
+    // Day-of-month is bounded at 01..=31 only (not month-aware) — leap-year /
+    // month-length validation belongs to a dedicated parser.
+    w.line("/// Return true iff `s` is an RFC-3339 date-time:");
     w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
-    w.line("/// length >= 20, separators at fixed positions, digits everywhere else");
-    w.line("/// in the date / time core. Field-range checks (month <= 12, etc.) are");
-    w.line("/// out of scope — a dedicated parser owns those.");
+    w.line("/// length >= 20, separators at fixed positions, digits everywhere else,");
+    w.line("/// and each numeric field within its RFC-3339 range:");
+    w.line("/// month 01-12, day 01-31, hour 00-23, minute 00-59, second 00-60");
+    w.line("/// (leap second), offset hour 00-23, offset minute 00-59. Day-of-month");
+    w.line("/// is not month-aware — a dedicated parser owns calendar correctness.");
     w.line("fn is_rfc3339_datetime(s: &str) -> bool {");
     w.indent();
     w.line("if !s.is_ascii() { return false; }");
@@ -1987,6 +1990,19 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("if b[4] != b'-' || b[7] != b'-' { return false; }");
     w.line("if b[10] != b'T' && b[10] != b't' { return false; }");
     w.line("if b[13] != b':' || b[16] != b':' { return false; }");
+    w.line("// Field-range checks. `two_digit` reads ASCII digits at b[i],b[i+1].");
+    w.line("let two_digit = |i: usize| -> u32 { (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32 };");
+    w.line("let month = two_digit(5);");
+    w.line("if !(1..=12).contains(&month) { return false; }");
+    w.line("let day = two_digit(8);");
+    w.line("if !(1..=31).contains(&day) { return false; }");
+    w.line("let hour = two_digit(11);");
+    w.line("if hour > 23 { return false; }");
+    w.line("let minute = two_digit(14);");
+    w.line("if minute > 59 { return false; }");
+    w.line("let second = two_digit(17);");
+    w.line("// RFC-3339 §5.6 permits 60 for leap seconds.");
+    w.line("if second > 60 { return false; }");
     w.line("// Optional fractional seconds + mandatory offset (Z or ±HH:MM).");
     w.line("let mut idx = 19;");
     w.line("if idx < b.len() && b[idx] == b'.' {");
@@ -2003,11 +2019,14 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("b'Z' | b'z' => idx + 1 == b.len(),");
     w.line("b'+' | b'-' => {");
     w.indent();
-    w.line("// ±HH:MM = 6 more bytes.");
+    w.line("// ±HH:MM = 6 more bytes; HH ∈ [00, 23] and MM ∈ [00, 59].");
     w.line("if idx + 6 != b.len() { return false; }");
-    w.line("b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()");
-    w.line("    && b[idx + 3] == b':'");
-    w.line("    && b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()");
+    w.line("if !(b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()) { return false; }");
+    w.line("if b[idx + 3] != b':' { return false; }");
+    w.line("if !(b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()) { return false; }");
+    w.line("let off_h = (b[idx + 1] - b'0') as u32 * 10 + (b[idx + 2] - b'0') as u32;");
+    w.line("let off_m = (b[idx + 4] - b'0') as u32 * 10 + (b[idx + 5] - b'0') as u32;");
+    w.line("off_h <= 23 && off_m <= 59");
     w.dedent();
     w.line("}");
     w.line("_ => false,");

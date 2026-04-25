@@ -506,11 +506,13 @@ fn is_identity(s: &str) -> bool {
     ))
 }
 
-/// Return true iff `s` looks like an RFC-3339 date-time:
+/// Return true iff `s` is an RFC-3339 date-time:
 /// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,
-/// length >= 20, separators at fixed positions, digits everywhere else
-/// in the date / time core. Field-range checks (month <= 12, etc.) are
-/// out of scope — a dedicated parser owns those.
+/// length >= 20, separators at fixed positions, digits everywhere else,
+/// and each numeric field within its RFC-3339 range:
+/// month 01-12, day 01-31, hour 00-23, minute 00-59, second 00-60
+/// (leap second), offset hour 00-23, offset minute 00-59. Day-of-month
+/// is not month-aware — a dedicated parser owns calendar correctness.
 fn is_rfc3339_datetime(s: &str) -> bool {
     if !s.is_ascii() { return false; }
     let b = s.as_bytes();
@@ -521,6 +523,19 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     if b[4] != b'-' || b[7] != b'-' { return false; }
     if b[10] != b'T' && b[10] != b't' { return false; }
     if b[13] != b':' || b[16] != b':' { return false; }
+    // Field-range checks. `two_digit` reads ASCII digits at b[i],b[i+1].
+    let two_digit = |i: usize| -> u32 { (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32 };
+    let month = two_digit(5);
+    if !(1..=12).contains(&month) { return false; }
+    let day = two_digit(8);
+    if !(1..=31).contains(&day) { return false; }
+    let hour = two_digit(11);
+    if hour > 23 { return false; }
+    let minute = two_digit(14);
+    if minute > 59 { return false; }
+    let second = two_digit(17);
+    // RFC-3339 §5.6 permits 60 for leap seconds.
+    if second > 60 { return false; }
     // Optional fractional seconds + mandatory offset (Z or ±HH:MM).
     let mut idx = 19;
     if idx < b.len() && b[idx] == b'.' {
@@ -533,11 +548,14 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     match b[idx] {
         b'Z' | b'z' => idx + 1 == b.len(),
         b'+' | b'-' => {
-            // ±HH:MM = 6 more bytes.
+            // ±HH:MM = 6 more bytes; HH ∈ [00, 23] and MM ∈ [00, 59].
             if idx + 6 != b.len() { return false; }
-            b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()
-                && b[idx + 3] == b':'
-                && b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()
+            if !(b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()) { return false; }
+            if b[idx + 3] != b':' { return false; }
+            if !(b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()) { return false; }
+            let off_h = (b[idx + 1] - b'0') as u32 * 10 + (b[idx + 2] - b'0') as u32;
+            let off_m = (b[idx + 4] - b'0') as u32 * 10 + (b[idx + 5] - b'0') as u32;
+            off_h <= 23 && off_m <= 59
         }
         _ => false,
     }
