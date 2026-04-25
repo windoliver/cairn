@@ -15,7 +15,11 @@ const RUSTFMT_SKIP: &str = "#![cfg_attr(rustfmt, rustfmt_skip)]\n";
 const FILE_LINTS: &str = "#![allow(clippy::module_name_repetitions, clippy::large_enum_variant, clippy::missing_errors_doc, clippy::missing_panics_doc, clippy::doc_markdown, clippy::needless_raw_string_hashes, missing_docs, dead_code)]\n";
 const ROOT: &str = "crates/cairn-mcp/src/generated";
 
-/// Emit the MCP tool declaration module plus per-verb / per-prelude JSON schemas.
+/// Emit the MCP tool declaration module plus per-verb / per-prelude JSON schemas
+/// and the supporting `common/`, `errors/`, `capabilities/`, `extensions/`, and
+/// `envelope/` schema bundles. The supporting bundles travel alongside the verbs
+/// so cross-file `$ref` paths like `../common/scope_filter.json` continue to
+/// resolve when the on-disk MCP schemas are loaded.
 ///
 /// # Errors
 ///
@@ -25,6 +29,9 @@ pub fn emit(doc: &Document) -> Result<Vec<GeneratedFile>, CodegenError> {
     let mut out = Vec::new();
     out.push(emit_mod(doc));
     for verb in &doc.verbs {
+        // The verb's stored bytes are now the full source file (not just
+        // $defs.Args), so any `#/$defs/<sibling>` reference inside Args/Data
+        // continues to resolve against schemas/verbs/<id>.json.
         out.push(emit_schema(
             &format!("{ROOT}/schemas/verbs/{}.json", verb.id),
             &verb.args_schema_bytes,
@@ -34,6 +41,46 @@ pub fn emit(doc: &Document) -> Result<Vec<GeneratedFile>, CodegenError> {
         out.push(emit_schema(
             &format!("{ROOT}/schemas/prelude/{}.json", prelude.id),
             &prelude.schema_bytes,
+        )?);
+    }
+    // Mirror every non-verb/non-prelude IDL file under schemas/<group>/<file>.
+    // The directory layout matches the IDL source tree so relative `$ref`s
+    // (e.g. `../common/primitives.json`) resolve byte-for-byte.
+    for group in ["common", "errors", "capabilities", "extensions", "envelope"] {
+        out.extend(emit_group(group)?);
+    }
+    Ok(out)
+}
+
+/// Walk `crates/cairn-idl/schema/<group>/` and emit every `*.json` file under
+/// `crates/cairn-mcp/src/generated/schemas/<group>/`. Non-JSON files (README,
+/// etc.) are ignored.
+fn emit_group(group: &str) -> Result<Vec<GeneratedFile>, CodegenError> {
+    let group_dir = std::path::PathBuf::from(crate::SCHEMA_DIR).join(group);
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&group_dir)
+        .map_err(|e| {
+            CodegenError::Emit(format!(
+                "schema group {group}: read_dir {}: {e}",
+                group_dir.display()
+            ))
+        })?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    entries.sort();
+
+    let mut out = Vec::with_capacity(entries.len());
+    for path in &entries {
+        let bytes = std::fs::read(path)
+            .map_err(|e| CodegenError::Emit(format!("read {}: {e}", path.display())))?;
+        let stem = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| CodegenError::Emit(format!("bad filename: {}", path.display())))?;
+        out.push(emit_schema(
+            &format!("{ROOT}/schemas/{group}/{stem}"),
+            &bytes,
         )?);
     }
     Ok(out)

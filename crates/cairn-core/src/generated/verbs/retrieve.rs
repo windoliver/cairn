@@ -75,6 +75,21 @@ pub enum RetrieveArgs {
     },
 }
 
+impl RetrieveArgs {
+    /// Capability advertised by the IDL for the matched variant, or `None`.
+    #[must_use]
+    pub fn capability(&self) -> Option<&'static str> {
+        match self {
+            Self::Record { .. } => Some("cairn.mcp.v1.retrieve.record"),
+            Self::Session { .. } => Some("cairn.mcp.v1.retrieve.session"),
+            Self::Turn { .. } => Some("cairn.mcp.v1.retrieve.turn"),
+            Self::Folder { .. } => Some("cairn.mcp.v1.retrieve.folder"),
+            Self::Scope { .. } => Some("cairn.mcp.v1.retrieve.scope"),
+            Self::Profile { .. } => Some("cairn.mcp.v1.retrieve.profile"),
+        }
+    }
+}
+
 pub type RetrieveData = serde_json::Value;
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/retrieve.json");

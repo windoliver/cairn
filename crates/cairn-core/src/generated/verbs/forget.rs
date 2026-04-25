@@ -20,6 +20,18 @@ pub enum ForgetArgs {
     },
 }
 
+impl ForgetArgs {
+    /// Capability advertised by the IDL for the matched variant, or `None`.
+    #[must_use]
+    pub fn capability(&self) -> Option<&'static str> {
+        match self {
+            Self::Record { .. } => Some("cairn.mcp.v1.forget.record"),
+            Self::Session { .. } => Some("cairn.mcp.v1.forget.session"),
+            Self::Scope { .. } => Some("cairn.mcp.v1.forget.scope"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForgetData {

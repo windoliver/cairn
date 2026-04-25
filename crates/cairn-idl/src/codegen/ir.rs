@@ -204,6 +204,10 @@ pub struct EnumVariant {
     /// Rust identifier — `PascalCase`-cased form of the wire string.
     pub rust_ident: String,
     pub doc: Option<String>,
+    /// Per-variant capability lifted from `x-cairn-capability` on the
+    /// originating `oneOf` const entry (e.g. `search.mode` variants advertise
+    /// `cairn.mcp.v1.search.semantic` etc.).
+    pub capability: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -453,6 +457,7 @@ fn lower_string_enum(values: &[Value], ctx: &mut Ctx) -> Result<RustType, Codege
                 wire: wire.to_string(),
                 rust_ident: pascal_case(wire),
                 doc: None,
+                capability: None,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -472,10 +477,15 @@ fn lower_const_oneof(arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenEr
                 .get("const")
                 .and_then(Value::as_str)
                 .ok_or_else(|| CodegenError::Ir("oneOf entry missing const".to_string()))?;
+            let capability = v
+                .get("x-cairn-capability")
+                .and_then(Value::as_str)
+                .map(String::from);
             Ok(EnumVariant {
                 wire: wire.to_string(),
                 rust_ident: pascal_case(wire),
                 doc: None,
+                capability,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -631,10 +641,10 @@ fn lower_untagged_union(
     // to enforce XOR groups against; fall back to an opaque `Json` blob so the
     // type is at least addressable.
     let outer = lower_object(value, ctx)?;
-    let RustType::Struct(StructDef { fields, .. }) = outer else {
+    let RustType::Struct(StructDef { mut fields, .. }) = outer else {
         return Ok(RustType::Json);
     };
-    let xor_groups = arr
+    let xor_groups: Vec<Vec<String>> = arr
         .iter()
         .map(|entry| {
             entry
@@ -648,6 +658,24 @@ fn lower_untagged_union(
                 .unwrap_or_default()
         })
         .collect();
+    // Fields that participate in *any* xor_group must remain Optional regardless
+    // of whether the outer schema marked them required — the XOR validator owns
+    // their presence. Fields that do NOT appear in any xor_group keep whatever
+    // shape `lower_object` produced (required → non-Optional, optional →
+    // Option<T>) so outer `required` stays load-bearing (e.g. ingest.kind,
+    // signed_intent's 10 auth-critical fields).
+    let xor_field_names: std::collections::BTreeSet<&str> = xor_groups
+        .iter()
+        .flat_map(|g| g.iter().map(String::as_str))
+        .collect();
+    for field in &mut fields {
+        if xor_field_names.contains(field.name.as_str())
+            && !matches!(field.ty, RustType::Optional(_))
+        {
+            field.ty = RustType::Optional(Box::new(field.ty.clone()));
+            field.required = false;
+        }
+    }
     Ok(RustType::UntaggedUnion(UntaggedUnionDef {
         name: target,
         fields,
@@ -1025,7 +1053,13 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         skill,
         capability,
         auth,
-        args_schema_bytes: serde_json::to_vec(args_schema)
+        // Capture the *entire* verb file so any `#/$defs/...` reference inside
+        // Args/Data resolves against siblings present in the same on-disk JSON.
+        // Cross-file `$ref`s like `../common/scope_filter.json` resolve via the
+        // sibling `common/`, `errors/`, `capabilities/`, `extensions/`, and
+        // `envelope/` schema bundles emitted by `emit_mcp` alongside the
+        // verbs/ directory.
+        args_schema_bytes: serde_json::to_vec(&file.value)
             .map_err(|e| CodegenError::Ir(e.to_string()))?,
         data_schema_bytes: serde_json::to_vec(data_schema)
             .map_err(|e| CodegenError::Ir(e.to_string()))?,

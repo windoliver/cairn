@@ -1,34 +1,97 @@
 {
-  "additionalProperties": false,
-  "properties": {
-    "citations": {
-      "enum": [
-        "on",
-        "compact",
-        "off"
-      ],
-      "type": "string"
-    },
-    "kind": {
-      "description": "Kind to file under if persist is true.",
-      "minLength": 1,
-      "type": "string"
-    },
-    "persist": {
-      "description": "When true, files the synthesis as a new reference or strategy_success memory.",
-      "type": "boolean",
-      "x-cairn-auth": "write_capability"
-    },
-    "record_ids": {
-      "items": {
-        "$ref": "../common/primitives.json#/$defs/Ulid"
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "citations": {
+          "enum": [
+            "on",
+            "compact",
+            "off"
+          ],
+          "type": "string"
+        },
+        "kind": {
+          "description": "Kind to file under if persist is true.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "persist": {
+          "description": "When true, files the synthesis as a new reference or strategy_success memory.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
+        "record_ids": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
       },
-      "minItems": 1,
-      "type": "array"
+      "required": [
+        "record_ids"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "persisted_record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid",
+          "description": "Present when persist was true."
+        },
+        "summary": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "type": "object"
     }
   },
-  "required": [
-    "record_ids"
-  ],
-  "type": "object"
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/summarize.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: summarize",
+  "type": "object",
+  "x-cairn-auth": "rebac",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "summarize",
+    "flags": [
+      {
+        "long": "persist",
+        "name": "persist",
+        "value_source": "bool"
+      },
+      {
+        "long": "kind",
+        "name": "kind",
+        "value_source": "string"
+      },
+      {
+        "long": "citations",
+        "name": "citations",
+        "value_source": "enum(on,compact,off)"
+      }
+    ],
+    "positional": {
+      "description": "One or more record ULIDs.",
+      "name": "record_ids",
+      "repeatable": true
+    }
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the canonical summarize surface",
+    "negative": [
+      "do NOT use to answer a general question — call search first"
+    ],
+    "positive": [
+      "use to roll up a list of known record ids into a single synthesis"
+    ]
+  },
+  "x-cairn-verb-id": "summarize"
 }

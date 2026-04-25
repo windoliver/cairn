@@ -1,0 +1,155 @@
+{
+  "$defs": {
+    "known": {
+      "description": "The four planned extensions at P0 — carried as literal values so codegen can emit an enum without re-walking the $defs.namespace schema.",
+      "items": {
+        "$ref": "#/$defs/namespace"
+      },
+      "type": "array",
+      "x-cairn-values": [
+        {
+          "enabler": "agent.enable_aggregate",
+          "name": "cairn.aggregate.v1",
+          "x-cairn-capability": "cairn.mcp.v1.extension.aggregate",
+          "x-cairn-since": "v0.2"
+        },
+        {
+          "enabler": "operator role",
+          "name": "cairn.admin.v1",
+          "x-cairn-capability": "cairn.mcp.v1.extension.admin",
+          "x-cairn-since": "v0.1"
+        },
+        {
+          "enabler": "enterprise deployment",
+          "name": "cairn.federation.v1",
+          "x-cairn-capability": "cairn.mcp.v1.extension.federation",
+          "x-cairn-since": "v0.3"
+        },
+        {
+          "enabler": "session.enable_tree",
+          "name": "cairn.sessiontree.v1",
+          "x-cairn-capability": "cairn.mcp.v1.extension.sessiontree",
+          "x-cairn-since": "v0.3"
+        }
+      ]
+    },
+    "namespace": {
+      "description": "One of the four registered extension triples. Independent enums on name / since / enabler would accept invalid combinations, so each namespace is pinned as a whole quadruple (name + since + enabler + capability). The capability string ties negotiation to the shared capabilities enum so status.extensions and status.capabilities cannot drift.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabler": {
+              "const": "agent.enable_aggregate"
+            },
+            "name": {
+              "const": "cairn.aggregate.v1"
+            },
+            "x-cairn-capability": {
+              "const": "cairn.mcp.v1.extension.aggregate"
+            },
+            "x-cairn-since": {
+              "const": "v0.2"
+            }
+          },
+          "required": [
+            "name",
+            "x-cairn-since",
+            "enabler",
+            "x-cairn-capability"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabler": {
+              "const": "operator role"
+            },
+            "name": {
+              "const": "cairn.admin.v1"
+            },
+            "x-cairn-capability": {
+              "const": "cairn.mcp.v1.extension.admin"
+            },
+            "x-cairn-since": {
+              "const": "v0.1"
+            }
+          },
+          "required": [
+            "name",
+            "x-cairn-since",
+            "enabler",
+            "x-cairn-capability"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabler": {
+              "const": "enterprise deployment"
+            },
+            "name": {
+              "const": "cairn.federation.v1"
+            },
+            "x-cairn-capability": {
+              "const": "cairn.mcp.v1.extension.federation"
+            },
+            "x-cairn-since": {
+              "const": "v0.3"
+            }
+          },
+          "required": [
+            "name",
+            "x-cairn-since",
+            "enabler",
+            "x-cairn-capability"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabler": {
+              "const": "session.enable_tree"
+            },
+            "name": {
+              "const": "cairn.sessiontree.v1"
+            },
+            "x-cairn-capability": {
+              "const": "cairn.mcp.v1.extension.sessiontree"
+            },
+            "x-cairn-since": {
+              "const": "v0.3"
+            }
+          },
+          "required": [
+            "name",
+            "x-cairn-since",
+            "enabler",
+            "x-cairn-capability"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/extensions/registry.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "namespaces": {
+      "items": {
+        "$ref": "#/$defs/namespace"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "namespaces"
+  ],
+  "title": "Cairn extension namespace registry",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

@@ -17,8 +17,7 @@ pub struct IngestArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<serde_json::Value>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -28,11 +27,9 @@ pub struct IngestArgs {
 }
 
 impl IngestArgs {
-    /// Enforce exactly-one-of each XOR group declared in the IDL.
+    /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8) != 1 { return Err("exactly one of [body] is required"); }
-        if (self.file.is_some() as u8) != 1 { return Err("exactly one of [file] is required"); }
-        if (self.url.is_some() as u8) != 1 { return Err("exactly one of [url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
         Ok(())
     }
 }

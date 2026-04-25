@@ -1,14 +1,145 @@
 {
-  "oneOf": [
-    {
-      "$ref": "#/$defs/ArgsRecord"
+  "$defs": {
+    "Args": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ArgsRecord"
+        },
+        {
+          "$ref": "#/$defs/ArgsSession"
+        },
+        {
+          "$ref": "#/$defs/ArgsScope"
+        }
+      ],
+      "x-cairn-discriminator": "mode"
     },
-    {
-      "$ref": "#/$defs/ArgsSession"
+    "ArgsRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "record"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "mode",
+        "record_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.record",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "record",
+            "name": "record_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.1"
     },
-    {
-      "$ref": "#/$defs/ArgsScope"
+    "ArgsScope": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "scope"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json"
+        }
+      },
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.scope",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "scope",
+            "name": "scope",
+            "value_source": "json"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.3"
+    },
+    "ArgsSession": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "session"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "session_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.session",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.2"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tombstones": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "deleted_count"
+      ],
+      "type": "object"
     }
-  ],
-  "x-cairn-discriminator": "mode"
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/forget.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: forget",
+  "type": "object",
+  "x-cairn-auth": "forget_capability",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "forget",
+    "note": "top-level CLI shape; per-mode flags are defined on each $defs.Args* sub-type"
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the single delete surface — there is no other delete path",
+    "negative": [
+      "do NOT use to 'mark as resolved' — that belongs to an ingest with kind:feedback",
+      "do NOT use on a draft the user wants to edit — that belongs to ingest with version bump"
+    ],
+    "positive": [
+      "use when the user asks to delete or forget a specific record / session / scope",
+      "use as part of a compliance-driven forget-me flow"
+    ]
+  },
+  "x-cairn-verb-id": "forget"
 }

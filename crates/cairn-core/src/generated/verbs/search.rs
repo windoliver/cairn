@@ -55,6 +55,18 @@ pub enum SearchArgsMode {
     Hybrid,
 }
 
+impl SearchArgsMode {
+    /// Capability advertised by the IDL for the matched variant, or `None`.
+    #[must_use]
+    pub const fn capability(self) -> Option<&'static str> {
+        match self {
+            Self::Keyword => Some("cairn.mcp.v1.search.keyword"),
+            Self::Semantic => Some("cairn.mcp.v1.search.semantic"),
+            Self::Hybrid => Some("cairn.mcp.v1.search.hybrid"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchArgs {

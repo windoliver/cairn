@@ -340,7 +340,9 @@ fn emit_errors(doc: &Document) -> GeneratedFile {
     w.line("use serde::{Deserialize, Serialize};");
     w.blank();
     w.line("#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]");
-    w.line("#[serde(rename_all = \"snake_case\")]");
+    // No `rename_all` — IDL error codes are PascalCase wire constants and the
+    // generated variant idents are already byte-identical to the wire form, so
+    // serde's default naming serialises/deserialises them without any rename.
     w.line("#[non_exhaustive]");
     w.line("pub enum ErrorCode {");
     w.indent();
@@ -598,6 +600,29 @@ fn write_enum(w: &mut RustWriter, e: &EnumDef) {
     }
     w.dedent();
     w.line("}");
+    if e.variants.iter().any(|v| v.capability.is_some()) {
+        w.blank();
+        w.line(&format!("impl {} {{", e.name.0));
+        w.indent();
+        w.line("/// Capability advertised by the IDL for the matched variant, or `None`.");
+        w.line("#[must_use]");
+        w.line("pub const fn capability(self) -> Option<&'static str> {");
+        w.indent();
+        w.line("match self {");
+        w.indent();
+        for variant in &e.variants {
+            match &variant.capability {
+                Some(cap) => w.line(&format!("Self::{} => Some(\"{cap}\"),", variant.rust_ident)),
+                None => w.line(&format!("Self::{} => None,", variant.rust_ident)),
+            }
+        }
+        w.dedent();
+        w.line("}");
+        w.dedent();
+        w.line("}");
+        w.dedent();
+        w.line("}");
+    }
 }
 
 fn write_enum_variant(w: &mut RustWriter, variant: &EnumVariant) {
@@ -648,6 +673,35 @@ fn write_tagged_union(
     }
     w.dedent();
     w.line("}");
+    if t.variants.iter().any(|v| v.capability.is_some()) {
+        w.blank();
+        w.line(&format!("impl {} {{", t.name.0));
+        w.indent();
+        w.line("/// Capability advertised by the IDL for the matched variant, or `None`.");
+        w.line("#[must_use]");
+        w.line("pub fn capability(&self) -> Option<&'static str> {");
+        w.indent();
+        w.line("match self {");
+        w.indent();
+        for variant in &t.variants {
+            // Match arm pattern depends on whether the variant has fields.
+            let arm = if variant.fields.is_empty() {
+                format!("Self::{}", variant.rust_ident)
+            } else {
+                format!("Self::{} {{ .. }}", variant.rust_ident)
+            };
+            match &variant.capability {
+                Some(cap) => w.line(&format!("{arm} => Some(\"{cap}\"),")),
+                None => w.line(&format!("{arm} => None,")),
+            }
+        }
+        w.dedent();
+        w.line("}");
+        w.dedent();
+        w.line("}");
+        w.dedent();
+        w.line("}");
+    }
     Ok(())
 }
 
@@ -701,42 +755,42 @@ fn write_untagged_union(
     w.line("#[serde(deny_unknown_fields)]");
     w.line(&format!("pub struct {} {{", u.name.0));
     w.indent();
+    // Render fields exactly as the IR carries them — outer `required` fields
+    // stay non-Optional, xor_group members are Optional. The IR's
+    // `lower_untagged_union` already enforced this split.
     for field in &u.fields {
-        // All fields are emitted as Optional so the validator can enforce the
-        // exactly-one-of-each-xor-group rule at runtime regardless of which
-        // variant was sent.
-        let optionalised = StructField {
-            name: field.name.clone(),
-            ty: if matches!(field.ty, RustType::Optional(_)) {
-                field.ty.clone()
-            } else {
-                RustType::Optional(Box::new(field.ty.clone()))
-            },
-            required: false,
-            doc: field.doc.clone(),
-        };
-        write_field(w, &optionalised, &u.name.0, common, true);
+        write_field(w, field, &u.name.0, common, true);
     }
     w.dedent();
     w.line("}");
     w.blank();
     w.line(&format!("impl {} {{", u.name.0));
     w.indent();
-    w.line("/// Enforce exactly-one-of each XOR group declared in the IDL.");
+    w.line(
+        "/// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.",
+    );
     w.line("pub fn validate(&self) -> Result<(), &'static str> {");
     w.indent();
+    // The contract of `oneOf: [{required: [...]}, ...]` is "exactly one of the
+    // entries matches". For our shape (each entry's `required` lists fields
+    // that are otherwise optional in the type), this collapses to "exactly one
+    // of the union of all xor-group fields is present". Compute the union once,
+    // sum is_some() across it, require == 1.
+    let mut union: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for group in &u.xor_groups {
-        if group.is_empty() {
-            continue;
+        for name in group {
+            union.insert(name.as_str());
         }
-        let checks = group
+    }
+    if !union.is_empty() {
+        let checks = union
             .iter()
             .map(|name| format!("self.{}.is_some() as u8", sanitise_ident(name)))
             .collect::<Vec<_>>()
             .join(" + ");
-        let group_str = group.join(", ");
+        let union_str = union.iter().copied().collect::<Vec<_>>().join(", ");
         w.line(&format!(
-            "if ({checks}) != 1 {{ return Err(\"exactly one of [{group_str}] is required\"); }}"
+            "if ({checks}) != 1 {{ return Err(\"exactly one of [{union_str}] is required\"); }}"
         ));
     }
     w.line("Ok(())");

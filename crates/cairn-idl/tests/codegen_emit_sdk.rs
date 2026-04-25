@@ -101,3 +101,98 @@ fn every_generated_file_carries_generated_header() {
         );
     }
 }
+
+#[test]
+fn search_mode_enum_exposes_per_variant_capability() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let search = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/verbs/search.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&search.bytes).unwrap();
+    // The mode enum carries per-variant capabilities (search.semantic etc).
+    assert!(
+        body.contains("impl SearchArgsMode {"),
+        "SearchArgsMode missing capability() impl block"
+    );
+    assert!(
+        body.contains("Self::Semantic => Some(\"cairn.mcp.v1.search.semantic\")"),
+        "SearchArgsMode::Semantic must expose its capability"
+    );
+    assert!(
+        body.contains("Self::Keyword => Some(\"cairn.mcp.v1.search.keyword\")"),
+        "SearchArgsMode::Keyword must expose its capability"
+    );
+    assert!(
+        body.contains("Self::Hybrid => Some(\"cairn.mcp.v1.search.hybrid\")"),
+        "SearchArgsMode::Hybrid must expose its capability"
+    );
+}
+
+#[test]
+fn retrieve_args_tagged_union_exposes_per_variant_capability() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let retrieve = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/verbs/retrieve.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&retrieve.bytes).unwrap();
+    assert!(
+        body.contains("impl RetrieveArgs {"),
+        "RetrieveArgs missing capability() impl block"
+    );
+    assert!(
+        body.contains("Self::Record { .. } => Some(\"cairn.mcp.v1.retrieve.record\")"),
+        "RetrieveArgs::Record must expose its capability"
+    );
+    assert!(
+        body.contains("Self::Profile { .. } => Some(\"cairn.mcp.v1.retrieve.profile\")"),
+        "RetrieveArgs::Profile must expose its capability"
+    );
+}
+
+#[test]
+fn forget_args_tagged_union_exposes_per_variant_capability() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let forget = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/verbs/forget.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&forget.bytes).unwrap();
+    assert!(
+        body.contains("impl ForgetArgs {"),
+        "ForgetArgs missing capability() impl block"
+    );
+    assert!(
+        body.contains("Self::Record { .. } => Some(\"cairn.mcp.v1.forget.record\")"),
+        "ForgetArgs::Record must expose its capability"
+    );
+}
+
+#[test]
+fn error_code_enum_omits_rename_all_so_pascal_wire_round_trips() {
+    let files = emit_sdk::emit(&doc()).unwrap();
+    let errors = files
+        .iter()
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/errors/mod.rs")
+        })
+        .unwrap();
+    let body = std::str::from_utf8(&errors.bytes).unwrap();
+    // The IDL error codes are PascalCase wire constants — `rename_all =
+    // "snake_case"` would invert them and break the wire contract.
+    assert!(
+        !body.contains("#[serde(rename_all = \"snake_case\")]"),
+        "ErrorCode must not declare rename_all (PascalCase wire is the contract)"
+    );
+}

@@ -128,25 +128,17 @@ pub struct SignedIntentScope {
 #[serde(deny_unknown_fields)]
 pub struct SignedIntent {
     /// operation_id ULIDs of prior operations this one depends on. Bounded and deduplicated so a malformed intent cannot push a pathologically large DAG fan-in at WAL dependency processing time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_parents: Option<Vec<crate::generated::common::Ulid>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issued_at: Option<String>,
+    pub chain_parents: Vec<crate::generated::common::Ulid>,
+    pub expires_at: String,
+    pub issued_at: String,
     /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer: Option<crate::generated::common::Identity>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_version: Option<i64>,
+    pub issuer: crate::generated::common::Identity,
+    pub key_version: i64,
     /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nonce: Option<crate::generated::common::Nonce16Base64>,
+    pub nonce: crate::generated::common::Nonce16Base64,
     /// ULID (Crockford base32, 26 chars); unique per issuer within expires_at window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<crate::generated::common::Ulid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<SignedIntentScope>,
+    pub operation_id: crate::generated::common::Ulid,
+    pub scope: SignedIntentScope,
     /// Monotonic per-issuer counter; strictly increasing. Bounded by JSON's safe integer range (2^53 − 1) so validators and JSON decoders cannot disagree on the represented value. Mutually exclusive with server_challenge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
@@ -154,18 +146,15 @@ pub struct SignedIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_challenge: Option<crate::generated::common::Nonce16Base64>,
     /// Ed25519 signature over the canonical JSON of every other field. 64 raw bytes = 128 lowercase hex chars.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<crate::generated::common::Ed25519Signature>,
+    pub signature: crate::generated::common::Ed25519Signature,
     /// sha256 of the record / plan / receipt this signature authorizes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_hash: Option<String>,
+    pub target_hash: String,
 }
 
 impl SignedIntent {
-    /// Enforce exactly-one-of each XOR group declared in the IDL.
+    /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.sequence.is_some() as u8) != 1 { return Err("exactly one of [sequence] is required"); }
-        if (self.server_challenge.is_some() as u8) != 1 { return Err("exactly one of [server_challenge] is required"); }
+        if (self.sequence.is_some() as u8 + self.server_challenge.is_some() as u8) != 1 { return Err("exactly one of [sequence, server_challenge] is required"); }
         Ok(())
     }
 }

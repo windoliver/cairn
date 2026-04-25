@@ -80,3 +80,63 @@ fn tool_decl_description_includes_skill_triggers() {
         "ingest's positive trigger missing"
     );
 }
+
+#[test]
+fn supporting_schema_groups_are_emitted_alongside_verbs() {
+    // Cross-file `$ref` paths inside verb schemas (e.g.
+    // `../common/scope_filter.json`) need the sibling schema groups to ship
+    // under the same on-disk root, otherwise the references dangle when the
+    // MCP server validates incoming requests.
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
+    for required in [
+        "crates/cairn-mcp/src/generated/schemas/common/primitives.json",
+        "crates/cairn-mcp/src/generated/schemas/common/scope_filter.json",
+        "crates/cairn-mcp/src/generated/schemas/errors/error.json",
+        "crates/cairn-mcp/src/generated/schemas/capabilities/capabilities.json",
+        "crates/cairn-mcp/src/generated/schemas/extensions/registry.json",
+        "crates/cairn-mcp/src/generated/schemas/envelope/request.json",
+        "crates/cairn-mcp/src/generated/schemas/envelope/response.json",
+        "crates/cairn-mcp/src/generated/schemas/envelope/signed_intent.json",
+    ] {
+        assert!(
+            names.iter().any(|n| n.ends_with(required)),
+            "missing supporting schema {required}"
+        );
+    }
+}
+
+#[test]
+fn verb_schema_carries_full_idl_file_with_local_defs() {
+    // Per-verb schema should be the full source file so `#/$defs/...` refs
+    // inside Args/Data resolve against the same JSON document.
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let retrieve = files
+        .iter()
+        .find(|f| f.path.ends_with("schemas/verbs/retrieve.json"))
+        .unwrap();
+    let body = std::str::from_utf8(&retrieve.bytes).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+    let defs = parsed
+        .get("$defs")
+        .and_then(serde_json::Value::as_object)
+        .expect("retrieve schema must keep its $defs envelope");
+    for required_def in [
+        "Args",
+        "ArgsRecord",
+        "ArgsSession",
+        "ArgsTurn",
+        "ArgsFolder",
+        "ArgsScope",
+        "ArgsProfile",
+        "Data",
+    ] {
+        assert!(
+            defs.contains_key(required_def),
+            "retrieve schema missing $defs.{required_def} — local refs would dangle"
+        );
+    }
+}

@@ -193,10 +193,92 @@ fn untagged_union_xor_groups() {
         panic!("expected UntaggedUnion, got {ty:?}")
     };
     assert_eq!(u.fields.len(), 4);
-    // `kind` is the outer-required field.
-    assert!(u.fields.iter().find(|f| f.name == "kind").unwrap().required);
-    // body/file/url stay Optional in the type itself, XOR is in xor_groups.
+    // `kind` is the outer-required field — must stay required and non-Optional.
+    let kind = u.fields.iter().find(|f| f.name == "kind").unwrap();
+    assert!(kind.required, "ingest.kind must remain required");
+    assert!(
+        !matches!(kind.ty, RustType::Optional(_)),
+        "ingest.kind type must not be Option<_>"
+    );
+    // body/file/url stay Optional in the type itself; XOR lives in xor_groups.
+    for xor in ["body", "file", "url"] {
+        let f = u.fields.iter().find(|f| f.name == xor).unwrap();
+        assert!(!f.required, "ingest.{xor} must not be required");
+        assert!(
+            matches!(f.ty, RustType::Optional(_)),
+            "ingest.{xor} type must be Option<_>"
+        );
+    }
+    // xor_groups echo the IDL `oneOf`: three groups, one element each.
     assert_eq!(u.xor_groups.len(), 3);
+    let groups: Vec<&[String]> = u.xor_groups.iter().map(Vec::as_slice).collect();
+    assert!(groups.contains(&[String::from("body")].as_slice()));
+    assert!(groups.contains(&[String::from("file")].as_slice()));
+    assert!(groups.contains(&[String::from("url")].as_slice()));
+}
+
+#[test]
+fn untagged_union_preserves_outer_required_for_signed_intent_shape() {
+    // signed_intent has 10 outer-required fields and a XOR over
+    // {sequence, server_challenge}. None of the 10 may become Optional.
+    let v = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "operation_id", "nonce", "target_hash", "scope",
+            "issuer", "issued_at", "expires_at", "key_version",
+            "chain_parents", "signature"
+        ],
+        "properties": {
+            "operation_id":     { "type": "string" },
+            "nonce":            { "type": "string" },
+            "sequence":         { "type": "integer", "minimum": 0 },
+            "server_challenge": { "type": "string" },
+            "target_hash":      { "type": "string" },
+            "scope":            { "type": "object" },
+            "issuer":           { "type": "string" },
+            "issued_at":        { "type": "string" },
+            "expires_at":       { "type": "string" },
+            "key_version":      { "type": "integer", "minimum": 1 },
+            "chain_parents":    { "type": "array", "items": {"type": "string"} },
+            "signature":        { "type": "string" }
+        },
+        "oneOf": [
+            { "required": ["sequence"] },
+            { "required": ["server_challenge"] }
+        ]
+    });
+    let mut ctx = Ctx::with_target("SignedIntent");
+    let ty = lower_schema(&v, &mut ctx).unwrap();
+    let RustType::UntaggedUnion(u) = ty else {
+        panic!("expected UntaggedUnion, got {ty:?}")
+    };
+    for required in [
+        "operation_id",
+        "nonce",
+        "target_hash",
+        "scope",
+        "issuer",
+        "issued_at",
+        "expires_at",
+        "key_version",
+        "chain_parents",
+        "signature",
+    ] {
+        let f = u.fields.iter().find(|f| f.name == required).unwrap();
+        assert!(f.required, "{required} must remain required");
+        assert!(
+            !matches!(f.ty, RustType::Optional(_)),
+            "{required} type must not be Option<_>"
+        );
+    }
+    for xor in ["sequence", "server_challenge"] {
+        let f = u.fields.iter().find(|f| f.name == xor).unwrap();
+        assert!(
+            matches!(f.ty, RustType::Optional(_)),
+            "{xor} must be Option<_>"
+        );
+    }
 }
 
 #[test]
