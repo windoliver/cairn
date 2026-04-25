@@ -148,27 +148,37 @@ impl PluginManifest {
         })
     }
 
-    /// Verify the manifest's `contract_version_range` accepts the supplied
-    /// host `CONTRACT_VERSION` for the same contract.
+    /// Verify the manifest declares `expected` contract and that
+    /// `contract_version_range` accepts the supplied host `CONTRACT_VERSION`.
     ///
     /// Hosts call this before invoking a plugin's `register(&mut PluginRegistry)`
-    /// to fail closed on manifest-level version mismatch — independent of the
-    /// runtime check the registry itself performs.
+    /// to fail closed on both contract-kind and version mismatches — independent
+    /// of the runtime check the registry itself performs.
     ///
     /// # Errors
-    /// [`PluginError::UnsupportedContractVersion`] when `host_version` is
-    /// outside `self.contract_version_range`.
-    pub fn verify_compatible_with(&self, host_version: ContractVersion) -> Result<(), PluginError> {
-        if self.contract_version_range.accepts(host_version) {
-            Ok(())
-        } else {
-            Err(PluginError::UnsupportedContractVersion {
-                contract: self.contract.as_static_str(),
+    /// - [`PluginError::ContractMismatch`] when `self.contract != expected`.
+    /// - [`PluginError::UnsupportedContractVersion`] when `host_version` is
+    ///   outside `self.contract_version_range`.
+    pub fn verify_compatible_with(
+        &self,
+        expected: ContractKind,
+        host_version: ContractVersion,
+    ) -> Result<(), PluginError> {
+        if self.contract != expected {
+            return Err(PluginError::ContractMismatch {
+                expected,
+                actual: self.contract,
+            });
+        }
+        if !self.contract_version_range.accepts(host_version) {
+            return Err(PluginError::UnsupportedContractVersion {
+                contract: expected.as_static_str(),
                 plugin: self.name.clone(),
                 plugin_range: self.contract_version_range,
                 host: host_version,
-            })
+            });
         }
+        Ok(())
     }
 }
 
@@ -390,11 +400,11 @@ mod tests {
     fn verify_compatible_with_accepts_host_in_range() {
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
         assert!(
-            m.verify_compatible_with(ContractVersion::new(0, 1, 0))
+            m.verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 1, 0))
                 .is_ok()
         );
         assert!(
-            m.verify_compatible_with(ContractVersion::new(0, 1, 9))
+            m.verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 1, 9))
                 .is_ok()
         );
     }
@@ -403,12 +413,28 @@ mod tests {
     fn verify_compatible_with_rejects_host_outside_range() {
         let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
         let err = m
-            .verify_compatible_with(ContractVersion::new(0, 2, 0))
+            .verify_compatible_with(ContractKind::MemoryStore, ContractVersion::new(0, 2, 0))
             .expect_err("host outside range must fail");
         match err {
             PluginError::UnsupportedContractVersion { contract, host, .. } => {
                 assert_eq!(contract, "MemoryStore");
                 assert_eq!(host, ContractVersion::new(0, 2, 0));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_compatible_with_rejects_contract_mismatch() {
+        let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        // Fixture is a MemoryStore manifest; verify against LLMProvider must fail.
+        let err = m
+            .verify_compatible_with(ContractKind::LLMProvider, ContractVersion::new(0, 1, 0))
+            .expect_err("contract kind mismatch must fail");
+        match err {
+            PluginError::ContractMismatch { expected, actual } => {
+                assert_eq!(expected, ContractKind::LLMProvider);
+                assert_eq!(actual, ContractKind::MemoryStore);
             }
             other => panic!("wrong variant: {other:?}"),
         }

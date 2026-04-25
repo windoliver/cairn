@@ -99,6 +99,15 @@ pub enum PluginError {
     /// The plugin manifest contains invalid or missing fields.
     #[error("invalid plugin manifest: {0}")]
     InvalidManifest(String),
+
+    /// Plugin manifest declares a different contract than the host expects.
+    #[error("plugin manifest declares contract {actual:?} but host expected {expected:?}")]
+    ContractMismatch {
+        /// The contract kind the host was trying to verify against.
+        expected: crate::contract::manifest::ContractKind,
+        /// The contract kind the manifest actually declares.
+        actual: crate::contract::manifest::ContractKind,
+    },
 }
 
 use crate::contract::{
