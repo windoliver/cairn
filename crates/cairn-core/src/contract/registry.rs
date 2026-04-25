@@ -82,6 +82,20 @@ pub enum PluginError {
         host: ContractVersion,
     },
 
+    /// Plugin's runtime name does not match the registered identifier.
+    #[error(
+        "plugin runtime name {runtime:?} does not match registered key {registered} \
+         for contract {contract}"
+    )]
+    IdentityMismatch {
+        /// Contract under which registration was attempted.
+        contract: &'static str,
+        /// Name passed to the registry (the key).
+        registered: PluginName,
+        /// Name reported by the plugin at runtime via `name()`.
+        runtime: String,
+    },
+
     /// The plugin manifest contains invalid or missing fields.
     #[error("invalid plugin manifest: {0}")]
     InvalidManifest(String),
@@ -163,6 +177,13 @@ macro_rules! register_method {
                     plugin: name,
                     plugin_range: plugin.supported_contract_versions(),
                     host: $host_version,
+                });
+            }
+            if plugin.name() != name.as_str() {
+                return Err(PluginError::IdentityMismatch {
+                    contract: $contract,
+                    registered: name,
+                    runtime: plugin.name().to_string(),
                 });
             }
             if self.$field.contains_key(&name) {
@@ -329,13 +350,14 @@ mod tests {
     // -- Registry tests ---------------------------------------------------
 
     struct StubStore {
+        name: &'static str,
         range: VersionRange,
     }
 
     #[async_trait::async_trait]
     impl MemoryStore for StubStore {
-        fn name(&self) -> &'static str {
-            "stub"
+        fn name(&self) -> &str {
+            self.name
         }
         fn capabilities(&self) -> &MemoryStoreCapabilities {
             static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
@@ -366,12 +388,13 @@ mod tests {
         reg.register_memory_store(
             name.clone(),
             Arc::new(StubStore {
+                name: "cairn-store-sqlite",
                 range: compatible(),
             }),
         )
         .expect("compatible plugin registers");
         let resolved = reg.memory_store(&name).expect("registered");
-        assert_eq!(resolved.name(), "stub");
+        assert_eq!(resolved.name(), "cairn-store-sqlite");
     }
 
     #[test]
@@ -381,6 +404,7 @@ mod tests {
         reg.register_memory_store(
             name.clone(),
             Arc::new(StubStore {
+                name: "cairn-store-sqlite",
                 range: compatible(),
             }),
         )
@@ -389,6 +413,7 @@ mod tests {
             .register_memory_store(
                 name,
                 Arc::new(StubStore {
+                    name: "cairn-store-sqlite",
                     range: compatible(),
                 }),
             )
@@ -404,6 +429,7 @@ mod tests {
             .register_memory_store(
                 name,
                 Arc::new(StubStore {
+                    name: "acme-store-future",
                     range: incompatible(),
                 }),
             )
@@ -415,6 +441,22 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_identity_mismatch() {
+        let mut reg = PluginRegistry::new();
+        let key = PluginName::new("acme-store").expect("valid");
+        let err = reg
+            .register_memory_store(
+                key,
+                Arc::new(StubStore {
+                    name: "different-runtime-name",
+                    range: compatible(),
+                }),
+            )
+            .expect_err("identity mismatch must fail closed");
+        assert!(matches!(err, PluginError::IdentityMismatch { .. }));
     }
 
     #[test]

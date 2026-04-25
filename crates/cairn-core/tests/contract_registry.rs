@@ -17,7 +17,7 @@ mod compatible_plugin {
     #[async_trait::async_trait]
     impl MemoryStore for FakeStore {
         fn name(&self) -> &'static str {
-            "fake-compatible"
+            "fake-compat"
         }
         fn capabilities(&self) -> &MemoryStoreCapabilities {
             static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
@@ -75,7 +75,7 @@ fn compatible_plugin_registers_via_macro() {
 
     let name = PluginName::new("fake-compat").expect("valid name");
     let resolved = reg.memory_store(&name).expect("registered");
-    assert_eq!(resolved.name(), "fake-compatible");
+    assert_eq!(resolved.name(), "fake-compat");
     assert!(
         resolved
             .supported_contract_versions()
