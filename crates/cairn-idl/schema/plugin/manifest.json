@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/plugin/manifest.json",
+  "title": "Cairn plugin capability manifest",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "description": "Brief §4.1. Each plugin publishes one of these so the host can validate name, contract, version range, and feature flags before activation.",
+  "type": "object",
+  "required": ["name", "contract", "contract_version_range"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{1,62}[a-z0-9])$",
+      "description": "Stable plugin identifier; same shape as PluginName in cairn-core."
+    },
+    "contract": {
+      "type": "string",
+      "enum": [
+        "MemoryStore",
+        "LLMProvider",
+        "WorkflowOrchestrator",
+        "SensorIngress",
+        "McpServer",
+        "FrontendAdapter",
+        "AgentProvider"
+      ]
+    },
+    "contract_version_range": {
+      "type": "object",
+      "required": ["min", "max_exclusive"],
+      "additionalProperties": false,
+      "properties": {
+        "min": { "$ref": "#/$defs/version" },
+        "max_exclusive": { "$ref": "#/$defs/version" }
+      }
+    },
+    "features": {
+      "type": "object",
+      "description": "Free-form boolean feature flags this plugin advertises. Cairn's pipeline may consult these to gate optional behavior.",
+      "additionalProperties": { "type": "boolean" }
+    }
+  },
+  "$defs": {
+    "version": {
+      "type": "object",
+      "required": ["major", "minor", "patch"],
+      "additionalProperties": false,
+      "properties": {
+        "major": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "minor": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "patch": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    }
+  }
+}
