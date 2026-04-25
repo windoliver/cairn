@@ -190,10 +190,13 @@ fn signed_intent_rejects_chain_parents_with_duplicates() {
 fn signed_intent_rejects_malformed_operation_id() {
     let mut m = signed_intent_minimum();
     // Lowercase + wrong length — both fail the Crockford ULID check.
+    // The check now fires at the Ulid newtype's hand-rolled Deserialize,
+    // so the error message no longer carries the field name; matching on
+    // "ULID" alone is enough to confirm the right validator caught it.
     m.insert("operation_id".into(), serde_json::json!("not-a-ulid"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
-        err.to_string().contains("operation_id") && err.to_string().contains("ULID"),
+        err.to_string().contains("ULID"),
         "expected ULID error, got: {err}"
     );
 }
@@ -206,9 +209,11 @@ fn signed_intent_rejects_malformed_chain_parent_ulid() {
         serde_json::json!(["not-a-ulid-of-length-26-chars"]),
     );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    // Same as operation_id — the Ulid newtype rejects the entry at its
+    // own deserialize layer; field name is no longer in the error.
     assert!(
-        err.to_string().contains("chain_parents") && err.to_string().contains("ULID"),
-        "expected chain_parents ULID error, got: {err}"
+        err.to_string().contains("ULID"),
+        "expected ULID error, got: {err}"
     );
 }
 
@@ -1771,5 +1776,73 @@ fn signed_intent_rejects_feb_29_div_by_100_not_400() {
     assert!(
         err.to_string().contains("issued_at"),
         "expected century non-leap feb-29 rejection, got: {err}"
+    );
+}
+
+// ── F5 (round 7): Ulid newtype pattern enforced at every call site ───────────
+
+#[test]
+fn retrieve_record_rejects_non_ulid_id() {
+    let json = serde_json::json!({"target": "record", "id": "not-a-ulid"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID"),
+        "expected ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_short_ulid() {
+    let json = serde_json::json!({"target": "record", "id": "0123"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID"),
+        "expected ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn forget_record_rejects_short_ulid() {
+    let json = serde_json::json!({"mode": "record", "record_id": "0123"});
+    let err = serde_json::from_value::<ForgetArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID"),
+        "expected ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_lowercase_ulid() {
+    // Lowercase letters are not in the Crockford base32 alphabet.
+    let json = serde_json::json!({"target": "record", "id": "01arz3ndektsv4rrffq69g5fav"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected lowercase-ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_accepts_valid_ulid() {
+    let json = serde_json::json!({"target": "record", "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    let parsed: RetrieveArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, RetrieveArgs::Record { .. }));
+}
+
+#[test]
+fn retrieve_scope_rejects_overlong_cursor_via_newtype() {
+    // Cursor newtype enforces maxLength: 512 at deserialize. Use the Session
+    // variant since RetrieveArgs::Session.cursor is a typed Cursor newtype
+    // (the Scope variant currently uses a raw String). 513 chars trips the cap.
+    let cursor: String = "x".repeat(513);
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "cursor": cursor,
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("Cursor") || err.to_string().contains("cursor"),
+        "expected cursor cap rejection, got: {err}"
     );
 }

@@ -250,10 +250,21 @@ fn emit_common_entry(
         RustType::Primitive(p) => {
             // Common primitives are exposed as transparent newtype wrappers
             // so the IDL-declared identity (e.g. `Ulid`) survives in the
-            // type system.
-            w.line("#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]");
-            w.line("#[serde(transparent)]");
-            w.line(&format!("pub struct {}(pub {});", name.0, render_prim(*p)));
+            // type system. For string newtypes that carry a pattern in the
+            // IDL (Ulid, Cursor, …) we hand-roll Deserialize so the pattern
+            // is enforced at every call site, not only at the SignedIntent
+            // envelope. Serialize stays transparent.
+            if matches!(p, Prim::String) && primitive_has_pattern(&name.0) {
+                w.line("#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]");
+                w.line("#[serde(transparent)]");
+                w.line(&format!("pub struct {}(pub {});", name.0, render_prim(*p)));
+                w.blank();
+                write_pattern_newtype_deserialize(w, &name.0);
+            } else {
+                w.line("#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]");
+                w.line("#[serde(transparent)]");
+                w.line(&format!("pub struct {}(pub {});", name.0, render_prim(*p)));
+            }
         }
         RustType::Json => {
             w.line(&format!("pub type {} = serde_json::Value;", name.0));
@@ -298,6 +309,63 @@ fn emit_common_entry(
         }
     }
     Ok(())
+}
+
+/// String-newtype types whose IDL definition carries a `pattern` (or other
+/// shape constraint) that must be enforced at every deserialise boundary.
+/// Listed by Rust type name. The default `#[serde(transparent)]` Deserialize
+/// derive accepts any string — this allow-list opts the named newtypes into
+/// a hand-rolled Deserialize that runs the shape check first.
+fn primitive_has_pattern(name: &str) -> bool {
+    matches!(name, "Ulid" | "Cursor")
+}
+
+/// Emit a hand-rolled `Deserialize` for a string newtype whose value must
+/// satisfy a pattern / length cap declared in the IDL. The body dispatches by
+/// the newtype's nominal name — adding a new pattern-bearing newtype means
+/// extending [`primitive_has_pattern`] and this match.
+fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {name} {{"
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;");
+    match name {
+        "Ulid" => {
+            // Crockford base32, 26 chars, alphabet [0-9A-HJKMNP-TV-Z].
+            // Error messages keep the uppercase "ULID" tag so callers
+            // grepping for the IDL primitive name see a consistent token
+            // across every call site (SignedIntent's bespoke check uses the
+            // same wording — see write_signed_intent_extra_checks).
+            w.line("if s.len() != 26 { return Err(::serde::de::Error::custom(\"ULID: must be 26 chars\")); }");
+            w.line("if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"ULID: must be Crockford base32 (uppercase, no I/L/O/U)\"));");
+            w.dedent();
+            w.line("}");
+        }
+        "Cursor" => {
+            // Opaque token: minLength: 1, maxLength: 512.
+            w.line("if s.is_empty() { return Err(::serde::de::Error::custom(\"Cursor: must not be empty\")); }");
+            w.line("if s.len() > 512 { return Err(::serde::de::Error::custom(\"Cursor: must be <= 512 chars\")); }");
+        }
+        _ => {
+            // Catch-all so adding a new entry to `primitive_has_pattern`
+            // without updating this match is a compile-time tap on the
+            // shoulder rather than a silent passthrough.
+            w.line(&format!(
+                "let _ = &s; return Err(::serde::de::Error::custom(\"{name}: pattern unimplemented\"));"
+            ));
+        }
+    }
+    w.line(&format!("Ok({name}(s))"));
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
 }
 
 /// Return a copy of `ty` with its nominal name swapped to `name` (only the

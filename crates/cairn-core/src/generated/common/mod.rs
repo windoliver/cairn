@@ -43,9 +43,19 @@ pub enum Capabilities {
     CairnMcpV1ExtensionSessiontree,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Cursor(pub String);
+
+impl<'de> ::serde::Deserialize<'de> for Cursor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        if s.is_empty() { return Err(::serde::de::Error::custom("Cursor: must not be empty")); }
+        if s.len() > 512 { return Err(::serde::de::Error::custom("Cursor: must be <= 512 chars")); }
+        Ok(Cursor(s))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -190,6 +200,18 @@ impl<'de> ::serde::Deserialize<'de> for ScopeFilter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Ulid(pub String);
+
+impl<'de> ::serde::Deserialize<'de> for Ulid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        if s.len() != 26 { return Err(::serde::de::Error::custom("ULID: must be 26 chars")); }
+        if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {
+            return Err(::serde::de::Error::custom("ULID: must be Crockford base32 (uppercase, no I/L/O/U)"));
+        }
+        Ok(Ulid(s))
+    }
+}
