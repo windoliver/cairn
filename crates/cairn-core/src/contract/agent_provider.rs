@@ -7,6 +7,7 @@
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract version for `AgentProvider`. Bumps when the trait surface changes.
+#[doc(hidden)]
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 0, 1);
 
 /// Static capability declaration for an `AgentProvider` impl.
@@ -14,6 +15,7 @@ pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 0, 1);
 // machine adds indirection with no clarity gain here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[doc(hidden)]
 pub struct AgentProviderCapabilities {
     /// Whether the agent respects a caller-supplied cost budget.
     pub honors_cost_budget: bool,
@@ -30,6 +32,7 @@ pub struct AgentProviderCapabilities {
 /// Brief §4 row 6: P2 forward stub. Method surface, cost-budget enforcement,
 /// and conformance suite land in #124 / #125.
 #[async_trait::async_trait]
+#[doc(hidden)]
 pub trait AgentProvider: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;

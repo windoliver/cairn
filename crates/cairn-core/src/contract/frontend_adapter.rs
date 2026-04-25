@@ -7,6 +7,7 @@
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract version for `FrontendAdapter`. Bumps when the trait surface changes.
+#[doc(hidden)]
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 0, 1);
 
 /// Static capability declaration for a `FrontendAdapter` impl.
@@ -14,6 +15,7 @@ pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 0, 1);
 // adds indirection with no clarity gain here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[doc(hidden)]
 pub struct FrontendAdapterCapabilities {
     /// Whether the adapter can project memory records as rendered markdown.
     pub markdown_projection: bool,
@@ -28,6 +30,7 @@ pub struct FrontendAdapterCapabilities {
 /// Brief §4 row 7: P1 forward stub. Method surface and conformance suite
 /// ship in #113.
 #[async_trait::async_trait]
+#[doc(hidden)]
 pub trait FrontendAdapter: Send + Sync {
     /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;

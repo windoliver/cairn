@@ -1,4 +1,4 @@
-//! `MCPServer` contract (brief §4 row 5).
+//! `McpServer` contract (brief §4 row 5).
 //!
 //! P0: stdio + SSE transports; eight core verbs + opt-in extensions.
 //! Implementation lives in `cairn-mcp` (#64); transports + handshake
