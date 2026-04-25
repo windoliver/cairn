@@ -1116,6 +1116,42 @@ fn filter_accepts_fanout_at_max() {
     }
 }
 
+#[test]
+fn filter_rejects_huge_fanout_without_recursing_into_children() {
+    // 1024-element `and` array with malformed children. The new parser
+    // short-circuits at `arr.len() > max_fanout` *before* allocating the
+    // child Vec or visiting any child, so the rejection message is the
+    // fanout error — not a per-child shape error. This is the F1
+    // contract: fanout/depth checks happen before allocation.
+    let bogus_child = serde_json::json!({"this": "is not a valid leaf"});
+    let items: Vec<_> = (0..1024).map(|_| bogus_child.clone()).collect();
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": items})).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fanout"),
+        "expected fanout rejection (short-circuit before child parse), got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_huge_depth_without_traversing_full_chain() {
+    // Build a 1024-deep `not` chain wrapping a malformed leaf. The depth
+    // budget is decremented on each operator descent and rejection
+    // happens at the cap (8) — the parser does not walk the full 1024-
+    // frame chain before rejecting. The malformed leaf is therefore
+    // never reached / allocated.
+    let mut node = serde_json::json!({"this": "is not a valid leaf"});
+    for _ in 0..1024 {
+        node = serde_json::json!({"not": node});
+    }
+    let err = serde_json::from_value::<SearchArgsFilters>(node).unwrap_err();
+    assert!(
+        err.to_string().contains("depth"),
+        "expected depth rejection (short-circuit before full traversal), got: {err}"
+    );
+}
+
 // ── F1 (round 6): RetrieveArgs per-variant constraints ───────────────────────
 
 #[test]

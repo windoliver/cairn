@@ -53,66 +53,45 @@ enum RawSearchArgsFilters {
     Leaf(serde_json::Value),
 }
 
-impl<'de> ::serde::Deserialize<'de> for RawSearchArgsFilters {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: ::serde::Deserializer<'de> {
-        let value = ::serde_json::Value::deserialize(deserializer)?;
-        let obj = value.as_object().ok_or_else(|| ::serde::de::Error::custom("filter: must be a JSON object"))?;
-        let has_and = obj.contains_key("and");
-        let has_or = obj.contains_key("or");
-        let has_not = obj.contains_key("not");
-        let op_count = u8::from(has_and) + u8::from(has_or) + u8::from(has_not);
-        if op_count > 1 {
-            return Err(::serde::de::Error::custom("filter: at most one of `and`, `or`, `not` may be set"));
-        }
-        if op_count == 1 {
-            for k in obj.keys() {
-                if !matches!(k.as_str(), "and" | "or" | "not") { return Err(::serde::de::Error::custom("filter: operator node must not carry extra keys")); }
-            }
-            if has_and {
-                let arr = obj.get("and").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom("filter.and: must be an array"))?;
-                let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
-                for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }
-                return Ok(Self::And { and: items });
-            }
-            if has_or {
-                let arr = obj.get("or").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom("filter.or: must be an array"))?;
-                let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
-                for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }
-                return Ok(Self::Or { or: items });
-            }
-            let inner_value = obj.get("not").cloned().ok_or_else(|| ::serde::de::Error::custom("filter.not: missing"))?;
-            let inner: RawSearchArgsFilters = ::serde_json::from_value(inner_value).map_err(::serde::de::Error::custom)?;
-            return Ok(Self::Not { not: Box::new(inner) });
-        }
-        let leaf: serde_json::Value = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;
-        Ok(Self::Leaf(leaf))
-    }
-}
-
 #[allow(clippy::result_unit_err)]
-fn validate_search_args_filters_depth(node: &RawSearchArgsFilters, depth: u32, max_fanout: u32) -> Result<(), &'static str> {
-    match node {
-        RawSearchArgsFilters::And { and } => {
-            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
-            if and.is_empty() { return Err("filter.and: must contain at least one item"); }
-            if and.len() as u32 > max_fanout { return Err("filter.and: exceeds max fanout"); }
-            for child in and { validate_search_args_filters_depth(child, depth - 1, max_fanout)?; }
-            Ok(())
-        },
-        RawSearchArgsFilters::Or { or } => {
-            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
-            if or.is_empty() { return Err("filter.or: must contain at least one item"); }
-            if or.len() as u32 > max_fanout { return Err("filter.or: exceeds max fanout"); }
-            for child in or { validate_search_args_filters_depth(child, depth - 1, max_fanout)?; }
-            Ok(())
-        },
-        RawSearchArgsFilters::Not { not } => {
-            if depth == 0 { return Err("filter: exceeds max boolean depth"); }
-            validate_search_args_filters_depth(not, depth - 1, max_fanout)
-        },
-        RawSearchArgsFilters::Leaf(v) => validate_filter_leaf_shape(v),
+fn parse_search_args_filters_node(value: &::serde_json::Value, remaining_depth: u32, max_fanout: u32) -> Result<RawSearchArgsFilters, &'static str> {
+    let obj = value.as_object().ok_or("filter: must be a JSON object")?;
+    let has_and = obj.contains_key("and");
+    let has_or = obj.contains_key("or");
+    let has_not = obj.contains_key("not");
+    let op_count = u8::from(has_and) + u8::from(has_or) + u8::from(has_not);
+    if op_count > 1 {
+        return Err("filter: at most one of `and`, `or`, `not` may be set");
     }
+    if op_count == 1 {
+        for k in obj.keys() {
+            if !matches!(k.as_str(), "and" | "or" | "not") { return Err("filter: operator node must not carry extra keys"); }
+        }
+        if remaining_depth == 0 { return Err("filter: exceeds max boolean depth"); }
+        let next_depth = remaining_depth - 1;
+        if has_and {
+            let arr = obj.get("and").and_then(::serde_json::Value::as_array).ok_or("filter.and: must be an array")?;
+            if arr.is_empty() { return Err("filter.and: must contain at least one item"); }
+            if arr.len() as u32 > max_fanout { return Err("filter.and: exceeds max fanout"); }
+            let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
+            for item in arr { items.push(parse_search_args_filters_node(item, next_depth, max_fanout)?); }
+            return Ok(RawSearchArgsFilters::And { and: items });
+        }
+        if has_or {
+            let arr = obj.get("or").and_then(::serde_json::Value::as_array).ok_or("filter.or: must be an array")?;
+            if arr.is_empty() { return Err("filter.or: must contain at least one item"); }
+            if arr.len() as u32 > max_fanout { return Err("filter.or: exceeds max fanout"); }
+            let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
+            for item in arr { items.push(parse_search_args_filters_node(item, next_depth, max_fanout)?); }
+            return Ok(RawSearchArgsFilters::Or { or: items });
+        }
+        let inner_value = obj.get("not").ok_or("filter.not: missing")?;
+        let inner = parse_search_args_filters_node(inner_value, next_depth, max_fanout)?;
+        return Ok(RawSearchArgsFilters::Not { not: Box::new(inner) });
+    }
+    validate_filter_leaf_shape(value)?;
+    let leaf: serde_json::Value = ::serde_json::from_value(value.clone()).map_err(|_| "filter leaf: failed to deserialise")?;
+    Ok(RawSearchArgsFilters::Leaf(leaf))
 }
 
 fn lower_search_args_filters(node: RawSearchArgsFilters) -> SearchArgsFilters {
@@ -127,8 +106,8 @@ fn lower_search_args_filters(node: RawSearchArgsFilters) -> SearchArgsFilters {
 impl<'de> ::serde::Deserialize<'de> for SearchArgsFilters {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: ::serde::Deserializer<'de> {
-        let raw = RawSearchArgsFilters::deserialize(deserializer)?;
-        validate_search_args_filters_depth(&raw, 8, 32).map_err(::serde::de::Error::custom)?;
+        let value = ::serde_json::Value::deserialize(deserializer)?;
+        let raw = parse_search_args_filters_node(&value, 8, 32).map_err(::serde::de::Error::custom)?;
         Ok(lower_search_args_filters(raw))
     }
 }

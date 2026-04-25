@@ -2635,13 +2635,21 @@ fn write_recursive(
     w.line("}");
     w.blank();
 
-    // Raw mirror — same wire shape, but with a hand-rolled Deserialize that
-    // dispatches by operator key. The `#[serde(untagged)]` derive would let
-    // `{"and":[..],"or":[..]}` deserialise as the first matching variant
-    // (And) and silently drop the `or` branch; same for an operator object
-    // that also carries leaf keys. We reject any object that mixes operator
-    // keys with each other or with leaf-shape keys, then dispatch on the
-    // single present operator.
+    // Hand-rolled Deserialize: parse the *top* level into a `serde_json::Value`,
+    // then dispatch through `parse_<name>_node` which threads a `remaining_depth`
+    // counter and a `max_fanout` budget down the recursion. Depth and fanout are
+    // checked **before** allocating any `Vec` for child nodes — so a payload
+    // declaring `{"and": [<33 children>]}` rejects after reading `arr.len()`,
+    // never paying for the 33-element `Vec::with_capacity` or for parsing any
+    // child. Same for an over-deep `not`-chain: depth is decremented before the
+    // recursive call, so the fail-fast happens one frame deeper than the cap
+    // rather than after the whole tree has been materialised.
+    //
+    // The previous design parsed Raw recursively with `from_value(item.clone())`
+    // and only ran the depth/fanout check post-hoc — meaning a 1 GB attacker
+    // payload allocated and recursed in full before being rejected. The new
+    // shape integrates the bound checks into the parse itself, so the cost of a
+    // rejected oversized filter is bounded by the *cap*, not by the input size.
     let raw_name = format!("Raw{}", r.name.0);
     w.line(&format!("enum {raw_name} {{"));
     w.indent();
@@ -2652,149 +2660,93 @@ fn write_recursive(
     w.dedent();
     w.line("}");
     w.blank();
+
+    // Recursive parser: takes the JSON `value`, the remaining depth budget,
+    // and the max fanout. Decrements depth on every operator descent; checks
+    // fanout against `arr.len()` *before* allocating the child Vec; recurses
+    // directly on the `serde_json::Value` reference (no `.clone()` of the
+    // subtree). Returns the constructed Raw tree on success, an error on
+    // shape/depth/fanout failure.
+    w.line("#[allow(clippy::result_unit_err)]");
     w.line(&format!(
-        "impl<'de> ::serde::Deserialize<'de> for {raw_name} {{"
+        "fn parse_{0}_node(value: &::serde_json::Value, remaining_depth: u32, max_fanout: u32) -> Result<{raw_name}, &'static str> {{",
+        snake_case(&r.name.0)
     ));
     w.indent();
-    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
-    w.line("where D: ::serde::Deserializer<'de> {");
-    w.indent();
-    w.line("let value = ::serde_json::Value::deserialize(deserializer)?;");
-    w.line(
-        "let obj = value.as_object().ok_or_else(|| ::serde::de::Error::custom(\"filter: must be a JSON object\"))?;",
-    );
-    // Detect which operator keys are present.
+    w.line("let obj = value.as_object().ok_or(\"filter: must be a JSON object\")?;");
     w.line("let has_and = obj.contains_key(\"and\");");
     w.line("let has_or = obj.contains_key(\"or\");");
     w.line("let has_not = obj.contains_key(\"not\");");
     w.line("let op_count = u8::from(has_and) + u8::from(has_or) + u8::from(has_not);");
     w.line("if op_count > 1 {");
     w.indent();
-    w.line(
-        "return Err(::serde::de::Error::custom(\"filter: at most one of `and`, `or`, `not` may be set\"));",
-    );
+    w.line("return Err(\"filter: at most one of `and`, `or`, `not` may be set\");");
     w.dedent();
     w.line("}");
-    // If an operator key is present, no other keys are allowed (the operator
-    // node is closed: `{"and": [...]}` only). Mixing with leaf-shape keys
-    // would silently drop the leaf in the untagged form.
+    // Operator branch.
     w.line("if op_count == 1 {");
     w.indent();
     w.line("for k in obj.keys() {");
     w.indent();
-    w.line(
-        "if !matches!(k.as_str(), \"and\" | \"or\" | \"not\") { return Err(::serde::de::Error::custom(\"filter: operator node must not carry extra keys\")); }",
-    );
+    w.line("if !matches!(k.as_str(), \"and\" | \"or\" | \"not\") { return Err(\"filter: operator node must not carry extra keys\"); }");
     w.dedent();
     w.line("}");
+    // Depth budget: every operator node consumes one frame. Check *before*
+    // descending so we never recurse past the cap.
+    w.line("if remaining_depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
+    w.line("let next_depth = remaining_depth - 1;");
+    // And: read length, fanout-check, then allocate.
     w.line("if has_and {");
     w.indent();
-    w.line("let arr = obj.get(\"and\").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom(\"filter.and: must be an array\"))?;");
+    w.line("let arr = obj.get(\"and\").and_then(::serde_json::Value::as_array).ok_or(\"filter.and: must be an array\")?;");
+    w.line("if arr.is_empty() { return Err(\"filter.and: must contain at least one item\"); }");
+    w.line("if arr.len() as u32 > max_fanout { return Err(\"filter.and: exceeds max fanout\"); }");
     w.line(&format!(
         "let mut items: Vec<{raw_name}> = Vec::with_capacity(arr.len());"
     ));
-    w.line("for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }");
-    w.line("return Ok(Self::And { and: items });");
+    w.line(&format!(
+        "for item in arr {{ items.push(parse_{0}_node(item, next_depth, max_fanout)?); }}",
+        snake_case(&r.name.0)
+    ));
+    w.line(&format!("return Ok({raw_name}::And {{ and: items }});"));
     w.dedent();
     w.line("}");
+    // Or: same fanout-before-allocate dance.
     w.line("if has_or {");
     w.indent();
-    w.line("let arr = obj.get(\"or\").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom(\"filter.or: must be an array\"))?;");
+    w.line("let arr = obj.get(\"or\").and_then(::serde_json::Value::as_array).ok_or(\"filter.or: must be an array\")?;");
+    w.line("if arr.is_empty() { return Err(\"filter.or: must contain at least one item\"); }");
+    w.line("if arr.len() as u32 > max_fanout { return Err(\"filter.or: exceeds max fanout\"); }");
     w.line(&format!(
         "let mut items: Vec<{raw_name}> = Vec::with_capacity(arr.len());"
     ));
-    w.line("for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }");
-    w.line("return Ok(Self::Or { or: items });");
-    w.dedent();
-    w.line("}");
-    // Not branch — operand is a single Filter, not an array.
-    w.line("let inner_value = obj.get(\"not\").cloned().ok_or_else(|| ::serde::de::Error::custom(\"filter.not: missing\"))?;");
     w.line(&format!(
-        "let inner: {raw_name} = ::serde_json::from_value(inner_value).map_err(::serde::de::Error::custom)?;"
-    ));
-    w.line("return Ok(Self::Not { not: Box::new(inner) });");
-    w.dedent();
-    w.line("}");
-    // No operator key — must be a leaf object. The leaf validator (called
-    // from the recursive depth check below) does the structural check; here
-    // we just thread the JSON value through.
-    if leaf_inline {
-        // For inline leaves (Json), deserialise from the value into the
-        // leaf's renderable type. In practice this is `serde_json::Value`,
-        // so the from_value is a clone.
-        w.line(&format!(
-            "let leaf: {leaf_render} = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;"
-        ));
-    } else {
-        w.line(&format!(
-            "let leaf: {leaf_render} = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;"
-        ));
-    }
-    w.line("Ok(Self::Leaf(leaf))");
-    w.dedent();
-    w.line("}");
-    w.dedent();
-    w.line("}");
-    w.blank();
-
-    // Recursive validator: enforce depth ≤ max_depth, and/or fanout in [1, max_fanout].
-    // `depth` is the *remaining* budget; we decrement on operator descent and reject when
-    // it underflows. minItems=1 (rejecting empty `and: []` / `or: []`) is the same path.
-    w.line("#[allow(clippy::result_unit_err)]");
-    w.line(&format!(
-        "fn validate_{}_depth(node: &{raw_name}, depth: u32, max_fanout: u32) -> Result<(), &'static str> {{",
+        "for item in arr {{ items.push(parse_{0}_node(item, next_depth, max_fanout)?); }}",
         snake_case(&r.name.0)
     ));
-    w.indent();
-    w.line(&format!("match node {{"));
-    w.indent();
-    w.line(&format!("{raw_name}::And {{ and }} => {{"));
-    w.indent();
-    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
-    w.line("if and.is_empty() { return Err(\"filter.and: must contain at least one item\"); }");
-    w.line("if and.len() as u32 > max_fanout { return Err(\"filter.and: exceeds max fanout\"); }");
+    w.line(&format!("return Ok({raw_name}::Or {{ or: items }});"));
+    w.dedent();
+    w.line("}");
+    // Not: single child; depth has already been decremented above. No fanout
+    // check (single operand).
+    w.line("let inner_value = obj.get(\"not\").ok_or(\"filter.not: missing\")?;");
     w.line(&format!(
-        "for child in and {{ validate_{}_depth(child, depth - 1, max_fanout)?; }}",
+        "let inner = parse_{0}_node(inner_value, next_depth, max_fanout)?;",
         snake_case(&r.name.0)
     ));
-    w.line("Ok(())");
-    w.dedent();
-    w.line("},");
-    w.line(&format!("{raw_name}::Or {{ or }} => {{"));
-    w.indent();
-    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
-    w.line("if or.is_empty() { return Err(\"filter.or: must contain at least one item\"); }");
-    w.line("if or.len() as u32 > max_fanout { return Err(\"filter.or: exceeds max fanout\"); }");
     w.line(&format!(
-        "for child in or {{ validate_{}_depth(child, depth - 1, max_fanout)?; }}",
-        snake_case(&r.name.0)
-    ));
-    w.line("Ok(())");
-    w.dedent();
-    w.line("},");
-    w.line(&format!("{raw_name}::Not {{ not }} => {{"));
-    w.indent();
-    w.line("if depth == 0 { return Err(\"filter: exceeds max boolean depth\"); }");
-    w.line(&format!(
-        "validate_{}_depth(not, depth - 1, max_fanout)",
-        snake_case(&r.name.0)
+        "return Ok({raw_name}::Not {{ not: Box::new(inner) }});"
     ));
     w.dedent();
-    w.line("},");
-    // The leaf type lowers to `serde_json::Value` because `filter_leaf` is a
-    // oneOf-of-$refs without a discriminator. Without a structural check the
-    // arm would accept any JSON shape — `{}`, `null`, wrong-typed `value`, or
-    // arbitrary extra keys. We special-case the known recursive enums whose
-    // leaves are filter leaves and call a hand-rolled validator.
+    w.line("}");
+    // Leaf branch: validate the leaf shape, then materialise the leaf value.
     if recursive_has_filter_leaf(&r.name.0) {
-        w.line(&format!(
-            "{raw_name}::Leaf(v) => validate_filter_leaf_shape(v),"
-        ));
-    } else {
-        w.line(&format!("{raw_name}::Leaf(_) => Ok(()),"));
+        w.line("validate_filter_leaf_shape(value)?;");
     }
-    w.dedent();
-    w.line("}");
+    w.line(&format!(
+        "let leaf: {leaf_render} = ::serde_json::from_value(value.clone()).map_err(|_| \"filter leaf: failed to deserialise\")?;"
+    ));
+    w.line(&format!("Ok({raw_name}::Leaf(leaf))"));
     w.dedent();
     w.line("}");
     w.blank();
@@ -2830,8 +2782,9 @@ fn write_recursive(
     w.line("}");
     w.blank();
 
-    // Hand-rolled Deserialize: parse into Raw, validate depth + fanout +
-    // minItems against the IDL bounds, then lower into the public enum.
+    // Public Deserialize: parse the top-level Value once, then call the
+    // recursive parser with the IDL-declared depth/fanout caps. The parser
+    // short-circuits oversized inputs before any per-child allocation.
     w.line(&format!(
         "impl<'de> ::serde::Deserialize<'de> for {} {{",
         r.name.0
@@ -2840,11 +2793,9 @@ fn write_recursive(
     w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
     w.line("where D: ::serde::Deserializer<'de> {");
     w.indent();
+    w.line("let value = ::serde_json::Value::deserialize(deserializer)?;");
     w.line(&format!(
-        "let raw = {raw_name}::deserialize(deserializer)?;"
-    ));
-    w.line(&format!(
-        "validate_{}_depth(&raw, {}, {}).map_err(::serde::de::Error::custom)?;",
+        "let raw = parse_{0}_node(&value, {1}, {2}).map_err(::serde::de::Error::custom)?;",
         snake_case(&r.name.0),
         r.max_depth,
         r.max_fanout
