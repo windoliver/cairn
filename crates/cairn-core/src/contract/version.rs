@@ -54,15 +54,19 @@ impl VersionRange {
 
     /// `true` iff `host` is in `[min, max_exclusive)`.
     #[must_use]
-    pub fn accepts(&self, host: ContractVersion) -> bool {
-        let key = (host.major, host.minor, host.patch);
-        let lo = (self.min.major, self.min.minor, self.min.patch);
-        let hi = (
-            self.max_exclusive.major,
-            self.max_exclusive.minor,
-            self.max_exclusive.patch,
-        );
-        key >= lo && key < hi
+    pub const fn accepts(&self, host: ContractVersion) -> bool {
+        // Hand-unfolded lexicographic compare: tuple `PartialOrd` is not yet
+        // stable in const context, so we cannot use `(a, b, c) >= (..)` here.
+        let ge_min = host.major > self.min.major
+            || (host.major == self.min.major
+                && (host.minor > self.min.minor
+                    || (host.minor == self.min.minor && host.patch >= self.min.patch)));
+        let lt_max = host.major < self.max_exclusive.major
+            || (host.major == self.max_exclusive.major
+                && (host.minor < self.max_exclusive.minor
+                    || (host.minor == self.max_exclusive.minor
+                        && host.patch < self.max_exclusive.patch)));
+        ge_min && lt_max
     }
 }
 

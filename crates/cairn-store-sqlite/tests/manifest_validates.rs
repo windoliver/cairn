@@ -1,5 +1,5 @@
-//! Integration: the bundled plugin.toml parses, validates against the
-//! IDL JSON schema, and matches the host contract version + name.
+//! Integration: the bundled plugin.toml parses through the manifest
+//! parser and matches the host contract version + name.
 
 // Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]

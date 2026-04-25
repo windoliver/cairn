@@ -17,7 +17,7 @@ thiserror = { workspace = true }
 # NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
 # scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
 # native-compilation surface before any storage code uses it. The real dep
-# lands with the storage implementation in issue #6.
+# lands with the storage implementation in issue #46.
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
