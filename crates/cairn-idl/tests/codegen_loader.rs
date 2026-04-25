@@ -109,3 +109,20 @@ fn rejects_dangling_ref() {
     let msg = format!("{err}");
     assert!(msg.contains("NotARealType"), "got: {msg}");
 }
+
+#[test]
+fn rejects_dangling_local_ref() {
+    // A `#/$defs/<name>` pointer must resolve inside the origin file.
+    // Without local-ref validation, typos in same-file pointers ship silently.
+    let tmp = fork_schema();
+    let path = tmp.path().join("verbs/ingest.json");
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["$defs"]["Data"]["properties"]["record_id"] =
+        serde_json::json!({ "$ref": "#/$defs/Missing" });
+    write_json(&path, &value);
+
+    let err = load(tmp.path()).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("Missing"), "got: {msg}");
+    assert!(msg.contains("not found"), "got: {msg}");
+}

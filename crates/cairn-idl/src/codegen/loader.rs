@@ -370,10 +370,17 @@ fn resolve_ref(
     targets: &std::collections::BTreeSet<String>,
     schema_root: &Path,
 ) -> Result<(), CodegenError> {
-    // Local pointer (e.g. "#/$defs/Filter"): can't validate without the
-    // origin file; the structural test suite already covers in-file pointers,
-    // so the codegen loader trusts them.
-    if reference.starts_with('#') {
+    // Local pointer (e.g. "#/$defs/Filter"): resolve against the origin file.
+    // `where_` is already the rel-path of the origin file (e.g.
+    // "verbs/ingest.json"), and `build_ref_index` populates `<file>#<pointer>`
+    // entries via `collect_pointers`, so we can validate by membership lookup.
+    if let Some(pointer) = reference.strip_prefix('#') {
+        let needle = format!("{where_}#{pointer}");
+        if !targets.contains(&needle) {
+            return Err(CodegenError::Loader(format!(
+                "{where_}: local $ref {reference:?} -> {needle} not found"
+            )));
+        }
         return Ok(());
     }
     let (file_part, pointer) = reference.split_once('#').unwrap_or((reference, ""));
