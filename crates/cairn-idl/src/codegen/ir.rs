@@ -240,6 +240,9 @@ use super::CodegenError;
 #[derive(Debug, Default, Clone)]
 pub struct Ctx {
     pub target: Option<TypeName>,
+    /// Local `$defs` from the containing IDL file. Populated by the per-verb
+    /// caller so `lower_tagged_union` can resolve `#/$defs/<Name>` refs.
+    pub defs: std::collections::BTreeMap<String, Value>,
 }
 
 impl Ctx {
@@ -247,17 +250,26 @@ impl Ctx {
     pub fn with_target(name: impl Into<String>) -> Self {
         Self {
             target: Some(TypeName::new(name)),
+            defs: std::collections::BTreeMap::new(),
         }
     }
 
+    /// Attach local `$defs` for tagged-union variant resolution.
+    #[must_use]
+    pub fn with_defs(mut self, defs: std::collections::BTreeMap<String, Value>) -> Self {
+        self.defs = defs;
+        self
+    }
+
     /// Derive a child context by appending `suffix` to the current target name.
+    /// The child inherits the parent's `defs` for nested lookups.
     #[must_use]
     pub fn child(&self, suffix: &str) -> Self {
         let target = self
             .target
             .as_ref()
             .map(|t| TypeName::new(format!("{}{suffix}", t.0)));
-        Self { target }
+        Self { target, defs: self.defs.clone() }
     }
 }
 
@@ -438,17 +450,123 @@ fn lower_const_oneof(arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenEr
     }))
 }
 
-// Tagged + untagged union lowering land in Task 9 / Task 10. Stubs:
+fn lower_tagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
+    let discriminator = value
+        .get("x-cairn-discriminator")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CodegenError::Ir("x-cairn-discriminator must be a string".to_string()))?
+        .to_string();
+    let target = ctx.target.clone().unwrap_or_else(|| TypeName::new("Union"));
+    let mut variants = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let reference = entry
+            .get("$ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CodegenError::Ir("tagged-union variant must be a $ref".to_string()))?;
+        // Local def lookup ("#/$defs/ArgsRecord" → "ArgsRecord").
+        let def_name = reference
+            .strip_prefix("#/$defs/")
+            .ok_or_else(|| {
+                CodegenError::Ir(format!("non-local $ref in tagged union: {reference}"))
+            })?;
+        let def = ctx
+            .defs
+            .get(def_name)
+            .ok_or_else(|| CodegenError::Ir(format!("unknown $defs entry: {def_name}")))?
+            .clone();
 
-fn lower_tagged_union(
-    _value: &Value,
-    _arr: &[Value],
-    _ctx: &mut Ctx,
-) -> Result<RustType, CodegenError> {
-    Err(CodegenError::Ir(
-        "tagged union lowering arrives in Task 9".to_string(),
-    ))
+        let wire = def
+            .pointer(&format!("/properties/{discriminator}/const"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CodegenError::Ir(format!(
+                    "{def_name}: properties.{discriminator}.const required for tagged-union variant"
+                ))
+            })?
+            .to_string();
+        let rust_ident = pascal_case(&wire);
+
+        // Lower variant body as a struct so we keep its fields.
+        let mut child = ctx.child(&rust_ident);
+        let body_ty = lower_schema(&def, &mut child)?;
+        let RustType::Struct(StructDef { mut fields, .. }) = body_ty else {
+            return Err(CodegenError::Ir(format!(
+                "tagged variant {def_name} did not lower to a struct"
+            )));
+        };
+        // Drop the discriminator field — serde tag covers it.
+        fields.retain(|f| f.name != discriminator);
+
+        let capability = def
+            .get("x-cairn-capability")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let cli = def.get("x-cairn-cli").map(parse_cli_block).transpose()?;
+        variants.push(TaggedVariant {
+            wire,
+            rust_ident,
+            fields,
+            capability,
+            cli,
+            doc: def.get("description").and_then(Value::as_str).map(String::from),
+        });
+    }
+    Ok(RustType::TaggedUnion(TaggedUnionDef {
+        name: target,
+        discriminator,
+        variants,
+        doc: value.get("description").and_then(Value::as_str).map(String::from),
+    }))
 }
+
+/// Parse a `x-cairn-cli` JSON block into a [`CliCommand`].
+/// Shared with later tasks (Task 12+) that need to extract CLI shapes from IDL.
+pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError> {
+    let command = value
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CodegenError::Ir("x-cairn-cli.command required".to_string()))?
+        .to_string();
+    let flags = value
+        .get("flags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|f| {
+                    Ok(CliFlag {
+                        name: f
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        long: f
+                            .get("long")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        value_source: f
+                            .get("value_source")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, CodegenError>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let positional = value.get("positional").map(|p| CliPositional {
+        name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        description: p
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    });
+    Ok(CliCommand { command, flags, positional })
+}
+
+// Untagged union lowering lands in Task 10. Stub:
 
 fn lower_untagged_union(
     _value: &Value,

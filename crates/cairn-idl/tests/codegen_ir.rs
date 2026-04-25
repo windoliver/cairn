@@ -101,3 +101,43 @@ fn additional_properties_true_lowers_to_json() {
     let ty = lower_schema(&v, &mut ctx).unwrap();
     assert!(matches!(ty, RustType::Json));
 }
+
+#[test]
+fn tagged_union_with_discriminator() {
+    let mut defs = std::collections::BTreeMap::new();
+    defs.insert("ArgsRecord".to_string(), json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "id"],
+        "properties": {
+            "target": { "const": "record" },
+            "id": { "type": "string" }
+        }
+    }));
+    defs.insert("ArgsSession".to_string(), json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "session_id"],
+        "x-cairn-capability": "cairn.mcp.v1.retrieve.session",
+        "properties": {
+            "target": { "const": "session" },
+            "session_id": { "type": "string" }
+        }
+    }));
+    let v = json!({
+        "x-cairn-discriminator": "target",
+        "oneOf": [
+            { "$ref": "#/$defs/ArgsRecord" },
+            { "$ref": "#/$defs/ArgsSession" }
+        ]
+    });
+    let mut ctx = Ctx::with_target("RetrieveArgs").with_defs(defs);
+    let ty = lower_schema(&v, &mut ctx).unwrap();
+    let RustType::TaggedUnion(t) = ty else { panic!("expected TaggedUnion, got {ty:?}") };
+    assert_eq!(t.discriminator, "target");
+    assert_eq!(t.variants.len(), 2);
+    assert_eq!(t.variants[0].wire, "record");
+    assert_eq!(t.variants[0].rust_ident, "Record");
+    assert_eq!(t.variants[1].wire, "session");
+    assert_eq!(t.variants[1].capability.as_deref(), Some("cairn.mcp.v1.retrieve.session"));
+}
