@@ -576,17 +576,18 @@ fn write_request_envelope(
 ///   * verb=retrieve + status=committed ⟹ target present
 ///   * verb≠retrieve ⟹ target absent
 ///
-/// The default Struct lowering drops every arm, so a malformed response
-/// (e.g. `status=committed` without data, or non-retrieve with a stray
-/// `target`) silently round-trips. We dispatch `data` by verb (typed) and
-/// enforce the four invariants in a hand-rolled Deserialize.
+/// Plus the bidirectional UnknownVerb binding from response.json:
+///   * verb=unknown ⟹ status=rejected AND error.code=UnknownVerb
+///   * status=rejected AND error.code=UnknownVerb ⟹ verb=unknown
 ///
-/// Retrieve sub-dispatch by target (DataRecord vs DataSession vs ...) is
-/// deferred — the per-target Data variants live in `verbs/retrieve.rs` as
-/// untyped Json today, and pulling them through here would add 6 more
-/// variants and a second discriminator. Tracked as a follow-up; the four
-/// invariants below catch the load-bearing structural mistakes the
-/// adversarial review surfaced.
+/// And per-target retrieve dispatch — when `verb=retrieve` and
+/// `status=committed`, `data` MUST match the per-target Data sub-shape
+/// declared by `verbs/retrieve.json` (DataRecord, DataSession, …).
+///
+/// The default Struct lowering drops every arm, so a malformed response
+/// silently round-trips. We dispatch `data` by verb (typed), retrieve by
+/// target, and enforce the cross-cutting invariants in a hand-rolled
+/// Deserialize.
 #[allow(
     clippy::too_many_lines,
     reason = "single-pass emission keeps the bespoke envelope dispatch in one place"
@@ -613,13 +614,32 @@ fn write_response_envelope(
         w.blank();
     }
 
+    // Per-target typed dispatch for retrieve responses. Each variant wraps
+    // the matching Data sub-type from `verbs/retrieve.rs`. Untagged because
+    // the discriminator (`target`) lives on the response envelope, not in
+    // the data payload itself.
+    w.line("/// Retrieve response payload, dispatched on `Response.target` at deserialize time.");
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+    w.line("#[serde(untagged)]");
+    w.line("#[non_exhaustive]");
+    w.line("pub enum RetrieveData {");
+    w.indent();
+    w.line("Record(crate::generated::verbs::retrieve::DataRecord),");
+    w.line("Profile(crate::generated::verbs::retrieve::DataProfile),");
+    w.line("Session(crate::generated::verbs::retrieve::DataSession),");
+    w.line("Turn(crate::generated::verbs::retrieve::DataTurn),");
+    w.line("Folder(crate::generated::verbs::retrieve::DataFolder),");
+    w.line("Scope(crate::generated::verbs::retrieve::DataScope),");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
     // Typed per-verb data dispatch. Each variant wraps the verb's Data type
-    // (`crate::generated::verbs::<id>::<Pascal>Data`). The `unknown` verb
+    // (`crate::generated::verbs::<id>::<Pascal>Data`). Retrieve wraps the
+    // target-dispatched `RetrieveData` enum above. The `unknown` verb
     // (UnknownVerb sentinel) carries no data — there is no `verbs/unknown.rs`.
     w.line("/// Per-verb response payload, dispatched on `Response.verb` at deserialize time.");
-    w.line("///");
-    w.line("/// Retrieve currently lands as opaque JSON; per-target sub-dispatch");
-    w.line("/// (`DataRecord` vs `DataSession` vs ...) is a follow-up.");
+    w.line("/// Retrieve sub-dispatches on `Response.target` to a typed `RetrieveData`.");
     w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
     w.line("#[serde(untagged)]");
     w.line("#[non_exhaustive]");
@@ -628,10 +648,7 @@ fn write_response_envelope(
     for verb in &doc.verbs {
         let pascal = pascal_case(&verb.id);
         if verb.id == "retrieve" {
-            // Retrieve's `Data` is itself a oneOf over six sub-types. Until
-            // the sub-dispatch lands, surface it as raw JSON so the verb
-            // layer can route on `target` after the structural checks pass.
-            w.line(&format!("{pascal}(serde_json::Value),"));
+            w.line(&format!("{pascal}(RetrieveData),"));
         } else {
             w.line(&format!(
                 "{pascal}(crate::generated::verbs::{}::{pascal}Data),",
@@ -743,6 +760,31 @@ fn write_response_envelope(
     );
     w.dedent();
     w.line("}");
+    // UnknownVerb bidirectional binding — verb=unknown ⟺ status=rejected
+    // AND error.code=UnknownVerb. The error envelope is currently typed as
+    // `serde_json::Value` (the IDL Error oneOf hasn't been lowered yet —
+    // tracked by #62), so we read `error.code` defensively from JSON. When
+    // the typed Error lands the same checks port without changing semantics.
+    w.line("let error_code = raw.error.as_ref().and_then(|e| e.get(\"code\")).and_then(|c| c.as_str());");
+    w.line("if matches!(raw.verb, ResponseVerb::Unknown) {");
+    w.indent();
+    w.line(
+        "if !matches!(raw.status, ResponseStatus::Rejected) { return Err(::serde::de::Error::custom(\"verb=unknown requires status=rejected\")); }",
+    );
+    w.line(
+        "if error_code != Some(\"UnknownVerb\") { return Err(::serde::de::Error::custom(\"verb=unknown requires error.code=UnknownVerb\")); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.line(
+        "if !matches!(raw.verb, ResponseVerb::Unknown) && error_code == Some(\"UnknownVerb\") {",
+    );
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(\"error.code=UnknownVerb is paired with verb=unknown only\"));",
+    );
+    w.dedent();
+    w.line("}");
     // Per-verb data dispatch. Skipped on rejected/aborted (data was just
     // proven None above).
     w.line("let data = if let Some(payload) = raw.data {");
@@ -752,10 +794,57 @@ fn write_response_envelope(
     for verb in &doc.verbs {
         let pascal = pascal_case(&verb.id);
         if verb.id == "retrieve" {
-            // Retrieve sub-dispatch deferred — accept opaque JSON.
-            w.line(&format!(
-                "ResponseVerb::{pascal} => ResponseData::{pascal}(payload),"
-            ));
+            // Retrieve dispatches by `target` — the IDL response schema's
+            // per-target if/then arms bind `data` to the matching Data
+            // sub-type (DataRecord / DataSession / ...). The structural check
+            // above already proved `target` is present on committed retrieve
+            // responses; match on it here to land in the typed RetrieveData
+            // variant. The structural rule that retrieve+committed ⟹ target
+            // also holds the inverse (target absent here means status was
+            // not committed, which means data was already None per the
+            // committed-only-data invariant). Defensively reject any payload
+            // that arrives without a target.
+            w.line(&format!("ResponseVerb::{pascal} => {{",));
+            w.indent();
+            w.line(
+                "let target = raw.target.ok_or_else(|| ::serde::de::Error::custom(\"verb=retrieve with data requires target\"))?;",
+            );
+            w.line(&format!("ResponseData::{pascal}(match target {{"));
+            w.indent();
+            w.line("ResponseTarget::Record => RetrieveData::Record(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataRecord as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.line("ResponseTarget::Profile => RetrieveData::Profile(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataProfile as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.line("ResponseTarget::Session => RetrieveData::Session(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataSession as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.line("ResponseTarget::Turn => RetrieveData::Turn(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataTurn as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.line("ResponseTarget::Folder => RetrieveData::Folder(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataFolder as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.line("ResponseTarget::Scope => RetrieveData::Scope(");
+            w.indent();
+            w.line("<crate::generated::verbs::retrieve::DataScope as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?");
+            w.dedent();
+            w.line("),");
+            w.dedent();
+            w.line("})");
+            w.dedent();
+            w.line("},");
         } else {
             w.line(&format!(
                 "ResponseVerb::{pascal} => ResponseData::{pascal}("

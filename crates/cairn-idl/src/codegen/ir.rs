@@ -1079,20 +1079,48 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
     let mut wanted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     collect_ref_names(&args, &mut wanted);
     collect_ref_names(&data, &mut wanted);
-    for (def_name, def_value) in &defs {
-        if def_name == "Args" || def_name == "Data" {
-            continue;
+    // Retrieve's `Data` is a oneOf without a discriminator (the dispatch lives
+    // on the response envelope's `target` field), so the generic walker above
+    // falls through to `RustType::Json` and harvests no refs. Force-include the
+    // six per-target Data sub-types so the response envelope can dispatch
+    // typed payloads against them. See response.json's per-target if/then arms.
+    if id == "retrieve" {
+        for sub in [
+            "DataRecord",
+            "DataProfile",
+            "DataSession",
+            "DataTurn",
+            "DataFolder",
+            "DataScope",
+        ] {
+            wanted.insert(sub.to_string());
         }
-        if def_name == "filter" || def_name.starts_with("filter_") {
-            continue;
+    }
+    // Iterate to a fixed point so transitive refs resolve. Each pass lowers
+    // every newly-wanted def and harvests any refs *its* lowered shape needs.
+    // Bounded by `defs.len()` (each def can only be added once).
+    for _ in 0..=defs.len() {
+        let mut added = false;
+        for (def_name, def_value) in &defs {
+            if def_name == "Args" || def_name == "Data" {
+                continue;
+            }
+            if def_name == "filter" || def_name.starts_with("filter_") {
+                continue;
+            }
+            let pascal = pascal_case(def_name);
+            if !wanted.contains(&pascal) || local_types.contains_key(&TypeName::new(&pascal)) {
+                continue;
+            }
+            let mut local_ctx = Ctx::with_target(&pascal).with_defs(defs.clone());
+            let lowered = lower_schema(def_value, &mut local_ctx)?;
+            collect_ref_names(&lowered, &mut wanted);
+            local_types.insert(TypeName::new(pascal), lowered);
+            added = true;
         }
-        let pascal = pascal_case(def_name);
-        if !wanted.contains(&pascal) {
-            continue;
+        if !added {
+            break;
         }
-        let mut local_ctx = Ctx::with_target(&pascal).with_defs(defs.clone());
-        let lowered = lower_schema(def_value, &mut local_ctx)?;
-        local_types.insert(TypeName::new(pascal), lowered);
     }
 
     let cli = build_cli_shape(&file.value, &args)?;

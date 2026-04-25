@@ -149,17 +149,28 @@ pub enum ResponseVerb {
     Unknown,
 }
 
+/// Retrieve response payload, dispatched on `Response.target` at deserialize time.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum RetrieveData {
+    Record(crate::generated::verbs::retrieve::DataRecord),
+    Profile(crate::generated::verbs::retrieve::DataProfile),
+    Session(crate::generated::verbs::retrieve::DataSession),
+    Turn(crate::generated::verbs::retrieve::DataTurn),
+    Folder(crate::generated::verbs::retrieve::DataFolder),
+    Scope(crate::generated::verbs::retrieve::DataScope),
+}
+
 /// Per-verb response payload, dispatched on `Response.verb` at deserialize time.
-///
-/// Retrieve currently lands as opaque JSON; per-target sub-dispatch
-/// (`DataRecord` vs `DataSession` vs ...) is a follow-up.
+/// Retrieve sub-dispatches on `Response.target` to a typed `RetrieveData`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum ResponseData {
     Ingest(crate::generated::verbs::ingest::IngestData),
     Search(crate::generated::verbs::search::SearchData),
-    Retrieve(serde_json::Value),
+    Retrieve(RetrieveData),
     Summarize(crate::generated::verbs::summarize::SummarizeData),
     AssembleHot(crate::generated::verbs::assemble_hot::AssembleHotData),
     CaptureTrace(crate::generated::verbs::capture_trace::CaptureTraceData),
@@ -227,6 +238,14 @@ impl<'de> ::serde::Deserialize<'de> for Response {
         if !matches!(raw.verb, ResponseVerb::Retrieve) && raw.target.is_some() {
             return Err(::serde::de::Error::custom("target is retrieve-only — forbidden for other verbs"));
         }
+        let error_code = raw.error.as_ref().and_then(|e| e.get("code")).and_then(|c| c.as_str());
+        if matches!(raw.verb, ResponseVerb::Unknown) {
+            if !matches!(raw.status, ResponseStatus::Rejected) { return Err(::serde::de::Error::custom("verb=unknown requires status=rejected")); }
+            if error_code != Some("UnknownVerb") { return Err(::serde::de::Error::custom("verb=unknown requires error.code=UnknownVerb")); }
+        }
+        if !matches!(raw.verb, ResponseVerb::Unknown) && error_code == Some("UnknownVerb") {
+            return Err(::serde::de::Error::custom("error.code=UnknownVerb is paired with verb=unknown only"));
+        }
         let data = if let Some(payload) = raw.data {
             Some(match raw.verb {
                 ResponseVerb::Ingest => ResponseData::Ingest(
@@ -235,7 +254,29 @@ impl<'de> ::serde::Deserialize<'de> for Response {
                 ResponseVerb::Search => ResponseData::Search(
                     <crate::generated::verbs::search::SearchData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                 ),
-                ResponseVerb::Retrieve => ResponseData::Retrieve(payload),
+                ResponseVerb::Retrieve => {
+                    let target = raw.target.ok_or_else(|| ::serde::de::Error::custom("verb=retrieve with data requires target"))?;
+                    ResponseData::Retrieve(match target {
+                        ResponseTarget::Record => RetrieveData::Record(
+                            <crate::generated::verbs::retrieve::DataRecord as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                        ResponseTarget::Profile => RetrieveData::Profile(
+                            <crate::generated::verbs::retrieve::DataProfile as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                        ResponseTarget::Session => RetrieveData::Session(
+                            <crate::generated::verbs::retrieve::DataSession as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                        ResponseTarget::Turn => RetrieveData::Turn(
+                            <crate::generated::verbs::retrieve::DataTurn as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                        ResponseTarget::Folder => RetrieveData::Folder(
+                            <crate::generated::verbs::retrieve::DataFolder as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                        ResponseTarget::Scope => RetrieveData::Scope(
+                            <crate::generated::verbs::retrieve::DataScope as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
+                        ),
+                    })
+                },
                 ResponseVerb::Summarize => ResponseData::Summarize(
                     <crate::generated::verbs::summarize::SummarizeData as ::serde::Deserialize>::deserialize(payload).map_err(::serde::de::Error::custom)?
                 ),

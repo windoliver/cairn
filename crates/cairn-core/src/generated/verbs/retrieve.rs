@@ -5,6 +5,129 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataFolder {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u64>,
+    pub items: Vec<RecordRef>,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataProfileSubject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataProfileSubject {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawDataProfileSubject> for DataProfileSubject {
+    type Error = &'static str;
+    fn try_from(raw: RawDataProfileSubject) -> Result<Self, Self::Error> {
+        if !(raw.user.is_some() || raw.agent.is_some()) { return Err("at least one of [user, agent] is required"); }
+        Ok(Self {
+            agent: raw.agent,
+            user: raw.user,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataProfileSubject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataProfileSubject::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataProfile {
+    /// Free-form profile payload — typed in a later increment once the profile taxonomy lands.
+    pub profile: serde_json::Value,
+    pub subject: DataProfileSubject,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontmatter: Option<serde_json::Value>,
+    pub kind: String,
+    pub record_id: crate::generated::common::Ulid,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataScope {
+    pub items: Vec<RecordRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<crate::generated::common::Cursor>,
+    pub scope: crate::generated::common::ScopeFilter,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataSession {
+    pub items: Vec<TurnItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<crate::generated::common::Cursor>,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataTurn {
+    pub session_id: String,
+    pub turn: TurnItem,
+    pub turn_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordRef {
+    pub kind: String,
+    pub record_id: crate::generated::common::Ulid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnItemRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    pub role: TurnItemRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub turn_id: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

@@ -10,7 +10,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use cairn_core::generated::common::ScopeFilter;
-use cairn_core::generated::envelope::{Request, RequestArgs, Response, ResponseData, SignedIntent};
+use cairn_core::generated::envelope::{
+    Request, RequestArgs, Response, ResponseData, RetrieveData, SignedIntent,
+};
 use cairn_core::generated::verbs::ingest::IngestArgs;
 use cairn_core::generated::verbs::search::SearchArgsFilters;
 
@@ -744,9 +746,136 @@ fn response_retrieve_committed_with_target_round_trips() {
         serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}),
     );
     let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
-    // Retrieve sub-dispatch is deferred — just assert it lands in the
-    // Retrieve(opaque JSON) variant.
-    assert!(matches!(parsed.data, Some(ResponseData::Retrieve(_))));
+    match parsed.data {
+        Some(ResponseData::Retrieve(RetrieveData::Record(rec))) => {
+            assert_eq!(rec.record_id.0, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+            assert_eq!(rec.kind, "note");
+        }
+        other => panic!("expected Retrieve::Record variant, got {other:?}"),
+    }
+}
+
+// ── F2 (round 5): retrieve sub-dispatch by target + UnknownVerb invariant ───
+
+#[test]
+fn response_retrieve_session_target_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("session"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"session_id": "s1", "items": []}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    match parsed.data {
+        Some(ResponseData::Retrieve(RetrieveData::Session(s))) => {
+            assert_eq!(s.session_id, "s1");
+            assert!(s.items.is_empty());
+        }
+        other => panic!("expected Retrieve::Session variant, got {other:?}"),
+    }
+}
+
+#[test]
+fn response_retrieve_target_record_with_session_data_is_rejected() {
+    // target=record but the data is session-shaped — DataRecord deserialize
+    // must fail on the missing record_id / kind fields.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("record"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"session_id": "s1", "items": []}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing field") || msg.contains("unknown field"),
+        "expected target-mismatched-data error, got: {msg}"
+    );
+}
+
+#[test]
+fn response_retrieve_target_session_with_record_data_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("session"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": "note"}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("missing field") || msg.contains("unknown field"),
+        "expected target-mismatched-data error, got: {msg}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_committed_is_rejected() {
+    // verb=unknown is rejected-only per the IDL bidirectional binding.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("data".into(), serde_json::json!({"hits": []}));
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("verb=unknown") || msg.contains("requires status=rejected"),
+        "expected unknown-verb-needs-rejected error, got: {msg}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_with_rejected_unknownverb_code_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "boom", "data": {"verb": "xyz"}}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+
+#[test]
+fn response_unknown_verb_with_other_error_code_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "InvalidArgs", "message": "boom"}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("verb=unknown") && msg.contains("UnknownVerb"),
+        "expected unknown-verb-needs-UnknownVerb-code error, got: {msg}"
+    );
+}
+
+#[test]
+fn response_search_with_unknownverb_code_is_rejected() {
+    // Bidirectional half — UnknownVerb code is paired with verb=unknown only.
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "boom", "data": {"verb": "xyz"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("UnknownVerb") && msg.contains("verb=unknown"),
+        "expected UnknownVerb-paired-with-unknown error, got: {msg}"
+    );
 }
 
 #[test]
