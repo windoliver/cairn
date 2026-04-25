@@ -535,6 +535,82 @@ fn response_rejects_wrong_contract() {
     assert!(err.to_string().contains("contract"));
 }
 
+// ── Finding F4: ScopeFilter rejects empty values per IDL minLength/minItems ──
+
+#[test]
+fn scope_filter_rejects_empty_string_user() {
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "user": "" })).unwrap_err();
+    assert!(
+        err.to_string().contains("user") && err.to_string().contains("empty"),
+        "expected user-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_rejects_empty_string_session_id() {
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "session_id": "" })).unwrap_err();
+    assert!(
+        err.to_string().contains("session_id"),
+        "expected session_id-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_rejects_empty_tags_array() {
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [] })).unwrap_err();
+    assert!(
+        err.to_string().contains("tags"),
+        "expected tags-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_rejects_empty_kind_array() {
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "kind": [] })).unwrap_err();
+    assert!(
+        err.to_string().contains("kind"),
+        "expected kind-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_rejects_empty_record_ids_array() {
+    let err =
+        serde_json::from_value::<ScopeFilter>(serde_json::json!({ "record_ids": [] })).unwrap_err();
+    assert!(
+        err.to_string().contains("record_ids"),
+        "expected record_ids-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_rejects_tags_with_empty_string_item() {
+    let err = serde_json::from_value::<ScopeFilter>(serde_json::json!({ "tags": [""] }))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("tags") && err.to_string().contains("empty"),
+        "expected tags-item-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn scope_filter_accepts_non_empty_tags() {
+    let parsed: ScopeFilter =
+        serde_json::from_value(serde_json::json!({ "tags": ["x"] })).unwrap();
+    assert_eq!(parsed.tags.as_deref(), Some(&["x".to_string()][..]));
+}
+
+#[test]
+fn scope_filter_accepts_non_empty_user() {
+    let parsed: ScopeFilter =
+        serde_json::from_value(serde_json::json!({ "user": "u1" })).unwrap();
+    assert_eq!(parsed.user.as_deref(), Some("u1"));
+}
+
 #[test]
 fn scope_filter_rejects_unknown_only_keys() {
     // deny_unknown_fields covers this — keep the assertion tight regardless.

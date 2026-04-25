@@ -134,6 +134,39 @@ impl ::core::convert::TryFrom<RawScopeFilter> for ScopeFilter {
     type Error = &'static str;
     fn try_from(raw: RawScopeFilter) -> Result<Self, Self::Error> {
         if !(raw.user.is_some() || raw.agent.is_some() || raw.tenant.is_some() || raw.workspace.is_some() || raw.entity.is_some() || raw.tier.is_some() || raw.session_id.is_some() || raw.kind.is_some() || raw.tags.is_some() || raw.record_ids.is_some()) { return Err("at least one of [user, agent, tenant, workspace, entity, tier, session_id, kind, tags, record_ids] is required"); }
+        if let Some(v) = &raw.user {
+            if v.is_empty() { return Err("user: must not be empty"); }
+        }
+        if let Some(v) = &raw.agent {
+            if v.is_empty() { return Err("agent: must not be empty"); }
+        }
+        if let Some(v) = &raw.tenant {
+            if v.is_empty() { return Err("tenant: must not be empty"); }
+        }
+        if let Some(v) = &raw.workspace {
+            if v.is_empty() { return Err("workspace: must not be empty"); }
+        }
+        if let Some(v) = &raw.entity {
+            if v.is_empty() { return Err("entity: must not be empty"); }
+        }
+        if let Some(v) = &raw.session_id {
+            if v.is_empty() { return Err("session_id: must not be empty"); }
+        }
+        if let Some(v) = &raw.kind {
+            if v.is_empty() { return Err("kind: must contain at least one item"); }
+            for item in v {
+                if item.is_empty() { return Err("kind: items must not be empty"); }
+            }
+        }
+        if let Some(v) = &raw.tags {
+            if v.is_empty() { return Err("tags: must contain at least one item"); }
+            for item in v {
+                if item.is_empty() { return Err("tags: items must not be empty"); }
+            }
+        }
+        if let Some(v) = &raw.record_ids {
+            if v.is_empty() { return Err("record_ids: must contain at least one item"); }
+        }
         Ok(Self {
             agent: raw.agent,
             entity: raw.entity,

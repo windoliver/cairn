@@ -1006,6 +1006,13 @@ fn write_struct_any_of_companion(
     w.line(&format!(
         "if !({presence_checks}) {{ return Err(\"at least one of [{names}] is required\"); }}"
     ));
+    // Type-specific extra invariants. The IDL annotates ScopeFilter's
+    // string fields with `minLength: 1` and array fields with `minItems: 1`.
+    // The generic IR strips those, so without this hook
+    // `{"tags": []}` and `{"user": ""}` slip through the presence check.
+    if s.name.0 == "ScopeFilter" {
+        write_scope_filter_extra_checks(w);
+    }
     w.line("Ok(Self {");
     w.indent();
     for field in &s.fields {
@@ -1394,6 +1401,59 @@ fn write_untagged_union_deserialize(
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit bespoke field-level non-emptiness checks for `ScopeFilter`.
+///
+/// The IDL marks every string field with `minLength: 1` and every array
+/// field with `minItems: 1`. Round-3 only added presence-of-anyOf, so
+/// `{"tags": []}` and `{"user": ""}` slipped through. The validator here
+/// rejects the empty-but-present values per the IDL.
+fn write_scope_filter_extra_checks(w: &mut RustWriter) {
+    // String fields: minLength: 1.
+    for field in [
+        "user",
+        "agent",
+        "tenant",
+        "workspace",
+        "entity",
+        "session_id",
+    ] {
+        w.line(&format!("if let Some(v) = &raw.{field} {{"));
+        w.indent();
+        w.line(&format!(
+            "if v.is_empty() {{ return Err(\"{field}: must not be empty\"); }}"
+        ));
+        w.dedent();
+        w.line("}");
+    }
+    // Array fields: minItems: 1; array element strings (kind, tags) further
+    // require minLength: 1 per the IDL's `items` block.
+    for field in ["kind", "tags"] {
+        w.line(&format!("if let Some(v) = &raw.{field} {{"));
+        w.indent();
+        w.line(&format!(
+            "if v.is_empty() {{ return Err(\"{field}: must contain at least one item\"); }}"
+        ));
+        w.line("for item in v {");
+        w.indent();
+        w.line(&format!(
+            "if item.is_empty() {{ return Err(\"{field}: items must not be empty\"); }}"
+        ));
+        w.dedent();
+        w.line("}");
+        w.dedent();
+        w.line("}");
+    }
+    // record_ids: minItems: 1; element shape already enforced via Ulid newtype
+    // ($ref to primitives.json#/$defs/Ulid). The IDL's pattern is checked at
+    // the SignedIntent layer, not here — this matches the round-3 scope of
+    // ScopeFilter (presence + non-emptiness).
+    w.line("if let Some(v) = &raw.record_ids {");
+    w.indent();
+    w.line("if v.is_empty() { return Err(\"record_ids: must contain at least one item\"); }");
     w.dedent();
     w.line("}");
 }
