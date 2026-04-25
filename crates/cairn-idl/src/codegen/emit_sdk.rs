@@ -1477,11 +1477,20 @@ fn write_scope_filter_extra_checks(w: &mut RustWriter) {
 ///   `uniqueItems`).
 /// * `operation_id`, every `chain_parents[i]`: ULID alphabet check (26 chars,
 ///   Crockford base32 — `^[0-9A-HJKMNP-TV-Z]{26}$`).
-///
-/// Pattern-level validation for `nonce`, `signature`, `target_hash`, and
-/// `issuer` is left to the verb layer where format errors map to
-/// `InvalidArgs` — the round-4 finding scope is "reject obviously malformed
-/// payloads"; full regex compilation in cairn-core is out of scope.
+/// * `nonce` and `server_challenge`: 16-byte base64 alphabet + length
+///   (`^[A-Za-z0-9+/]{21}[AQgw](==)?$`).
+/// * `signature`: `ed25519:` prefix + 128 lowercase hex chars
+///   (`^ed25519:[0-9a-f]{128}$`).
+/// * `target_hash`: `sha256:` prefix + 64 lowercase hex chars
+///   (`^sha256:[0-9a-f]{64}$`).
+/// * `issuer`: identity prefix (`agt:`/`usr:`/`snr:`) + non-empty body in
+///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|usr|snr):[A-Za-z0-9._:-]+$`).
+/// * `scope.tenant`/`workspace`/`entity`: `minLength: 1`.
+/// * `issued_at`/`expires_at`: minimal RFC-3339 date-time shape — `len >= 20`,
+///   ASCII-only, `-` at positions 4/7, `T` at 10, `:` at 13/16, second-pair
+///   digits, and a final `Z` or `+/-HH:MM` offset. Stricter validation lands
+///   when a date-time parser ships in the verb layer; this catches obviously
+///   malformed strings without pulling `chrono` into `cairn-core`.
 fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     // sequence bound — JSON safe-integer cap from the IDL.
     w.line("if let Some(seq) = raw.sequence {");
@@ -1513,14 +1522,35 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     w.line("if !is_ulid_shape(&parent.0) { return Err(\"chain_parents[*]: must be a Crockford-base32 ULID\"); }");
     w.dedent();
     w.line("}");
-    // TODO: pattern validation for nonce/signature/target_hash/issuer
-    // (regex needed). See envelope/signed_intent.json + common/primitives.json.
+    // Nonce16Base64 shape on nonce + (when present) server_challenge.
+    w.line("if !is_nonce16_base64(&raw.nonce.0) { return Err(\"nonce: must be a 16-byte base64 nonce (22 chars [+ '==' padding] with [AQgw] tail)\"); }");
+    w.line("if let Some(c) = &raw.server_challenge {");
+    w.indent();
+    w.line("if !is_nonce16_base64(&c.0) { return Err(\"server_challenge: must be a 16-byte base64 nonce (22 chars [+ '==' padding] with [AQgw] tail)\"); }");
+    w.dedent();
+    w.line("}");
+    // Ed25519 signature prefix + 128 lowercase hex chars.
+    w.line("if !is_ed25519_signature(&raw.signature.0) { return Err(\"signature: must be \\\"ed25519:\\\" + 128 lowercase hex chars\"); }");
+    // SHA-256 target_hash prefix + 64 lowercase hex chars.
+    w.line("if !is_sha256_target_hash(&raw.target_hash) { return Err(\"target_hash: must be \\\"sha256:\\\" + 64 lowercase hex chars\"); }");
+    // Identity prefix on issuer.
+    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
+    // Scope inner string fields — minLength: 1 per IDL.
+    w.line("if raw.scope.tenant.is_empty() { return Err(\"scope.tenant: must not be empty\"); }");
+    w.line(
+        "if raw.scope.workspace.is_empty() { return Err(\"scope.workspace: must not be empty\"); }",
+    );
+    w.line("if raw.scope.entity.is_empty() { return Err(\"scope.entity: must not be empty\"); }");
+    // RFC-3339 date-time shape on issued_at / expires_at.
+    w.line("if !is_rfc3339_datetime(&raw.issued_at) { return Err(\"issued_at: must be an RFC-3339 date-time (e.g. 2026-01-01T00:00:00Z)\"); }");
+    w.line("if !is_rfc3339_datetime(&raw.expires_at) { return Err(\"expires_at: must be an RFC-3339 date-time (e.g. 2026-01-01T00:00:00Z)\"); }");
 }
 
-/// Emit a `fn is_ulid_shape(s: &str) -> bool` helper used by SignedIntent's
-/// TryFrom impl to validate the Crockford base32 alphabet without pulling
-/// `regex` into `cairn-core`. Emitted at module scope alongside
-/// SignedIntent.
+/// Emit the bespoke shape helpers used by SignedIntent's TryFrom impl
+/// (`is_ulid_shape`, `is_nonce16_base64`, `is_ed25519_signature`,
+/// `is_sha256_target_hash`, `is_identity`, `is_rfc3339_datetime`). All are
+/// hand-rolled byte-level checks so we don't have to pull `regex` into
+/// `cairn-core`. Emitted once at module scope.
 fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars");
     w.line("/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
@@ -1532,6 +1562,121 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'");
     w.dedent();
     w.line("))");
+    w.dedent();
+    w.line("}");
+    w.blank();
+    // Nonce16Base64: ^[A-Za-z0-9+/]{21}[AQgw](==)?$  — 22 significant chars
+    // with the 22nd in [AQgw] (so trailing 4 bits are zero — canonical for
+    // exactly 16 bytes), optional `==` padding.
+    w.line("/// Return true iff `s` is a 16-byte base64 nonce: 22 significant chars");
+    w.line("/// with the 22nd in `[AQgw]` (canonical 16-byte encoding) and optional `==` padding.");
+    w.line("fn is_nonce16_base64(s: &str) -> bool {");
+    w.indent();
+    w.line("let bytes = s.as_bytes();");
+    w.line("let (head, tail22, padded) = match bytes.len() {");
+    w.indent();
+    w.line("22 => (&bytes[..21], bytes[21], false),");
+    w.line("24 => (&bytes[..21], bytes[21], true),");
+    w.line("_ => return false,");
+    w.dedent();
+    w.line("};");
+    w.line("if !head.iter().all(|b| matches!(b,");
+    w.indent();
+    w.line("b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/'");
+    w.dedent();
+    w.line(")) { return false; }");
+    w.line("if !matches!(tail22, b'A' | b'Q' | b'g' | b'w') { return false; }");
+    w.line("if padded && &bytes[22..] != b\"==\" { return false; }");
+    w.line("true");
+    w.dedent();
+    w.line("}");
+    w.blank();
+    // Ed25519 signature: ^ed25519:[0-9a-f]{128}$
+    w.line("/// Return true iff `s` matches `ed25519:` + exactly 128 lowercase hex chars.");
+    w.line("fn is_ed25519_signature(s: &str) -> bool {");
+    w.indent();
+    w.line("let Some(tail) = s.strip_prefix(\"ed25519:\") else { return false; };");
+    w.line("if tail.len() != 128 { return false; }");
+    w.line("tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))");
+    w.dedent();
+    w.line("}");
+    w.blank();
+    // SHA-256 target hash: ^sha256:[0-9a-f]{64}$
+    w.line("/// Return true iff `s` matches `sha256:` + exactly 64 lowercase hex chars.");
+    w.line("fn is_sha256_target_hash(s: &str) -> bool {");
+    w.indent();
+    w.line("let Some(tail) = s.strip_prefix(\"sha256:\") else { return false; };");
+    w.line("if tail.len() != 64 { return false; }");
+    w.line("tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))");
+    w.dedent();
+    w.line("}");
+    w.blank();
+    // Identity: ^(agt|usr|snr):[A-Za-z0-9._:-]+$
+    w.line("/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a");
+    w.line("/// non-empty body in `[A-Za-z0-9._:-]`.");
+    w.line("fn is_identity(s: &str) -> bool {");
+    w.indent();
+    w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
+    w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+    w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
+    w.line("    else { return false; };");
+    w.line("if tail.is_empty() { return false; }");
+    w.line("tail.bytes().all(|b| matches!(b,");
+    w.indent();
+    w.line("b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'");
+    w.dedent();
+    w.line("))");
+    w.dedent();
+    w.line("}");
+    w.blank();
+    // RFC-3339 date-time minimal shape:
+    // YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|±HH:MM)
+    // We don't validate field ranges (month <= 12 etc.) — that belongs to a
+    // dedicated parser. We catch the obvious shape mistakes (wrong separators,
+    // non-ASCII, missing offset) which is what the IDL `format: date-time`
+    // hint protects against in practice.
+    w.line("/// Return true iff `s` looks like an RFC-3339 date-time:");
+    w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
+    w.line("/// length >= 20, separators at fixed positions, digits everywhere else");
+    w.line("/// in the date / time core. Field-range checks (month <= 12, etc.) are");
+    w.line("/// out of scope — a dedicated parser owns those.");
+    w.line("fn is_rfc3339_datetime(s: &str) -> bool {");
+    w.indent();
+    w.line("if !s.is_ascii() { return false; }");
+    w.line("let b = s.as_bytes();");
+    w.line("if b.len() < 20 { return false; }");
+    w.line("// YYYY-MM-DDTHH:MM:SS");
+    w.line("let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];");
+    w.line("for &i in &digits { if !b[i].is_ascii_digit() { return false; } }");
+    w.line("if b[4] != b'-' || b[7] != b'-' { return false; }");
+    w.line("if b[10] != b'T' && b[10] != b't' { return false; }");
+    w.line("if b[13] != b':' || b[16] != b':' { return false; }");
+    w.line("// Optional fractional seconds + mandatory offset (Z or ±HH:MM).");
+    w.line("let mut idx = 19;");
+    w.line("if idx < b.len() && b[idx] == b'.' {");
+    w.indent();
+    w.line("idx += 1;");
+    w.line("let frac_start = idx;");
+    w.line("while idx < b.len() && b[idx].is_ascii_digit() { idx += 1; }");
+    w.line("if idx == frac_start { return false; }");
+    w.dedent();
+    w.line("}");
+    w.line("if idx >= b.len() { return false; }");
+    w.line("match b[idx] {");
+    w.indent();
+    w.line("b'Z' | b'z' => idx + 1 == b.len(),");
+    w.line("b'+' | b'-' => {");
+    w.indent();
+    w.line("// ±HH:MM = 6 more bytes.");
+    w.line("if idx + 6 != b.len() { return false; }");
+    w.line("b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()");
+    w.line("    && b[idx + 3] == b':'");
+    w.line("    && b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()");
+    w.dedent();
+    w.line("}");
+    w.line("_ => false,");
+    w.dedent();
+    w.line("}");
     w.dedent();
     w.line("}");
 }

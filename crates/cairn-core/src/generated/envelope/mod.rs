@@ -368,6 +368,18 @@ impl ::core::convert::TryFrom<RawSignedIntent> for SignedIntent {
         for parent in &raw.chain_parents {
             if !is_ulid_shape(&parent.0) { return Err("chain_parents[*]: must be a Crockford-base32 ULID"); }
         }
+        if !is_nonce16_base64(&raw.nonce.0) { return Err("nonce: must be a 16-byte base64 nonce (22 chars [+ '==' padding] with [AQgw] tail)"); }
+        if let Some(c) = &raw.server_challenge {
+            if !is_nonce16_base64(&c.0) { return Err("server_challenge: must be a 16-byte base64 nonce (22 chars [+ '==' padding] with [AQgw] tail)"); }
+        }
+        if !is_ed25519_signature(&raw.signature.0) { return Err("signature: must be \"ed25519:\" + 128 lowercase hex chars"); }
+        if !is_sha256_target_hash(&raw.target_hash) { return Err("target_hash: must be \"sha256:\" + 64 lowercase hex chars"); }
+        if !is_identity(&raw.issuer.0) { return Err("issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]"); }
+        if raw.scope.tenant.is_empty() { return Err("scope.tenant: must not be empty"); }
+        if raw.scope.workspace.is_empty() { return Err("scope.workspace: must not be empty"); }
+        if raw.scope.entity.is_empty() { return Err("scope.entity: must not be empty"); }
+        if !is_rfc3339_datetime(&raw.issued_at) { return Err("issued_at: must be an RFC-3339 date-time (e.g. 2026-01-01T00:00:00Z)"); }
+        if !is_rfc3339_datetime(&raw.expires_at) { return Err("expires_at: must be an RFC-3339 date-time (e.g. 2026-01-01T00:00:00Z)"); }
         Ok(Self {
             chain_parents: raw.chain_parents,
             expires_at: raw.expires_at,
@@ -400,4 +412,85 @@ fn is_ulid_shape(s: &str) -> bool {
     s.bytes().all(|b| matches!(b,
         b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
     ))
+}
+
+/// Return true iff `s` is a 16-byte base64 nonce: 22 significant chars
+/// with the 22nd in `[AQgw]` (canonical 16-byte encoding) and optional `==` padding.
+fn is_nonce16_base64(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let (head, tail22, padded) = match bytes.len() {
+        22 => (&bytes[..21], bytes[21], false),
+        24 => (&bytes[..21], bytes[21], true),
+        _ => return false,
+    };
+    if !head.iter().all(|b| matches!(b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/'
+    )) { return false; }
+    if !matches!(tail22, b'A' | b'Q' | b'g' | b'w') { return false; }
+    if padded && &bytes[22..] != b"==" { return false; }
+    true
+}
+
+/// Return true iff `s` matches `ed25519:` + exactly 128 lowercase hex chars.
+fn is_ed25519_signature(s: &str) -> bool {
+    let Some(tail) = s.strip_prefix("ed25519:") else { return false; };
+    if tail.len() != 128 { return false; }
+    tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Return true iff `s` matches `sha256:` + exactly 64 lowercase hex chars.
+fn is_sha256_target_hash(s: &str) -> bool {
+    let Some(tail) = s.strip_prefix("sha256:") else { return false; };
+    if tail.len() != 64 { return false; }
+    tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a
+/// non-empty body in `[A-Za-z0-9._:-]`.
+fn is_identity(s: &str) -> bool {
+    let tail = if let Some(t) = s.strip_prefix("agt:") { t }
+        else if let Some(t) = s.strip_prefix("usr:") { t }
+        else if let Some(t) = s.strip_prefix("snr:") { t }
+        else { return false; };
+    if tail.is_empty() { return false; }
+    tail.bytes().all(|b| matches!(b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'
+    ))
+}
+
+/// Return true iff `s` looks like an RFC-3339 date-time:
+/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,
+/// length >= 20, separators at fixed positions, digits everywhere else
+/// in the date / time core. Field-range checks (month <= 12, etc.) are
+/// out of scope — a dedicated parser owns those.
+fn is_rfc3339_datetime(s: &str) -> bool {
+    if !s.is_ascii() { return false; }
+    let b = s.as_bytes();
+    if b.len() < 20 { return false; }
+    // YYYY-MM-DDTHH:MM:SS
+    let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    for &i in &digits { if !b[i].is_ascii_digit() { return false; } }
+    if b[4] != b'-' || b[7] != b'-' { return false; }
+    if b[10] != b'T' && b[10] != b't' { return false; }
+    if b[13] != b':' || b[16] != b':' { return false; }
+    // Optional fractional seconds + mandatory offset (Z or ±HH:MM).
+    let mut idx = 19;
+    if idx < b.len() && b[idx] == b'.' {
+        idx += 1;
+        let frac_start = idx;
+        while idx < b.len() && b[idx].is_ascii_digit() { idx += 1; }
+        if idx == frac_start { return false; }
+    }
+    if idx >= b.len() { return false; }
+    match b[idx] {
+        b'Z' | b'z' => idx + 1 == b.len(),
+        b'+' | b'-' => {
+            // ±HH:MM = 6 more bytes.
+            if idx + 6 != b.len() { return false; }
+            b[idx + 1].is_ascii_digit() && b[idx + 2].is_ascii_digit()
+                && b[idx + 3] == b':'
+                && b[idx + 4].is_ascii_digit() && b[idx + 5].is_ascii_digit()
+        }
+        _ => false,
+    }
 }

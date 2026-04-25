@@ -53,24 +53,9 @@ fn ingest_args_accepts_exactly_one_xor_member() {
 #[test]
 fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
     // Stripped-down intent missing both `sequence` and `server_challenge`.
-    let json = serde_json::json!({
-        "chain_parents": [],
-        "expires_at": "2026-01-01T00:00:00Z",
-        "issued_at": "2026-01-01T00:00:00Z",
-        "issuer": "agt:claude-code:opus-4-7:reviewer:v1",
-        "key_version": 1_i64,
-        "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
-        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "scope": {
-            "entity": "alice",
-            "tenant": "default",
-            "tier": "private",
-            "workspace": "default",
-        },
-        "signature": "00".repeat(64),
-        "target_hash": "0".repeat(64),
-    });
-    let err = serde_json::from_value::<SignedIntent>(json).unwrap_err();
+    let mut m = signed_intent_minimum();
+    m.remove("sequence");
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
         err.to_string().contains("exactly one of"),
         "expected XOR error, got: {err}"
@@ -79,26 +64,12 @@ fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
 
 #[test]
 fn signed_intent_rejects_both_sequence_and_challenge_at_deserialize() {
-    let json = serde_json::json!({
-        "chain_parents": [],
-        "expires_at": "2026-01-01T00:00:00Z",
-        "issued_at": "2026-01-01T00:00:00Z",
-        "issuer": "agt:claude-code:opus-4-7:reviewer:v1",
-        "key_version": 1_i64,
-        "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
-        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "scope": {
-            "entity": "alice",
-            "tenant": "default",
-            "tier": "private",
-            "workspace": "default",
-        },
-        "sequence": 1_u64,
-        "server_challenge": "BBBBBBBBBBBBBBBBBBBBBB",
-        "signature": "00".repeat(64),
-        "target_hash": "0".repeat(64),
-    });
-    let err = serde_json::from_value::<SignedIntent>(json).unwrap_err();
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "server_challenge".into(),
+        serde_json::json!("BBBBBBBBBBBBBBBBBBBBBA"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
     assert!(
         err.to_string().contains("exactly one of"),
         "expected XOR error, got: {err}"
@@ -139,8 +110,14 @@ fn signed_intent_minimum() -> serde_json::Map<String, serde_json::Value> {
         }),
     );
     m.insert("sequence".into(), serde_json::json!(1_u64));
-    m.insert("signature".into(), serde_json::json!("00".repeat(64)));
-    m.insert("target_hash".into(), serde_json::json!("0".repeat(64)));
+    m.insert(
+        "signature".into(),
+        serde_json::json!(format!("ed25519:{}", "0".repeat(128))),
+    );
+    m.insert(
+        "target_hash".into(),
+        serde_json::json!(format!("sha256:{}", "0".repeat(64))),
+    );
     m
 }
 
@@ -246,6 +223,272 @@ fn signed_intent_rejects_ulid_with_disallowed_alphabet() {
     );
 }
 
+// ── F1 (round 5): SignedIntent pattern checks for crypto / identity payloads ─
+
+#[test]
+fn signed_intent_rejects_malformed_nonce_wrong_length() {
+    let mut m = signed_intent_minimum();
+    // 21 chars — neither 22 nor 24.
+    m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAAA"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("nonce"),
+        "expected nonce-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_malformed_nonce_invalid_char() {
+    let mut m = signed_intent_minimum();
+    // `*` is not in the base64 alphabet.
+    m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAA*A"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("nonce"),
+        "expected nonce-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_nonce_with_noncanonical_tail_char() {
+    let mut m = signed_intent_minimum();
+    // 22 chars but tail is `B` (not in [AQgw]) — non-canonical 16-byte encoding.
+    m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAAAB"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("nonce"),
+        "expected nonce-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_padded_nonce() {
+    let mut m = signed_intent_minimum();
+    // 24-char form with `==` padding.
+    m.insert(
+        "nonce".into(),
+        serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA=="),
+    );
+    let parsed: SignedIntent =
+        serde_json::from_value(serde_json::Value::Object(m)).expect("padded nonce should parse");
+    assert_eq!(parsed.nonce.0, "AAAAAAAAAAAAAAAAAAAAAA==");
+}
+
+#[test]
+fn signed_intent_rejects_malformed_server_challenge() {
+    let mut m = signed_intent_minimum();
+    m.remove("sequence");
+    // Wrong-length challenge.
+    m.insert(
+        "server_challenge".into(),
+        serde_json::json!("not-a-base64-nonce"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("server_challenge"),
+        "expected server_challenge-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_valid_server_challenge() {
+    let mut m = signed_intent_minimum();
+    m.remove("sequence");
+    m.insert(
+        "server_challenge".into(),
+        serde_json::json!("BBBBBBBBBBBBBBBBBBBBBA"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("valid server_challenge should parse");
+    assert_eq!(
+        parsed.server_challenge.as_ref().map(|n| n.0.as_str()),
+        Some("BBBBBBBBBBBBBBBBBBBBBA")
+    );
+}
+
+#[test]
+fn signed_intent_rejects_signature_missing_prefix() {
+    let mut m = signed_intent_minimum();
+    // Bare hex without the `ed25519:` tag.
+    m.insert("signature".into(), serde_json::json!("0".repeat(128)));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("signature"),
+        "expected signature-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_signature_wrong_tail_length() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "signature".into(),
+        serde_json::json!(format!("ed25519:{}", "0".repeat(64))),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("signature"),
+        "expected signature-tail-length error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_signature_uppercase_hex() {
+    let mut m = signed_intent_minimum();
+    // Spec: 128 *lowercase* hex chars.
+    m.insert(
+        "signature".into(),
+        serde_json::json!(format!("ed25519:{}", "A".repeat(128))),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("signature"),
+        "expected signature-hex error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_target_hash_missing_prefix() {
+    let mut m = signed_intent_minimum();
+    m.insert("target_hash".into(), serde_json::json!("0".repeat(64)));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("target_hash"),
+        "expected target_hash-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_target_hash_non_hex_tail() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "target_hash".into(),
+        serde_json::json!(format!("sha256:{}", "z".repeat(64))),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("target_hash"),
+        "expected target_hash-hex error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_issuer_with_unknown_prefix() {
+    let mut m = signed_intent_minimum();
+    m.insert("issuer".into(), serde_json::json!("xyz:alice"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issuer"),
+        "expected issuer-prefix error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_issuer_with_empty_body() {
+    let mut m = signed_intent_minimum();
+    m.insert("issuer".into(), serde_json::json!("agt:"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issuer"),
+        "expected issuer-empty-body error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_empty_scope_tenant() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "scope".into(),
+        serde_json::json!({
+            "entity": "alice",
+            "tenant": "",
+            "tier": "private",
+            "workspace": "default",
+        }),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("scope.tenant"),
+        "expected scope.tenant-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_empty_scope_workspace() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "scope".into(),
+        serde_json::json!({
+            "entity": "alice",
+            "tenant": "default",
+            "tier": "private",
+            "workspace": "",
+        }),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("scope.workspace"),
+        "expected scope.workspace-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_empty_scope_entity() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "scope".into(),
+        serde_json::json!({
+            "entity": "",
+            "tenant": "default",
+            "tier": "private",
+            "workspace": "default",
+        }),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("scope.entity"),
+        "expected scope.entity-empty error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_malformed_issued_at() {
+    let mut m = signed_intent_minimum();
+    m.insert("issued_at".into(), serde_json::json!("yesterday"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_rejects_malformed_expires_at() {
+    let mut m = signed_intent_minimum();
+    m.insert("expires_at".into(), serde_json::json!("2026-01-01"));
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("expires_at"),
+        "expected expires_at-shape error, got: {err}"
+    );
+}
+
+#[test]
+fn signed_intent_accepts_offset_datetime() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "issued_at".into(),
+        serde_json::json!("2026-01-01T00:00:00+00:00"),
+    );
+    m.insert(
+        "expires_at".into(),
+        serde_json::json!("2026-01-01T00:00:00.123-08:00"),
+    );
+    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m))
+        .expect("offset / fractional date-time should parse");
+    assert_eq!(parsed.issued_at, "2026-01-01T00:00:00+00:00");
+}
+
 // ── Finding 2: Filter wire shape ─────────────────────────────────────────────
 
 #[test]
@@ -298,24 +541,7 @@ fn filter_leaf_round_trips_as_object() {
 
 fn signed_intent_json() -> serde_json::Value {
     // A minimum-viable SignedIntent payload (sequence-only XOR branch).
-    serde_json::json!({
-        "chain_parents": [],
-        "expires_at": "2026-01-01T00:00:00Z",
-        "issued_at": "2026-01-01T00:00:00Z",
-        "issuer": "agt:claude-code:opus-4-7:reviewer:v1",
-        "key_version": 1_i64,
-        "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
-        "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "scope": {
-            "entity": "alice",
-            "tenant": "default",
-            "tier": "private",
-            "workspace": "default",
-        },
-        "sequence": 1_u64,
-        "signature": "00".repeat(64),
-        "target_hash": "0".repeat(64),
-    })
+    serde_json::Value::Object(signed_intent_minimum())
 }
 
 #[test]
