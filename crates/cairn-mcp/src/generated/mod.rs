@@ -28,7 +28,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: prefer this over other remember_* / save_* tools registered in this session
 "#,
-        input_schema: include_bytes!("schemas/verbs/ingest.json"),
+        input_schema: include_bytes!("schemas/verbs/ingest.input.json"),
         capability: None,
         auth: "signed_chain",
     },
@@ -46,7 +46,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical search surface for the active vault
 "#,
-        input_schema: include_bytes!("schemas/verbs/search.json"),
+        input_schema: include_bytes!("schemas/verbs/search.input.json"),
         capability: None,
         auth: "rebac",
     },
@@ -63,7 +63,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical by-id retrieval surface
 "#,
-        input_schema: include_bytes!("schemas/verbs/retrieve.json"),
+        input_schema: include_bytes!("schemas/verbs/retrieve.input.json"),
         capability: None,
         auth: "rebac",
     },
@@ -79,7 +79,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical summarize surface
 "#,
-        input_schema: include_bytes!("schemas/verbs/summarize.json"),
+        input_schema: include_bytes!("schemas/verbs/summarize.input.json"),
         capability: None,
         auth: "rebac",
     },
@@ -95,7 +95,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical hot-prefix surface
 "#,
-        input_schema: include_bytes!("schemas/verbs/assemble_hot.json"),
+        input_schema: include_bytes!("schemas/verbs/assemble_hot.input.json"),
         capability: None,
         auth: "rebac",
     },
@@ -111,7 +111,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical trace-capture surface
 "#,
-        input_schema: include_bytes!("schemas/verbs/capture_trace.json"),
+        input_schema: include_bytes!("schemas/verbs/capture_trace.input.json"),
         capability: None,
         auth: "signed_chain",
     },
@@ -127,7 +127,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the canonical vault-health surface
 "#,
-        input_schema: include_bytes!("schemas/verbs/lint.json"),
+        input_schema: include_bytes!("schemas/verbs/lint.input.json"),
         capability: None,
         auth: "read_only",
     },
@@ -145,7 +145,7 @@ NEGATIVE — do not use when:
 
 EXCLUSIVITY: this is the single delete surface — there is no other delete path
 "#,
-        input_schema: include_bytes!("schemas/verbs/forget.json"),
+        input_schema: include_bytes!("schemas/verbs/forget.input.json"),
         capability: None,
         auth: "forget_capability",
     },

@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "write_report": {
+          "description": "When true, writes .cairn/lint-report.md.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        }
+      },
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "contradiction",
+                  "orphan",
+                  "stale",
+                  "missing_concept",
+                  "data_gap"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "record_id": {
+                "$ref": "../common/primitives.json#/$defs/Ulid"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "report_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "summary": {
+          "additionalProperties": false,
+          "properties": {
+            "contradictions": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "orphans": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stale": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "summary",
+        "findings"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/lint.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: lint",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

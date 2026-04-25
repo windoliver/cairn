@@ -110,6 +110,167 @@ fn supporting_schema_groups_are_emitted_alongside_verbs() {
 }
 
 #[test]
+fn input_schema_files_are_emitted_per_verb() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
+    for verb in [
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
+    ] {
+        assert!(
+            names.iter().any(|n| n.ends_with(&format!(
+                "crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json"
+            ))),
+            "missing input schema for {verb}"
+        );
+    }
+}
+
+#[test]
+fn input_schema_root_delegates_to_args() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    for verb in [
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
+    ] {
+        let suffix = format!(
+            "crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json"
+        );
+        let f = files
+            .iter()
+            .find(|f| f.path.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("missing {verb}.input.json"));
+        let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
+        assert_eq!(
+            parsed.get("$ref").and_then(serde_json::Value::as_str),
+            Some("#/$defs/Args"),
+            "{verb}.input.json must root at $ref #/$defs/Args"
+        );
+        let defs = parsed
+            .get("$defs")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{verb}.input.json missing $defs"));
+        assert!(
+            defs.contains_key("Args"),
+            "{verb}.input.json $defs must include Args"
+        );
+    }
+}
+
+#[test]
+fn input_schema_args_for_required_verbs_advertises_required() {
+    // ingest, summarize: Args has top-level `required` (or oneOf gating).
+    // The Args sub-schema MUST advertise the requirement so MCP clients
+    // reject `{}` rather than passing it through silently.
+    let files = emit_mcp::emit(&doc()).unwrap();
+    for (verb, expected_required_or_one_of) in [
+        ("ingest", "kind"),
+        ("summarize", "record_ids"),
+        ("capture_trace", "from"),
+    ] {
+        let suffix = format!(
+            "crates/cairn-mcp/src/generated/schemas/verbs/{verb}.input.json"
+        );
+        let f = files
+            .iter()
+            .find(|f| f.path.ends_with(&suffix))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
+        let args = parsed
+            .pointer("/$defs/Args")
+            .unwrap_or_else(|| panic!("{verb}: $defs.Args missing"));
+        let required = args
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.iter().any(|v| v.as_str() == Some(expected_required_or_one_of)))
+            .unwrap_or(false);
+        assert!(
+            required,
+            "{verb}: Args must require {expected_required_or_one_of}"
+        );
+    }
+}
+
+#[test]
+fn input_schema_for_oneof_verbs_keeps_dispatch() {
+    // For verbs whose Args is an XOR oneOf (ingest body/file/url) or
+    // tagged-union dispatch (forget mode, retrieve target), the Args schema
+    // must keep the oneOf or rely on $defs/Args*-style sub-types so callers
+    // cannot send `{}` and get past validation.
+    let files = emit_mcp::emit(&doc()).unwrap();
+
+    // ingest: Args has its own oneOf at the Args level.
+    let ingest = files
+        .iter()
+        .find(|f| f.path.ends_with("schemas/verbs/ingest.input.json"))
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&ingest.bytes).unwrap();
+    let args = parsed.pointer("/$defs/Args").unwrap();
+    assert!(
+        args.get("oneOf").is_some(),
+        "ingest Args must keep its oneOf XOR dispatch"
+    );
+
+    // forget / retrieve: Args itself is a oneOf over $defs/Args* subtypes.
+    for verb in ["forget", "retrieve"] {
+        let f = files
+            .iter()
+            .find(|f| {
+                f.path
+                    .ends_with(&format!("schemas/verbs/{verb}.input.json"))
+            })
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&f.bytes).unwrap();
+        let args = parsed.pointer("/$defs/Args").unwrap();
+        assert!(
+            args.get("oneOf").is_some(),
+            "{verb} Args must keep its oneOf dispatch over Args* sub-types"
+        );
+    }
+}
+
+#[test]
+fn tool_decl_input_schema_points_at_input_file() {
+    let files = emit_mcp::emit(&doc()).unwrap();
+    let mod_rs = files
+        .iter()
+        .find(|f| f.path.ends_with("crates/cairn-mcp/src/generated/mod.rs"))
+        .unwrap();
+    let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
+    for verb in [
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
+    ] {
+        let needle = format!("schemas/verbs/{verb}.input.json");
+        assert!(
+            body.contains(&needle),
+            "ToolDecl for {verb} must include_bytes! the .input.json companion"
+        );
+    }
+}
+
+#[test]
 fn verb_schema_carries_full_idl_file_with_local_defs() {
     // Per-verb schema should be the full source file so `#/$defs/...` refs
     // inside Args/Data resolve against the same JSON document.

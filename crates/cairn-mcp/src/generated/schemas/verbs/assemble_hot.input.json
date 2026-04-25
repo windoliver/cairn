@@ -1,0 +1,44 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB).",
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefix": {
+          "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix",
+        "bytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/assemble_hot.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: assemble_hot",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

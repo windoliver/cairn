@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::fmt::{RustWriter, write_json_canonical};
 use super::ir::{Document, VerbDef};
@@ -36,6 +36,10 @@ pub fn emit(doc: &Document) -> Result<Vec<GeneratedFile>, CodegenError> {
             &format!("{ROOT}/schemas/verbs/{}.json", verb.id),
             &verb.args_schema_bytes,
         )?);
+        // Companion file rooted at $defs.Args so MCP clients have a tool
+        // input schema that actually validates Args (not the verb document).
+        // ToolDecl.input_schema points here.
+        out.push(emit_args_input_schema(verb)?);
     }
     for prelude in &doc.preludes {
         out.push(emit_schema(
@@ -125,7 +129,7 @@ fn emit_tool_decl(w: &mut RustWriter, verb: &VerbDef) {
     // Multi-line raw string so embedded newlines stay readable.
     w.line(&format!("description: r#\"{description}\"#,"));
     w.line(&format!(
-        "input_schema: include_bytes!(\"schemas/verbs/{}.json\"),",
+        "input_schema: include_bytes!(\"schemas/verbs/{}.input.json\"),",
         verb.id
     ));
     match &verb.capability {
@@ -174,5 +178,67 @@ fn emit_schema(rel_path: &str, raw_bytes: &[u8]) -> Result<GeneratedFile, Codege
     Ok(GeneratedFile {
         path: PathBuf::from(rel_path),
         bytes: write_json_canonical(&value).into_bytes(),
+    })
+}
+
+/// Emit a per-verb tool-input schema rooted at the verb's `$defs/Args`.
+///
+/// MCP clients validate tool inputs against `ToolDecl.input_schema`. The full
+/// verb document has `type: object` with verb metadata at the root, and Args
+/// only lives under `$defs/Args` — so without this companion the schema MCP
+/// clients see is a permissive object that accepts `{}` for every verb,
+/// including verbs with required fields. We emit a sibling
+/// `<verb>.input.json` whose root delegates via `$ref: #/$defs/Args` and
+/// carries a copy of the original `$defs` so local `#/$defs/<sibling>`
+/// references inside Args continue to resolve. Cross-file `../common/...`
+/// refs resolve against the same schemas/ tree that MCP already publishes
+/// (siblings of the verb file).
+fn emit_args_input_schema(verb: &VerbDef) -> Result<GeneratedFile, CodegenError> {
+    let value: Value = serde_json::from_slice(&verb.args_schema_bytes)
+        .map_err(|e| CodegenError::Emit(format!("args input schema parse: {e}")))?;
+    let defs = value
+        .get("$defs")
+        .cloned()
+        .ok_or_else(|| CodegenError::Emit(format!("verb {}: missing $defs", verb.id)))?;
+    if defs.get("Args").is_none() {
+        return Err(CodegenError::Emit(format!(
+            "verb {}: missing $defs.Args",
+            verb.id
+        )));
+    }
+
+    let mut root = Map::new();
+    root.insert(
+        "$schema".to_string(),
+        Value::String("https://json-schema.org/draft/2020-12/schema".to_string()),
+    );
+    root.insert(
+        "$id".to_string(),
+        Value::String(format!(
+            "https://cairn.dev/schema/cairn.mcp.v1/verbs/{}.input.json",
+            verb.id
+        )),
+    );
+    root.insert(
+        "x-cairn-contract".to_string(),
+        Value::String("cairn.mcp.v1".to_string()),
+    );
+    root.insert(
+        "title".to_string(),
+        Value::String(format!("Cairn verb input: {}", verb.id)),
+    );
+    // The root delegates to Args via $ref. JSON Schema 2020-12 allows
+    // sibling keywords with $ref, but pure $ref-at-root is the cleanest
+    // expression of "this document IS the Args schema".
+    root.insert(
+        "$ref".to_string(),
+        Value::String("#/$defs/Args".to_string()),
+    );
+    root.insert("$defs".to_string(), defs);
+
+    let canonical = write_json_canonical(&Value::Object(root));
+    Ok(GeneratedFile {
+        path: PathBuf::from(format!("{ROOT}/schemas/verbs/{}.input.json", verb.id)),
+        bytes: canonical.into_bytes(),
     })
 }
