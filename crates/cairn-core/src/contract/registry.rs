@@ -4,6 +4,9 @@
 //! `register(&mut PluginRegistry)` (emitted by `register_plugin!`) in a
 //! deterministic order, then assemble the active set from config.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Stable identifier for a plugin instance. Lowercase ASCII alnum + `-`
@@ -84,9 +87,205 @@ pub enum PluginError {
     InvalidManifest(String),
 }
 
+use crate::contract::{
+    agent_provider::AgentProvider, frontend_adapter::FrontendAdapter, llm_provider::LLMProvider,
+    mcp_server::McpServer, memory_store::MemoryStore, sensor_ingress::SensorIngress,
+    workflow_orchestrator::WorkflowOrchestrator,
+};
+
+/// Active set of registered plugins, keyed per contract by `PluginName`.
+///
+/// Constructed empty by the host at startup, then populated by calling each
+/// plugin crate's `register(&mut PluginRegistry)` (emitted by
+/// `register_plugin!`). After all `register` calls, the host queries the
+/// active impl per contract from `.cairn/config.yaml` (brief §4.1).
+#[derive(Default)]
+pub struct PluginRegistry {
+    memory_stores: HashMap<PluginName, Arc<dyn MemoryStore>>,
+    llm_providers: HashMap<PluginName, Arc<dyn LLMProvider>>,
+    workflow_orchestrators: HashMap<PluginName, Arc<dyn WorkflowOrchestrator>>,
+    sensor_ingress: HashMap<PluginName, Arc<dyn SensorIngress>>,
+    mcp_servers: HashMap<PluginName, Arc<dyn McpServer>>,
+    frontend_adapters: HashMap<PluginName, Arc<dyn FrontendAdapter>>,
+    agent_providers: HashMap<PluginName, Arc<dyn AgentProvider>>,
+}
+
+impl std::fmt::Debug for PluginRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRegistry")
+            .field(
+                "memory_stores",
+                &self.memory_stores.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "llm_providers",
+                &self.llm_providers.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "workflow_orchestrators",
+                &self.workflow_orchestrators.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "sensor_ingress",
+                &self.sensor_ingress.keys().collect::<Vec<_>>(),
+            )
+            .field("mcp_servers", &self.mcp_servers.keys().collect::<Vec<_>>())
+            .field(
+                "frontend_adapters",
+                &self.frontend_adapters.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "agent_providers",
+                &self.agent_providers.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+// Macro expansion needs absolute paths to avoid name collisions across contracts.
+#[allow(unused_qualifications)]
+macro_rules! register_method {
+    ($method:ident, $field:ident, $trait_:path, $contract:literal, $host_version:expr) => {
+        /// Register a plugin under the given contract.
+        ///
+        /// # Errors
+        /// - [`PluginError::DuplicateName`] when `name` is already registered for this contract.
+        /// - [`PluginError::UnsupportedContractVersion`] when the impl's
+        ///   `supported_contract_versions()` does not accept the host's `CONTRACT_VERSION`.
+        pub fn $method(
+            &mut self,
+            name: PluginName,
+            plugin: Arc<dyn $trait_>,
+        ) -> Result<(), PluginError> {
+            if !plugin.supported_contract_versions().accepts($host_version) {
+                return Err(PluginError::UnsupportedContractVersion {
+                    contract: $contract,
+                    plugin: name,
+                    plugin_range: plugin.supported_contract_versions(),
+                    host: $host_version,
+                });
+            }
+            if self.$field.contains_key(&name) {
+                return Err(PluginError::DuplicateName {
+                    contract: $contract,
+                    name,
+                });
+            }
+            self.$field.insert(name, plugin);
+            Ok(())
+        }
+    };
+}
+
+impl PluginRegistry {
+    /// Construct an empty `PluginRegistry`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    register_method!(
+        register_memory_store,
+        memory_stores,
+        crate::contract::memory_store::MemoryStore,
+        "MemoryStore",
+        crate::contract::memory_store::CONTRACT_VERSION
+    );
+    register_method!(
+        register_llm_provider,
+        llm_providers,
+        crate::contract::llm_provider::LLMProvider,
+        "LLMProvider",
+        crate::contract::llm_provider::CONTRACT_VERSION
+    );
+    register_method!(
+        register_workflow_orchestrator,
+        workflow_orchestrators,
+        crate::contract::workflow_orchestrator::WorkflowOrchestrator,
+        "WorkflowOrchestrator",
+        crate::contract::workflow_orchestrator::CONTRACT_VERSION
+    );
+    register_method!(
+        register_sensor_ingress,
+        sensor_ingress,
+        crate::contract::sensor_ingress::SensorIngress,
+        "SensorIngress",
+        crate::contract::sensor_ingress::CONTRACT_VERSION
+    );
+    register_method!(
+        register_mcp_server,
+        mcp_servers,
+        crate::contract::mcp_server::McpServer,
+        "McpServer",
+        crate::contract::mcp_server::CONTRACT_VERSION
+    );
+    register_method!(
+        register_frontend_adapter,
+        frontend_adapters,
+        crate::contract::frontend_adapter::FrontendAdapter,
+        "FrontendAdapter",
+        crate::contract::frontend_adapter::CONTRACT_VERSION
+    );
+    register_method!(
+        register_agent_provider,
+        agent_providers,
+        crate::contract::agent_provider::AgentProvider,
+        "AgentProvider",
+        crate::contract::agent_provider::CONTRACT_VERSION
+    );
+
+    /// Look up a registered `MemoryStore` by plugin name.
+    #[must_use]
+    pub fn memory_store(&self, name: &PluginName) -> Option<Arc<dyn MemoryStore>> {
+        self.memory_stores.get(name).cloned()
+    }
+
+    /// Look up a registered `LLMProvider` by plugin name.
+    #[must_use]
+    pub fn llm_provider(&self, name: &PluginName) -> Option<Arc<dyn LLMProvider>> {
+        self.llm_providers.get(name).cloned()
+    }
+
+    /// Look up a registered `WorkflowOrchestrator` by plugin name.
+    #[must_use]
+    pub fn workflow_orchestrator(
+        &self,
+        name: &PluginName,
+    ) -> Option<Arc<dyn WorkflowOrchestrator>> {
+        self.workflow_orchestrators.get(name).cloned()
+    }
+
+    /// Look up a registered `SensorIngress` plugin by plugin name.
+    #[must_use]
+    pub fn sensor_ingress_plugin(&self, name: &PluginName) -> Option<Arc<dyn SensorIngress>> {
+        self.sensor_ingress.get(name).cloned()
+    }
+
+    /// Look up a registered `McpServer` by plugin name.
+    #[must_use]
+    pub fn mcp_server(&self, name: &PluginName) -> Option<Arc<dyn McpServer>> {
+        self.mcp_servers.get(name).cloned()
+    }
+
+    /// Look up a registered `FrontendAdapter` by plugin name.
+    #[must_use]
+    pub fn frontend_adapter(&self, name: &PluginName) -> Option<Arc<dyn FrontendAdapter>> {
+        self.frontend_adapters.get(name).cloned()
+    }
+
+    /// Look up a registered `AgentProvider` by plugin name.
+    #[must_use]
+    pub fn agent_provider(&self, name: &PluginName) -> Option<Arc<dyn AgentProvider>> {
+        self.agent_providers.get(name).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+
+    // -- PluginName tests -------------------------------------------------
 
     #[test]
     fn name_accepts_kebab_alnum() {
@@ -127,11 +326,101 @@ mod tests {
         ));
     }
 
+    // -- Registry tests ---------------------------------------------------
+
+    struct StubStore {
+        range: VersionRange,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryStore for StubStore {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn capabilities(&self) -> &MemoryStoreCapabilities {
+            static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                fts: true,
+                vector: false,
+                graph_edges: false,
+                transactions: true,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            self.range
+        }
+    }
+
+    fn compatible() -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    fn incompatible() -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+    }
+
     #[test]
-    fn name_display_matches_input() {
-        let n = PluginName::new("cairn-store-sqlite").expect("valid");
-        assert_eq!(n.to_string(), "cairn-store-sqlite");
+    fn registers_and_resolves_memory_store() {
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        reg.register_memory_store(
+            name.clone(),
+            Arc::new(StubStore {
+                range: compatible(),
+            }),
+        )
+        .expect("compatible plugin registers");
+        let resolved = reg.memory_store(&name).expect("registered");
+        assert_eq!(resolved.name(), "stub");
+    }
+
+    #[test]
+    fn rejects_duplicate_name() {
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        reg.register_memory_store(
+            name.clone(),
+            Arc::new(StubStore {
+                range: compatible(),
+            }),
+        )
+        .expect("first registers");
+        let err = reg
+            .register_memory_store(
+                name,
+                Arc::new(StubStore {
+                    range: compatible(),
+                }),
+            )
+            .expect_err("duplicate must fail");
+        assert!(matches!(err, PluginError::DuplicateName { .. }));
+    }
+
+    #[test]
+    fn rejects_incompatible_contract_version() {
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("acme-store-future").expect("valid");
+        let err = reg
+            .register_memory_store(
+                name,
+                Arc::new(StubStore {
+                    range: incompatible(),
+                }),
+            )
+            .expect_err("incompatible plugin must fail closed");
+        match err {
+            PluginError::UnsupportedContractVersion { host, contract, .. } => {
+                assert_eq!(host, CONTRACT_VERSION);
+                assert_eq!(contract, "MemoryStore");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lookup_returns_none_for_unknown_name() {
+        let reg = PluginRegistry::new();
+        let name = PluginName::new("unknown").expect("valid");
+        assert!(reg.memory_store(&name).is_none());
     }
 }
-
-// PluginRegistry struct + impl arrives in Task 10 (Batch E) once contract traits exist.
