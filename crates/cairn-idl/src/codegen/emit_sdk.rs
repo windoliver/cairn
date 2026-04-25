@@ -497,9 +497,7 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
     w.line("#[allow(clippy::result_unit_err)]");
     w.line("fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str> {");
     w.indent();
-    w.line(
-        "let obj = err.as_object().ok_or(\"error: must be a JSON object\")?;",
-    );
+    w.line("let obj = err.as_object().ok_or(\"error: must be a JSON object\")?;");
     w.line(
         "let code = obj.get(\"code\").and_then(::serde_json::Value::as_str).ok_or(\"error: code must be a string\")?;",
     );
@@ -519,9 +517,7 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
     w.line(
         "let message = obj.get(\"message\").and_then(::serde_json::Value::as_str).ok_or(\"error: message must be a string\")?;",
     );
-    w.line(
-        "if message.is_empty() { return Err(\"error: message must not be empty\"); }",
-    );
+    w.line("if message.is_empty() { return Err(\"error: message must not be empty\"); }");
     // Per-code data requirements. Codes without required `data` (Internal,
     // MissingSignature) are tolerated — the IDL marks `data` optional or its
     // sub-schema empty.
@@ -532,7 +528,10 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
     write_error_data_arm(
         w,
         "InvalidArgs",
-        &[("field", FieldShape::NonEmptyString), ("reason", FieldShape::NonEmptyString)],
+        &[
+            ("field", FieldShape::NonEmptyString),
+            ("reason", FieldShape::NonEmptyString),
+        ],
     );
     write_error_data_arm(
         w,
@@ -1041,9 +1040,7 @@ fn write_response_envelope(
     // enumerated in `validate_error_envelope` below.
     w.line("if let Some(err) = raw.error.as_ref() {");
     w.indent();
-    w.line(
-        "validate_error_envelope(err).map_err(::serde::de::Error::custom)?;",
-    );
+    w.line("validate_error_envelope(err).map_err(::serde::de::Error::custom)?;");
     w.dedent();
     w.line("}");
     // Per-verb data dispatch. Skipped on rejected/aborted (data was just
@@ -2623,13 +2620,9 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.line("/// Structural validator for `filter_leaf` JSON values. See the IDL");
     w.line("/// `verbs/search.json#/$defs/filter_leaf` oneOf for the shape contract.");
     w.line("#[allow(clippy::result_unit_err)]");
-    w.line(
-        "fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static str> {",
-    );
+    w.line("fn validate_filter_leaf_shape(v: &::serde_json::Value) -> Result<(), &'static str> {");
     w.indent();
-    w.line(
-        "let obj = v.as_object().ok_or(\"filter leaf: must be a JSON object\")?;",
-    );
+    w.line("let obj = v.as_object().ok_or(\"filter leaf: must be a JSON object\")?;");
     // Reject unknown keys. The closed shape is exactly {field, op, value}.
     w.line("for k in obj.keys() {");
     w.indent();
@@ -2645,9 +2638,7 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.line(
         "let op = obj.get(\"op\").and_then(::serde_json::Value::as_str).ok_or(\"filter leaf: op must be a string\")?;",
     );
-    w.line(
-        "let value = obj.get(\"value\").ok_or(\"filter leaf: value missing\")?;",
-    );
+    w.line("let value = obj.get(\"value\").ok_or(\"filter leaf: value missing\")?;");
     // Operator-shape dispatch — mirrors each filter_leaf_* variant in search.json.
     w.line("match op {");
     w.indent();
@@ -2721,7 +2712,9 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.dedent();
     w.line("} else if !value.is_number() {");
     w.indent();
-    w.line("return Err(\"filter leaf: array_contains value must be a non-empty string or number\");");
+    w.line(
+        "return Err(\"filter leaf: array_contains value must be a non-empty string or number\");",
+    );
     w.dedent();
     w.line("}");
     w.dedent();

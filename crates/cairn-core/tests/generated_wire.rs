@@ -1500,8 +1500,8 @@ fn forget_record_accepts_canonical_payload() {
 fn filter_rejects_empty_object_leaf() {
     // The leaf must be a closed `{field, op, value}` object — `{}` has none of
     // those required fields and previously slipped through as `Leaf(Value)`.
-    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [{}]}))
-        .unwrap_err();
+    let err =
+        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [{}]})).unwrap_err();
     assert!(
         err.to_string().contains("filter leaf"),
         "expected leaf-shape error, got: {err}"
@@ -1521,8 +1521,8 @@ fn filter_rejects_null_leaf() {
 #[test]
 fn filter_rejects_leaf_with_empty_field() {
     let leaf = serde_json::json!({"field": "", "op": "eq", "value": 1});
-    let err =
-        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
     assert!(
         err.to_string().contains("field") && err.to_string().contains("empty"),
         "expected empty-field rejection, got: {err}"
@@ -1532,8 +1532,8 @@ fn filter_rejects_leaf_with_empty_field() {
 #[test]
 fn filter_rejects_leaf_with_unknown_op() {
     let leaf = serde_json::json!({"field": "x", "op": "unknown_op", "value": 1});
-    let err =
-        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
     assert!(
         err.to_string().contains("unknown op") || err.to_string().contains("op"),
         "expected unknown-op rejection, got: {err}"
@@ -1543,8 +1543,8 @@ fn filter_rejects_leaf_with_unknown_op() {
 #[test]
 fn filter_rejects_leaf_with_extra_key() {
     let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1, "extra": true});
-    let err =
-        serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]})).unwrap_err();
+    let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [leaf]}))
+        .unwrap_err();
     assert!(
         err.to_string().contains("unknown key") || err.to_string().contains("filter leaf"),
         "expected extra-key rejection, got: {err}"
