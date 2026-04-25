@@ -46,13 +46,48 @@ pub enum SearchArgsFilters {
     Leaf(serde_json::Value),
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 enum RawSearchArgsFilters {
     And { and: Vec<RawSearchArgsFilters> },
     Or { or: Vec<RawSearchArgsFilters> },
     Not { not: Box<RawSearchArgsFilters> },
     Leaf(serde_json::Value),
+}
+
+impl<'de> ::serde::Deserialize<'de> for RawSearchArgsFilters {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let value = ::serde_json::Value::deserialize(deserializer)?;
+        let obj = value.as_object().ok_or_else(|| ::serde::de::Error::custom("filter: must be a JSON object"))?;
+        let has_and = obj.contains_key("and");
+        let has_or = obj.contains_key("or");
+        let has_not = obj.contains_key("not");
+        let op_count = u8::from(has_and) + u8::from(has_or) + u8::from(has_not);
+        if op_count > 1 {
+            return Err(::serde::de::Error::custom("filter: at most one of `and`, `or`, `not` may be set"));
+        }
+        if op_count == 1 {
+            for k in obj.keys() {
+                if !matches!(k.as_str(), "and" | "or" | "not") { return Err(::serde::de::Error::custom("filter: operator node must not carry extra keys")); }
+            }
+            if has_and {
+                let arr = obj.get("and").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom("filter.and: must be an array"))?;
+                let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
+                for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }
+                return Ok(Self::And { and: items });
+            }
+            if has_or {
+                let arr = obj.get("or").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom("filter.or: must be an array"))?;
+                let mut items: Vec<RawSearchArgsFilters> = Vec::with_capacity(arr.len());
+                for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }
+                return Ok(Self::Or { or: items });
+            }
+            let inner_value = obj.get("not").cloned().ok_or_else(|| ::serde::de::Error::custom("filter.not: missing"))?;
+            let inner: RawSearchArgsFilters = ::serde_json::from_value(inner_value).map_err(::serde::de::Error::custom)?;
+            return Ok(Self::Not { not: Box::new(inner) });
+        }
+        let leaf: serde_json::Value = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;
+        Ok(Self::Leaf(leaf))
+    }
 }
 
 #[allow(clippy::result_unit_err)]

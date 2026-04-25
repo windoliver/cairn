@@ -1512,8 +1512,11 @@ fn filter_rejects_empty_object_leaf() {
 fn filter_rejects_null_leaf() {
     let err = serde_json::from_value::<SearchArgsFilters>(serde_json::json!({"and": [null]}))
         .unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("filter leaf") || err.to_string().contains("did not match"),
+        msg.contains("filter leaf")
+            || msg.contains("did not match")
+            || msg.contains("JSON object"),
         "expected null-leaf rejection, got: {err}"
     );
 }
@@ -1865,6 +1868,80 @@ fn retrieve_scope_rejects_overlong_cursor_via_newtype() {
         err.to_string().contains("Cursor") || err.to_string().contains("cursor"),
         "expected cursor cap rejection, got: {err}"
     );
+}
+
+// ── F3 (round 8): Filter operator nodes deny extra keys ─────────────────────
+
+#[test]
+fn filter_rejects_node_with_two_operator_keys() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({"and": [leaf.clone()], "or": [leaf.clone()]});
+    let err = serde_json::from_value::<SearchArgsFilters>(wire).unwrap_err();
+    assert!(
+        err.to_string().contains("at most one"),
+        "expected mixed-operator rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_operator_node_with_leaf_keys() {
+    // {"and":[..], "field":"x", "op":"eq", "value":1} previously matched And
+    // and silently dropped the leaf-shape keys.
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({
+        "and": [leaf.clone()],
+        "field": "x",
+        "op": "eq",
+        "value": 1,
+    });
+    let err = serde_json::from_value::<SearchArgsFilters>(wire).unwrap_err();
+    assert!(
+        err.to_string().contains("extra keys") || err.to_string().contains("operator node"),
+        "expected mixed-operator+leaf rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_rejects_operator_node_with_arbitrary_extra_key() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({"and": [leaf.clone()], "foo": 1});
+    let err = serde_json::from_value::<SearchArgsFilters>(wire).unwrap_err();
+    assert!(
+        err.to_string().contains("extra keys") || err.to_string().contains("operator node"),
+        "expected extra-key rejection, got: {err}"
+    );
+}
+
+#[test]
+fn filter_pure_and_still_round_trips() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({"and": [leaf.clone()]});
+    let parsed: SearchArgsFilters = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::And { .. }));
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+}
+
+#[test]
+fn filter_pure_or_still_round_trips() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({"or": [leaf.clone()]});
+    let parsed: SearchArgsFilters = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Or { .. }));
+}
+
+#[test]
+fn filter_pure_not_still_round_trips() {
+    let leaf = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let wire = serde_json::json!({"not": leaf.clone()});
+    let parsed: SearchArgsFilters = serde_json::from_value(wire).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Not { .. }));
+}
+
+#[test]
+fn filter_pure_leaf_still_round_trips_as_leaf() {
+    let wire = serde_json::json!({"field": "x", "op": "eq", "value": 1});
+    let parsed: SearchArgsFilters = serde_json::from_value(wire).unwrap();
+    assert!(matches!(parsed, SearchArgsFilters::Leaf(_)));
 }
 
 // ── F2 (round 8): Response status bound to error-code family ─────────────────

@@ -2514,16 +2514,104 @@ fn write_recursive(
     w.line("}");
     w.blank();
 
-    // Raw mirror — same wire shape, derives Deserialize directly.
+    // Raw mirror — same wire shape, but with a hand-rolled Deserialize that
+    // dispatches by operator key. The `#[serde(untagged)]` derive would let
+    // `{"and":[..],"or":[..]}` deserialise as the first matching variant
+    // (And) and silently drop the `or` branch; same for an operator object
+    // that also carries leaf keys. We reject any object that mixes operator
+    // keys with each other or with leaf-shape keys, then dispatch on the
+    // single present operator.
     let raw_name = format!("Raw{}", r.name.0);
-    w.line("#[derive(Deserialize)]");
-    w.line("#[serde(untagged)]");
     w.line(&format!("enum {raw_name} {{"));
     w.indent();
     w.line(&format!("And {{ and: Vec<{raw_name}> }},"));
     w.line(&format!("Or {{ or: Vec<{raw_name}> }},"));
     w.line(&format!("Not {{ not: Box<{raw_name}> }},"));
     w.line(&format!("Leaf({leaf_render}),"));
+    w.dedent();
+    w.line("}");
+    w.blank();
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {raw_name} {{"
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("let value = ::serde_json::Value::deserialize(deserializer)?;");
+    w.line(
+        "let obj = value.as_object().ok_or_else(|| ::serde::de::Error::custom(\"filter: must be a JSON object\"))?;",
+    );
+    // Detect which operator keys are present.
+    w.line("let has_and = obj.contains_key(\"and\");");
+    w.line("let has_or = obj.contains_key(\"or\");");
+    w.line("let has_not = obj.contains_key(\"not\");");
+    w.line("let op_count = u8::from(has_and) + u8::from(has_or) + u8::from(has_not);");
+    w.line("if op_count > 1 {");
+    w.indent();
+    w.line(
+        "return Err(::serde::de::Error::custom(\"filter: at most one of `and`, `or`, `not` may be set\"));",
+    );
+    w.dedent();
+    w.line("}");
+    // If an operator key is present, no other keys are allowed (the operator
+    // node is closed: `{"and": [...]}` only). Mixing with leaf-shape keys
+    // would silently drop the leaf in the untagged form.
+    w.line("if op_count == 1 {");
+    w.indent();
+    w.line("for k in obj.keys() {");
+    w.indent();
+    w.line(
+        "if !matches!(k.as_str(), \"and\" | \"or\" | \"not\") { return Err(::serde::de::Error::custom(\"filter: operator node must not carry extra keys\")); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.line("if has_and {");
+    w.indent();
+    w.line("let arr = obj.get(\"and\").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom(\"filter.and: must be an array\"))?;");
+    w.line(&format!(
+        "let mut items: Vec<{raw_name}> = Vec::with_capacity(arr.len());"
+    ));
+    w.line("for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }");
+    w.line("return Ok(Self::And { and: items });");
+    w.dedent();
+    w.line("}");
+    w.line("if has_or {");
+    w.indent();
+    w.line("let arr = obj.get(\"or\").and_then(::serde_json::Value::as_array).ok_or_else(|| ::serde::de::Error::custom(\"filter.or: must be an array\"))?;");
+    w.line(&format!(
+        "let mut items: Vec<{raw_name}> = Vec::with_capacity(arr.len());"
+    ));
+    w.line("for item in arr { items.push(::serde_json::from_value(item.clone()).map_err(::serde::de::Error::custom)?); }");
+    w.line("return Ok(Self::Or { or: items });");
+    w.dedent();
+    w.line("}");
+    // Not branch — operand is a single Filter, not an array.
+    w.line("let inner_value = obj.get(\"not\").cloned().ok_or_else(|| ::serde::de::Error::custom(\"filter.not: missing\"))?;");
+    w.line(&format!(
+        "let inner: {raw_name} = ::serde_json::from_value(inner_value).map_err(::serde::de::Error::custom)?;"
+    ));
+    w.line("return Ok(Self::Not { not: Box::new(inner) });");
+    w.dedent();
+    w.line("}");
+    // No operator key — must be a leaf object. The leaf validator (called
+    // from the recursive depth check below) does the structural check; here
+    // we just thread the JSON value through.
+    if leaf_inline {
+        // For inline leaves (Json), deserialise from the value into the
+        // leaf's renderable type. In practice this is `serde_json::Value`,
+        // so the from_value is a clone.
+        w.line(&format!(
+            "let leaf: {leaf_render} = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;"
+        ));
+    } else {
+        w.line(&format!(
+            "let leaf: {leaf_render} = ::serde_json::from_value(value).map_err(::serde::de::Error::custom)?;"
+        ));
+    }
+    w.line("Ok(Self::Leaf(leaf))");
+    w.dedent();
+    w.line("}");
     w.dedent();
     w.line("}");
     w.blank();
