@@ -645,8 +645,7 @@ patch = 0
     fn register_with_manifest_inserts_into_both_maps() {
         let mut reg = PluginRegistry::new();
         let name = PluginName::new("cairn-store-sqlite").expect("valid");
-        let manifest =
-            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        let manifest = PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
         reg.register_memory_store_with_manifest(
             name.clone(),
             manifest,
@@ -658,10 +657,7 @@ patch = 0
         .expect("manifest-aware registration succeeds");
 
         assert!(reg.memory_store(&name).is_some(), "store registered");
-        assert!(
-            reg.parsed_manifest(&name).is_some(),
-            "manifest registered"
-        );
+        assert!(reg.parsed_manifest(&name).is_some(), "manifest registered");
         assert_eq!(
             reg.parsed_manifest(&name).unwrap().contract(),
             ContractKind::MemoryStore
@@ -697,8 +693,7 @@ patch = 0
 
         let mut reg = PluginRegistry::new();
         let name = PluginName::new("cairn-store-sqlite").expect("valid");
-        let manifest =
-            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        let manifest = PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
         let err = reg
             .register_llm_provider_with_manifest(
                 name,
@@ -716,8 +711,7 @@ patch = 0
     fn register_with_manifest_rejects_global_duplicate_name() {
         let mut reg = PluginRegistry::new();
         let name = PluginName::new("cairn-store-sqlite").expect("valid");
-        let manifest =
-            PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
+        let manifest = PluginManifest::parse_toml(store_manifest_text()).expect("manifest parses");
         reg.register_memory_store_with_manifest(
             name.clone(),
             manifest.clone(),

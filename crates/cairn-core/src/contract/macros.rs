@@ -243,8 +243,7 @@ macro_rules! __register_plugin_with_manifest_helper {
             reg: &mut $crate::contract::registry::PluginRegistry,
         ) -> ::core::result::Result<(), $crate::contract::registry::PluginError> {
             let name = $crate::contract::registry::PluginName::new($name)?;
-            let manifest =
-                $crate::contract::manifest::PluginManifest::parse_toml($manifest)?;
+            let manifest = $crate::contract::manifest::PluginManifest::parse_toml($manifest)?;
             reg.$method(
                 name,
                 manifest,
