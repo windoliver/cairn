@@ -24,11 +24,11 @@ fn case_outcome_constructs_pending() {
 #[test]
 fn case_outcome_constructs_ok() {
     let outcome = CaseOutcome {
-        id: "register_round_trip",
+        id: "arc_pointer_stable",
         tier: Tier::One,
         status: CaseStatus::Ok,
     };
-    assert_eq!(outcome.id, "register_round_trip");
+    assert_eq!(outcome.id, "arc_pointer_stable");
     assert_eq!(outcome.tier, Tier::One);
     assert!(matches!(outcome.status, CaseStatus::Ok));
 }
