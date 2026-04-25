@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Semver-shaped contract version. `0.x` is pre-stable; bumping `minor`
 /// is a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractVersion {
     /// Major version component.
     pub major: u16,
@@ -36,6 +37,7 @@ impl std::fmt::Display for ContractVersion {
 
 /// Half-open range `[min, max_exclusive)` over `ContractVersion`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VersionRange {
     /// Lower bound (inclusive).
     pub min: ContractVersion,

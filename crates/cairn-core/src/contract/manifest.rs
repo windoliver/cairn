@@ -38,6 +38,7 @@ pub enum ContractKind {
 /// Wire form: matches the TOML manifest exactly. `name` is parsed as a
 /// `String` here and validated via `PluginName::new` on the way out.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PluginManifestWire {
     name: String,
     contract: ContractKind,
@@ -156,5 +157,69 @@ mod tests {
         "#;
         let m = PluginManifest::parse_toml(minimal).expect("valid");
         assert!(m.features.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_field() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            rogue_field = "boom"
+            [contract_version_range.min]
+            major = 0
+            minor = 1
+            patch = 0
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 2
+            patch = 0
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_range_field() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            [contract_version_range]
+            rogue = "boom"
+            [contract_version_range.min]
+            major = 0
+            minor = 1
+            patch = 0
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 2
+            patch = 0
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_version_field() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            [contract_version_range.min]
+            major = 0
+            minor = 1
+            patch = 0
+            rogue = 99
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 2
+            patch = 0
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
     }
 }
