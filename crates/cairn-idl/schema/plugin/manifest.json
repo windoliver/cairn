@@ -27,6 +27,7 @@
     },
     "contract_version_range": {
       "type": "object",
+      "description": "Half-open `[min, max_exclusive)`. The Rust parser additionally rejects empty/inverted ranges (min >= max_exclusive); JSON Schema cannot express this cross-property invariant.",
       "required": ["min", "max_exclusive"],
       "additionalProperties": false,
       "properties": {
@@ -37,6 +38,7 @@
     "features": {
       "type": "object",
       "description": "Free-form boolean feature flags this plugin advertises. Cairn's pipeline may consult these to gate optional behavior.",
+      "propertyNames": { "pattern": "^[A-Za-z0-9_]{1,64}$" },
       "additionalProperties": { "type": "boolean" }
     }
   },

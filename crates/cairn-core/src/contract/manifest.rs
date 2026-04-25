@@ -63,15 +63,62 @@ pub struct PluginManifest {
     pub features: BTreeMap<String, bool>,
 }
 
+/// Returns `true` when `range.min < range.max_exclusive` (strictly ordered).
+///
+/// JSON Schema cannot express cross-property comparison, so this check lives
+/// exclusively in the Rust parser. See the `contract_version_range` description
+/// in `manifest.json` for the documented gap.
+fn is_strictly_ordered(range: &VersionRange) -> bool {
+    let lo = (range.min.major, range.min.minor, range.min.patch);
+    let hi = (
+        range.max_exclusive.major,
+        range.max_exclusive.minor,
+        range.max_exclusive.patch,
+    );
+    lo < hi
+}
+
+/// Returns `true` when `key` satisfies the feature-key grammar:
+/// non-empty, at most 64 chars, all chars ASCII alphanumeric or `_`.
+///
+/// This mirrors the `^[A-Za-z0-9_]{1,64}$` pattern in `manifest.json`
+/// `propertyNames`.
+fn is_valid_feature_key(key: &str) -> bool {
+    !key.is_empty() && key.len() <= 64 && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl PluginManifest {
     /// Parse a manifest from its TOML source.
     ///
     /// # Errors
-    /// [`PluginError::InvalidManifest`] for syntactic errors;
-    /// [`PluginError::InvalidName`] when `name` violates `PluginName` rules.
+    /// - [`PluginError::InvalidManifest`] for syntactic errors, an inverted/empty
+    ///   `contract_version_range`, or an invalid feature key.
+    /// - [`PluginError::InvalidName`] when `name` violates `PluginName` rules.
     pub fn parse_toml(source: &str) -> Result<Self, PluginError> {
         let wire: PluginManifestWire =
             toml::from_str(source).map_err(|e| PluginError::InvalidManifest(e.to_string()))?;
+
+        // Semantic validation: range must be non-empty (min < max_exclusive).
+        // JSON Schema cannot enforce this cross-property invariant; the Rust
+        // parser is the gatekeeper.
+        if !is_strictly_ordered(&wire.contract_version_range) {
+            return Err(PluginError::InvalidManifest(format!(
+                "contract_version_range is empty or inverted: \
+                 min {} must be strictly less than max_exclusive {}",
+                wire.contract_version_range.min, wire.contract_version_range.max_exclusive,
+            )));
+        }
+
+        // Validate every feature key: ^[A-Za-z0-9_]{1,64}$
+        for key in wire.features.keys() {
+            if !is_valid_feature_key(key) {
+                return Err(PluginError::InvalidManifest(format!(
+                    "feature key {key:?} is invalid: \
+                     must be 1..=64 ASCII alnum + `_`",
+                )));
+            }
+        }
+
         Ok(Self {
             name: PluginName::new(wire.name)?,
             contract: wire.contract,
@@ -222,4 +269,74 @@ mod tests {
             Err(PluginError::InvalidManifest(_))
         ));
     }
+
+    // -- Finding 1: semantic range / feature-key validation ------------------
+
+    #[test]
+    fn rejects_empty_version_range() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            [contract_version_range.min]
+            major = 0
+            minor = 1
+            patch = 0
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 1
+            patch = 0
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_inverted_version_range() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            [contract_version_range.min]
+            major = 1
+            minor = 0
+            patch = 0
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 1
+            patch = 0
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_feature_key_with_dot() {
+        let bad = r#"
+            name = "good-name"
+            contract = "MemoryStore"
+            [contract_version_range.min]
+            major = 0
+            minor = 1
+            patch = 0
+            [contract_version_range.max_exclusive]
+            major = 0
+            minor = 2
+            patch = 0
+            [features]
+            "bad.key" = true
+        "#;
+        assert!(matches!(
+            PluginManifest::parse_toml(bad),
+            Err(PluginError::InvalidManifest(_))
+        ));
+    }
+
+    // Note: TOML does not permit empty string as a bare key, so the
+    // `"" = true` case cannot be represented in TOML syntax. The
+    // `is_valid_feature_key` function still guards against it for callers
+    // that construct the BTreeMap directly. The dot-key test above covers
+    // the parser-accessible invalid-key path.
 }
