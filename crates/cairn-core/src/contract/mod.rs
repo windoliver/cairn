@@ -3,6 +3,8 @@
 //! Brief §4.1: every contract is a trait, every trait declares
 //! `CONTRACT_VERSION`, plugins register through `register_plugin!`.
 
+pub mod agent_provider;
+pub mod frontend_adapter;
 pub mod llm_provider;
 pub mod mcp_server;
 pub mod memory_store;
