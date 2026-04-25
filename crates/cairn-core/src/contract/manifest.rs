@@ -195,7 +195,30 @@ mod tests {
     use super::*;
     use crate::contract::version::ContractVersion;
 
-    const FIXTURE: &str = include_str!("../../../cairn-idl/schema/plugin/example.toml");
+    // Inlined from `crates/cairn-idl/schema/plugin/example.toml` so that
+    // `cargo package -p cairn-core` does not pull in a sibling crate path that
+    // is absent from the published package.  The cairn-idl-side file is kept
+    // intact for the JSON-Schema validation test in
+    // `crates/cairn-idl/tests/plugin_manifest_validation.rs`.
+    const FIXTURE: &str = r#"
+name = "cairn-store-sqlite"
+contract = "MemoryStore"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+
+[features]
+fts = true
+vector = false
+graph_edges = false
+"#;
 
     #[test]
     fn parses_example_fixture() {
