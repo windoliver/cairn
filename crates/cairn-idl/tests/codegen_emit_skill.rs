@@ -1,3 +1,7 @@
+//! Snapshot-style integration tests for `emit_skill` — checks every verb
+//! section is present in the rendered SKILL.md and the conventions/version
+//! companion files are emitted with stable provenance markers.
+
 use cairn_idl::codegen::{emit_skill, ir, loader};
 
 fn doc() -> ir::Document {

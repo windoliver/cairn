@@ -25,6 +25,10 @@ pub struct VerbDef {
     pub id: String,
     pub args: RustType,
     pub data: RustType,
+    /// Locally-defined `$defs` types referenced from Args/Data that need to be
+    /// emitted as siblings in the per-verb file (e.g. `search.Hit`). Stored as
+    /// `PascalCase` `TypeName`s so emitters and ref resolution agree.
+    pub local_types: BTreeMap<TypeName, RustType>,
     pub cli: CliShape,
     pub skill: SkillBlock,
     pub capability: Option<String>,
@@ -610,8 +614,13 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
 fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
     let target = ctx.target.clone().unwrap_or_else(|| TypeName::new("Union"));
     // Borrow the object lowering for the outer struct so we get the property fields.
-    let RustType::Struct(StructDef { fields, .. }) = lower_object(value, ctx)? else {
-        return Err(CodegenError::Ir("untagged union outer must be an object".to_string()));
+    // When the outer schema has only `oneOf` (no `properties` at the outer level —
+    // e.g. extensions/registry's `namespace` quadruple), there is no parent struct
+    // to enforce XOR groups against; fall back to an opaque `Json` blob so the
+    // type is at least addressable.
+    let outer = lower_object(value, ctx)?;
+    let RustType::Struct(StructDef { fields, .. }) = outer else {
+        return Ok(RustType::Json);
     };
     let xor_groups = arr
         .iter()
@@ -677,10 +686,28 @@ pub fn lower_filter_root(value: &Value, ctx: &mut Ctx) -> Result<RustType, Codeg
 }
 
 fn typename_from_ref(reference: &str) -> TypeName {
-    // "../common/primitives.json#/$defs/Ulid" → "Ulid"
-    let after_hash = reference.split('#').nth(1).unwrap_or("");
-    let last = after_hash.rsplit('/').next().unwrap_or("");
-    TypeName::new(last)
+    // Three shapes are accepted:
+    //   "../common/primitives.json#/$defs/Ulid" → "Ulid"
+    //   "#/$defs/namespace"                     → "Namespace"
+    //   "../common/scope_filter.json"           → "ScopeFilter" (file stem, no fragment)
+    // The trailing identifier is PascalCase-normalised so wire-form $defs keys
+    // (e.g. lowercase `namespace`) become valid Rust type identifiers.
+    let (file_part, after_hash) = match reference.split_once('#') {
+        Some((file, frag)) => (file, frag),
+        None => (reference, ""),
+    };
+    let raw = after_hash.rsplit('/').next().unwrap_or("");
+    let basis = if raw.is_empty() {
+        // Whole-file ref — derive from file basename stem.
+        std::path::Path::new(file_part)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        raw.to_string()
+    };
+    TypeName::new(pascal_case(&basis))
 }
 
 /// Convert a `snake_case`, `kebab-case`, or `dot.separated` string to `PascalCase`.
@@ -734,11 +761,24 @@ pub fn build(raw: &RawDocument) -> Result<Document, CodegenError> {
     // Errors → flat list of (code, data-typename) pairs.
     let error_codes = build_error_codes(&raw.errors)?;
 
-    // Common types — lower every entry under common/*.json#/$defs/*.
+    // Common types — lower every entry under common/*.json#/$defs/*, plus the
+    // capabilities and extensions registries (their types are addressable from
+    // the same `crate::generated::common::*` module).
     let mut common = BTreeMap::new();
     for file in raw.common.values() {
-        ingest_defs_into(&file.value, &mut common)?;
+        ingest_defs_into(file, &mut common)?;
     }
+    for file in raw.capabilities.values() {
+        ingest_defs_into(file, &mut common)?;
+    }
+    for file in raw.extensions.values() {
+        ingest_defs_into(file, &mut common)?;
+    }
+    // Errors: each variant is dispatched on `code`, not via a single Rust type.
+    // For the envelope's `Option<Error>` field we emit an opaque alias here so
+    // the generated code compiles end-to-end. Stronger typing lands when the
+    // error model is fully lowered (#62).
+    common.insert(TypeName::new("Error"), RustType::Json);
 
     // Envelope types — request, response, signed_intent.
     let mut envelope = BTreeMap::new();
@@ -783,26 +823,33 @@ pub fn build(raw: &RawDocument) -> Result<Document, CodegenError> {
 
 /// Ingest type definitions from a single IDL file into `out`.
 ///
-/// For files that have `$defs`, every entry is lowered individually. For
-/// top-level schema files (e.g. `common/scope_filter.json`) the file's
-/// `title` last word is used as the type name.
+/// For files that have `$defs`, every entry is lowered individually under its
+/// (`PascalCase`-normalised) `$defs` key. For top-level schema files (e.g.
+/// `common/scope_filter.json`) the file's stem is `PascalCase`'d and used as
+/// the type name — this matches the convention used by `typename_from_ref`
+/// for fragment-less `$ref`s, so the IR map and consumer field types agree.
 fn ingest_defs_into(
-    value: &Value,
+    file: &RawFile,
     out: &mut BTreeMap<TypeName, RustType>,
 ) -> Result<(), CodegenError> {
-    if let Some(defs) = value.get("$defs").and_then(Value::as_object) {
+    if let Some(defs) = file.value.get("$defs").and_then(Value::as_object) {
         for (name, def) in defs {
-            let mut ctx = Ctx::with_target(name);
+            let pascal = pascal_case(name);
+            let mut ctx = Ctx::with_target(&pascal);
             let ty = lower_schema(def, &mut ctx)?;
-            out.insert(TypeName::new(name), ty);
+            out.insert(TypeName::new(pascal), ty);
         }
     } else {
-        // Top-level schema (e.g. scope_filter.json) — use the `title` last word.
-        if let Some(title) = value.get("title").and_then(Value::as_str) {
-            let last = title.split_whitespace().last().unwrap_or("Anon");
-            let name = TypeName::new(pascal_case(last));
+        // Top-level schema (e.g. scope_filter.json) — use the file stem.
+        let stem = file
+            .rel_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if !stem.is_empty() {
+            let name = TypeName::new(pascal_case(stem));
             let mut ctx = Ctx::with_target(&name.0);
-            let ty = lower_schema(value, &mut ctx)?;
+            let ty = lower_schema(&file.value, &mut ctx)?;
             out.insert(name, ty);
         }
     }
@@ -840,6 +887,7 @@ fn build_error_codes(
 }
 
 /// Lower one verb file into a [`VerbDef`].
+#[allow(clippy::too_many_lines, reason = "single-pass lowering keeps the verb plumbing in one place; splitting it would obscure the data flow")]
 fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
     let path_str = file.rel_path.to_string_lossy();
 
@@ -898,8 +946,32 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         lower_schema(args_schema, &mut args_ctx)?
     };
 
-    let mut data_ctx = Ctx::with_target(&target_data).with_defs(defs);
+    let mut data_ctx = Ctx::with_target(&target_data).with_defs(defs.clone());
     let data = lower_schema(data_schema, &mut data_ctx)?;
+
+    // Walk Args/Data and lower any local `$defs` entry referenced by name but
+    // not already covered by Args/Data themselves (e.g. `search.$defs.Hit`).
+    // The filter family is intentionally excluded — it is collapsed into the
+    // recursive `Filter` enum by `lower_filter_root`.
+    let mut local_types: BTreeMap<TypeName, RustType> = BTreeMap::new();
+    let mut wanted: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    collect_ref_names(&args, &mut wanted);
+    collect_ref_names(&data, &mut wanted);
+    for (def_name, def_value) in &defs {
+        if def_name == "Args" || def_name == "Data" {
+            continue;
+        }
+        if def_name == "filter" || def_name.starts_with("filter_") {
+            continue;
+        }
+        let pascal = pascal_case(def_name);
+        if !wanted.contains(&pascal) {
+            continue;
+        }
+        let mut local_ctx = Ctx::with_target(&pascal).with_defs(defs.clone());
+        let lowered = lower_schema(def_value, &mut local_ctx)?;
+        local_types.insert(TypeName::new(pascal), lowered);
+    }
 
     let cli = build_cli_shape(&file.value, &args)?;
     let skill = parse_skill_block(&file.value);
@@ -924,6 +996,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         id,
         args,
         data,
+        local_types,
         cli,
         skill,
         capability,
@@ -933,6 +1006,40 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         data_schema_bytes: serde_json::to_vec(data_schema)
             .map_err(|e| CodegenError::Ir(e.to_string()))?,
     })
+}
+
+/// Walk a [`RustType`] and accumulate every `Ref` target name into `out`.
+/// Names land already `PascalCase`'d by the loader.
+fn collect_ref_names(ty: &RustType, out: &mut std::collections::BTreeSet<String>) {
+    match ty {
+        RustType::Ref(name) => {
+            out.insert(name.0.clone());
+        }
+        RustType::Optional(inner) | RustType::Vec(inner) | RustType::Map(inner) => {
+            collect_ref_names(inner, out);
+        }
+        RustType::Struct(s) => {
+            for f in &s.fields {
+                collect_ref_names(&f.ty, out);
+            }
+        }
+        RustType::TaggedUnion(t) => {
+            for v in &t.variants {
+                for f in &v.fields {
+                    collect_ref_names(&f.ty, out);
+                }
+            }
+        }
+        RustType::UntaggedUnion(u) => {
+            for f in &u.fields {
+                collect_ref_names(&f.ty, out);
+            }
+        }
+        RustType::Recursive(r) => {
+            collect_ref_names(&r.leaf, out);
+        }
+        RustType::Enum(_) | RustType::Primitive(_) | RustType::Json => {}
+    }
 }
 
 /// Build the [`CliShape`] for a verb.

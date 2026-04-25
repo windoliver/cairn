@@ -1,3 +1,8 @@
+//! Unit tests for the IR lowering layer (`cairn_idl::codegen::ir`). Covers
+//! primitive lowering, struct field handling, ref resolution, string enums,
+//! tagged / untagged unions, and the end-to-end `build()` against the live
+//! schema directory.
+
 use serde_json::json;
 use cairn_idl::codegen::ir::{build, lower_schema, Ctx, Prim, RustType, TypeName};
 use cairn_idl::codegen::loader;
