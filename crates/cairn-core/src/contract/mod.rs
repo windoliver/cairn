@@ -4,6 +4,7 @@
 //! `CONTRACT_VERSION`, plugins register through `register_plugin!`.
 
 pub mod llm_provider;
+pub mod mcp_server;
 pub mod memory_store;
 pub mod registry;
 pub mod sensor_ingress;
