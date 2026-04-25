@@ -188,6 +188,7 @@ dependencies = [
 name = "cairn-mcp"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "serde",
