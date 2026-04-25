@@ -13,7 +13,10 @@ fn codegen_binary_help_exits_zero() {
     // The binary must have a deterministic, well-formed CLI.
     // `--help` should print usage and exit 0.
     let bin = env!("CARGO_BIN_EXE_cairn-codegen");
-    let out = Command::new(bin).arg("--help").output().expect("cairn-codegen --help");
+    let out = Command::new(bin)
+        .arg("--help")
+        .output()
+        .expect("cairn-codegen --help");
     assert!(
         out.status.success(),
         "cairn-codegen --help should exit 0, got {:?}\nstdout: {}\nstderr: {}",

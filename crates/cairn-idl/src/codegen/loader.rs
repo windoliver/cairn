@@ -74,17 +74,14 @@ pub fn load(schema_root: &Path) -> Result<RawDocument, CodegenError> {
         })?;
         for entry in arr {
             let rel = entry.as_str().ok_or_else(|| {
-                CodegenError::Loader(format!(
-                    "x-cairn-files.{group}[*] must be string paths"
-                ))
+                CodegenError::Loader(format!("x-cairn-files.{group}[*] must be string paths"))
             })?;
             let rel_path = PathBuf::from(rel);
             let abs = schema_root.join(&rel_path);
             let bytes = std::fs::read(&abs)
                 .map_err(|e| CodegenError::Loader(format!("read {}: {e}", abs.display())))?;
-            let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
-                CodegenError::Loader(format!("parse {}: {e}", abs.display()))
-            })?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|e| CodegenError::Loader(format!("parse {}: {e}", abs.display())))?;
             let file = RawFile {
                 rel_path: rel_path.clone(),
                 value,
@@ -208,12 +205,7 @@ pub fn validate(doc: &RawDocument) -> Result<(), CodegenError> {
 
     // (4) Every cross-file $ref resolves.
     let target_index = build_ref_index(doc);
-    walk_refs(
-        &doc.index,
-        "index.json",
-        &target_index,
-        &doc.schema_root,
-    )?;
+    walk_refs(&doc.index, "index.json", &target_index, &doc.schema_root)?;
     for file in &doc.verbs {
         walk_refs(
             &file.value,
@@ -255,10 +247,9 @@ fn check_contract(value: &Value, where_: &str, expected: &str) -> Result<(), Cod
 fn capability_universe(
     doc: &RawDocument,
 ) -> Result<std::collections::BTreeSet<String>, CodegenError> {
-    let cap_file = doc
-        .capabilities
-        .get("capabilities")
-        .ok_or_else(|| CodegenError::Loader("capabilities/capabilities.json missing".to_string()))?;
+    let cap_file = doc.capabilities.get("capabilities").ok_or_else(|| {
+        CodegenError::Loader("capabilities/capabilities.json missing".to_string())
+    })?;
     let one_of = cap_file
         .value
         .get("oneOf")
@@ -268,14 +259,9 @@ fn capability_universe(
         })?;
     let mut out = std::collections::BTreeSet::new();
     for entry in one_of {
-        let c = entry
-            .get("const")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                CodegenError::Loader(
-                    "capabilities.oneOf[*].const must be string".to_string(),
-                )
-            })?;
+        let c = entry.get("const").and_then(Value::as_str).ok_or_else(|| {
+            CodegenError::Loader("capabilities.oneOf[*].const must be string".to_string())
+        })?;
         out.insert(c.to_string());
     }
     Ok(out)
@@ -288,7 +274,9 @@ fn walk_capabilities(
 ) -> Result<(), CodegenError> {
     match value {
         Value::Object(map) => {
-            if let Some(Value::String(cap)) = map.get("x-cairn-capability") && !universe.contains(cap) {
+            if let Some(Value::String(cap)) = map.get("x-cairn-capability")
+                && !universe.contains(cap)
+            {
                 return Err(CodegenError::Loader(format!(
                     "{where_}: x-cairn-capability {cap:?} not declared in capabilities.json"
                 )));

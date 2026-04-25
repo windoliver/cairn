@@ -27,7 +27,10 @@ fn snapshot_sdk_verbs_mod() {
 #[test]
 fn snapshot_sdk_ingest() {
     let files = emit_sdk::emit(&doc()).unwrap();
-    insta::assert_snapshot!(read(&files, "crates/cairn-core/src/generated/verbs/ingest.rs"));
+    insta::assert_snapshot!(read(
+        &files,
+        "crates/cairn-core/src/generated/verbs/ingest.rs"
+    ));
 }
 
 #[test]
@@ -45,7 +48,10 @@ fn snapshot_mcp_mod() {
 #[test]
 fn snapshot_mcp_ingest_schema() {
     let files = emit_mcp::emit(&doc()).unwrap();
-    insta::assert_snapshot!(read(&files, "crates/cairn-mcp/src/generated/schemas/verbs/ingest.json"));
+    insta::assert_snapshot!(read(
+        &files,
+        "crates/cairn-mcp/src/generated/schemas/verbs/ingest.json"
+    ));
 }
 
 #[test]

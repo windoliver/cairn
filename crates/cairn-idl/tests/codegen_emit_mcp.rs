@@ -56,7 +56,10 @@ fn schemas_use_canonical_json() {
         .find(|f| f.path.ends_with("schemas/verbs/ingest.json"))
         .unwrap();
     let body = std::str::from_utf8(&ingest.bytes).unwrap();
-    assert!(body.ends_with('\n'), "canonical JSON must end with a newline");
+    assert!(
+        body.ends_with('\n'),
+        "canonical JSON must end with a newline"
+    );
     // Parsing must succeed and round-trip via canonical writer == identity.
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
     let again = cairn_idl::codegen::fmt::write_json_canonical(&parsed);
@@ -72,5 +75,8 @@ fn tool_decl_description_includes_skill_triggers() {
         .unwrap();
     let body = std::str::from_utf8(&mod_rs.bytes).unwrap();
     // Any description should include at least one positive trigger phrase.
-    assert!(body.contains("remember that"), "ingest's positive trigger missing");
+    assert!(
+        body.contains("remember that"),
+        "ingest's positive trigger missing"
+    );
 }

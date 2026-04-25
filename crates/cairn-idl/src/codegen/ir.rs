@@ -281,7 +281,10 @@ impl Ctx {
             .target
             .as_ref()
             .map(|t| TypeName::new(format!("{}{suffix}", t.0)));
-        Self { target, defs: self.defs.clone() }
+        Self {
+            target,
+            defs: self.defs.clone(),
+        }
     }
 }
 
@@ -324,7 +327,9 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
             return lower_untagged_union(value, arr, ctx);
         }
         // (2d) single-entry oneOf that contains a $ref — treat as just the $ref.
-        if arr.len() == 1 && let Some(reference) = arr[0].get("$ref").and_then(Value::as_str) {
+        if arr.len() == 1
+            && let Some(reference) = arr[0].get("$ref").and_then(Value::as_str)
+        {
             return Ok(RustType::Ref(typename_from_ref(reference)));
         }
         // (2e) all entries are $refs without a discriminator — the variants are
@@ -345,26 +350,22 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
     // For IR purposes we take the first listed type; in practice this only appears
     // in the request/response envelope's opaque dispatch fields which lower to Json.
     let ty_value = value.get("type");
-    let ty: Option<&str> = ty_value
-        .and_then(Value::as_str)
-        .or_else(|| {
-            ty_value
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(Value::as_str)
-        });
+    let ty: Option<&str> = ty_value.and_then(Value::as_str).or_else(|| {
+        ty_value
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(Value::as_str)
+    });
     let enum_arr = value.get("enum").and_then(Value::as_array);
 
     match (ty, enum_arr) {
         (Some("string"), Some(values)) => lower_string_enum(values, ctx),
         (Some("string"), None) => Ok(RustType::Primitive(Prim::String)),
-        (Some("integer"), _) => {
-            Ok(if value.get("minimum").and_then(Value::as_i64) == Some(0) {
-                RustType::Primitive(Prim::U64)
-            } else {
-                RustType::Primitive(Prim::I64)
-            })
-        }
+        (Some("integer"), _) => Ok(if value.get("minimum").and_then(Value::as_i64) == Some(0) {
+            RustType::Primitive(Prim::U64)
+        } else {
+            RustType::Primitive(Prim::I64)
+        }),
         (Some("number"), _) => Ok(RustType::Primitive(Prim::F64)),
         (Some("boolean"), _) => Ok(RustType::Primitive(Prim::Bool)),
         (Some("array"), _) => {
@@ -396,10 +397,7 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
         // No properties → treat as opaque Json blob.
         return Ok(RustType::Json);
     };
-    let target_name = ctx
-        .target
-        .clone()
-        .unwrap_or_else(|| TypeName::new("Anon"));
+    let target_name = ctx.target.clone().unwrap_or_else(|| TypeName::new("Anon"));
     let required: std::collections::BTreeSet<String> = value
         .get("required")
         .and_then(Value::as_array)
@@ -448,9 +446,9 @@ fn lower_string_enum(values: &[Value], ctx: &mut Ctx) -> Result<RustType, Codege
     let variants = values
         .iter()
         .map(|v| -> Result<EnumVariant, CodegenError> {
-            let wire = v.as_str().ok_or_else(|| {
-                CodegenError::Ir("enum value not a string".to_string())
-            })?;
+            let wire = v
+                .as_str()
+                .ok_or_else(|| CodegenError::Ir("enum value not a string".to_string()))?;
             Ok(EnumVariant {
                 wire: wire.to_string(),
                 rust_ident: pascal_case(wire),
@@ -459,10 +457,7 @@ fn lower_string_enum(values: &[Value], ctx: &mut Ctx) -> Result<RustType, Codege
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(RustType::Enum(EnumDef {
-        name: ctx
-            .target
-            .clone()
-            .unwrap_or_else(|| TypeName::new("Enum")),
+        name: ctx.target.clone().unwrap_or_else(|| TypeName::new("Enum")),
         variants,
         rename_all: Some("snake_case"),
         doc: None,
@@ -485,17 +480,18 @@ fn lower_const_oneof(arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenEr
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(RustType::Enum(EnumDef {
-        name: ctx
-            .target
-            .clone()
-            .unwrap_or_else(|| TypeName::new("Enum")),
+        name: ctx.target.clone().unwrap_or_else(|| TypeName::new("Enum")),
         variants,
         rename_all: Some("snake_case"),
         doc: None,
     }))
 }
 
-fn lower_tagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
+fn lower_tagged_union(
+    value: &Value,
+    arr: &[Value],
+    ctx: &mut Ctx,
+) -> Result<RustType, CodegenError> {
     let discriminator = value
         .get("x-cairn-discriminator")
         .and_then(Value::as_str)
@@ -509,11 +505,9 @@ fn lower_tagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<Rus
             .and_then(Value::as_str)
             .ok_or_else(|| CodegenError::Ir("tagged-union variant must be a $ref".to_string()))?;
         // Local def lookup ("#/$defs/ArgsRecord" → "ArgsRecord").
-        let def_name = reference
-            .strip_prefix("#/$defs/")
-            .ok_or_else(|| {
-                CodegenError::Ir(format!("non-local $ref in tagged union: {reference}"))
-            })?;
+        let def_name = reference.strip_prefix("#/$defs/").ok_or_else(|| {
+            CodegenError::Ir(format!("non-local $ref in tagged union: {reference}"))
+        })?;
         let def = ctx
             .defs
             .get(def_name)
@@ -553,14 +547,20 @@ fn lower_tagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<Rus
             fields,
             capability,
             cli,
-            doc: def.get("description").and_then(Value::as_str).map(String::from),
+            doc: def
+                .get("description")
+                .and_then(Value::as_str)
+                .map(String::from),
         });
     }
     Ok(RustType::TaggedUnion(TaggedUnionDef {
         name: target,
         discriminator,
         variants,
-        doc: value.get("description").and_then(Value::as_str).map(String::from),
+        doc: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(String::from),
     }))
 }
 
@@ -601,17 +601,29 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
         .transpose()?
         .unwrap_or_default();
     let positional = value.get("positional").map(|p| CliPositional {
-        name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+        name: p
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         description: p
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
     });
-    Ok(CliCommand { command, flags, positional })
+    Ok(CliCommand {
+        command,
+        flags,
+        positional,
+    })
 }
 
-fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
+fn lower_untagged_union(
+    value: &Value,
+    arr: &[Value],
+    ctx: &mut Ctx,
+) -> Result<RustType, CodegenError> {
     let target = ctx.target.clone().unwrap_or_else(|| TypeName::new("Union"));
     // Borrow the object lowering for the outer struct so we get the property fields.
     // When the outer schema has only `oneOf` (no `properties` at the outer level —
@@ -628,7 +640,11 @@ fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<R
             entry
                 .get("required")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default()
         })
         .collect();
@@ -636,7 +652,10 @@ fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<R
         name: target,
         fields,
         xor_groups,
-        doc: value.get("description").and_then(Value::as_str).map(String::from),
+        doc: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(String::from),
     }))
 }
 
@@ -677,11 +696,17 @@ pub fn lower_filter_root(value: &Value, ctx: &mut Ctx) -> Result<RustType, Codeg
     let mut leaf_ctx = Ctx::with_target("FilterLeaf").with_defs(ctx.defs.clone());
     let leaf_ty = lower_schema(&leaf, &mut leaf_ctx)?;
     Ok(RustType::Recursive(RecursiveEnumDef {
-        name: ctx.target.clone().unwrap_or_else(|| TypeName::new("Filter")),
+        name: ctx
+            .target
+            .clone()
+            .unwrap_or_else(|| TypeName::new("Filter")),
         leaf: Box::new(leaf_ty),
         max_depth,
         max_fanout,
-        doc: value.get("description").and_then(Value::as_str).map(String::from),
+        doc: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(String::from),
     }))
 }
 
@@ -887,7 +912,10 @@ fn build_error_codes(
 }
 
 /// Lower one verb file into a [`VerbDef`].
-#[allow(clippy::too_many_lines, reason = "single-pass lowering keeps the verb plumbing in one place; splitting it would obscure the data flow")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "single-pass lowering keeps the verb plumbing in one place; splitting it would obscure the data flow"
+)]
 fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
     let path_str = file.rel_path.to_string_lossy();
 
@@ -895,9 +923,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         .value
         .get("x-cairn-verb-id")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            CodegenError::Ir(format!("{path_str}: x-cairn-verb-id missing"))
-        })?
+        .ok_or_else(|| CodegenError::Ir(format!("{path_str}: x-cairn-verb-id missing")))?
         .to_string();
 
     // Collect all `$defs` entries so tagged-union lowering can resolve local refs.
@@ -933,9 +959,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
                 .value
                 .pointer("/$defs/filter")
                 .cloned()
-                .ok_or_else(|| {
-                    CodegenError::Ir("search.json missing /$defs/filter".to_string())
-                })?;
+                .ok_or_else(|| CodegenError::Ir("search.json missing /$defs/filter".to_string()))?;
             let mut filter_ctx = Ctx::with_target("Filter").with_defs(defs.clone());
             let filter_ty = lower_filter_root(&filter_def, &mut filter_ctx)?;
             // Preserve the Optional wrapper that lower_schema produced; replace inner.
@@ -1052,10 +1076,7 @@ fn build_cli_shape(verb_value: &Value, args: &RustType) -> Result<CliShape, Code
         let mut variants = Vec::with_capacity(t.variants.len());
         for v in &t.variants {
             let cli = v.cli.clone().ok_or_else(|| {
-                CodegenError::Ir(format!(
-                    "tagged variant {:?} missing x-cairn-cli",
-                    v.wire
-                ))
+                CodegenError::Ir(format!("tagged variant {:?} missing x-cairn-cli", v.wire))
             })?;
             variants.push(cli);
         }

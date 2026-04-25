@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use cairn_idl::codegen::loader::{load, RawDocument};
+use cairn_idl::codegen::loader::{RawDocument, load};
 use tempfile::TempDir;
 
 fn schema_dir() -> PathBuf {
@@ -44,7 +44,12 @@ fn write_json(path: &std::path::Path, value: &serde_json::Value) {
 fn loads_real_schema_root() {
     let doc: RawDocument = load(&schema_dir()).expect("real schema must load");
     // Manifest pins eight verbs.
-    assert_eq!(doc.verbs.len(), 8, "expected 8 verbs, got {}", doc.verbs.len());
+    assert_eq!(
+        doc.verbs.len(),
+        8,
+        "expected 8 verbs, got {}",
+        doc.verbs.len()
+    );
     // Two preludes (status, handshake).
     assert_eq!(doc.preludes.len(), 2);
     // index.json itself is captured.
@@ -55,8 +60,7 @@ fn loads_real_schema_root() {
 fn rejects_wrong_contract_id() {
     let tmp = fork_schema();
     let path = tmp.path().join("verbs/ingest.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["x-cairn-contract"] = serde_json::json!("cairn.mcp.v2");
     write_json(&path, &value);
 
@@ -69,8 +73,7 @@ fn rejects_wrong_contract_id() {
 fn rejects_verb_missing_args_defs() {
     let tmp = fork_schema();
     let path = tmp.path().join("verbs/ingest.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["$defs"].as_object_mut().unwrap().remove("Args");
     write_json(&path, &value);
 
@@ -83,8 +86,7 @@ fn rejects_verb_missing_args_defs() {
 fn rejects_unknown_capability_reference() {
     let tmp = fork_schema();
     let path = tmp.path().join("verbs/forget.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["x-cairn-capability"] = serde_json::json!("cairn.mcp.v1.does_not_exist");
     write_json(&path, &value);
 
@@ -97,8 +99,7 @@ fn rejects_unknown_capability_reference() {
 fn rejects_dangling_ref() {
     let tmp = fork_schema();
     let path = tmp.path().join("verbs/ingest.json");
-    let mut value: serde_json::Value =
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     // Replace the Ulid ref in Data.record_id with a nonexistent one.
     value["$defs"]["Data"]["properties"]["record_id"] =
         serde_json::json!({ "$ref": "../common/primitives.json#/$defs/NotARealType" });

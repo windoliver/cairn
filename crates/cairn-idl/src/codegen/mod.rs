@@ -98,7 +98,10 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
     // Stable-sort outputs so reports are deterministic.
     all.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let mut report = Report { files_emitted: all.len(), drift: Vec::new() };
+    let mut report = Report {
+        files_emitted: all.len(),
+        drift: Vec::new(),
+    };
 
     match opts.mode {
         RunMode::Write => {

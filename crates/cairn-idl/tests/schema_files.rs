@@ -25,8 +25,7 @@ fn schema_dir() -> &'static Path {
 }
 
 fn read_json(path: &Path) -> Value {
-    let bytes = fs::read(path)
-        .unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"));
+    let bytes = fs::read(path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"));
     serde_json::from_slice(&bytes)
         .unwrap_or_else(|err| panic!("failed to parse {path:?} as JSON: {err}"))
 }
@@ -66,8 +65,18 @@ fn manifest_parses_and_has_required_top_level_keys() {
     let m = manifest();
     let path = schema_dir().join("index.json");
     let obj = require_object(&m, &path);
-    for key in ["$schema", "$id", "title", "x-cairn-contract", "x-cairn-files", "x-cairn-verb-ids"] {
-        assert!(obj.contains_key(key), "index.json missing required key {key}");
+    for key in [
+        "$schema",
+        "$id",
+        "title",
+        "x-cairn-contract",
+        "x-cairn-files",
+        "x-cairn-verb-ids",
+    ] {
+        assert!(
+            obj.contains_key(key),
+            "index.json missing required key {key}"
+        );
     }
     assert_eq!(
         obj.get("x-cairn-contract").and_then(Value::as_str),
@@ -142,8 +151,7 @@ fn manifest_and_filesystem_are_bijective() {
 }
 
 fn walk_json(dir: &Path, out: &mut BTreeSet<PathBuf>) {
-    for entry in fs::read_dir(dir)
-        .unwrap_or_else(|err| panic!("failed to read dir {dir:?}: {err}"))
+    for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("failed to read dir {dir:?}: {err}"))
     {
         let entry = entry.expect("dir entry");
         let path = entry.path();
@@ -253,9 +261,7 @@ fn resolve_fragment<'a>(doc: &'a Value, fragment: &str) -> Option<&'a Value> {
 }
 
 fn ref_resolves(source_path: &Path, reference: &str) -> bool {
-    let (file_part, fragment) = reference
-        .split_once('#')
-        .unwrap_or((reference, ""));
+    let (file_part, fragment) = reference.split_once('#').unwrap_or((reference, ""));
     let target_doc: Value = if file_part.is_empty() {
         // Local fragment — resolve against the source document itself.
         read_json(source_path)
@@ -542,7 +548,14 @@ fn is_array_constrained(node: &serde_json::Map<String, Value>) -> bool {
 }
 
 fn is_integer_constrained(node: &serde_json::Map<String, Value>) -> bool {
-    for key in ["minimum", "maximum", "enum", "const", "exclusiveMinimum", "exclusiveMaximum"] {
+    for key in [
+        "minimum",
+        "maximum",
+        "enum",
+        "const",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+    ] {
         if node.contains_key(key) {
             return true;
         }
@@ -592,19 +605,22 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
     // Open fields with no assertion must be explicitly allowlisted with a
     // reason; a bare `"type": "string"` anywhere else is a policy failure.
     let allow: BTreeSet<(String, String)> = [
-        ("verbs/search.json",       "/$defs/Hit/properties/snippet"),
-        ("verbs/search.json",       "/$defs/Hit/properties/citation"),
+        ("verbs/search.json", "/$defs/Hit/properties/snippet"),
+        ("verbs/search.json", "/$defs/Hit/properties/citation"),
         ("verbs/assemble_hot.json", "/$defs/Data/properties/prefix"),
-        ("verbs/retrieve.json",     "/$defs/DataRecord/properties/body"),
-        ("verbs/retrieve.json",     "/$defs/RecordRef/properties/snippet"),
-        ("verbs/retrieve.json",     "/$defs/TurnItem/properties/content"),
-        ("verbs/retrieve.json",     "/$defs/TurnItem/properties/reasoning"),
-        ("verbs/ingest.json",       "/$defs/Args/properties/kind"),
+        ("verbs/retrieve.json", "/$defs/DataRecord/properties/body"),
+        ("verbs/retrieve.json", "/$defs/RecordRef/properties/snippet"),
+        ("verbs/retrieve.json", "/$defs/TurnItem/properties/content"),
+        (
+            "verbs/retrieve.json",
+            "/$defs/TurnItem/properties/reasoning",
+        ),
+        ("verbs/ingest.json", "/$defs/Args/properties/kind"),
         // kind has minLength:1 — guarded by parent fallback; skip
     ]
-        .iter()
-        .map(|(f, p)| (f.to_string(), p.to_string()))
-        .collect();
+    .iter()
+    .map(|(f, p)| (f.to_string(), p.to_string()))
+    .collect();
 
     let mut findings: Vec<String> = Vec::new();
     for path in manifest_paths() {

@@ -4,11 +4,17 @@
 //!   (1) all four surfaces enumerate the same eight verb ids in IDL order,
 //!   (2) `status` and `handshake` appear separately, never as core verbs.
 
-use cairn_idl::codegen::{ir, loader, emit_cli, emit_mcp, emit_sdk, emit_skill};
+use cairn_idl::codegen::{emit_cli, emit_mcp, emit_sdk, emit_skill, ir, loader};
 
 const EXPECTED_VERBS: &[&str] = &[
-    "ingest", "search", "retrieve", "summarize",
-    "assemble_hot", "capture_trace", "lint", "forget",
+    "ingest",
+    "search",
+    "retrieve",
+    "summarize",
+    "assemble_hot",
+    "capture_trace",
+    "lint",
+    "forget",
 ];
 
 fn doc() -> ir::Document {
@@ -28,7 +34,10 @@ fn sdk_verb_registry_lists_eight_verbs() {
     let files = emit_sdk::emit(&doc()).unwrap();
     let body_bytes = &files
         .iter()
-        .find(|f| f.path.ends_with("crates/cairn-core/src/generated/verbs/mod.rs"))
+        .find(|f| {
+            f.path
+                .ends_with("crates/cairn-core/src/generated/verbs/mod.rs")
+        })
         .unwrap()
         .bytes;
     let body = std::str::from_utf8(body_bytes).unwrap();
@@ -68,13 +77,18 @@ fn cli_subcommand_tree_lists_eight_verbs_plus_two_preludes() {
         .iter()
         .map(|v| {
             let needle = format!("\"{v}\"");
-            let i = body.find(&needle).unwrap_or_else(|| panic!("CLI missing verb {v}"));
+            let i = body
+                .find(&needle)
+                .unwrap_or_else(|| panic!("CLI missing verb {v}"));
             (i, *v)
         })
         .collect();
     idx_per_verb.sort_unstable();
     let order: Vec<&str> = idx_per_verb.into_iter().map(|(_, v)| v).collect();
-    assert_eq!(order, EXPECTED_VERBS, "CLI verb subcommand order != IDL order");
+    assert_eq!(
+        order, EXPECTED_VERBS,
+        "CLI verb subcommand order != IDL order"
+    );
     // Preludes present.
     assert!(body.contains("\"status\""));
     assert!(body.contains("\"handshake\""));
@@ -93,7 +107,9 @@ fn mcp_tools_array_lists_eight_verbs_in_idl_order() {
         .iter()
         .map(|v| {
             let needle = format!("name: \"{v}\"");
-            let i = body.find(&needle).unwrap_or_else(|| panic!("MCP missing verb {v}"));
+            let i = body
+                .find(&needle)
+                .unwrap_or_else(|| panic!("MCP missing verb {v}"));
             (i, *v)
         })
         .collect();
@@ -101,8 +117,14 @@ fn mcp_tools_array_lists_eight_verbs_in_idl_order() {
     let order: Vec<&str> = idx_per_verb.into_iter().map(|(_, v)| v).collect();
     assert_eq!(order, EXPECTED_VERBS, "MCP TOOLS order != IDL order");
     // Preludes are NOT in TOOLS — they're protocol preludes, not tools.
-    assert!(!body.contains("name: \"status\""), "status leaked into TOOLS");
-    assert!(!body.contains("name: \"handshake\""), "handshake leaked into TOOLS");
+    assert!(
+        !body.contains("name: \"status\""),
+        "status leaked into TOOLS"
+    );
+    assert!(
+        !body.contains("name: \"handshake\""),
+        "handshake leaked into TOOLS"
+    );
 }
 
 #[test]
@@ -115,7 +137,10 @@ fn skill_md_lists_eight_verb_sections_plus_separate_prelude_section() {
         .bytes;
     let body = std::str::from_utf8(body_bytes).unwrap();
     for verb in EXPECTED_VERBS {
-        assert!(body.contains(&format!("## `cairn {verb}`")), "SKILL.md missing section for {verb}");
+        assert!(
+            body.contains(&format!("## `cairn {verb}`")),
+            "SKILL.md missing section for {verb}"
+        );
     }
     assert!(body.contains("Protocol preludes"));
     // status / handshake are mentioned only inside the preludes section.

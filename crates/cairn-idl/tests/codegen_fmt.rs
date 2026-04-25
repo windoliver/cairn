@@ -1,7 +1,7 @@
 //! Tests for `cairn_idl::codegen::fmt` — verifies the canonical JSON writer
 //! and the Rust source-code helper render bytes deterministically.
 
-use cairn_idl::codegen::fmt::{write_json_canonical, RustWriter};
+use cairn_idl::codegen::fmt::{RustWriter, write_json_canonical};
 use serde_json::json;
 
 #[test]

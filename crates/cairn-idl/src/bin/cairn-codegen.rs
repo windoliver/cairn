@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cairn_idl::codegen::{run, RunMode, RunOpts};
+use cairn_idl::codegen::{RunMode, RunOpts, run};
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "cairn-codegen", about = "Cairn IDL → Rust + JSON codegen")]
@@ -38,7 +38,11 @@ fn main() -> ExitCode {
 
     let opts = RunOpts {
         workspace_root,
-        mode: if cli.check { RunMode::Check } else { RunMode::Write },
+        mode: if cli.check {
+            RunMode::Check
+        } else {
+            RunMode::Write
+        },
     };
 
     match run(&opts) {
@@ -59,7 +63,10 @@ fn main() -> ExitCode {
         }
         Ok(report) => {
             if cli.check {
-                eprintln!("cairn-codegen: clean — {} file(s) match.", report.files_emitted);
+                eprintln!(
+                    "cairn-codegen: clean — {} file(s) match.",
+                    report.files_emitted
+                );
             } else {
                 eprintln!("cairn-codegen: wrote {} file(s).", report.files_emitted);
             }

@@ -2,8 +2,8 @@
 
 #![allow(missing_docs)]
 
+use cairn_idl::codegen::{RunMode, RunOpts, run};
 use std::path::PathBuf;
-use cairn_idl::codegen::{run, RunMode, RunOpts};
 
 fn fork_workspace_outputs() -> tempfile::TempDir {
     // Write a fresh codegen output tree into a tempdir.

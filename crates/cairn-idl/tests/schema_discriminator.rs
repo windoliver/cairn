@@ -2,8 +2,8 @@
 //! or is in a known allow-list (string-const enums; XOR-required patterns;
 //! the request envelope's verb-dispatch oneOf).
 
-use std::path::PathBuf;
 use serde_json::Value;
+use std::path::PathBuf;
 
 const ALLOWED_NO_DISCRIMINATOR: &[&str] = &[
     // Closed string enums:
@@ -57,7 +57,11 @@ fn walk(root: &std::path::Path, dir: &std::path::Path, violations: &mut Vec<Stri
         }
         let bytes = std::fs::read(&path).unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
-        let rel = path.strip_prefix(root).unwrap().to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         check(&value, &rel, &mut String::new(), violations);
     }
 }

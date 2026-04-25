@@ -20,8 +20,14 @@ fn help_flag_lists_all_eight_verbs() {
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
     for verb in [
-        "ingest", "search", "retrieve", "summarize",
-        "assemble_hot", "capture_trace", "lint", "forget",
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
     ] {
         assert!(
             stdout.contains(verb),
@@ -50,11 +56,18 @@ fn simple_verb_fails_closed_with_not_implemented_marker() {
     // Verbs whose Args are not a tagged union accept a bare invocation and
     // reach the scaffold dispatch in main.rs, which exits 2 with a marker.
     for verb in [
-        "ingest", "search", "summarize",
-        "assemble_hot", "capture_trace", "lint",
+        "ingest",
+        "search",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
     ] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
-        assert!(!out.status.success(), "verb {verb} exited OK — should fail closed");
+        assert!(
+            !out.status.success(),
+            "verb {verb} exited OK — should fail closed"
+        );
         assert_eq!(out.status.code(), Some(2), "verb {verb} wrong exit code");
         let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
         assert!(
@@ -83,7 +96,10 @@ fn tagged_union_verb_requires_target_flag() {
 
 #[test]
 fn unknown_argument_fails_closed() {
-    let out = cli().arg("--definitely-not-a-flag").output().expect("cairn");
+    let out = cli()
+        .arg("--definitely-not-a-flag")
+        .output()
+        .expect("cairn");
     assert!(!out.status.success(), "exit: {:?}", out.status);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");

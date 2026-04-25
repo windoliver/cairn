@@ -1,9 +1,9 @@
 //! Running codegen 5 times in fresh tempdirs yields byte-equal output trees.
 //! Catches accidental hash-iteration leaks (`HashMap`, `HashSet`, etc.).
 
+use cairn_idl::codegen::{RunMode, RunOpts, run};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use cairn_idl::codegen::{run, RunMode, RunOpts};
 
 fn snapshot_tree(root: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut out = BTreeMap::new();

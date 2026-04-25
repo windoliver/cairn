@@ -1,7 +1,7 @@
 //! Re-running codegen against an already-clean workspace is a no-op.
 
+use cairn_idl::codegen::{RunMode, RunOpts, run};
 use std::path::PathBuf;
-use cairn_idl::codegen::{run, RunMode, RunOpts};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,5 +43,9 @@ fn workspace_check_is_clean() {
         mode: RunMode::Check,
     })
     .unwrap();
-    assert!(report.drift.is_empty(), "drift in committed workspace: {:?}", report.drift);
+    assert!(
+        report.drift.is_empty(),
+        "drift in committed workspace: {:?}",
+        report.drift
+    );
 }

@@ -1,5 +1,5 @@
 #![allow(missing_docs)]
-use cairn_idl::codegen::{run, RunMode, RunOpts};
+use cairn_idl::codegen::{RunMode, RunOpts, run};
 use std::path::PathBuf;
 
 fn workspace_root() -> PathBuf {
@@ -19,12 +19,22 @@ fn run_write_mode_emits_files_into_tempdir() {
         mode: RunMode::Write,
     })
     .unwrap();
-    assert!(report.files_emitted >= 8 + 8 + 1 + 3,
+    assert!(
+        report.files_emitted >= 8 + 8 + 1 + 3,
         "expected at least 8 SDK verb files, 8 schemas, mods, skill bundle; got {}",
-        report.files_emitted);
+        report.files_emitted
+    );
     // Spot-check a few outputs landed.
-    assert!(tmp.path().join("crates/cairn-core/src/generated/verbs/mod.rs").exists());
-    assert!(tmp.path().join("crates/cairn-mcp/src/generated/schemas/verbs/ingest.json").exists());
+    assert!(
+        tmp.path()
+            .join("crates/cairn-core/src/generated/verbs/mod.rs")
+            .exists()
+    );
+    assert!(
+        tmp.path()
+            .join("crates/cairn-mcp/src/generated/schemas/verbs/ingest.json")
+            .exists()
+    );
     assert!(tmp.path().join("skills/cairn/SKILL.md").exists());
 }
 
