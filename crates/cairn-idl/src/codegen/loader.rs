@@ -122,7 +122,7 @@ pub fn load(schema_root: &Path) -> Result<RawDocument, CodegenError> {
         }
     }
 
-    Ok(RawDocument {
+    let doc = RawDocument {
         schema_root: schema_root.to_path_buf(),
         index,
         envelope,
@@ -132,7 +132,290 @@ pub fn load(schema_root: &Path) -> Result<RawDocument, CodegenError> {
         common,
         preludes,
         verbs,
-    })
+    };
+    validate(&doc)?;
+    Ok(doc)
+}
+
+/// Apply the structural invariants the spec relies on. Mirrors the
+/// assertions already covered by `tests/schema_files.rs`, but consumed by the
+/// codegen pipeline so a malformed IDL fails the generator before any file is
+/// written.
+pub fn validate(doc: &RawDocument) -> Result<(), CodegenError> {
+    let contract = "cairn.mcp.v1";
+
+    // (1) x-cairn-contract matches on every file (and the index).
+    check_contract(&doc.index, "index.json", contract)?;
+    for files in [
+        &doc.envelope,
+        &doc.errors,
+        &doc.capabilities,
+        &doc.extensions,
+        &doc.common,
+        &doc.preludes,
+    ] {
+        for (key, file) in files {
+            check_contract(&file.value, &format!("{key}.json"), contract)?;
+        }
+    }
+    for file in &doc.verbs {
+        check_contract(
+            &file.value,
+            file.rel_path.to_str().unwrap_or("<verb>"),
+            contract,
+        )?;
+    }
+
+    // (2) Every verb declares the expected fields.
+    for file in &doc.verbs {
+        let path = file.rel_path.to_str().unwrap_or("<verb>");
+        for required in [
+            "x-cairn-verb-id",
+            "x-cairn-cli",
+            "x-cairn-skill-triggers",
+            "x-cairn-auth",
+        ] {
+            if file.value.get(required).is_none() {
+                return Err(CodegenError::Loader(format!(
+                    "{path}: missing required key {required}"
+                )));
+            }
+        }
+        let defs = file
+            .value
+            .get("$defs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| CodegenError::Loader(format!("{path}: $defs must be an object")))?;
+        for required in ["Args", "Data"] {
+            if !defs.contains_key(required) {
+                return Err(CodegenError::Loader(format!(
+                    "{path}: $defs.{required} is required"
+                )));
+            }
+        }
+    }
+
+    // (3) Every x-cairn-capability resolves against capabilities.json.
+    let capability_set = capability_universe(doc)?;
+    walk_capabilities(&doc.index, "index.json", &capability_set)?;
+    for file in &doc.verbs {
+        walk_capabilities(
+            &file.value,
+            file.rel_path.to_str().unwrap_or("<verb>"),
+            &capability_set,
+        )?;
+    }
+
+    // (4) Every cross-file $ref resolves.
+    let target_index = build_ref_index(doc);
+    walk_refs(
+        &doc.index,
+        "index.json",
+        &target_index,
+        &doc.schema_root,
+    )?;
+    for file in &doc.verbs {
+        walk_refs(
+            &file.value,
+            file.rel_path.to_str().unwrap_or("<verb>"),
+            &target_index,
+            &doc.schema_root,
+        )?;
+    }
+    for files in [
+        &doc.envelope,
+        &doc.errors,
+        &doc.preludes,
+        &doc.common,
+        &doc.extensions,
+    ] {
+        for file in files.values() {
+            walk_refs(
+                &file.value,
+                file.rel_path.to_str().unwrap_or("<file>"),
+                &target_index,
+                &doc.schema_root,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn check_contract(value: &Value, where_: &str, expected: &str) -> Result<(), CodegenError> {
+    let actual = value.get("x-cairn-contract").and_then(Value::as_str);
+    if actual != Some(expected) {
+        return Err(CodegenError::Loader(format!(
+            "{where_}: x-cairn-contract = {actual:?}, expected {expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn capability_universe(
+    doc: &RawDocument,
+) -> Result<std::collections::BTreeSet<String>, CodegenError> {
+    let cap_file = doc
+        .capabilities
+        .get("capabilities")
+        .ok_or_else(|| CodegenError::Loader("capabilities/capabilities.json missing".to_string()))?;
+    let one_of = cap_file
+        .value
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CodegenError::Loader("capabilities.json must have oneOf array".to_string())
+        })?;
+    let mut out = std::collections::BTreeSet::new();
+    for entry in one_of {
+        let c = entry
+            .get("const")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CodegenError::Loader(
+                    "capabilities.oneOf[*].const must be string".to_string(),
+                )
+            })?;
+        out.insert(c.to_string());
+    }
+    Ok(out)
+}
+
+fn walk_capabilities(
+    value: &Value,
+    where_: &str,
+    universe: &std::collections::BTreeSet<String>,
+) -> Result<(), CodegenError> {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(cap)) = map.get("x-cairn-capability") && !universe.contains(cap) {
+                return Err(CodegenError::Loader(format!(
+                    "{where_}: x-cairn-capability {cap:?} not declared in capabilities.json"
+                )));
+            }
+            for v in map.values() {
+                walk_capabilities(v, where_, universe)?;
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                walk_capabilities(v, where_, universe)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Build a set of `(rel_path, json_pointer)` targets that any `$ref` may
+/// resolve to.
+fn build_ref_index(doc: &RawDocument) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut all: Vec<&RawFile> = Vec::new();
+    all.extend(doc.envelope.values());
+    all.extend(doc.errors.values());
+    all.extend(doc.capabilities.values());
+    all.extend(doc.extensions.values());
+    all.extend(doc.common.values());
+    all.extend(doc.preludes.values());
+    all.extend(doc.verbs.iter());
+    for file in all {
+        let rel = file.rel_path.to_str().unwrap_or("");
+        out.insert(format!("{rel}#"));
+        collect_pointers(&file.value, &mut String::new(), rel, &mut out);
+    }
+    out
+}
+
+fn collect_pointers(
+    value: &Value,
+    prefix: &mut String,
+    file: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    out.insert(format!("{file}#{prefix}"));
+    if let Value::Object(map) = value {
+        for (k, v) in map {
+            let saved = prefix.len();
+            prefix.push('/');
+            for c in k.chars() {
+                match c {
+                    '~' => prefix.push_str("~0"),
+                    '/' => prefix.push_str("~1"),
+                    other => prefix.push(other),
+                }
+            }
+            collect_pointers(v, prefix, file, out);
+            prefix.truncate(saved);
+        }
+    }
+}
+
+fn walk_refs(
+    value: &Value,
+    where_: &str,
+    targets: &std::collections::BTreeSet<String>,
+    schema_root: &Path,
+) -> Result<(), CodegenError> {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(reference)) = map.get("$ref") {
+                resolve_ref(reference, where_, targets, schema_root)?;
+            }
+            for v in map.values() {
+                walk_refs(v, where_, targets, schema_root)?;
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                walk_refs(v, where_, targets, schema_root)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn resolve_ref(
+    reference: &str,
+    where_: &str,
+    targets: &std::collections::BTreeSet<String>,
+    schema_root: &Path,
+) -> Result<(), CodegenError> {
+    // Local pointer (e.g. "#/$defs/Filter"): can't validate without the
+    // origin file; the structural test suite already covers in-file pointers,
+    // so the codegen loader trusts them.
+    if reference.starts_with('#') {
+        return Ok(());
+    }
+    let (file_part, pointer) = reference.split_once('#').unwrap_or((reference, ""));
+    let abs = schema_root
+        .join(Path::new(where_).parent().unwrap_or(Path::new("")))
+        .join(file_part);
+    let Ok(normalised) = abs.canonicalize() else {
+        return Err(CodegenError::Loader(format!(
+            "{where_}: $ref {reference:?} -> file {} does not exist",
+            abs.display()
+        )));
+    };
+    let rel = normalised
+        .strip_prefix(
+            schema_root
+                .canonicalize()
+                .map_err(|e| CodegenError::Loader(format!("canonicalize schema_root: {e}")))?,
+        )
+        .map_err(|_| {
+            CodegenError::Loader(format!(
+                "{where_}: $ref {reference:?} resolves outside schema root"
+            ))
+        })?;
+    let needle = format!("{}#{pointer}", rel.to_string_lossy());
+    if !targets.contains(&needle) {
+        return Err(CodegenError::Loader(format!(
+            "{where_}: $ref {reference:?} -> {needle} not found"
+        )));
+    }
+    Ok(())
 }
 
 fn read_json(path: &Path) -> Result<Value, CodegenError> {

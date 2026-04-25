@@ -6,6 +6,10 @@
   "x-cairn-verb-id": "forget",
   "x-cairn-capability": null,
   "x-cairn-auth": "forget_capability",
+  "x-cairn-cli": {
+    "command": "forget",
+    "note": "top-level CLI shape; per-mode flags are defined on each $defs.Args* sub-type"
+  },
   "x-cairn-skill-triggers": {
     "positive": [
       "use when the user asks to delete or forget a specific record / session / scope",
