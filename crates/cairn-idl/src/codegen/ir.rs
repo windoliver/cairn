@@ -90,6 +90,10 @@ pub enum AuthModel {
     Rebac,
     SignedPrincipal,
     HardwareKey,
+    /// Capability-token auth used by the `forget` verb.
+    ForgetCapability,
+    /// Read-only auth model (no mutation capability required).
+    ReadOnly,
 }
 
 impl AuthModel {
@@ -102,6 +106,8 @@ impl AuthModel {
             "rebac" => Some(Self::Rebac),
             "signed_principal" => Some(Self::SignedPrincipal),
             "hardware_key" => Some(Self::HardwareKey),
+            "forget_capability" => Some(Self::ForgetCapability),
+            "read_only" => Some(Self::ReadOnly),
             _ => None,
         }
     }
@@ -114,6 +120,8 @@ impl AuthModel {
             Self::Rebac => "rebac",
             Self::SignedPrincipal => "signed_principal",
             Self::HardwareKey => "hardware_key",
+            Self::ForgetCapability => "forget_capability",
+            Self::ReadOnly => "read_only",
         }
     }
 }
@@ -283,6 +291,17 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
         return Ok(RustType::Ref(typename_from_ref(reference)));
     }
 
+    // (1b) `allOf: [{ "$ref": "..." }]` — single-entry allOf used to annotate a $ref
+    // with description/metadata. Unwrap the inner $ref and pass through.
+    // Multi-entry allOf or non-$ref allOf falls through so `type`/`properties` can
+    // still produce a struct if present.
+    if let Some(all_of) = value.get("allOf").and_then(Value::as_array)
+        && all_of.len() == 1
+        && let Some(reference) = all_of[0].get("$ref").and_then(Value::as_str)
+    {
+        return Ok(RustType::Ref(typename_from_ref(reference)));
+    }
+
     // (2) `oneOf` cases.
     if let Some(arr) = value.get("oneOf").and_then(Value::as_array) {
         // (2a) tagged union (handled in Task 9 — fall through if discriminator absent).
@@ -304,6 +323,13 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
         if arr.len() == 1 && let Some(reference) = arr[0].get("$ref").and_then(Value::as_str) {
             return Ok(RustType::Ref(typename_from_ref(reference)));
         }
+        // (2e) all entries are $refs without a discriminator — the variants are
+        // structurally distinct; we cannot generate typed enum arms without a
+        // discriminator field, so we fall back to opaque Json. Consumers that need
+        // typed access must add x-cairn-discriminator to the IDL.
+        if arr.iter().all(|v| v.get("$ref").is_some()) {
+            return Ok(RustType::Json);
+        }
         return Err(CodegenError::Ir(
             "oneOf shape not recognised — needs x-cairn-discriminator or all-const variants"
                 .to_string(),
@@ -311,7 +337,18 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
     }
 
     // (3) explicit type.
-    let ty = value.get("type").and_then(Value::as_str);
+    // JSON Schema allows `type` to be an array of strings (e.g. `["object", "array"]`).
+    // For IR purposes we take the first listed type; in practice this only appears
+    // in the request/response envelope's opaque dispatch fields which lower to Json.
+    let ty_value = value.get("type");
+    let ty: Option<&str> = ty_value
+        .and_then(Value::as_str)
+        .or_else(|| {
+            ty_value
+                .and_then(Value::as_array)
+                .and_then(|a| a.first())
+                .and_then(Value::as_str)
+        });
     let enum_arr = value.get("enum").and_then(Value::as_array);
 
     match (ty, enum_arr) {
@@ -664,4 +701,292 @@ pub fn pascal_case(s: &str) -> String {
         }
     }
     out
+}
+
+// ── build: RawDocument → Document ────────────────────────────────────────────
+
+use super::loader::{RawDocument, RawFile};
+
+/// Walk a [`RawDocument`] and lower it to the fully-typed [`Document`] IR.
+///
+/// This is the entry point for Phase 2. Each verb, prelude, common file, and
+/// envelope file is lowered exactly once; the search verb's `filters` field is
+/// special-cased to call [`lower_filter_root`].
+///
+/// # Errors
+/// Returns [`CodegenError::Ir`] when any schema cannot be represented in the IR.
+pub fn build(raw: &RawDocument) -> Result<Document, CodegenError> {
+    let contract = "cairn.mcp.v1".to_string();
+
+    // Capabilities (already validated by loader).
+    let capabilities: Vec<String> = raw
+        .capabilities
+        .get("capabilities")
+        .and_then(|f| f.value.get("oneOf"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.get("const").and_then(Value::as_str).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Errors → flat list of (code, data-typename) pairs.
+    let error_codes = build_error_codes(&raw.errors)?;
+
+    // Common types — lower every entry under common/*.json#/$defs/*.
+    let mut common = BTreeMap::new();
+    for file in raw.common.values() {
+        ingest_defs_into(&file.value, &mut common)?;
+    }
+
+    // Envelope types — request, response, signed_intent.
+    let mut envelope = BTreeMap::new();
+    for file in raw.envelope.values() {
+        let stem = file
+            .rel_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let name = TypeName::new(pascal_case(stem));
+        let mut ctx = Ctx::with_target(&name.0);
+        envelope.insert(name, lower_schema(&file.value, &mut ctx)?);
+    }
+
+    // Verbs.
+    let mut verbs = Vec::with_capacity(raw.verbs.len());
+    for file in &raw.verbs {
+        verbs.push(build_verb(file)?);
+    }
+
+    // Preludes (BTreeMap — iterate in sorted order for stability).
+    let mut preludes = Vec::with_capacity(raw.preludes.len());
+    for (id, file) in &raw.preludes {
+        let mut ctx = Ctx::with_target(format!("{}Response", pascal_case(id)));
+        preludes.push(PreludeDef {
+            id: id.clone(),
+            response: lower_schema(&file.value, &mut ctx)?,
+            schema_bytes: file.bytes.clone(),
+        });
+    }
+
+    Ok(Document {
+        contract,
+        capabilities,
+        error_codes,
+        common,
+        envelope,
+        verbs,
+        preludes,
+    })
+}
+
+/// Ingest type definitions from a single IDL file into `out`.
+///
+/// For files that have `$defs`, every entry is lowered individually. For
+/// top-level schema files (e.g. `common/scope_filter.json`) the file's
+/// `title` last word is used as the type name.
+fn ingest_defs_into(
+    value: &Value,
+    out: &mut BTreeMap<TypeName, RustType>,
+) -> Result<(), CodegenError> {
+    if let Some(defs) = value.get("$defs").and_then(Value::as_object) {
+        for (name, def) in defs {
+            let mut ctx = Ctx::with_target(name);
+            let ty = lower_schema(def, &mut ctx)?;
+            out.insert(TypeName::new(name), ty);
+        }
+    } else {
+        // Top-level schema (e.g. scope_filter.json) — use the `title` last word.
+        if let Some(title) = value.get("title").and_then(Value::as_str) {
+            let last = title.split_whitespace().last().unwrap_or("Anon");
+            let name = TypeName::new(pascal_case(last));
+            let mut ctx = Ctx::with_target(&name.0);
+            let ty = lower_schema(value, &mut ctx)?;
+            out.insert(name, ty);
+        }
+    }
+    Ok(())
+}
+
+/// Lower the `oneOf` in `errors/error.json` into a flat `Vec<ErrorVariant>`.
+fn build_error_codes(
+    errors: &BTreeMap<String, RawFile>,
+) -> Result<Vec<ErrorVariant>, CodegenError> {
+    let file = errors
+        .get("error")
+        .ok_or_else(|| CodegenError::Ir("errors/error.json missing".to_string()))?;
+    let one_of = file
+        .value
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CodegenError::Ir("errors.json missing oneOf".to_string()))?;
+    let mut out = Vec::with_capacity(one_of.len());
+    for entry in one_of {
+        let code = entry
+            .pointer("/properties/code/const")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                CodegenError::Ir("error variant missing properties.code.const".to_string())
+            })?
+            .to_string();
+        let data = entry
+            .pointer("/properties/data/$ref")
+            .and_then(Value::as_str)
+            .map(typename_from_ref);
+        out.push(ErrorVariant { code, data });
+    }
+    Ok(out)
+}
+
+/// Lower one verb file into a [`VerbDef`].
+fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
+    let path_str = file.rel_path.to_string_lossy();
+
+    let id = file
+        .value
+        .get("x-cairn-verb-id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CodegenError::Ir(format!("{path_str}: x-cairn-verb-id missing"))
+        })?
+        .to_string();
+
+    // Collect all `$defs` entries so tagged-union lowering can resolve local refs.
+    let defs: BTreeMap<String, Value> = file
+        .value
+        .get("$defs")
+        .and_then(Value::as_object)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    let args_schema = file
+        .value
+        .pointer("/$defs/Args")
+        .ok_or_else(|| CodegenError::Ir(format!("{path_str}: $defs.Args missing")))?;
+    let data_schema = file
+        .value
+        .pointer("/$defs/Data")
+        .ok_or_else(|| CodegenError::Ir(format!("{path_str}: $defs.Data missing")))?;
+
+    let target_args = format!("{}Args", pascal_case(&id));
+    let target_data = format!("{}Data", pascal_case(&id));
+
+    // Lower Args — special-case search's `filters` field to use lower_filter_root.
+    let mut args_ctx = Ctx::with_target(&target_args).with_defs(defs.clone());
+    let args = if id == "search" {
+        let RustType::Struct(mut s) = lower_schema(args_schema, &mut args_ctx)? else {
+            return Err(CodegenError::Ir(
+                "search.$defs.Args expected to lower to Struct".to_string(),
+            ));
+        };
+        if let Some(field) = s.fields.iter_mut().find(|f| f.name == "filters") {
+            let filter_def = file
+                .value
+                .pointer("/$defs/filter")
+                .cloned()
+                .ok_or_else(|| {
+                    CodegenError::Ir("search.json missing /$defs/filter".to_string())
+                })?;
+            let mut filter_ctx = Ctx::with_target("Filter").with_defs(defs.clone());
+            let filter_ty = lower_filter_root(&filter_def, &mut filter_ctx)?;
+            // Preserve the Optional wrapper that lower_schema produced; replace inner.
+            field.ty = RustType::Optional(Box::new(filter_ty));
+        }
+        RustType::Struct(s)
+    } else {
+        lower_schema(args_schema, &mut args_ctx)?
+    };
+
+    let mut data_ctx = Ctx::with_target(&target_data).with_defs(defs);
+    let data = lower_schema(data_schema, &mut data_ctx)?;
+
+    let cli = build_cli_shape(&file.value, &args)?;
+    let skill = parse_skill_block(&file.value);
+    let capability = file
+        .value
+        .get("x-cairn-capability")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let auth_str = file
+        .value
+        .get("x-cairn-auth")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CodegenError::Ir(format!("{path_str}: x-cairn-auth missing")))?;
+    let auth = AuthModel::from_str(auth_str).ok_or_else(|| {
+        CodegenError::Ir(format!(
+            "{path_str}: unknown x-cairn-auth value {auth_str:?}"
+        ))
+    })?;
+
+    Ok(VerbDef {
+        id,
+        args,
+        data,
+        cli,
+        skill,
+        capability,
+        auth,
+        args_schema_bytes: serde_json::to_vec(args_schema)
+            .map_err(|e| CodegenError::Ir(e.to_string()))?,
+        data_schema_bytes: serde_json::to_vec(data_schema)
+            .map_err(|e| CodegenError::Ir(e.to_string()))?,
+    })
+}
+
+/// Build the [`CliShape`] for a verb.
+///
+/// When `args` is a [`RustType::TaggedUnion`] the shape is built from per-variant
+/// `x-cairn-cli` blocks (the top-level `x-cairn-cli` is ignored for tagged-union
+/// verbs). Otherwise the top-level block is used.
+fn build_cli_shape(verb_value: &Value, args: &RustType) -> Result<CliShape, CodegenError> {
+    if let RustType::TaggedUnion(t) = args {
+        let mut variants = Vec::with_capacity(t.variants.len());
+        for v in &t.variants {
+            let cli = v.cli.clone().ok_or_else(|| {
+                CodegenError::Ir(format!(
+                    "tagged variant {:?} missing x-cairn-cli",
+                    v.wire
+                ))
+            })?;
+            variants.push(cli);
+        }
+        return Ok(CliShape::Variants(variants));
+    }
+    let block = verb_value
+        .get("x-cairn-cli")
+        .ok_or_else(|| CodegenError::Ir("verb missing top-level x-cairn-cli".to_string()))?;
+    Ok(CliShape::Single(parse_cli_block(block)?))
+}
+
+/// Extract `x-cairn-skill-triggers` from a verb file into a [`SkillBlock`].
+fn parse_skill_block(verb_value: &Value) -> SkillBlock {
+    let Some(block) = verb_value.get("x-cairn-skill-triggers") else {
+        return SkillBlock::default();
+    };
+    SkillBlock {
+        positive: block
+            .get("positive")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        negative: block
+            .get("negative")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        exclusivity: block
+            .get("exclusivity")
+            .and_then(Value::as_str)
+            .map(String::from),
+    }
 }

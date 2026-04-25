@@ -1,5 +1,6 @@
 use serde_json::json;
-use cairn_idl::codegen::ir::{lower_schema, Ctx, Prim, RustType};
+use cairn_idl::codegen::ir::{build, lower_schema, Ctx, Prim, RustType, TypeName};
+use cairn_idl::codegen::loader;
 
 #[test]
 fn primitive_string() {
@@ -199,4 +200,16 @@ fn filter_family_collapses_to_recursive() {
     let RustType::Recursive(r) = ty else { panic!("expected Recursive, got {ty:?}") };
     assert_eq!(r.max_depth, 8);
     assert_eq!(r.max_fanout, 32);
+}
+
+#[test]
+fn build_real_document() {
+    let raw = loader::load(std::path::Path::new(cairn_idl::SCHEMA_DIR)).unwrap();
+    let doc = build(&raw).unwrap();
+    assert_eq!(doc.contract, "cairn.mcp.v1");
+    assert_eq!(doc.verbs.len(), 8);
+    assert_eq!(doc.preludes.len(), 2);
+    assert!(doc.common.contains_key(&TypeName::new("Ulid")));
+    assert!(!doc.error_codes.is_empty());
+    assert!(!doc.capabilities.is_empty());
 }
