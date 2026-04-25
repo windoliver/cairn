@@ -1,5 +1,5 @@
-# cargo-deny policy for Cairn. Not wired into CI in this issue; enablement
-# tracked in #158.
+# cargo-deny policy for Cairn. Wired into the `supply-chain` workflow
+# (.github/workflows/supply-chain.yml). Local equivalent: `cargo deny check`.
 
 [licenses]
 allow = [

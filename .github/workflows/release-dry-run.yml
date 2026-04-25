@@ -1,0 +1,180 @@
+name: release-dry-run
+
+# Exercises the release pipeline without publishing.
+#
+# What this job proves before a real release ever runs:
+#   1. Every workspace crate's manifest is publish-clean enough to
+#      `cargo package` (catches missing version requirements, bad
+#      file lists, malformed metadata) and produces a `.crate`
+#      archive. This step uses `--no-verify`; see "Known limitation"
+#      below for what that means.
+#   2. The two pure-leaf crates (`cairn-idl`, `cairn-core` — no
+#      intra-workspace deps) survive a full `cargo publish --dry-run`,
+#      including the post-package verify build with the registry-
+#      rewritten manifest.
+#   3. The single Rust binary builds in release mode on Ubuntu and macOS.
+#   4. Generated artifacts (binary + cargo-package archives) are uploaded
+#      so reviewers can inspect them on the run page.
+#
+# Known limitation: downstream workspace crates
+# (`cairn-cli`, `cairn-mcp`, the adapters, `cairn-workflows`,
+# `cairn-test-fixtures`) cannot pass `cargo publish --dry-run` until
+# their workspace deps are on crates.io, because cargo's verify build
+# resolves the registry-rewritten manifest. v0.1 accepts this gap; the
+# real-publish workflow under #141 will use staged real publishes (or
+# a local-registry overlay like `cargo-vendor` + `[source.replace]`)
+# to close it.
+#
+# On `v*` tag pushes the workflow first checks that the tag literal
+# matches `[workspace.package].version` so a mistakenly-cut tag fails
+# fast instead of green-rehearsing the wrong version.
+#
+# Triggers:
+#   - workflow_dispatch (manual sanity check / release rehearsal).
+#   - Tag push for `v*` so cutting a tag rehearses the publish pipeline
+#     before #141 wires actual publish credentials.
+#
+# Out of scope (tracked elsewhere):
+#   - Real `cargo publish` to crates.io and signing — issue #141.
+#   - Homebrew formula audit and `cargo install` smoke — issue #100.
+#   - Desktop signing/notarization — issue #139.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_LTO: "thin"
+
+jobs:
+  publish-dry-run:
+    name: publish / cargo publish --dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: release-publish
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Validate tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag_version="${TAG_REF#v}"
+          manifest_version=$(
+            cargo metadata --no-deps --format-version 1 --locked \
+              | python3 -c 'import json, sys; meta = json.load(sys.stdin); versions = sorted({p["version"] for p in meta["packages"]}); print(versions[0] if len(versions) == 1 else "\n".join(versions))'
+          )
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "::error::tag '$TAG_REF' (parsed as '$tag_version') does not match workspace version '$manifest_version'"
+            exit 1
+          fi
+          echo "tag '$TAG_REF' matches workspace version '$manifest_version'"
+      # `--allow-dirty` is required because the CI checkout lacks the
+      # `.cargo_vcs_info.json` Cargo derives from a clean tag during
+      # local development. `--locked` keeps dependency resolution
+      # identical to what crates.io would see on a real publish.
+      #
+      # Two steps cover the publish surface:
+      #
+      #   1. `cargo package --workspace --no-verify` validates every
+      #      manifest (missing version, bad metadata, file list) and
+      #      produces a `.crate` archive per crate. `--no-verify`
+      #      skips the post-package verify build, so this step does
+      #      NOT prove that downstream crates' registry-rewritten
+      #      manifests resolve and compile — see the workflow header
+      #      for the v0.1 limitation and the #141 plan to close it.
+      #
+      #   2. `cargo publish --dry-run` for the two pure-leaf crates
+      #      (`cairn-idl`, `cairn-core` — no intra-workspace deps)
+      #      exercises the full registry-aware path including the
+      #      post-package verify build. Downstream crates cannot use
+      #      this step until their upstream deps exist on crates.io.
+      - name: cargo package --workspace --no-verify
+        run: cargo package --workspace --no-verify --locked --allow-dirty
+      - name: cargo publish --dry-run (cairn-idl)
+        run: cargo publish --dry-run --locked --allow-dirty -p cairn-idl
+      - name: cargo publish --dry-run (cairn-core)
+        run: cargo publish --dry-run --locked --allow-dirty -p cairn-core
+      - name: Collect .crate archives
+        run: |
+          mkdir -p dist/crates
+          find target/package -maxdepth 2 -name '*.crate' -print -exec cp {} dist/crates/ \;
+      - name: Upload .crate archives
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: crate-archives
+          path: dist/crates/
+          if-no-files-found: error
+          retention-days: 7
+
+  binary:
+    name: binary / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: cairn-x86_64-unknown-linux-gnu
+          - os: macos-latest
+            artifact: cairn-aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: release-binary-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo build --release -p cairn-cli
+        run: cargo build --release --locked -p cairn-cli
+      - name: Stage binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/cairn dist/cairn
+      - name: Smoke-check binary version
+        # Fail closed: the binary must start, print `--version`, and the
+        # printed version must match the workspace manifest. On tag pushes
+        # the manifest version is also asserted to match the tag in the
+        # earlier `publish-dry-run` job; this step closes the loop on the
+        # built artefact itself.
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(./dist/cairn --version)
+          expected="cairn $(cargo metadata --no-deps --format-version 1 --locked \
+            | python3 -c 'import json,sys; m=json.load(sys.stdin); v={p["version"] for p in m["packages"]}; print(next(iter(v)) if len(v)==1 else sys.exit("workspace versions diverged: " + " ".join(sorted(v))))')"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::binary smoke check failed: got '$actual', expected '$expected'"
+            exit 1
+          fi
+          echo "binary smoke check ok: $actual"
+      - name: Upload binary
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/cairn
+          if-no-files-found: error
+          retention-days: 7
