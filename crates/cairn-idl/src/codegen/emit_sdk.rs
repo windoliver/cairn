@@ -785,6 +785,25 @@ fn write_response_envelope(
     );
     w.dedent();
     w.line("}");
+    // UnknownVerb shape per errors/error.json: every error variant requires a
+    // non-empty `message`, and the UnknownVerb variant requires `data.verb` as
+    // a non-empty string. Until the typed Error envelope ships (#62), defend
+    // these invariants here so a malformed UnknownVerb response cannot pass.
+    w.line("if error_code == Some(\"UnknownVerb\") {");
+    w.indent();
+    w.line("let err = raw.error.as_ref().expect(\"error_code Some implies error present\");");
+    w.line("let message = err.get(\"message\").and_then(|m| m.as_str()).unwrap_or(\"\");");
+    w.line(
+        "if message.is_empty() { return Err(::serde::de::Error::custom(\"error.code=UnknownVerb requires non-empty message\")); }",
+    );
+    w.line(
+        "let attempted_verb = err.get(\"data\").and_then(|d| d.get(\"verb\")).and_then(|v| v.as_str()).unwrap_or(\"\");",
+    );
+    w.line(
+        "if attempted_verb.is_empty() { return Err(::serde::de::Error::custom(\"error.code=UnknownVerb requires non-empty error.data.verb\")); }",
+    );
+    w.dedent();
+    w.line("}");
     // Per-verb data dispatch. Skipped on rejected/aborted (data was just
     // proven None above).
     w.line("let data = if let Some(payload) = raw.data {");

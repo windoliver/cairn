@@ -1229,3 +1229,82 @@ fn retrieve_scope_rejects_long_cursor() {
     );
 }
 
+// ── F2 (round 6): UnknownVerb error must carry message + data.verb ───────────
+
+#[test]
+fn response_unknown_verb_without_message_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "data": {"verb": "xyz"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("message"),
+        "expected non-empty-message error, got: {err}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_with_empty_message_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "", "data": {"verb": "xyz"}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("message"),
+        "expected non-empty-message error, got: {err}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_without_data_verb_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "boom"}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("data.verb") || err.to_string().contains("verb"),
+        "expected non-empty-data.verb error, got: {err}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_with_empty_data_verb_is_rejected() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "boom", "data": {"verb": ""}}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("data.verb") || err.to_string().contains("verb"),
+        "expected non-empty-data.verb error, got: {err}"
+    );
+}
+
+#[test]
+fn response_unknown_verb_with_message_and_data_verb_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("unknown"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({"code": "UnknownVerb", "message": "unrecognised verb", "data": {"verb": "synthesise"}}),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+

@@ -246,6 +246,13 @@ impl<'de> ::serde::Deserialize<'de> for Response {
         if !matches!(raw.verb, ResponseVerb::Unknown) && error_code == Some("UnknownVerb") {
             return Err(::serde::de::Error::custom("error.code=UnknownVerb is paired with verb=unknown only"));
         }
+        if error_code == Some("UnknownVerb") {
+            let err = raw.error.as_ref().expect("error_code Some implies error present");
+            let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            if message.is_empty() { return Err(::serde::de::Error::custom("error.code=UnknownVerb requires non-empty message")); }
+            let attempted_verb = err.get("data").and_then(|d| d.get("verb")).and_then(|v| v.as_str()).unwrap_or("");
+            if attempted_verb.is_empty() { return Err(::serde::de::Error::custom("error.code=UnknownVerb requires non-empty error.data.verb")); }
+        }
         let data = if let Some(payload) = raw.data {
             Some(match raw.verb {
                 ResponseVerb::Ingest => ResponseData::Ingest(
