@@ -740,4 +740,77 @@ patch = 0
             .expect_err("global duplicate must fail");
         assert!(matches!(err, PluginError::DuplicateName { .. }));
     }
+
+    #[test]
+    fn register_with_manifest_rejects_cross_contract_duplicate_name() {
+        // Same `PluginName` registered first as MemoryStore, then again as
+        // LLMProvider. The per-contract dup check cannot fire (different
+        // contract maps), so this exercises the global manifest dup-key
+        // check exclusively.
+        struct StubLlm {
+            name: &'static str,
+            range: VersionRange,
+        }
+        #[async_trait::async_trait]
+        impl crate::contract::llm_provider::LLMProvider for StubLlm {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn capabilities(&self) -> &crate::contract::llm_provider::LLMProviderCapabilities {
+                static CAPS: crate::contract::llm_provider::LLMProviderCapabilities =
+                    crate::contract::llm_provider::LLMProviderCapabilities {
+                        json_mode: false,
+                        streaming: false,
+                        tool_calls: false,
+                    };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                self.range
+            }
+        }
+
+        let llm_manifest_text = r#"
+name = "cairn-store-sqlite"
+contract = "LLMProvider"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+"#;
+
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("cairn-store-sqlite").expect("valid");
+        let store_manifest =
+            PluginManifest::parse_toml(store_manifest_text()).expect("store manifest parses");
+        reg.register_memory_store_with_manifest(
+            name.clone(),
+            store_manifest,
+            Arc::new(StubStore {
+                name: "cairn-store-sqlite",
+                range: compatible(),
+            }),
+        )
+        .expect("memory store registers");
+
+        let llm_manifest =
+            PluginManifest::parse_toml(llm_manifest_text).expect("llm manifest parses");
+        let err = reg
+            .register_llm_provider_with_manifest(
+                name,
+                llm_manifest,
+                Arc::new(StubLlm {
+                    name: "cairn-store-sqlite",
+                    range: compatible(),
+                }),
+            )
+            .expect_err("cross-contract duplicate must fail");
+        assert!(matches!(err, PluginError::DuplicateName { .. }));
+    }
 }

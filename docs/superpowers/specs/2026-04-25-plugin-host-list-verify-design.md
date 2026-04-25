@@ -120,20 +120,34 @@ Each bundled crate gains:
 
 ### 3.4 Registry extension
 
-`PluginRegistry` gains a parallel `HashMap<PluginName, PluginManifest>`
-per contract, populated alongside the `Arc<dyn Trait>` map. New accessor:
+`PluginRegistry` gains a single global `HashMap<PluginName,
+PluginManifest>`, populated alongside whichever per-contract `Arc<dyn
+Trait>` map the plugin registers into. One global map (rather than one
+parallel map per contract) enforces global `PluginName` uniqueness:
+even if the per-contract impl maps would tolerate the same name in two
+contract slots, the global manifest map rejects the second
+`register_*_with_manifest` call with `PluginError::DuplicateName`. This
+matches the brief's "stable identifier of a plugin instance" framing
+(§4.1) — a `PluginName` identifies one plugin, not one (plugin,
+contract) pair. New accessors:
 
 ```rust
 impl PluginRegistry {
     pub fn parsed_manifest(&self, name: &PluginName) -> Option<&PluginManifest>;
+    pub fn parsed_manifests_sorted(&self) -> Vec<(&PluginName, &PluginManifest)>;
 }
 ```
+
+`parsed_manifests_sorted` returns alphabetically-ordered manifests so
+`cairn plugins list` / `verify` get stable output without reaching into
+the underlying `HashMap`.
 
 The existing seven `register_<contract>()` methods are **kept unchanged**
 to preserve the public API just shipped by PR #174. Each gets a sibling
 `register_<contract>_with_manifest(name, manifest, plugin)` method that
 performs the same registration and additionally stores the parsed
-manifest. The macro-emitted four-arg form (§6.1) calls the
+manifest in the global map (failing closed if the name is already
+present there). The macro-emitted four-arg form (§6.1) calls the
 `_with_manifest` variant; the three-arg form keeps calling the original.
 
 This avoids a churn-y signature change and lets unit tests that don't
