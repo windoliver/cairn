@@ -36,6 +36,9 @@
       "verbs/capture_trace.json",
       "verbs/lint.json",
       "verbs/forget.json"
+    ],
+    "plugin": [
+      "plugin/manifest.json"
     ]
   },
   "x-cairn-verb-ids": [

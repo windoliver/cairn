@@ -1,5 +1,5 @@
-# cargo-deny policy for Cairn. Not wired into CI in this issue; enablement
-# tracked in #158.
+# cargo-deny policy for Cairn. Wired into the `supply-chain` workflow
+# (.github/workflows/supply-chain.yml). Local equivalent: `cargo deny check`.
 
 [licenses]
 allow = [
@@ -21,3 +21,13 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+
+# Deny-by-default for dependency sources. Without this, the
+# `cargo-deny check sources` step in supply-chain.yml only warns on
+# unknown git or registry sources — a PR could add an arbitrary git
+# dependency and still pass the required gate.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

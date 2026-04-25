@@ -7,8 +7,12 @@ use std::process::ExitCode;
 
 mod generated;
 
+fn build_command() -> clap::Command {
+    generated::command().version(env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> ExitCode {
-    let matches = generated::command().get_matches();
+    let matches = build_command().get_matches();
     match matches.subcommand() {
         Some((verb, _sub)) => {
             eprintln!(
@@ -19,7 +23,7 @@ fn main() -> ExitCode {
         }
         None => {
             // No subcommand: print help and exit 0.
-            let _ = generated::command().print_help();
+            let _ = build_command().print_help();
             println!();
             ExitCode::SUCCESS
         }

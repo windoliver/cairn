@@ -25,9 +25,10 @@ fn schema_dir() -> &'static Path {
 }
 
 fn read_json(path: &Path) -> Value {
-    let bytes = fs::read(path).unwrap_or_else(|err| panic!("failed to read {path:?}: {err}"));
+    let bytes =
+        fs::read(path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     serde_json::from_slice(&bytes)
-        .unwrap_or_else(|err| panic!("failed to parse {path:?} as JSON: {err}"))
+        .unwrap_or_else(|err| panic!("failed to parse {} as JSON: {err}", path.display()))
 }
 
 fn manifest() -> Value {
@@ -57,7 +58,7 @@ fn manifest_paths() -> Vec<PathBuf> {
 
 fn require_object<'a>(v: &'a Value, path: &Path) -> &'a serde_json::Map<String, Value> {
     v.as_object()
-        .unwrap_or_else(|| panic!("{path:?}: top-level value must be a JSON object"))
+        .unwrap_or_else(|| panic!("{}: top-level value must be a JSON object", path.display()))
 }
 
 #[test]
@@ -151,7 +152,8 @@ fn manifest_and_filesystem_are_bijective() {
 }
 
 fn walk_json(dir: &Path, out: &mut BTreeSet<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("failed to read dir {dir:?}: {err}"))
+    for entry in fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read dir {}: {err}", dir.display()))
     {
         let entry = entry.expect("dir entry");
         let path = entry.path();
@@ -306,7 +308,8 @@ fn response_inline_family_enums() -> std::collections::BTreeMap<String, BTreeSet
         .and_then(Value::as_array)
         .expect("response.json allOf must be an array");
 
-    let mut map: std::collections::BTreeMap<String, BTreeSet<String>> = Default::default();
+    let mut map: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
     for arm in all_of {
         let Some(if_obj) = arm.get("if").and_then(Value::as_object) else {
             continue;
@@ -379,7 +382,8 @@ fn every_error_code_is_in_exactly_one_response_status_family() {
         .and_then(Value::as_object)
         .expect("response.json: x-cairn-error-code-families must be an object");
 
-    let mut seen: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut seen: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (family, codes) in families {
         let codes = codes
             .as_array()
@@ -447,8 +451,7 @@ fn every_verb_and_prelude_surface_is_in_capabilities_or_mandatory_list() {
         let is_mandatory = mandatory.contains(&surface);
         let has_root_cap = root_cap
             .and_then(Value::as_str)
-            .map(|c| enum_set.contains(c))
-            .unwrap_or(false);
+            .is_some_and(|c| enum_set.contains(c));
         if !is_mandatory && !has_root_cap {
             missing.push(surface);
         }
@@ -492,7 +495,7 @@ fn every_verb_and_prelude_surface_is_in_capabilities_or_mandatory_list() {
         match cap {
             None => missing.push(format!("extension.{name} (no x-cairn-capability)")),
             Some(c) if !enum_set.contains(&c) => {
-                missing.push(format!("extension.{name} -> {c} (not in capability enum)"))
+                missing.push(format!("extension.{name} -> {c} (not in capability enum)"));
             }
             _ => {}
         }
@@ -565,7 +568,7 @@ fn is_integer_constrained(node: &serde_json::Map<String, Value>) -> bool {
 
 fn walk_unguarded(
     doc: &Value,
-    pointer: String,
+    pointer: &str,
     file: &str,
     allowlist: &BTreeSet<(String, String)>,
     out: &mut Vec<String>,
@@ -580,7 +583,7 @@ fn walk_unguarded(
                     _ => true,
                 };
                 if !ok {
-                    let key = (file.to_string(), pointer.clone());
+                    let key = (file.to_string(), pointer.to_string());
                     if !allowlist.contains(&key) {
                         out.push(format!("{file}#{pointer} (unguarded {ty})"));
                     }
@@ -588,12 +591,12 @@ fn walk_unguarded(
             }
             for (k, v) in map {
                 let escaped = k.replace('~', "~0").replace('/', "~1");
-                walk_unguarded(v, format!("{pointer}/{escaped}"), file, allowlist, out);
+                walk_unguarded(v, &format!("{pointer}/{escaped}"), file, allowlist, out);
             }
         }
         Value::Array(items) => {
             for (i, item) in items.iter().enumerate() {
-                walk_unguarded(item, format!("{pointer}/{i}"), file, allowlist, out);
+                walk_unguarded(item, &format!("{pointer}/{i}"), file, allowlist, out);
             }
         }
         _ => {}
@@ -630,7 +633,7 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
             .to_string_lossy()
             .into_owned();
         let v = read_json(&path);
-        walk_unguarded(&v, String::new(), &rel, &allow, &mut findings);
+        walk_unguarded(&v, "", &rel, &allow, &mut findings);
     }
     assert!(
         findings.is_empty(),

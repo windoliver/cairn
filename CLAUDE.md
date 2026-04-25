@@ -302,15 +302,31 @@ disable workspace lints without a code comment explaining why.
 
 ## 8. Verification checklist (run before pushing)
 
+These are the same commands the `ci.yml`, `docs.yml`, and `supply-chain.yml`
+workflows run. See `docs/ci.md` for the job-by-job mapping.
+
 ```bash
+# ci.yml
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
-cargo test --doc --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo check --workspace --all-targets --locked
+cargo nextest run --workspace --locked --no-fail-fast
+cargo test --doc --workspace --locked
 ./scripts/check-core-boundary.sh
-cargo deny check        # licenses + advisories + bans
-cargo audit             # RUSTSEC advisories
-cargo machete           # unused deps (optional)
+
+# docs.yml
+RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
+  cargo doc --workspace --no-deps --document-private-items --locked
+
+# supply-chain.yml (install once: cargo install cargo-deny cargo-audit cargo-machete)
+cargo deny check
+cargo audit --deny warnings
+cargo machete
+
+# release-dry-run.yml (only when touching publish-affecting metadata)
+cargo package --workspace --no-verify --locked --allow-dirty
+cargo publish --dry-run --locked --allow-dirty -p cairn-idl
+cargo publish --dry-run --locked --allow-dirty -p cairn-core
 ```
 
 A PR that touches generated code must also re-run `cargo run -p cairn-idl
@@ -357,6 +373,7 @@ cairn/
 │   ├── cairn-idl/                  ← IDL + codegen. Run `cargo run -p cairn-idl --bin cairn-codegen` after IDL edits; CI gates on no-diff.
 │   └── cairn-test-fixtures/        ← dev-only test helpers
 ├── docs/
+│   ├── ci.md                       ← CI/CD reference + branch protection
 │   ├── design/
 │   │   ├── design-brief.md         ← SOURCE OF TRUTH
 │   │   ├── architecture.md         ← crate topology summary

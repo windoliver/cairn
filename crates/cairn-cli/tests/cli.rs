@@ -15,6 +15,18 @@ fn cli() -> Command {
 }
 
 #[test]
+fn prints_version_with_flag() {
+    let out = cli().arg("--version").output().expect("cairn --version");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(stdout.starts_with("cairn "), "got: {stdout:?}");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "got: {stdout:?}"
+    );
+}
+
+#[test]
 fn help_flag_lists_all_eight_verbs() {
     let out = cli().arg("--help").output().expect("cairn --help");
     assert!(out.status.success(), "exit: {:?}", out.status);

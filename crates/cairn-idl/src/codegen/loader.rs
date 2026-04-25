@@ -110,6 +110,10 @@ pub fn load(schema_root: &Path) -> Result<RawDocument, CodegenError> {
                 "verbs" => {
                     verbs.push(file);
                 }
+                "plugin" => {
+                    // Plugin manifest is owned by the contract registry layer
+                    // (PR #174 / #176) and is not part of the codegen surface.
+                }
                 other => {
                     return Err(CodegenError::Loader(format!(
                         "unknown x-cairn-files group: {other}"
