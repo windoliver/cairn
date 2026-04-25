@@ -1,0 +1,34 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "citations": {
+      "enum": [
+        "on",
+        "compact",
+        "off"
+      ],
+      "type": "string"
+    },
+    "kind": {
+      "description": "Kind to file under if persist is true.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "persist": {
+      "description": "When true, files the synthesis as a new reference or strategy_success memory.",
+      "type": "boolean",
+      "x-cairn-auth": "write_capability"
+    },
+    "record_ids": {
+      "items": {
+        "$ref": "../common/primitives.json#/$defs/Ulid"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "record_ids"
+  ],
+  "type": "object"
+}

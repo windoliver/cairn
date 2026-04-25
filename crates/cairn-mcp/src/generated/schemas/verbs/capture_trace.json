@@ -1,0 +1,18 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "description": "Path to the trace log or transcript file.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "from"
+  ],
+  "type": "object"
+}

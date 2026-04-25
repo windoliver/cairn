@@ -1,0 +1,23 @@
+{
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ArgsRecord"
+    },
+    {
+      "$ref": "#/$defs/ArgsSession"
+    },
+    {
+      "$ref": "#/$defs/ArgsTurn"
+    },
+    {
+      "$ref": "#/$defs/ArgsFolder"
+    },
+    {
+      "$ref": "#/$defs/ArgsScope"
+    },
+    {
+      "$ref": "#/$defs/ArgsProfile"
+    }
+  ],
+  "x-cairn-discriminator": "target"
+}

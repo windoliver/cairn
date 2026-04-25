@@ -1,0 +1,11 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "write_report": {
+      "description": "When true, writes .cairn/lint-report.md.",
+      "type": "boolean",
+      "x-cairn-auth": "write_capability"
+    }
+  },
+  "type": "object"
+}

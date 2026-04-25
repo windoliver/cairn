@@ -1,0 +1,14 @@
+{
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ArgsRecord"
+    },
+    {
+      "$ref": "#/$defs/ArgsSession"
+    },
+    {
+      "$ref": "#/$defs/ArgsScope"
+    }
+  ],
+  "x-cairn-discriminator": "mode"
+}

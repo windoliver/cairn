@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "citations": {
+      "enum": [
+        "on",
+        "compact",
+        "off"
+      ],
+      "type": "string"
+    },
+    "cursor": {
+      "$ref": "../common/primitives.json#/$defs/Cursor",
+      "description": "Opaque continuation token from a prior search Data.next_cursor."
+    },
+    "filters": {
+      "$ref": "#/$defs/filter"
+    },
+    "limit": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "mode": {
+      "oneOf": [
+        {
+          "const": "keyword",
+          "x-cairn-capability": "cairn.mcp.v1.search.keyword"
+        },
+        {
+          "const": "semantic",
+          "x-cairn-capability": "cairn.mcp.v1.search.semantic"
+        },
+        {
+          "const": "hybrid",
+          "x-cairn-capability": "cairn.mcp.v1.search.hybrid"
+        }
+      ]
+    },
+    "query": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "../common/scope_filter.json",
+      "description": "Optional narrowing of the already-authorized signed-intent scope. Reuses the closed scope filter grammar — unknown keys and empty values reject at schema validation so a typo cannot silently widen reads."
+    }
+  },
+  "required": [
+    "query",
+    "mode"
+  ],
+  "type": "object"
+}

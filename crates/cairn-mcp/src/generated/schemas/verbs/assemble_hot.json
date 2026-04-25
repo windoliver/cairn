@@ -1,0 +1,16 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "budget": {
+      "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB).",
+      "maximum": 4194304,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
