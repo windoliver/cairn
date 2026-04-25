@@ -88,3 +88,88 @@ fn auth_override_paths_are_stable_strings() {
         }
     }
 }
+
+// ── Round-5 finding F3: ToolDecl surfaces field-level x-cairn-capability ───
+
+fn capabilities_for(name: &str) -> Vec<(&'static str, &'static str)> {
+    let t = tool(name);
+    t.capability_overrides
+        .iter()
+        .map(|o| (o.path, o.capability))
+        .collect()
+}
+
+#[test]
+fn forget_surfaces_capability_per_mode() {
+    let mut got = capabilities_for("forget");
+    got.sort();
+    let mut want = vec![
+        ("mode=record", "cairn.mcp.v1.forget.record"),
+        ("mode=session", "cairn.mcp.v1.forget.session"),
+        ("mode=scope", "cairn.mcp.v1.forget.scope"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn retrieve_surfaces_capability_per_target() {
+    let mut got = capabilities_for("retrieve");
+    got.sort();
+    let mut want = vec![
+        ("target=record", "cairn.mcp.v1.retrieve.record"),
+        ("target=session", "cairn.mcp.v1.retrieve.session"),
+        ("target=turn", "cairn.mcp.v1.retrieve.turn"),
+        ("target=folder", "cairn.mcp.v1.retrieve.folder"),
+        ("target=scope", "cairn.mcp.v1.retrieve.scope"),
+        ("target=profile", "cairn.mcp.v1.retrieve.profile"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn search_surfaces_capability_per_mode() {
+    let mut got = capabilities_for("search");
+    got.sort();
+    let mut want = vec![
+        ("mode=keyword", "cairn.mcp.v1.search.keyword"),
+        ("mode=semantic", "cairn.mcp.v1.search.semantic"),
+        ("mode=hybrid", "cairn.mcp.v1.search.hybrid"),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn root_capability_null_verbs_have_capability_overrides() {
+    // Every verb whose root `capability` is None must carry capability
+    // overrides — otherwise the MCP transport has no way to gate the call.
+    for name in ["search", "retrieve", "forget"] {
+        let t = tool(name);
+        assert!(
+            t.capability.is_none(),
+            "{name} should have no root capability"
+        );
+        assert!(
+            !t.capability_overrides.is_empty(),
+            "{name} must carry capability overrides when root capability is None"
+        );
+    }
+}
+
+#[test]
+fn capability_override_paths_are_stable_strings() {
+    // Every override carries a non-empty path and a `cairn.mcp.v1.*` capability.
+    for t in TOOLS {
+        for ov in t.capability_overrides {
+            assert!(!ov.path.is_empty(), "{}: empty cap override path", t.name);
+            assert!(
+                ov.capability.starts_with("cairn.mcp.v1."),
+                "{}: capability `{}` should start with cairn.mcp.v1.",
+                t.name,
+                ov.capability
+            );
+        }
+    }
+}

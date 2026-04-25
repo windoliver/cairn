@@ -119,6 +119,27 @@ fn emit_mod(doc: &Document) -> GeneratedFile {
     w.dedent();
     w.line("}");
     w.blank();
+    w.line("/// One field- / mode-level capability override surfaced from the IDL's");
+    w.line("/// `x-cairn-capability` annotations on Args properties or Args sub-types.");
+    w.line("///");
+    w.line("/// Verbs `search`, `retrieve`, and `forget` advertise no root capability");
+    w.line("/// (the IDL leaves `x-cairn-capability: null` at the verb document level)");
+    w.line("/// — instead each Args sub-type / mode declares its own concrete");
+    w.line("/// capability string (`cairn.mcp.v1.search.keyword`,");
+    w.line("/// `cairn.mcp.v1.retrieve.profile`, `cairn.mcp.v1.forget.scope`, …).");
+    w.line("/// Surfacing them here lets the MCP transport check the right capability");
+    w.line("/// once the request shape is known. Gating logic is out of scope for the");
+    w.line("/// codegen — this struct only exposes the metadata.");
+    w.line("pub struct CapabilityOverride {");
+    w.indent();
+    w.line("/// Dot-path inside Args identifying the trigger. Same encoding as");
+    w.line("/// `AuthOverride.path`.");
+    w.line("pub path: &'static str,");
+    w.line("/// Capability string required when `path` matches.");
+    w.line("pub capability: &'static str,");
+    w.dedent();
+    w.line("}");
+    w.blank();
     w.line("/// Static tool declaration the MCP transport layer registers at startup.");
     w.line("pub struct ToolDecl {");
     w.indent();
@@ -130,6 +151,11 @@ fn emit_mod(doc: &Document) -> GeneratedFile {
     w.line("/// Field- / mode-level auth overrides. Empty when the verb's");
     w.line("/// declared `auth` covers every reachable Args shape.");
     w.line("pub auth_overrides: &'static [AuthOverride],");
+    w.line("/// Field- / mode-level capability overrides. Non-empty for verbs");
+    w.line("/// whose root `capability` is `None` but whose Args sub-types or");
+    w.line("/// const enums advertise per-mode capabilities (search, retrieve,");
+    w.line("/// forget).");
+    w.line("pub capability_overrides: &'static [CapabilityOverride],");
     w.dedent();
     w.line("}");
     w.blank();
@@ -172,6 +198,20 @@ fn emit_tool_decl(w: &mut RustWriter, verb: &VerbDef) {
                 "AuthOverride {{ path: \"{}\", auth: \"{}\" }},",
                 ov.path,
                 ov.auth.as_str()
+            ));
+        }
+        w.dedent();
+        w.line("],");
+    }
+    if verb.capability_overrides.is_empty() {
+        w.line("capability_overrides: &[],");
+    } else {
+        w.line("capability_overrides: &[");
+        w.indent();
+        for ov in &verb.capability_overrides {
+            w.line(&format!(
+                "CapabilityOverride {{ path: \"{}\", capability: \"{}\" }},",
+                ov.path, ov.capability,
             ));
         }
         w.dedent();

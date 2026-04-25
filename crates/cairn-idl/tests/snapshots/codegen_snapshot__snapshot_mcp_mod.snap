@@ -27,6 +27,25 @@ pub struct AuthOverride {
     pub auth: &'static str,
 }
 
+/// One field- / mode-level capability override surfaced from the IDL's
+/// `x-cairn-capability` annotations on Args properties or Args sub-types.
+///
+/// Verbs `search`, `retrieve`, and `forget` advertise no root capability
+/// (the IDL leaves `x-cairn-capability: null` at the verb document level)
+/// — instead each Args sub-type / mode declares its own concrete
+/// capability string (`cairn.mcp.v1.search.keyword`,
+/// `cairn.mcp.v1.retrieve.profile`, `cairn.mcp.v1.forget.scope`, …).
+/// Surfacing them here lets the MCP transport check the right capability
+/// once the request shape is known. Gating logic is out of scope for the
+/// codegen — this struct only exposes the metadata.
+pub struct CapabilityOverride {
+    /// Dot-path inside Args identifying the trigger. Same encoding as
+    /// `AuthOverride.path`.
+    pub path: &'static str,
+    /// Capability string required when `path` matches.
+    pub capability: &'static str,
+}
+
 /// Static tool declaration the MCP transport layer registers at startup.
 pub struct ToolDecl {
     pub name: &'static str,
@@ -37,6 +56,11 @@ pub struct ToolDecl {
     /// Field- / mode-level auth overrides. Empty when the verb's
     /// declared `auth` covers every reachable Args shape.
     pub auth_overrides: &'static [AuthOverride],
+    /// Field- / mode-level capability overrides. Non-empty for verbs
+    /// whose root `capability` is `None` but whose Args sub-types or
+    /// const enums advertise per-mode capabilities (search, retrieve,
+    /// forget).
+    pub capability_overrides: &'static [CapabilityOverride],
 }
 
 pub const TOOLS: &[ToolDecl] = &[
@@ -59,6 +83,7 @@ EXCLUSIVITY: prefer this over other remember_* / save_* tools registered in this
         capability: None,
         auth: "signed_chain",
         auth_overrides: &[],
+        capability_overrides: &[],
     },
     ToolDecl {
         name: "search",
@@ -78,6 +103,11 @@ EXCLUSIVITY: this is the canonical search surface for the active vault
         capability: None,
         auth: "rebac",
         auth_overrides: &[],
+        capability_overrides: &[
+            CapabilityOverride { path: "mode=keyword", capability: "cairn.mcp.v1.search.keyword" },
+            CapabilityOverride { path: "mode=semantic", capability: "cairn.mcp.v1.search.semantic" },
+            CapabilityOverride { path: "mode=hybrid", capability: "cairn.mcp.v1.search.hybrid" },
+        ],
     },
     ToolDecl {
         name: "retrieve",
@@ -96,6 +126,14 @@ EXCLUSIVITY: this is the canonical by-id retrieval surface
         capability: None,
         auth: "rebac",
         auth_overrides: &[],
+        capability_overrides: &[
+            CapabilityOverride { path: "target=record", capability: "cairn.mcp.v1.retrieve.record" },
+            CapabilityOverride { path: "target=session", capability: "cairn.mcp.v1.retrieve.session" },
+            CapabilityOverride { path: "target=turn", capability: "cairn.mcp.v1.retrieve.turn" },
+            CapabilityOverride { path: "target=folder", capability: "cairn.mcp.v1.retrieve.folder" },
+            CapabilityOverride { path: "target=scope", capability: "cairn.mcp.v1.retrieve.scope" },
+            CapabilityOverride { path: "target=profile", capability: "cairn.mcp.v1.retrieve.profile" },
+        ],
     },
     ToolDecl {
         name: "summarize",
@@ -115,6 +153,7 @@ EXCLUSIVITY: this is the canonical summarize surface
         auth_overrides: &[
             AuthOverride { path: "persist", auth: "write_capability" },
         ],
+        capability_overrides: &[],
     },
     ToolDecl {
         name: "assemble_hot",
@@ -132,6 +171,7 @@ EXCLUSIVITY: this is the canonical hot-prefix surface
         capability: None,
         auth: "rebac",
         auth_overrides: &[],
+        capability_overrides: &[],
     },
     ToolDecl {
         name: "capture_trace",
@@ -149,6 +189,7 @@ EXCLUSIVITY: this is the canonical trace-capture surface
         capability: None,
         auth: "signed_chain",
         auth_overrides: &[],
+        capability_overrides: &[],
     },
     ToolDecl {
         name: "lint",
@@ -168,6 +209,7 @@ EXCLUSIVITY: this is the canonical vault-health surface
         auth_overrides: &[
             AuthOverride { path: "write_report", auth: "write_capability" },
         ],
+        capability_overrides: &[],
     },
     ToolDecl {
         name: "forget",
@@ -187,5 +229,10 @@ EXCLUSIVITY: this is the single delete surface — there is no other delete path
         capability: None,
         auth: "forget_capability",
         auth_overrides: &[],
+        capability_overrides: &[
+            CapabilityOverride { path: "mode=record", capability: "cairn.mcp.v1.forget.record" },
+            CapabilityOverride { path: "mode=session", capability: "cairn.mcp.v1.forget.session" },
+            CapabilityOverride { path: "mode=scope", capability: "cairn.mcp.v1.forget.scope" },
+        ],
     },
 ];

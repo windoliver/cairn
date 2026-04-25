@@ -39,6 +39,12 @@ pub struct VerbDef {
     /// and `summarize.persist=true` need `write_capability` even though the
     /// verb-level auth is `read_only` / `rebac`.
     pub auth_overrides: Vec<AuthOverride>,
+    /// Field- / mode-level capability overrides lifted from
+    /// `x-cairn-capability` annotations attached to Args properties or Args
+    /// sub-types. Surfaced in the MCP tool declarations so callers know which
+    /// concrete capability is required when the verb-level capability is
+    /// `null` (e.g. `search.mode=keyword` requires `cairn.mcp.v1.search.keyword`).
+    pub capability_overrides: Vec<CapabilityOverride>,
     pub args_schema_bytes: Vec<u8>,
     pub data_schema_bytes: Vec<u8>,
 }
@@ -55,6 +61,22 @@ pub struct AuthOverride {
     /// Auth model required when the path is present (or set to true for
     /// boolean flags).
     pub auth: AuthModel,
+}
+
+/// One field-level / mode-level `x-cairn-capability` annotation lifted
+/// from the IDL. Surfaced in MCP tool declarations so MCP clients know
+/// which capability string the verb actually needs once a specific Args
+/// sub-type or property has been chosen — verb-level capability is null
+/// for `search` / `retrieve` / `forget`, but each mode/target/sub-type
+/// carries its own concrete capability string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityOverride {
+    /// Dot-path inside Args identifying the trigger. Same encoding as
+    /// [`AuthOverride::path`]: bare property name for property-level
+    /// triggers, `<discriminator>=<wire>` for tagged-union sub-types.
+    pub path: String,
+    /// Capability string required when the path is present.
+    pub capability: String,
 }
 
 /// One protocol prelude (status, handshake).
@@ -1142,6 +1164,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         ))
     })?;
     let auth_overrides = collect_auth_overrides(args_schema, &defs, &path_str)?;
+    let capability_overrides = collect_capability_overrides(args_schema, &defs, &path_str)?;
 
     Ok(VerbDef {
         id,
@@ -1153,6 +1176,7 @@ fn build_verb(file: &RawFile) -> Result<VerbDef, CodegenError> {
         capability,
         auth,
         auth_overrides,
+        capability_overrides,
         // Capture the *entire* verb file so any `#/$defs/...` reference inside
         // Args/Data resolves against siblings present in the same on-disk JSON.
         // Cross-file `$ref`s like `../common/scope_filter.json` resolve via the
@@ -1241,6 +1265,106 @@ fn collect_auth_overrides(
         }
     }
 
+    Ok(out)
+}
+
+/// Walk the verb's `$defs/Args` schema and harvest every `x-cairn-capability`
+/// annotation found below the root. Three shapes are supported, mirroring
+/// [`collect_auth_overrides`] plus a const-level form:
+///
+/// * Sub-type-level — `Args` is a `oneOf` over `#/$defs/Args*` entries
+///   (forget, retrieve), each carrying `x-cairn-capability`. Yields a
+///   [`CapabilityOverride`] with `path: <discriminator>=<wire-const>`.
+///
+/// * Const-level (closed string enum) — a property whose value is a
+///   `oneOf` of `{const: <wire>, x-cairn-capability: <cap>}` entries
+///   (search.mode). Yields one override per const with
+///   `path: <property>=<wire>`.
+///
+/// * Property-level — `Args.properties.<name>.x-cairn-capability: "<cap>"`.
+///   Yields a [`CapabilityOverride`] with `path: <name>`. (Currently
+///   unused by any verb; kept for symmetry so future IDL annotations
+///   land without re-plumbing.)
+fn collect_capability_overrides(
+    args_schema: &Value,
+    defs: &BTreeMap<String, Value>,
+    where_: &str,
+) -> Result<Vec<CapabilityOverride>, CodegenError> {
+    let mut out = Vec::new();
+
+    // Sub-type dispatch (forget, retrieve).
+    if let Some(arr) = args_schema.get("oneOf").and_then(Value::as_array) {
+        let discriminator = args_schema
+            .get("x-cairn-discriminator")
+            .and_then(Value::as_str);
+        for entry in arr {
+            let Some(reference) = entry.get("$ref").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(def_name) = reference.strip_prefix("#/$defs/") else {
+                continue;
+            };
+            let Some(def) = defs.get(def_name) else {
+                continue;
+            };
+            let Some(cap) = def.get("x-cairn-capability").and_then(Value::as_str) else {
+                continue;
+            };
+            let path = if let Some(disc) = discriminator
+                && let Some(wire) = def
+                    .pointer(&format!("/properties/{disc}/const"))
+                    .and_then(Value::as_str)
+            {
+                format!("{disc}={wire}")
+            } else {
+                def_name.to_string()
+            };
+            out.push(CapabilityOverride {
+                path,
+                capability: cap.to_string(),
+            });
+        }
+    }
+
+    // Property-level + const-level walk over Args.properties.
+    if let Some(props) = args_schema.get("properties").and_then(Value::as_object) {
+        let mut keys: Vec<&String> = props.keys().collect();
+        keys.sort();
+        for k in keys {
+            let prop = &props[k];
+            // Property-level.
+            if let Some(cap) = prop.get("x-cairn-capability").and_then(Value::as_str) {
+                out.push(CapabilityOverride {
+                    path: k.clone(),
+                    capability: cap.to_string(),
+                });
+            }
+            // Const-level — `oneOf` of `{const: <wire>, x-cairn-capability: <cap>}`
+            // entries (search.mode pattern). Each const becomes its own override
+            // keyed by `<property>=<wire>` so the MCP layer can reason about the
+            // specific reachable mode.
+            if let Some(arr) = prop.get("oneOf").and_then(Value::as_array) {
+                for entry in arr {
+                    let Some(wire) = entry.get("const").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(cap) = entry.get("x-cairn-capability").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    out.push(CapabilityOverride {
+                        path: format!("{k}={wire}"),
+                        capability: cap.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Sanity: we shouldn't emit unparseable content. If the IDL grew an
+    // unknown capability shape we'd silently drop it; callers should still
+    // be able to surface an error path. Right now the function never fails,
+    // so propagate `Result` for symmetry with `collect_auth_overrides`.
+    let _ = where_;
     Ok(out)
 }
 
