@@ -313,6 +313,7 @@ cargo check --workspace --all-targets --locked
 cargo nextest run --workspace --locked --no-fail-fast
 cargo test --doc --workspace --locked
 ./scripts/check-core-boundary.sh
+cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 # docs.yml
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
