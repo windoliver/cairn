@@ -13,7 +13,19 @@ pub mod fmt;
 pub mod ir;
 pub mod loader;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Workspace-relative roots that codegen *owns* end-to-end. Files inside these
+/// directories that aren't part of the latest emit are stale and either flagged
+/// (`Check`) or pruned (`Write`). Adding a new emitter destination means
+/// extending this list — that is intentional, so an unowned tree isn't silently
+/// scrubbed.
+const OWNED_ROOTS: &[&str] = &[
+    "crates/cairn-core/src/generated",
+    "crates/cairn-cli/src/generated",
+    "crates/cairn-mcp/src/generated",
+    "skills/cairn",
+];
 
 /// One generated artefact returned by an emitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +115,11 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
         drift: Vec::new(),
     };
 
+    // Set of expected workspace-relative paths for the current emit. Used both
+    // to detect stale on-disk files (Check) and to delete them (Write).
+    let expected: std::collections::BTreeSet<PathBuf> =
+        all.iter().map(|f| f.path.clone()).collect();
+
     match opts.mode {
         RunMode::Write => {
             for file in &all {
@@ -111,10 +128,24 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
                     std::fs::create_dir_all(parent)?;
                 }
                 // Atomic write via tempfile + persist.
-                let dir = abs.parent().unwrap_or(std::path::Path::new("."));
+                let dir = abs.parent().unwrap_or(Path::new("."));
                 let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
                 tmp.write_all(&file.bytes)?;
                 tmp.persist(&abs).map_err(|e| CodegenError::Io(e.error))?;
+            }
+            // Prune anything inside the owned roots that the emit didn't
+            // claim. Without this, removing an IDL file leaves the stale
+            // generated artefact committed and `--check` keeps reporting clean.
+            for stale in stale_files(&opts.workspace_root, &expected)? {
+                let abs = opts.workspace_root.join(&stale);
+                // `remove_file` is idempotent enough — we collected the path by
+                // walking the directory, so it should still exist. Treat ENOENT
+                // as benign to keep the run resilient against concurrent edits.
+                if let Err(e) = std::fs::remove_file(&abs)
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(CodegenError::Io(e));
+                }
             }
         }
         RunMode::Check => {
@@ -128,7 +159,70 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
                     report.drift.push(file.path.clone());
                 }
             }
+            // Stale files (on-disk, inside an owned root, not produced by this
+            // emit) count as drift — otherwise removing an IDL source still
+            // leaves a generated artefact lying around and `--check` is silent.
+            for stale in stale_files(&opts.workspace_root, &expected)? {
+                report.drift.push(stale);
+            }
+            // Deterministic order keeps snapshot tests stable regardless of
+            // the order emitters and the walker visited paths in.
+            report.drift.sort();
+            report.drift.dedup();
         }
     }
     Ok(report)
+}
+
+/// Walk every [`OWNED_ROOTS`] entry under `workspace_root` and return the
+/// workspace-relative paths of files NOT in `expected`. Missing roots are
+/// silently skipped — the generator may legitimately run before the directory
+/// exists (fresh `tempdir` in tests, first run on a new repo).
+fn stale_files(
+    workspace_root: &Path,
+    expected: &std::collections::BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>, CodegenError> {
+    let mut stale = Vec::new();
+    for root in OWNED_ROOTS {
+        let abs_root = workspace_root.join(root);
+        if !abs_root.exists() {
+            continue;
+        }
+        walk_files(&abs_root, &mut |abs_path| {
+            // Translate back to a workspace-relative path so it matches
+            // `expected` (which the emitters populate with relative paths).
+            let Ok(rel) = abs_path.strip_prefix(workspace_root) else {
+                return Ok(());
+            };
+            let rel_buf = rel.to_path_buf();
+            if !expected.contains(&rel_buf) {
+                stale.push(rel_buf);
+            }
+            Ok(())
+        })?;
+    }
+    stale.sort();
+    stale.dedup();
+    Ok(stale)
+}
+
+/// Recursive directory walker — invokes `visit` once per regular file. Kept
+/// inline (no `walkdir` dep) so codegen has no extra runtime dependencies.
+fn walk_files(
+    dir: &Path,
+    visit: &mut dyn FnMut(&Path) -> Result<(), CodegenError>,
+) -> Result<(), CodegenError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            walk_files(&path, visit)?;
+        } else if file_type.is_file() {
+            visit(&path)?;
+        }
+        // Symlinks et al. are intentionally ignored — codegen never emits them
+        // and following them risks straying outside the workspace.
+    }
+    Ok(())
 }

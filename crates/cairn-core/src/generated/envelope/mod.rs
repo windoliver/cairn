@@ -124,8 +124,7 @@ pub struct SignedIntentScope {
     pub workspace: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SignedIntent {
     /// operation_id ULIDs of prior operations this one depends on. Bounded and deduplicated so a malformed intent cannot push a pathologically large DAG fan-in at WAL dependency processing time.
     pub chain_parents: Vec<crate::generated::common::Ulid>,
@@ -156,5 +155,61 @@ impl SignedIntent {
     pub fn validate(&self) -> Result<(), &'static str> {
         if (self.sequence.is_some() as u8 + self.server_challenge.is_some() as u8) != 1 { return Err("exactly one of [sequence, server_challenge] is required"); }
         Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSignedIntent {
+    /// operation_id ULIDs of prior operations this one depends on. Bounded and deduplicated so a malformed intent cannot push a pathologically large DAG fan-in at WAL dependency processing time.
+    chain_parents: Vec<crate::generated::common::Ulid>,
+    expires_at: String,
+    issued_at: String,
+    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
+    issuer: crate::generated::common::Identity,
+    key_version: i64,
+    /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
+    nonce: crate::generated::common::Nonce16Base64,
+    /// ULID (Crockford base32, 26 chars); unique per issuer within expires_at window.
+    operation_id: crate::generated::common::Ulid,
+    scope: SignedIntentScope,
+    /// Monotonic per-issuer counter; strictly increasing. Bounded by JSON's safe integer range (2^53 − 1) so validators and JSON decoders cannot disagree on the represented value. Mutually exclusive with server_challenge.
+    #[serde(default)]
+    sequence: Option<u64>,
+    /// Fresh nonce obtained from `cairn handshake`; required when sequence is absent. Same 16-byte base64 shape as nonce.
+    #[serde(default)]
+    server_challenge: Option<crate::generated::common::Nonce16Base64>,
+    /// Ed25519 signature over the canonical JSON of every other field. 64 raw bytes = 128 lowercase hex chars.
+    signature: crate::generated::common::Ed25519Signature,
+    /// sha256 of the record / plan / receipt this signature authorizes.
+    target_hash: String,
+}
+
+impl ::core::convert::TryFrom<RawSignedIntent> for SignedIntent {
+    type Error = &'static str;
+    fn try_from(raw: RawSignedIntent) -> Result<Self, Self::Error> {
+        if (raw.sequence.is_some() as u8 + raw.server_challenge.is_some() as u8) != 1 { return Err("exactly one of [sequence, server_challenge] is required"); }
+        Ok(Self {
+            chain_parents: raw.chain_parents,
+            expires_at: raw.expires_at,
+            issued_at: raw.issued_at,
+            issuer: raw.issuer,
+            key_version: raw.key_version,
+            nonce: raw.nonce,
+            operation_id: raw.operation_id,
+            scope: raw.scope,
+            sequence: raw.sequence,
+            server_challenge: raw.server_challenge,
+            signature: raw.signature,
+            target_hash: raw.target_hash,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for SignedIntent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawSignedIntent::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
 }

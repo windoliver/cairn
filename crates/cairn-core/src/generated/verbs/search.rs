@@ -40,10 +40,10 @@ pub enum SearchArgsCitations {
 #[serde(untagged)]
 #[non_exhaustive]
 pub enum SearchArgsFilters {
+    And { and: Vec<Self> },
+    Or { or: Vec<Self> },
+    Not { not: Box<Self> },
     Leaf(serde_json::Value),
-    And(Vec<Self>),
-    Or(Vec<Self>),
-    Not(Box<Self>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

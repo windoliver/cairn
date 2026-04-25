@@ -5,8 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IngestArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -31,6 +30,51 @@ impl IngestArgs {
     pub fn validate(&self) -> Result<(), &'static str> {
         if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
         Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIngestArgs {
+    #[serde(default)]
+    body: Option<String>,
+    /// Path on the local filesystem.
+    #[serde(default)]
+    file: Option<String>,
+    /// Extra YAML frontmatter fields to store alongside the body.
+    #[serde(default)]
+    frontmatter: Option<serde_json::Value>,
+    /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
+    kind: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        Ok(Self {
+            body: raw.body,
+            file: raw.file,
+            frontmatter: raw.frontmatter,
+            kind: raw.kind,
+            session_id: raw.session_id,
+            tags: raw.tags,
+            url: raw.url,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for IngestArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawIngestArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
 }
 

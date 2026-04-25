@@ -562,6 +562,22 @@ fn write_field(
     common: &BTreeSet<String>,
     pub_qualifier: bool,
 ) {
+    write_field_inner(w, field, parent_name, common, pub_qualifier, true);
+}
+
+/// Emit a struct field. `serializing` controls whether serialise-only attrs
+/// (`skip_serializing_if`) are included — set to `false` when the host struct
+/// derives only `Deserialize` (e.g. the private `Raw…` companion of an
+/// untagged-union public type), so the generated code stays free of dead
+/// attribute noise.
+fn write_field_inner(
+    w: &mut RustWriter,
+    field: &StructField,
+    parent_name: &str,
+    common: &BTreeSet<String>,
+    pub_qualifier: bool,
+    serializing: bool,
+) {
     if let Some(doc) = &field.doc {
         write_doc(w, doc);
     }
@@ -571,7 +587,11 @@ fn write_field(
         None
     };
     if matches!(field.ty, RustType::Optional(_)) {
-        w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
+        if serializing {
+            w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
+        } else {
+            w.line("#[serde(default)]");
+        }
     }
     if let Some(name) = &serde_name {
         w.line(&format!("#[serde(rename = \"{name}\")]"));
@@ -751,8 +771,10 @@ fn write_untagged_union(
     if let Some(doc) = &u.doc {
         write_doc(w, doc);
     }
-    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
-    w.line("#[serde(deny_unknown_fields)]");
+    // Serialize derives directly off the public type. Deserialize is hand-written
+    // below so the XOR contract is enforced at the deserialization boundary —
+    // callers cannot construct an invalid value by parsing JSON.
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
     w.line(&format!("pub struct {} {{", u.name.0));
     w.indent();
     // Render fields exactly as the IR carries them — outer `required` fields
@@ -764,41 +786,140 @@ fn write_untagged_union(
     w.dedent();
     w.line("}");
     w.blank();
-    w.line(&format!("impl {} {{", u.name.0));
-    w.indent();
-    w.line(
-        "/// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.",
-    );
-    w.line("pub fn validate(&self) -> Result<(), &'static str> {");
-    w.indent();
-    // The contract of `oneOf: [{required: [...]}, ...]` is "exactly one of the
-    // entries matches". For our shape (each entry's `required` lists fields
-    // that are otherwise optional in the type), this collapses to "exactly one
-    // of the union of all xor-group fields is present". Compute the union once,
-    // sum is_some() across it, require == 1.
+
+    // Compute the XOR field union once — used both by `validate()` and by the
+    // `TryFrom` impl below. `BTreeSet` keeps a deterministic emission order.
     let mut union: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for group in &u.xor_groups {
         for name in group {
             union.insert(name.as_str());
         }
     }
+
+    write_untagged_union_validate(w, &u.name.0, &union);
+    w.blank();
+    write_untagged_union_deserialize(w, u, common, &union);
+
+    Ok(())
+}
+
+/// Emit the public `validate(&self)` method that callers building instances by
+/// hand can use to self-check XOR membership before sending. Mirrors the
+/// historic API; the deserialise path goes through [`write_untagged_union_deserialize`]
+/// instead.
+fn write_untagged_union_validate(
+    w: &mut RustWriter,
+    type_name: &str,
+    union: &std::collections::BTreeSet<&str>,
+) {
+    w.line(&format!("impl {type_name} {{"));
+    w.indent();
+    w.line(
+        "/// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.",
+    );
+    w.line("pub fn validate(&self) -> Result<(), &'static str> {");
+    w.indent();
     if !union.is_empty() {
-        let checks = union
-            .iter()
-            .map(|name| format!("self.{}.is_some() as u8", sanitise_ident(name)))
-            .collect::<Vec<_>>()
-            .join(" + ");
-        let union_str = union.iter().copied().collect::<Vec<_>>().join(", ");
-        w.line(&format!(
-            "if ({checks}) != 1 {{ return Err(\"exactly one of [{union_str}] is required\"); }}"
-        ));
+        write_xor_check(w, "self", union);
     }
     w.line("Ok(())");
     w.dedent();
     w.line("}");
     w.dedent();
     w.line("}");
-    Ok(())
+}
+
+/// Emit the private `Raw<Name>` companion, the `TryFrom<Raw<Name>>` impl
+/// (which performs the XOR check), and the hand-rolled `Deserialize` that
+/// funnels every parse through `TryFrom`. This is what makes the XOR contract
+/// load-bearing on the wire — without it, callers could deserialize an
+/// invalid intent and only discover the problem at `validate()` call time.
+fn write_untagged_union_deserialize(
+    w: &mut RustWriter,
+    u: &UntaggedUnionDef,
+    common: &BTreeSet<String>,
+    union: &std::collections::BTreeSet<&str>,
+) {
+    let raw_name = format!("Raw{}", u.name.0);
+
+    // Private companion mirrors the public field shape but only derives Deserialize.
+    w.line("#[derive(Deserialize)]");
+    w.line("#[serde(deny_unknown_fields)]");
+    w.line(&format!("struct {raw_name} {{"));
+    w.indent();
+    for field in &u.fields {
+        // Raw is Deserialize-only — emit the serialise-stripped form so
+        // `#[serde(skip_serializing_if = ...)]` doesn't dangle as dead noise.
+        write_field_inner(w, field, &u.name.0, common, false, false);
+    }
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // TryFrom encapsulates validation + field move. Any future invariant
+    // (e.g. cross-field constraints) can land here without disturbing the
+    // Deserialize impl.
+    w.line(&format!(
+        "impl ::core::convert::TryFrom<{raw_name}> for {} {{",
+        u.name.0
+    ));
+    w.indent();
+    w.line("type Error = &'static str;");
+    w.line(&format!(
+        "fn try_from(raw: {raw_name}) -> Result<Self, Self::Error> {{"
+    ));
+    w.indent();
+    if !union.is_empty() {
+        write_xor_check(w, "raw", union);
+    }
+    w.line("Ok(Self {");
+    w.indent();
+    for field in &u.fields {
+        let ident = sanitise_ident(&field.name);
+        w.line(&format!("{ident}: raw.{ident},"));
+    }
+    w.dedent();
+    w.line("})");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
+    // Hand-rolled Deserialize that funnels through TryFrom — guarantees the
+    // XOR check happens at every parse boundary (JSON, MCP, CLI args, ...).
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {} {{",
+        u.name.0
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line(&format!(
+        "let raw = {raw_name}::deserialize(deserializer)?;"
+    ));
+    w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit the `if (a.is_some() as u8 + b.is_some() as u8 + ...) != 1 { return Err(...) }`
+/// guard shared between `validate(&self)` and `TryFrom<Raw…>`. `receiver` is the
+/// expression-level prefix (`self` for the public method, `raw` for the
+/// `TryFrom`).
+fn write_xor_check(w: &mut RustWriter, receiver: &str, union: &std::collections::BTreeSet<&str>) {
+    let checks = union
+        .iter()
+        .map(|name| format!("{receiver}.{}.is_some() as u8", sanitise_ident(name)))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let union_str = union.iter().copied().collect::<Vec<_>>().join(", ");
+    w.line(&format!(
+        "if ({checks}) != 1 {{ return Err(\"exactly one of [{union_str}] is required\"); }}"
+    ));
 }
 
 // ── Recursive enum (filter family) ───────────────────────────────────────────
@@ -840,10 +961,19 @@ fn write_recursive(
     w.line("#[non_exhaustive]");
     w.line(&format!("pub enum {} {{", r.name.0));
     w.indent();
+    // The IDL wire shape is `{"and": [...]}`, `{"or": [...]}`, `{"not": <node>}`,
+    // or a leaf object. With `#[serde(untagged)]` serde tries variants in source
+    // order, so the structured arms come *first* — otherwise a `Leaf(serde_json::Value)`
+    // alternative would greedily accept any JSON object and the boolean operators
+    // would become unreachable on the deserialise side.
+    //
+    // Each operator is a struct variant whose single field name matches the IDL
+    // key. Untagged struct variants serialise as `{"<key>": <value>}`, which is
+    // exactly the wire form filter_and_L*/filter_or_L*/filter_not_L* declare.
+    w.line("And { and: Vec<Self> },");
+    w.line("Or { or: Vec<Self> },");
+    w.line("Not { not: Box<Self> },");
     w.line(&format!("Leaf({leaf_render}),"));
-    w.line("And(Vec<Self>),");
-    w.line("Or(Vec<Self>),");
-    w.line("Not(Box<Self>),");
     w.dedent();
     w.line("}");
     Ok(())
