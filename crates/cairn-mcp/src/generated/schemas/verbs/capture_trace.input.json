@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "description": "Path to the trace log or transcript file.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "trace_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/capture_trace.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: capture_trace",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

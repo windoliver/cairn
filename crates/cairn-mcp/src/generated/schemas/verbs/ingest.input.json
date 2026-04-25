@@ -1,0 +1,88 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "body"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "url"
+          ]
+        }
+      ],
+      "properties": {
+        "body": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "file": {
+          "description": "Path on the local filesystem.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontmatter": {
+          "description": "Extra YAML frontmatter fields to store alongside the body.",
+          "type": "object"
+        },
+        "kind": {
+          "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "format": "uri",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid",
+          "description": "ULID of the newly stored record."
+        },
+        "session_id": {
+          "description": "Resolved session (created if absent — see §8.1).",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "session_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/ingest.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: ingest",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "Args": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ArgsRecord"
+        },
+        {
+          "$ref": "#/$defs/ArgsSession"
+        },
+        {
+          "$ref": "#/$defs/ArgsScope"
+        }
+      ],
+      "x-cairn-discriminator": "mode"
+    },
+    "ArgsRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "record"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "mode",
+        "record_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.record",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "record",
+            "name": "record_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.1"
+    },
+    "ArgsScope": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "scope"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json"
+        }
+      },
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.scope",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "scope",
+            "name": "scope",
+            "value_source": "json"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.3"
+    },
+    "ArgsSession": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "session"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "session_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.forget.session",
+      "x-cairn-cli": {
+        "command": "forget",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          }
+        ]
+      },
+      "x-cairn-since": "v0.2"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tombstones": {
+          "items": {
+            "$ref": "../common/primitives.json#/$defs/Ulid"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "deleted_count"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/forget.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: forget",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

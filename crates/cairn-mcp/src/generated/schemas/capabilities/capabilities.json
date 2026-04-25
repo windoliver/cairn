@@ -1,0 +1,126 @@
+{
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/capabilities/capabilities.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Negotiable capability strings advertised on status.capabilities. A surface that is NOT in this enum is instead enumerated in x-cairn-mandatory-surfaces below — those are always present whenever the server speaks cairn.mcp.v1 and do not require advertisement. Every verb root, prelude response, hook, and sensor surface MUST appear in exactly one of the two lists.",
+  "oneOf": [
+    {
+      "const": "cairn.mcp.v1.search.keyword",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.search.semantic",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.search.hybrid",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.record",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.session",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.turn",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.folder",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.scope",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.retrieve.profile",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.forget.record",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.forget.session",
+      "x-cairn-since": "v0.2"
+    },
+    {
+      "const": "cairn.mcp.v1.forget.scope",
+      "x-cairn-since": "v0.3"
+    },
+    {
+      "const": "cairn.mcp.v1.extension.aggregate",
+      "x-cairn-since": "v0.2"
+    },
+    {
+      "const": "cairn.mcp.v1.extension.admin",
+      "x-cairn-since": "v0.1"
+    },
+    {
+      "const": "cairn.mcp.v1.extension.federation",
+      "x-cairn-since": "v0.3"
+    },
+    {
+      "const": "cairn.mcp.v1.extension.sessiontree",
+      "x-cairn-since": "v0.3"
+    }
+  ],
+  "title": "Cairn capability strings (P0)",
+  "type": "string",
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-mandatory-surfaces": [
+    {
+      "reason": "Required for version / incarnation probe before any signed intent.",
+      "since": "v0.1",
+      "surface": "prelude.status"
+    },
+    {
+      "reason": "Required to mint server_challenge nonces for signed intents.",
+      "since": "v0.1",
+      "surface": "prelude.handshake"
+    },
+    {
+      "reason": "Core write verb; gating is per-auth, not per-capability.",
+      "since": "v0.1",
+      "surface": "verb.ingest"
+    },
+    {
+      "reason": "Root verb is always present; individual modes (keyword/semantic/hybrid) are negotiable.",
+      "since": "v0.1",
+      "surface": "verb.search"
+    },
+    {
+      "reason": "Root verb is always present; individual targets are negotiable.",
+      "since": "v0.1",
+      "surface": "verb.retrieve"
+    },
+    {
+      "reason": "Core synthesis verb; rebac-authorized, not capability-gated.",
+      "since": "v0.1",
+      "surface": "verb.summarize"
+    },
+    {
+      "reason": "Core turn-start verb; rebac-authorized, not capability-gated.",
+      "since": "v0.1",
+      "surface": "verb.assemble_hot"
+    },
+    {
+      "reason": "Core trace persistence; signed-chain-authorized, not capability-gated.",
+      "since": "v0.1",
+      "surface": "verb.capture_trace"
+    },
+    {
+      "reason": "Core read-only vault-health verb.",
+      "since": "v0.1",
+      "surface": "verb.lint"
+    },
+    {
+      "reason": "Root verb is always present; individual modes are negotiable.",
+      "since": "v0.1",
+      "surface": "verb.forget"
+    }
+  ]
+}

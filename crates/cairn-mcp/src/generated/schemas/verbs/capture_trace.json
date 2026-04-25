@@ -1,0 +1,66 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "description": "Path to the trace log or transcript file.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "from"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "trace_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/capture_trace.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: capture_trace",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "capture_trace",
+    "flags": [
+      {
+        "long": "from",
+        "name": "from",
+        "value_source": "path"
+      },
+      {
+        "long": "session",
+        "name": "session_id",
+        "value_source": "string"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the canonical trace-capture surface",
+    "negative": [
+      "do NOT use for durable facts about the user or world — call ingest"
+    ],
+    "positive": [
+      "use to persist a reasoning trajectory / transcript for later ACE distillation"
+    ]
+  },
+  "x-cairn-verb-id": "capture_trace"
+}

@@ -1,0 +1,71 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "description": "Byte budget for the assembled prefix (default 25000; hard cap 4 MiB).",
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prefix": {
+          "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix",
+        "bytes"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/assemble_hot.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: assemble_hot",
+  "type": "object",
+  "x-cairn-auth": "rebac",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "assemble_hot",
+    "flags": [
+      {
+        "long": "session",
+        "name": "session_id",
+        "value_source": "string"
+      },
+      {
+        "long": "budget",
+        "name": "budget",
+        "value_source": "u32"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the canonical hot-prefix surface",
+    "negative": [
+      "do NOT call in a tight inner loop — one call per turn"
+    ],
+    "positive": [
+      "use at the start of every turn to load the hot-memory prefix for this agent/session"
+    ]
+  },
+  "x-cairn-verb-id": "assemble_hot"
+}

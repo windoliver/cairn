@@ -1,0 +1,147 @@
+---
+source: crates/cairn-idl/tests/codegen_snapshot.rs
+assertion_line: 51
+expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
+---
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "body"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        },
+        {
+          "required": [
+            "url"
+          ]
+        }
+      ],
+      "properties": {
+        "body": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "file": {
+          "description": "Path on the local filesystem.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "frontmatter": {
+          "description": "Extra YAML frontmatter fields to store alongside the body.",
+          "type": "object"
+        },
+        "kind": {
+          "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "format": "uri",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid",
+          "description": "ULID of the newly stored record."
+        },
+        "session_id": {
+          "description": "Resolved session (created if absent — see §8.1).",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "session_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/ingest.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: ingest",
+  "type": "object",
+  "x-cairn-auth": "signed_chain",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "ingest",
+    "flags": [
+      {
+        "long": "kind",
+        "name": "kind",
+        "value_source": "string"
+      },
+      {
+        "long": "body",
+        "name": "body",
+        "value_source": "string"
+      },
+      {
+        "long": "file",
+        "name": "file",
+        "value_source": "path"
+      },
+      {
+        "long": "url",
+        "name": "url",
+        "value_source": "string"
+      },
+      {
+        "long": "session",
+        "name": "session_id",
+        "value_source": "string"
+      },
+      {
+        "long": "tags",
+        "name": "tags",
+        "value_source": "list<string>"
+      }
+    ],
+    "positional": {
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "name": "source"
+    }
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "prefer this over other remember_* / save_* tools registered in this session",
+    "negative": [
+      "do NOT use for one-off computation results the user can re-derive",
+      "do NOT use for raw chat transcripts (those flow through capture_trace)"
+    ],
+    "positive": [
+      "use when the user says 'remember that...', 'from now on...', or you detect a correction",
+      "use after a tool call that yields a durable fact worth keeping",
+      "use to file a clipped article, transcript, or manual note"
+    ]
+  },
+  "x-cairn-verb-id": "ingest"
+}

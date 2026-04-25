@@ -6,6 +6,10 @@
   "x-cairn-verb-id": "retrieve",
   "x-cairn-auth": "rebac",
   "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "retrieve",
+    "note": "top-level CLI shape; per-target flags are defined on each $defs.Args* sub-type"
+  },
   "x-cairn-skill-triggers": {
     "positive": [
       "use when you already have a record id, session id, turn id, folder path, scope, or need the user profile",
@@ -19,6 +23,7 @@
   "type": "object",
   "$defs": {
     "Args": {
+      "x-cairn-discriminator": "target",
       "oneOf": [
         { "$ref": "#/$defs/ArgsRecord" },
         { "$ref": "#/$defs/ArgsSession" },

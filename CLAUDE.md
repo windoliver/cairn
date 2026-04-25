@@ -370,7 +370,7 @@ cairn/
 │   ├── cairn-store-sqlite/         ← SQLite + FTS5 + sqlite-vec
 │   ├── cairn-sensors-local/        ← hooks/IDE/term/clipboard/voice/screen
 │   ├── cairn-workflows/            ← background workflow host
-│   ├── cairn-idl/                  ← IDL + codegen (cairn-codegen bin)
+│   ├── cairn-idl/                  ← IDL + codegen. Run `cargo run -p cairn-idl --bin cairn-codegen` after IDL edits; CI gates on no-diff.
 │   └── cairn-test-fixtures/        ← dev-only test helpers
 ├── docs/
 │   ├── ci.md                       ← CI/CD reference + branch protection

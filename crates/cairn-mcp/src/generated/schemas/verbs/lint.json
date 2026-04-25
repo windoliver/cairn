@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "Args": {
+      "additionalProperties": false,
+      "properties": {
+        "write_report": {
+          "description": "When true, writes .cairn/lint-report.md.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        }
+      },
+      "type": "object"
+    },
+    "Data": {
+      "additionalProperties": false,
+      "properties": {
+        "findings": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "contradiction",
+                  "orphan",
+                  "stale",
+                  "missing_concept",
+                  "data_gap"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "record_id": {
+                "$ref": "../common/primitives.json#/$defs/Ulid"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "report_path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "summary": {
+          "additionalProperties": false,
+          "properties": {
+            "contradictions": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "orphans": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stale": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "total"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "summary",
+        "findings"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/lint.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb: lint",
+  "type": "object",
+  "x-cairn-auth": "read_only",
+  "x-cairn-capability": null,
+  "x-cairn-cli": {
+    "command": "lint",
+    "flags": [
+      {
+        "long": "write-report",
+        "name": "write_report",
+        "value_source": "bool"
+      }
+    ]
+  },
+  "x-cairn-contract": "cairn.mcp.v1",
+  "x-cairn-skill-triggers": {
+    "exclusivity": "this is the canonical vault-health surface",
+    "negative": [
+      "do NOT call per turn — run on a cadence (daily / on PR)"
+    ],
+    "positive": [
+      "use to check vault health — contradictions, orphans, stale claims, missing concept pages"
+    ]
+  },
+  "x-cairn-verb-id": "lint"
+}

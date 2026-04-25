@@ -1,0 +1,549 @@
+{
+  "$defs": {
+    "CapabilityUnavailableData": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "$ref": "../capabilities/capabilities.json"
+        }
+      },
+      "required": [
+        "capability"
+      ],
+      "type": "object"
+    },
+    "ConflictVersionData": {
+      "additionalProperties": false,
+      "properties": {
+        "actual": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expected": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected",
+        "actual"
+      ],
+      "type": "object"
+    },
+    "ExpiredIntentData": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "issued_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "now": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "issued_at",
+        "expires_at",
+        "now"
+      ],
+      "type": "object"
+    },
+    "InternalData": {
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "type": "object"
+    },
+    "InvalidArgsData": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "InvalidFilterData": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MissingSignatureData": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "NotFoundData": {
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    },
+    "OutOfOrderSequenceData": {
+      "additionalProperties": false,
+      "properties": {
+        "attempted": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "high_water": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issuer": {
+          "$ref": "../common/primitives.json#/$defs/Identity"
+        }
+      },
+      "required": [
+        "issuer",
+        "high_water",
+        "attempted"
+      ],
+      "type": "object"
+    },
+    "PluginSuspendedData": {
+      "additionalProperties": false,
+      "properties": {
+        "plugin_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "plugin_id"
+      ],
+      "type": "object"
+    },
+    "QuarantineRequiredData": {
+      "additionalProperties": false,
+      "properties": {
+        "quarantine_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ReplayDetectedData": {
+      "additionalProperties": false,
+      "properties": {
+        "operation_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "operation_id"
+      ],
+      "type": "object"
+    },
+    "RevokedKeyData": {
+      "additionalProperties": false,
+      "properties": {
+        "issuer": {
+          "$ref": "../common/primitives.json#/$defs/Identity"
+        },
+        "key_version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "issuer",
+        "key_version"
+      ],
+      "type": "object"
+    },
+    "UnauthorizedData": {
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "required"
+      ],
+      "type": "object"
+    },
+    "UnknownVerbData": {
+      "additionalProperties": false,
+      "properties": {
+        "verb": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "verb"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/errors/error.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "InvalidArgs"
+        },
+        "data": {
+          "$ref": "#/$defs/InvalidArgsData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "InvalidFilter"
+        },
+        "data": {
+          "$ref": "#/$defs/InvalidFilterData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "CapabilityUnavailable"
+        },
+        "data": {
+          "$ref": "#/$defs/CapabilityUnavailableData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "UnknownVerb"
+        },
+        "data": {
+          "$ref": "#/$defs/UnknownVerbData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "ExpiredIntent"
+        },
+        "data": {
+          "$ref": "#/$defs/ExpiredIntentData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "ReplayDetected"
+        },
+        "data": {
+          "$ref": "#/$defs/ReplayDetectedData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "OutOfOrderSequence"
+        },
+        "data": {
+          "$ref": "#/$defs/OutOfOrderSequenceData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "RevokedKey"
+        },
+        "data": {
+          "$ref": "#/$defs/RevokedKeyData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "MissingSignature"
+        },
+        "data": {
+          "$ref": "#/$defs/MissingSignatureData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "Unauthorized"
+        },
+        "data": {
+          "$ref": "#/$defs/UnauthorizedData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "NotFound"
+        },
+        "data": {
+          "$ref": "#/$defs/NotFoundData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "ConflictVersion"
+        },
+        "data": {
+          "$ref": "#/$defs/ConflictVersionData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "QuarantineRequired"
+        },
+        "data": {
+          "$ref": "#/$defs/QuarantineRequiredData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "PluginSuspended"
+        },
+        "data": {
+          "$ref": "#/$defs/PluginSuspendedData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "data"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "Internal"
+        },
+        "data": {
+          "$ref": "#/$defs/InternalData"
+        },
+        "message": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "required": [
+    "code",
+    "message"
+  ],
+  "title": "Cairn error",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

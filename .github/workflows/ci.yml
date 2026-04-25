@@ -127,3 +127,19 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check --workspace --all-targets
         run: cargo check --workspace --all-targets --locked
+
+  codegen-drift:
+    name: codegen / no drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: codegen-drift
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo run -p cairn-idl --bin cairn-codegen -- --check
+        run: cargo run -p cairn-idl --bin cairn-codegen --locked -- --check

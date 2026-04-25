@@ -12,6 +12,7 @@ description = "Cairn verb layer, domain types, and error enums. No I/O, no adapt
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }

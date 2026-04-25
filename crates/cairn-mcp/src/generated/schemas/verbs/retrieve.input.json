@@ -1,0 +1,557 @@
+{
+  "$defs": {
+    "Args": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ArgsRecord"
+        },
+        {
+          "$ref": "#/$defs/ArgsSession"
+        },
+        {
+          "$ref": "#/$defs/ArgsTurn"
+        },
+        {
+          "$ref": "#/$defs/ArgsFolder"
+        },
+        {
+          "$ref": "#/$defs/ArgsScope"
+        },
+        {
+          "$ref": "#/$defs/ArgsProfile"
+        }
+      ],
+      "x-cairn-discriminator": "target"
+    },
+    "ArgsFolder": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "maximum": 16,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "const": "folder"
+        }
+      },
+      "required": [
+        "target",
+        "path"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.folder",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "folder",
+            "name": "path",
+            "value_source": "string"
+          },
+          {
+            "long": "depth",
+            "name": "depth",
+            "value_source": "u8"
+          }
+        ]
+      }
+    },
+    "ArgsProfile": {
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "user"
+          ]
+        },
+        {
+          "required": [
+            "agent"
+          ]
+        }
+      ],
+      "properties": {
+        "agent": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "const": "profile"
+        },
+        "user": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.profile",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "profile",
+            "name": "profile",
+            "value_source": "bool"
+          },
+          {
+            "long": "user",
+            "name": "user",
+            "value_source": "string"
+          },
+          {
+            "long": "agent",
+            "name": "agent",
+            "value_source": "string"
+          }
+        ]
+      }
+    },
+    "ArgsRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "target": {
+          "const": "record"
+        }
+      },
+      "required": [
+        "target",
+        "id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.record",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "positional": {
+          "description": "Record ULID",
+          "name": "id"
+        }
+      }
+    },
+    "ArgsScope": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Opaque continuation token from a prior DataScope.next_cursor.",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json"
+        },
+        "target": {
+          "const": "scope"
+        }
+      },
+      "required": [
+        "target",
+        "scope"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.scope",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "scope",
+            "name": "scope",
+            "value_source": "json"
+          },
+          {
+            "long": "cursor",
+            "name": "cursor",
+            "value_source": "string"
+          }
+        ]
+      }
+    },
+    "ArgsSession": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor",
+          "description": "Opaque continuation token from a prior DataSession.next_cursor."
+        },
+        "include": {
+          "items": {
+            "enum": [
+              "tool_calls",
+              "reasoning"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "limit": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "order": {
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "type": "string"
+        },
+        "rehydrate": {
+          "type": "boolean"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "const": "session"
+        }
+      },
+      "required": [
+        "target",
+        "session_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.session",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          },
+          {
+            "long": "limit",
+            "name": "limit",
+            "value_source": "u32"
+          },
+          {
+            "long": "order",
+            "name": "order",
+            "value_source": "enum(asc,desc)"
+          },
+          {
+            "long": "rehydrate",
+            "name": "rehydrate",
+            "value_source": "bool"
+          },
+          {
+            "long": "include",
+            "name": "include",
+            "value_source": "list<enum(tool_calls,reasoning)>"
+          },
+          {
+            "long": "cursor",
+            "name": "cursor",
+            "value_source": "string"
+          }
+        ]
+      }
+    },
+    "ArgsTurn": {
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "items": {
+            "enum": [
+              "tool_calls",
+              "reasoning"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "const": "turn"
+        },
+        "turn_id": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "target",
+        "session_id",
+        "turn_id"
+      ],
+      "type": "object",
+      "x-cairn-capability": "cairn.mcp.v1.retrieve.turn",
+      "x-cairn-cli": {
+        "command": "retrieve",
+        "flags": [
+          {
+            "long": "session",
+            "name": "session_id",
+            "value_source": "string"
+          },
+          {
+            "long": "turn",
+            "name": "turn_id",
+            "value_source": "u64"
+          },
+          {
+            "long": "include",
+            "name": "include",
+            "value_source": "list<enum(tool_calls,reasoning)>"
+          }
+        ]
+      }
+    },
+    "Data": {
+      "description": "Shape depends on the matched Args target. The response envelope echoes target so validators can bind Data to the exact branch. Each branch requires its target metadata so a session response can never be mistaken for a folder response even outside the envelope.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DataRecord"
+        },
+        {
+          "$ref": "#/$defs/DataProfile"
+        },
+        {
+          "$ref": "#/$defs/DataSession"
+        },
+        {
+          "$ref": "#/$defs/DataTurn"
+        },
+        {
+          "$ref": "#/$defs/DataFolder"
+        },
+        {
+          "$ref": "#/$defs/DataScope"
+        }
+      ]
+    },
+    "DataFolder": {
+      "additionalProperties": false,
+      "properties": {
+        "depth": {
+          "maximum": 16,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/RecordRef"
+          },
+          "type": "array"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "items"
+      ],
+      "type": "object"
+    },
+    "DataProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "description": "Free-form profile payload — typed in a later increment once the profile taxonomy lands.",
+          "type": "object"
+        },
+        "subject": {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "user"
+              ]
+            },
+            {
+              "required": [
+                "agent"
+              ]
+            }
+          ],
+          "properties": {
+            "agent": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "user": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "subject",
+        "profile"
+      ],
+      "type": "object"
+    },
+    "DataRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "type": "string"
+        },
+        "frontmatter": {
+          "type": "object"
+        },
+        "kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        }
+      },
+      "required": [
+        "record_id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "DataScope": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/RecordRef"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "scope": {
+          "$ref": "../common/scope_filter.json"
+        }
+      },
+      "required": [
+        "scope",
+        "items"
+      ],
+      "type": "object"
+    },
+    "DataSession": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TurnItem"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "items"
+      ],
+      "type": "object"
+    },
+    "DataTurn": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "turn": {
+          "$ref": "#/$defs/TurnItem"
+        },
+        "turn_id": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_id",
+        "turn_id",
+        "turn"
+      ],
+      "type": "object"
+    },
+    "RecordRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "snippet": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TurnItem": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant",
+            "tool",
+            "system"
+          ],
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "turn_id": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn_id",
+        "role"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/verbs/retrieve.input.json",
+  "$ref": "#/$defs/Args",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cairn verb input: retrieve",
+  "x-cairn-contract": "cairn.mcp.v1"
+}
