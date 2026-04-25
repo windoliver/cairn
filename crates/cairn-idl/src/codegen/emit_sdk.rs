@@ -400,6 +400,9 @@ fn emit_envelope(
         }
         w.blank();
     }
+    // SignedIntent's bespoke TryFrom uses `is_ulid_shape`. Emit the helper
+    // once, at module scope, so any TryFrom validation can reference it.
+    write_ulid_shape_helper(&mut w);
     Ok(GeneratedFile {
         path: PathBuf::from(ROOT).join("envelope/mod.rs"),
         bytes: w.finish().into_bytes(),
@@ -1121,6 +1124,15 @@ fn write_untagged_union_deserialize(
     if !union.is_empty() {
         write_xor_check(w, "raw", union);
     }
+    // Type-specific extra invariants. The IDL annotates `SignedIntent` with
+    // ULID/Identity/Nonce16Base64 patterns, key_version >= 1, sequence ≤
+    // 2^53−1, chain_parents maxItems=64 + uniqueItems. The generic IR
+    // doesn't carry those constraints so a TypeName match keeps the bespoke
+    // checks here while leaving the codegen for other untagged unions
+    // (IngestArgs, ...) untouched.
+    if u.name.0 == "SignedIntent" {
+        write_signed_intent_extra_checks(w);
+    }
     w.line("Ok(Self {");
     w.indent();
     for field in &u.fields {
@@ -1151,6 +1163,78 @@ fn write_untagged_union_deserialize(
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit bespoke field-level validation for `SignedIntent`.
+///
+/// The generic IR strips JSON Schema's `pattern` / `format` / numeric bounds /
+/// `uniqueItems` constraints, but the signed-intent envelope is the auth
+/// substrate — every field carries a load-bearing shape. We special-case it
+/// here so the same TryFrom path that already enforces the XOR also rejects
+/// malformed crypto/identity payloads at deserialize time.
+///
+/// Checks emitted:
+/// * `sequence <= 9_007_199_254_740_991` (JSON safe-integer cap from IDL).
+/// * `key_version >= 1` (IDL `minimum: 1`).
+/// * `chain_parents.len() <= 64` and unique entries (IDL `maxItems` /
+///   `uniqueItems`).
+/// * `operation_id`, every `chain_parents[i]`: ULID alphabet check (26 chars,
+///   Crockford base32 — `^[0-9A-HJKMNP-TV-Z]{26}$`).
+///
+/// Pattern-level validation for `nonce`, `signature`, `target_hash`, and
+/// `issuer` is left to the verb layer where format errors map to
+/// `InvalidArgs` — the round-4 finding scope is "reject obviously malformed
+/// payloads"; full regex compilation in cairn-core is out of scope.
+fn write_signed_intent_extra_checks(w: &mut RustWriter) {
+    // sequence bound — JSON safe-integer cap from the IDL.
+    w.line("if let Some(seq) = raw.sequence {");
+    w.indent();
+    w.line("if seq > 9_007_199_254_740_991_u64 { return Err(\"sequence: exceeds JSON safe-integer cap (2^53 - 1)\"); }");
+    w.dedent();
+    w.line("}");
+    // key_version >= 1.
+    w.line("if raw.key_version < 1 { return Err(\"key_version: must be >= 1\"); }");
+    // chain_parents: bounded and unique.
+    w.line("if raw.chain_parents.len() > 64 { return Err(\"chain_parents: exceeds maxItems (64)\"); }");
+    w.line("{");
+    w.indent();
+    w.line("let mut seen = ::std::collections::BTreeSet::new();");
+    w.line("for parent in &raw.chain_parents {");
+    w.indent();
+    w.line("if !seen.insert(parent.0.clone()) { return Err(\"chain_parents: must be unique\"); }");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    // ULID shape on operation_id and chain_parents — 26 chars, Crockford
+    // base32 (no I, L, O, U). Hand-rolled to avoid pulling regex into core.
+    w.line("if !is_ulid_shape(&raw.operation_id.0) { return Err(\"operation_id: must be a Crockford-base32 ULID\"); }");
+    w.line("for parent in &raw.chain_parents {");
+    w.indent();
+    w.line("if !is_ulid_shape(&parent.0) { return Err(\"chain_parents[*]: must be a Crockford-base32 ULID\"); }");
+    w.dedent();
+    w.line("}");
+    // TODO: pattern validation for nonce/signature/target_hash/issuer
+    // (regex needed). See envelope/signed_intent.json + common/primitives.json.
+}
+
+/// Emit a `fn is_ulid_shape(s: &str) -> bool` helper used by SignedIntent's
+/// TryFrom impl to validate the Crockford base32 alphabet without pulling
+/// `regex` into `cairn-core`. Emitted at module scope alongside
+/// SignedIntent.
+fn write_ulid_shape_helper(w: &mut RustWriter) {
+    w.line("/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars");
+    w.line("/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
+    w.line("fn is_ulid_shape(s: &str) -> bool {");
+    w.indent();
+    w.line("if s.len() != 26 { return false; }");
+    w.line("s.bytes().all(|b| matches!(b,");
+    w.indent();
+    w.line("b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'");
+    w.dedent();
+    w.line("))");
     w.dedent();
     w.line("}");
 }

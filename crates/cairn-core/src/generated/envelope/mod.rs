@@ -255,6 +255,21 @@ impl ::core::convert::TryFrom<RawSignedIntent> for SignedIntent {
     type Error = &'static str;
     fn try_from(raw: RawSignedIntent) -> Result<Self, Self::Error> {
         if (raw.sequence.is_some() as u8 + raw.server_challenge.is_some() as u8) != 1 { return Err("exactly one of [sequence, server_challenge] is required"); }
+        if let Some(seq) = raw.sequence {
+            if seq > 9_007_199_254_740_991_u64 { return Err("sequence: exceeds JSON safe-integer cap (2^53 - 1)"); }
+        }
+        if raw.key_version < 1 { return Err("key_version: must be >= 1"); }
+        if raw.chain_parents.len() > 64 { return Err("chain_parents: exceeds maxItems (64)"); }
+        {
+            let mut seen = ::std::collections::BTreeSet::new();
+            for parent in &raw.chain_parents {
+                if !seen.insert(parent.0.clone()) { return Err("chain_parents: must be unique"); }
+            }
+        }
+        if !is_ulid_shape(&raw.operation_id.0) { return Err("operation_id: must be a Crockford-base32 ULID"); }
+        for parent in &raw.chain_parents {
+            if !is_ulid_shape(&parent.0) { return Err("chain_parents[*]: must be a Crockford-base32 ULID"); }
+        }
         Ok(Self {
             chain_parents: raw.chain_parents,
             expires_at: raw.expires_at,
@@ -278,4 +293,13 @@ impl<'de> ::serde::Deserialize<'de> for SignedIntent {
         let raw = RawSignedIntent::deserialize(deserializer)?;
         Self::try_from(raw).map_err(::serde::de::Error::custom)
     }
+}
+
+/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars
+/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).
+fn is_ulid_shape(s: &str) -> bool {
+    if s.len() != 26 { return false; }
+    s.bytes().all(|b| matches!(b,
+        b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
+    ))
 }
