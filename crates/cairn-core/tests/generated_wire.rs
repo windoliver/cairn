@@ -240,8 +240,12 @@ fn signed_intent_rejects_malformed_nonce_wrong_length() {
     // 21 chars — neither 22 nor 24.
     m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAAA"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    // After F2 the Nonce16Base64 newtype's hand-rolled Deserialize fires
+    // first; the SignedIntent extra-checks are the second line of defense
+    // for fields not lifted to a typed newtype. Either signal is acceptable.
     assert!(
-        err.to_string().contains("nonce"),
+        msg.contains("nonce") || msg.contains("Nonce16Base64"),
         "expected nonce-shape error, got: {err}"
     );
 }
@@ -252,8 +256,9 @@ fn signed_intent_rejects_malformed_nonce_invalid_char() {
     // `*` is not in the base64 alphabet.
     m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAA*A"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("nonce"),
+        msg.contains("nonce") || msg.contains("Nonce16Base64"),
         "expected nonce-shape error, got: {err}"
     );
 }
@@ -264,8 +269,9 @@ fn signed_intent_rejects_nonce_with_noncanonical_tail_char() {
     // 22 chars but tail is `B` (not in [AQgw]) — non-canonical 16-byte encoding.
     m.insert("nonce".into(), serde_json::json!("AAAAAAAAAAAAAAAAAAAAAB"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("nonce"),
+        msg.contains("nonce") || msg.contains("Nonce16Base64"),
         "expected nonce-shape error, got: {err}"
     );
 }
@@ -293,8 +299,12 @@ fn signed_intent_rejects_malformed_server_challenge() {
         serde_json::json!("not-a-base64-nonce"),
     );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    // The newtype primitive Deserialize identifies the violated shape;
+    // SignedIntent's bespoke field check tags the field name. After F2
+    // the primitive check runs first.
     assert!(
-        err.to_string().contains("server_challenge"),
+        msg.contains("server_challenge") || msg.contains("Nonce16Base64"),
         "expected server_challenge-shape error, got: {err}"
     );
 }
@@ -321,8 +331,12 @@ fn signed_intent_rejects_signature_missing_prefix() {
     // Bare hex without the `ed25519:` tag.
     m.insert("signature".into(), serde_json::json!("0".repeat(128)));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    // After F2 the Ed25519Signature primitive's hand-rolled Deserialize
+    // fires first; the SignedIntent bespoke check is the second line of
+    // defense.
     assert!(
-        err.to_string().contains("signature"),
+        msg.contains("signature") || msg.contains("Ed25519Signature"),
         "expected signature-shape error, got: {err}"
     );
 }
@@ -335,8 +349,9 @@ fn signed_intent_rejects_signature_wrong_tail_length() {
         serde_json::json!(format!("ed25519:{}", "0".repeat(64))),
     );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("signature"),
+        msg.contains("signature") || msg.contains("Ed25519Signature"),
         "expected signature-tail-length error, got: {err}"
     );
 }
@@ -350,8 +365,9 @@ fn signed_intent_rejects_signature_uppercase_hex() {
         serde_json::json!(format!("ed25519:{}", "A".repeat(128))),
     );
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("signature"),
+        msg.contains("signature") || msg.contains("Ed25519Signature"),
         "expected signature-hex error, got: {err}"
     );
 }
@@ -386,8 +402,11 @@ fn signed_intent_rejects_issuer_with_unknown_prefix() {
     let mut m = signed_intent_minimum();
     m.insert("issuer".into(), serde_json::json!("xyz:alice"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
+    // After F2 the Identity primitive's hand-rolled Deserialize fires
+    // first; the SignedIntent bespoke check is the second line of defense.
     assert!(
-        err.to_string().contains("issuer"),
+        msg.contains("issuer") || msg.contains("Identity"),
         "expected issuer-prefix error, got: {err}"
     );
 }
@@ -397,8 +416,9 @@ fn signed_intent_rejects_issuer_with_empty_body() {
     let mut m = signed_intent_minimum();
     m.insert("issuer".into(), serde_json::json!("agt:"));
     let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("issuer"),
+        msg.contains("issuer") || msg.contains("Identity"),
         "expected issuer-empty-body error, got: {err}"
     );
 }
@@ -2254,4 +2274,141 @@ fn response_aborted_with_aborted_family_code_round_trips() {
     );
     let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
     assert!(parsed.data.is_none());
+}
+
+// ── F2 (round 9): every pattern-bearing primitive validated at deserialize ───
+//
+// Before round 9 only Ulid and Cursor enforced their IDL pattern at every
+// deserialise boundary. The four other pattern-bearing primitives in
+// `crates/cairn-idl/schema/common/primitives.json` (Nonce16Base64,
+// Ed25519Signature, Identity) derived `#[serde(transparent)]` Deserialize, so
+// HandshakeResponseChallenge.nonce (and any other call-site outside
+// SignedIntent) silently accepted garbage. F2 lifts every pattern-bearing
+// primitive to a hand-rolled Deserialize.
+
+#[test]
+fn handshake_challenge_rejects_malformed_nonce() {
+    use cairn_core::generated::handshake::HandshakeResponseChallenge;
+    let json = serde_json::json!({
+        "nonce": "not-a-base64-nonce",
+        "expires_at": 1_000_u64,
+    });
+    let err = serde_json::from_value::<HandshakeResponseChallenge>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("Nonce16Base64"),
+        "expected Nonce16Base64 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn handshake_challenge_rejects_nonce_with_noncanonical_tail() {
+    use cairn_core::generated::handshake::HandshakeResponseChallenge;
+    // 22 chars, base64 alphabet, but tail is `B` (not in [AQgw]).
+    let json = serde_json::json!({
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAB",
+        "expires_at": 1_000_u64,
+    });
+    let err = serde_json::from_value::<HandshakeResponseChallenge>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("Nonce16Base64"),
+        "expected Nonce16Base64 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn handshake_challenge_accepts_valid_nonce() {
+    use cairn_core::generated::handshake::HandshakeResponseChallenge;
+    let json = serde_json::json!({
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+        "expires_at": 1_000_u64,
+    });
+    let parsed: HandshakeResponseChallenge = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed.nonce.0, "AAAAAAAAAAAAAAAAAAAAAA==");
+}
+
+#[test]
+fn identity_primitive_rejects_unknown_prefix() {
+    use cairn_core::generated::common::Identity;
+    let err = serde_json::from_value::<Identity>(serde_json::json!("xyz:alice")).unwrap_err();
+    assert!(
+        err.to_string().contains("Identity"),
+        "expected Identity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn identity_primitive_rejects_empty_body() {
+    use cairn_core::generated::common::Identity;
+    let err = serde_json::from_value::<Identity>(serde_json::json!("agt:")).unwrap_err();
+    assert!(
+        err.to_string().contains("Identity"),
+        "expected Identity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn identity_primitive_rejects_invalid_body_chars() {
+    use cairn_core::generated::common::Identity;
+    // Space is not in [A-Za-z0-9._:-].
+    let err = serde_json::from_value::<Identity>(serde_json::json!("usr:alice bob")).unwrap_err();
+    assert!(
+        err.to_string().contains("Identity"),
+        "expected Identity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn identity_primitive_accepts_canonical_value() {
+    use cairn_core::generated::common::Identity;
+    let parsed: Identity =
+        serde_json::from_value(serde_json::json!("agt:claude-code:opus-4-7:reviewer:v1")).unwrap();
+    assert_eq!(parsed.0, "agt:claude-code:opus-4-7:reviewer:v1");
+}
+
+#[test]
+fn ed25519_signature_primitive_rejects_missing_prefix() {
+    use cairn_core::generated::common::Ed25519Signature;
+    let bad = serde_json::json!("0".repeat(128));
+    let err = serde_json::from_value::<Ed25519Signature>(bad).unwrap_err();
+    assert!(
+        err.to_string().contains("Ed25519Signature"),
+        "expected Ed25519Signature rejection, got: {err}"
+    );
+}
+
+#[test]
+fn ed25519_signature_primitive_rejects_uppercase_hex() {
+    use cairn_core::generated::common::Ed25519Signature;
+    let bad = serde_json::json!(format!("ed25519:{}", "A".repeat(128)));
+    let err = serde_json::from_value::<Ed25519Signature>(bad).unwrap_err();
+    assert!(
+        err.to_string().contains("Ed25519Signature"),
+        "expected Ed25519Signature rejection, got: {err}"
+    );
+}
+
+#[test]
+fn ed25519_signature_primitive_accepts_canonical_value() {
+    use cairn_core::generated::common::Ed25519Signature;
+    let good = serde_json::json!(format!("ed25519:{}", "0".repeat(128)));
+    let parsed: Ed25519Signature = serde_json::from_value(good).unwrap();
+    assert!(parsed.0.starts_with("ed25519:"));
+}
+
+#[test]
+fn nonce16_primitive_rejects_wrong_length() {
+    use cairn_core::generated::common::Nonce16Base64;
+    let err = serde_json::from_value::<Nonce16Base64>(serde_json::json!("AAA")).unwrap_err();
+    assert!(
+        err.to_string().contains("Nonce16Base64"),
+        "expected Nonce16Base64 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn nonce16_primitive_accepts_unpadded_canonical_value() {
+    use cairn_core::generated::common::Nonce16Base64;
+    let parsed: Nonce16Base64 =
+        serde_json::from_value(serde_json::json!("BBBBBBBBBBBBBBBBBBBBBA")).unwrap();
+    assert_eq!(parsed.0, "BBBBBBBBBBBBBBBBBBBBBA");
 }

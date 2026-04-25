@@ -57,23 +57,83 @@ impl<'de> ::serde::Deserialize<'de> for Cursor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Ed25519Signature(pub String);
 
+impl<'de> ::serde::Deserialize<'de> for Ed25519Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        let Some(tail) = s.strip_prefix("ed25519:") else {
+            return Err(::serde::de::Error::custom("Ed25519Signature: must start with `ed25519:`"));
+        };
+        if tail.len() != 128 {
+            return Err(::serde::de::Error::custom("Ed25519Signature: must be `ed25519:` + exactly 128 hex chars"));
+        }
+        if !tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(::serde::de::Error::custom("Ed25519Signature: hex tail must be lowercase 0-9 a-f"));
+        }
+        Ok(Ed25519Signature(s))
+    }
+}
+
 pub type Error = serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Identity(pub String);
+
+impl<'de> ::serde::Deserialize<'de> for Identity {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        let tail = if let Some(t) = s.strip_prefix("agt:") { t }
+            else if let Some(t) = s.strip_prefix("usr:") { t }
+            else if let Some(t) = s.strip_prefix("snr:") { t }
+            else {
+            return Err(::serde::de::Error::custom("Identity: must start with one of [agt:, usr:, snr:]"));
+        };
+        if tail.is_empty() {
+            return Err(::serde::de::Error::custom("Identity: body after prefix must not be empty"));
+        }
+        if !tail.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-')) {
+            return Err(::serde::de::Error::custom("Identity: body chars must be in [A-Za-z0-9._:-]"));
+        }
+        Ok(Identity(s))
+    }
+}
 
 pub type Known = Vec<crate::generated::common::Namespace>;
 
 pub type Namespace = serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Nonce16Base64(pub String);
+
+impl<'de> ::serde::Deserialize<'de> for Nonce16Base64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
+        let bytes = s.as_bytes();
+        let (head, tail22, padded) = match bytes.len() {
+            22 => (&bytes[..21], bytes[21], false),
+            24 => (&bytes[..21], bytes[21], true),
+            _ => return Err(::serde::de::Error::custom("Nonce16Base64: must be 22 chars (or 24 with `==` padding)")),
+        };
+        if !head.iter().all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/')) {
+            return Err(::serde::de::Error::custom("Nonce16Base64: head 21 chars must be base64 alphabet"));
+        }
+        if !matches!(tail22, b'A' | b'Q' | b'g' | b'w') {
+            return Err(::serde::de::Error::custom("Nonce16Base64: 22nd char must be one of [AQgw] for canonical 16-byte encoding"));
+        }
+        if padded && &bytes[22..] != b"==" {
+            return Err(::serde::de::Error::custom("Nonce16Base64: trailing chars must be `==` when padded"));
+        }
+        Ok(Nonce16Base64(s))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

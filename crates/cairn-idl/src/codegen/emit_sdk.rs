@@ -316,14 +316,31 @@ fn emit_common_entry(
 /// Listed by Rust type name. The default `#[serde(transparent)]` Deserialize
 /// derive accepts any string — this allow-list opts the named newtypes into
 /// a hand-rolled Deserialize that runs the shape check first.
+///
+/// The five entries cover every pattern-bearing primitive in
+/// `crates/cairn-idl/schema/common/primitives.json`. Without enforcement at
+/// every call site (e.g. `HandshakeResponseChallenge.nonce`) only the
+/// SignedIntent envelope's bespoke checks would catch malformed values; the
+/// prelude / verb dispatch surfaces would silently accept garbage.
 fn primitive_has_pattern(name: &str) -> bool {
-    matches!(name, "Ulid" | "Cursor")
+    matches!(
+        name,
+        "Ulid" | "Cursor" | "Nonce16Base64" | "Ed25519Signature" | "Identity"
+    )
 }
 
 /// Emit a hand-rolled `Deserialize` for a string newtype whose value must
 /// satisfy a pattern / length cap declared in the IDL. The body dispatches by
 /// the newtype's nominal name — adding a new pattern-bearing newtype means
 /// extending [`primitive_has_pattern`] and this match.
+///
+/// The shape checks are inlined byte-level (no `regex`, no helper calls) so
+/// `crates/cairn-core/src/generated/common/mod.rs` stays self-contained and
+/// doesn't have to import the envelope's helper module. The patterns mirror
+/// `is_ulid_shape` / `is_nonce16_base64` / `is_ed25519_signature` /
+/// `is_identity` in `envelope/mod.rs`; if those ever drift, the wire shape
+/// they're testing has drifted too, and the `cairn-idl` schema-validation
+/// tests will fail first.
 fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
     w.line(&format!(
         "impl<'de> ::serde::Deserialize<'de> for {name} {{"
@@ -351,6 +368,74 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
             // Opaque token: minLength: 1, maxLength: 512.
             w.line("if s.is_empty() { return Err(::serde::de::Error::custom(\"Cursor: must not be empty\")); }");
             w.line("if s.len() > 512 { return Err(::serde::de::Error::custom(\"Cursor: must be <= 512 chars\")); }");
+        }
+        "Nonce16Base64" => {
+            // ^[A-Za-z0-9+/]{21}[AQgw](==)?$ — 22 significant chars with the
+            // 22nd in [AQgw] (canonical 16-byte encoding), optional `==`
+            // padding so the literal length is 22 or 24. Mirrors
+            // `is_nonce16_base64` in envelope/mod.rs.
+            w.line("let bytes = s.as_bytes();");
+            w.line("let (head, tail22, padded) = match bytes.len() {");
+            w.indent();
+            w.line("22 => (&bytes[..21], bytes[21], false),");
+            w.line("24 => (&bytes[..21], bytes[21], true),");
+            w.line("_ => return Err(::serde::de::Error::custom(\"Nonce16Base64: must be 22 chars (or 24 with `==` padding)\")),");
+            w.dedent();
+            w.line("};");
+            w.line("if !head.iter().all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/')) {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Nonce16Base64: head 21 chars must be base64 alphabet\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !matches!(tail22, b'A' | b'Q' | b'g' | b'w') {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Nonce16Base64: 22nd char must be one of [AQgw] for canonical 16-byte encoding\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if padded && &bytes[22..] != b\"==\" {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Nonce16Base64: trailing chars must be `==` when padded\"));");
+            w.dedent();
+            w.line("}");
+        }
+        "Ed25519Signature" => {
+            // ^ed25519:[0-9a-f]{128}$ — mirrors `is_ed25519_signature`.
+            w.line("let Some(tail) = s.strip_prefix(\"ed25519:\") else {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Ed25519Signature: must start with `ed25519:`\"));");
+            w.dedent();
+            w.line("};");
+            w.line("if tail.len() != 128 {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Ed25519Signature: must be `ed25519:` + exactly 128 hex chars\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Ed25519Signature: hex tail must be lowercase 0-9 a-f\"));");
+            w.dedent();
+            w.line("}");
+        }
+        "Identity" => {
+            // ^(agt|usr|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
+            w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
+            w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+            w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
+            w.line("    else {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, usr:, snr:]\"));");
+            w.dedent();
+            w.line("};");
+            w.line("if tail.is_empty() {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Identity: body after prefix must not be empty\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !tail.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-')) {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"Identity: body chars must be in [A-Za-z0-9._:-]\"));");
+            w.dedent();
+            w.line("}");
         }
         _ => {
             // Catch-all so adding a new entry to `primitive_has_pattern`
