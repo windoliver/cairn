@@ -141,3 +141,31 @@ fn tagged_union_with_discriminator() {
     assert_eq!(t.variants[1].wire, "session");
     assert_eq!(t.variants[1].capability.as_deref(), Some("cairn.mcp.v1.retrieve.session"));
 }
+
+#[test]
+fn untagged_union_xor_groups() {
+    let v = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind"],
+        "properties": {
+            "kind": { "type": "string" },
+            "body": { "type": "string" },
+            "file": { "type": "string" },
+            "url":  { "type": "string" }
+        },
+        "oneOf": [
+            { "required": ["body"] },
+            { "required": ["file"] },
+            { "required": ["url"] }
+        ]
+    });
+    let mut ctx = Ctx::with_target("IngestArgs");
+    let ty = lower_schema(&v, &mut ctx).unwrap();
+    let RustType::UntaggedUnion(u) = ty else { panic!("expected UntaggedUnion, got {ty:?}") };
+    assert_eq!(u.fields.len(), 4);
+    // `kind` is the outer-required field.
+    assert!(u.fields.iter().find(|f| f.name == "kind").unwrap().required);
+    // body/file/url stay Optional in the type itself, XOR is in xor_groups.
+    assert_eq!(u.xor_groups.len(), 3);
+}

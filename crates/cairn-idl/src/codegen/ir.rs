@@ -566,16 +566,28 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
     Ok(CliCommand { command, flags, positional })
 }
 
-// Untagged union lowering lands in Task 10. Stub:
-
-fn lower_untagged_union(
-    _value: &Value,
-    _arr: &[Value],
-    _ctx: &mut Ctx,
-) -> Result<RustType, CodegenError> {
-    Err(CodegenError::Ir(
-        "untagged union lowering arrives in Task 10".to_string(),
-    ))
+fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<RustType, CodegenError> {
+    let target = ctx.target.clone().unwrap_or_else(|| TypeName::new("Union"));
+    // Borrow the object lowering for the outer struct so we get the property fields.
+    let RustType::Struct(StructDef { fields, .. }) = lower_object(value, ctx)? else {
+        return Err(CodegenError::Ir("untagged union outer must be an object".to_string()));
+    };
+    let xor_groups = arr
+        .iter()
+        .map(|entry| {
+            entry
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    Ok(RustType::UntaggedUnion(UntaggedUnionDef {
+        name: target,
+        fields,
+        xor_groups,
+        doc: value.get("description").and_then(Value::as_str).map(String::from),
+    }))
 }
 
 fn typename_from_ref(reference: &str) -> TypeName {
