@@ -1,0 +1,65 @@
+---
+source: crates/cairn-idl/tests/codegen_snapshot.rs
+assertion_line: 48
+expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
+---
+{
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "body"
+      ]
+    },
+    {
+      "required": [
+        "file"
+      ]
+    },
+    {
+      "required": [
+        "url"
+      ]
+    }
+  ],
+  "properties": {
+    "body": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "file": {
+      "description": "Path on the local filesystem.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "frontmatter": {
+      "description": "Extra YAML frontmatter fields to store alongside the body.",
+      "type": "object"
+    },
+    "kind": {
+      "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
+      "minLength": 1,
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "tags": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "url": {
+      "format": "uri",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "type": "object"
+}
