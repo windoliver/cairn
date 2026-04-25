@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ForgetArgs {
@@ -18,6 +18,84 @@ pub enum ForgetArgs {
     Scope {
         scope: crate::generated::common::ScopeFilter,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawForgetArgsRecord {
+    #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    record_id: crate::generated::common::Ulid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawForgetArgsSession {
+    #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawForgetArgsScope {
+    #[allow(dead_code)] mode: serde::de::IgnoredAny,
+    scope: crate::generated::common::ScopeFilter,
+}
+
+enum RawForgetArgs {
+    Record(RawForgetArgsRecord),
+    Session(RawForgetArgsSession),
+    Scope(RawForgetArgsScope),
+}
+
+impl<'de> ::serde::Deserialize<'de> for RawForgetArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let value = ::serde_json::Value::deserialize(deserializer)?;
+        let tag = value.get("mode").and_then(::serde_json::Value::as_str).ok_or_else(|| ::serde::de::Error::custom("missing discriminator: mode"))?;
+        match tag {
+            "record" => {
+                let v = <RawForgetArgsRecord as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Record(v))
+            },
+            "session" => {
+                let v = <RawForgetArgsSession as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Session(v))
+            },
+            "scope" => {
+                let v = <RawForgetArgsScope as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Scope(v))
+            },
+            other => Err(::serde::de::Error::custom(format!("unknown mode value: {other}")))
+        }
+    }
+}
+
+impl ::core::convert::TryFrom<RawForgetArgs> for ForgetArgs {
+    type Error = &'static str;
+    fn try_from(raw: RawForgetArgs) -> Result<Self, Self::Error> {
+        match raw {
+            RawForgetArgs::Record(inner) => {
+                let record_id = inner.record_id;
+                Ok(Self::Record { record_id })
+            },
+            RawForgetArgs::Session(inner) => {
+                let session_id = inner.session_id;
+                Ok(Self::Session { session_id })
+            },
+            RawForgetArgs::Scope(inner) => {
+                let scope = inner.scope;
+                Ok(Self::Scope { scope })
+            },
+        }
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for ForgetArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawForgetArgs::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 impl ForgetArgs {

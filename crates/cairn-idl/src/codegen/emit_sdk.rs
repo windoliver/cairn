@@ -1345,10 +1345,16 @@ fn write_tagged_union(
 }
 
 /// Bespoke-validator allow-list for tagged unions: enums whose variants need
-/// extra IDL constraints (numeric bounds, array minItems, uniqueItems) the
-/// generic IR doesn't carry. Listed by Rust type name.
+/// extra IDL constraints (numeric bounds, array minItems, uniqueItems, or
+/// per-variant `additionalProperties: false`) the generic IR doesn't carry.
+/// Listed by Rust type name.
+///
+/// Routing a tagged union through the Raw-companion path lets us emit
+/// `#[serde(deny_unknown_fields)]` per Raw struct variant — without it,
+/// serde's internally-tagged dispatch silently drops cross-variant fields
+/// (e.g. a `scope` payload smuggled into a `target=record` retrieve call).
 fn tagged_union_has_extra_validators(name: &str) -> bool {
-    matches!(name, "RetrieveArgs")
+    matches!(name, "RetrieveArgs" | "ForgetArgs")
 }
 
 /// Emit the `Raw<Name>` companion + `TryFrom` + hand-rolled `Deserialize` for
@@ -1362,36 +1368,105 @@ fn write_tagged_union_raw_companion(
 ) {
     let raw_name = format!("Raw{}", t.name.0);
 
-    // Raw enum mirrors the public shape (same tag + rename_all + variants).
-    w.line("#[derive(Deserialize)]");
-    w.line(&format!(
-        "#[serde(tag = \"{}\", rename_all = \"snake_case\")]",
-        t.discriminator
-    ));
-    w.line(&format!("enum {raw_name} {{"));
-    w.indent();
+    // Per-variant Raw structs each carry `#[serde(deny_unknown_fields)]` so
+    // payloads with cross-variant or otherwise-unknown keys reject at parse
+    // time rather than silently dropping the offending field. The IDL marks
+    // every Args variant `additionalProperties: false` — without these structs
+    // the serde tagged-enum dispatch would accept (and drop) e.g. a `scope`
+    // field smuggled into a `target=record` retrieve call. We can't put
+    // `deny_unknown_fields` on enum variants directly (serde rejects it), so
+    // each variant lowers to a sibling struct and the Raw enum itself peeks
+    // the discriminator from a `serde_json::Value` and dispatches.
     for variant in &t.variants {
-        if !wire_matches_rename(&variant.wire, &variant.rust_ident) {
-            w.line(&format!("#[serde(rename = \"{}\")]", variant.wire));
-        }
         if variant.fields.is_empty() {
-            w.line(&format!("{},", variant.rust_ident));
             continue;
         }
-        w.line(&format!("{} {{", variant.rust_ident));
+        let raw_variant_name = format!("{raw_name}{}", variant.rust_ident);
+        w.line("#[derive(Deserialize)]");
+        w.line("#[serde(deny_unknown_fields)]");
+        w.line(&format!("struct {raw_variant_name} {{"));
         w.indent();
         let nested_parent = format!("{}{}", t.name.0, variant.rust_ident);
+        // Discriminator field is deserialised but ignored — its value was
+        // already matched in the dispatcher below.
+        w.line(&format!(
+            "#[allow(dead_code)] {}: serde::de::IgnoredAny,",
+            sanitise_ident(&t.discriminator)
+        ));
         for field in &variant.fields {
             write_field_inner(w, field, &nested_parent, common, false, false);
         }
         w.dedent();
-        w.line("},");
+        w.line("}");
+        w.blank();
+    }
+
+    // Raw enum: variants keyed by discriminator, each carrying its typed
+    // (deny_unknown_fields-marked) raw struct. The hand-rolled Deserialize
+    // peeks the discriminator from a `serde_json::Value`, then re-deserialises
+    // the whole payload as the matched per-variant struct.
+    w.line(&format!("enum {raw_name} {{"));
+    w.indent();
+    for variant in &t.variants {
+        if variant.fields.is_empty() {
+            w.line(&format!("{},", variant.rust_ident));
+            continue;
+        }
+        let raw_variant_name = format!("{raw_name}{}", variant.rust_ident);
+        w.line(&format!("{}({raw_variant_name}),", variant.rust_ident));
     }
     w.dedent();
     w.line("}");
     w.blank();
 
+    w.line(&format!(
+        "impl<'de> ::serde::Deserialize<'de> for {raw_name} {{"
+    ));
+    w.indent();
+    w.line("fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>");
+    w.line("where D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("let value = ::serde_json::Value::deserialize(deserializer)?;");
+    w.line(&format!(
+        "let tag = value.get(\"{}\").and_then(::serde_json::Value::as_str).ok_or_else(|| ::serde::de::Error::custom(\"missing discriminator: {}\"))?;",
+        t.discriminator, t.discriminator
+    ));
+    w.line("match tag {");
+    w.indent();
+    for variant in &t.variants {
+        if variant.fields.is_empty() {
+            w.line(&format!(
+                "\"{}\" => Ok(Self::{}),",
+                variant.wire, variant.rust_ident
+            ));
+            continue;
+        }
+        let raw_variant_name = format!("{raw_name}{}", variant.rust_ident);
+        w.line(&format!("\"{}\" => {{", variant.wire));
+        w.indent();
+        w.line(&format!(
+            "let v = <{raw_variant_name} as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;"
+        ));
+        w.line(&format!("Ok(Self::{}(v))", variant.rust_ident));
+        w.dedent();
+        w.line("},");
+    }
+    w.line(&format!(
+        "other => Err(::serde::de::Error::custom(format!(\"unknown {} value: {{other}}\")))",
+        t.discriminator
+    ));
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
     // TryFrom: per-variant constraint enforcement, then convert to public.
+    // Raw variants are tuple-form `Variant(RawNameVariant)` — we destructure
+    // the inner per-variant struct and bind each field for the IDL checks
+    // before materialising the public struct-style enum variant.
     w.line(&format!(
         "impl ::core::convert::TryFrom<{raw_name}> for {} {{",
         t.name.0
@@ -1416,8 +1491,14 @@ fn write_tagged_union_raw_companion(
             .map(|f| sanitise_ident(&f.name))
             .collect();
         let bind_list = bind.join(", ");
-        w.line(&format!("{raw_name}::{dest} {{ {bind_list} }} => {{"));
+        w.line(&format!("{raw_name}::{dest}(inner) => {{"));
         w.indent();
+        // Move every typed field out of the per-variant Raw struct and bind it
+        // by its public-variant ident so the per-variant IDL checks below
+        // (limit ranges, uniqueItems, …) can refer to bare names.
+        for ident in &bind {
+            w.line(&format!("let {ident} = inner.{ident};"));
+        }
         // Type-specific per-variant checks for RetrieveArgs.
         if t.name.0 == "RetrieveArgs" {
             write_retrieve_args_variant_checks(w, &variant.rust_ident);

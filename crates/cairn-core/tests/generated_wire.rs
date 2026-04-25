@@ -13,6 +13,7 @@ use cairn_core::generated::common::ScopeFilter;
 use cairn_core::generated::envelope::{
     Request, RequestArgs, Response, ResponseData, RetrieveData, SignedIntent,
 };
+use cairn_core::generated::verbs::forget::ForgetArgs;
 use cairn_core::generated::verbs::ingest::IngestArgs;
 use cairn_core::generated::verbs::retrieve::RetrieveArgs;
 use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsFilters};
@@ -1401,4 +1402,88 @@ fn signed_intent_accepts_leap_second() {
     );
     let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
     assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+}
+
+// ── F1 (round 7): Tagged-union variants reject cross-variant / unknown keys ──
+
+#[test]
+fn retrieve_record_rejects_cross_variant_scope_field() {
+    // `scope` belongs to ArgsScope; it must not slip through on a record-target
+    // payload (where the IDL marks ArgsRecord additionalProperties: false).
+    let json = serde_json::json!({
+        "target": "record",
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "scope": {"user": "u1"},
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field") || err.to_string().contains("scope"),
+        "expected cross-variant-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_arbitrary_unknown_key() {
+    let json = serde_json::json!({
+        "target": "record",
+        "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "unknown": 1,
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field") || err.to_string().contains("unknown"),
+        "expected unknown-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_session_rejects_cross_variant_path_field() {
+    let json = serde_json::json!({
+        "target": "session",
+        "session_id": "s1",
+        "path": "/x",
+    });
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field") || err.to_string().contains("path"),
+        "expected cross-variant-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn forget_record_rejects_cross_variant_session_id_field() {
+    let json = serde_json::json!({
+        "mode": "record",
+        "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "session_id": "x",
+    });
+    let err = serde_json::from_value::<ForgetArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field") || err.to_string().contains("session_id"),
+        "expected cross-variant-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn forget_session_rejects_cross_variant_scope_field() {
+    let json = serde_json::json!({
+        "mode": "session",
+        "session_id": "s1",
+        "scope": {"user": "u1"},
+    });
+    let err = serde_json::from_value::<ForgetArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown field") || err.to_string().contains("scope"),
+        "expected cross-variant-field rejection, got: {err}"
+    );
+}
+
+#[test]
+fn forget_record_accepts_canonical_payload() {
+    let json = serde_json::json!({
+        "mode": "record",
+        "record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    });
+    let parsed: ForgetArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ForgetArgs::Record { .. }));
 }

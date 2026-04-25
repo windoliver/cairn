@@ -199,58 +199,128 @@ pub enum RetrieveArgs {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "target", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsRecord {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    id: crate::generated::common::Ulid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsSession {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    /// Opaque continuation token from a prior DataSession.next_cursor.
+    #[serde(default)]
+    cursor: Option<crate::generated::common::Cursor>,
+    #[serde(default)]
+    include: Option<Vec<RetrieveArgsSessionInclude>>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    order: Option<RetrieveArgsSessionOrder>,
+    #[serde(default)]
+    rehydrate: Option<bool>,
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsTurn {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    #[serde(default)]
+    include: Option<Vec<RetrieveArgsTurnInclude>>,
+    session_id: String,
+    turn_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsFolder {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    #[serde(default)]
+    depth: Option<u64>,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsScope {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    /// Opaque continuation token from a prior DataScope.next_cursor.
+    #[serde(default)]
+    cursor: Option<String>,
+    scope: crate::generated::common::ScopeFilter,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRetrieveArgsProfile {
+    #[allow(dead_code)] target: serde::de::IgnoredAny,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+}
+
 enum RawRetrieveArgs {
-    Record {
-        id: crate::generated::common::Ulid,
-    },
-    Session {
-        /// Opaque continuation token from a prior DataSession.next_cursor.
-        #[serde(default)]
-        cursor: Option<crate::generated::common::Cursor>,
-        #[serde(default)]
-        include: Option<Vec<RetrieveArgsSessionInclude>>,
-        #[serde(default)]
-        limit: Option<i64>,
-        #[serde(default)]
-        order: Option<RetrieveArgsSessionOrder>,
-        #[serde(default)]
-        rehydrate: Option<bool>,
-        session_id: String,
-    },
-    Turn {
-        #[serde(default)]
-        include: Option<Vec<RetrieveArgsTurnInclude>>,
-        session_id: String,
-        turn_id: u64,
-    },
-    Folder {
-        #[serde(default)]
-        depth: Option<u64>,
-        path: String,
-    },
-    Scope {
-        /// Opaque continuation token from a prior DataScope.next_cursor.
-        #[serde(default)]
-        cursor: Option<String>,
-        scope: crate::generated::common::ScopeFilter,
-    },
-    Profile {
-        #[serde(default)]
-        agent: Option<String>,
-        #[serde(default)]
-        user: Option<String>,
-    },
+    Record(RawRetrieveArgsRecord),
+    Session(RawRetrieveArgsSession),
+    Turn(RawRetrieveArgsTurn),
+    Folder(RawRetrieveArgsFolder),
+    Scope(RawRetrieveArgsScope),
+    Profile(RawRetrieveArgsProfile),
+}
+
+impl<'de> ::serde::Deserialize<'de> for RawRetrieveArgs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let value = ::serde_json::Value::deserialize(deserializer)?;
+        let tag = value.get("target").and_then(::serde_json::Value::as_str).ok_or_else(|| ::serde::de::Error::custom("missing discriminator: target"))?;
+        match tag {
+            "record" => {
+                let v = <RawRetrieveArgsRecord as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Record(v))
+            },
+            "session" => {
+                let v = <RawRetrieveArgsSession as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Session(v))
+            },
+            "turn" => {
+                let v = <RawRetrieveArgsTurn as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Turn(v))
+            },
+            "folder" => {
+                let v = <RawRetrieveArgsFolder as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Folder(v))
+            },
+            "scope" => {
+                let v = <RawRetrieveArgsScope as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Scope(v))
+            },
+            "profile" => {
+                let v = <RawRetrieveArgsProfile as ::serde::Deserialize>::deserialize(value).map_err(::serde::de::Error::custom)?;
+                Ok(Self::Profile(v))
+            },
+            other => Err(::serde::de::Error::custom(format!("unknown target value: {other}")))
+        }
+    }
 }
 
 impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
     type Error = &'static str;
     fn try_from(raw: RawRetrieveArgs) -> Result<Self, Self::Error> {
         match raw {
-            RawRetrieveArgs::Record { id } => {
+            RawRetrieveArgs::Record(inner) => {
+                let id = inner.id;
                 Ok(Self::Record { id })
             },
-            RawRetrieveArgs::Session { cursor, include, limit, order, rehydrate, session_id } => {
+            RawRetrieveArgs::Session(inner) => {
+                let cursor = inner.cursor;
+                let include = inner.include;
+                let limit = inner.limit;
+                let order = inner.order;
+                let rehydrate = inner.rehydrate;
+                let session_id = inner.session_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
                 if let Some(lim) = limit {
                     if !(1..=10000).contains(&lim) { return Err("limit: must be in [1, 10000]"); }
@@ -264,7 +334,10 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                 }
                 Ok(Self::Session { cursor, include, limit, order, rehydrate, session_id })
             },
-            RawRetrieveArgs::Turn { include, session_id, turn_id } => {
+            RawRetrieveArgs::Turn(inner) => {
+                let include = inner.include;
+                let session_id = inner.session_id;
+                let turn_id = inner.turn_id;
                 if session_id.is_empty() { return Err("session_id: must not be empty"); }
                 if let Some(inc) = &include {
                     if inc.is_empty() { return Err("include: must contain at least one item"); }
@@ -275,21 +348,27 @@ impl ::core::convert::TryFrom<RawRetrieveArgs> for RetrieveArgs {
                 }
                 Ok(Self::Turn { include, session_id, turn_id })
             },
-            RawRetrieveArgs::Folder { depth, path } => {
+            RawRetrieveArgs::Folder(inner) => {
+                let depth = inner.depth;
+                let path = inner.path;
                 if path.is_empty() { return Err("path: must not be empty"); }
                 if let Some(d) = depth {
                     if d > 16 { return Err("depth: must be in [0, 16]"); }
                 }
                 Ok(Self::Folder { depth, path })
             },
-            RawRetrieveArgs::Scope { cursor, scope } => {
+            RawRetrieveArgs::Scope(inner) => {
+                let cursor = inner.cursor;
+                let scope = inner.scope;
                 if let Some(c) = &cursor {
                     if c.is_empty() { return Err("cursor: must not be empty"); }
                     if c.len() > 512 { return Err("cursor: must be <= 512 chars"); }
                 }
                 Ok(Self::Scope { cursor, scope })
             },
-            RawRetrieveArgs::Profile { agent, user } => {
+            RawRetrieveArgs::Profile(inner) => {
+                let agent = inner.agent;
+                let user = inner.user;
                 if user.is_none() && agent.is_none() { return Err("at least one of [user, agent] is required"); }
                 if let Some(u) = &user {
                     if u.is_empty() { return Err("user: must not be empty"); }
