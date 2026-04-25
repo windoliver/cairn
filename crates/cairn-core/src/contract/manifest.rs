@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::contract::registry::{PluginError, PluginName};
-use crate::contract::version::VersionRange;
+use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract enum mirroring `cairn-idl/schema/plugin/manifest.json#contract`.
 ///
@@ -33,6 +33,27 @@ pub enum ContractKind {
     FrontendAdapter,
     /// Implements `AgentProvider` contract.
     AgentProvider,
+}
+
+impl ContractKind {
+    /// Stable `&'static str` identifier matching the literal used in
+    /// [`PluginError::UnsupportedContractVersion::contract`] for the same kind.
+    ///
+    /// These strings must remain in sync with the `$contract` literals in the
+    /// `register_method!` macro in `registry.rs` — they serve as the shared
+    /// discriminator in error messages and downstream consumers.
+    #[must_use]
+    pub fn as_static_str(self) -> &'static str {
+        match self {
+            ContractKind::MemoryStore => "MemoryStore",
+            ContractKind::LLMProvider => "LLMProvider",
+            ContractKind::WorkflowOrchestrator => "WorkflowOrchestrator",
+            ContractKind::SensorIngress => "SensorIngress",
+            ContractKind::McpServer => "McpServer",
+            ContractKind::FrontendAdapter => "FrontendAdapter",
+            ContractKind::AgentProvider => "AgentProvider",
+        }
+    }
 }
 
 /// Wire form: matches the TOML manifest exactly. `name` is parsed as a
@@ -125,6 +146,29 @@ impl PluginManifest {
             contract_version_range: wire.contract_version_range,
             features: wire.features,
         })
+    }
+
+    /// Verify the manifest's `contract_version_range` accepts the supplied
+    /// host `CONTRACT_VERSION` for the same contract.
+    ///
+    /// Hosts call this before invoking a plugin's `register(&mut PluginRegistry)`
+    /// to fail closed on manifest-level version mismatch — independent of the
+    /// runtime check the registry itself performs.
+    ///
+    /// # Errors
+    /// [`PluginError::UnsupportedContractVersion`] when `host_version` is
+    /// outside `self.contract_version_range`.
+    pub fn verify_compatible_with(&self, host_version: ContractVersion) -> Result<(), PluginError> {
+        if self.contract_version_range.accepts(host_version) {
+            Ok(())
+        } else {
+            Err(PluginError::UnsupportedContractVersion {
+                contract: self.contract.as_static_str(),
+                plugin: self.name.clone(),
+                plugin_range: self.contract_version_range,
+                host: host_version,
+            })
+        }
     }
 }
 
@@ -339,4 +383,34 @@ mod tests {
     // `is_valid_feature_key` function still guards against it for callers
     // that construct the BTreeMap directly. The dot-key test above covers
     // the parser-accessible invalid-key path.
+
+    // -- Finding 2: verify_compatible_with -----------------------------------
+
+    #[test]
+    fn verify_compatible_with_accepts_host_in_range() {
+        let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        assert!(
+            m.verify_compatible_with(ContractVersion::new(0, 1, 0))
+                .is_ok()
+        );
+        assert!(
+            m.verify_compatible_with(ContractVersion::new(0, 1, 9))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn verify_compatible_with_rejects_host_outside_range() {
+        let m = PluginManifest::parse_toml(FIXTURE).expect("fixture is valid");
+        let err = m
+            .verify_compatible_with(ContractVersion::new(0, 2, 0))
+            .expect_err("host outside range must fail");
+        match err {
+            PluginError::UnsupportedContractVersion { contract, host, .. } => {
+                assert_eq!(contract, "MemoryStore");
+                assert_eq!(host, ContractVersion::new(0, 2, 0));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
 }
