@@ -31,10 +31,11 @@
 /// behind an explicit `init(&Config)` method on your impl.
 ///
 /// # Examples
-/// ```ignore
-/// use cairn_core::contract::register_plugin;
+///
+/// ```
 /// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// use cairn_core::register_plugin;
 ///
 /// #[derive(Default)]
 /// struct MyStore;
@@ -42,11 +43,29 @@
 /// #[async_trait::async_trait]
 /// impl MemoryStore for MyStore {
 ///     fn name(&self) -> &str { "acme-store" }
-///     fn capabilities(&self) -> &MemoryStoreCapabilities { unimplemented!() }
-///     fn supported_contract_versions(&self) -> VersionRange { unimplemented!() }
+///     fn capabilities(&self) -> &MemoryStoreCapabilities {
+///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+///             fts: false,
+///             vector: false,
+///             graph_edges: false,
+///             transactions: false,
+///         };
+///         &CAPS
+///     }
+///     fn supported_contract_versions(&self) -> VersionRange {
+///         VersionRange::new(
+///             ContractVersion::new(0, 1, 0),
+///             ContractVersion::new(0, 2, 0),
+///         )
+///     }
 /// }
 ///
 /// register_plugin!(MemoryStore, MyStore, "acme-store");
+///
+/// // The macro emits a `register` fn that hosts call during startup.
+/// // Constructing a registry and verifying registration works:
+/// let mut reg = cairn_core::contract::registry::PluginRegistry::new();
+/// register(&mut reg).expect("compatible plugin registers");
 /// ```
 #[macro_export]
 macro_rules! register_plugin {
