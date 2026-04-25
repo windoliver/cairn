@@ -20,3 +20,8 @@ serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+# Forward-declared scaffold dep used by the codegen bin once it ships. Drop
+# this entry as soon as serde is referenced in a non-trivial code path.
+[package.metadata.cargo-machete]
+ignored = ["serde"]

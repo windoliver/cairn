@@ -15,7 +15,10 @@ fn prints_version_with_flag() {
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
     assert!(stdout.starts_with("cairn "), "got: {stdout:?}");
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")), "got: {stdout:?}");
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "got: {stdout:?}"
+    );
 }
 
 #[test]
@@ -24,8 +27,14 @@ fn default_prints_help_listing_all_eight_verbs() {
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
     for verb in [
-        "ingest", "search", "retrieve", "summarize",
-        "assemble_hot", "capture_trace", "lint", "forget",
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
     ] {
         assert!(
             stdout.contains(verb),
@@ -45,11 +54,20 @@ fn help_flag_matches_default() {
 #[test]
 fn known_verb_fails_closed() {
     for verb in [
-        "ingest", "search", "retrieve", "summarize",
-        "assemble_hot", "capture_trace", "lint", "forget",
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
     ] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
-        assert!(!out.status.success(), "verb {verb} exited OK — should fail closed");
+        assert!(
+            !out.status.success(),
+            "verb {verb} exited OK — should fail closed"
+        );
         assert_eq!(out.status.code(), Some(2), "verb {verb} wrong exit code");
         let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
         assert!(
@@ -66,7 +84,10 @@ fn known_verb_fails_closed() {
 
 #[test]
 fn unknown_argument_fails_closed() {
-    let out = cli().arg("--definitely-not-a-flag").output().expect("cairn");
+    let out = cli()
+        .arg("--definitely-not-a-flag")
+        .output()
+        .expect("cairn");
     assert!(!out.status.success(), "exit: {:?}", out.status);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
@@ -107,10 +128,7 @@ fn trailing_arg_after_verb_still_fails_closed() {
     assert!(!out.status.success(), "exit: {:?}", out.status);
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
-    assert!(
-        stderr.contains("not yet implemented"),
-        "got: {stderr:?}",
-    );
+    assert!(stderr.contains("not yet implemented"), "got: {stderr:?}");
     assert!(
         stderr.contains("trailing"),
         "trailing-args hint should mention the extra tokens: {stderr:?}",

@@ -20,13 +20,16 @@ tokio = "1"
 tracing = "0.1"
 anyhow = "1"
 
-cairn-core = { path = "crates/cairn-core" }
-cairn-mcp = { path = "crates/cairn-mcp" }
-cairn-store-sqlite = { path = "crates/cairn-store-sqlite" }
-cairn-sensors-local = { path = "crates/cairn-sensors-local" }
-cairn-workflows = { path = "crates/cairn-workflows" }
-cairn-idl = { path = "crates/cairn-idl" }
-cairn-test-fixtures = { path = "crates/cairn-test-fixtures" }
+# Path + version on intra-workspace deps so `cargo publish` can rewrite the
+# path to a registry version without losing the constraint. The version
+# tracks `[workspace.package].version`; bump them together.
+cairn-core = { path = "crates/cairn-core", version = "0.0.1" }
+cairn-mcp = { path = "crates/cairn-mcp", version = "0.0.1" }
+cairn-store-sqlite = { path = "crates/cairn-store-sqlite", version = "0.0.1" }
+cairn-sensors-local = { path = "crates/cairn-sensors-local", version = "0.0.1" }
+cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
+cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
+cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

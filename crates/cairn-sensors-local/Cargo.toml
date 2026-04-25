@@ -19,3 +19,7 @@ cairn-test-fixtures = { workspace = true }
 
 [lints]
 workspace = true
+
+# Forward-declared scaffold deps. Drop entries as their first call site lands.
+[package.metadata.cargo-machete]
+ignored = ["cairn-core", "tracing"]

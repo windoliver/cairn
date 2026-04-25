@@ -1,0 +1,31 @@
+version: 2
+
+# Keep SHA-pinned actions current. Dependabot rewrites the SHA + comment
+# when the upstream action ships a new tagged release; reviewers verify
+# the new SHA against the cited tag before merging.
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: ci
+      include: scope
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
+      include: scope

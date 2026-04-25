@@ -27,3 +27,16 @@ cairn-test-fixtures = { workspace = true }
 
 [lints]
 workspace = true
+
+# Forward-declared scaffold deps. These are wired by upcoming verb-impl
+# issues; until the bodies land, machete reports them as unused. Drop an
+# entry from this list as soon as its first call site exists.
+[package.metadata.cargo-machete]
+ignored = [
+    "anyhow",
+    "cairn-core",
+    "cairn-mcp",
+    "cairn-sensors-local",
+    "cairn-store-sqlite",
+    "cairn-workflows",
+]
