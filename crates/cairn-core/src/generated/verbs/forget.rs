@@ -80,6 +80,7 @@ impl ::core::convert::TryFrom<RawForgetArgs> for ForgetArgs {
             },
             RawForgetArgs::Session(inner) => {
                 let session_id = inner.session_id;
+                if session_id.is_empty() { return Err("session_id: must not be empty"); }
                 Ok(Self::Session { session_id })
             },
             RawForgetArgs::Scope(inner) => {

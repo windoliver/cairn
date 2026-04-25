@@ -1738,9 +1738,11 @@ fn write_tagged_union_raw_companion(
         for ident in &bind {
             w.line(&format!("let {ident} = inner.{ident};"));
         }
-        // Type-specific per-variant checks for RetrieveArgs.
+        // Type-specific per-variant checks for RetrieveArgs / ForgetArgs.
         if t.name.0 == "RetrieveArgs" {
             write_retrieve_args_variant_checks(w, &variant.rust_ident);
+        } else if t.name.0 == "ForgetArgs" {
+            write_forget_args_variant_checks(w, &variant.rust_ident);
         }
         w.line(&format!("Ok(Self::{dest} {{ {bind_list} }})"));
         w.dedent();
@@ -1857,6 +1859,16 @@ fn write_retrieve_args_variant_checks(w: &mut RustWriter, variant: &str) {
             w.line("}");
         }
         _ => {}
+    }
+}
+
+/// Per-variant validators for `ForgetArgs`, lifted from `verbs/forget.json`.
+/// Local bindings come from the TryFrom match arm above. The Session variant
+/// requires session_id minLength=1; Record/Scope require no extras (Ulid +
+/// ScopeFilter newtypes already enforce shape).
+fn write_forget_args_variant_checks(w: &mut RustWriter, variant: &str) {
+    if variant == "Session" {
+        w.line("if session_id.is_empty() { return Err(\"session_id: must not be empty\"); }");
     }
 }
 

@@ -1829,6 +1829,25 @@ fn retrieve_record_accepts_valid_ulid() {
     assert!(matches!(parsed, RetrieveArgs::Record { .. }));
 }
 
+// ── F1 (round 8): ForgetArgs Session.session_id minLength=1 ──────────────────
+
+#[test]
+fn forget_session_rejects_empty_session_id() {
+    let json = serde_json::json!({"mode": "session", "session_id": ""});
+    let err = serde_json::from_value::<ForgetArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("session_id") && err.to_string().contains("empty"),
+        "expected empty session_id rejection, got: {err}"
+    );
+}
+
+#[test]
+fn forget_session_accepts_non_empty_session_id() {
+    let json = serde_json::json!({"mode": "session", "session_id": "s1"});
+    let parsed: ForgetArgs = serde_json::from_value(json).unwrap();
+    assert!(matches!(parsed, ForgetArgs::Session { .. }));
+}
+
 #[test]
 fn retrieve_scope_rejects_overlong_cursor_via_newtype() {
     // Cursor newtype enforces maxLength: 512 at deserialize. Use the Session
