@@ -585,6 +585,12 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     }
 }
 
+/// Return true iff `s` is one of the closed capability strings in
+/// `capabilities/capabilities.json#oneOf[].const`.
+fn is_known_capability(s: &str) -> bool {
+    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree")
+}
+
 /// Structural validator for the error envelope payload. Mirrors the
 /// closed `oneOf` in `errors/error.json` until the typed Error envelope
 /// lands (#62). See `write_error_envelope_validator` in emit_sdk.rs for
@@ -592,6 +598,9 @@ fn is_rfc3339_datetime(s: &str) -> bool {
 #[allow(clippy::result_unit_err)]
 fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str> {
     let obj = err.as_object().ok_or("error: must be a JSON object")?;
+    for k in obj.keys() {
+        if !matches!(k.as_str(), "code" | "message" | "data") { return Err("error: unknown top-level key"); }
+    }
     let code = obj.get("code").and_then(::serde_json::Value::as_str).ok_or("error: code must be a string")?;
     match code {
         "InvalidArgs" | "InvalidFilter" | "CapabilityUnavailable" | "UnknownVerb" | "ExpiredIntent" | "ReplayDetected" | "OutOfOrderSequence" | "RevokedKey" | "MissingSignature" | "Unauthorized" | "NotFound" | "ConflictVersion" | "QuarantineRequired" | "PluginSuspended" | "Internal" => {},
@@ -602,6 +611,9 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
     match code {
         "InvalidArgs" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=InvalidArgs: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "field" | "reason") { return Err("error.code=InvalidArgs: data has unknown key"); }
+            }
             let v = data.get("field").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidArgs: data.field must be a string")?;
             if v.is_empty() { return Err("error.code=InvalidArgs: data.field must not be empty"); }
             let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidArgs: data.reason must be a string")?;
@@ -609,35 +621,53 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         },
         "InvalidFilter" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=InvalidFilter: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "reason") { return Err("error.code=InvalidFilter: data has unknown key"); }
+            }
             let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=InvalidFilter: data.reason must be a string")?;
             if v.is_empty() { return Err("error.code=InvalidFilter: data.reason must not be empty"); }
         },
         "CapabilityUnavailable" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=CapabilityUnavailable: data object required")?;
-            let v = data.get("capability").and_then(::serde_json::Value::as_str).ok_or("error.code=CapabilityUnavailable: data.capability must be a string")?;
-            if v.is_empty() { return Err("error.code=CapabilityUnavailable: data.capability must not be empty"); }
+            for k in data.keys() {
+                if !matches!(k.as_str(), "capability") { return Err("error.code=CapabilityUnavailable: data has unknown key"); }
+            }
+            let v = data.get("capability").and_then(::serde_json::Value::as_str).ok_or("error.code=CapabilityUnavailable: data.capability must be a capability string")?;
+            if !is_known_capability(v) { return Err("error.code=CapabilityUnavailable: data.capability must be a known capability"); }
         },
         "UnknownVerb" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=UnknownVerb: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "verb") { return Err("error.code=UnknownVerb: data has unknown key"); }
+            }
             let v = data.get("verb").and_then(::serde_json::Value::as_str).ok_or("error.code=UnknownVerb: data.verb must be a string")?;
             if v.is_empty() { return Err("error.code=UnknownVerb: data.verb must not be empty"); }
         },
         "ExpiredIntent" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ExpiredIntent: data object required")?;
-            let v = data.get("issued_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.issued_at must be a string")?;
-            if v.is_empty() { return Err("error.code=ExpiredIntent: data.issued_at must not be empty"); }
-            let v = data.get("expires_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.expires_at must be a string")?;
-            if v.is_empty() { return Err("error.code=ExpiredIntent: data.expires_at must not be empty"); }
-            let v = data.get("now").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.now must be a string")?;
-            if v.is_empty() { return Err("error.code=ExpiredIntent: data.now must not be empty"); }
+            for k in data.keys() {
+                if !matches!(k.as_str(), "issued_at" | "expires_at" | "now") { return Err("error.code=ExpiredIntent: data has unknown key"); }
+            }
+            let v = data.get("issued_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.issued_at must be an RFC-3339 date-time string")?;
+            if !is_rfc3339_datetime(v) { return Err("error.code=ExpiredIntent: data.issued_at must be an RFC-3339 date-time"); }
+            let v = data.get("expires_at").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.expires_at must be an RFC-3339 date-time string")?;
+            if !is_rfc3339_datetime(v) { return Err("error.code=ExpiredIntent: data.expires_at must be an RFC-3339 date-time"); }
+            let v = data.get("now").and_then(::serde_json::Value::as_str).ok_or("error.code=ExpiredIntent: data.now must be an RFC-3339 date-time string")?;
+            if !is_rfc3339_datetime(v) { return Err("error.code=ExpiredIntent: data.now must be an RFC-3339 date-time"); }
         },
         "ReplayDetected" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ReplayDetected: data object required")?;
-            let v = data.get("operation_id").and_then(::serde_json::Value::as_str).ok_or("error.code=ReplayDetected: data.operation_id must be a string")?;
-            if v.is_empty() { return Err("error.code=ReplayDetected: data.operation_id must not be empty"); }
+            for k in data.keys() {
+                if !matches!(k.as_str(), "operation_id") { return Err("error.code=ReplayDetected: data has unknown key"); }
+            }
+            let v = data.get("operation_id").and_then(::serde_json::Value::as_str).ok_or("error.code=ReplayDetected: data.operation_id must be a ULID string")?;
+            if !is_ulid_shape(v) { return Err("error.code=ReplayDetected: data.operation_id must be a Crockford base32 ULID"); }
         },
         "OutOfOrderSequence" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=OutOfOrderSequence: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "issuer" | "high_water" | "attempted") { return Err("error.code=OutOfOrderSequence: data has unknown key"); }
+            }
             let v = data.get("issuer").and_then(::serde_json::Value::as_str).ok_or("error.code=OutOfOrderSequence: data.issuer must be a string")?;
             if v.is_empty() { return Err("error.code=OutOfOrderSequence: data.issuer must not be empty"); }
             let v = data.get("high_water").and_then(::serde_json::Value::as_i64).ok_or("error.code=OutOfOrderSequence: data.high_water must be a non-negative integer")?;
@@ -647,6 +677,9 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         },
         "RevokedKey" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=RevokedKey: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "issuer" | "key_version") { return Err("error.code=RevokedKey: data has unknown key"); }
+            }
             let v = data.get("issuer").and_then(::serde_json::Value::as_str).ok_or("error.code=RevokedKey: data.issuer must be a string")?;
             if v.is_empty() { return Err("error.code=RevokedKey: data.issuer must not be empty"); }
             let v = data.get("key_version").and_then(::serde_json::Value::as_i64).ok_or("error.code=RevokedKey: data.key_version must be a positive integer")?;
@@ -654,16 +687,25 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         },
         "Unauthorized" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=Unauthorized: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "required") { return Err("error.code=Unauthorized: data has unknown key"); }
+            }
             let v = data.get("required").and_then(::serde_json::Value::as_str).ok_or("error.code=Unauthorized: data.required must be a string")?;
             if v.is_empty() { return Err("error.code=Unauthorized: data.required must not be empty"); }
         },
         "NotFound" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=NotFound: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "target") { return Err("error.code=NotFound: data has unknown key"); }
+            }
             let v = data.get("target").and_then(::serde_json::Value::as_str).ok_or("error.code=NotFound: data.target must be a string")?;
             if v.is_empty() { return Err("error.code=NotFound: data.target must not be empty"); }
         },
         "ConflictVersion" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=ConflictVersion: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "expected" | "actual") { return Err("error.code=ConflictVersion: data has unknown key"); }
+            }
             let v = data.get("expected").and_then(::serde_json::Value::as_i64).ok_or("error.code=ConflictVersion: data.expected must be a non-negative integer")?;
             if v < 0 { return Err("error.code=ConflictVersion: data.expected must be a non-negative integer"); }
             let v = data.get("actual").and_then(::serde_json::Value::as_i64).ok_or("error.code=ConflictVersion: data.actual must be a non-negative integer")?;
@@ -671,15 +713,42 @@ fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str
         },
         "QuarantineRequired" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=QuarantineRequired: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "reason") { return Err("error.code=QuarantineRequired: data has unknown key"); }
+            }
             let v = data.get("reason").and_then(::serde_json::Value::as_str).ok_or("error.code=QuarantineRequired: data.reason must be a string")?;
             if v.is_empty() { return Err("error.code=QuarantineRequired: data.reason must not be empty"); }
         },
         "PluginSuspended" => {
             let data = obj.get("data").and_then(::serde_json::Value::as_object).ok_or("error.code=PluginSuspended: data object required")?;
+            for k in data.keys() {
+                if !matches!(k.as_str(), "plugin_id") { return Err("error.code=PluginSuspended: data has unknown key"); }
+            }
             let v = data.get("plugin_id").and_then(::serde_json::Value::as_str).ok_or("error.code=PluginSuspended: data.plugin_id must be a string")?;
             if v.is_empty() { return Err("error.code=PluginSuspended: data.plugin_id must not be empty"); }
         },
-        "Internal" | "MissingSignature" => {},
+        "Internal" => {
+            if let Some(d) = obj.get("data") {
+                if !d.is_null() {
+                    let data = d.as_object().ok_or("error.code=Internal: data must be an object or null")?;
+                    for k in data.keys() {
+                        if k != "correlation_id" { return Err("error.code=Internal: data has unknown key"); }
+                    }
+                    if let Some(cid) = data.get("correlation_id") {
+                        let cid = cid.as_str().ok_or("error.code=Internal: data.correlation_id must be a ULID string")?;
+                        if !is_ulid_shape(cid) { return Err("error.code=Internal: data.correlation_id must be a Crockford base32 ULID"); }
+                    }
+                }
+            }
+        },
+        "MissingSignature" => {
+            if let Some(d) = obj.get("data") {
+                if !d.is_null() {
+                    let data = d.as_object().ok_or("error.code=MissingSignature: data must be an object or null")?;
+                    if !data.is_empty() { return Err("error.code=MissingSignature: data has unknown key"); }
+                }
+            }
+        },
         _ => {},
     }
     Ok(())

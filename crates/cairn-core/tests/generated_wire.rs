@@ -1514,9 +1514,7 @@ fn filter_rejects_null_leaf() {
         .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("filter leaf")
-            || msg.contains("did not match")
-            || msg.contains("JSON object"),
+        msg.contains("filter leaf") || msg.contains("did not match") || msg.contains("JSON object"),
         "expected null-leaf rejection, got: {err}"
     );
 }
@@ -2002,6 +2000,147 @@ fn filter_pure_leaf_still_round_trips_as_leaf() {
     let wire = serde_json::json!({"field": "x", "op": "eq", "value": 1});
     let parsed: SearchArgsFilters = serde_json::from_value(wire).unwrap();
     assert!(matches!(parsed, SearchArgsFilters::Leaf(_)));
+}
+
+// ── F5 (round 8): Error envelope validator closes top-level + data shapes ───
+
+#[test]
+fn response_error_rejects_unknown_top_level_key() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "NotFound",
+            "message": "x",
+            "data": {"target": "t"},
+            "unknown_top": 1,
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown top-level key"),
+        "expected unknown-top-key rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_error_rejects_replay_detected_with_non_ulid_operation_id() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "ReplayDetected",
+            "message": "x",
+            "data": {"operation_id": "not-a-ulid"},
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected non-ULID operation_id rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_error_rejects_expired_intent_with_garbage_timestamp() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "ExpiredIntent",
+            "message": "x",
+            "data": {
+                "issued_at": "yesterday",
+                "expires_at": "2026-01-01T00:00:00Z",
+                "now": "2026-01-01T00:00:00Z",
+            },
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("RFC-3339") || err.to_string().contains("issued_at"),
+        "expected RFC-3339 rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_error_rejects_capability_unavailable_with_unknown_capability() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "x",
+            "data": {"capability": "cairn.bogus.fake.v1"},
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("known capability") || err.to_string().contains("capability"),
+        "expected unknown-capability rejection, got: {err}"
+    );
+}
+
+#[test]
+fn response_error_capability_unavailable_with_known_capability_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": "x",
+            "data": {"capability": "cairn.mcp.v1.search.semantic"},
+        }),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+
+#[test]
+fn response_error_replay_detected_with_valid_ulid_round_trips() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("search"));
+    m.insert("status".into(), serde_json::json!("rejected"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "ReplayDetected",
+            "message": "x",
+            "data": {"operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"},
+        }),
+    );
+    let parsed: Response = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
+    assert!(parsed.data.is_none());
+}
+
+#[test]
+fn response_error_rejects_data_with_unknown_key() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("aborted"));
+    m.insert(
+        "error".into(),
+        serde_json::json!({
+            "code": "NotFound",
+            "message": "x",
+            "data": {"target": "t", "extra": 1},
+        }),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown key"),
+        "expected unknown-data-key rejection, got: {err}"
+    );
 }
 
 // ── F2 (round 8): Response status bound to error-code family ─────────────────

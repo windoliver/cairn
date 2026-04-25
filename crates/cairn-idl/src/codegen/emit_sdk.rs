@@ -474,11 +474,36 @@ fn emit_envelope(
     // once, at module scope, so any TryFrom validation can reference it.
     write_ulid_shape_helper(&mut w);
     w.blank();
+    write_known_capability_helper(&mut w, doc);
+    w.blank();
     write_error_envelope_validator(&mut w, doc);
     Ok(GeneratedFile {
         path: PathBuf::from(ROOT).join("envelope/mod.rs"),
         bytes: w.finish().into_bytes(),
     })
+}
+
+/// Emit `is_known_capability`, used by the error envelope validator to enforce
+/// `CapabilityUnavailable.data.capability` against the closed enum lifted from
+/// `capabilities/capabilities.json`. Hard-coded match on the IDL strings.
+fn write_known_capability_helper(w: &mut RustWriter, doc: &Document) {
+    w.line("/// Return true iff `s` is one of the closed capability strings in");
+    w.line("/// `capabilities/capabilities.json#oneOf[].const`.");
+    w.line("fn is_known_capability(s: &str) -> bool {");
+    w.indent();
+    if doc.capabilities.is_empty() {
+        w.line("let _ = s; false");
+    } else {
+        let alts = doc
+            .capabilities
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        w.line(&format!("matches!(s, {alts})"));
+    }
+    w.dedent();
+    w.line("}");
 }
 
 /// Emit `validate_error_envelope`, used by the Response Deserialize impl to
@@ -498,6 +523,16 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
     w.line("fn validate_error_envelope(err: &::serde_json::Value) -> Result<(), &'static str> {");
     w.indent();
     w.line("let obj = err.as_object().ok_or(\"error: must be a JSON object\")?;");
+    // Reject unknown top-level keys. errors/error.json's per-variant oneOf
+    // declares `additionalProperties: false` on every arm; the closed key
+    // set is exactly {code, message, data}.
+    w.line("for k in obj.keys() {");
+    w.indent();
+    w.line(
+        "if !matches!(k.as_str(), \"code\" | \"message\" | \"data\") { return Err(\"error: unknown top-level key\"); }",
+    );
+    w.dedent();
+    w.line("}");
     w.line(
         "let code = obj.get(\"code\").and_then(::serde_json::Value::as_str).ok_or(\"error: code must be a string\")?;",
     );
@@ -541,23 +576,19 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
     write_error_data_arm(
         w,
         "CapabilityUnavailable",
-        &[("capability", FieldShape::NonEmptyString)],
+        &[("capability", FieldShape::Capability)],
     );
     write_error_data_arm(w, "UnknownVerb", &[("verb", FieldShape::NonEmptyString)]);
     write_error_data_arm(
         w,
         "ExpiredIntent",
         &[
-            ("issued_at", FieldShape::NonEmptyString),
-            ("expires_at", FieldShape::NonEmptyString),
-            ("now", FieldShape::NonEmptyString),
+            ("issued_at", FieldShape::Rfc3339Datetime),
+            ("expires_at", FieldShape::Rfc3339Datetime),
+            ("now", FieldShape::Rfc3339Datetime),
         ],
     );
-    write_error_data_arm(
-        w,
-        "ReplayDetected",
-        &[("operation_id", FieldShape::NonEmptyString)],
-    );
+    write_error_data_arm(w, "ReplayDetected", &[("operation_id", FieldShape::Ulid)]);
     write_error_data_arm(
         w,
         "OutOfOrderSequence",
@@ -599,8 +630,59 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
         "PluginSuspended",
         &[("plugin_id", FieldShape::NonEmptyString)],
     );
-    // Internal and MissingSignature have no required data fields.
-    w.line("\"Internal\" | \"MissingSignature\" => {},");
+    // Internal and MissingSignature have no required data fields. When data is
+    // present, the closed shape still applies — Internal allows an optional
+    // `correlation_id` (Ulid), MissingSignature has no permitted keys.
+    w.line("\"Internal\" => {");
+    w.indent();
+    w.line("if let Some(d) = obj.get(\"data\") {");
+    w.indent();
+    w.line("if !d.is_null() {");
+    w.indent();
+    w.line(
+        "let data = d.as_object().ok_or(\"error.code=Internal: data must be an object or null\")?;",
+    );
+    w.line("for k in data.keys() {");
+    w.indent();
+    w.line(
+        "if k != \"correlation_id\" { return Err(\"error.code=Internal: data has unknown key\"); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.line("if let Some(cid) = data.get(\"correlation_id\") {");
+    w.indent();
+    w.line(
+        "let cid = cid.as_str().ok_or(\"error.code=Internal: data.correlation_id must be a ULID string\")?;",
+    );
+    w.line(
+        "if !is_ulid_shape(cid) { return Err(\"error.code=Internal: data.correlation_id must be a Crockford base32 ULID\"); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
+    w.line("\"MissingSignature\" => {");
+    w.indent();
+    w.line("if let Some(d) = obj.get(\"data\") {");
+    w.indent();
+    w.line("if !d.is_null() {");
+    w.indent();
+    w.line(
+        "let data = d.as_object().ok_or(\"error.code=MissingSignature: data must be an object or null\")?;",
+    );
+    w.line(
+        "if !data.is_empty() { return Err(\"error.code=MissingSignature: data has unknown key\"); }",
+    );
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("}");
+    w.dedent();
+    w.line("},");
     w.line("_ => {},");
     w.dedent();
     w.line("}");
@@ -614,6 +696,9 @@ enum FieldShape {
     NonEmptyString,
     NonNegativeInt,
     PositiveInt,
+    Ulid,
+    Rfc3339Datetime,
+    Capability,
 }
 
 fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldShape)]) {
@@ -622,6 +707,18 @@ fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldSh
     w.line(&format!(
         "let data = obj.get(\"data\").and_then(::serde_json::Value::as_object).ok_or(\"error.code={code}: data object required\")?;"
     ));
+    // Reject unknown keys on the data object — every error.json $defs subtype
+    // declares `additionalProperties: false`. Build the closed allow-list
+    // from the field list.
+    let allow: Vec<String> = fields.iter().map(|(n, _)| format!("\"{n}\"")).collect();
+    let allow_pat = allow.join(" | ");
+    w.line("for k in data.keys() {");
+    w.indent();
+    w.line(&format!(
+        "if !matches!(k.as_str(), {allow_pat}) {{ return Err(\"error.code={code}: data has unknown key\"); }}"
+    ));
+    w.dedent();
+    w.line("}");
     for (name, shape) in fields {
         match shape {
             FieldShape::NonEmptyString => {
@@ -646,6 +743,30 @@ fn write_error_data_arm(w: &mut RustWriter, code: &str, fields: &[(&str, FieldSh
                 ));
                 w.line(&format!(
                     "if v < 1 {{ return Err(\"error.code={code}: data.{name} must be a positive integer\"); }}"
+                ));
+            }
+            FieldShape::Ulid => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_str).ok_or(\"error.code={code}: data.{name} must be a ULID string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_ulid_shape(v) {{ return Err(\"error.code={code}: data.{name} must be a Crockford base32 ULID\"); }}"
+                ));
+            }
+            FieldShape::Rfc3339Datetime => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_str).ok_or(\"error.code={code}: data.{name} must be an RFC-3339 date-time string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_rfc3339_datetime(v) {{ return Err(\"error.code={code}: data.{name} must be an RFC-3339 date-time\"); }}"
+                ));
+            }
+            FieldShape::Capability => {
+                w.line(&format!(
+                    "let v = data.get(\"{name}\").and_then(::serde_json::Value::as_str).ok_or(\"error.code={code}: data.{name} must be a capability string\")?;"
+                ));
+                w.line(&format!(
+                    "if !is_known_capability(v) {{ return Err(\"error.code={code}: data.{name} must be a known capability\"); }}"
                 ));
             }
         }
@@ -2845,7 +2966,9 @@ fn write_filter_leaf_validator(w: &mut RustWriter) {
     w.line("for item in arr {");
     w.indent();
     w.line("let s = item.as_str().ok_or(\"filter leaf: in/nin array must be all strings or all numbers\")?;");
-    w.line("if s.is_empty() { return Err(\"filter leaf: array items must be non-empty strings\"); }");
+    w.line(
+        "if s.is_empty() { return Err(\"filter leaf: array items must be non-empty strings\"); }",
+    );
     w.dedent();
     w.line("}");
     w.dedent();

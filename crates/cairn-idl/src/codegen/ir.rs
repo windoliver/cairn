@@ -991,9 +991,7 @@ fn build_error_code_families(
         .get("x-cairn-error-code-families")
         .and_then(Value::as_object)
         .ok_or_else(|| {
-            CodegenError::Ir(
-                "envelope/response.json missing x-cairn-error-code-families".into(),
-            )
+            CodegenError::Ir("envelope/response.json missing x-cairn-error-code-families".into())
         })?;
     let collect = |key: &str| -> Result<Vec<String>, CodegenError> {
         families
