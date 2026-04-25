@@ -30,8 +30,6 @@ const ALLOWED_NO_DISCRIMINATOR: &[&str] = &[
     // Response union — variants are structurally distinct (different required fields);
     // a discriminator field will be added in a later increment once the response envelope lands.
     "verbs/retrieve.json#/$defs/Data/oneOf",
-    // forget Args is a tagged union on `mode` — discriminator will be added alongside retrieve.
-    "verbs/forget.json#/$defs/Args/oneOf",
 ];
 
 #[test]

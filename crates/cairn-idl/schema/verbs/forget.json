@@ -24,6 +24,7 @@
   "type": "object",
   "$defs": {
     "Args": {
+      "x-cairn-discriminator": "mode",
       "oneOf": [
         { "$ref": "#/$defs/ArgsRecord" },
         { "$ref": "#/$defs/ArgsSession" },
