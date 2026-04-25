@@ -12,6 +12,24 @@
 /// in the calling crate that registers `$impl` under contract `$contract`
 /// with the stable name `$name`.
 ///
+/// # Construction discipline
+///
+/// The generated `register` function constructs the impl via
+/// `<$impl as Default>::default()` **before** the registry runs version,
+/// identity, or duplicate-name checks. Implementations of [`Default::default`]
+/// must therefore be **side-effect free**: no I/O, no resource allocation,
+/// no panics. Open files, network connections, model handles, etc. belong in
+/// a separate `init`/`open` step the host invokes after registration —
+/// typically driven by `.cairn/config.yaml` (brief §4.1).
+///
+/// Config-driven construction (e.g., a `MemoryStore` impl that needs a
+/// database path at build time) is **not yet supported** by this macro;
+/// it will arrive in a follow-up issue that adds a factory variant
+/// (`register_plugin_with!(<contract>, <impl>, <name>, |cfg| <factory>)`)
+/// alongside trait-level associated consts so compatibility can be checked
+/// before construction. Until then: keep `Default` cheap, push real init
+/// behind an explicit `init(&Config)` method on your impl.
+///
 /// # Examples
 /// ```ignore
 /// use cairn_core::contract::register_plugin;
