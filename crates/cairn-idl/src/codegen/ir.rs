@@ -300,6 +300,10 @@ pub fn lower_schema(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenErr
         if arr.iter().all(|v| v.get("required").is_some()) {
             return lower_untagged_union(value, arr, ctx);
         }
+        // (2d) single-entry oneOf that contains a $ref — treat as just the $ref.
+        if arr.len() == 1 && let Some(reference) = arr[0].get("$ref").and_then(Value::as_str) {
+            return Ok(RustType::Ref(typename_from_ref(reference)));
+        }
         return Err(CodegenError::Ir(
             "oneOf shape not recognised — needs x-cairn-discriminator or all-const variants"
                 .to_string(),
@@ -586,6 +590,51 @@ fn lower_untagged_union(value: &Value, arr: &[Value], ctx: &mut Ctx) -> Result<R
         name: target,
         fields,
         xor_groups,
+        doc: value.get("description").and_then(Value::as_str).map(String::from),
+    }))
+}
+
+/// Special-case lowering for the `filter` family. Collapses `filter_L0..L8`
+/// into a single recursive enum:
+///
+/// ```rust,ignore
+/// pub enum Filter {
+///     Leaf(FilterLeaf),
+///     And(Vec<Filter>),
+///     Or(Vec<Filter>),
+///     Not(Box<Filter>),
+/// }
+/// ```
+///
+/// The depth bound stays in JSON Schema only — runtime depth checks belong
+/// to the search verb implementation (#9 / #63).
+///
+/// # Errors
+/// Returns [`CodegenError::Ir`] when `filter_leaf` is absent from `ctx.defs`
+/// or the leaf schema cannot be lowered.
+pub fn lower_filter_root(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> {
+    let max_depth = value
+        .get("x-cairn-max-depth")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(8);
+    let max_fanout = value
+        .get("x-cairn-max-fanout")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(32);
+    let leaf = ctx
+        .defs
+        .get("filter_leaf")
+        .ok_or_else(|| CodegenError::Ir("filter family missing filter_leaf def".to_string()))?
+        .clone();
+    let mut leaf_ctx = Ctx::with_target("FilterLeaf").with_defs(ctx.defs.clone());
+    let leaf_ty = lower_schema(&leaf, &mut leaf_ctx)?;
+    Ok(RustType::Recursive(RecursiveEnumDef {
+        name: ctx.target.clone().unwrap_or_else(|| TypeName::new("Filter")),
+        leaf: Box::new(leaf_ty),
+        max_depth,
+        max_fanout,
         doc: value.get("description").and_then(Value::as_str).map(String::from),
     }))
 }

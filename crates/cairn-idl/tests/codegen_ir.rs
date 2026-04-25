@@ -169,3 +169,34 @@ fn untagged_union_xor_groups() {
     // body/file/url stay Optional in the type itself, XOR is in xor_groups.
     assert_eq!(u.xor_groups.len(), 3);
 }
+
+#[test]
+fn filter_family_collapses_to_recursive() {
+    // Minimal stand-in for the filter root schema.
+    let v = json!({
+        "x-cairn-max-depth": 8,
+        "x-cairn-max-fanout": 32,
+        "$ref": "#/$defs/filter_L8"
+    });
+    let mut defs = std::collections::BTreeMap::new();
+    defs.insert("filter_leaf".to_string(), json!({
+        "oneOf": [
+            { "$ref": "#/$defs/filter_leaf_string" }
+        ]
+    }));
+    defs.insert("filter_leaf_string".to_string(), json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "op", "value"],
+        "properties": {
+            "field": {"type": "string"},
+            "op": {"type": "string", "enum": ["eq"]},
+            "value": {"type": "string"}
+        }
+    }));
+    let mut ctx = Ctx::with_target("Filter").with_defs(defs);
+    let ty = cairn_idl::codegen::ir::lower_filter_root(&v, &mut ctx).unwrap();
+    let RustType::Recursive(r) = ty else { panic!("expected Recursive, got {ty:?}") };
+    assert_eq!(r.max_depth, 8);
+    assert_eq!(r.max_fanout, 32);
+}
