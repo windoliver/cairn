@@ -1569,9 +1569,25 @@ fn write_struct(
 
 /// Bespoke-validator allow-list: structs whose Deserialize must run extra
 /// IDL constraints the generic IR doesn't carry (numeric bounds, array
-/// minItems, uniqueItems). Listed by Rust type name.
+/// minItems, uniqueItems, string `minLength: 1`). Listed by Rust type name.
+///
+/// The retrieve Data* structs (and their RecordRef shared element) all
+/// declare per-field constraints in `verbs/retrieve.json#/$defs/Data*`
+/// (path/session_id/kind minLength 1, depth maximum 16) that the generic
+/// IR strips during lowering. Special-casing them here drives those
+/// constraints into a hand-rolled Deserialize via the existing Raw-companion
+/// path. A future enhancement is to thread the constraints through the IR
+/// itself; for now the allow-list keeps the codegen surface narrow.
 fn struct_has_extra_validators(name: &str) -> bool {
-    matches!(name, "SearchArgs")
+    matches!(
+        name,
+        "SearchArgs"
+            | "DataRecord"
+            | "DataSession"
+            | "DataTurn"
+            | "DataFolder"
+            | "RecordRef"
+    )
 }
 
 /// Emit the `Raw<Name>` companion + `TryFrom` + hand-rolled `Deserialize`
@@ -1625,6 +1641,15 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     }
     if s.name.0 == "SearchArgs" {
         write_search_args_extra_checks(w);
+    }
+    // Retrieve Data* / RecordRef share the same shape: a handful of strings
+    // marked `minLength: 1` and (for DataFolder) a numeric `maximum`. The
+    // helper dispatches by struct name.
+    if matches!(
+        s.name.0.as_str(),
+        "DataRecord" | "DataSession" | "DataTurn" | "DataFolder" | "RecordRef"
+    ) {
+        write_retrieve_data_extra_checks(w, &s.name.0);
     }
     w.line("Ok(Self {");
     w.indent();
@@ -2382,6 +2407,66 @@ fn write_search_args_extra_checks(w: &mut RustWriter) {
     w.line("if !(1..=1000).contains(&lim) { return Err(\"limit: must be in [1, 1000]\"); }");
     w.dedent();
     w.line("}");
+}
+
+/// Emit bespoke field-level validation for the retrieve `Data*` structs and
+/// the shared `RecordRef` element. The IDL declares these in
+/// `verbs/retrieve.json#/$defs/Data*`:
+///
+/// * `DataRecord.kind`: minLength 1.
+/// * `DataSession.session_id`: minLength 1.
+/// * `DataTurn.session_id`: minLength 1. (`turn_id` is u64 in Rust so the IDL
+///   `minimum: 0` is structural; nothing to enforce.)
+/// * `DataFolder.path`: minLength 1; `DataFolder.depth`: maximum 16.
+/// * `RecordRef.kind`: minLength 1.
+///
+/// The generic IR strips these constraints during lowering, so without the
+/// hand-rolled check `DataFolder { depth: 999, path: "" }` and
+/// `DataRecord { kind: "" }` deserialize through. Match-on-name dispatch
+/// keeps the bespoke logic narrowly scoped — every check has the constraint's
+/// schema source cited inline.
+fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
+    match type_name {
+        "DataRecord" => {
+            // DataRecord.kind: minLength 1.
+            w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+        }
+        "DataSession" => {
+            // DataSession.session_id: minLength 1.
+            w.line(
+                "if raw.session_id.is_empty() { return Err(\"session_id: must not be empty\"); }",
+            );
+        }
+        "DataTurn" => {
+            // DataTurn.session_id: minLength 1. turn_id is u64, so the IDL
+            // `minimum: 0` is structural — no extra check needed.
+            w.line(
+                "if raw.session_id.is_empty() { return Err(\"session_id: must not be empty\"); }",
+            );
+        }
+        "DataFolder" => {
+            // DataFolder.path: minLength 1; DataFolder.depth: maximum 16.
+            w.line("if raw.path.is_empty() { return Err(\"path: must not be empty\"); }");
+            w.line("if let Some(d) = raw.depth {");
+            w.indent();
+            w.line("if d > 16 { return Err(\"depth: must be in [0, 16]\"); }");
+            w.dedent();
+            w.line("}");
+        }
+        "RecordRef" => {
+            // RecordRef.kind: minLength 1.
+            w.line("if raw.kind.is_empty() { return Err(\"kind: must not be empty\"); }");
+        }
+        _ => {
+            // Unreachable — the dispatch in write_struct_raw_companion gates
+            // every entry in this match. Keep the catch-all so adding a new
+            // entry to the allow-list without updating this match is a
+            // compile-time tap on the shoulder.
+            w.line(&format!(
+                "let _ = &raw; return Err(\"{type_name}: extra-checks unimplemented\");"
+            ));
+        }
+    }
 }
 
 /// Emit bespoke field-level validation for `SignedIntent`.

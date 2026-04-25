@@ -2412,3 +2412,73 @@ fn nonce16_primitive_accepts_unpadded_canonical_value() {
         serde_json::from_value(serde_json::json!("BBBBBBBBBBBBBBBBBBBBBA")).unwrap();
     assert_eq!(parsed.0, "BBBBBBBBBBBBBBBBBBBBBA");
 }
+
+// ── F3 (round 9): retrieve Data* per-field constraints at deserialize ─────────
+
+#[test]
+fn retrieve_data_folder_rejects_depth_above_max() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("folder"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"path": "a/b", "depth": 999, "items": []}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("depth"),
+        "expected DataFolder.depth rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_data_folder_rejects_empty_path() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("folder"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"path": "", "depth": 1, "items": []}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("path"),
+        "expected DataFolder.path rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_data_record_rejects_empty_kind() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("record"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"record_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "kind": ""}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("kind"),
+        "expected DataRecord.kind rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_data_session_rejects_empty_session_id() {
+    let mut m = response_base();
+    m.insert("verb".into(), serde_json::json!("retrieve"));
+    m.insert("status".into(), serde_json::json!("committed"));
+    m.insert("target".into(), serde_json::json!("session"));
+    m.insert(
+        "data".into(),
+        serde_json::json!({"session_id": "", "items": []}),
+    );
+    let err = serde_json::from_value::<Response>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("session_id"),
+        "expected DataSession.session_id rejection, got: {err}"
+    );
+}

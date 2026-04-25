@@ -5,13 +5,45 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataFolder {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth: Option<u64>,
     pub items: Vec<RecordRef>,
     pub path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataFolder {
+    #[serde(default)]
+    depth: Option<u64>,
+    items: Vec<RecordRef>,
+    path: String,
+}
+
+impl ::core::convert::TryFrom<RawDataFolder> for DataFolder {
+    type Error = &'static str;
+    fn try_from(raw: RawDataFolder) -> Result<Self, Self::Error> {
+        if raw.path.is_empty() { return Err("path: must not be empty"); }
+        if let Some(d) = raw.depth {
+            if d > 16 { return Err("depth: must be in [0, 16]"); }
+        }
+        Ok(Self {
+            depth: raw.depth,
+            items: raw.items,
+            path: raw.path,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataFolder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataFolder::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -59,7 +91,7 @@ pub struct DataProfile {
     pub subject: DataProfileSubject,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +100,38 @@ pub struct DataRecord {
     pub frontmatter: Option<serde_json::Value>,
     pub kind: String,
     pub record_id: crate::generated::common::Ulid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataRecord {
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    frontmatter: Option<serde_json::Value>,
+    kind: String,
+    record_id: crate::generated::common::Ulid,
+}
+
+impl ::core::convert::TryFrom<RawDataRecord> for DataRecord {
+    type Error = &'static str;
+    fn try_from(raw: RawDataRecord) -> Result<Self, Self::Error> {
+        if raw.kind.is_empty() { return Err("kind: must not be empty"); }
+        Ok(Self {
+            body: raw.body,
+            frontmatter: raw.frontmatter,
+            kind: raw.kind,
+            record_id: raw.record_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataRecord::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,7 +143,7 @@ pub struct DataScope {
     pub scope: crate::generated::common::ScopeFilter,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataSession {
     pub items: Vec<TurnItem>,
@@ -88,7 +152,36 @@ pub struct DataSession {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataSession {
+    items: Vec<TurnItem>,
+    #[serde(default)]
+    next_cursor: Option<crate::generated::common::Cursor>,
+    session_id: String,
+}
+
+impl ::core::convert::TryFrom<RawDataSession> for DataSession {
+    type Error = &'static str;
+    fn try_from(raw: RawDataSession) -> Result<Self, Self::Error> {
+        if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        Ok(Self {
+            items: raw.items,
+            next_cursor: raw.next_cursor,
+            session_id: raw.session_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataSession {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataSession::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataTurn {
     pub session_id: String,
@@ -96,13 +189,70 @@ pub struct DataTurn {
     pub turn_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDataTurn {
+    session_id: String,
+    turn: TurnItem,
+    turn_id: u64,
+}
+
+impl ::core::convert::TryFrom<RawDataTurn> for DataTurn {
+    type Error = &'static str;
+    fn try_from(raw: RawDataTurn) -> Result<Self, Self::Error> {
+        if raw.session_id.is_empty() { return Err("session_id: must not be empty"); }
+        Ok(Self {
+            session_id: raw.session_id,
+            turn: raw.turn,
+            turn_id: raw.turn_id,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for DataTurn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawDataTurn::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordRef {
     pub kind: String,
     pub record_id: crate::generated::common::Ulid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snippet: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRecordRef {
+    kind: String,
+    record_id: crate::generated::common::Ulid,
+    #[serde(default)]
+    snippet: Option<String>,
+}
+
+impl ::core::convert::TryFrom<RawRecordRef> for RecordRef {
+    type Error = &'static str;
+    fn try_from(raw: RawRecordRef) -> Result<Self, Self::Error> {
+        if raw.kind.is_empty() { return Err("kind: must not be empty"); }
+        Ok(Self {
+            kind: raw.kind,
+            record_id: raw.record_id,
+            snippet: raw.snippet,
+        })
+    }
+}
+
+impl<'de> ::serde::Deserialize<'de> for RecordRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: ::serde::Deserializer<'de> {
+        let raw = RawRecordRef::deserialize(deserializer)?;
+        Self::try_from(raw).map_err(::serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
