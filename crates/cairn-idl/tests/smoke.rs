@@ -9,20 +9,23 @@ fn crate_name_matches() {
 }
 
 #[test]
-fn codegen_binary_fails_closed() {
-    // The codegen scaffold must NOT report success — any caller shelling out
-    // to it could otherwise treat missing schema generation as complete.
+fn codegen_binary_help_exits_zero() {
+    // The binary must have a deterministic, well-formed CLI.
+    // `--help` should print usage and exit 0.
     let bin = env!("CARGO_BIN_EXE_cairn-codegen");
-    let out = Command::new(bin).output().expect("cairn-codegen");
-    assert!(!out.status.success(), "cairn-codegen exited OK — should fail closed");
-    assert_eq!(out.status.code(), Some(2), "wrong exit code");
-    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    let out = Command::new(bin).arg("--help").output().expect("cairn-codegen --help");
     assert!(
-        stderr.contains("not yet implemented"),
-        "stderr missing not-implemented marker: {stderr:?}",
+        out.status.success(),
+        "cairn-codegen --help should exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
-    assert!(stdout.is_empty(), "scaffold must not print to stdout: {stdout:?}");
+    assert!(
+        stdout.contains("cairn-codegen"),
+        "--help output should contain binary name: {stdout:?}",
+    );
 }
 
 #[test]
