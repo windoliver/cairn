@@ -71,9 +71,7 @@ macro_rules! __register_plugin_helper {
             let name = $crate::contract::registry::PluginName::new($name)?;
             reg.$method(
                 name,
-                ::std::sync::Arc::new(
-                    <$impl as ::core::default::Default>::default(),
-                ),
+                ::std::sync::Arc::new(<$impl as ::core::default::Default>::default()),
             )
         }
     };

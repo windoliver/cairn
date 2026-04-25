@@ -3,9 +3,7 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::memory_store::{
-    MemoryStore, MemoryStoreCapabilities, CONTRACT_VERSION,
-};
+use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
@@ -31,10 +29,7 @@ mod compatible_plugin {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(
-                ContractVersion::new(0, 1, 0),
-                ContractVersion::new(0, 2, 0),
-            )
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
     }
 
@@ -81,14 +76,18 @@ fn compatible_plugin_registers_via_macro() {
     let name = PluginName::new("fake-compat").expect("valid name");
     let resolved = reg.memory_store(&name).expect("registered");
     assert_eq!(resolved.name(), "fake-compatible");
-    assert!(resolved.supported_contract_versions().accepts(CONTRACT_VERSION));
+    assert!(
+        resolved
+            .supported_contract_versions()
+            .accepts(CONTRACT_VERSION)
+    );
 }
 
 #[test]
 fn incompatible_plugin_fails_closed() {
     let mut reg = PluginRegistry::new();
-    let err = future_plugin::register(&mut reg)
-        .expect_err("plugin demanding future host must fail");
+    let err =
+        future_plugin::register(&mut reg).expect_err("plugin demanding future host must fail");
     match err {
         PluginError::UnsupportedContractVersion { contract, host, .. } => {
             assert_eq!(contract, "MemoryStore");
