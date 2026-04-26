@@ -3,6 +3,8 @@
 //! Confidence is a single scalar in `[0.0, 1.0]`; Evidence is a four-part
 //! vector that drives promotion, expiration, and dream scheduling.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainError;
@@ -21,6 +23,29 @@ pub enum ConfidenceBand {
 }
 
 impl ConfidenceBand {
+    /// Wire-format identifier. Stable across surfaces.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Uncertain => "uncertain",
+        }
+    }
+
+    /// Parse a wire-form band string. Returns
+    /// [`DomainError::UnsupportedConfidenceBand`] for unknown values.
+    pub fn parse(value: &str) -> Result<Self, DomainError> {
+        match value {
+            "high" => Ok(Self::High),
+            "normal" => Ok(Self::Normal),
+            "uncertain" => Ok(Self::Uncertain),
+            other => Err(DomainError::UnsupportedConfidenceBand {
+                value: other.to_owned(),
+            }),
+        }
+    }
+
     /// Map a confidence scalar to its band.
     #[must_use]
     pub fn from_scalar(confidence: f32) -> Self {
@@ -31,6 +56,12 @@ impl ConfidenceBand {
         } else {
             Self::Normal
         }
+    }
+}
+
+impl fmt::Display for ConfidenceBand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -93,6 +124,55 @@ mod tests {
     #[test]
     fn band_uncertain() {
         assert_eq!(ConfidenceBand::from_scalar(0.1), ConfidenceBand::Uncertain);
+    }
+
+    #[test]
+    fn band_as_str_all_3_values() {
+        assert_eq!(ConfidenceBand::High.as_str(), "high");
+        assert_eq!(ConfidenceBand::Normal.as_str(), "normal");
+        assert_eq!(ConfidenceBand::Uncertain.as_str(), "uncertain");
+    }
+
+    #[test]
+    fn band_parse_all_3_valid() {
+        assert_eq!(
+            ConfidenceBand::parse("high").expect("high"),
+            ConfidenceBand::High
+        );
+        assert_eq!(
+            ConfidenceBand::parse("normal").expect("normal"),
+            ConfidenceBand::Normal
+        );
+        assert_eq!(
+            ConfidenceBand::parse("uncertain").expect("uncertain"),
+            ConfidenceBand::Uncertain
+        );
+    }
+
+    #[test]
+    fn band_parse_rejects_invented() {
+        let err = ConfidenceBand::parse("very_high").unwrap_err();
+        assert!(matches!(err, DomainError::UnsupportedConfidenceBand { .. }));
+    }
+
+    #[test]
+    fn band_as_str_parse_round_trip() {
+        for band in [
+            ConfidenceBand::High,
+            ConfidenceBand::Normal,
+            ConfidenceBand::Uncertain,
+        ] {
+            assert_eq!(
+                ConfidenceBand::parse(band.as_str()).expect(band.as_str()),
+                band
+            );
+        }
+    }
+
+    #[test]
+    fn band_display_matches_wire_form() {
+        assert_eq!(format!("{}", ConfidenceBand::High), "high");
+        assert_eq!(format!("{}", ConfidenceBand::Uncertain), "uncertain");
     }
 
     #[test]
