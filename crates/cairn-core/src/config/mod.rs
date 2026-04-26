@@ -40,7 +40,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultTier {
-    /// Single-user, on-disk SQLite vault. P0 default.
+    /// Single-user, on-disk `SQLite` vault. P0 default.
     #[default]
     Local,
     /// Embedded in another process (library mode). P1.
@@ -49,7 +49,7 @@ pub enum VaultTier {
     Cloud,
 }
 
-/// Ordered steps in the hot-memory assembly recipe (§3.1 hot_memory.recipe).
+/// Ordered steps in the hot-memory assembly recipe (§3.1 `hot_memory.recipe`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HotMemoryRecipeStep {
@@ -79,7 +79,7 @@ pub enum ExtractTrigger {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LlmProvider {
-    /// Any OpenAI-compatible endpoint (Ollama, LM Studio, OpenAI, Azure).
+    /// Any `OpenAI`-compatible endpoint (Ollama, LM Studio, `OpenAI`, Azure).
     OpenaiCompatible,
 }
 
