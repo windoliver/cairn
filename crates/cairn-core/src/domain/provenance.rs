@@ -59,6 +59,10 @@ struct ProvenanceWire {
     llm_id_if_any: Option<Option<String>>,
 }
 
+#[allow(
+    clippy::option_option,
+    reason = "load-bearing: distinguishes missing key from explicit null"
+)]
 fn deserialize_explicit_optional<'de, D>(
     deserializer: D,
 ) -> Result<Option<Option<String>>, D::Error>

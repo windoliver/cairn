@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    ActorChainEntry, ChainRole, DomainError, EvidenceVector, IdentityKind, Provenance,
+    ActorChainEntry, ChainRole, DomainError, EvidenceVector, Identity, IdentityKind, Provenance,
     Rfc3339Timestamp, ScopeTuple,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
@@ -324,14 +324,38 @@ impl MemoryRecord {
     /// another.
     ///
     /// Containment rules:
+    /// - `canonical_record_hash` must equal `intent.target_hash` —
+    ///   the signed intent binds the issuer's signature to a specific
+    ///   record content; without this check the intent could be replayed
+    ///   onto a different record body/provenance. Format `sha256:<hex>`.
     /// - `scope.tenant`, `scope.workspace`, `scope.entity` (when set) must
     ///   exactly equal the corresponding `SignedIntent.scope` field.
     /// - `visibility` must be `≤` `SignedIntent.scope.tier` — promotion
     ///   to a tier broader than the signed authorization is rejected.
+    /// - `scope.user`, when set, must equal a cryptographically-established
+    ///   human identity: the chain author (when human) or `intent.issuer`
+    ///   (when human). The unsigned chain entries at P0 are not sufficient.
+    /// - `scope.agent`, when set, must equal the chain author (when agent)
+    ///   or `intent.issuer` (when agent).
     /// - `signature` field's wire form is *not* re-verified here; that
     ///   remains the caller's job once keychain-resident keys are
     ///   available.
-    pub fn validate_against_intent(&self, intent: &SignedIntent) -> Result<(), DomainError> {
+    ///
+    /// `canonical_record_hash` is provided by the caller (typically the
+    /// store boundary) so cairn-core stays I/O-free and dep-light.
+    pub fn validate_against_intent(
+        &self,
+        intent: &SignedIntent,
+        canonical_record_hash: &str,
+    ) -> Result<(), DomainError> {
+        if canonical_record_hash != intent.target_hash {
+            return Err(DomainError::MissingSignature {
+                message: format!(
+                    "canonical record hash `{canonical_record_hash}` does not match SignedIntent.target_hash `{}` — the signed intent is not bound to this record",
+                    intent.target_hash
+                ),
+            });
+        }
         // The signed intent's scope (tenant/workspace/entity/tier) is the
         // authorization envelope. The record must *explicitly* carry the
         // same tenant/workspace/entity — omission would let a write into
@@ -400,6 +424,47 @@ impl MemoryRecord {
                 ),
             });
         }
+        self.validate_scope_principals_against_intent(intent)
+    }
+
+    /// scope.user / scope.agent must bind to a cryptographically established
+    /// identity — chain author (signed at P0) or `intent.issuer` (signed by
+    /// the issuing key). Without this, an agent author could persist
+    /// `scope.user = usr:victim` and have it ride the intent's authorization
+    /// onto downstream consumers that filter by user scope.
+    fn validate_scope_principals_against_intent(
+        &self,
+        intent: &SignedIntent,
+    ) -> Result<(), DomainError> {
+        let issuer = intent.issuer.0.as_str();
+        let author_entry = self
+            .actor_chain
+            .iter()
+            .find(|e| e.role == ChainRole::Author);
+        let author = author_entry.map_or("", |e| e.identity.as_str());
+        let author_kind = author_entry.map(|e| e.identity.kind());
+        if let Some(user) = self.scope.user.as_deref() {
+            let author_matches = author_kind == Some(IdentityKind::Human) && user == author;
+            let issuer_matches = issuer.starts_with("usr:") && user == issuer;
+            if !(author_matches || issuer_matches) {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.user `{user}` is not cryptographically established — must equal the human chain author or SignedIntent.issuer (got author=`{author}`, issuer=`{issuer}`)"
+                    ),
+                });
+            }
+        }
+        if let Some(agent) = self.scope.agent.as_deref() {
+            let author_matches = author_kind == Some(IdentityKind::Agent) && agent == author;
+            let issuer_matches = issuer.starts_with("agt:") && agent == issuer;
+            if !(author_matches || issuer_matches) {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.agent `{agent}` is not cryptographically established — must equal the agent chain author or SignedIntent.issuer (got author=`{author}`, issuer=`{issuer}`)"
+                    ),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -424,20 +489,26 @@ impl MemoryRecord {
         Ok(())
     }
 
-    /// Cross-field check binding scope and originator to the signed author.
+    /// Shape-only check on `scope.user` / `scope.agent` and the
+    /// `provenance.originating_agent_id` ↔ author binding.
     ///
-    /// At P0 the record carries a single author signature; principal,
-    /// delegator, and sensor chain entries are unsigned attestations until
-    /// per-entry countersignatures arrive at P2 (brief §4.2). To avoid
-    /// scope-attribution forgery (an agent author claiming
-    /// `scope.user = victim` via an unsigned `principal: usr:victim`
-    /// entry), the only chain identity allowed to satisfy
-    /// `scope.user`/`scope.agent` and `provenance.originating_agent_id`
-    /// is the author itself.
+    /// `scope.user` / `scope.agent` must be canonical *full* identity
+    /// strings (`usr:tafeng`, `agt:claude-code:opus-4-7:main:v1`) so the
+    /// IDL filter sees the same string a query uses. This catches
+    /// kind/format mistakes early.
     ///
-    /// When countersignatures land at P2, this check should grow to
-    /// accept any identity in the chain whose countersignature has been
-    /// verified.
+    /// **Identity binding** (scope value matches a cryptographically
+    /// established principal — author or `SignedIntent.issuer`) lives in
+    /// [`MemoryRecord::validate_against_intent`]; without an intent, validate alone
+    /// cannot prove the user/agent claim. Stores **must** call both:
+    /// validate alone is insufficient to authorize a write.
+    ///
+    /// At P0 `provenance.originating_agent_id` must equal the signing
+    /// author — the originator is the signer until P2 countersignatures
+    /// land (brief §4.2). Cross-kind delegation (`agent author` writing
+    /// on behalf of a human) is expressed via `scope.user` plus a signed
+    /// intent issued by that human, not by setting `originating_agent_id`
+    /// to a different identity.
     fn validate_actor_scope_consistency(&self) -> Result<(), DomainError> {
         let Some(author) = self
             .actor_chain
@@ -448,46 +519,30 @@ impl MemoryRecord {
             // someone bypassed that step.
             return Ok(());
         };
-        let author_full = author.identity.as_str();
-        let author_kind = author.identity.kind();
 
-        // Canonical encoding for scope.user / scope.agent is the full
-        // identity (`usr:tafeng`, `agt:...:v1`) — the IDL filter sees the
-        // string verbatim, so a bare body would split the key space and
-        // hide records from exact scope queries that use the full form.
-        // scope.user *requires* a human author; scope.agent *requires* an
-        // agent author. Cross-kind matching would let an agent author
-        // claim a human user scope (or vice versa) and break typed
-        // authorization filters.
         if let Some(user) = self.scope.user.as_deref() {
-            if author_kind != IdentityKind::Human {
-                return Err(DomainError::MalformedScope {
+            let parsed =
+                Identity::parse(user.to_owned()).map_err(|_| DomainError::MalformedScope {
                     message: format!(
-                        "scope.user requires a human (`usr:`) author, but author is `{author_full}`"
+                        "scope.user `{user}` is not a canonical identity (full `usr:` form required)"
                     ),
-                });
-            }
-            if user != author_full {
+                })?;
+            if parsed.kind() != IdentityKind::Human {
                 return Err(DomainError::MalformedScope {
-                    message: format!(
-                        "scope.user `{user}` is not canonical — must equal the full author identity `{author_full}` (the bare body form is rejected to avoid split-key queries)"
-                    ),
+                    message: format!("scope.user `{user}` must be a human (`usr:`) identity"),
                 });
             }
         }
         if let Some(agent) = self.scope.agent.as_deref() {
-            if author_kind != IdentityKind::Agent {
-                return Err(DomainError::MalformedScope {
+            let parsed =
+                Identity::parse(agent.to_owned()).map_err(|_| DomainError::MalformedScope {
                     message: format!(
-                        "scope.agent requires an agent (`agt:`) author, but author is `{author_full}`"
+                        "scope.agent `{agent}` is not a canonical identity (full `agt:` form required)"
                     ),
-                });
-            }
-            if agent != author_full {
+                })?;
+            if parsed.kind() != IdentityKind::Agent {
                 return Err(DomainError::MalformedScope {
-                    message: format!(
-                        "scope.agent `{agent}` is not canonical — must equal the full author identity `{author_full}`"
-                    ),
+                    message: format!("scope.agent `{agent}` must be an agent (`agt:`) identity"),
                 });
             }
         }
@@ -856,12 +911,21 @@ mod tests {
         }
     }
 
+    /// The canonical record hash that matches `intent_for`'s `target_hash`.
+    /// Tests that don't exercise the `target_hash` binding pass this value to
+    /// `validate_against_intent` so other rules can be tested in isolation.
+    fn matching_target_hash() -> String {
+        format!("sha256:{}", "a".repeat(64))
+    }
+
     #[test]
     fn intent_containment_rejects_tenant_mismatch() {
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
         let intent = intent_for("other", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r.validate_against_intent(&intent).unwrap_err();
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -873,21 +937,22 @@ mod tests {
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Team;
         let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r.validate_against_intent(&intent).unwrap_err();
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
         assert!(matches!(err, DomainError::UnsupportedVisibility { .. }));
     }
 
     #[test]
     fn intent_containment_rejects_unset_tenant() {
-        // Record omitting tenant must not be silently contained — the intent
-        // binds to a specific tenant and a record without one is ambiguous,
-        // not "matching by absence".
         let mut r = sample_record();
         r.scope.tenant = None;
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
         let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r.validate_against_intent(&intent).unwrap_err();
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -898,7 +963,9 @@ mod tests {
         r.scope.workspace = None;
         r.scope.entity = Some("ent".to_owned());
         let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r.validate_against_intent(&intent).unwrap_err();
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -909,7 +976,9 @@ mod tests {
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = None;
         let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r.validate_against_intent(&intent).unwrap_err();
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -921,8 +990,70 @@ mod tests {
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Private;
         let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        r.validate_against_intent(&intent)
-            .expect("scope contained, visibility ≤ tier");
+        r.validate_against_intent(&intent, &matching_target_hash())
+            .expect("scope contained, visibility ≤ tier, target hash matches");
+    }
+
+    #[test]
+    fn intent_containment_rejects_target_hash_mismatch() {
+        // The signed intent binds to a specific record content via
+        // `target_hash`. A different record (different body, provenance,
+        // chain) must not satisfy the intent even with matching scope.
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let wrong_hash = format!("sha256:{}", "b".repeat(64));
+        let err = r.validate_against_intent(&intent, &wrong_hash).unwrap_err();
+        assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn intent_containment_accepts_user_scope_via_intent_issuer() {
+        // Agent-authored record about a user: scope.user binds to the
+        // human intent issuer, who cryptographically authorized the
+        // write. This is the legitimate "agent acts on behalf of user"
+        // path that homogeneous-author validation alone cannot express.
+        let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.scope.user = Some("usr:tafeng".to_owned());
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: agent.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = agent;
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        // intent.issuer = `usr:tafeng` from intent_for(); matches scope.user.
+        r.validate_against_intent(&intent, &matching_target_hash())
+            .expect("agent-authored user memory authorized by user-issued intent");
+    }
+
+    #[test]
+    fn intent_containment_rejects_user_scope_without_matching_principal() {
+        // scope.user that matches neither the chain author nor the
+        // intent issuer is forgery — reject.
+        let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.scope.user = Some("usr:victim".to_owned());
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: agent.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = agent;
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r
+            .validate_against_intent(&intent, &matching_target_hash())
+            .unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
     #[test]
