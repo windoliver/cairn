@@ -10,7 +10,12 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{DomainError, Identity, IdentityKind, Rfc3339Timestamp};
 
 /// Mandatory provenance frontmatter on every [`crate::domain::MemoryRecord`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `llm_id_if_any` is structurally required — the key must be present in
+/// the wire form (`null` for "no LLM") so a missing/truncated record can
+/// be detected. The custom `Deserialize` below uses an `Option<Option<…>>`
+/// pattern to distinguish "key absent" from "key present, value null".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provenance {
     /// Sensor identity that captured the source bytes.
@@ -32,6 +37,57 @@ pub struct Provenance {
     /// serialized so consumers can distinguish "explicit no-LLM
     /// provenance" from a missing/truncated record.
     pub llm_id_if_any: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvenanceWire {
+    source_sensor: Identity,
+    created_at: Rfc3339Timestamp,
+    originating_agent_id: Identity,
+    source_hash: String,
+    consent_ref: String,
+    /// Three-state on the wire: outer `None` = key absent (truncated record),
+    /// `Some(None)` = explicit null (no-LLM provenance), `Some(Some(_))` =
+    /// model id. Without the custom `deserialize_with`, serde collapses
+    /// `null` into outer `None`, conflating "missing" with "explicit null".
+    #[serde(default, deserialize_with = "deserialize_explicit_optional")]
+    #[allow(
+        clippy::option_option,
+        reason = "load-bearing: distinguishes missing key from explicit null"
+    )]
+    llm_id_if_any: Option<Option<String>>,
+}
+
+fn deserialize_explicit_optional<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for Provenance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = ProvenanceWire::deserialize(deserializer)?;
+        let llm_id_if_any = raw.llm_id_if_any.ok_or_else(|| {
+            serde::de::Error::custom(
+                "provenance.llm_id_if_any is structurally required (use null when no LLM was used)",
+            )
+        })?;
+        Ok(Self {
+            source_sensor: raw.source_sensor,
+            created_at: raw.created_at,
+            originating_agent_id: raw.originating_agent_id,
+            source_hash: raw.source_hash,
+            consent_ref: raw.consent_ref,
+            llm_id_if_any,
+        })
+    }
 }
 
 impl Provenance {
@@ -166,6 +222,40 @@ mod tests {
                 field: "llm_id_if_any"
             }
         ));
+    }
+
+    #[test]
+    fn deserialize_rejects_missing_llm_id_key() {
+        // Key entirely absent — must reject. A bare `Option<String>` would
+        // default to `None` and silently accept this; the custom deserializer
+        // distinguishes "missing" from "explicit null".
+        let json = r#"{
+            "source_sensor": "snr:local:hook:cc-session:v1",
+            "created_at": "2026-04-22T14:02:11Z",
+            "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "consent_ref": "consent:01HQZ"
+        }"#;
+        let res: Result<Provenance, _> = serde_json::from_str(json);
+        let err = res.expect_err("missing llm_id_if_any key must fail");
+        assert!(
+            err.to_string().contains("llm_id_if_any"),
+            "error mentions field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_accepts_explicit_null_llm_id() {
+        let json = r#"{
+            "source_sensor": "snr:local:hook:cc-session:v1",
+            "created_at": "2026-04-22T14:02:11Z",
+            "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
+            "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "consent_ref": "consent:01HQZ",
+            "llm_id_if_any": null
+        }"#;
+        let p: Provenance = serde_json::from_str(json).expect("explicit null is valid");
+        assert!(p.llm_id_if_any.is_none());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::domain::{
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
+use crate::generated::envelope::{SignedIntent, SignedIntentScopeTier};
 
 /// Ed25519 signature in `ed25519:<128 lowercase hex>` form. Mirrors the
 /// schema in `crates/cairn-idl/schema/common/primitives.json` so domain
@@ -80,12 +81,22 @@ pub struct RecordId(String);
 
 impl RecordId {
     /// Parse a wire-form ULID.
+    ///
+    /// Length is 26, alphabet is Crockford base32 (uppercase, no `I L O
+    /// U`), and the first character is bounded to `[0..=7]` because a
+    /// ULID encodes a 128-bit integer and the high 5 bits of the leading
+    /// Crockford symbol must be zero — otherwise the value overflows
+    /// 128 bits and downstream ULID decoders will misorder or reject it.
     pub fn parse(raw: impl Into<String>) -> Result<Self, DomainError> {
         let raw = raw.into();
         if raw.len() != 26 {
             return Err(DomainError::EmptyField { field: "record_id" });
         }
-        if !raw.bytes().all(|b| {
+        let bytes = raw.as_bytes();
+        if !matches!(bytes[0], b'0'..=b'7') {
+            return Err(DomainError::EmptyField { field: "record_id" });
+        }
+        if !bytes[1..].iter().all(|b| {
             matches!(b,
                 b'0'..=b'9'
                 | b'A'..=b'H'
@@ -305,6 +316,93 @@ impl MemoryRecord {
         Ok(())
     }
 
+    /// Pre-store containment check: the record's scope and visibility
+    /// must be contained by the verified [`SignedIntent`] that authorizes
+    /// the write. `validate()` alone is shape-only; the store boundary
+    /// must call this method as well so a record signed for one
+    /// `(tenant, workspace, entity, tier)` cannot be persisted into
+    /// another.
+    ///
+    /// Containment rules:
+    /// - `scope.tenant`, `scope.workspace`, `scope.entity` (when set) must
+    ///   exactly equal the corresponding `SignedIntent.scope` field.
+    /// - `visibility` must be `≤` `SignedIntent.scope.tier` — promotion
+    ///   to a tier broader than the signed authorization is rejected.
+    /// - `signature` field's wire form is *not* re-verified here; that
+    ///   remains the caller's job once keychain-resident keys are
+    ///   available.
+    pub fn validate_against_intent(&self, intent: &SignedIntent) -> Result<(), DomainError> {
+        // The signed intent's scope (tenant/workspace/entity/tier) is the
+        // authorization envelope. The record must *explicitly* carry the
+        // same tenant/workspace/entity — omission would let a write into
+        // a narrower record scope satisfy a broader intent and pollute
+        // governance/retrieval boundaries downstream.
+        let record_tenant =
+            self.scope
+                .tenant
+                .as_deref()
+                .ok_or_else(|| DomainError::MalformedScope {
+                    message: format!(
+                        "scope.tenant must be set to `{}` to match SignedIntent.scope.tenant",
+                        intent.scope.tenant
+                    ),
+                })?;
+        if record_tenant != intent.scope.tenant {
+            return Err(DomainError::MalformedScope {
+                message: format!(
+                    "scope.tenant `{record_tenant}` does not match SignedIntent.scope.tenant `{}`",
+                    intent.scope.tenant
+                ),
+            });
+        }
+        let record_workspace =
+            self.scope
+                .workspace
+                .as_deref()
+                .ok_or_else(|| DomainError::MalformedScope {
+                    message: format!(
+                        "scope.workspace must be set to `{}` to match SignedIntent.scope.workspace",
+                        intent.scope.workspace
+                    ),
+                })?;
+        if record_workspace != intent.scope.workspace {
+            return Err(DomainError::MalformedScope {
+                message: format!(
+                    "scope.workspace `{record_workspace}` does not match SignedIntent.scope.workspace `{}`",
+                    intent.scope.workspace
+                ),
+            });
+        }
+        let record_entity =
+            self.scope
+                .entity
+                .as_deref()
+                .ok_or_else(|| DomainError::MalformedScope {
+                    message: format!(
+                        "scope.entity must be set to `{}` to match SignedIntent.scope.entity",
+                        intent.scope.entity
+                    ),
+                })?;
+        if record_entity != intent.scope.entity {
+            return Err(DomainError::MalformedScope {
+                message: format!(
+                    "scope.entity `{record_entity}` does not match SignedIntent.scope.entity `{}`",
+                    intent.scope.entity
+                ),
+            });
+        }
+        let intent_tier = intent_tier_to_visibility(intent.scope.tier);
+        if self.visibility > intent_tier {
+            return Err(DomainError::UnsupportedVisibility {
+                value: format!(
+                    "record visibility `{:?}` exceeds SignedIntent tier `{:?}`",
+                    self.visibility, intent_tier
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// At P0 only the author signs the record — principal, delegator, and
     /// `Sensor` chain entries are unsigned claims, not verified provenance.
     /// Until per-entry countersignatures land at P2 (brief §4.2
@@ -494,6 +592,17 @@ fn epoch_with_nanos(raw: &str) -> Result<(i64, u32), DomainError> {
     let days = days_from_civil(year, month, day);
     let local = days * 86_400 + hour * 3600 + minute * 60 + second;
     Ok((local - offset_seconds, nanos))
+}
+
+fn intent_tier_to_visibility(t: SignedIntentScopeTier) -> MemoryVisibility {
+    match t {
+        SignedIntentScopeTier::Private => MemoryVisibility::Private,
+        SignedIntentScopeTier::Session => MemoryVisibility::Session,
+        SignedIntentScopeTier::Project => MemoryVisibility::Project,
+        SignedIntentScopeTier::Team => MemoryVisibility::Team,
+        SignedIntentScopeTier::Org => MemoryVisibility::Org,
+        SignedIntentScopeTier::Public => MemoryVisibility::Public,
+    }
 }
 
 fn parse_int(bytes: &[u8]) -> Option<i64> {
@@ -715,6 +824,119 @@ mod tests {
         });
         let err = r.validate().unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    fn intent_for(
+        tenant: &str,
+        workspace: &str,
+        entity: &str,
+        tier: SignedIntentScopeTier,
+    ) -> SignedIntent {
+        SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".to_owned(),
+            issued_at: "2026-04-22T14:02:11Z".to_owned(),
+            issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
+            key_version: 1,
+            nonce: crate::generated::common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
+            operation_id: crate::generated::common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
+            scope: crate::generated::envelope::SignedIntentScope {
+                tenant: tenant.to_owned(),
+                workspace: workspace.to_owned(),
+                entity: entity.to_owned(),
+                tier,
+            },
+            sequence: Some(1),
+            server_challenge: None,
+            signature: crate::generated::common::Ed25519Signature(format!(
+                "ed25519:{}",
+                "a".repeat(128)
+            )),
+            target_hash: format!("sha256:{}", "a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn intent_containment_rejects_tenant_mismatch() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        let intent = intent_for("other", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_visibility_promotion() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.visibility = MemoryVisibility::Team;
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::UnsupportedVisibility { .. }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_unset_tenant() {
+        // Record omitting tenant must not be silently contained — the intent
+        // binds to a specific tenant and a record without one is ambiguous,
+        // not "matching by absence".
+        let mut r = sample_record();
+        r.scope.tenant = None;
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_unset_workspace() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = None;
+        r.scope.entity = Some("ent".to_owned());
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_unset_entity() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = None;
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn intent_containment_accepts_matching_scope() {
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.visibility = MemoryVisibility::Private;
+        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
+        r.validate_against_intent(&intent)
+            .expect("scope contained, visibility ≤ tier");
+    }
+
+    #[test]
+    fn record_id_rejects_overflow_first_char() {
+        let err = RecordId::parse("8ZZZZZZZZZZZZZZZZZZZZZZZZZ").unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::EmptyField { field: "record_id" }
+        ));
+    }
+
+    #[test]
+    fn record_id_accepts_max_valid_first_char() {
+        RecordId::parse("7ZZZZZZZZZZZZZZZZZZZZZZZZZ").expect("first char `7` is the max valid");
     }
 
     #[test]
