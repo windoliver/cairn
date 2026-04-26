@@ -13,6 +13,12 @@ description = "Shared test helpers and fixture loaders for Cairn crates."
 [dependencies]
 cairn-core = { workspace = true }
 
+[dev-dependencies]
+insta = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
 [lints]
 workspace = true
 
