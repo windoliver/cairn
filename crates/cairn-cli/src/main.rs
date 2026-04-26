@@ -27,14 +27,12 @@ fn plugins_subcommand() -> clap::Command {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
-            clap::Command::new("list")
-                .about("List loaded plugins")
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Emit JSON instead of a human-readable table"),
-                ),
+            clap::Command::new("list").about("List loaded plugins").arg(
+                clap::Arg::new("json")
+                    .long("json")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Emit JSON instead of a human-readable table"),
+            ),
         )
         .subcommand(
             clap::Command::new("verify")
