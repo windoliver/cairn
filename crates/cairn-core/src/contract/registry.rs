@@ -411,56 +411,70 @@ impl PluginRegistry {
         v
     }
 
-    /// Return every typed plugin registration whose `PluginName` does NOT
-    /// have a corresponding entry in the manifest map. Each tuple is
-    /// `(plugin_name, contract_label)` where `contract_label` matches the
-    /// `$contract` literal used in the per-contract `register_*` methods
-    /// (e.g. `"MemoryStore"`). Result is alphabetical by name.
+    /// Return every typed plugin registration NOT covered by a manifest of
+    /// the matching contract kind. Each tuple is `(plugin_name,
+    /// contract_label)` where `contract_label` matches the `$contract`
+    /// literal used in the per-contract `register_*` methods
+    /// (e.g. `"MemoryStore"`). Result is sorted by `(name, contract)`.
     ///
     /// This exists so `cairn plugins verify` can enforce "every typed
-    /// registration must carry a manifest" as a tier-1 gate. The 3-arg
-    /// `register_plugin!` macro path (manifest-less) is still public for
-    /// unit tests; without this helper it could pass `verify` silently by
-    /// not appearing in `parsed_manifests_sorted()`.
+    /// registration must carry a matching manifest" as a tier-1 gate.
+    /// The 3-arg `register_plugin!` macro path (manifest-less) is still
+    /// public for unit tests; the bare `register_*` per-contract methods
+    /// are also public. Without this helper, both would pass `verify` by
+    /// being invisible to `parsed_manifests_sorted()`.
+    ///
+    /// The check is contract-aware: a plugin registered for `MemoryStore`
+    /// with a manifest AND for `MCPServer` bare under the same name will
+    /// surface the bare `MCPServer` registration here, because the
+    /// manifest's `contract()` is `MemoryStore`, not `MCPServer`.
     #[must_use]
     pub fn typed_plugins_without_manifests(&self) -> Vec<(&PluginName, &'static str)> {
+        use crate::contract::manifest::ContractKind;
+
+        let covers = |name: &PluginName, expected: ContractKind| {
+            self.manifests
+                .get(name)
+                .is_some_and(|m| m.contract() == expected)
+        };
+
         let mut out: Vec<(&PluginName, &'static str)> = Vec::new();
         for n in self.memory_stores.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::MemoryStore) {
                 out.push((n, "MemoryStore"));
             }
         }
         for n in self.llm_providers.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::LLMProvider) {
                 out.push((n, "LLMProvider"));
             }
         }
         for n in self.workflow_orchestrators.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::WorkflowOrchestrator) {
                 out.push((n, "WorkflowOrchestrator"));
             }
         }
         for n in self.sensor_ingress.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::SensorIngress) {
                 out.push((n, "SensorIngress"));
             }
         }
         for n in self.mcp_servers.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::MCPServer) {
                 out.push((n, "MCPServer"));
             }
         }
         for n in self.frontend_adapters.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::FrontendAdapter) {
                 out.push((n, "FrontendAdapter"));
             }
         }
         for n in self.agent_providers.keys() {
-            if !self.manifests.contains_key(n) {
+            if !covers(n, ContractKind::AgentProvider) {
                 out.push((n, "AgentProvider"));
             }
         }
-        out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then_with(|| a.1.cmp(b.1)));
         out
     }
 

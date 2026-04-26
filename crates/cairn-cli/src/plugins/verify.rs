@@ -327,6 +327,111 @@ mod tests {
     }
 
     #[test]
+    fn cross_contract_same_name_orphan_is_failed() {
+        // Regression for the round-3 review finding: a single PluginName
+        // registered for two different contracts (one with a manifest,
+        // one bare) must surface the bare registration as Failed even
+        // though `manifests.contains_key(name)` is true.
+        use cairn_core::contract::manifest::PluginManifest;
+        use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
+        use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+        use cairn_core::contract::registry::{PluginName, PluginRegistry};
+        use cairn_core::contract::version::{ContractVersion, VersionRange};
+
+        #[derive(Default)]
+        struct DualStore;
+        #[async_trait::async_trait]
+        impl MemoryStore for DualStore {
+            fn name(&self) -> &'static str {
+                "dual-plugin"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: false,
+                    vector: false,
+                    graph_edges: false,
+                    transactions: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            }
+        }
+
+        #[derive(Default)]
+        struct DualMcp;
+        #[async_trait::async_trait]
+        impl MCPServer for DualMcp {
+            fn name(&self) -> &'static str {
+                "dual-plugin"
+            }
+            fn capabilities(&self) -> &MCPServerCapabilities {
+                static CAPS: MCPServerCapabilities = MCPServerCapabilities {
+                    stdio: false,
+                    sse: false,
+                    http_streamable: false,
+                    extensions: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            }
+        }
+
+        let store_manifest_toml = r#"
+name = "dual-plugin"
+contract = "MemoryStore"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+"#;
+
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("dual-plugin").expect("valid");
+
+        // Register MemoryStore WITH a MemoryStore manifest...
+        let store_manifest =
+            PluginManifest::parse_toml(store_manifest_toml).expect("manifest parses");
+        reg.register_memory_store_with_manifest(
+            name.clone(),
+            store_manifest,
+            std::sync::Arc::new(DualStore),
+        )
+        .expect("registers");
+
+        // ...and MCPServer BARE (no manifest, same name). This is a
+        // legitimate path because the per-contract maps are independent
+        // and bare register_* only checks per-contract duplicates. The
+        // orphan gate must be contract-aware to catch the MCPServer half.
+        reg.register_mcp_server(name.clone(), std::sync::Arc::new(DualMcp))
+            .expect("bare register accepts cross-contract same name");
+
+        let report = run(&reg);
+        let orphan = report
+            .plugins
+            .iter()
+            .find(|p| p.contract == "MCPServer")
+            .expect("MCPServer orphan must appear in report");
+        assert_eq!(orphan.name, "dual-plugin");
+        assert_eq!(orphan.cases.len(), 1);
+        assert_eq!(
+            orphan.cases[0].id,
+            "manifest_present_for_typed_registration"
+        );
+        assert!(matches!(orphan.cases[0].status, CaseStatus::Failed { .. }));
+        assert_eq!(exit_code(&report, false), 69);
+    }
+
+    #[test]
     fn json_output_round_trips() {
         let reg = register_all().expect("registers");
         let report = run(&reg);
