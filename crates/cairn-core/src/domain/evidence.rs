@@ -163,7 +163,8 @@ mod tests {
             ConfidenceBand::Uncertain,
         ] {
             assert_eq!(
-                ConfidenceBand::parse(band.as_str()).expect(band.as_str()),
+                ConfidenceBand::parse(band.as_str())
+                    .unwrap_or_else(|_| panic!("{}", band.as_str())),
                 band
             );
         }

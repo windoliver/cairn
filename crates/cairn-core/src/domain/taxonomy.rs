@@ -287,7 +287,10 @@ mod tests {
             MemoryKind::KnowledgeGap,
         ];
         for kind in all {
-            assert_eq!(MemoryKind::parse(kind.as_str()).expect(kind.as_str()), kind);
+            assert_eq!(
+                MemoryKind::parse(kind.as_str()).unwrap_or_else(|_| panic!("{}", kind.as_str())),
+                kind
+            );
         }
     }
 
@@ -350,7 +353,7 @@ mod tests {
             MemoryClass::Graph,
         ] {
             assert_eq!(
-                MemoryClass::parse(class.as_str()).expect(class.as_str()),
+                MemoryClass::parse(class.as_str()).unwrap_or_else(|_| panic!("{}", class.as_str())),
                 class
             );
         }
@@ -424,7 +427,8 @@ mod tests {
             MemoryVisibility::Public,
         ] {
             assert_eq!(
-                MemoryVisibility::parse(vis.as_str()).expect(vis.as_str()),
+                MemoryVisibility::parse(vis.as_str())
+                    .unwrap_or_else(|_| panic!("{}", vis.as_str())),
                 vis
             );
         }
