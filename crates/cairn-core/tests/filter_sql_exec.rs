@@ -107,7 +107,7 @@ fn seed_db() -> Connection {
             ("active", "1"),
             ("tags", r#"["infra","migration"]"#),
             ("actor_chain", r#"["agt:claude"]"#),
-            ("backlinks", r#"[]"#),
+            ("backlinks", r"[]"),
             ("version", "1"),
         ],
     );
@@ -125,7 +125,7 @@ fn seed_db() -> Connection {
             ("active", "1"),
             ("tags", r#"["pref"]"#),
             ("actor_chain", r#"["usr:tafeng"]"#),
-            ("backlinks", r#"[]"#),
+            ("backlinks", r"[]"),
             ("version", "2"),
         ],
     );

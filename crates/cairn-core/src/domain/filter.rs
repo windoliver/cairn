@@ -53,8 +53,11 @@ const KNOWN_FIELDS: &[(&str, FieldType)] = &[
     // Numeric fields.
     ("priority", FieldType::Number),
     ("version", FieldType::Number),
-    ("created_at", FieldType::Number),
     ("confidence", FieldType::Number),
+    // Timestamp field — stored as RFC3339 text; ISO8601 is lexicographically
+    // sortable, so string ops (eq/neq/in/nin/string_contains/starts_with) work
+    // correctly against the stored representation.
+    ("created_at", FieldType::Str),
     // Boolean fields.
     ("is_static", FieldType::Boolean),
     ("tombstoned", FieldType::Boolean),
@@ -98,6 +101,19 @@ pub enum FilterError {
         /// Human-readable field type ("string", "number", "boolean", "array").
         field_type: &'static str,
     },
+
+    /// The value's JSON type is incompatible with the field type and operator.
+    #[error("value for field `{field}` op `{op}` has wrong shape: expected {expected}, got {got}")]
+    WrongValueShape {
+        /// Field that was queried.
+        field: String,
+        /// Operator that was rejected.
+        op: String,
+        /// What shape was expected.
+        expected: &'static str,
+        /// What shape was actually received.
+        got: &'static str,
+    },
 }
 
 // ── validate_filter ───────────────────────────────────────────────────────────
@@ -128,7 +144,8 @@ pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
 
 /// Validate a single leaf.  The serde parser (`validate_filter_leaf_shape`)
 /// already verified that `field`, `op`, and `value` are present and that the
-/// op is shape-valid; here we enforce the field allowlist and type-op matrix.
+/// op is shape-valid; here we enforce the field allowlist, type-op matrix,
+/// and value-shape compatibility.
 fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
     let Some(obj) = v.as_object() else {
         unreachable!("leaf is always a JSON object after parsing");
@@ -139,9 +156,11 @@ fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
     let Some(op) = obj["op"].as_str() else {
         unreachable!("op is always a string after parsing");
     };
+    let value = &obj["value"];
 
     let ft = field_type(field).ok_or_else(|| FilterError::UnknownField(field.to_owned()))?;
-    validate_op_for_type(field, op, ft)
+    validate_op_for_type(field, op, ft)?;
+    validate_value_shape(field, op, ft, value)
 }
 
 fn validate_op_for_type(field: &str, op: &str, ft: FieldType) -> Result<(), FilterError> {
@@ -175,6 +194,144 @@ fn validate_op_for_type(field: &str, op: &str, ft: FieldType) -> Result<(), Filt
             op: op.to_owned(),
             field_type: ft.as_str(),
         })
+    }
+}
+
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Null => "null",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Check that every element in `arr` satisfies `pred`; return `WrongValueShape`
+/// pointing at the first offending element if not.
+fn require_array_of(
+    field: &str,
+    op: &str,
+    arr: &[serde_json::Value],
+    expected: &'static str,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> Result<(), FilterError> {
+    for item in arr {
+        if !pred(item) {
+            return Err(FilterError::WrongValueShape {
+                field: field.to_owned(),
+                op: op.to_owned(),
+                expected,
+                got: json_type_name(item),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_value_shape(
+    field: &str,
+    op: &str,
+    ft: FieldType,
+    value: &serde_json::Value,
+) -> Result<(), FilterError> {
+    let scalar_err = |expected: &'static str| FilterError::WrongValueShape {
+        field: field.to_owned(),
+        op: op.to_owned(),
+        expected,
+        got: json_type_name(value),
+    };
+
+    match ft {
+        FieldType::Str => match op {
+            "in" | "nin" => {
+                let arr = value
+                    .as_array()
+                    .ok_or_else(|| scalar_err("array of strings"))?;
+                require_array_of(
+                    field,
+                    op,
+                    arr,
+                    "array of strings",
+                    serde_json::Value::is_string,
+                )
+            }
+            _ => value
+                .is_string()
+                .then_some(())
+                .ok_or_else(|| scalar_err("string")),
+        },
+        FieldType::Number => validate_number_value(field, op, value, scalar_err),
+        FieldType::Boolean => value
+            .is_boolean()
+            .then_some(())
+            .ok_or_else(|| scalar_err("boolean")),
+        FieldType::Array => validate_array_field_value(field, op, value, scalar_err),
+    }
+}
+
+fn validate_number_value(
+    field: &str,
+    op: &str,
+    value: &serde_json::Value,
+    scalar_err: impl Fn(&'static str) -> FilterError,
+) -> Result<(), FilterError> {
+    match op {
+        "in" | "nin" => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| scalar_err("array of numbers"))?;
+            require_array_of(
+                field,
+                op,
+                arr,
+                "array of numbers",
+                serde_json::Value::is_number,
+            )
+        }
+        "between" => {
+            let ok = value
+                .as_array()
+                .is_some_and(|a| a.len() == 2 && a[0].is_number() && a[1].is_number());
+            ok.then_some(())
+                .ok_or_else(|| scalar_err("[number, number]"))
+        }
+        _ => value
+            .is_number()
+            .then_some(())
+            .ok_or_else(|| scalar_err("number")),
+    }
+}
+
+fn validate_array_field_value(
+    field: &str,
+    op: &str,
+    value: &serde_json::Value,
+    scalar_err: impl Fn(&'static str) -> FilterError,
+) -> Result<(), FilterError> {
+    match op {
+        "array_contains" => value
+            .is_string()
+            .then_some(())
+            .ok_or_else(|| scalar_err("string")),
+        "array_contains_any" | "array_contains_all" => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| scalar_err("array of strings"))?;
+            require_array_of(
+                field,
+                op,
+                arr,
+                "array of strings",
+                serde_json::Value::is_string,
+            )
+        }
+        "array_size_eq" => value
+            .is_number()
+            .then_some(())
+            .ok_or_else(|| scalar_err("number")),
+        _ => unreachable!("op validated by validate_op_for_type"),
     }
 }
 
@@ -256,6 +413,19 @@ fn compile_leaf(v: &serde_json::Value, params: &mut Vec<serde_json::Value>) -> S
     }
 }
 
+/// Escape `%` and `_` in a LIKE operand so they are treated as literals.
+/// The caller must also emit `ESCAPE '\'` in the SQL fragment.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn compile_scalar_op(
     col: &str,
     op: &str,
@@ -323,21 +493,20 @@ fn compile_scalar_op(
             format!("instr({col}, ?) > 0")
         }
         "string_starts_with" => {
-            // Append `%` to the value to build a `LIKE` prefix pattern.
-            // `LIKE` metacharacters (`%`, `_`) in the value itself are NOT escaped
-            // at P0; escaping is a P1 hardening.
             let Some(s) = value.as_str() else {
                 unreachable!("string_starts_with value is a string after validation");
             };
-            params.push(serde_json::Value::String(format!("{s}%")));
-            format!("{col} LIKE ?")
+            let escaped = escape_like(s);
+            params.push(serde_json::Value::String(format!("{escaped}%")));
+            format!("{col} LIKE ? ESCAPE '\\'")
         }
         "string_ends_with" => {
             let Some(s) = value.as_str() else {
                 unreachable!("string_ends_with value is a string after validation");
             };
-            params.push(serde_json::Value::String(format!("%{s}")));
-            format!("{col} LIKE ?")
+            let escaped = escape_like(s);
+            params.push(serde_json::Value::String(format!("%{escaped}")));
+            format!("{col} LIKE ? ESCAPE '\\'")
         }
         _ => unreachable!("op was validated by validate_filter before compile_filter"),
     }
@@ -369,11 +538,17 @@ fn compile_array_op(
             let Some(arr) = value.as_array() else {
                 unreachable!("array_contains_all value is array after validation");
             };
-            let n = arr.len();
+            // Deduplicate to avoid COUNT(DISTINCT) mismatch when the caller
+            // provides repeated values (e.g. ["infra","infra"] must not require
+            // two distinct matches — the row already satisfies the intent).
+            let mut seen = std::collections::HashSet::new();
+            let unique: Vec<&serde_json::Value> =
+                arr.iter().filter(|v| seen.insert(v.as_str())).collect();
+            let n = unique.len();
             let placeholders = "?, ".repeat(n);
             let placeholders = placeholders.trim_end_matches(", ");
-            for v in arr {
-                params.push(v.clone());
+            for v in &unique {
+                params.push((*v).clone());
             }
             params.push(serde_json::Value::Number(serde_json::Number::from(
                 n as u64,
