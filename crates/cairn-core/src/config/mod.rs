@@ -531,6 +531,8 @@ pub struct ExtractBudget {
 ///
 /// The verb layer calls `config.capabilities()` before dispatching to
 /// gate features that require capabilities that may not be present.
+// Six orthogonal capability flags; a bitflags type would obscure the intent.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
