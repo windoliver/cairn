@@ -24,6 +24,8 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ulid = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
@@ -38,10 +40,7 @@ workspace = true
 # dropped from this list in Task 17 once main.rs adopted it (Task 13).
 # Drop each remaining entry once its first call site exists.
 [package.metadata.cargo-machete]
-ignored = [
-    "anyhow",
-    "serde",
-]
+ignored = []
 
 [lib]
 name = "cairn_cli"
