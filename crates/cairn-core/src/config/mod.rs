@@ -1,6 +1,10 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::domain::taxonomy::MemoryKind;
 
 use crate::contract::registry::PluginError;
 
@@ -221,6 +225,327 @@ string_enum! {
     unknown_msg: "expected regex | llm | agent | custom:<name>",
 }
 
+// ── Top-level ─────────────────────────────────────────────────────────────
+
+/// Root config type. Deserialized from `.cairn/config.yaml` (brief §3.1).
+///
+/// All fields default to the P0 offline-local deployment:
+/// `SQLite` store, no LLM, hook + IDE sensors, local tokio orchestrator,
+/// regex-only extractor chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CairnConfig {
+    /// Vault-level configuration.
+    pub vault: VaultConfig,
+    /// Store adapter selection.
+    pub store: StoreConfig,
+    /// LLM provider configuration.
+    pub llm: LlmConfig,
+    /// Sensor enablement.
+    pub sensors: SensorsConfig,
+    /// Workflow orchestrator selection.
+    pub workflows: WorkflowsConfig,
+    /// Pipeline stage configuration.
+    pub pipeline: PipelineConfig,
+}
+
+impl Default for CairnConfig {
+    fn default() -> Self {
+        Self {
+            vault:     VaultConfig::default(),
+            store:     StoreConfig::default(),
+            llm:       LlmConfig::default(),
+            sensors:   SensorsConfig::default(),
+            workflows: WorkflowsConfig::default(),
+            pipeline:  PipelineConfig::default(),
+        }
+    }
+}
+
+// ── Vault ─────────────────────────────────────────────────────────────────
+
+/// Vault-level configuration (§3.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VaultConfig {
+    /// Human-readable vault name.
+    pub name: String,
+    /// Storage tier.
+    pub tier: VaultTier,
+    /// Folder layout and enabled kinds.
+    pub layout: LayoutConfig,
+    /// Hot-memory assembly recipe and budget.
+    pub hot_memory: HotMemoryConfig,
+    /// Glob-keyed retention policies. Value: `"forever"` or `"<N>d"`.
+    pub retention: BTreeMap<String, String>,
+    /// Schema files to include in the vault.
+    pub schema_files: Vec<String>,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            name:         "my-vault".into(),
+            tier:         VaultTier::Local,
+            layout:       LayoutConfig::default(),
+            hot_memory:   HotMemoryConfig::default(),
+            retention:    BTreeMap::new(),
+            schema_files: vec![
+                "CLAUDE.md".into(),
+                "AGENTS.md".into(),
+                "GEMINI.md".into(),
+            ],
+        }
+    }
+}
+
+/// Folder names and enabled kinds (§3.1 layout block).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutConfig {
+    /// Directory name for source files.
+    pub sources: String,
+    /// Directory name for raw records.
+    pub records: String,
+    /// Directory name for wiki files.
+    pub wiki: String,
+    /// Directory name for skills.
+    pub skills: String,
+    /// Subset of the 19 `MemoryKind`s active for extraction + storage.
+    /// Empty means all 19 kinds are enabled (semantics: absence = unrestricted).
+    pub enabled_kinds: Vec<MemoryKind>,
+    /// File naming template.
+    pub file_naming: String,
+    /// Index file caps.
+    pub index: IndexConfig,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            sources:       "sources".into(),
+            records:       "raw".into(),
+            wiki:          "wiki".into(),
+            skills:        "skills".into(),
+            enabled_kinds: vec![],
+            file_naming:   "{kind}_{slug}.md".into(),
+            index:         IndexConfig::default(),
+        }
+    }
+}
+
+/// Index file caps (§3.1 layout.index).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IndexConfig {
+    /// Maximum number of lines in the index.
+    pub max_lines: u32,
+    /// Maximum number of bytes in the index.
+    pub max_bytes: u32,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self { max_lines: 200, max_bytes: 25_600 }
+    }
+}
+
+/// Hot-memory assembly recipe and budget (§3.1 hot_memory).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotMemoryConfig {
+    /// Ordered steps in the assembly recipe.
+    pub recipe: Vec<HotMemoryRecipeStep>,
+    /// Maximum bytes in the assembled hot prefix. Must be > 0.
+    pub max_bytes: u32,
+}
+
+impl Default for HotMemoryConfig {
+    fn default() -> Self {
+        Self {
+            recipe: vec![
+                HotMemoryRecipeStep::Purpose,
+                HotMemoryRecipeStep::Index,
+                HotMemoryRecipeStep::PinnedFeedback,
+                HotMemoryRecipeStep::TopSalienceProject,
+                HotMemoryRecipeStep::ActivePlaybook,
+                HotMemoryRecipeStep::RecentUserSignal,
+            ],
+            max_bytes: 25_600,
+        }
+    }
+}
+
+// ── Store ─────────────────────────────────────────────────────────────────
+
+/// Store adapter selection (§4.1 plugin config).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreConfig {
+    /// Which memory store adapter is active.
+    pub kind: StoreKind,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self { kind: StoreKind::Sqlite }
+    }
+}
+
+// ── LLM ──────────────────────────────────────────────────────────────────
+
+/// LLM provider configuration (§4.1, ADR 0001).
+///
+/// P0 default: all `None`. LLM-dependent features fail closed with
+/// `CapabilityUnavailable { code: "llm.not_configured" }`.
+/// Fields `model` and `api_key` support `${VAR}` interpolation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Which LLM provider backend is active.
+    pub provider: Option<LlmProvider>,
+    /// Base URL for the LLM provider endpoint.
+    pub base_url: Option<String>,
+    /// Model name to use. Supports `${VAR}` interpolation.
+    pub model: Option<String>,
+    /// API key. Supports `${VAR}` interpolation.
+    pub api_key: Option<String>,
+}
+
+// ── Sensors ───────────────────────────────────────────────────────────────
+
+/// Sensor enablement (§3.1 sensors block).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensorsConfig {
+    /// Hook sensor configuration.
+    pub hooks: SensorToggle,
+    /// IDE sensor configuration.
+    pub ide: SensorToggle,
+    /// Screen sensor configuration.
+    pub screen: SensorToggle,
+    /// Slack sensor configuration.
+    pub slack: SlackSensorConfig,
+}
+
+impl Default for SensorsConfig {
+    fn default() -> Self {
+        Self {
+            hooks:  SensorToggle { enabled: true },
+            ide:    SensorToggle { enabled: true },
+            screen: SensorToggle { enabled: false },
+            slack:  SlackSensorConfig::default(),
+        }
+    }
+}
+
+/// Simple on/off toggle for a sensor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensorToggle {
+    /// Whether this sensor is enabled.
+    pub enabled: bool,
+}
+
+/// Slack sensor configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SlackSensorConfig {
+    /// Whether the Slack sensor is enabled.
+    pub enabled: bool,
+    /// Slack channels or workspaces in scope.
+    pub scope: Vec<String>,
+}
+
+// ── Workflows ─────────────────────────────────────────────────────────────
+
+/// Workflow orchestrator selection (§4.1, §4.0 row 3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkflowsConfig {
+    /// Which workflow orchestrator is active.
+    pub orchestrator: OrchestratorKind,
+}
+
+impl Default for WorkflowsConfig {
+    fn default() -> Self {
+        Self { orchestrator: OrchestratorKind::Local }
+    }
+}
+
+// ── Pipeline ─────────────────────────────────────────────────────────────
+
+/// Pipeline stage configuration (§5.2.a).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PipelineConfig {
+    /// Extractor chain configuration.
+    pub extract: ExtractConfig,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self { extract: ExtractConfig::default() }
+    }
+}
+
+/// Extractor chain configuration (§5.2.a).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtractConfig {
+    /// Ordered list of extractor entries.
+    pub chain: Vec<ExtractorEntry>,
+}
+
+impl Default for ExtractConfig {
+    fn default() -> Self {
+        Self {
+            chain: vec![ExtractorEntry {
+                worker:  ExtractorWorkerKind::Regex,
+                kinds:   vec![],
+                trigger: None,
+                budget:  ExtractBudget::default(),
+            }],
+        }
+    }
+}
+
+/// One entry in the extractor chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtractorEntry {
+    /// Which extractor worker mode is used.
+    pub worker: ExtractorWorkerKind,
+    /// Kinds this extractor handles. Empty means all kinds.
+    pub kinds: Vec<MemoryKind>,
+    /// Condition that gates this extractor entry.
+    pub trigger: Option<ExtractTrigger>,
+    /// Resource limits for this extractor worker.
+    pub budget: ExtractBudget,
+}
+
+impl Default for ExtractorEntry {
+    fn default() -> Self {
+        Self {
+            worker:  ExtractorWorkerKind::Regex,
+            kinds:   vec![],
+            trigger: None,
+            budget:  ExtractBudget::default(),
+        }
+    }
+}
+
+/// Resource limits for one extractor worker. `None` means unlimited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ExtractBudget {
+    /// Maximum tokens this extractor may consume.
+    pub max_tokens: Option<u32>,
+    /// Maximum wall-clock time in milliseconds.
+    pub max_wall_ms: Option<u32>,
+    /// Maximum number of LLM turns.
+    pub max_turns: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +625,76 @@ mod tests {
         assert_eq!(json, r#""llm""#);
         let back: ExtractorWorkerKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ExtractorWorkerKind::Llm);
+    }
+
+    #[test]
+    fn default_config_deserializes_from_empty_json() {
+        let config: CairnConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config, CairnConfig::default());
+    }
+
+    #[test]
+    fn default_store_kind_is_sqlite() {
+        assert_eq!(CairnConfig::default().store.kind, StoreKind::Sqlite);
+    }
+
+    #[test]
+    fn default_llm_provider_is_none() {
+        assert!(CairnConfig::default().llm.provider.is_none());
+    }
+
+    #[test]
+    fn default_hooks_sensor_is_enabled() {
+        assert!(CairnConfig::default().sensors.hooks.enabled);
+    }
+
+    #[test]
+    fn default_screen_sensor_is_disabled() {
+        assert!(!CairnConfig::default().sensors.screen.enabled);
+    }
+
+    #[test]
+    fn default_orchestrator_is_local() {
+        assert_eq!(CairnConfig::default().workflows.orchestrator, OrchestratorKind::Local);
+    }
+
+    #[test]
+    fn default_extract_chain_has_regex_only() {
+        let chain = &CairnConfig::default().pipeline.extract.chain;
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].worker, ExtractorWorkerKind::Regex);
+    }
+
+    #[test]
+    fn full_config_json_round_trips() {
+        let json = r#"{
+          "vault": {
+            "name": "my-vault",
+            "tier": "local",
+            "layout": {
+              "sources": "inbox", "records": "memories", "wiki": "notes",
+              "skills": "skills", "enabled_kinds": ["user","feedback"],
+              "file_naming": "{kind}_{slug}.md",
+              "index": { "max_lines": 200, "max_bytes": 25600 }
+            },
+            "hot_memory": { "max_bytes": 25600, "recipe": ["purpose","index"] },
+            "retention": {}, "schema_files": ["CLAUDE.md"]
+          },
+          "store": { "kind": "sqlite" },
+          "llm": {},
+          "sensors": {
+            "hooks": { "enabled": true },
+            "ide": { "enabled": false },
+            "screen": { "enabled": false },
+            "slack": { "enabled": false, "scope": [] }
+          },
+          "workflows": { "orchestrator": "local" },
+          "pipeline": { "extract": { "chain": [{ "worker": "regex", "kinds": [] }] } }
+        }"#;
+        let config: CairnConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.vault.name, "my-vault");
+        assert_eq!(config.vault.layout.sources, "inbox");
+        assert_eq!(config.vault.layout.enabled_kinds.len(), 2);
+        assert!(!config.sensors.ide.enabled);
     }
 }
