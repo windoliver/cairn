@@ -73,3 +73,32 @@ fn record_graph_team_deserializes_and_validates() {
     r.validate().expect("graph_team_entity must pass validate()");
     insta::assert_json_snapshot!("record_graph_team_entity", &r);
 }
+
+// ── Config ───────────────────────────────────────────────────────────────────
+
+use cairn_core::config::CairnConfig;
+
+fn config_dir() -> std::path::PathBuf {
+    v0().join("config")
+}
+
+#[test]
+fn config_p0_defaults_deserializes_and_validates() {
+    let c: CairnConfig = load_json(config_dir().join("p0-defaults.json"));
+    c.validate().expect("p0-defaults must pass validate()");
+    insta::assert_json_snapshot!("config_p0_defaults", &c);
+}
+
+#[test]
+fn config_llm_enabled_deserializes_and_validates() {
+    let c: CairnConfig = load_json(config_dir().join("llm-enabled.json"));
+    c.validate().expect("llm-enabled must pass validate()");
+    insta::assert_json_snapshot!("config_llm_enabled", &c);
+}
+
+#[test]
+fn config_custom_store_deserializes_and_validates() {
+    let c: CairnConfig = load_json(config_dir().join("custom-store.json"));
+    c.validate().expect("custom-store must pass validate()");
+    insta::assert_json_snapshot!("config_custom_store", &c);
+}
