@@ -9,6 +9,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+use cairn_cli::config as cli_config;
 use cairn_cli::plugins;
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
@@ -20,6 +21,19 @@ fn build_command() -> clap::Command {
         .version(env!("CARGO_PKG_VERSION"))
         .about("Cairn — agent memory framework")
         .subcommand(plugins_subcommand())
+        .subcommand(bootstrap_subcommand())
+}
+
+fn bootstrap_subcommand() -> clap::Command {
+    clap::Command::new("bootstrap")
+        .about("Write a default .cairn/config.yaml to a vault directory")
+        .arg(
+            clap::Arg::new("vault-path")
+                .long("vault-path")
+                .default_value(".")
+                .value_name("PATH")
+                .help("Vault root directory (default: current directory)"),
+        )
 }
 
 fn plugins_subcommand() -> clap::Command {
@@ -72,6 +86,7 @@ fn main() -> ExitCode {
 
     match matches.subcommand() {
         Some(("plugins", sub)) => run_plugins(sub),
+        Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some((verb, _)) => {
             eprintln!(
                 "cairn {verb}: not yet implemented in this P0 scaffold. \
@@ -84,6 +99,29 @@ fn main() -> ExitCode {
             let _ = build_command().print_help();
             println!();
             ExitCode::SUCCESS
+        }
+    }
+}
+
+fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
+    let vault_path = std::path::PathBuf::from(
+        matches
+            .get_one::<String>("vault-path")
+            .expect("vault-path has a default value"),
+    );
+
+    match cli_config::write_default(&vault_path) {
+        Ok(()) => {
+            println!(
+                "cairn bootstrap: wrote default config to {}",
+                vault_path.join(".cairn/config.yaml").display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // EX_CONFIG (78) — bad config or file already exists
+            eprintln!("cairn bootstrap: {e:#}");
+            ExitCode::from(78)
         }
     }
 }
