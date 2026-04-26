@@ -1,0 +1,38 @@
+//! Cairn domain types — the typed `MemoryRecord` model and its supporting
+//! taxonomy, identity, scope, provenance, evidence, and actor-chain types.
+//!
+//! Brief sources:
+//! - §4.2 Identity — agents, sensors, actor chains
+//! - §6 Taxonomy — kind × class × visibility × scope
+//! - §6.4 `ConfidenceBand` + Evidence Vector
+//! - §6.5 Provenance (mandatory on every record)
+//!
+//! These types are pure data with `serde` derive. They have no I/O, no
+//! adapter dependency, and no async; the [`MemoryRecord::validate`] entry
+//! point is what every adapter calls before any persistence side effect.
+//!
+//! Serialization is stable across three call sites:
+//! - **API envelopes** → `serde_json` (the wire format).
+//! - **`SQLite` row JSON columns** → same `serde_json` representation.
+//! - **Markdown frontmatter** → YAML; field names and shapes match the
+//!   JSON form so a YAML projector reuses the same `serde` derive.
+
+pub mod actor_chain;
+pub mod error;
+pub mod evidence;
+pub mod identity;
+pub mod provenance;
+pub mod record;
+pub mod scope;
+pub mod taxonomy;
+pub mod timestamp;
+
+pub use actor_chain::{ActorChainEntry, ChainRole};
+pub use error::DomainError;
+pub use evidence::{ConfidenceBand, EvidenceVector};
+pub use identity::{Identity, IdentityKind};
+pub use provenance::Provenance;
+pub use record::MemoryRecord;
+pub use scope::ScopeTuple;
+pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+pub use timestamp::Rfc3339Timestamp;

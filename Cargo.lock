@@ -166,6 +166,7 @@ name = "cairn-core"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
