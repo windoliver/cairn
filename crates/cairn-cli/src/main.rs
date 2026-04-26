@@ -1,24 +1,38 @@
 //! `cairn` binary entry point.
 //!
-//! Verb subcommands (`ingest`, `search`, …) come from the IDL-generated
-//! clap `Command` tree (`mod generated`); the `plugins` subcommand is
-//! augmented at runtime. Until the verb layer lands (#59 / #9), every
-//! verb exits 2 with a not-implemented message so callers cannot mistake
-//! a scaffold for a real memory operation.
+//! Verb subcommands come from the IDL-generated clap builders (`mod generated`),
+//! each wrapped with a `--json` flag via `cairn_cli::verbs::with_json()`. Actual
+//! verb logic lives in `cairn_cli::verbs::*`; `main.rs` only owns parsing and
+//! dispatch.
 
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::plugins;
+use cairn_cli::{plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 
 mod generated;
 
 fn build_command() -> clap::Command {
-    generated::command()
+    clap::Command::new("cairn")
+        .about("Cairn — agent memory framework (cairn.mcp.v1)")
         .version(env!("CARGO_PKG_VERSION"))
-        .about("Cairn — agent memory framework")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        // Eight core verbs, each with --json added.
+        .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::summarize_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::assemble_hot_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::capture_trace_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::lint_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
+        // Protocol preludes.
+        .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
+        .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
+        // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
 }
 
@@ -62,28 +76,33 @@ fn main() -> ExitCode {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
                     ExitCode::SUCCESS
                 }
-                // EX_USAGE — every other clap-detected error is a usage error
-                // (unknown flag, missing required arg, invalid value, unknown
-                // subcommand, …). Spec §5.2 maps these to 64.
+                // EX_USAGE (64) for every clap-detected usage error.
                 _ => ExitCode::from(64),
             };
         }
     };
 
     match matches.subcommand() {
+        Some(("ingest", sub)) => verbs::ingest::run(sub),
+        Some(("search", sub)) => verbs::search::run(sub),
+        Some(("retrieve", sub)) => verbs::retrieve::run(sub),
+        Some(("summarize", sub)) => verbs::summarize::run(sub),
+        Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
+        Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
+        Some(("lint", sub)) => verbs::lint::run(sub),
+        Some(("forget", sub)) => verbs::forget::run(sub),
+        Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
+        Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
-        Some((verb, _)) => {
-            eprintln!(
-                "cairn {verb}: not yet implemented in this P0 scaffold. \
-                 Verb dispatch lands in #59 / #9; no memory operation was \
-                 performed."
-            );
-            ExitCode::from(2)
-        }
         None => {
             let _ = build_command().print_help();
             println!();
             ExitCode::SUCCESS
+        }
+        Some((verb, _)) => {
+            // Defensive: clap's subcommand_required(true) prevents this in practice.
+            eprintln!("cairn: unknown subcommand '{verb}'");
+            ExitCode::from(64)
         }
     }
 }
@@ -91,13 +110,12 @@ fn main() -> ExitCode {
 fn run_plugins(matches: &ArgMatches) -> ExitCode {
     let registry = match plugins::host::register_all() {
         Ok(r) => r,
-        // EX_CONFIG — bundled plugin.toml failed to parse. Spec §5.2.
+        // EX_CONFIG (78) — bundled plugin.toml failed to parse.
         Err(PluginError::InvalidManifest(msg)) => {
             eprintln!("cairn plugins: bundled plugin manifest invalid — {msg}");
             return ExitCode::from(78);
         }
-        // EX_UNAVAILABLE — registry rejected a plugin (name/contract/version
-        // mismatch, duplicate, identity error). Spec §5.2.
+        // EX_UNAVAILABLE (69) — registry rejected a plugin.
         Err(e) => {
             eprintln!("cairn plugins: startup failed — {e}");
             return ExitCode::from(69);
@@ -113,7 +131,6 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
             } else {
                 plugins::list::render_human(&registry)
             };
-            // Newline at end ensures the human table flushes cleanly.
             let _ = writeln!(stdout, "{}", text.trim_end_matches('\n'));
             ExitCode::SUCCESS
         }
