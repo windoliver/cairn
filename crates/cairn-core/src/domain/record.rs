@@ -18,12 +18,12 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    ActorChainEntry, ChainRole, DomainError, EvidenceVector, Identity, IdentityKind, Provenance,
-    Rfc3339Timestamp, ScopeTuple,
+    ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
-use crate::generated::envelope::{SignedIntent, SignedIntentScopeTier};
+use crate::generated::envelope::SignedIntentScopeTier;
 
 /// Ed25519 signature in `ed25519:<128 lowercase hex>` form. Mirrors the
 /// schema in `crates/cairn-idl/schema/common/primitives.json` so domain
@@ -317,7 +317,7 @@ impl MemoryRecord {
     }
 
     /// Pre-store containment check: the record's scope and visibility
-    /// must be contained by the verified [`SignedIntent`] that authorizes
+    /// must be contained by the [`VerifiedSignedIntent`] that authorizes
     /// the write. `validate()` alone is shape-only; the store boundary
     /// must call this method as well so a record signed for one
     /// `(tenant, workspace, entity, tier)` cannot be persisted into
@@ -327,33 +327,45 @@ impl MemoryRecord {
     /// - `canonical_record_hash` must equal `intent.target_hash` —
     ///   the signed intent binds the issuer's signature to a specific
     ///   record content; without this check the intent could be replayed
-    ///   onto a different record body/provenance. Format `sha256:<hex>`.
+    ///   onto a different record body/provenance. The
+    ///   [`CanonicalRecordHash`] type is opaque, so callers can't
+    ///   fabricate a matching hash from a string.
     /// - `scope.tenant`, `scope.workspace`, `scope.entity` (when set) must
     ///   exactly equal the corresponding `SignedIntent.scope` field.
     /// - `visibility` must be `≤` `SignedIntent.scope.tier` — promotion
     ///   to a tier broader than the signed authorization is rejected.
+    /// - `scope.session_id` is **not yet in the signed envelope** — set it
+    ///   on a record and containment rejects the write. Once
+    ///   `SignedIntentScope` grows a `session_id` field this check will
+    ///   compare them.
     /// - `scope.user`, when set, must equal a cryptographically-established
     ///   human identity: the chain author (when human) or `intent.issuer`
     ///   (when human). The unsigned chain entries at P0 are not sufficient.
     /// - `scope.agent`, when set, must equal the chain author (when agent)
     ///   or `intent.issuer` (when agent).
-    /// - `signature` field's wire form is *not* re-verified here; that
-    ///   remains the caller's job once keychain-resident keys are
-    ///   available.
     ///
-    /// `canonical_record_hash` is provided by the caller (typically the
-    /// store boundary) so cairn-core stays I/O-free and dep-light.
+    /// The `intent` is consumed as a [`VerifiedSignedIntent`] so the type
+    /// system enforces "the upstream verifier already checked signature,
+    /// expiry, nonce, and sequence". This method does **not** re-derive
+    /// crypto truth.
     pub fn validate_against_intent(
         &self,
-        intent: &SignedIntent,
-        canonical_record_hash: &str,
+        intent: &VerifiedSignedIntent,
+        canonical_record_hash: &CanonicalRecordHash,
     ) -> Result<(), DomainError> {
-        if canonical_record_hash != intent.target_hash {
+        let intent = intent.as_inner();
+        if canonical_record_hash.as_str() != intent.target_hash {
             return Err(DomainError::MissingSignature {
                 message: format!(
-                    "canonical record hash `{canonical_record_hash}` does not match SignedIntent.target_hash `{}` — the signed intent is not bound to this record",
+                    "canonical record hash `{}` does not match SignedIntent.target_hash `{}` — the signed intent is not bound to this record",
+                    canonical_record_hash.as_str(),
                     intent.target_hash
                 ),
+            });
+        }
+        if self.scope.session_id.is_some() {
+            return Err(DomainError::MalformedScope {
+                message: "scope.session_id is set, but the signed intent envelope has no session dimension yet — containment cannot authorize a session-scoped write".to_owned(),
             });
         }
         // The signed intent's scope (tenant/workspace/entity/tier) is the
@@ -434,7 +446,7 @@ impl MemoryRecord {
     /// onto downstream consumers that filter by user scope.
     fn validate_scope_principals_against_intent(
         &self,
-        intent: &SignedIntent,
+        intent: &crate::generated::envelope::SignedIntent,
     ) -> Result<(), DomainError> {
         let issuer = intent.issuer.0.as_str();
         let author_entry = self
@@ -882,12 +894,17 @@ mod tests {
     }
 
     fn intent_for(
+        record: &MemoryRecord,
         tenant: &str,
         workspace: &str,
         entity: &str,
         tier: SignedIntentScopeTier,
-    ) -> SignedIntent {
-        SignedIntent {
+    ) -> VerifiedSignedIntent {
+        // target_hash binds to the canonical hash of the actual record
+        // under test, so tests exercising other rules (scope mismatch,
+        // visibility promotion, etc.) get a matching hash by default.
+        let target_hash = CanonicalRecordHash::compute(record).expect("compute");
+        VerifiedSignedIntent::assume_verified(crate::generated::envelope::SignedIntent {
             chain_parents: vec![],
             expires_at: "2026-04-22T14:07:11Z".to_owned(),
             issued_at: "2026-04-22T14:02:11Z".to_owned(),
@@ -907,25 +924,17 @@ mod tests {
                 "ed25519:{}",
                 "a".repeat(128)
             )),
-            target_hash: format!("sha256:{}", "a".repeat(64)),
-        }
-    }
-
-    /// The canonical record hash that matches `intent_for`'s `target_hash`.
-    /// Tests that don't exercise the `target_hash` binding pass this value to
-    /// `validate_against_intent` so other rules can be tested in isolation.
-    fn matching_target_hash() -> String {
-        format!("sha256:{}", "a".repeat(64))
+            target_hash: target_hash.as_str().to_owned(),
+        })
     }
 
     #[test]
     fn intent_containment_rejects_tenant_mismatch() {
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
-        let intent = intent_for("other", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "other", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -936,10 +945,9 @@ mod tests {
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Team;
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::UnsupportedVisibility { .. }));
     }
 
@@ -949,10 +957,9 @@ mod tests {
         r.scope.tenant = None;
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -962,10 +969,9 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = None;
         r.scope.entity = Some("ent".to_owned());
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -975,10 +981,9 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = None;
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -989,24 +994,43 @@ mod tests {
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Private;
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        r.validate_against_intent(&intent, &matching_target_hash())
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        r.validate_against_intent(&intent, &hash)
             .expect("scope contained, visibility ≤ tier, target hash matches");
     }
 
     #[test]
     fn intent_containment_rejects_target_hash_mismatch() {
         // The signed intent binds to a specific record content via
-        // `target_hash`. A different record (different body, provenance,
-        // chain) must not satisfy the intent even with matching scope.
+        // `target_hash`. Mutating any signed field after the intent was
+        // issued must invalidate the binding.
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let wrong_hash = format!("sha256:{}", "b".repeat(64));
-        let err = r.validate_against_intent(&intent, &wrong_hash).unwrap_err();
+        // Capture the intent BEFORE mutating the body, then mutate.
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        r.body.push_str(" (tampered)");
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_session_scope() {
+        // SignedIntentScope has no session dimension yet; until it does,
+        // a session-scoped record cannot be authorized by intent
+        // containment — fail closed.
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.scope.session_id = Some("session-42".to_owned());
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
     #[test]
@@ -1027,16 +1051,14 @@ mod tests {
             at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
         }];
         r.provenance.originating_agent_id = agent;
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        // intent.issuer = `usr:tafeng` from intent_for(); matches scope.user.
-        r.validate_against_intent(&intent, &matching_target_hash())
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        r.validate_against_intent(&intent, &hash)
             .expect("agent-authored user memory authorized by user-issued intent");
     }
 
     #[test]
     fn intent_containment_rejects_user_scope_without_matching_principal() {
-        // scope.user that matches neither the chain author nor the
-        // intent issuer is forgery — reject.
         let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
@@ -1049,10 +1071,9 @@ mod tests {
             at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
         }];
         r.provenance.originating_agent_id = agent;
-        let intent = intent_for("acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let err = r
-            .validate_against_intent(&intent, &matching_target_hash())
-            .unwrap_err();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let hash = CanonicalRecordHash::compute(&r).expect("compute");
+        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 

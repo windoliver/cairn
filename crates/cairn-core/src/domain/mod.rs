@@ -18,9 +18,11 @@
 //!   JSON form so a YAML projector reuses the same `serde` derive.
 
 pub mod actor_chain;
+pub mod canonical;
 pub mod error;
 pub mod evidence;
 pub mod identity;
+pub mod intent;
 pub mod provenance;
 pub mod record;
 pub mod scope;
@@ -28,9 +30,11 @@ pub mod taxonomy;
 pub mod timestamp;
 
 pub use actor_chain::{ActorChainEntry, ChainRole};
+pub use canonical::CanonicalRecordHash;
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};
+pub use intent::VerifiedSignedIntent;
 pub use provenance::Provenance;
 pub use record::MemoryRecord;
 pub use scope::ScopeTuple;
