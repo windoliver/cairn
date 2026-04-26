@@ -7,6 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[allow(dead_code)]
 fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) -> T {
     let path = path.as_ref();
     let raw = std::fs::read_to_string(path)
@@ -15,6 +16,7 @@ fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) 
         .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
+#[allow(dead_code)]
 fn load_toml_str(path: impl AsRef<std::path::Path>) -> String {
     let path = path.as_ref();
     std::fs::read_to_string(path)
