@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
 
-use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
+use super::envelope::{emit_json, human_error, unimplemented_response};
 
 /// Run `cairn ingest`.
 #[must_use]
@@ -21,12 +21,11 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         if src == "-" {
             let mut buf = String::new();
             if std::io::stdin().read_to_string(&mut buf).is_err() {
-                let op = new_operation_id();
+                let r = unimplemented_response(ResponseVerb::Ingest);
                 if json {
-                    let r = unimplemented_response(ResponseVerb::Ingest);
                     emit_json(&r);
                 } else {
-                    human_error("ingest", "Internal", "failed to read stdin", &op);
+                    human_error("ingest", "Internal", "failed to read stdin", &r.operation_id);
                 }
                 return ExitCode::FAILURE;
             }
