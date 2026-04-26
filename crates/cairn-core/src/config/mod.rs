@@ -232,7 +232,7 @@ string_enum! {
 /// All fields default to the P0 offline-local deployment:
 /// `SQLite` store, no LLM, hook + IDE sensors, local tokio orchestrator,
 /// regex-only extractor chain.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CairnConfig {
     /// Vault-level configuration.
@@ -247,19 +247,6 @@ pub struct CairnConfig {
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
     pub pipeline: PipelineConfig,
-}
-
-impl Default for CairnConfig {
-    fn default() -> Self {
-        Self {
-            vault:     VaultConfig::default(),
-            store:     StoreConfig::default(),
-            llm:       LlmConfig::default(),
-            sensors:   SensorsConfig::default(),
-            workflows: WorkflowsConfig::default(),
-            pipeline:  PipelineConfig::default(),
-        }
-    }
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
@@ -350,7 +337,7 @@ impl Default for IndexConfig {
     }
 }
 
-/// Hot-memory assembly recipe and budget (§3.1 hot_memory).
+/// Hot-memory assembly recipe and budget (§3.1 `hot_memory`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotMemoryConfig {
@@ -475,17 +462,11 @@ impl Default for WorkflowsConfig {
 // ── Pipeline ─────────────────────────────────────────────────────────────
 
 /// Pipeline stage configuration (§5.2.a).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PipelineConfig {
     /// Extractor chain configuration.
     pub extract: ExtractConfig,
-}
-
-impl Default for PipelineConfig {
-    fn default() -> Self {
-        Self { extract: ExtractConfig::default() }
-    }
 }
 
 /// Extractor chain configuration (§5.2.a).
