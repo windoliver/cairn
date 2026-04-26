@@ -88,8 +88,8 @@ pub enum LlmProvider {
 }
 
 /// Macro: implement string-backed serde for enums with an implicit
-/// `Custom(String)` variant. Reduces boilerplate for StoreKind,
-/// OrchestratorKind, and ExtractorWorkerKind.
+/// `Custom(String)` variant. Reduces boilerplate for `StoreKind`,
+/// `OrchestratorKind`, and `ExtractorWorkerKind`.
 ///
 /// The `Custom` variant is always generated implicitly — do not list it in the
 /// invocation. This avoids a Rust macro local-ambiguity when the parser sees
@@ -185,7 +185,7 @@ string_enum! {
     /// Which memory store adapter is active (§4.1 plugin config).
     #[non_exhaustive]
     pub enum StoreKind {
-        /// SQLite + FTS5 + sqlite-vec. P0 default.
+        /// `SQLite` + FTS5 + sqlite-vec. P0 default.
         Sqlite => "sqlite",
         /// Nexus sidecar (P1).
         NexusSandbox => "nexus-sandbox",
@@ -199,7 +199,7 @@ string_enum! {
     /// Which workflow orchestrator is active (§4.1, §4.0 row 3).
     #[non_exhaustive]
     pub enum OrchestratorKind {
-        /// In-process tokio + SQLite job table. P0 default.
+        /// In-process tokio + `SQLite` job table. P0 default.
         Local => "local",
         /// Temporal workflow engine (P1 opt-in).
         Temporal => "temporal",
