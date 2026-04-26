@@ -16,7 +16,7 @@ pub fn render_human(registry: &PluginRegistry) -> String {
         .into_iter()
         .map(|(name, manifest)| HumanRow {
             name: name.as_str().to_string(),
-            contract: format!("{:?}", manifest.contract()),
+            contract: manifest.contract().as_static_str().to_string(),
             range: format!(
                 "[{}, {})",
                 manifest.contract_version_range().min,
@@ -68,7 +68,7 @@ pub fn render_json(registry: &PluginRegistry) -> String {
         .map(|(name, manifest)| {
             serde_json::json!({
                 "name": name.as_str(),
-                "contract": format!("{:?}", manifest.contract()),
+                "contract": manifest.contract().as_static_str(),
                 "contract_version_range": {
                     "min": manifest.contract_version_range().min.to_string(),
                     "max_exclusive": manifest.contract_version_range().max_exclusive.to_string(),
@@ -139,9 +139,13 @@ fn capabilities_for(
         ),
         // `LLMProvider`, `FrontendAdapter`, and `AgentProvider` have no
         // bundled implementations yet, so their capabilities render as
-        // `{}`. `ContractKind` is `#[non_exhaustive]`; the wildcard also
-        // covers any future variant until this renderer learns about it.
-        _ => serde_json::json!({}),
+        // `{}`. `ContractKind` is `#[non_exhaustive]`; the trailing `_`
+        // arm is a safety net for future variants until this renderer
+        // learns about them.
+        ContractKind::LLMProvider
+        | ContractKind::FrontendAdapter
+        | ContractKind::AgentProvider
+        | _ => serde_json::json!({}),
     }
 }
 
