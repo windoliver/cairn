@@ -170,8 +170,10 @@ cairn
 ```
 
 Future verb subcommands (`ingest`, `search`, …) slot in alongside
-`plugins`. They are out of scope here. The existing scaffold's behaviour
-of refusing unknown verbs is preserved by `clap`'s usage error (exit 2).
+`plugins`. They are out of scope here. Verb stubs that reach our dispatch
+exit 2 with a not-implemented marker; clap usage errors (unknown
+subcommand, missing required ArgGroup, unknown flag) exit 64
+(`EX_USAGE`) per §5.2.
 
 ### 3.6 Startup wiring
 
@@ -226,10 +228,10 @@ generic helpers); tier-2 cases are contract-specific function stubs.
 
 | Contract | Tier-1 (always run) | Tier-2 (`Pending` until impl) |
 |---|---|---|
-| `MemoryStore` | `manifest_matches_host`, `arc_pointer_stable`, `capability_self_consistency_floor` | `put_get_roundtrip`, `fts_query_returns_doc`, `vector_search_when_advertised` |
-| `WorkflowOrchestrator` | (same three) | `enqueue_then_complete` |
-| `SensorIngress` | (same three) | `emits_envelope_when_poked` |
-| `MCPServer` | (same three) | `initialize_and_list_tools` |
+| `MemoryStore` | `manifest_matches_host`, `arc_pointer_stable`, `capability_self_consistency_floor`, `manifest_features_match_capabilities` | `put_get_roundtrip`, `fts_query_returns_doc`, `vector_search_when_advertised` |
+| `WorkflowOrchestrator` | (same four) | `enqueue_then_complete` |
+| `SensorIngress` | (same four) | `emits_envelope_when_poked` |
+| `MCPServer` | (same four) | `initialize_and_list_tools` |
 
 Tier-1 specifics:
 
@@ -247,6 +249,13 @@ Tier-1 specifics:
   minimum floor; per-contract invariants (e.g.,
   `caps.fts == true ⇒ supports_fts() == true`) tighten in the per-impl
   PRs.
+- `manifest_features_match_capabilities` — compare the manifest's
+  `[features]` map against the runtime capability struct field set.
+  Fails on unknown manifest keys (typo / drift) or value disagreement;
+  manifest keys absent from the capability struct default to `false`
+  (matches the schema's optional/free-form `[features]` semantics).
+  Catches the case where a plugin advertises e.g. `fts = true` in
+  `plugin.toml` but its runtime `capabilities()` returns `fts = false`.
 
 Tier-2 stubs are real Rust functions in
 `cairn-core::contract::conformance::<contract>` whose bodies return
@@ -321,13 +330,14 @@ cairn-store-sqlite (MemoryStore)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
   tier-2 put_get_roundtrip                        pending (real impl pending)
   tier-2 fts_query_returns_doc                    pending (real impl pending)
   tier-2 vector_search_when_advertised            pending (real impl pending)
 
 …
 
-Summary: 4 plugins, 12 ok, 6 pending, 0 failed
+Summary: 4 plugins, 16 ok, 6 pending, 0 failed
 ```
 
 `--json`:
@@ -345,7 +355,7 @@ Summary: 4 plugins, 12 ok, 6 pending, 0 failed
       ]
     }
   ],
-  "summary": { "ok": 12, "pending": 6, "failed": 0 }
+  "summary": { "ok": 16, "pending": 6, "failed": 0 }
 }
 ```
 

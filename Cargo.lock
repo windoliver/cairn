@@ -148,6 +148,7 @@ name = "cairn-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "cairn-core",
  "cairn-mcp",
  "cairn-sensors-local",

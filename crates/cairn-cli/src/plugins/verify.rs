@@ -76,6 +76,51 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
         });
     }
 
+    // Coverage gate: every typed plugin registration must carry a manifest.
+    // Plugins registered through the legacy 3-arg `register_plugin!` form
+    // (no manifest) are still a valid unit-test path, but `verify` must
+    // surface them as Failed so they cannot pass the CI gate by being
+    // invisible to `parsed_manifests_sorted`.
+    for (orphan_name, contract_label) in registry.typed_plugins_without_manifests() {
+        let case = CaseOutcome {
+            id: "manifest_present_for_typed_registration",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!(
+                    "typed {contract_label} plugin {orphan_name} has no parsed manifest; \
+                     register through the manifest-aware path"
+                ),
+            },
+        };
+        summary.failed += 1;
+        plugins.push(PluginReport {
+            name: orphan_name.as_str().to_string(),
+            contract: contract_label.to_string(),
+            cases: vec![case],
+        });
+    }
+
+    // Coverage gate: an empty registry means no plugins were verified at
+    // all. This must fail closed — otherwise `cairn plugins verify` would
+    // exit 0 in a misconfigured runtime where `register_all` ran but
+    // produced no plugins (e.g. all bundled crates compiled out).
+    if plugins.is_empty() {
+        summary.failed += 1;
+        plugins.push(PluginReport {
+            name: "<registry>".to_string(),
+            contract: "<none>".to_string(),
+            cases: vec![CaseOutcome {
+                id: "registry_has_at_least_one_plugin",
+                tier: Tier::One,
+                status: CaseStatus::Failed {
+                    message: "PluginRegistry has zero plugins; verify cannot \
+                              certify an empty host"
+                        .to_string(),
+                },
+            }],
+        });
+    }
+
     VerifyReport { plugins, summary }
 }
 
@@ -225,6 +270,60 @@ mod tests {
             assert!(text.contains(n));
         }
         assert!(text.contains("Summary:"));
+    }
+
+    #[test]
+    fn empty_registry_fails_closed() {
+        let reg = cairn_core::contract::registry::PluginRegistry::new();
+        let report = run(&reg);
+        assert_eq!(report.plugins.len(), 1, "synthetic registry-empty plugin");
+        assert!(report.summary.failed >= 1);
+        assert_eq!(exit_code(&report, false), 69);
+        assert_eq!(exit_code(&report, true), 69);
+    }
+
+    #[test]
+    fn typed_registration_without_manifest_is_failed() {
+        use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+        use cairn_core::contract::registry::{PluginName, PluginRegistry};
+        use cairn_core::contract::version::{ContractVersion, VersionRange};
+
+        #[derive(Default)]
+        struct BareStore;
+
+        #[async_trait::async_trait]
+        impl MemoryStore for BareStore {
+            fn name(&self) -> &'static str {
+                "bare-store"
+            }
+            fn capabilities(&self) -> &MemoryStoreCapabilities {
+                static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                    fts: false,
+                    vector: false,
+                    graph_edges: false,
+                    transactions: false,
+                };
+                &CAPS
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            }
+        }
+
+        let mut reg = PluginRegistry::new();
+        let name = PluginName::new("bare-store").expect("valid");
+        // Bare register (no manifest) — the legacy 3-arg path. Must still
+        // be visible to verify as a coverage failure.
+        reg.register_memory_store(name, std::sync::Arc::new(BareStore))
+            .expect("registers");
+
+        let report = run(&reg);
+        assert_eq!(report.plugins.len(), 1);
+        assert_eq!(report.plugins[0].name, "bare-store");
+        let case = &report.plugins[0].cases[0];
+        assert_eq!(case.id, "manifest_present_for_typed_registration");
+        assert!(matches!(case.status, CaseStatus::Failed { .. }));
+        assert_eq!(exit_code(&report, false), 69);
     }
 
     #[test]

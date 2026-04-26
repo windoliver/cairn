@@ -195,10 +195,20 @@ pub(super) fn tier1_manifest_matches_host(
 /// struct's named fields. The caller passes a slice of `(field_name,
 /// runtime_value)` pairs derived from the plugin's `capabilities()` return.
 ///
-/// Fails if any feature key is in the manifest but not in `runtime` (or
-/// vice versa), or if any value disagrees. This catches manifest drift
-/// where a plugin advertises e.g. `fts = true` but its runtime
-/// capabilities return `fts = false`.
+/// Per the manifest schema, `[features]` is optional and free-form. The
+/// validation rule is therefore asymmetric:
+///
+/// - Keys present in the manifest but NOT in `runtime` → fail (unknown
+///   feature key — typo or drift from the trait's capability struct).
+/// - Keys present in `runtime` but absent from the manifest → treated as
+///   `false` (the schema default for an unspecified feature). Compared
+///   against the runtime value.
+/// - Keys present in both → values must match.
+///
+/// This way a plugin with all-`false` runtime capabilities and no
+/// `[features]` block passes (the canonical P0 stub case), while a
+/// plugin advertising `fts = true` but returning `fts = false` at runtime
+/// still fails — manifest drift remains caught.
 pub(super) fn tier1_manifest_features_match_capabilities(
     registry: &PluginRegistry,
     name: &PluginName,
@@ -216,23 +226,29 @@ pub(super) fn tier1_manifest_features_match_capabilities(
     };
     let manifest_features = manifest.features();
     let runtime_keys: BTreeSet<&str> = runtime.iter().map(|(k, _)| *k).collect();
-    let manifest_keys: BTreeSet<&str> = manifest_features.keys().map(String::as_str).collect();
 
-    if manifest_keys != runtime_keys {
-        let only_manifest: Vec<&str> = manifest_keys.difference(&runtime_keys).copied().collect();
-        let only_runtime: Vec<&str> = runtime_keys.difference(&manifest_keys).copied().collect();
+    // Reject unknown manifest keys (typo / drift from the capability
+    // struct field set).
+    let unknown: Vec<&str> = manifest_features
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !runtime_keys.contains(k))
+        .collect();
+    if !unknown.is_empty() {
         return CaseOutcome {
             id,
             tier: Tier::One,
             status: CaseStatus::Failed {
                 message: format!(
-                    "feature key mismatch — only in manifest: {only_manifest:?}, \
-                     only in runtime capabilities: {only_runtime:?}"
+                    "manifest declares unknown feature key(s) {unknown:?} \
+                     not present in the runtime capability struct"
                 ),
             },
         };
     }
 
+    // Compare each runtime capability against the manifest. Missing
+    // manifest keys default to `false` per schema.
     for (key, runtime_value) in runtime {
         let manifest_value = manifest_features.get(*key).copied().unwrap_or(false);
         if manifest_value != *runtime_value {
@@ -241,8 +257,8 @@ pub(super) fn tier1_manifest_features_match_capabilities(
                 tier: Tier::One,
                 status: CaseStatus::Failed {
                     message: format!(
-                        "feature {key:?} disagrees: manifest={manifest_value}, \
-                         runtime capabilities={runtime_value}"
+                        "feature {key:?} disagrees: manifest={manifest_value} \
+                         (or default-false if absent), runtime capabilities={runtime_value}"
                     ),
                 },
             };
