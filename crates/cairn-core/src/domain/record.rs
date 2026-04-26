@@ -324,12 +324,10 @@ impl MemoryRecord {
     /// another.
     ///
     /// Containment rules:
-    /// - `canonical_record_hash` must equal `intent.target_hash` —
-    ///   the signed intent binds the issuer's signature to a specific
-    ///   record content; without this check the intent could be replayed
-    ///   onto a different record body/provenance. The
-    ///   [`CanonicalRecordHash`] type is opaque, so callers can't
-    ///   fabricate a matching hash from a string.
+    /// - The canonical signed-payload hash of `self` must equal
+    ///   `intent.target_hash` — the binding is recomputed from the
+    ///   record on every call, so a stale hash from an older record
+    ///   instance cannot pass even if the caller still holds it.
     /// - `scope.tenant`, `scope.workspace`, `scope.entity` (when set) must
     ///   exactly equal the corresponding `SignedIntent.scope` field.
     /// - `visibility` must be `≤` `SignedIntent.scope.tier` — promotion
@@ -351,14 +349,14 @@ impl MemoryRecord {
     pub fn validate_against_intent(
         &self,
         intent: &VerifiedSignedIntent,
-        canonical_record_hash: &CanonicalRecordHash,
     ) -> Result<(), DomainError> {
         let intent = intent.as_inner();
-        if canonical_record_hash.as_str() != intent.target_hash {
+        let computed = CanonicalRecordHash::compute(self)?;
+        if computed.as_str() != intent.target_hash {
             return Err(DomainError::MissingSignature {
                 message: format!(
                     "canonical record hash `{}` does not match SignedIntent.target_hash `{}` — the signed intent is not bound to this record",
-                    canonical_record_hash.as_str(),
+                    computed.as_str(),
                     intent.target_hash
                 ),
             });
@@ -904,28 +902,34 @@ mod tests {
         // under test, so tests exercising other rules (scope mismatch,
         // visibility promotion, etc.) get a matching hash by default.
         let target_hash = CanonicalRecordHash::compute(record).expect("compute");
-        VerifiedSignedIntent::assume_verified(crate::generated::envelope::SignedIntent {
-            chain_parents: vec![],
-            expires_at: "2026-04-22T14:07:11Z".to_owned(),
-            issued_at: "2026-04-22T14:02:11Z".to_owned(),
-            issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
-            key_version: 1,
-            nonce: crate::generated::common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
-            operation_id: crate::generated::common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
-            scope: crate::generated::envelope::SignedIntentScope {
-                tenant: tenant.to_owned(),
-                workspace: workspace.to_owned(),
-                entity: entity.to_owned(),
-                tier,
+        VerifiedSignedIntent::dangerous_unverified_for_testing(
+            crate::generated::envelope::SignedIntent {
+                chain_parents: vec![],
+                expires_at: "2026-04-22T14:07:11Z".to_owned(),
+                issued_at: "2026-04-22T14:02:11Z".to_owned(),
+                issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
+                key_version: 1,
+                nonce: crate::generated::common::Nonce16Base64(
+                    "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+                ),
+                operation_id: crate::generated::common::Ulid(
+                    "01HQZX9F5N0000000000000000".to_owned(),
+                ),
+                scope: crate::generated::envelope::SignedIntentScope {
+                    tenant: tenant.to_owned(),
+                    workspace: workspace.to_owned(),
+                    entity: entity.to_owned(),
+                    tier,
+                },
+                sequence: Some(1),
+                server_challenge: None,
+                signature: crate::generated::common::Ed25519Signature(format!(
+                    "ed25519:{}",
+                    "a".repeat(128)
+                )),
+                target_hash: target_hash.as_str().to_owned(),
             },
-            sequence: Some(1),
-            server_challenge: None,
-            signature: crate::generated::common::Ed25519Signature(format!(
-                "ed25519:{}",
-                "a".repeat(128)
-            )),
-            target_hash: target_hash.as_str().to_owned(),
-        })
+        )
     }
 
     #[test]
@@ -933,8 +937,7 @@ mod tests {
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
         let intent = intent_for(&r, "other", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -946,8 +949,7 @@ mod tests {
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Team;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::UnsupportedVisibility { .. }));
     }
 
@@ -958,8 +960,7 @@ mod tests {
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -970,8 +971,7 @@ mod tests {
         r.scope.workspace = None;
         r.scope.entity = Some("ent".to_owned());
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -982,8 +982,7 @@ mod tests {
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = None;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -995,8 +994,7 @@ mod tests {
         r.scope.entity = Some("ent".to_owned());
         r.visibility = MemoryVisibility::Private;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        r.validate_against_intent(&intent, &hash)
+        r.validate_against_intent(&intent)
             .expect("scope contained, visibility ≤ tier, target hash matches");
     }
 
@@ -1012,8 +1010,7 @@ mod tests {
         // Capture the intent BEFORE mutating the body, then mutate.
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
         r.body.push_str(" (tampered)");
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
     }
 
@@ -1028,8 +1025,7 @@ mod tests {
         r.scope.entity = Some("ent".to_owned());
         r.scope.session_id = Some("session-42".to_owned());
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
@@ -1052,8 +1048,7 @@ mod tests {
         }];
         r.provenance.originating_agent_id = agent;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        r.validate_against_intent(&intent, &hash)
+        r.validate_against_intent(&intent)
             .expect("agent-authored user memory authorized by user-issued intent");
     }
 
@@ -1072,8 +1067,7 @@ mod tests {
         }];
         r.provenance.originating_agent_id = agent;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        let hash = CanonicalRecordHash::compute(&r).expect("compute");
-        let err = r.validate_against_intent(&intent, &hash).unwrap_err();
+        let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 

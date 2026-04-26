@@ -1,20 +1,27 @@
 //! Canonical record hashing — the single binding between a `MemoryRecord`
 //! and a `SignedIntent.target_hash`.
 //!
-//! [`CanonicalRecordHash`] is opaque: callers can't fabricate one from a
-//! string. Construction goes through [`CanonicalRecordHash::compute`],
-//! which serializes the record to JSON with sorted object keys, hashes
-//! the bytes with `SHA`-256, and prefixes with `sha256:`. The intent
-//! containment check at [`crate::domain::MemoryRecord::validate_against_intent`]
-//! takes a `&CanonicalRecordHash` so the type system enforces "the hash
-//! came from this record, not an arbitrary string the caller invented".
+//! [`CanonicalRecordHash`] is opaque and computed only from a real
+//! [`MemoryRecord`]. The intent containment check at
+//! [`crate::domain::MemoryRecord::validate_against_intent`] computes
+//! the hash internally from `self`, so callers can't pass a stale or
+//! mismatched value.
+//!
+//! ## Signed-payload form
+//!
+//! The canonical form **excludes** the `signature` field — this is the
+//! "signed payload" the author signs with Ed25519 and the same payload
+//! the intent issuer hashes for `target_hash`. Including the signature
+//! would be self-referential: the author can't sign bytes that include
+//! their own not-yet-existing signature. Storing the same form for both
+//! signers gives `sign(payload)` and `target_hash = sha256(payload)`.
 //!
 //! Mutation guarantees: any change to a signed field of the record
-//! (`id`, `body`, `scope`, `provenance`, `actor_chain`, `signature`,
-//! `evidence`, `salience`, `confidence`, `tags`, `extra_frontmatter`)
-//! flips at least one byte of the canonical encoding and therefore the
-//! digest. Tests pin this for each field so a future serde rename or
-//! skip annotation that drops a field from the canonical form fails CI.
+//! (`id`, `body`, `scope`, `provenance`, `actor_chain`, `evidence`,
+//! `salience`, `confidence`, `tags`, `extra_frontmatter`) flips at
+//! least one byte of the canonical encoding and therefore the digest.
+//! Tests pin this for each field. The `signature` field is excluded
+//! from the canonical payload by design and is verified independently.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -28,14 +35,19 @@ use crate::domain::{DomainError, MemoryRecord};
 pub struct CanonicalRecordHash(String);
 
 impl CanonicalRecordHash {
-    /// Hash the canonical JSON form of `record`. The encoding sorts every
-    /// object's keys lexicographically and emits no whitespace; it
-    /// therefore depends only on the record's content, not on the
-    /// serializer's struct-field order or hash-map iteration order.
+    /// Hash the canonical signed-payload form of `record`. The encoding
+    /// sorts every object's keys lexicographically, emits no whitespace,
+    /// and **excludes** the top-level `signature` field — see module
+    /// docs for the rationale. The result depends only on the record's
+    /// signed content, not on the serializer's struct-field order or
+    /// hash-map iteration order.
     pub fn compute(record: &MemoryRecord) -> Result<Self, DomainError> {
-        let value = serde_json::to_value(record).map_err(|e| DomainError::InvalidIdentity {
+        let mut value = serde_json::to_value(record).map_err(|e| DomainError::InvalidIdentity {
             message: format!("canonical serialize failed: {e}"),
         })?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("signature");
+        }
         let mut buf = String::new();
         write_canonical(&value, &mut buf);
         let digest = Sha256::digest(buf.as_bytes());
@@ -114,7 +126,7 @@ fn append_json_string(s: &str, out: &mut String) {
 }
 
 /// Serialize a value to canonical bytes for inspection in tests or
-/// storage adapters. Internal — adapters should compute the hash via
+/// storage adapters. Adapters should compute the hash via
 /// [`CanonicalRecordHash::compute`] rather than re-implement the
 /// canonicalizer. Returns an error when the value isn't serializable to
 /// JSON (e.g., a non-string-keyed map).
@@ -124,6 +136,22 @@ pub fn canonical_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, DomainError> 
     })?;
     let mut buf = String::new();
     write_canonical(&json, &mut buf);
+    Ok(buf.into_bytes())
+}
+
+/// Canonical signed-payload bytes for a record. Excludes the
+/// `signature` field so authors and intent issuers compute the same
+/// payload. Use this when implementing Ed25519 sign/verify or when
+/// debugging a `target_hash` mismatch.
+pub fn canonical_bytes_signed_payload(record: &MemoryRecord) -> Result<Vec<u8>, DomainError> {
+    let mut value = serde_json::to_value(record).map_err(|e| DomainError::InvalidIdentity {
+        message: format!("canonical serialize failed: {e}"),
+    })?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("signature");
+    }
+    let mut buf = String::new();
+    write_canonical(&value, &mut buf);
     Ok(buf.into_bytes())
 }
 
@@ -211,15 +239,29 @@ mod tests {
     }
 
     #[test]
-    fn signature_change_flips_hash() {
+    fn signature_change_does_not_flip_hash() {
+        // The canonical payload excludes the signature — see module docs.
+        // Author + intent issuer compute the same hash; only the
+        // signature varies (it's verified separately).
         use crate::domain::record::Ed25519Signature;
         let r1 = sample();
         let mut r2 = sample();
         r2.signature =
             Ed25519Signature::parse(format!("ed25519:{}", "b".repeat(128))).expect("valid");
-        assert_ne!(
+        assert_eq!(
             CanonicalRecordHash::compute(&r1).expect("compute"),
             CanonicalRecordHash::compute(&r2).expect("compute"),
+        );
+    }
+
+    #[test]
+    fn canonical_payload_omits_signature_key() {
+        let r = sample();
+        let bytes = canonical_bytes_signed_payload(&r).expect("compute");
+        let s = std::str::from_utf8(&bytes).expect("utf8");
+        assert!(
+            !s.contains("\"signature\""),
+            "canonical signed payload must not include the `signature` field, got: {s}"
         );
     }
 

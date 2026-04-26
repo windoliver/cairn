@@ -3,34 +3,46 @@
 //!
 //! `validate_against_intent` accepts only this type so the type system
 //! catches "called with raw bytes off the wire" at compile time. The
-//! verifier crate (P1+) constructs it via [`VerifiedSignedIntent::assume_verified`]
-//! after checking issuer signature, expiry, nonce, and sequence. At P0
-//! the constructor is the only path; once a real verifier exists the
-//! constructor moves behind a sealed trait so external callers must go
-//! through the verifier.
+//! constructor is **not public** — only the future verifier crate (and
+//! cairn-core's own tests) can produce one. External code that needs a
+//! verified intent must go through the verifier API, which performs
+//! issuer-signature, expiry, nonce, and sequence/replay checks.
 //!
-//! This is type-system signaling, not crypto. The wrapper holds no
-//! additional state — it's a marker that the intent was verified
-//! upstream. Misuse (constructing without verification) is caught by
-//! review and the unsafe-style `assume_verified` naming.
+//! Domain-level validation never re-derives crypto truth from the
+//! wrapper; it only reads the already-verified fields. The wrapper
+//! holds no extra state — it's a typed proof token.
 
 use crate::generated::envelope::SignedIntent;
 
 /// A `SignedIntent` whose signature, expiry, nonce, and sequence have
-/// been verified at the trust boundary. Construct via
-/// [`Self::assume_verified`] only after running the upstream verifier.
+/// been verified at the trust boundary. Construction is gated to
+/// cairn-core (and its tests) — external code obtains one only through
+/// the verifier API.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedSignedIntent(SignedIntent);
 
 impl VerifiedSignedIntent {
-    /// Wrap a `SignedIntent` whose verification has already happened.
-    /// The name is deliberately sharp — call sites that pass an
-    /// unverified intent are easy to grep for, and the verifier crate
-    /// is the only intended caller. Domain-level validation never
-    /// re-derives crypto truth from this wrapper; it only consumes the
-    /// already-verified fields.
+    /// `pub(crate)` so cairn-core's own modules can construct the
+    /// wrapper after running internal verification, and so the verifier
+    /// crate (added in a follow-up) can call this through a sealed
+    /// trait. External code cannot bypass verification. Currently
+    /// unused — production callers will arrive once the verifier ships.
+    #[allow(
+        dead_code,
+        reason = "production callers arrive with the verifier crate"
+    )]
+    pub(crate) fn from_verified(intent: SignedIntent) -> Self {
+        Self(intent)
+    }
+
+    /// Test-only constructor for cairn-core integration tests, gated to
+    /// `#[cfg(any(test, feature = "test-helpers"))]`. The
+    /// `test-helpers` feature is **not** enabled in any production
+    /// build profile and is intended for downstream test code only.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
     #[must_use]
-    pub fn assume_verified(intent: SignedIntent) -> Self {
+    pub fn dangerous_unverified_for_testing(intent: SignedIntent) -> Self {
         Self(intent)
     }
 

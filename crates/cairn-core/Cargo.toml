@@ -22,5 +22,11 @@ sha2 = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }
 
+[features]
+# Gated test helpers (e.g. `VerifiedSignedIntent::dangerous_unverified_for_testing`).
+# Not enabled in any production build; intended for downstream test code
+# that needs to construct domain types without going through the verifier.
+test-helpers = []
+
 [lints]
 workspace = true
