@@ -35,12 +35,10 @@ async-trait = { workspace = true }
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. anyhow and serde land their first call
-# sites when the verb layer is wired up in a follow-up issue. clap was
-# dropped from this list in Task 17 once main.rs adopted it (Task 13).
-# Drop each remaining entry once its first call site exists.
+# cargo-machete: temporarily suppress deps that are declared now but
+# get their first call site in a later task of this branch.
 [package.metadata.cargo-machete]
-ignored = []
+ignored = ["base64", "ulid"]
 
 [lib]
 name = "cairn_cli"
