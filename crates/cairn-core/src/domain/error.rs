@@ -70,6 +70,30 @@ pub enum DomainError {
         message: String,
     },
 
+    /// A [`crate::domain::MemoryKind`] string did not match any of the 19
+    /// recognized kinds (§6.1). Classifiers may not invent new kinds.
+    #[error("kind: unsupported memory kind `{value}`")]
+    UnsupportedKind {
+        /// Kind string that failed to parse.
+        value: String,
+    },
+
+    /// A [`crate::domain::MemoryClass`] string did not match any of the 4
+    /// recognized classes (§6.2).
+    #[error("class: unsupported memory class `{value}`")]
+    UnsupportedClass {
+        /// Class string that failed to parse.
+        value: String,
+    },
+
+    /// A [`crate::domain::ConfidenceBand`] string did not match `high`,
+    /// `normal`, or `uncertain` (§6.4).
+    #[error("confidence_band: unsupported value `{value}`")]
+    UnsupportedConfidenceBand {
+        /// Band string that failed to parse.
+        value: String,
+    },
+
     /// A required string field was empty (e.g., `body`, `record_id`).
     #[error("required field `{field}` must not be empty")]
     EmptyField {
