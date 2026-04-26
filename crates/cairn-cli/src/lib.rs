@@ -6,3 +6,4 @@
 //! tolerated here per CLAUDE.md §6.2 (bins/tests).
 
 pub mod plugins;
+pub mod verbs;
