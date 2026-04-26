@@ -80,7 +80,7 @@ fn invalid_config_returns_error() {
     let err = load(dir.path(), &CliOverrides::default()).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("max_bytes"),
+        msg.contains("vault.hot_memory.max_bytes"),
         "error should mention the bad field: {msg}"
     );
 }
