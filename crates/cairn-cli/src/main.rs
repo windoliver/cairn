@@ -94,11 +94,7 @@ fn main() -> ExitCode {
         Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
-        None => {
-            let _ = build_command().print_help();
-            println!();
-            ExitCode::SUCCESS
-        }
+        None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
             eprintln!("cairn: unknown subcommand '{verb}'");

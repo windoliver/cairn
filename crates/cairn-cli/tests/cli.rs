@@ -1,10 +1,11 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs without dispatch fail closed.
+//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
 //!
-//! The CLI tree itself is generated from the IDL by `cairn-codegen`; verb
-//! dispatch lands in #59 / #9. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) reach our dispatch and exit 2
-//!   with a not-implemented marker.
+//! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
+//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
+//! with `code: "Internal"`. Exit-code contract (spec §5.2):
+//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
+//!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
