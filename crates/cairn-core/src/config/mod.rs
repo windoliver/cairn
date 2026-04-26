@@ -527,6 +527,91 @@ pub struct ExtractBudget {
     pub max_turns: Option<u32>,
 }
 
+impl CairnConfig {
+    /// Validate semantic invariants that serde cannot enforce.
+    ///
+    /// # Errors
+    /// See [`ConfigError`] variants for the full list.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        use crate::contract::registry::PluginName;
+
+        // 1. Custom store plugin name grammar
+        if let StoreKind::Custom(name) = &self.store.kind {
+            PluginName::new(name.clone()).map_err(|source| ConfigError::InvalidPluginName {
+                field: "store.kind",
+                source,
+            })?;
+        }
+
+        // 2. Custom orchestrator plugin name grammar
+        if let OrchestratorKind::Custom(name) = &self.workflows.orchestrator {
+            PluginName::new(name.clone()).map_err(|source| ConfigError::InvalidPluginName {
+                field: "workflows.orchestrator",
+                source,
+            })?;
+        }
+
+        // 3. hot_memory.max_bytes must be > 0
+        if self.vault.hot_memory.max_bytes == 0 {
+            return Err(ConfigError::InvalidBudget {
+                field: "vault.hot_memory.max_bytes",
+                value: 0_u64,
+            });
+        }
+
+        // 4. Extractor budget fields must be > 0 when set
+        for entry in &self.pipeline.extract.chain {
+            let b = &entry.budget;
+            if b.max_tokens == Some(0) {
+                return Err(ConfigError::InvalidBudget {
+                    field: "pipeline.extract.chain[].budget.max_tokens",
+                    value: 0_u64,
+                });
+            }
+            if b.max_wall_ms == Some(0) {
+                return Err(ConfigError::InvalidBudget {
+                    field: "pipeline.extract.chain[].budget.max_wall_ms",
+                    value: 0_u64,
+                });
+            }
+            if b.max_turns == Some(0) {
+                return Err(ConfigError::InvalidBudget {
+                    field: "pipeline.extract.chain[].budget.max_turns",
+                    value: 0_u64,
+                });
+            }
+        }
+
+        // 5. LLM extractor in chain requires an LLM provider
+        let has_llm_worker = self
+            .pipeline
+            .extract
+            .chain
+            .iter()
+            .any(|e| e.worker == ExtractorWorkerKind::Llm);
+        if has_llm_worker && self.llm.provider.is_none() {
+            return Err(ConfigError::LlmExtractorWithoutProvider);
+        }
+
+        // 6. Retention key glob patterns: `*` only in the filename position
+        for key in self.vault.retention.keys() {
+            if key.contains('\0') {
+                return Err(ConfigError::InvalidRetentionKey(key.clone()));
+            }
+            let parts: Vec<&str> = key.split('/').collect();
+            // Every component except the last (filename) must be free of `*`
+            let dir_parts = parts.len().saturating_sub(1);
+            for part in &parts[..dir_parts] {
+                if part.contains('*') {
+                    return Err(ConfigError::InvalidRetentionKey(key.clone()));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +729,84 @@ mod tests {
         let chain = &CairnConfig::default().pipeline.extract.chain;
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].worker, ExtractorWorkerKind::Regex);
+    }
+
+    #[test]
+    fn validate_default_config_ok() {
+        CairnConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_hot_memory_budget() {
+        let mut config = CairnConfig::default();
+        config.vault.hot_memory.max_bytes = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBudget { field: "vault.hot_memory.max_bytes", .. }));
+    }
+
+    #[test]
+    fn validate_rejects_zero_extractor_budget_tokens() {
+        let mut config = CairnConfig::default();
+        config.pipeline.extract.chain[0].budget.max_tokens = Some(0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBudget { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_llm_worker_without_provider() {
+        let mut config = CairnConfig::default();
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Llm,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget::default(),
+        });
+        // llm.provider is None by default
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::LlmExtractorWithoutProvider));
+    }
+
+    #[test]
+    fn validate_accepts_llm_worker_with_provider() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Llm,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget::default(),
+        });
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_invalid_custom_store_name() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::Custom("BAD NAME WITH SPACES".into());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPluginName { field: "store.kind", .. }));
+    }
+
+    #[test]
+    fn validate_accepts_valid_custom_store_name() {
+        let mut config = CairnConfig::default();
+        config.store.kind = StoreKind::Custom("cairn-store-qdrant".into());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_retention_key_with_star_in_dir() {
+        let mut config = CairnConfig::default();
+        config.vault.retention.insert("*/trace.md".into(), "30d".into());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRetentionKey(_)));
+    }
+
+    #[test]
+    fn validate_accepts_retention_key_star_in_filename() {
+        let mut config = CairnConfig::default();
+        config.vault.retention.insert("raw/trace_*.md".into(), "30d".into());
+        config.validate().unwrap();
     }
 
     #[test]
