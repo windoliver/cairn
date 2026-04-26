@@ -660,6 +660,8 @@ impl CairnConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta;
+    use proptest::prelude::*;
 
     #[test]
     fn config_error_budget_display() {
@@ -921,5 +923,24 @@ mod tests {
         });
         let caps = config.capabilities();
         assert!(caps.agent_extract);
+    }
+
+    #[test]
+    fn default_config_snapshot() {
+        let json = serde_json::to_string_pretty(&CairnConfig::default())
+            .expect("CairnConfig::default() must be serializable");
+        insta::assert_snapshot!(json);
+    }
+
+    proptest! {
+        #[test]
+        fn default_config_json_round_trip(_seed in 0u8..1) {
+            // Tests serde symmetry on the default config; a full property test
+            // would require Arbitrary impls for all types (out of scope for P0).
+            let original = CairnConfig::default();
+            let json = serde_json::to_string(&original).unwrap();
+            let restored: CairnConfig = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original, restored);
+        }
     }
 }
