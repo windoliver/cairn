@@ -148,6 +148,7 @@ name = "cairn-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "cairn-core",
  "cairn-mcp",
  "cairn-sensors-local",
@@ -155,6 +156,9 @@ dependencies = [
  "cairn-test-fixtures",
  "cairn-workflows",
  "clap",
+ "insta",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -188,6 +192,7 @@ dependencies = [
 name = "cairn-mcp"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "serde",
@@ -198,6 +203,7 @@ dependencies = [
 name = "cairn-sensors-local"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "tracing",
@@ -207,6 +213,7 @@ dependencies = [
 name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "thiserror",
@@ -223,6 +230,7 @@ dependencies = [
 name = "cairn-workflows"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
  "tokio",
@@ -255,6 +263,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -1269,6 +1278,16 @@ dependencies = [
  "fastrand",
  "getrandom",
  "once_cell",
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys",
 ]

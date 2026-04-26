@@ -1,0 +1,66 @@
+---
+source: crates/cairn-cli/tests/plugins_list_snapshot.rs
+expression: json
+---
+{
+  "plugins": [
+    {
+      "capabilities": {
+        "extensions": false,
+        "http_streamable": false,
+        "sse": false,
+        "stdio": false
+      },
+      "contract": "MCPServer",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-mcp",
+      "source": "bundled:cairn-mcp"
+    },
+    {
+      "capabilities": {
+        "batches": false,
+        "consent_aware": false,
+        "streaming": false
+      },
+      "contract": "SensorIngress",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-sensors-local",
+      "source": "bundled:cairn-sensors-local"
+    },
+    {
+      "capabilities": {
+        "fts": false,
+        "graph_edges": false,
+        "transactions": false,
+        "vector": false
+      },
+      "contract": "MemoryStore",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-store-sqlite",
+      "source": "bundled:cairn-store-sqlite"
+    },
+    {
+      "capabilities": {
+        "crash_safe": false,
+        "cron_schedules": false,
+        "durable": false
+      },
+      "contract": "WorkflowOrchestrator",
+      "contract_version_range": {
+        "max_exclusive": "0.2.0",
+        "min": "0.1.0"
+      },
+      "name": "cairn-workflows",
+      "source": "bundled:cairn-workflows"
+    }
+  ]
+}

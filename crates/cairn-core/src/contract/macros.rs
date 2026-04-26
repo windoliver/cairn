@@ -67,8 +67,63 @@
 /// let mut reg = cairn_core::contract::registry::PluginRegistry::new();
 /// register(&mut reg).expect("compatible plugin registers");
 /// ```
+///
+/// # Manifest-aware form (preferred for bundled plugins)
+///
+/// ```
+/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+/// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// use cairn_core::register_plugin;
+///
+/// const MANIFEST_TOML: &str = r#"
+/// name = "acme-store"
+/// contract = "MemoryStore"
+///
+/// [contract_version_range.min]
+/// major = 0
+/// minor = 1
+/// patch = 0
+///
+/// [contract_version_range.max_exclusive]
+/// major = 0
+/// minor = 2
+/// patch = 0
+/// "#;
+///
+/// #[derive(Default)]
+/// struct MyStore;
+///
+/// #[async_trait::async_trait]
+/// impl MemoryStore for MyStore {
+///     fn name(&self) -> &str { "acme-store" }
+///     fn capabilities(&self) -> &MemoryStoreCapabilities {
+///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+///             fts: false,
+///             vector: false,
+///             graph_edges: false,
+///             transactions: false,
+///         };
+///         &CAPS
+///     }
+///     fn supported_contract_versions(&self) -> VersionRange {
+///         VersionRange::new(
+///             ContractVersion::new(0, 1, 0),
+///             ContractVersion::new(0, 2, 0),
+///         )
+///     }
+/// }
+///
+/// register_plugin!(MemoryStore, MyStore, "acme-store", MANIFEST_TOML);
+///
+/// let mut reg = cairn_core::contract::registry::PluginRegistry::new();
+/// register(&mut reg).expect("compatible plugin registers");
+/// assert!(reg.parsed_manifest(
+///     &cairn_core::contract::registry::PluginName::new("acme-store").unwrap()
+/// ).is_some());
+/// ```
 #[macro_export]
 macro_rules! register_plugin {
+    // 3-arg form: legacy / unit-test path with no manifest.
     (MemoryStore, $impl:ty, $name:literal) => {
         $crate::__register_plugin_helper!(register_memory_store, $impl, $name);
     };
@@ -90,6 +145,65 @@ macro_rules! register_plugin {
     (AgentProvider, $impl:ty, $name:literal) => {
         $crate::__register_plugin_helper!(register_agent_provider, $impl, $name);
     };
+
+    // 4-arg form: manifest-aware. `$manifest` is an expression producing a
+    // `&'static str` (typically a `pub const MANIFEST_TOML: &str = include_str!(...)`).
+    (MemoryStore, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_memory_store_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (LLMProvider, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_llm_provider_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (WorkflowOrchestrator, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_workflow_orchestrator_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (SensorIngress, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_sensor_ingress_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (MCPServer, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_mcp_server_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (FrontendAdapter, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_frontend_adapter_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
+    (AgentProvider, $impl:ty, $name:literal, $manifest:expr) => {
+        $crate::__register_plugin_with_manifest_helper!(
+            register_agent_provider_with_manifest,
+            $impl,
+            $name,
+            $manifest
+        );
+    };
 }
 
 #[doc(hidden)]
@@ -108,6 +222,31 @@ macro_rules! __register_plugin_helper {
             let name = $crate::contract::registry::PluginName::new($name)?;
             reg.$method(
                 name,
+                ::std::sync::Arc::new(<$impl as ::core::default::Default>::default()),
+            )
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __register_plugin_with_manifest_helper {
+    ($method:ident, $impl:ty, $name:literal, $manifest:expr) => {
+        /// Plugin entry point with manifest-aware registration.
+        ///
+        /// # Errors
+        /// Returns [`cairn_core::contract::registry::PluginError`] when the
+        /// name is invalid, the manifest fails to parse, the manifest
+        /// disagrees with the registered name / contract / host version,
+        /// or another plugin already holds this name.
+        pub fn register(
+            reg: &mut $crate::contract::registry::PluginRegistry,
+        ) -> ::core::result::Result<(), $crate::contract::registry::PluginError> {
+            let name = $crate::contract::registry::PluginName::new($name)?;
+            let manifest = $crate::contract::manifest::PluginManifest::parse_toml($manifest)?;
+            reg.$method(
+                name,
+                manifest,
                 ::std::sync::Arc::new(<$impl as ::core::default::Default>::default()),
             )
         }

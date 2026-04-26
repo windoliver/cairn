@@ -17,6 +17,7 @@
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
+pub mod conformance;
 pub mod frontend_adapter;
 pub mod llm_provider;
 pub mod manifest;
@@ -32,6 +33,7 @@ pub mod macros;
 
 // Flat re-exports so users can write `cairn_core::contract::MemoryStore`
 // instead of `cairn_core::contract::memory_store::MemoryStore`.
+pub use conformance::{CaseOutcome, CaseStatus, Tier, run_conformance_for_plugin};
 pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};

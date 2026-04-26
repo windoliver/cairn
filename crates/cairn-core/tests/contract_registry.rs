@@ -107,3 +107,60 @@ fn keeps_arc_pointer_stable() {
     let b = reg.memory_store(&name).expect("registered");
     assert!(Arc::ptr_eq(&a, &b));
 }
+
+mod manifest_aware_plugin {
+    use super::*;
+
+    pub const MANIFEST_TOML: &str = r#"
+name = "fake-with-manifest"
+contract = "MemoryStore"
+
+[contract_version_range.min]
+major = 0
+minor = 1
+patch = 0
+
+[contract_version_range.max_exclusive]
+major = 0
+minor = 2
+patch = 0
+"#;
+
+    #[derive(Default)]
+    pub struct FakeStore;
+
+    #[async_trait::async_trait]
+    impl MemoryStore for FakeStore {
+        fn name(&self) -> &'static str {
+            "fake-with-manifest"
+        }
+        fn capabilities(&self) -> &MemoryStoreCapabilities {
+            static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                fts: false,
+                vector: false,
+                graph_edges: false,
+                transactions: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+    }
+
+    register_plugin!(MemoryStore, FakeStore, "fake-with-manifest", MANIFEST_TOML);
+}
+
+#[test]
+fn manifest_aware_macro_registers_with_manifest() {
+    let mut reg = PluginRegistry::new();
+    manifest_aware_plugin::register(&mut reg).expect("manifest-aware register succeeds");
+
+    let name = PluginName::new("fake-with-manifest").expect("valid");
+    assert!(reg.memory_store(&name).is_some(), "trait registered");
+    assert!(reg.parsed_manifest(&name).is_some(), "manifest registered");
+    assert_eq!(
+        reg.parsed_manifest(&name).unwrap().contract(),
+        cairn_core::contract::manifest::ContractKind::MemoryStore
+    );
+}

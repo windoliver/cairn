@@ -36,6 +36,7 @@ must be updated in the same PR.
 | `build / macos-latest` (`ci.yml`) | ✅ required | Same on macOS. |
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
+| `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
 | `docs / cargo doc` (`docs.yml`) | ✅ required | Broken intra-doc links fail. |
 | `deny / licenses + bans + sources` (`supply-chain.yml`) | ✅ required | Runs on every PR — workflow-level path filtering would leave the required check Pending on non-manifest PRs and either deadlock merges or silently miss manifest-only changes. Cache makes this cheap. |
 | `audit / RUSTSEC advisories` (`supply-chain.yml`) | ✅ required | Same reasoning as `deny`. Daily cron catches advisories disclosed after merge. |
@@ -134,6 +135,7 @@ CI is split so the failed job tells you which kind of bug you have:
 | `build` (Ubuntu or macOS) | Compile failure on a target you didn't test. Build matrix exists exactly for this. |
 | `invariant / cairn-core dep-freeness` | Adapter or runtime crate crept into core. Move it to the right crate; see CLAUDE.md §3. |
 | `codegen / no drift` | IDL changed without re-running codegen, or a generated file was hand-edited. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the diff. |
+| `plugins / cairn plugins verify` | Bundled-plugin conformance regression. Reproduce with `cargo run -p cairn-cli -- plugins verify --strict`. |
 | `docs / cargo doc` | Broken intra-doc link or missing-docs lint. |
 | `deny` | License or banned crate. Update the manifest or `deny.toml` (with a justification in the PR). |
 | `audit` | RUSTSEC advisory on a transitive dep. Update the lockfile or pin a patched version. |
@@ -206,6 +208,7 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    build / macos-latest
    invariant / cairn-core dep-freeness
    codegen / no drift
+   plugins / cairn plugins verify
    docs / cargo doc
    deny / licenses + bans + sources
    audit / RUSTSEC advisories

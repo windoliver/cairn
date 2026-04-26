@@ -22,22 +22,27 @@ cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
+insta = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. These are wired by upcoming verb-impl
-# issues; until the bodies land, machete reports them as unused. Drop an
-# entry from this list as soon as its first call site exists.
+# Forward-declared scaffold deps. anyhow and serde land their first call
+# sites when the verb layer is wired up in a follow-up issue. clap was
+# dropped from this list in Task 17 once main.rs adopted it (Task 13).
+# Drop each remaining entry once its first call site exists.
 [package.metadata.cargo-machete]
 ignored = [
     "anyhow",
-    "cairn-core",
-    "cairn-mcp",
-    "cairn-sensors-local",
-    "cairn-store-sqlite",
-    "cairn-workflows",
+    "serde",
 ]
+
+[lib]
+name = "cairn_cli"
+path = "src/lib.rs"
