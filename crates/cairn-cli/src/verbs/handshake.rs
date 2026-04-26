@@ -34,9 +34,9 @@ pub fn run(json: bool) -> ExitCode {
     if json {
         emit_json(&resp);
     } else {
-        println!("contract:   cairn.mcp.v1");
+        println!("contract:   {}", resp.contract);
         println!("nonce:      {}", nonce.0);
-        println!("expires_at: {expires_at} (epoch-ms, TTL 60 s)");
+        println!("expires_at: {} (epoch-ms, TTL 60 s)", resp.challenge.expires_at);
     }
     ExitCode::SUCCESS
 }
