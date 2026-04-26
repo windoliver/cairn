@@ -1,0 +1,410 @@
+//! Metadata filter DSL validation and SQL compilation (§8.0.d).
+//!
+//! Two-step pipeline:
+//! 1. [`validate_filter`] — walks the parsed [`SearchArgsFilters`] tree,
+//!    checks every leaf field against the P0 allowlist, and ensures the op
+//!    is valid for that field's type. Rejects with [`FilterError`] before any
+//!    store is touched.
+//! 2. [`compile_filter`] — converts a validated tree into a parameterized
+//!    [`CompiledFilter`] (`sql` fragment + positional `params`). All user
+//!    values land in `params`; the `sql` string contains only structure and
+//!    `?` placeholders, so SQL injection via field values is impossible.
+
+use thiserror::Error;
+
+use crate::generated::verbs::search::SearchArgsFilters;
+
+// ── Field allowlist ───────────────────────────────────────────────────────────
+
+/// Type classification of a P0 filter field (§8.0.d table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldType {
+    /// Single string value (`kind`, `class`, `visibility`, `path`, `title`, `category`, …).
+    Str,
+    /// Numeric value (`priority`, `version`, `created_at`, `confidence`).
+    Number,
+    /// Boolean flag (`is_static`, `tombstoned`, `active`).
+    Boolean,
+    /// JSON-array column (`tags`, `actor_chain`, `backlinks`).
+    Array,
+}
+
+impl FieldType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Str => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Array => "array",
+        }
+    }
+}
+
+// Ordered list of (field_name, type) pairs.  All P0 allowlisted fields are here;
+// any field not in this list is rejected by `validate_filter`.
+const KNOWN_FIELDS: &[(&str, FieldType)] = &[
+    // String fields — direct `records` table columns.
+    ("kind", FieldType::Str),
+    ("class", FieldType::Str),
+    ("visibility", FieldType::Str),
+    ("path", FieldType::Str),
+    ("title", FieldType::Str),
+    ("category", FieldType::Str),
+    // Numeric fields.
+    ("priority", FieldType::Number),
+    ("version", FieldType::Number),
+    ("created_at", FieldType::Number),
+    ("confidence", FieldType::Number),
+    // Boolean fields.
+    ("is_static", FieldType::Boolean),
+    ("tombstoned", FieldType::Boolean),
+    ("active", FieldType::Boolean),
+    // Array fields — stored as JSON columns.
+    ("tags", FieldType::Array),
+    ("actor_chain", FieldType::Array),
+    ("backlinks", FieldType::Array),
+];
+
+/// Return the declared [`FieldType`] for a filter field name, or `None` if the
+/// field is not in the P0 allowlist.
+#[must_use]
+pub fn field_type(name: &str) -> Option<FieldType> {
+    KNOWN_FIELDS
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, t)| *t)
+}
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+/// Failure from filter validation.
+///
+/// Produced by [`validate_filter`] and surfaced to the caller so it can
+/// translate to an `InvalidFilter` wire error before touching `SQLite`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum FilterError {
+    /// The filter references a field not in the P0 allowlist (§8.0.d).
+    #[error("unknown filter field `{0}` — only P0 allowlisted fields are accepted")]
+    UnknownField(String),
+
+    /// The operator is not valid for the declared type of the field (§8.0.d table).
+    #[error("op `{op}` is not supported for field `{field}` of type {field_type}")]
+    UnsupportedOp {
+        /// Field that was queried.
+        field: String,
+        /// Operator that was rejected.
+        op: String,
+        /// Human-readable field type ("string", "number", "boolean", "array").
+        field_type: &'static str,
+    },
+}
+
+// ── validate_filter ───────────────────────────────────────────────────────────
+
+/// Validate a parsed [`SearchArgsFilters`] tree against the P0 field allowlist
+/// and per-type operator rules (§8.0.d).
+///
+/// Call this before [`compile_filter`] and before dispatching to any store.
+/// Returns the first [`FilterError`] found, depth-first left-to-right.
+pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
+    match filter {
+        SearchArgsFilters::And { and } => {
+            for child in and {
+                validate_filter(child)?;
+            }
+            Ok(())
+        }
+        SearchArgsFilters::Or { or } => {
+            for child in or {
+                validate_filter(child)?;
+            }
+            Ok(())
+        }
+        SearchArgsFilters::Not { not } => validate_filter(not),
+        SearchArgsFilters::Leaf(v) => validate_leaf(v),
+    }
+}
+
+/// Validate a single leaf.  The serde parser (`validate_filter_leaf_shape`)
+/// already verified that `field`, `op`, and `value` are present and that the
+/// op is shape-valid; here we enforce the field allowlist and type-op matrix.
+fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
+    let Some(obj) = v.as_object() else {
+        unreachable!("leaf is always a JSON object after parsing");
+    };
+    let Some(field) = obj["field"].as_str() else {
+        unreachable!("field is always a string after parsing");
+    };
+    let Some(op) = obj["op"].as_str() else {
+        unreachable!("op is always a string after parsing");
+    };
+
+    let ft = field_type(field).ok_or_else(|| FilterError::UnknownField(field.to_owned()))?;
+    validate_op_for_type(field, op, ft)
+}
+
+fn validate_op_for_type(field: &str, op: &str, ft: FieldType) -> Result<(), FilterError> {
+    let valid = match ft {
+        FieldType::Str => matches!(
+            op,
+            "eq" | "neq"
+                | "in"
+                | "nin"
+                | "string_contains"
+                | "string_starts_with"
+                | "string_ends_with"
+        ),
+        FieldType::Number => {
+            matches!(
+                op,
+                "eq" | "neq" | "lt" | "lte" | "gt" | "gte" | "between" | "in" | "nin"
+            )
+        }
+        FieldType::Boolean => op == "eq",
+        FieldType::Array => matches!(
+            op,
+            "array_contains" | "array_contains_any" | "array_contains_all" | "array_size_eq"
+        ),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FilterError::UnsupportedOp {
+            field: field.to_owned(),
+            op: op.to_owned(),
+            field_type: ft.as_str(),
+        })
+    }
+}
+
+// ── compile_filter ────────────────────────────────────────────────────────────
+
+/// A compiled filter: a SQL fragment using `?` placeholders and the matching
+/// positional parameters.
+///
+/// Embed `sql` directly inside a `WHERE` clause and bind `params` in order.
+/// No user values are ever interpolated into `sql`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledFilter {
+    /// SQL fragment for use inside a `WHERE` clause. Uses `?` placeholders.
+    pub sql: String,
+    /// Values to bind at the `?` positions, in order.
+    pub params: Vec<serde_json::Value>,
+}
+
+/// Compile a validated [`SearchArgsFilters`] tree to a parameterized `SQLite`
+/// `WHERE` fragment.
+///
+/// # Caller contract
+/// [`validate_filter`] must have returned `Ok` for `filter` before calling
+/// this function.  Calling on an unvalidated filter may produce incorrect SQL
+/// for unknown fields (they pass through as column names) or `unreachable!`
+/// for unexpected op values.
+#[must_use]
+pub fn compile_filter(filter: &SearchArgsFilters) -> CompiledFilter {
+    let mut params = Vec::new();
+    let sql = compile_node(filter, &mut params);
+    CompiledFilter { sql, params }
+}
+
+fn compile_node(filter: &SearchArgsFilters, params: &mut Vec<serde_json::Value>) -> String {
+    match filter {
+        SearchArgsFilters::And { and } => {
+            let parts: Vec<String> = and.iter().map(|f| compile_node(f, params)).collect();
+            format!("({})", parts.join(" AND "))
+        }
+        SearchArgsFilters::Or { or } => {
+            let parts: Vec<String> = or.iter().map(|f| compile_node(f, params)).collect();
+            format!("({})", parts.join(" OR "))
+        }
+        SearchArgsFilters::Not { not } => {
+            format!("(NOT {})", compile_node(not, params))
+        }
+        SearchArgsFilters::Leaf(v) => compile_leaf(v, params),
+    }
+}
+
+/// Map a validated field name to its SQL column expression in the `records` table.
+fn field_col(name: &str) -> &str {
+    // All P0 allowlisted fields map 1-to-1 to same-named columns on the
+    // `records` table.  Array fields (`tags`, `actor_chain`, `backlinks`) are
+    // stored as JSON text columns; array ops use `json_each()` sub-selects.
+    name
+}
+
+fn compile_leaf(v: &serde_json::Value, params: &mut Vec<serde_json::Value>) -> String {
+    let Some(obj) = v.as_object() else {
+        unreachable!("leaf is always a JSON object; validate_filter must be called first");
+    };
+    let Some(field) = obj["field"].as_str() else {
+        unreachable!("leaf field is always a string; validate_filter must be called first");
+    };
+    let Some(op) = obj["op"].as_str() else {
+        unreachable!("leaf op is always a string; validate_filter must be called first");
+    };
+    let value = &obj["value"];
+    let col = field_col(field);
+
+    let ft = field_type(field).unwrap_or_else(|| {
+        unreachable!("field is in allowlist; validate_filter must be called before compile_filter")
+    });
+
+    match ft {
+        FieldType::Array => compile_array_op(col, op, value, params),
+        _ => compile_scalar_op(col, op, value, params),
+    }
+}
+
+fn compile_scalar_op(
+    col: &str,
+    op: &str,
+    value: &serde_json::Value,
+    params: &mut Vec<serde_json::Value>,
+) -> String {
+    match op {
+        "eq" => {
+            params.push(value.clone());
+            format!("{col} = ?")
+        }
+        "neq" => {
+            params.push(value.clone());
+            format!("{col} != ?")
+        }
+        "lt" => {
+            params.push(value.clone());
+            format!("{col} < ?")
+        }
+        "lte" => {
+            params.push(value.clone());
+            format!("{col} <= ?")
+        }
+        "gt" => {
+            params.push(value.clone());
+            format!("{col} > ?")
+        }
+        "gte" => {
+            params.push(value.clone());
+            format!("{col} >= ?")
+        }
+        "in" => {
+            let Some(arr) = value.as_array() else {
+                unreachable!("in value is array after validation");
+            };
+            let placeholders = "?, ".repeat(arr.len());
+            let placeholders = placeholders.trim_end_matches(", ");
+            for v in arr {
+                params.push(v.clone());
+            }
+            format!("{col} IN ({placeholders})")
+        }
+        "nin" => {
+            let Some(arr) = value.as_array() else {
+                unreachable!("nin value is array after validation");
+            };
+            let placeholders = "?, ".repeat(arr.len());
+            let placeholders = placeholders.trim_end_matches(", ");
+            for v in arr {
+                params.push(v.clone());
+            }
+            format!("{col} NOT IN ({placeholders})")
+        }
+        "between" => {
+            let Some(arr) = value.as_array() else {
+                unreachable!("between value is 2-element array after validation");
+            };
+            params.push(arr[0].clone());
+            params.push(arr[1].clone());
+            format!("{col} BETWEEN ? AND ?")
+        }
+        "string_contains" => {
+            // Use `instr()` for substring matching — avoids `LIKE` special-char escaping.
+            params.push(value.clone());
+            format!("instr({col}, ?) > 0")
+        }
+        "string_starts_with" => {
+            // Append `%` to the value to build a `LIKE` prefix pattern.
+            // `LIKE` metacharacters (`%`, `_`) in the value itself are NOT escaped
+            // at P0; escaping is a P1 hardening.
+            let Some(s) = value.as_str() else {
+                unreachable!("string_starts_with value is a string after validation");
+            };
+            params.push(serde_json::Value::String(format!("{s}%")));
+            format!("{col} LIKE ?")
+        }
+        "string_ends_with" => {
+            let Some(s) = value.as_str() else {
+                unreachable!("string_ends_with value is a string after validation");
+            };
+            params.push(serde_json::Value::String(format!("%{s}")));
+            format!("{col} LIKE ?")
+        }
+        _ => unreachable!("op was validated by validate_filter before compile_filter"),
+    }
+}
+
+fn compile_array_op(
+    col: &str,
+    op: &str,
+    value: &serde_json::Value,
+    params: &mut Vec<serde_json::Value>,
+) -> String {
+    match op {
+        "array_contains" => {
+            params.push(value.clone());
+            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE value = ?)")
+        }
+        "array_contains_any" => {
+            let Some(arr) = value.as_array() else {
+                unreachable!("array_contains_any value is array after validation");
+            };
+            let placeholders = "?, ".repeat(arr.len());
+            let placeholders = placeholders.trim_end_matches(", ");
+            for v in arr {
+                params.push(v.clone());
+            }
+            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN ({placeholders}))")
+        }
+        "array_contains_all" => {
+            let Some(arr) = value.as_array() else {
+                unreachable!("array_contains_all value is array after validation");
+            };
+            let n = arr.len();
+            let placeholders = "?, ".repeat(n);
+            let placeholders = placeholders.trim_end_matches(", ");
+            for v in arr {
+                params.push(v.clone());
+            }
+            params.push(serde_json::Value::Number(serde_json::Number::from(
+                n as u64,
+            )));
+            format!(
+                "(SELECT COUNT(DISTINCT value) FROM json_each({col}) WHERE value IN ({placeholders})) = ?"
+            )
+        }
+        "array_size_eq" => {
+            params.push(value.clone());
+            format!("json_array_length({col}) = ?")
+        }
+        _ => unreachable!("op was validated by validate_filter before compile_filter"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_type_lookup_known() {
+        assert_eq!(field_type("kind"), Some(FieldType::Str));
+        assert_eq!(field_type("priority"), Some(FieldType::Number));
+        assert_eq!(field_type("is_static"), Some(FieldType::Boolean));
+        assert_eq!(field_type("tags"), Some(FieldType::Array));
+    }
+
+    #[test]
+    fn field_type_lookup_unknown() {
+        assert_eq!(field_type("not_a_real_field"), None);
+        assert_eq!(field_type(""), None);
+    }
+}
