@@ -1,0 +1,15 @@
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "InvalidArgs",
+    "message": "query must not be empty",
+    "data": {
+      "field": "query",
+      "reason": "must not be empty"
+    }
+  },
+  "operation_id": "01HQZX9F5N0000000000000007",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "search"
+}

@@ -102,3 +102,37 @@ fn config_custom_store_deserializes_and_validates() {
     c.validate().expect("custom-store must pass validate()");
     insta::assert_json_snapshot!("config_custom_store", &c);
 }
+
+// ── Envelopes ─────────────────────────────────────────────────────────────────
+
+use cairn_core::generated::envelope::{Response, SignedIntent};
+
+fn envelopes_dir() -> std::path::PathBuf {
+    v0().join("envelopes")
+}
+
+#[test]
+fn signed_intent_sequence_deserializes() {
+    let si: SignedIntent = load_json(envelopes_dir().join("signed-intent-sequence.json"));
+    si.validate().expect("signed-intent-sequence must pass validate()");
+    insta::assert_json_snapshot!("signed_intent_sequence", &si);
+}
+
+#[test]
+fn signed_intent_challenge_deserializes() {
+    let si: SignedIntent = load_json(envelopes_dir().join("signed-intent-challenge.json"));
+    si.validate().expect("signed-intent-challenge must pass validate()");
+    insta::assert_json_snapshot!("signed_intent_challenge", &si);
+}
+
+#[test]
+fn response_committed_search_deserializes() {
+    let r: Response = load_json(envelopes_dir().join("response-committed-search.json"));
+    insta::assert_json_snapshot!("response_committed_search", &r);
+}
+
+#[test]
+fn response_rejected_invalid_args_deserializes() {
+    let r: Response = load_json(envelopes_dir().join("response-rejected-invalid-args.json"));
+    insta::assert_json_snapshot!("response_rejected_invalid_args", &r);
+}
