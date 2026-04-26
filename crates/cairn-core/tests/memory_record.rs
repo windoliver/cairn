@@ -30,7 +30,7 @@ fn record() -> MemoryRecord {
         class: MemoryClass::Semantic,
         visibility: MemoryVisibility::Private,
         scope: ScopeTuple {
-            user: Some("tafeng".to_owned()),
+            user: Some("usr:tafeng".to_owned()),
             ..ScopeTuple::default()
         },
         body: "user prefers dark mode".to_owned(),
@@ -138,14 +138,15 @@ fn unsupported_visibility_rejected_at_deserialize() {
         "kind": "user",
         "class": "semantic",
         "visibility": "internal",
-        "scope": {"user": "tafeng"},
+        "scope": {"user": "usr:tafeng"},
         "body": "x",
         "provenance": {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
             "source_hash": format!("sha256:{}", "a".repeat(64)),
-            "consent_ref": "consent:1"
+            "consent_ref": "consent:1",
+            "llm_id_if_any": null
         },
         "updated_at": "2026-04-22T14:05:11Z",
         "evidence": {"recall_count": 0, "score": 0.0, "unique_queries": 0, "recency_half_life_days": 14},

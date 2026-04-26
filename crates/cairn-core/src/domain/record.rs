@@ -202,6 +202,7 @@ impl MemoryRecord {
             });
         }
         validate_chain(&self.actor_chain)?;
+        self.validate_p0_chain_shape()?;
         self.validate_sensor_consistency()?;
         self.validate_actor_scope_consistency()?;
         self.validate_temporal_invariants()?;
@@ -304,6 +305,27 @@ impl MemoryRecord {
         Ok(())
     }
 
+    /// At P0 only the author signs the record — principal, delegator, and
+    /// `Sensor` chain entries are unsigned claims, not verified provenance.
+    /// Until per-entry countersignatures land at P2 (brief §4.2
+    /// "Countersignatures") downstream audit, ranking, and consent flows
+    /// would have no way to distinguish a real principal/delegator from an
+    /// arbitrary string an attacker added. So at P0 the chain is allowed
+    /// to contain *only* the single `Author` entry.
+    fn validate_p0_chain_shape(&self) -> Result<(), DomainError> {
+        for entry in &self.actor_chain {
+            if entry.role != ChainRole::Author {
+                return Err(DomainError::MissingSignature {
+                    message: format!(
+                        "actor_chain entry with role `{:?}` is not allowed at P0 — only the `Author` role is signed; principal/delegator/sensor entries become valid once P2 countersignatures are modeled",
+                        entry.role
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Cross-field check binding scope and originator to the signed author.
     ///
     /// At P0 the record carries a single author signature; principal,
@@ -328,28 +350,48 @@ impl MemoryRecord {
             // someone bypassed that step.
             return Ok(());
         };
-        let author_user_body = author.identity.as_str().strip_prefix("usr:");
-        let author_agent_body = author.identity.as_str().strip_prefix("agt:");
+        let author_full = author.identity.as_str();
+        let author_kind = author.identity.kind();
 
-        if let Some(user) = self.scope.user.as_deref()
-            && Some(user) != author_user_body
-        {
-            return Err(DomainError::MalformedScope {
-                message: format!(
-                    "scope.user `{user}` does not match the signing author `{}` (P0: only the author is signed; principal/delegator entries are unsigned at P0)",
-                    author.identity.as_str()
-                ),
-            });
+        // Canonical encoding for scope.user / scope.agent is the full
+        // identity (`usr:tafeng`, `agt:...:v1`) — the IDL filter sees the
+        // string verbatim, so a bare body would split the key space and
+        // hide records from exact scope queries that use the full form.
+        // scope.user *requires* a human author; scope.agent *requires* an
+        // agent author. Cross-kind matching would let an agent author
+        // claim a human user scope (or vice versa) and break typed
+        // authorization filters.
+        if let Some(user) = self.scope.user.as_deref() {
+            if author_kind != IdentityKind::Human {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.user requires a human (`usr:`) author, but author is `{author_full}`"
+                    ),
+                });
+            }
+            if user != author_full {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.user `{user}` is not canonical — must equal the full author identity `{author_full}` (the bare body form is rejected to avoid split-key queries)"
+                    ),
+                });
+            }
         }
-        if let Some(agent) = self.scope.agent.as_deref()
-            && Some(agent) != author_agent_body
-        {
-            return Err(DomainError::MalformedScope {
-                message: format!(
-                    "scope.agent `{agent}` does not match the signing author `{}` (P0: only the author is signed)",
-                    author.identity.as_str()
-                ),
-            });
+        if let Some(agent) = self.scope.agent.as_deref() {
+            if author_kind != IdentityKind::Agent {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.agent requires an agent (`agt:`) author, but author is `{author_full}`"
+                    ),
+                });
+            }
+            if agent != author_full {
+                return Err(DomainError::MalformedScope {
+                    message: format!(
+                        "scope.agent `{agent}` is not canonical — must equal the full author identity `{author_full}`"
+                    ),
+                });
+            }
         }
         if self.provenance.originating_agent_id != author.identity {
             return Err(DomainError::InvalidIdentity {
@@ -492,7 +534,7 @@ mod tests {
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
             scope: ScopeTuple {
-                user: Some("tafeng".to_owned()),
+                user: Some("usr:tafeng".to_owned()),
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
@@ -627,8 +669,8 @@ mod tests {
         assert!(matches!(err, DomainError::InvalidIdentity { .. }));
 
         // Adding a sensor chain entry naming source_sensor is NOT enough at
-        // P0 — the sensor must be the actual author so the signature
-        // proves sensor participation.
+        // P0 — the P0 chain-shape rule rejects any non-Author role
+        // (sensor entries are unsigned attestations until P2).
         r.actor_chain.push(ActorChainEntry {
             role: ChainRole::Sensor,
             identity: r.provenance.source_sensor.clone(),
@@ -636,7 +678,10 @@ mod tests {
         });
         let err = r.validate().unwrap_err();
         assert!(
-            matches!(err, DomainError::InvalidIdentity { .. }),
+            matches!(
+                err,
+                DomainError::MissingSignature { .. } | DomainError::InvalidIdentity { .. }
+            ),
             "unsigned sensor entry must not be sufficient for sensor_observation"
         );
 
@@ -657,27 +702,156 @@ mod tests {
     }
 
     #[test]
-    fn sensor_chain_entry_must_match_provenance() {
+    fn sensor_chain_entry_rejected_at_p0() {
+        // Sensor role entries are unsigned at P0 → rejected by the P0
+        // chain-shape rule before sensor consistency runs. (When P2
+        // countersignatures land, the sensor-entry-equals-source_sensor
+        // check inside validate_sensor_consistency takes over.)
         let mut r = sample_record();
-        let chain_sensor =
-            Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor identity");
-        let other_sensor =
-            Identity::parse("snr:local:hook:other:v1").expect("valid sensor identity");
         r.actor_chain.push(ActorChainEntry {
             role: ChainRole::Sensor,
-            identity: chain_sensor,
+            identity: Identity::parse("snr:local:hook:other:v1").expect("valid"),
             at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
         });
-        r.provenance.source_sensor = other_sensor;
         let err = r.validate().unwrap_err();
-        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
+        assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn p0_chain_rejects_non_author_roles() {
+        // Even when scope/originator bind to the author, P0 chains must
+        // not contain unsigned principal/delegator/sensor entries — they
+        // would be exposed as provenance to downstream code with no
+        // signature backing them.
+        let mut r = sample_record();
+        r.actor_chain.insert(
+            0,
+            ActorChainEntry {
+                role: ChainRole::Principal,
+                identity: Identity::parse("usr:tafeng").expect("valid"),
+                at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+            },
+        );
+        // Re-align the chain to keep the only signed entry the author —
+        // but the unsigned principal must still reject.
+        let err = r.validate().unwrap_err();
+        assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn scope_agent_accepts_full_identity() {
+        let mut r = sample_record();
+        // Re-author as an agent and use the full `agt:...` form for
+        // scope.agent.
+        let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: agent.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = agent.clone();
+        r.scope = ScopeTuple {
+            agent: Some(agent.as_str().to_owned()),
+            ..ScopeTuple::default()
+        };
+        r.validate()
+            .expect("full agt: identity accepted as scope.agent");
+    }
+
+    #[test]
+    fn scope_agent_rejects_bare_body() {
+        // Canonical scope encoding is the full identity. Bare body forms
+        // ("claude-code:opus-4-7:main:v1") are rejected to avoid splitting
+        // the IDL filter key space.
+        let mut r = sample_record();
+        let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: agent.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = agent;
+        r.scope = ScopeTuple {
+            agent: Some("claude-code:opus-4-7:main:v1".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let err = r.validate().unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn scope_user_rejects_agent_author() {
+        // scope.user requires a human author.
+        let mut r = sample_record();
+        let agent = Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid");
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: agent.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = agent.clone();
+        r.scope = ScopeTuple {
+            user: Some(agent.as_str().to_owned()),
+            ..ScopeTuple::default()
+        };
+        let err = r.validate().unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn scope_agent_rejects_human_author() {
+        // scope.agent requires an agent author.
+        let mut r = sample_record();
+        // Sample author is `usr:tafeng`. Set scope.agent — must reject.
+        r.scope = ScopeTuple {
+            agent: Some("usr:tafeng".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let err = r.validate().unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
+    }
+
+    #[test]
+    fn provenance_llm_id_serialized_when_none() {
+        let r = sample_record();
+        let json = serde_json::to_value(&r).expect("ser");
+        let provenance = json
+            .get("provenance")
+            .and_then(|v| v.as_object())
+            .expect("provenance object");
+        assert!(
+            provenance.contains_key("llm_id_if_any"),
+            "llm_id_if_any must always serialize, even when None"
+        );
+        assert_eq!(
+            provenance.get("llm_id_if_any"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[test]
+    fn provenance_round_trip_preserves_explicit_no_llm() {
+        // The serialization side ensures every record carries the
+        // `llm_id_if_any` key (null when no LLM was used). This test pins
+        // the round-trip so the structural-stability invariant codex
+        // round 1 flagged is enforced from the producer side: a sender
+        // can never emit a record without the key.
+        let r = sample_record();
+        let s = serde_json::to_string(&r).expect("ser");
+        assert!(
+            s.contains("\"llm_id_if_any\":null"),
+            "expected explicit `llm_id_if_any: null` in {s}"
+        );
+        let back: MemoryRecord = serde_json::from_str(&s).expect("de");
+        assert_eq!(r, back);
     }
 
     #[test]
     fn agent_author_cannot_forge_user_scope_via_unsigned_principal() {
         // P0 attack: agent signs a record but adds an unsigned `principal:
-        // usr:victim` entry, claiming `scope.user = victim`. Validator must
-        // reject because principal/delegator entries are unsigned at P0.
+        // usr:victim` entry, claiming `scope.user = victim`. With the P0
+        // chain-shape rule the unsigned principal is rejected before the
+        // scope cross-check even runs — both gates close the forgery.
         let mut r = sample_record();
         r.actor_chain = vec![
             ActorChainEntry {
@@ -698,7 +872,10 @@ mod tests {
         r.provenance.originating_agent_id = Identity::parse("agt:attacker:v1").expect("valid");
         let err = r.validate().unwrap_err();
         assert!(
-            matches!(err, DomainError::MalformedScope { .. }),
+            matches!(
+                err,
+                DomainError::MissingSignature { .. } | DomainError::MalformedScope { .. }
+            ),
             "agent author cannot satisfy scope.user via unsigned principal entry"
         );
     }

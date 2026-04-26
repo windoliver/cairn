@@ -27,8 +27,10 @@ pub struct Provenance {
     /// `consent.log` row id this write was authorized under.
     pub consent_ref: String,
     /// LLM identifier (model + revision) when the record was produced or
-    /// summarized by a model. Optional — only present when applicable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// summarized by a model. Optional in *value* (`null` when not
+    /// applicable) but **structurally required** — the field is always
+    /// serialized so consumers can distinguish "explicit no-LLM
+    /// provenance" from a missing/truncated record.
     pub llm_id_if_any: Option<String>,
 }
 
