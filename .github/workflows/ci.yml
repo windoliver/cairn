@@ -108,6 +108,31 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  plugins-verify:
+    name: plugins / cairn plugins verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
+        with:
+          shared-key: plugins-verify
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cairn plugins verify (default mode)
+        run: cargo run -p cairn-cli --locked -- plugins verify
+      - name: cairn plugins verify (json artifact)
+        run: cargo run -p cairn-cli --locked -- plugins verify --json > plugins-verify.json
+      - name: Upload plugins-verify.json
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plugins-verify-${{ github.run_id }}
+          path: plugins-verify.json
+          retention-days: 14
+
   build:
     name: build / ${{ matrix.os }}
     strategy:
