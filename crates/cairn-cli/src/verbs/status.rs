@@ -1,7 +1,9 @@
-//! `cairn status` handler — deterministic capability discovery (§8.0.a).
+//! `cairn status` handler — capability discovery (§8.0.a).
 //!
 //! Returns the contract version, advertised capabilities, and server info.
-//! For the P0 scaffold with no store wired, capabilities is empty.
+//! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
+//! When the store adapter lands, read the incarnation from the daemon table.
+//! For P0 scaffold with no store wired, capabilities is empty.
 
 use std::process::ExitCode;
 
@@ -136,6 +138,31 @@ mod tests {
         assert_eq!(h, 0);
         assert_eq!(mi, 0);
         assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn secs_to_ymdhms_dec31_non_leap() {
+        // 1999-12-31 23:59:59 UTC — day before Y2K
+        // secs from epoch: 946684799
+        let (y, mo, d, h, mi, s) = secs_to_ymdhms(946_684_799);
+        assert_eq!((y, mo, d, h, mi, s), (1999, 12, 31, 23, 59, 59));
+    }
+
+    #[test]
+    fn secs_to_ymdhms_leap_day_2000() {
+        // 2000-02-29 00:00:00 UTC — century leap year
+        // secs from epoch: 951782400
+        let (y, mo, d, h, mi, s) = secs_to_ymdhms(951_782_400);
+        assert_eq!((y, mo, d), (2000, 2, 29));
+        assert_eq!((h, mi, s), (0, 0, 0));
+    }
+
+    #[test]
+    fn secs_to_ymdhms_year_boundary_y2k() {
+        // 2000-01-01 00:00:00 UTC
+        // secs from epoch: 946684800
+        let (y, mo, d, h, mi, s) = secs_to_ymdhms(946_684_800);
+        assert_eq!((y, mo, d, h, mi, s), (2000, 1, 1, 0, 0, 0));
     }
 
     #[test]

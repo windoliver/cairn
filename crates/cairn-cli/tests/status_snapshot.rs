@@ -1,4 +1,5 @@
-//! Integration tests for `cairn status`.
+//! Integration tests for `cairn status` — structural assertions over
+//! time-varying output (no insta snapshots since `incarnation` differs per call).
 
 use std::process::Command;
 
