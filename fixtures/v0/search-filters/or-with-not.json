@@ -1,0 +1,6 @@
+{
+  "or": [
+    {"field": "kind", "op": "in", "value": ["user", "feedback", "rule"]},
+    {"not": {"field": "visibility", "op": "eq", "value": "public"}}
+  ]
+}

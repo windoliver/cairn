@@ -1,0 +1,12 @@
+{
+  "mode": "keyword",
+  "query": "dark mode vim keybindings",
+  "limit": 10,
+  "citations": "compact",
+  "filters": {
+    "and": [
+      {"field": "kind", "op": "eq", "value": "user"},
+      {"field": "visibility", "op": "eq", "value": "private"}
+    ]
+  }
+}

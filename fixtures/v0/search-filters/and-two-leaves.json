@@ -1,0 +1,6 @@
+{
+  "and": [
+    {"field": "visibility", "op": "eq", "value": "private"},
+    {"field": "salience", "op": "gte", "value": 0.5}
+  ]
+}

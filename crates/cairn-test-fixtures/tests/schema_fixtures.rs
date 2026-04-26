@@ -136,3 +136,35 @@ fn response_rejected_invalid_args_deserializes() {
     let r: Response = load_json(envelopes_dir().join("response-rejected-invalid-args.json"));
     insta::assert_json_snapshot!("response_rejected_invalid_args", &r);
 }
+
+// ── Search filters ────────────────────────────────────────────────────────────
+
+use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsFilters};
+
+fn filters_dir() -> std::path::PathBuf {
+    v0().join("search-filters")
+}
+
+#[test]
+fn filter_leaf_eq_deserializes() {
+    let f: SearchArgsFilters = load_json(filters_dir().join("leaf-eq.json"));
+    insta::assert_json_snapshot!("filter_leaf_eq", &f);
+}
+
+#[test]
+fn filter_and_two_leaves_deserializes() {
+    let f: SearchArgsFilters = load_json(filters_dir().join("and-two-leaves.json"));
+    insta::assert_json_snapshot!("filter_and_two_leaves", &f);
+}
+
+#[test]
+fn filter_or_with_not_deserializes() {
+    let f: SearchArgsFilters = load_json(filters_dir().join("or-with-not.json"));
+    insta::assert_json_snapshot!("filter_or_with_not", &f);
+}
+
+#[test]
+fn search_args_keyword_deserializes() {
+    let a: SearchArgs = load_json(filters_dir().join("search-args-keyword.json"));
+    insta::assert_json_snapshot!("search_args_keyword", &a);
+}
