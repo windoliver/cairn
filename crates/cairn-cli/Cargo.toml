@@ -38,7 +38,7 @@ workspace = true
 # cargo-machete: temporarily suppress deps that are declared now but
 # get their first call site in a later task of this branch.
 [package.metadata.cargo-machete]
-ignored = ["anyhow", "base64", "serde", "ulid"]
+ignored = ["anyhow", "serde"]
 
 [lib]
 name = "cairn_cli"

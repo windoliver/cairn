@@ -14,6 +14,10 @@ pub fn new_operation_id() -> Ulid {
 }
 
 /// Generate a fresh 16-byte nonce as standard base64 (24 chars with `==` padding).
+///
+/// Uses ULID bytes: 48-bit timestamp + 80-bit random component.
+/// Adequate for P0 challenge correlation; replace with `rand::OsRng` when
+/// the handshake challenge-response is wired to a real signature scheme.
 #[must_use]
 pub fn new_nonce() -> Nonce16Base64 {
     use base64::Engine as _;
