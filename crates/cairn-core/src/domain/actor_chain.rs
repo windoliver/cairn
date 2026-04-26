@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{DomainError, Identity, Rfc3339Timestamp};
+use crate::domain::{DomainError, Identity, IdentityKind, Rfc3339Timestamp};
 
 /// Role tag for a chain entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,7 +38,8 @@ pub struct ActorChainEntry {
     pub at: Rfc3339Timestamp,
 }
 
-/// Validate chain ordering and required entries.
+/// Validate chain ordering, required entries, and role/identity-kind
+/// compatibility.
 ///
 /// Rules (§4.2):
 /// - At least one entry.
@@ -46,6 +47,14 @@ pub struct ActorChainEntry {
 /// - Order is `Principal* → Delegator* → Author → Sensor*` — a single
 ///   author bracketed by zero-or-more principals/delegators before and
 ///   sensors after.
+/// - Each role carries an identity of the matching kind:
+///   - `Principal`  → `Human`  (`usr:` prefix only)
+///   - `Delegator`  → `Agent`  (`agt:` prefix only)
+///   - `Author`     → any kind — humans, agents, *and* sensors author
+///     records. Sensors are the canonical authors of `sensor_observation`
+///     and raw-event records (brief §4.2 "every raw event the sensor
+///     emits").
+///   - `Sensor`     → `Sensor` (`snr:` prefix only)
 pub fn validate_chain(entries: &[ActorChainEntry]) -> Result<(), DomainError> {
     if entries.is_empty() {
         return Err(DomainError::MissingSignature {
@@ -68,12 +77,21 @@ pub fn validate_chain(entries: &[ActorChainEntry]) -> Result<(), DomainError> {
     let mut seen_author = false;
     let mut seen_delegator = false;
     for entry in entries {
+        let kind = entry.identity.kind();
         match entry.role {
             ChainRole::Principal => {
                 if seen_delegator || seen_author {
                     return Err(DomainError::MissingSignature {
                         message: "`principal` entries must precede delegator/author/sensor"
                             .to_owned(),
+                    });
+                }
+                if kind != IdentityKind::Human {
+                    return Err(DomainError::InvalidIdentity {
+                        message: format!(
+                            "role `principal` requires a `usr:` identity, got `{}`",
+                            entry.identity.as_str()
+                        ),
                     });
                 }
             }
@@ -83,15 +101,32 @@ pub fn validate_chain(entries: &[ActorChainEntry]) -> Result<(), DomainError> {
                         message: "`delegator` entries must precede author/sensor".to_owned(),
                     });
                 }
+                if kind != IdentityKind::Agent {
+                    return Err(DomainError::InvalidIdentity {
+                        message: format!(
+                            "role `delegator` requires an `agt:` identity, got `{}`",
+                            entry.identity.as_str()
+                        ),
+                    });
+                }
                 seen_delegator = true;
             }
             ChainRole::Author => {
+                let _ = kind; // any IdentityKind permitted as author
                 seen_author = true;
             }
             ChainRole::Sensor => {
                 if !seen_author {
                     return Err(DomainError::MissingSignature {
                         message: "`sensor` entries must follow author".to_owned(),
+                    });
+                }
+                if kind != IdentityKind::Sensor {
+                    return Err(DomainError::InvalidIdentity {
+                        message: format!(
+                            "role `sensor` requires a `snr:` identity, got `{}`",
+                            entry.identity.as_str()
+                        ),
                     });
                 }
             }
@@ -173,5 +208,48 @@ mod tests {
         ];
         let err = validate_chain(&chain).unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn principal_must_be_human() {
+        let chain = vec![
+            entry(ChainRole::Principal, "agt:not-a-human:v1"),
+            entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1"),
+        ];
+        let err = validate_chain(&chain).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
+    }
+
+    #[test]
+    fn delegator_must_be_agent() {
+        let chain = vec![
+            entry(ChainRole::Delegator, "usr:tafeng"),
+            entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1"),
+        ];
+        let err = validate_chain(&chain).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
+    }
+
+    #[test]
+    fn author_can_be_human() {
+        let chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+        validate_chain(&chain).expect("human author allowed");
+    }
+
+    #[test]
+    fn author_can_be_sensor() {
+        // Sensors author their own raw events (brief §4.2).
+        let chain = vec![entry(ChainRole::Author, "snr:local:hook:cc-session:v1")];
+        validate_chain(&chain).expect("sensor-authored record allowed");
+    }
+
+    #[test]
+    fn sensor_must_be_sensor_kind() {
+        let chain = vec![
+            entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1"),
+            entry(ChainRole::Sensor, "agt:not-a-sensor:v1"),
+        ];
+        let err = validate_chain(&chain).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
     }
 }

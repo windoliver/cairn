@@ -23,6 +23,7 @@ fn signature_a() -> Ed25519Signature {
 }
 
 fn record() -> MemoryRecord {
+    let user_id = Identity::parse("usr:tafeng").expect("valid");
     MemoryRecord {
         id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
         kind: MemoryKind::User,
@@ -30,16 +31,14 @@ fn record() -> MemoryRecord {
         visibility: MemoryVisibility::Private,
         scope: ScopeTuple {
             user: Some("tafeng".to_owned()),
-            project: Some("cairn".to_owned()),
             ..ScopeTuple::default()
         },
         body: "user prefers dark mode".to_owned(),
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
             created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
-            originating_agent_id: Identity::parse("agt:claude-code:opus-4-7:main:v1")
-                .expect("valid"),
-            source_hash: "sha256:abc123".to_owned(),
+            originating_agent_id: user_id.clone(),
+            source_hash: format!("sha256:{}", "a".repeat(64)),
             consent_ref: "consent:01HQZ".to_owned(),
             llm_id_if_any: Some("opus-4-7".to_owned()),
         },
@@ -54,7 +53,7 @@ fn record() -> MemoryRecord {
         confidence: 0.7,
         actor_chain: vec![ActorChainEntry {
             role: ChainRole::Author,
-            identity: Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("valid"),
+            identity: user_id,
             at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
         }],
         signature: signature_a(),
@@ -145,7 +144,7 @@ fn unsupported_visibility_rejected_at_deserialize() {
             "source_sensor": "snr:local:hook:cc-session:v1",
             "created_at": "2026-04-22T14:02:11Z",
             "originating_agent_id": "agt:claude-code:opus-4-7:main:v1",
-            "source_hash": "sha256:abc",
+            "source_hash": format!("sha256:{}", "a".repeat(64)),
             "consent_ref": "consent:1"
         },
         "updated_at": "2026-04-22T14:05:11Z",
@@ -262,7 +261,7 @@ prop_compose! {
         score in 0.0f32..=1.0,
         unique_queries in 0u32..100,
     ) -> MemoryRecord {
-        MemoryRecord {
+        let mut r = MemoryRecord {
             kind,
             class,
             visibility,
@@ -271,7 +270,24 @@ prop_compose! {
             confidence,
             evidence: EvidenceVector { recall_count, score, unique_queries, recency_half_life_days: 14 },
             ..record()
+        };
+        // For SensorObservation, the sensor must be the chain author at
+        // P0 (a sensor-role entry is unsigned and not sufficient). The
+        // chain therefore has no human/agent identities, so swap scope to
+        // an entity-only scope to keep cross-field invariants happy.
+        if r.kind == MemoryKind::SensorObservation {
+            r.actor_chain = vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: r.provenance.source_sensor.clone(),
+                at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+            }];
+            r.provenance.originating_agent_id = r.provenance.source_sensor.clone();
+            r.scope = ScopeTuple {
+                entity: Some("camera-4".to_owned()),
+                ..ScopeTuple::default()
+            };
         }
+        r
     }
 }
 
