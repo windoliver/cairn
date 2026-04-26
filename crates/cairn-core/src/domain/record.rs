@@ -350,6 +350,12 @@ impl MemoryRecord {
         &self,
         intent: &VerifiedSignedIntent,
     ) -> Result<(), DomainError> {
+        // Run the full shape validation first so containment never
+        // approves a record that fails domain invariants. Skipping
+        // this would let an adapter persist a malformed record (empty
+        // body, P0-forbidden chain role, scope.project set, broken
+        // provenance) just because target_hash matches its hash.
+        self.validate()?;
         let intent = intent.as_inner();
         let computed = CanonicalRecordHash::compute(self)?;
         if computed.as_str() != intent.target_hash {
@@ -902,34 +908,28 @@ mod tests {
         // under test, so tests exercising other rules (scope mismatch,
         // visibility promotion, etc.) get a matching hash by default.
         let target_hash = CanonicalRecordHash::compute(record).expect("compute");
-        VerifiedSignedIntent::dangerous_unverified_for_testing(
-            crate::generated::envelope::SignedIntent {
-                chain_parents: vec![],
-                expires_at: "2026-04-22T14:07:11Z".to_owned(),
-                issued_at: "2026-04-22T14:02:11Z".to_owned(),
-                issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
-                key_version: 1,
-                nonce: crate::generated::common::Nonce16Base64(
-                    "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
-                ),
-                operation_id: crate::generated::common::Ulid(
-                    "01HQZX9F5N0000000000000000".to_owned(),
-                ),
-                scope: crate::generated::envelope::SignedIntentScope {
-                    tenant: tenant.to_owned(),
-                    workspace: workspace.to_owned(),
-                    entity: entity.to_owned(),
-                    tier,
-                },
-                sequence: Some(1),
-                server_challenge: None,
-                signature: crate::generated::common::Ed25519Signature(format!(
-                    "ed25519:{}",
-                    "a".repeat(128)
-                )),
-                target_hash: target_hash.as_str().to_owned(),
+        VerifiedSignedIntent::from_verified_for_test(crate::generated::envelope::SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".to_owned(),
+            issued_at: "2026-04-22T14:02:11Z".to_owned(),
+            issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
+            key_version: 1,
+            nonce: crate::generated::common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
+            operation_id: crate::generated::common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
+            scope: crate::generated::envelope::SignedIntentScope {
+                tenant: tenant.to_owned(),
+                workspace: workspace.to_owned(),
+                entity: entity.to_owned(),
+                tier,
             },
-        )
+            sequence: Some(1),
+            server_challenge: None,
+            signature: crate::generated::common::Ed25519Signature(format!(
+                "ed25519:{}",
+                "a".repeat(128)
+            )),
+            target_hash: target_hash.as_str().to_owned(),
+        })
     }
 
     #[test]
@@ -1012,6 +1012,36 @@ mod tests {
         r.body.push_str(" (tampered)");
         let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
+    }
+
+    #[test]
+    fn intent_containment_runs_shape_validation_first() {
+        // Even with a matching target_hash, a malformed record (here:
+        // empty body) must be rejected. Containment is the pre-store
+        // gate — it cannot be the only gate skipping shape checks.
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.body.clear();
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::EmptyField { field: "body" }));
+    }
+
+    #[test]
+    fn intent_containment_rejects_project_scope() {
+        // scope.project is not in SignedIntentScope yet; the per-record
+        // validate() rejects it, and containment must inherit that
+        // rejection by running shape validation first.
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        r.scope.project = Some("cairn".to_owned());
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
     #[test]
