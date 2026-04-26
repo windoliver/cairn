@@ -443,40 +443,38 @@ impl MemoryRecord {
         self.validate_scope_principals_against_intent(intent)
     }
 
-    /// scope.user / scope.agent must bind to a cryptographically established
-    /// identity — chain author (signed at P0) or `intent.issuer` (signed by
-    /// the issuing key). Without this, an agent author could persist
-    /// `scope.user = usr:victim` and have it ride the intent's authorization
-    /// onto downstream consumers that filter by user scope.
+    /// scope.user / scope.agent must bind to a cryptographically
+    /// established identity. The only such identity available at this
+    /// layer is `intent.issuer` — the upstream verifier already
+    /// confirmed its signature. The chain author's identity is
+    /// **not** verified by [`Self::validate`] (which is shape-only),
+    /// so binding scope.user to the author would let an attacker forge
+    /// `actor_chain.author = usr:victim` with a syntactically valid but
+    /// uncountersigned signature and pollute cross-user memory under
+    /// an authorized tenant/workspace/entity. Author-bound containment
+    /// returns once a `VerifiedMemoryRecord` token (P1+) proves the
+    /// signature against keychain-resident keys.
     fn validate_scope_principals_against_intent(
         &self,
         intent: &crate::generated::envelope::SignedIntent,
     ) -> Result<(), DomainError> {
         let issuer = intent.issuer.0.as_str();
-        let author_entry = self
-            .actor_chain
-            .iter()
-            .find(|e| e.role == ChainRole::Author);
-        let author = author_entry.map_or("", |e| e.identity.as_str());
-        let author_kind = author_entry.map(|e| e.identity.kind());
         if let Some(user) = self.scope.user.as_deref() {
-            let author_matches = author_kind == Some(IdentityKind::Human) && user == author;
             let issuer_matches = issuer.starts_with("usr:") && user == issuer;
-            if !(author_matches || issuer_matches) {
+            if !issuer_matches {
                 return Err(DomainError::MalformedScope {
                     message: format!(
-                        "scope.user `{user}` is not cryptographically established — must equal the human chain author or SignedIntent.issuer (got author=`{author}`, issuer=`{issuer}`)"
+                        "scope.user `{user}` is not cryptographically established — must equal the human SignedIntent.issuer (got issuer=`{issuer}`); chain-author binding requires a verified record signature (P1+)"
                     ),
                 });
             }
         }
         if let Some(agent) = self.scope.agent.as_deref() {
-            let author_matches = author_kind == Some(IdentityKind::Agent) && agent == author;
             let issuer_matches = issuer.starts_with("agt:") && agent == issuer;
-            if !(author_matches || issuer_matches) {
+            if !issuer_matches {
                 return Err(DomainError::MalformedScope {
                     message: format!(
-                        "scope.agent `{agent}` is not cryptographically established — must equal the agent chain author or SignedIntent.issuer (got author=`{author}`, issuer=`{issuer}`)"
+                        "scope.agent `{agent}` is not cryptographically established — must equal the agent SignedIntent.issuer (got issuer=`{issuer}`); chain-author binding requires a verified record signature (P1+)"
                     ),
                 });
             }
@@ -1080,6 +1078,35 @@ mod tests {
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
         r.validate_against_intent(&intent)
             .expect("agent-authored user memory authorized by user-issued intent");
+    }
+
+    #[test]
+    fn intent_containment_rejects_user_scope_via_forged_author() {
+        // Adversarial path: an attacker constructs a record whose
+        // chain-author identity is `usr:victim` with a syntactically
+        // valid but uncountersigned signature, then sets
+        // `scope.user = usr:victim`. validate() is shape-only, so it
+        // accepts the well-formed identity and signature wire form.
+        // Containment must reject because intent.issuer (the only
+        // cryptographically established identity here) is `usr:tafeng`,
+        // not `usr:victim` — the author claim is unverified.
+        let mut r = sample_record();
+        r.scope.tenant = Some("acme".to_owned());
+        r.scope.workspace = Some("ws".to_owned());
+        r.scope.entity = Some("ent".to_owned());
+        let victim = Identity::parse("usr:victim").expect("valid");
+        r.scope.user = Some("usr:victim".to_owned());
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: victim.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.originating_agent_id = victim;
+        let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
+        // intent.issuer = usr:tafeng (not usr:victim) — author claim
+        // is uncountersigned, so containment must not accept it.
+        let err = r.validate_against_intent(&intent).unwrap_err();
+        assert!(matches!(err, DomainError::MalformedScope { .. }));
     }
 
     #[test]

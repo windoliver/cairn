@@ -1,14 +1,14 @@
 //! [`VerifiedSignedIntent`] — typed wrapper signaling a `SignedIntent`
-//! has passed signature/replay verification at the trust boundary.
+//! has passed verification at the trust boundary.
 //!
 //! `validate_against_intent` accepts only this type so the type system
-//! catches "called with raw bytes off the wire" at compile time. The
-//! constructor is **not public** — production code obtains an instance
-//! only via the future verifier crate, which performs issuer-signature,
-//! expiry, nonce, and sequence/replay checks before returning it. The
-//! verifier-side construction path lives behind a sealed trait
-//! (`SignedIntentVerifier::__from_verified`) so cairn-core stays the
-//! sole authority for instantiation.
+//! catches "called with raw bytes off the wire" at compile time.
+//! Production callers mint instances via
+//! [`crate::verifier::verify_signed_intent`] — that function (P0:
+//! syntactic checks; P1+: full crypto + replay) is the single
+//! production path. The construction primitive itself lives behind a
+//! sealed trait (`SignedIntentVerifier::__from_verified`) gated by a
+//! private witness, so external crates cannot bypass the verifier.
 //!
 //! Domain-level validation never re-derives crypto truth from the
 //! wrapper; it only reads the already-verified fields. The wrapper
