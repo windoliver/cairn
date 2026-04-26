@@ -8,6 +8,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod config;
 pub mod contract;
 pub mod domain;
 pub mod generated;
