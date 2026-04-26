@@ -7,7 +7,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-#[allow(dead_code)]
 fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) -> T {
     let path = path.as_ref();
     let raw = std::fs::read_to_string(path)
@@ -37,4 +36,40 @@ fn v0_directory_structure_exists() {
         let p = base.join(sub);
         assert!(p.is_dir(), "fixtures/v0/{sub} must be a directory: {p:?}");
     }
+}
+
+// ── Records ─────────────────────────────────────────────────────────────────
+
+use cairn_core::domain::record::MemoryRecord;
+
+fn records_dir() -> std::path::PathBuf {
+    v0().join("records")
+}
+
+#[test]
+fn record_semantic_private_deserializes_and_validates() {
+    let r: MemoryRecord = load_json(records_dir().join("semantic_private_user.json"));
+    r.validate().expect("semantic_private_user must pass validate()");
+    insta::assert_json_snapshot!("record_semantic_private_user", &r);
+}
+
+#[test]
+fn record_episodic_session_deserializes_and_validates() {
+    let r: MemoryRecord = load_json(records_dir().join("episodic_session_trace.json"));
+    r.validate().expect("episodic_session_trace must pass validate()");
+    insta::assert_json_snapshot!("record_episodic_session_trace", &r);
+}
+
+#[test]
+fn record_procedural_project_deserializes_and_validates() {
+    let r: MemoryRecord = load_json(records_dir().join("procedural_project_playbook.json"));
+    r.validate().expect("procedural_project_playbook must pass validate()");
+    insta::assert_json_snapshot!("record_procedural_project_playbook", &r);
+}
+
+#[test]
+fn record_graph_team_deserializes_and_validates() {
+    let r: MemoryRecord = load_json(records_dir().join("graph_team_entity.json"));
+    r.validate().expect("graph_team_entity must pass validate()");
+    insta::assert_json_snapshot!("record_graph_team_entity", &r);
 }
