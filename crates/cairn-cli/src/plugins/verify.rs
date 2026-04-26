@@ -2,7 +2,7 @@
 //! registered plugin and emit a summary.
 
 use cairn_core::contract::conformance::{CaseStatus, run_conformance_for_plugin};
-use cairn_core::contract::registry::{PluginName, PluginRegistry};
+use cairn_core::contract::registry::PluginRegistry;
 
 /// Aggregated outcome of a verify run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,12 +160,6 @@ pub fn render_json(report: &VerifyReport) -> String {
         }
     }))
     .expect("json serialization is infallible for owned values")
-}
-
-/// Convenience: also resolve a `PluginName` for callers that need it.
-#[must_use]
-pub fn resolve_name(raw: &str) -> Option<PluginName> {
-    PluginName::new(raw).ok()
 }
 
 #[cfg(test)]
