@@ -327,7 +327,7 @@ cairn-store-sqlite (MemoryStore)
 
 …
 
-Summary: 4 plugins, 12 ok, 7 pending, 0 failed
+Summary: 4 plugins, 12 ok, 6 pending, 0 failed
 ```
 
 `--json`:
@@ -345,7 +345,7 @@ Summary: 4 plugins, 12 ok, 7 pending, 0 failed
       ]
     }
   ],
-  "summary": { "ok": 12, "pending": 7, "failed": 0 }
+  "summary": { "ok": 12, "pending": 6, "failed": 0 }
 }
 ```
 
