@@ -39,6 +39,7 @@ pub enum ConfigError {
 /// Vault storage tier (§3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum VaultTier {
     /// Single-user, on-disk `SQLite` vault. P0 default.
     #[default]
@@ -52,6 +53,7 @@ pub enum VaultTier {
 /// Ordered steps in the hot-memory assembly recipe (§3.1 `hot_memory.recipe`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HotMemoryRecipeStep {
     /// Vault purpose (brief §2.2).
     Purpose,
@@ -70,14 +72,16 @@ pub enum HotMemoryRecipeStep {
 /// Condition that gates an extractor entry in the chain (§5.2.a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ExtractTrigger {
     /// Run this extractor only when the previous one produced confidence < 0.6.
     ConfidenceBelow,
 }
 
 /// Which LLM provider backend is active (§4.1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum LlmProvider {
     /// Any `OpenAI`-compatible endpoint (Ollama, LM Studio, `OpenAI`, Azure).
     OpenaiCompatible,
