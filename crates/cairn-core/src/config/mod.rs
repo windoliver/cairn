@@ -527,6 +527,26 @@ pub struct ExtractBudget {
     pub max_turns: Option<u32>,
 }
 
+/// Derived capability set, computed from `CairnConfig` (no I/O).
+///
+/// The verb layer calls `config.capabilities()` before dispatching to
+/// gate features that require capabilities that may not be present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilitySet {
+    /// Always true at P0 (`FTS5` always present).
+    pub keyword_search:  bool,
+    /// True iff `llm.provider` is `Some`.
+    pub semantic_search: bool,
+    /// True iff `semantic_search` (requires vector embeddings).
+    pub hybrid_search:   bool,
+    /// True iff `llm.provider` is `Some`.
+    pub llm_extract:     bool,
+    /// True iff the pipeline chain contains an `agent` worker.
+    pub agent_extract:   bool,
+    /// False for `sqlite` (P0). P1+ stores may advertise this.
+    pub graph_edges:     bool,
+}
+
 impl CairnConfig {
     /// Validate semantic invariants that serde cannot enforce.
     ///
@@ -609,6 +629,29 @@ impl CairnConfig {
         }
 
         Ok(())
+    }
+
+    /// Derive the active capability set from this config (pure, no I/O).
+    ///
+    /// The verb layer uses this to gate features before dispatch.
+    #[must_use]
+    pub fn capabilities(&self) -> CapabilitySet {
+        let llm_on = self.llm.provider.is_some();
+        let agent_extract = self
+            .pipeline
+            .extract
+            .chain
+            .iter()
+            .any(|e| e.worker == ExtractorWorkerKind::Agent);
+
+        CapabilitySet {
+            keyword_search:  true,
+            semantic_search: llm_on,
+            hybrid_search:   llm_on,
+            llm_extract:     llm_on,
+            agent_extract,
+            graph_edges:     false, // P0: sqlite always false; P1+ gates on store capability
+        }
     }
 }
 
@@ -840,5 +883,41 @@ mod tests {
         assert_eq!(config.vault.layout.sources, "inbox");
         assert_eq!(config.vault.layout.enabled_kinds.len(), 2);
         assert!(!config.sensors.ide.enabled);
+    }
+
+    #[test]
+    fn capabilities_llm_off_by_default() {
+        let caps = CairnConfig::default().capabilities();
+        assert!(caps.keyword_search,  "keyword_search always true");
+        assert!(!caps.semantic_search, "no LLM → no semantic");
+        assert!(!caps.hybrid_search,   "no LLM → no hybrid");
+        assert!(!caps.llm_extract,     "no LLM → no llm_extract");
+        assert!(!caps.agent_extract,   "default chain has no agent worker");
+        assert!(!caps.graph_edges,     "sqlite → no graph edges");
+    }
+
+    #[test]
+    fn capabilities_llm_on() {
+        let mut config = CairnConfig::default();
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        let caps = config.capabilities();
+        assert!(caps.keyword_search);
+        assert!(caps.semantic_search);
+        assert!(caps.hybrid_search);
+        assert!(caps.llm_extract);
+        assert!(!caps.agent_extract);
+    }
+
+    #[test]
+    fn capabilities_agent_extract_when_chain_has_agent() {
+        let mut config = CairnConfig::default();
+        config.pipeline.extract.chain.push(ExtractorEntry {
+            worker: ExtractorWorkerKind::Agent,
+            kinds: vec![],
+            trigger: None,
+            budget: ExtractBudget::default(),
+        });
+        let caps = config.capabilities();
+        assert!(caps.agent_extract);
     }
 }
