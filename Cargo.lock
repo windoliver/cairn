@@ -155,6 +155,7 @@ dependencies = [
  "cairn-test-fixtures",
  "cairn-workflows",
  "clap",
+ "insta",
  "serde",
  "serde_json",
 ]

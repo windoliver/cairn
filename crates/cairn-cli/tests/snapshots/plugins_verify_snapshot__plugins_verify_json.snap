@@ -1,0 +1,133 @@
+---
+source: crates/cairn-cli/tests/plugins_verify_snapshot.rs
+expression: json
+---
+{
+  "plugins": [
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "initialize_and_list_tools",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        }
+      ],
+      "contract": "MCPServer",
+      "name": "cairn-mcp"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "emits_envelope_when_poked",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        }
+      ],
+      "contract": "SensorIngress",
+      "name": "cairn-sensors-local"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "put_get_roundtrip",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        },
+        {
+          "id": "fts_query_returns_doc",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        },
+        {
+          "id": "vector_search_when_advertised",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        }
+      ],
+      "contract": "MemoryStore",
+      "name": "cairn-store-sqlite"
+    },
+    {
+      "cases": [
+        {
+          "id": "manifest_matches_host",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "arc_pointer_stable",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "enqueue_then_complete",
+          "reason": "real impl pending",
+          "status": "pending",
+          "tier": 2
+        }
+      ],
+      "contract": "WorkflowOrchestrator",
+      "name": "cairn-workflows"
+    }
+  ],
+  "summary": {
+    "failed": 0,
+    "ok": 12,
+    "pending": 6
+  }
+}
