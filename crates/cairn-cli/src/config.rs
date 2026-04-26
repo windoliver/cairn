@@ -64,8 +64,8 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
 /// cannot be resolved, figment extraction fails, or `CairnConfig::validate()`
 /// rejects the resulting config.
 pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
-    use figment::providers::{Env, Format, Serialized, Yaml};
     use figment::Figment;
+    use figment::providers::{Env, Format, Serialized, Yaml};
 
     let config_path = vault_path.join(".cairn/config.yaml");
 

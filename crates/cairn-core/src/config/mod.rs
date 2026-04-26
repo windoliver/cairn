@@ -272,16 +272,12 @@ pub struct VaultConfig {
 impl Default for VaultConfig {
     fn default() -> Self {
         Self {
-            name:         "my-vault".into(),
-            tier:         VaultTier::Local,
-            layout:       LayoutConfig::default(),
-            hot_memory:   HotMemoryConfig::default(),
-            retention:    BTreeMap::new(),
-            schema_files: vec![
-                "CLAUDE.md".into(),
-                "AGENTS.md".into(),
-                "GEMINI.md".into(),
-            ],
+            name: "my-vault".into(),
+            tier: VaultTier::Local,
+            layout: LayoutConfig::default(),
+            hot_memory: HotMemoryConfig::default(),
+            retention: BTreeMap::new(),
+            schema_files: vec!["CLAUDE.md".into(), "AGENTS.md".into(), "GEMINI.md".into()],
         }
     }
 }
@@ -310,13 +306,13 @@ pub struct LayoutConfig {
 impl Default for LayoutConfig {
     fn default() -> Self {
         Self {
-            sources:       "sources".into(),
-            records:       "raw".into(),
-            wiki:          "wiki".into(),
-            skills:        "skills".into(),
+            sources: "sources".into(),
+            records: "raw".into(),
+            wiki: "wiki".into(),
+            skills: "skills".into(),
             enabled_kinds: vec![],
-            file_naming:   "{kind}_{slug}.md".into(),
-            index:         IndexConfig::default(),
+            file_naming: "{kind}_{slug}.md".into(),
+            index: IndexConfig::default(),
         }
     }
 }
@@ -333,7 +329,10 @@ pub struct IndexConfig {
 
 impl Default for IndexConfig {
     fn default() -> Self {
-        Self { max_lines: 200, max_bytes: 25_600 }
+        Self {
+            max_lines: 200,
+            max_bytes: 25_600,
+        }
     }
 }
 
@@ -375,7 +374,9 @@ pub struct StoreConfig {
 
 impl Default for StoreConfig {
     fn default() -> Self {
-        Self { kind: StoreKind::Sqlite }
+        Self {
+            kind: StoreKind::Sqlite,
+        }
     }
 }
 
@@ -418,10 +419,10 @@ pub struct SensorsConfig {
 impl Default for SensorsConfig {
     fn default() -> Self {
         Self {
-            hooks:  SensorToggle { enabled: true },
-            ide:    SensorToggle { enabled: true },
+            hooks: SensorToggle { enabled: true },
+            ide: SensorToggle { enabled: true },
             screen: SensorToggle { enabled: false },
-            slack:  SlackSensorConfig::default(),
+            slack: SlackSensorConfig::default(),
         }
     }
 }
@@ -455,7 +456,9 @@ pub struct WorkflowsConfig {
 
 impl Default for WorkflowsConfig {
     fn default() -> Self {
-        Self { orchestrator: OrchestratorKind::Local }
+        Self {
+            orchestrator: OrchestratorKind::Local,
+        }
     }
 }
 
@@ -481,10 +484,10 @@ impl Default for ExtractConfig {
     fn default() -> Self {
         Self {
             chain: vec![ExtractorEntry {
-                worker:  ExtractorWorkerKind::Regex,
-                kinds:   vec![],
+                worker: ExtractorWorkerKind::Regex,
+                kinds: vec![],
                 trigger: None,
-                budget:  ExtractBudget::default(),
+                budget: ExtractBudget::default(),
             }],
         }
     }
@@ -507,10 +510,10 @@ pub struct ExtractorEntry {
 impl Default for ExtractorEntry {
     fn default() -> Self {
         Self {
-            worker:  ExtractorWorkerKind::Regex,
-            kinds:   vec![],
+            worker: ExtractorWorkerKind::Regex,
+            kinds: vec![],
             trigger: None,
-            budget:  ExtractBudget::default(),
+            budget: ExtractBudget::default(),
         }
     }
 }
@@ -536,17 +539,17 @@ pub struct ExtractBudget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
-    pub keyword_search:  bool,
+    pub keyword_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub semantic_search: bool,
     /// True iff `semantic_search` (requires vector embeddings).
-    pub hybrid_search:   bool,
+    pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
-    pub llm_extract:     bool,
+    pub llm_extract: bool,
     /// True iff the pipeline chain contains an `agent` worker.
-    pub agent_extract:   bool,
+    pub agent_extract: bool,
     /// False for `sqlite` (P0). P1+ stores may advertise this.
-    pub graph_edges:     bool,
+    pub graph_edges: bool,
 }
 
 impl CairnConfig {
@@ -647,12 +650,12 @@ impl CairnConfig {
             .any(|e| e.worker == ExtractorWorkerKind::Agent);
 
         CapabilitySet {
-            keyword_search:  true,
+            keyword_search: true,
             semantic_search: llm_on,
-            hybrid_search:   llm_on,
-            llm_extract:     llm_on,
+            hybrid_search: llm_on,
+            llm_extract: llm_on,
             agent_extract,
-            graph_edges:     false, // P0: sqlite always false; P1+ gates on store capability
+            graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
         }
     }
 }
@@ -678,7 +681,10 @@ mod tests {
     #[test]
     fn config_error_env_var_display() {
         let e = ConfigError::UnresolvedEnvVar("OPENAI_API_KEY".into());
-        assert_eq!(e.to_string(), "unresolved env var in config: ${OPENAI_API_KEY}");
+        assert_eq!(
+            e.to_string(),
+            "unresolved env var in config: ${OPENAI_API_KEY}"
+        );
     }
 
     #[test]
@@ -711,8 +717,7 @@ mod tests {
 
     #[test]
     fn store_kind_custom_round_trips() {
-        let json =
-            serde_json::to_string(&StoreKind::Custom("cairn-store-qdrant".into())).unwrap();
+        let json = serde_json::to_string(&StoreKind::Custom("cairn-store-qdrant".into())).unwrap();
         assert_eq!(json, r#""custom:cairn-store-qdrant""#);
         let back: StoreKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, StoreKind::Custom("cairn-store-qdrant".into()));
@@ -768,7 +773,10 @@ mod tests {
 
     #[test]
     fn default_orchestrator_is_local() {
-        assert_eq!(CairnConfig::default().workflows.orchestrator, OrchestratorKind::Local);
+        assert_eq!(
+            CairnConfig::default().workflows.orchestrator,
+            OrchestratorKind::Local
+        );
     }
 
     #[test]
@@ -788,7 +796,13 @@ mod tests {
         let mut config = CairnConfig::default();
         config.vault.hot_memory.max_bytes = 0;
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidBudget { field: "vault.hot_memory.max_bytes", .. }));
+        assert!(matches!(
+            err,
+            ConfigError::InvalidBudget {
+                field: "vault.hot_memory.max_bytes",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -831,7 +845,13 @@ mod tests {
         let mut config = CairnConfig::default();
         config.store.kind = StoreKind::Custom("BAD NAME WITH SPACES".into());
         let err = config.validate().unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidPluginName { field: "store.kind", .. }));
+        assert!(matches!(
+            err,
+            ConfigError::InvalidPluginName {
+                field: "store.kind",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -844,7 +864,10 @@ mod tests {
     #[test]
     fn validate_rejects_retention_key_with_star_in_dir() {
         let mut config = CairnConfig::default();
-        config.vault.retention.insert("*/trace.md".into(), "30d".into());
+        config
+            .vault
+            .retention
+            .insert("*/trace.md".into(), "30d".into());
         let err = config.validate().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidRetentionKey(_)));
     }
@@ -852,7 +875,10 @@ mod tests {
     #[test]
     fn validate_accepts_retention_key_star_in_filename() {
         let mut config = CairnConfig::default();
-        config.vault.retention.insert("raw/trace_*.md".into(), "30d".into());
+        config
+            .vault
+            .retention
+            .insert("raw/trace_*.md".into(), "30d".into());
         config.validate().unwrap();
     }
 
@@ -892,12 +918,12 @@ mod tests {
     #[test]
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities();
-        assert!(caps.keyword_search,  "keyword_search always true");
+        assert!(caps.keyword_search, "keyword_search always true");
         assert!(!caps.semantic_search, "no LLM → no semantic");
-        assert!(!caps.hybrid_search,   "no LLM → no hybrid");
-        assert!(!caps.llm_extract,     "no LLM → no llm_extract");
-        assert!(!caps.agent_extract,   "default chain has no agent worker");
-        assert!(!caps.graph_edges,     "sqlite → no graph edges");
+        assert!(!caps.hybrid_search, "no LLM → no hybrid");
+        assert!(!caps.llm_extract, "no LLM → no llm_extract");
+        assert!(!caps.agent_extract, "default chain has no agent worker");
+        assert!(!caps.graph_edges, "sqlite → no graph edges");
     }
 
     #[test]
