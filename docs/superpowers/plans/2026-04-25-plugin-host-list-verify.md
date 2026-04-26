@@ -2814,7 +2814,8 @@ pub struct VerifyReport {
 pub struct PluginReport {
     /// Plugin name.
     pub name: String,
-    /// Contract kind, formatted as `Debug` (matches `--json`).
+    /// Contract kind, stable string from `ContractKind::as_static_str()`
+    /// (matches `--json`). Same source as `plugins::list` for consistency.
     pub contract: String,
     /// Per-case outcomes (tier-1 first, then tier-2, declaration order).
     pub cases: Vec<cairn_core::contract::conformance::CaseOutcome>,
@@ -2849,7 +2850,7 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
         }
         plugins.push(PluginReport {
             name: name.as_str().to_string(),
-            contract: format!("{:?}", manifest.contract()),
+            contract: manifest.contract().as_static_str().to_string(),
             cases,
         });
     }
