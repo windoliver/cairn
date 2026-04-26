@@ -16,9 +16,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 toml = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+proptest = { workspace = true }
 
 [lints]
 workspace = true
