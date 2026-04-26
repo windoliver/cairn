@@ -118,7 +118,7 @@ jobs:
           mkdir -p dist/crates
           find target/package -maxdepth 2 -name '*.crate' -print -exec cp {} dist/crates/ \;
       - name: Upload .crate archives
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: crate-archives
           path: dist/crates/
@@ -172,7 +172,7 @@ jobs:
           fi
           echo "binary smoke check ok: $actual"
       - name: Upload binary
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
           path: dist/cairn
