@@ -1,5 +1,8 @@
-//! Tier-1 conformance: ensure the three core cases pass against a
-//! well-formed stub plugin registered with a matching manifest.
+//! Tier-1 conformance: ensure the four core cases pass against a
+//! well-formed stub plugin registered with a matching manifest. The
+//! cases are: `manifest_matches_host`, `arc_pointer_stable`,
+//! `capability_self_consistency_floor`,
+//! `manifest_features_match_capabilities`.
 
 use std::sync::Arc;
 
@@ -27,6 +30,12 @@ patch = 0
 major = 0
 minor = 2
 patch = 0
+
+[features]
+fts = false
+vector = false
+graph_edges = false
+transactions = false
 "#;
 
 #[derive(Default)]
@@ -63,7 +72,7 @@ fn tier1_cases_pass_for_well_formed_memory_store() {
     let outcomes = run_conformance_for_plugin(&reg, &name);
 
     let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
-    assert_eq!(tier1.len(), 3, "expect 3 tier-1 cases");
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
     for outcome in &tier1 {
         assert!(
             matches!(outcome.status, CaseStatus::Ok),
@@ -77,6 +86,7 @@ fn tier1_cases_pass_for_well_formed_memory_store() {
     assert!(ids.contains(&"manifest_matches_host"));
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
+    assert!(ids.contains(&"manifest_features_match_capabilities"));
 }
 
 const MCP_MANIFEST: &str = r#"
@@ -92,6 +102,12 @@ patch = 0
 major = 0
 minor = 2
 patch = 0
+
+[features]
+stdio = true
+sse = false
+http_streamable = false
+extensions = false
 "#;
 
 #[derive(Default)]
@@ -127,7 +143,7 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
     let outcomes = run_conformance_for_plugin(&reg, &name);
 
     let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
-    assert_eq!(tier1.len(), 3, "expect 3 tier-1 cases");
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
     for outcome in &tier1 {
         assert!(
             matches!(outcome.status, CaseStatus::Ok),
@@ -141,6 +157,7 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
     assert!(ids.contains(&"manifest_matches_host"));
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
+    assert!(ids.contains(&"manifest_features_match_capabilities"));
 }
 
 const SENSOR_MANIFEST: &str = r#"
@@ -156,6 +173,11 @@ patch = 0
 major = 0
 minor = 2
 patch = 0
+
+[features]
+batches = true
+streaming = false
+consent_aware = true
 "#;
 
 #[derive(Default)]
@@ -190,7 +212,7 @@ fn tier1_cases_pass_for_well_formed_sensor_ingress() {
     let outcomes = run_conformance_for_plugin(&reg, &name);
 
     let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
-    assert_eq!(tier1.len(), 3, "expect 3 tier-1 cases");
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
     for outcome in &tier1 {
         assert!(
             matches!(outcome.status, CaseStatus::Ok),
@@ -204,6 +226,7 @@ fn tier1_cases_pass_for_well_formed_sensor_ingress() {
     assert!(ids.contains(&"manifest_matches_host"));
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
+    assert!(ids.contains(&"manifest_features_match_capabilities"));
 }
 
 const WORKFLOW_MANIFEST: &str = r#"
@@ -219,6 +242,11 @@ patch = 0
 major = 0
 minor = 2
 patch = 0
+
+[features]
+durable = true
+crash_safe = true
+cron_schedules = false
 "#;
 
 #[derive(Default)]
@@ -257,7 +285,7 @@ fn tier1_cases_pass_for_well_formed_workflow_orchestrator() {
     let outcomes = run_conformance_for_plugin(&reg, &name);
 
     let tier1: Vec<_> = outcomes.iter().filter(|o| o.tier == Tier::One).collect();
-    assert_eq!(tier1.len(), 3, "expect 3 tier-1 cases");
+    assert_eq!(tier1.len(), 4, "expect 4 tier-1 cases");
     for outcome in &tier1 {
         assert!(
             matches!(outcome.status, CaseStatus::Ok),
@@ -271,4 +299,5 @@ fn tier1_cases_pass_for_well_formed_workflow_orchestrator() {
     assert!(ids.contains(&"manifest_matches_host"));
     assert!(ids.contains(&"arc_pointer_stable"));
     assert!(ids.contains(&"capability_self_consistency_floor"));
+    assert!(ids.contains(&"manifest_features_match_capabilities"));
 }

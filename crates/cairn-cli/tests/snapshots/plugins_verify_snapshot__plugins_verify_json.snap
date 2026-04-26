@@ -22,6 +22,11 @@ expression: json
           "tier": 1
         },
         {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
           "id": "initialize_and_list_tools",
           "reason": "real impl pending",
           "status": "pending",
@@ -49,6 +54,11 @@ expression: json
           "tier": 1
         },
         {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
           "id": "emits_envelope_when_poked",
           "reason": "real impl pending",
           "status": "pending",
@@ -72,6 +82,11 @@ expression: json
         },
         {
           "id": "capability_self_consistency_floor",
+          "status": "ok",
+          "tier": 1
+        },
+        {
+          "id": "manifest_features_match_capabilities",
           "status": "ok",
           "tier": 1
         },
@@ -115,6 +130,11 @@ expression: json
           "tier": 1
         },
         {
+          "id": "manifest_features_match_capabilities",
+          "status": "ok",
+          "tier": 1
+        },
+        {
           "id": "enqueue_then_complete",
           "reason": "real impl pending",
           "status": "pending",
@@ -127,7 +147,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 12,
+    "ok": 16,
     "pending": 6
   }
 }

@@ -10,6 +10,7 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use cairn_cli::plugins;
+use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 
 mod generated;
@@ -61,7 +62,10 @@ fn main() -> ExitCode {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
                     ExitCode::SUCCESS
                 }
-                _ => ExitCode::from(2),
+                // EX_USAGE — every other clap-detected error is a usage error
+                // (unknown flag, missing required arg, invalid value, unknown
+                // subcommand, …). Spec §5.2 maps these to 64.
+                _ => ExitCode::from(64),
             };
         }
     };
@@ -87,9 +91,15 @@ fn main() -> ExitCode {
 fn run_plugins(matches: &ArgMatches) -> ExitCode {
     let registry = match plugins::host::register_all() {
         Ok(r) => r,
+        // EX_CONFIG — bundled plugin.toml failed to parse. Spec §5.2.
+        Err(PluginError::InvalidManifest(msg)) => {
+            eprintln!("cairn plugins: bundled plugin manifest invalid — {msg}");
+            return ExitCode::from(78);
+        }
+        // EX_UNAVAILABLE — registry rejected a plugin (name/contract/version
+        // mismatch, duplicate, identity error). Spec §5.2.
         Err(e) => {
             eprintln!("cairn plugins: startup failed — {e}");
-            // EX_UNAVAILABLE
             return ExitCode::from(69);
         }
     };

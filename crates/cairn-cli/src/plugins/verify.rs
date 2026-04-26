@@ -1,7 +1,9 @@
 //! `cairn plugins verify` — run the conformance suite against every
 //! registered plugin and emit a summary.
 
-use cairn_core::contract::conformance::{CaseStatus, run_conformance_for_plugin};
+use cairn_core::contract::conformance::{
+    CaseOutcome, CaseStatus, Tier, run_conformance_for_plugin,
+};
 use cairn_core::contract::registry::PluginRegistry;
 
 /// Aggregated outcome of a verify run.
@@ -44,7 +46,22 @@ pub fn run(registry: &PluginRegistry) -> VerifyReport {
     let mut summary = Summary::default();
 
     for (name, manifest) in registry.parsed_manifests_sorted() {
-        let cases = run_conformance_for_plugin(registry, name);
+        let mut cases = run_conformance_for_plugin(registry, name);
+        // Defense-in-depth: if a future contract route forgets to emit any
+        // case, synthesize a `Failed` so verify cannot exit 0 against a
+        // plugin with zero coverage.
+        if cases.is_empty() {
+            cases.push(CaseOutcome {
+                id: "no_cases_emitted",
+                tier: Tier::One,
+                status: CaseStatus::Failed {
+                    message: format!(
+                        "conformance runner returned zero cases for plugin {name}; \
+                         this should never happen — file a bug"
+                    ),
+                },
+            });
+        }
         for c in &cases {
             match c.status {
                 CaseStatus::Ok => summary.ok += 1,
@@ -173,8 +190,10 @@ mod tests {
         let report = run(&reg);
         assert_eq!(report.plugins.len(), 4);
         assert_eq!(report.summary.failed, 0, "no failures expected");
-        // 4 plugins × 3 tier-1 = 12 ok minimum.
-        assert!(report.summary.ok >= 12);
+        // 4 plugins × 4 tier-1 cases (manifest_matches_host,
+        // arc_pointer_stable, capability_self_consistency_floor,
+        // manifest_features_match_capabilities) = 16 ok minimum.
+        assert!(report.summary.ok >= 16);
         assert!(report.summary.pending >= 4, "tier-2 stubs are pending");
     }
 

@@ -4,7 +4,10 @@
 //! assert manifest/identity/version invariants. Tier-2 cases (verb
 //! behaviour) return `Pending` until per-impl PRs replace the bodies.
 
-use crate::contract::conformance::{CaseOutcome, CaseStatus, Tier, tier1_manifest_matches_host};
+use crate::contract::conformance::{
+    CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
+    tier1_manifest_matches_host,
+};
 use crate::contract::registry::{PluginName, PluginRegistry};
 use crate::contract::sensor_ingress::CONTRACT_VERSION;
 
@@ -14,14 +17,33 @@ use crate::contract::sensor_ingress::CONTRACT_VERSION;
 #[must_use]
 pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     let Some(plugin) = registry.sensor_ingress_plugin(name) else {
-        return Vec::new();
+        return vec![CaseOutcome {
+            id: "typed_plugin_registered",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!(
+                    "manifest declared SensorIngress but no SensorIngress \
+                     Arc registered under name {name}"
+                ),
+            },
+        }];
     };
+    let caps = plugin.capabilities();
 
     vec![
         // Tier 1
         tier1_manifest_matches_host(registry, name, CONTRACT_VERSION),
         tier1_arc_pointer_stable(registry, name, &plugin),
         tier1_capability_self_consistency_floor(&*plugin),
+        tier1_manifest_features_match_capabilities(
+            registry,
+            name,
+            &[
+                ("batches", caps.batches),
+                ("streaming", caps.streaming),
+                ("consent_aware", caps.consent_aware),
+            ],
+        ),
         // Tier 2 (stub)
         CaseOutcome {
             id: "emits_envelope_when_poked",

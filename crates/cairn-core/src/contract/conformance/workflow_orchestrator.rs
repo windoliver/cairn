@@ -4,7 +4,10 @@
 //! and assert manifest/identity/version invariants. Tier-2 cases (verb
 //! behaviour) return `Pending` until per-impl PRs replace the bodies.
 
-use crate::contract::conformance::{CaseOutcome, CaseStatus, Tier, tier1_manifest_matches_host};
+use crate::contract::conformance::{
+    CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
+    tier1_manifest_matches_host,
+};
 use crate::contract::registry::{PluginName, PluginRegistry};
 use crate::contract::workflow_orchestrator::CONTRACT_VERSION;
 
@@ -15,14 +18,33 @@ use crate::contract::workflow_orchestrator::CONTRACT_VERSION;
 #[must_use]
 pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     let Some(plugin) = registry.workflow_orchestrator(name) else {
-        return Vec::new();
+        return vec![CaseOutcome {
+            id: "typed_plugin_registered",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!(
+                    "manifest declared WorkflowOrchestrator but no \
+                     WorkflowOrchestrator Arc registered under name {name}"
+                ),
+            },
+        }];
     };
+    let caps = plugin.capabilities();
 
     vec![
         // Tier 1
         tier1_manifest_matches_host(registry, name, CONTRACT_VERSION),
         tier1_arc_pointer_stable(registry, name, &plugin),
         tier1_capability_self_consistency_floor(&*plugin),
+        tier1_manifest_features_match_capabilities(
+            registry,
+            name,
+            &[
+                ("durable", caps.durable),
+                ("crash_safe", caps.crash_safe),
+                ("cron_schedules", caps.cron_schedules),
+            ],
+        ),
         // Tier 2 (stub)
         CaseOutcome {
             id: "enqueue_then_complete",

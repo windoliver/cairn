@@ -6,18 +6,21 @@ cairn-mcp (MCPServer)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
   tier-2 initialize_and_list_tools                pending (real impl pending)
 
 cairn-sensors-local (SensorIngress)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
   tier-2 emits_envelope_when_poked                pending (real impl pending)
 
 cairn-store-sqlite (MemoryStore)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
   tier-2 put_get_roundtrip                        pending (real impl pending)
   tier-2 fts_query_returns_doc                    pending (real impl pending)
   tier-2 vector_search_when_advertised            pending (real impl pending)
@@ -26,6 +29,7 @@ cairn-workflows (WorkflowOrchestrator)
   tier-1 manifest_matches_host                    ok
   tier-1 arc_pointer_stable                       ok
   tier-1 capability_self_consistency_floor        ok
+  tier-1 manifest_features_match_capabilities     ok
   tier-2 enqueue_then_complete                    pending (real impl pending)
 
-Summary: 4 plugins, 12 ok, 6 pending, 0 failed
+Summary: 4 plugins, 16 ok, 6 pending, 0 failed

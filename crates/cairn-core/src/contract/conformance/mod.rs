@@ -23,6 +23,8 @@ pub mod memory_store;
 pub mod sensor_ingress;
 pub mod workflow_orchestrator;
 
+use std::collections::BTreeSet;
+
 use crate::contract::manifest::ContractKind;
 use crate::contract::registry::{PluginError, PluginName, PluginRegistry};
 
@@ -117,9 +119,24 @@ pub fn run_conformance_for_plugin(
         ContractKind::WorkflowOrchestrator => workflow_orchestrator::run(registry, name),
         ContractKind::SensorIngress => sensor_ingress::run(registry, name),
         ContractKind::MCPServer => mcp_server::run(registry, name),
-        // P0 ships no bundled plugins for these — verify returns empty.
-        ContractKind::LLMProvider | ContractKind::FrontendAdapter | ContractKind::AgentProvider => {
-            Vec::new()
+        // P0 ships no bundled plugins for these — return a single Failed
+        // sentinel so `cairn plugins verify` cannot pass a manifest whose
+        // contract has no conformance runner. Once these contracts get
+        // bundled plugins, add per-contract `run` modules and route here.
+        kind @ (ContractKind::LLMProvider
+        | ContractKind::FrontendAdapter
+        | ContractKind::AgentProvider) => {
+            vec![CaseOutcome {
+                id: "no_conformance_runner",
+                tier: Tier::One,
+                status: CaseStatus::Failed {
+                    message: format!(
+                        "no conformance runner registered for contract {kind:?}; \
+                         add a per-contract `run` module under \
+                         `cairn-core::contract::conformance`"
+                    ),
+                },
+            }]
         }
     }
 }
@@ -169,6 +186,73 @@ pub(super) fn tier1_manifest_matches_host(
         id: "manifest_matches_host",
         tier: Tier::One,
         status,
+    }
+}
+
+/// Internal helper: tier-1 `manifest_features_match_capabilities` case.
+///
+/// Compares the manifest's `[features]` map against the runtime capability
+/// struct's named fields. The caller passes a slice of `(field_name,
+/// runtime_value)` pairs derived from the plugin's `capabilities()` return.
+///
+/// Fails if any feature key is in the manifest but not in `runtime` (or
+/// vice versa), or if any value disagrees. This catches manifest drift
+/// where a plugin advertises e.g. `fts = true` but its runtime
+/// capabilities return `fts = false`.
+pub(super) fn tier1_manifest_features_match_capabilities(
+    registry: &PluginRegistry,
+    name: &PluginName,
+    runtime: &[(&'static str, bool)],
+) -> CaseOutcome {
+    let id = "manifest_features_match_capabilities";
+    let Some(manifest) = registry.parsed_manifest(name) else {
+        return CaseOutcome {
+            id,
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!("no manifest registered for plugin {name}"),
+            },
+        };
+    };
+    let manifest_features = manifest.features();
+    let runtime_keys: BTreeSet<&str> = runtime.iter().map(|(k, _)| *k).collect();
+    let manifest_keys: BTreeSet<&str> = manifest_features.keys().map(String::as_str).collect();
+
+    if manifest_keys != runtime_keys {
+        let only_manifest: Vec<&str> = manifest_keys.difference(&runtime_keys).copied().collect();
+        let only_runtime: Vec<&str> = runtime_keys.difference(&manifest_keys).copied().collect();
+        return CaseOutcome {
+            id,
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!(
+                    "feature key mismatch — only in manifest: {only_manifest:?}, \
+                     only in runtime capabilities: {only_runtime:?}"
+                ),
+            },
+        };
+    }
+
+    for (key, runtime_value) in runtime {
+        let manifest_value = manifest_features.get(*key).copied().unwrap_or(false);
+        if manifest_value != *runtime_value {
+            return CaseOutcome {
+                id,
+                tier: Tier::One,
+                status: CaseStatus::Failed {
+                    message: format!(
+                        "feature {key:?} disagrees: manifest={manifest_value}, \
+                         runtime capabilities={runtime_value}"
+                    ),
+                },
+            };
+        }
+    }
+
+    CaseOutcome {
+        id,
+        tier: Tier::One,
+        status: CaseStatus::Ok,
     }
 }
 

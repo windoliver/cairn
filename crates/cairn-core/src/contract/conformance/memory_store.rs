@@ -4,7 +4,10 @@
 //! manifest/identity/version invariants. Tier-2 cases (verb behaviour)
 //! return `Pending` until per-impl PRs replace the bodies.
 
-use crate::contract::conformance::{CaseOutcome, CaseStatus, Tier, tier1_manifest_matches_host};
+use crate::contract::conformance::{
+    CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
+    tier1_manifest_matches_host,
+};
 use crate::contract::memory_store::CONTRACT_VERSION;
 use crate::contract::registry::{PluginName, PluginRegistry};
 
@@ -14,14 +17,34 @@ use crate::contract::registry::{PluginName, PluginRegistry};
 #[must_use]
 pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     let Some(plugin) = registry.memory_store(name) else {
-        return Vec::new();
+        return vec![CaseOutcome {
+            id: "typed_plugin_registered",
+            tier: Tier::One,
+            status: CaseStatus::Failed {
+                message: format!(
+                    "manifest declared MemoryStore but no MemoryStore Arc \
+                     registered under name {name}"
+                ),
+            },
+        }];
     };
+    let caps = plugin.capabilities();
 
     vec![
         // Tier 1
         tier1_manifest_matches_host(registry, name, CONTRACT_VERSION),
         tier1_arc_pointer_stable(registry, name, &plugin),
         tier1_capability_self_consistency_floor(&*plugin),
+        tier1_manifest_features_match_capabilities(
+            registry,
+            name,
+            &[
+                ("fts", caps.fts),
+                ("vector", caps.vector),
+                ("graph_edges", caps.graph_edges),
+                ("transactions", caps.transactions),
+            ],
+        ),
         // Tier 2 (stubs)
         CaseOutcome {
             id: "put_get_roundtrip",
