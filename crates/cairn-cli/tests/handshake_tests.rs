@@ -9,7 +9,10 @@ fn cli() -> Command {
 
 #[test]
 fn handshake_json_has_challenge_keys() {
-    let out = cli().args(["handshake", "--json"]).output().expect("cairn handshake --json");
+    let out = cli()
+        .args(["handshake", "--json"])
+        .output()
+        .expect("cairn handshake --json");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
@@ -22,8 +25,14 @@ fn handshake_json_has_challenge_keys() {
 
 #[test]
 fn two_handshakes_return_different_nonces() {
-    let out1 = cli().args(["handshake", "--json"]).output().expect("handshake 1");
-    let out2 = cli().args(["handshake", "--json"]).output().expect("handshake 2");
+    let out1 = cli()
+        .args(["handshake", "--json"])
+        .output()
+        .expect("handshake 1");
+    let out2 = cli()
+        .args(["handshake", "--json"])
+        .output()
+        .expect("handshake 2");
     let v1: serde_json::Value =
         serde_json::from_str(String::from_utf8(out1.stdout).expect("utf-8").trim()).expect("json");
     let v2: serde_json::Value =
@@ -39,5 +48,8 @@ fn handshake_human_exits_zero() {
     let out = cli().arg("handshake").output().expect("cairn handshake");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    assert!(stdout.contains("nonce"), "human output missing nonce line: {stdout}");
+    assert!(
+        stdout.contains("nonce"),
+        "human output missing nonce line: {stdout}"
+    );
 }

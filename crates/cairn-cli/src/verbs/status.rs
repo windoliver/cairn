@@ -41,7 +41,10 @@ pub fn run(json: bool) -> ExitCode {
             println!("capabilities: (none — store not wired in this P0 build)");
         } else {
             for cap in &resp.capabilities {
-                println!("  capability: {}", serde_json::to_string(cap).unwrap_or_default());
+                println!(
+                    "  capability: {}",
+                    serde_json::to_string(cap).unwrap_or_default()
+                );
             }
         }
     }
@@ -66,22 +69,42 @@ fn chrono_like_now() -> String {
 }
 
 fn secs_to_ymdhms(mut s: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let sec = s % 60; s /= 60;
-    let min = s % 60; s /= 60;
-    let hour = s % 24; s /= 24;
+    let sec = s % 60;
+    s /= 60;
+    let min = s % 60;
+    s /= 60;
+    let hour = s % 24;
+    s /= 24;
     let mut days = s;
     let mut year = 1970u64;
     loop {
         let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year { break; }
+        if days < days_in_year {
+            break;
+        }
         days -= days_in_year;
         year += 1;
     }
     let leap = is_leap(year);
-    let months = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u64;
     for &m in &months {
-        if days < m { break; }
+        if days < m {
+            break;
+        }
         days -= m;
         month += 1;
     }
@@ -110,7 +133,10 @@ mod tests {
         // Format: YYYY-MM-DDTHH:MM:SSZ
         assert_eq!(now.len(), 20, "RFC-3339 must be 20 chars: {now}");
         assert!(now.ends_with('Z'), "RFC-3339 must end with Z: {now}");
-        assert!(now.contains('T'), "RFC-3339 must contain T separator: {now}");
+        assert!(
+            now.contains('T'),
+            "RFC-3339 must contain T separator: {now}"
+        );
         // Simple validation of structure
         let parts: Vec<&str> = now.split('T').collect();
         assert_eq!(parts.len(), 2, "RFC-3339 must have exactly one T: {now}");

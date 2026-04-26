@@ -15,7 +15,12 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     if json {
         emit_json(&resp);
     } else {
-        human_error("summarize", "Internal", "store not wired in this P0 build", &resp.operation_id);
+        human_error(
+            "summarize",
+            "Internal",
+            "store not wired in this P0 build",
+            &resp.operation_id,
+        );
     }
     ExitCode::FAILURE
 }

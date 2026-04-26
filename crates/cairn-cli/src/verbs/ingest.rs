@@ -25,7 +25,12 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
                 if json {
                     emit_json(&r);
                 } else {
-                    human_error("ingest", "Internal", "failed to read stdin", &r.operation_id);
+                    human_error(
+                        "ingest",
+                        "Internal",
+                        "failed to read stdin",
+                        &r.operation_id,
+                    );
                 }
                 return ExitCode::FAILURE;
             }
@@ -42,7 +47,12 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         emit_json(&resp);
     } else {
         let op = resp.operation_id.clone();
-        human_error("ingest", "Internal", "store not wired in this P0 build", &op);
+        human_error(
+            "ingest",
+            "Internal",
+            "store not wired in this P0 build",
+            &op,
+        );
     }
     ExitCode::FAILURE
 }

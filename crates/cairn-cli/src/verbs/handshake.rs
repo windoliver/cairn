@@ -36,7 +36,10 @@ pub fn run(json: bool) -> ExitCode {
     } else {
         println!("contract:   {}", resp.contract);
         println!("nonce:      {}", nonce.0);
-        println!("expires_at: {} (epoch-ms, TTL 60 s)", resp.challenge.expires_at);
+        println!(
+            "expires_at: {} (epoch-ms, TTL 60 s)",
+            resp.challenge.expires_at
+        );
     }
     ExitCode::SUCCESS
 }

@@ -53,7 +53,10 @@ pub fn emit_json<T: serde::Serialize>(value: &T) {
 
 /// Print a human-readable one-line error to stderr.
 pub fn human_error(verb: &str, code: &str, message: &str, operation_id: &Ulid) {
-    eprintln!("cairn {verb}: {code} — {message} (operation_id: {})", operation_id.0);
+    eprintln!(
+        "cairn {verb}: {code} — {message} (operation_id: {})",
+        operation_id.0
+    );
 }
 
 #[cfg(test)]

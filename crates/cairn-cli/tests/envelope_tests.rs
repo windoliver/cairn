@@ -11,7 +11,8 @@ fn assert_aborted_internal(verb_args: &[&str]) {
     let out = {
         let mut cmd = cli();
         cmd.args(verb_args);
-        cmd.output().unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
+        cmd.output()
+            .unwrap_or_else(|e| panic!("failed to run {verb_args:?}: {e}"))
     };
     // Aborted → exit 1 (generic failure)
     assert_eq!(
@@ -21,8 +22,9 @@ fn assert_aborted_internal(verb_args: &[&str]) {
         out.status
     );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}"));
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("verb {verb_args:?} JSON parse failed: {e}\nstdout: {stdout:?}")
+    });
     assert_eq!(v["contract"], "cairn.mcp.v1", "verb {verb_args:?}");
     assert_eq!(v["status"], "aborted", "verb {verb_args:?}");
     assert_eq!(v["error"]["code"], "Internal", "verb {verb_args:?}");

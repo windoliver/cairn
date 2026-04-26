@@ -9,8 +9,15 @@ fn cli() -> Command {
 
 #[test]
 fn status_json_has_required_keys() {
-    let out = cli().args(["status", "--json"]).output().expect("cairn status --json");
-    assert!(out.status.success(), "cairn status --json failed: {:?}", out.status);
+    let out = cli()
+        .args(["status", "--json"])
+        .output()
+        .expect("cairn status --json");
+    assert!(
+        out.status.success(),
+        "cairn status --json failed: {:?}",
+        out.status
+    );
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(v["contract"], "cairn.mcp.v1");
@@ -27,5 +34,8 @@ fn status_human_exits_zero() {
     let out = cli().arg("status").output().expect("cairn status");
     assert!(out.status.success(), "exit: {:?}", out.status);
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    assert!(stdout.contains("cairn.mcp.v1"), "human output missing contract: {stdout}");
+    assert!(
+        stdout.contains("cairn.mcp.v1"),
+        "human output missing contract: {stdout}"
+    );
 }

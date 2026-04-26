@@ -86,7 +86,11 @@ fn simple_verb_human_mode_exits_one_with_internal() {
             !out.status.success(),
             "verb {verb} exited OK — should fail with Internal"
         );
-        assert_eq!(out.status.code(), Some(1), "verb {verb} wrong exit code (want 1)");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "verb {verb} wrong exit code (want 1)"
+        );
         let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
         assert!(
             stderr.contains("Internal"),
