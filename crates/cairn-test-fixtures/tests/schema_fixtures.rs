@@ -15,7 +15,6 @@ fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) 
         .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
-#[allow(dead_code)]
 fn load_toml_str(path: impl AsRef<std::path::Path>) -> String {
     let path = path.as_ref();
     std::fs::read_to_string(path)
@@ -167,4 +166,28 @@ fn filter_or_with_not_deserializes() {
 fn search_args_keyword_deserializes() {
     let a: SearchArgs = load_json(filters_dir().join("search-args-keyword.json"));
     insta::assert_json_snapshot!("search_args_keyword", &a);
+}
+
+// ── Plugin manifests ──────────────────────────────────────────────────────────
+
+use cairn_core::contract::manifest::PluginManifest;
+
+fn manifests_dir() -> std::path::PathBuf {
+    v0().join("manifests")
+}
+
+#[test]
+fn manifest_cairn_store_sqlite_parses() {
+    let src = load_toml_str(manifests_dir().join("cairn-store-sqlite.toml"));
+    let m = PluginManifest::parse_toml(&src).expect("cairn-store-sqlite.toml must parse");
+    assert_eq!(m.name().as_str(), "cairn-store-sqlite");
+    insta::assert_debug_snapshot!("manifest_cairn_store_sqlite", m);
+}
+
+#[test]
+fn manifest_cairn_llm_openai_compat_parses() {
+    let src = load_toml_str(manifests_dir().join("cairn-llm-openai-compat.toml"));
+    let m = PluginManifest::parse_toml(&src).expect("cairn-llm-openai-compat.toml must parse");
+    assert_eq!(m.name().as_str(), "cairn-llm-openai-compat");
+    insta::assert_debug_snapshot!("manifest_cairn_llm_openai_compat", m);
 }

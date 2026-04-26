@@ -1,0 +1,26 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: m
+---
+PluginManifest {
+    name: PluginName(
+        "cairn-llm-openai-compat",
+    ),
+    contract: LLMProvider,
+    contract_version_range: VersionRange {
+        min: ContractVersion {
+            major: 0,
+            minor: 1,
+            patch: 0,
+        },
+        max_exclusive: ContractVersion {
+            major: 0,
+            minor: 2,
+            patch: 0,
+        },
+    },
+    features: {
+        "function_calling": true,
+        "streaming": true,
+    },
+}
