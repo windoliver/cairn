@@ -39,14 +39,13 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
     let mut unresolved: Option<String> = None;
     let result = re.replace_all(src, |caps: &regex::Captures<'_>| {
         let name = &caps[1];
-        match std::env::var(name) {
-            Ok(val) => val,
-            Err(_) => {
-                if unresolved.is_none() {
-                    unresolved = Some(name.to_owned());
-                }
-                caps[0].to_owned()
+        if let Ok(val) = std::env::var(name) {
+            val
+        } else {
+            if unresolved.is_none() {
+                unresolved = Some(name.to_owned());
             }
+            caps[0].to_owned()
         }
     });
     if let Some(name) = unresolved {
