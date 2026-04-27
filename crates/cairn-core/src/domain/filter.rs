@@ -174,6 +174,10 @@ pub enum FilterError {
 const MAX_FILTER_DEPTH: usize = 8;
 /// Maximum fanout for `and` / `or` nodes (matches the serde-layer cap).
 const MAX_FILTER_FANOUT: usize = 32;
+/// Maximum number of items in a set operand (`in`, `nin`, `array_contains_any`,
+/// `array_contains_all`). Keeps compiled `?` placeholder counts well below
+/// SQLite's default variable limit (999) even under heavy nesting.
+const MAX_SET_OPERAND_SIZE: usize = 64;
 
 /// Validate a parsed [`SearchArgsFilters`] tree against the P0 field allowlist
 /// and per-type operator rules (§8.0.d).
@@ -308,6 +312,15 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+fn require_set_size(field: &str, op: &str, len: usize) -> Result<(), FilterError> {
+    if len > MAX_SET_OPERAND_SIZE {
+        return Err(FilterError::MalformedLeaf(format!(
+            "field `{field}` op `{op}` has {len} items; maximum is {MAX_SET_OPERAND_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
 fn require_nonempty_string(field: &str, op: &str, s: &str) -> Result<(), FilterError> {
     if s.is_empty() {
         Err(FilterError::MalformedLeaf(format!(
@@ -365,6 +378,7 @@ fn validate_value_shape(
                         op: op.to_owned(),
                     });
                 }
+                require_set_size(field, op, arr.len())?;
                 for item in arr {
                     let s = item.as_str().ok_or_else(|| FilterError::WrongValueShape {
                         field: field.to_owned(),
@@ -412,6 +426,7 @@ fn validate_number_value(
                     op: op.to_owned(),
                 });
             }
+            require_set_size(field, op, arr.len())?;
             require_array_of(
                 field,
                 op,
@@ -457,6 +472,7 @@ fn validate_array_field_value(
                     op: op.to_owned(),
                 });
             }
+            require_set_size(field, op, arr.len())?;
             for item in arr {
                 let s = item.as_str().ok_or_else(|| FilterError::WrongValueShape {
                     field: field.to_owned(),
@@ -511,6 +527,7 @@ fn validate_timestamp_value(
                     op: op.to_owned(),
                 });
             }
+            require_set_size(field, op, arr.len())?;
             for item in arr {
                 let Some(s) = item.as_str() else {
                     return Err(FilterError::WrongValueShape {
