@@ -135,9 +135,9 @@ Verbatim from brief §3 (lines ~340-426):
   content_rowid='rowid', tokenize='porter unicode61')`).
 - Triggers `records_fts_ai`, `records_fts_ad`, `records_fts_au` keeping
   FTS5 in sync.
-- `records_latest` view: filters `active = 1 AND tombstoned = 0` and
-  `NOT EXISTS` an `updates` edge pointing to the row **whose source
-  record is itself active and not tombstoned**:
+- `records_latest` view: matches the brief's definition exactly —
+  `active = 1`, `tombstoned = 0`, and `NOT EXISTS` any `updates` edge
+  whose `dst = record_id`:
 
   ```sql
   CREATE VIEW records_latest AS
@@ -146,23 +146,29 @@ Verbatim from brief §3 (lines ~340-426):
      WHERE r.active = 1
        AND r.tombstoned = 0
        AND NOT EXISTS (
-         SELECT 1
-           FROM edges e
-           JOIN records src ON src.record_id = e.src
-          WHERE e.kind   = 'updates'
-            AND e.dst    = r.record_id
-            AND src.active     = 1
-            AND src.tombstoned = 0
+         SELECT 1 FROM edges e
+          WHERE e.kind = 'updates' AND e.dst = r.record_id
        );
   ```
 
-  **Brief deviation, called out for review.** The brief's view (§3
-  ~line 418) checks only `NOT EXISTS (SELECT 1 FROM edges WHERE
-  kind='updates' AND dst=r.record_id)`. That hides a live destination
-  even when the supersession source has itself been tombstoned or
-  superseded — a stale `updates` edge from a dead row keeps suppressing
-  the live target. The strengthened view ignores such stale edges.
-  Revert if the brief intentionally wants suppressions to be sticky.
+  **Supersession is durable**, not revivable: once an `updates` edge
+  exists pointing at a record, that record is permanently excluded
+  from `records_latest`. This is the brief's intended semantics
+  (§3 ~line 418) — the alternative (re-emerging when the supersessor
+  dies) creates a stale-read hazard where downstream readers observe
+  conflicting "latest" facts depending on later lifecycle changes.
+
+  The dead-source-hides-live-dst concern from earlier review rounds
+  is mitigated runtime-side: the §5.6 forget pipeline is the only
+  legitimate path that tombstones a source row, and Phase B step
+  `edges.drain` removes the source's outgoing edges (including its
+  `updates` edges) atomically with the tombstone. Schema cannot
+  enforce this because edge cleanup is operation-graph-specific
+  (only `forget_*` removes edges; ordinary supersession does not).
+  An `updates` edge from a tombstoned source is a transient state
+  during forget Phase B that lasts at most one chunk; the
+  reader_fence + `tombstoned = 1` filter on the dst prevent any
+  observable resurrection.
 - `edges` table: columns `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
   `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`,
   plus referential integrity that the brief leaves implicit:
@@ -191,15 +197,16 @@ Verbatim from brief §3 (lines ~340-426):
   - `edges_updates_supersede_insert` —
     `BEFORE INSERT ON edges WHEN NEW.kind = 'updates'` raises `ABORT`
     unless **both** `NEW.src` and `NEW.dst` exist in `records` with
-    `active = 1` and `tombstoned = 0`, and the src row's `target_id`
-    differs from the dst row's `target_id` (an `updates` edge is
-    fact-supersession across distinct target_ids per brief §3 line
-    ~409). Because this check runs at INSERT time (SQLite has no
-    deferred triggers), callers must INSERT the new records row
-    before any `updates` edge that references it — see the edges
-    description above for the contract. Subsequent src-tombstoning
-    is handled by `records_latest` excluding edges from dead sources
-    at read time.
+    `tombstoned = 0`, and the src row's `target_id` differs from the
+    dst row's `target_id` (an `updates` edge is fact-supersession
+    across distinct target_ids per brief §3 line ~409). At
+    creation time both rows must be present and not yet tombstoned;
+    the src does not need to be `active = 1` because supersession is
+    durable — once written, the edge keeps excluding `dst` from
+    `records_latest` regardless of subsequent src lifecycle. Because
+    this check runs at INSERT time (SQLite has no deferred triggers),
+    callers must INSERT the new records row before any `updates`
+    edge that references it.
   - `edges_updates_supersede_update` — same predicate, but
     `BEFORE UPDATE ON edges WHEN NEW.kind = 'updates'`. Closes the
     `UPDATE edges SET kind = 'updates' WHERE …` bypass.
@@ -556,18 +563,30 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   ('shared','exclusive','free')`, `holder_count INTEGER NOT NULL
   CHECK (holder_count >= 0)`, `epoch INTEGER NOT NULL CHECK (epoch >= 0)`,
   `waiters BLOB`, `last_heartbeat_at INTEGER`,
-  `PRIMARY KEY (scope_kind, scope_key)`. A row-level CHECK ties the
-  two state columns together so contradictory states (e.g.,
-  `mode='free'` with holders, `mode='exclusive'` with > 1 holder) are
-  unrepresentable:
+  `PRIMARY KEY (scope_kind, scope_key)`. The `(mode, holder_count)`
+  consistency invariant is **not** enforced as a row-level CHECK,
+  because SQLite enforces CHECKs per statement (not deferred to
+  COMMIT) and the §5.6 acquisition protocol writes the two columns
+  with different values across two statements (lock_holders insert
+  triggers a recompute of `holder_count`, while `mode` was set by the
+  prior locks UPDATE). Encoding the joint invariant as an immediate
+  CHECK would make the protocol's well-formed transitions
+  unrepresentable. Instead the invariant is enforced **at every
+  acquisition's final commit point** by the storage impl
+  (acquisition is one `BEGIN IMMEDIATE … COMMIT` per §5.6) and
+  cross-checked by:
+  - the `lock_holders_count_after_*` triggers, which always set
+    `holder_count = (SELECT COUNT(*) FROM lock_holders ...)`, and on
+    delete-to-zero flip `mode` to `'free'`;
+  - the §15 concurrency invariant test (CI gate) that runs random
+    schedules of acquire/heartbeat/release/reclaim and asserts no
+    `(mode, holder_count)` pair outside `{(free,0), (exclusive,1),
+    (shared,N≥1)}` ever observes at COMMIT.
 
-  ```sql
-  CHECK (
-    (mode = 'free'      AND holder_count = 0) OR
-    (mode = 'exclusive' AND holder_count = 1) OR
-    (mode = 'shared'    AND holder_count >= 1)
-  )
-  ```
+  This is a deliberate tradeoff: schema CHECK gives no value here
+  because the well-formed write path would itself trip it; the
+  invariant is verifiable by behavioral test, which is what §5.6's
+  concurrency test is for.
 - `lock_holders` — every column from the brief block (`holder_id`,
   `acquired_epoch`, `owner_incarnation`, `boot_id`, `reclaim_deadline`),
   `PRIMARY KEY (scope_kind, scope_key, holder_id)`,
@@ -1106,17 +1125,16 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   delete row 3; reopen via `open()`; expect
   `StoreError::MigrationHistoryMismatch` (contiguity branch). Repeat
   with a duplicated migration_id row.
-- `dead_source_updates_edge_does_not_hide_dst` — insert two records
-  R1 (target T1) and R2 (target T2), both `active=1, tombstoned=0`.
-  Insert valid `updates` edge (src=R1, dst=R2). Confirm R2 disappears
-  from `records_latest`. Now `UPDATE records SET tombstoned = 1
-  WHERE record_id = R1.record_id`; reselect from `records_latest`;
-  R2 should reappear (the dead source's stale edge no longer hides
-  it). Repeat with `active = 0` instead of tombstoning.
-- `updates_edge_requires_live_source` — insert R1 (src) with
-  `active = 0`; insert R2 (dst) live; attempt `INSERT INTO edges
-  (src=R1, dst=R2, kind='updates')`; expect ABORT via
-  `edges_updates_supersede_insert` (live-source predicate).
+- `supersession_is_durable` — insert R1 (target T1, active=1,
+  tombstoned=0) and R2 (target T2, active=1, tombstoned=0); insert
+  valid `updates` edge `(src=R1, dst=R2)`. Confirm R2 is excluded
+  from `records_latest`. Tombstone R1; **R2 must remain excluded**
+  (matches the brief's durable-supersession semantics). Set
+  R1.active=0; R2 still excluded.
+- `updates_edge_requires_non_tombstoned_endpoints` — insert R1 with
+  `tombstoned=1`, R2 live; attempt `INSERT INTO edges (src=R1, dst=R2,
+  kind='updates')`; expect ABORT via the supersede trigger
+  (tombstoned-src predicate). Same with tombstoned dst.
 - `issuer_seq_direct_insert_rejected` — attempt `INSERT INTO
   issuer_seq (issuer='mallory', high_water=99999999)` with no matching
   `used` row; expect ABORT via `issuer_seq_insert_must_match_ledger`.
@@ -1144,14 +1162,17 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   expect ABORT via `consent_journal_immutable`. Attempt
   `DELETE FROM consent_journal WHERE row_id = …`; expect ABORT via
   `consent_journal_no_delete`.
-- `lock_state_invariants_enforced` — attempt
-  `INSERT INTO locks VALUES ('entity','x','free',1,0,NULL,NULL)`;
-  expect CHECK violation (free with holders). Attempt
-  `INSERT INTO locks VALUES ('entity','x','exclusive',2,0,NULL,NULL)`;
-  expect CHECK violation (multi-holder exclusive). Attempt
-  `INSERT INTO locks VALUES ('entity','x','shared',0,0,NULL,NULL)`;
-  expect CHECK violation (shared without holders). Insert valid
-  `('entity','x','shared',2,0,NULL,NULL)`; expect success.
+- `lock_acquisition_round_trip` — exercise the §5.6 acquisition
+  pattern against the migrated schema (without the storage impl):
+  start with no `locks` row; in one `BEGIN IMMEDIATE … COMMIT`,
+  `INSERT INTO locks (...)` with `mode='exclusive', holder_count=1`,
+  then `INSERT INTO lock_holders (...)`. Confirm the row state at
+  COMMIT is `(exclusive, 1)`. In a second transaction, DELETE the
+  holder; confirm AFTER DELETE trigger drove the row to `(free, 0)`.
+  In a third, INSERT two shared holders (preceded by the shared-mode
+  UPDATE in each); confirm `(shared, 2)`; release both; confirm
+  `(free, 0)`. (This replaces the prior negative CHECK test, which
+  the immediate-CHECK approach was unable to support correctly.)
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
