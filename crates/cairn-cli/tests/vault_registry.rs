@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use cairn_cli::vault::registry::{VaultRegistryStore, resolve_vault, ResolveOpts};
+use cairn_cli::vault::registry::{ResolveOpts, VaultRegistryStore, resolve_vault};
 use cairn_core::config::{VaultEntry, VaultRegistry};
 
 /// Convenience: bootstrap a minimal vault in a temp dir so walk-up discovery works.
@@ -29,7 +29,12 @@ fn save_and_reload_round_trips() {
     let store = VaultRegistryStore::new(dir.path().join("vaults.toml"));
 
     let mut reg = VaultRegistry::default();
-    reg.vaults.push(VaultEntry::new("work", "/tmp/work", Some("day job".into()), None));
+    reg.vaults.push(VaultEntry::new(
+        "work",
+        "/tmp/work",
+        Some("day job".into()),
+        None,
+    ));
     reg.default = Some("work".into());
     store.save(&reg).unwrap();
 
@@ -43,8 +48,7 @@ fn save_and_reload_round_trips() {
 #[test]
 fn save_creates_parent_dirs() {
     let dir = tempfile::tempdir().unwrap();
-    let store =
-        VaultRegistryStore::new(dir.path().join("nested").join("deep").join("vaults.toml"));
+    let store = VaultRegistryStore::new(dir.path().join("nested").join("deep").join("vaults.toml"));
     store.save(&VaultRegistry::default()).unwrap();
     assert!(dir.path().join("nested/deep/vaults.toml").exists());
 }
@@ -270,7 +274,11 @@ mod cli_vault_add {
         cairn()
             .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
             .args([
-                "vault", "add", vault_a.path().to_str().unwrap(), "--name", "dup",
+                "vault",
+                "add",
+                vault_a.path().to_str().unwrap(),
+                "--name",
+                "dup",
             ])
             .output()
             .unwrap();
@@ -278,16 +286,17 @@ mod cli_vault_add {
         let out = cairn()
             .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
             .args([
-                "vault", "add", vault_b.path().to_str().unwrap(), "--name", "dup",
+                "vault",
+                "add",
+                vault_b.path().to_str().unwrap(),
+                "--name",
+                "dup",
             ])
             .output()
             .expect("cairn vault add duplicate");
         assert!(!out.status.success());
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("dup"),
-            "expected name in error: {stderr}"
-        );
+        assert!(stderr.contains("dup"), "expected name in error: {stderr}");
     }
 
     #[test]
@@ -344,9 +353,9 @@ mod cli_vault_add {
 }
 
 mod cli_vault_list {
-    use std::process::Command;
     use cairn_cli::vault::VaultRegistryStore;
     use cairn_core::config::{VaultEntry, VaultRegistry};
+    use std::process::Command;
 
     fn cairn() -> Command {
         Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -361,8 +370,18 @@ mod cli_vault_list {
         let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
         let mut reg = VaultRegistry::default();
         reg.default = Some("alpha".into());
-        reg.vaults.push(VaultEntry::new("alpha", a.path().to_str().unwrap(), Some("first vault".into()), None));
-        reg.vaults.push(VaultEntry::new("beta", b.path().to_str().unwrap(), None, None));
+        reg.vaults.push(VaultEntry::new(
+            "alpha",
+            a.path().to_str().unwrap(),
+            Some("first vault".into()),
+            None,
+        ));
+        reg.vaults.push(VaultEntry::new(
+            "beta",
+            b.path().to_str().unwrap(),
+            None,
+            None,
+        ));
         store.save(&reg).unwrap();
         (a, b, reg_dir)
     }
@@ -471,20 +490,27 @@ mod cli_vault_list {
         store.save(&reg).unwrap();
 
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
-            .env("CAIRN_REGISTRY", reg_dir.path().join("vaults.toml").to_str().unwrap())
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
             .args(["vault", "list"])
             .output()
             .expect("cairn vault list");
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8(out.stdout).unwrap();
         insta::assert_snapshot!(stdout);
     }
 }
 
 mod cli_vault_switch {
-    use std::process::Command;
     use cairn_cli::vault::VaultRegistryStore;
     use cairn_core::config::{VaultEntry, VaultRegistry};
+    use std::process::Command;
 
     fn cairn() -> Command {
         Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -498,8 +524,18 @@ mod cli_vault_switch {
         let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
         let mut reg = VaultRegistry::default();
         reg.default = Some("alpha".into());
-        reg.vaults.push(VaultEntry::new("alpha", a.path().to_str().unwrap(), None, None));
-        reg.vaults.push(VaultEntry::new("beta", b.path().to_str().unwrap(), None, None));
+        reg.vaults.push(VaultEntry::new(
+            "alpha",
+            a.path().to_str().unwrap(),
+            None,
+            None,
+        ));
+        reg.vaults.push(VaultEntry::new(
+            "beta",
+            b.path().to_str().unwrap(),
+            None,
+            None,
+        ));
         store.save(&reg).unwrap();
         (a, b)
     }
@@ -563,9 +599,9 @@ mod cli_vault_switch {
 }
 
 mod cli_vault_remove {
-    use std::process::Command;
     use cairn_cli::vault::VaultRegistryStore;
     use cairn_core::config::VaultEntry;
+    use std::process::Command;
 
     fn cairn() -> Command {
         Command::new(env!("CARGO_BIN_EXE_cairn"))
@@ -576,7 +612,12 @@ mod cli_vault_remove {
         std::fs::create_dir_all(v.path().join(".cairn")).unwrap();
         let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
         let mut reg = store.load().unwrap();
-        reg.vaults.push(VaultEntry::new(name, v.path().to_str().unwrap(), None, None));
+        reg.vaults.push(VaultEntry::new(
+            name,
+            v.path().to_str().unwrap(),
+            None,
+            None,
+        ));
         store.save(&reg).unwrap();
         v
     }
@@ -646,11 +687,19 @@ mod cli_vault_remove {
         let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
         let mut reg = cairn_core::config::VaultRegistry::default();
         reg.default = Some("solo".into());
-        reg.vaults.push(VaultEntry::new("solo", vault_dir.path().to_str().unwrap(), None, None));
+        reg.vaults.push(VaultEntry::new(
+            "solo",
+            vault_dir.path().to_str().unwrap(),
+            None,
+            None,
+        ));
         store.save(&reg).unwrap();
 
         let out = cairn()
-            .env("CAIRN_REGISTRY", reg_dir.path().join("vaults.toml").to_str().unwrap())
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
             .args(["vault", "remove", "solo"])
             .output()
             .expect("cairn vault remove default vault");
@@ -712,9 +761,11 @@ mod cli_vault_flag {
         cairn()
             .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
             .args([
-                "vault", "add",
+                "vault",
+                "add",
                 vault_dir.path().to_str().unwrap(),
-                "--name", "envtest",
+                "--name",
+                "envtest",
             ])
             .output()
             .unwrap();
@@ -746,11 +797,7 @@ mod cli_vault_flag {
                 "CAIRN_REGISTRY",
                 reg_dir.path().join("vaults.toml").to_str().unwrap(),
             )
-            .args([
-                "--vault",
-                vault_dir.path().to_str().unwrap(),
-                "search",
-            ])
+            .args(["--vault", vault_dir.path().to_str().unwrap(), "search"])
             .output()
             .expect("cairn --vault <path> search");
         // Path resolution succeeds → verb may fail with Internal (1) but not 78

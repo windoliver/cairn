@@ -28,7 +28,9 @@ pub enum VaultError {
         name: String,
     },
     /// The target path is not a cairn vault (no `.cairn/` directory).
-    #[error("'{path}' is not a cairn vault (no .cairn/ directory found) — run `cairn bootstrap` first")]
+    #[error(
+        "'{path}' is not a cairn vault (no .cairn/ directory found) — run `cairn bootstrap` first"
+    )]
     NotAVault {
         /// The path that was checked.
         path: PathBuf,
@@ -57,8 +59,7 @@ impl VaultRegistryStore {
     pub fn default_path() -> anyhow::Result<PathBuf> {
         #[cfg(target_os = "windows")]
         {
-            let appdata =
-                std::env::var("APPDATA").context("APPDATA env var not set")?;
+            let appdata = std::env::var("APPDATA").context("APPDATA env var not set")?;
             Ok(PathBuf::from(appdata).join("cairn").join("vaults.toml"))
         }
         #[cfg(not(target_os = "windows"))]
@@ -111,7 +112,9 @@ impl VaultRegistryStore {
             .with_context(|| format!("creating temp file in {}", parent.display()))?;
         tmp.write_all(toml.as_bytes())
             .context("writing registry temp file")?;
-        tmp.as_file().sync_all().context("syncing registry temp file")?;
+        tmp.as_file()
+            .sync_all()
+            .context("syncing registry temp file")?;
         tmp.persist(&self.path)
             .map_err(|e| e.error)
             .with_context(|| format!("persisting registry to {}", self.path.display()))?;

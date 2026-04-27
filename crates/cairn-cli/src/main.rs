@@ -25,7 +25,9 @@ fn build_command() -> clap::Command {
                 .long("vault")
                 .value_name("NAME_OR_PATH")
                 .global(true)
-                .help("Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)"),
+                .help(
+                    "Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)",
+                ),
         )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
@@ -456,9 +458,7 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
                 }
             };
             if !reg.contains(&name) {
-                eprintln!(
-                    "cairn vault switch: vault '{name}' not found — run `cairn vault list`"
-                );
+                eprintln!("cairn vault switch: vault '{name}' not found — run `cairn vault list`");
                 return ExitCode::from(78);
             }
             reg.default = Some(name.clone());
@@ -488,9 +488,7 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
                 }
             };
             if !reg.contains(&name) {
-                eprintln!(
-                    "cairn vault remove: vault '{name}' not found — run `cairn vault list`"
-                );
+                eprintln!("cairn vault remove: vault '{name}' not found — run `cairn vault list`");
                 return ExitCode::from(78);
             }
             if reg.default.as_deref() == Some(&name) {
@@ -504,7 +502,9 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
             if json {
                 println!("{}", serde_json::json!({ "removed": name }));
             } else {
-                println!("cairn vault remove: removed '{name}' from registry (vault files untouched)");
+                println!(
+                    "cairn vault remove: removed '{name}' from registry (vault files untouched)"
+                );
             }
             ExitCode::SUCCESS
         }

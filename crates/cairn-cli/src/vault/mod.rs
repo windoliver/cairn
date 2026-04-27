@@ -4,4 +4,6 @@ pub mod bootstrap;
 pub mod registry;
 
 pub use bootstrap::{BootstrapOpts, BootstrapReceipt, bootstrap, render_human};
-pub use registry::{ResolveOpts, VaultError, VaultRegistryStore, add_vault, resolve_vault, walk_up_to_vault};
+pub use registry::{
+    ResolveOpts, VaultError, VaultRegistryStore, add_vault, resolve_vault, walk_up_to_vault,
+};

@@ -157,9 +157,6 @@ path = "~/vaults/research"
 expires_at = "2026-07-01"
 "#;
         let reg = VaultRegistry::from_toml(toml).unwrap();
-        assert_eq!(
-            reg.vaults[0].expires_at.as_deref(),
-            Some("2026-07-01")
-        );
+        assert_eq!(reg.vaults[0].expires_at.as_deref(), Some("2026-07-01"));
     }
 }
