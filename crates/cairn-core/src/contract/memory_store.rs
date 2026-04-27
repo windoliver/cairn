@@ -32,11 +32,12 @@ pub struct StoredRecord {
 
 /// Errors returned by `MemoryStore` methods.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     #[error("store not yet implemented")]
     Unimplemented,
-    #[error("store I/O: {0}")]
-    Io(String),
+    #[error("store internal error: {0}")]
+    Internal(String),
 }
 
 /// Storage contract — typed CRUD over `MemoryRecord`.
@@ -94,11 +95,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dyn_compatible() {
+    #[tokio::test]
+    async fn dyn_compatible() {
         let s: Box<dyn MemoryStore> = Box::new(StubStore);
         assert_eq!(s.name(), "stub");
         assert!(s.capabilities().fts);
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
+        assert!(s.get("x").await.is_err());
+        assert!(s.list_active().await.is_err());
     }
 }
