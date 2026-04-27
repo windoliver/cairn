@@ -6,6 +6,21 @@
 use cairn_mcp::error::TransportError;
 use cairn_mcp::generated::TOOLS;
 use cairn_mcp::handler::{CairnMcpHandler, dispatch_stub};
+use rmcp::model::{Content, RawContent};
+
+fn content_to_text(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(|c| {
+            if let RawContent::Text(t) = &**c {
+                Some(t.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 #[test]
 fn transport_error_is_send_sync() {
@@ -94,7 +109,7 @@ fn dispatch_stub_is_error_result() {
         !result.content.is_empty(),
         "dispatch_stub must include content"
     );
-    let text = format!("{:?}", result.content);
+    let text = content_to_text(&result.content);
     assert!(
         text.contains("ingest"),
         "dispatch_stub content must mention the verb name"

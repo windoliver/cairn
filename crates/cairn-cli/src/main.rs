@@ -106,9 +106,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         None => {
-            let _ = build_command().print_help();
-            println!();
-            ExitCode::SUCCESS
+            unreachable!("invariant: generated::command() sets subcommand_required(true)")
         }
     }
 }

@@ -13,11 +13,9 @@ description = "MCP adapter surface for the Cairn verb layer."
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 rmcp = { workspace = true }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -28,10 +26,7 @@ insta = { workspace = true }
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
-# serde: no direct call site yet (used transitively via serde_json in handler.rs).
 # tokio: used transitively — rmcp::transport::io::stdio() returns tokio::io types;
 #   direct tokio usage lands when cairn-cli wires the runtime.
-# tracing-subscriber: no call site yet — wired in cairn-cli, kept here for future use.
 [package.metadata.cargo-machete]
-ignored = ["serde", "tokio", "tracing-subscriber"]
+ignored = ["tokio"]

@@ -4,6 +4,21 @@
 
 use cairn_mcp::generated::TOOLS;
 use cairn_mcp::handler::dispatch_stub;
+use rmcp::model::{Content, RawContent};
+
+fn content_to_text(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(|c| {
+            if let RawContent::Text(t) = &**c {
+                Some(t.text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 #[test]
 fn stub_returns_is_error_true_for_all_verbs() {
@@ -28,9 +43,7 @@ fn stub_embeds_verb_name_in_content() {
             tool.name
         );
 
-        // Extract text from Content items using Debug representation
-        // (matching approach in smoke.rs test)
-        let content_text = format!("{:?}", result.content);
+        let content_text = content_to_text(&result.content);
         assert!(
             content_text.contains(tool.name),
             "dispatch_stub for '{}' must embed verb name in content; got: {content_text}",
@@ -57,7 +70,7 @@ fn unknown_verb_triggers_handler_error_branch() {
         !result.content.is_empty(),
         "dispatch_stub must include content"
     );
-    let content_text = format!("{:?}", result.content);
+    let content_text = content_to_text(&result.content);
     assert!(
         content_text.contains("not yet implemented"),
         "dispatch_stub content must mention placeholder message; got: {content_text}"
