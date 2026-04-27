@@ -20,6 +20,15 @@ fn build_command() -> clap::Command {
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .arg(
+            clap::Arg::new("vault")
+                .long("vault")
+                .value_name("NAME_OR_PATH")
+                .global(true)
+                .help(
+                    "Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)",
+                ),
+        )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
@@ -37,6 +46,7 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(vault_subcommand())
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -61,6 +71,93 @@ fn bootstrap_subcommand() -> clap::Command {
                 .action(clap::ArgAction::SetTrue)
                 .help("Overwrite existing placeholder files"),
         )
+}
+
+fn vault_subcommand() -> clap::Command {
+    clap::Command::new("vault")
+        .about("Manage the vault registry (brief §3.3)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("add")
+                .about("Register a vault in the registry")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Filesystem path to the vault root"),
+                )
+                .arg(
+                    clap::Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Short identifier for the vault"),
+                )
+                .arg(
+                    clap::Arg::new("label")
+                        .long("label")
+                        .value_name("LABEL")
+                        .help("Human-readable description"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("list")
+                .about("List registered vaults")
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("switch")
+                .about("Set the default vault")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to make default"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("remove")
+                .about("Remove a vault from the registry (does not delete files)")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to remove"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+}
+
+fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
+    let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
+        std::path::PathBuf::from(p)
+    } else {
+        cairn_cli::vault::VaultRegistryStore::default_path()?
+    };
+    Ok(cairn_cli::vault::VaultRegistryStore::new(path))
 }
 
 fn plugins_subcommand() -> clap::Command {
@@ -109,6 +206,53 @@ fn main() -> ExitCode {
         }
     };
 
+    // Resolve --vault flag or CAIRN_VAULT env (§3.3 precedence 1 + 2).
+    // Skip for `vault` and `bootstrap` management subcommands — they operate on the
+    // registry/filesystem itself, not on a single vault's data.
+    let explicit_vault: Option<String> = matches
+        .get_one::<String>("vault")
+        .cloned()
+        .or_else(|| std::env::var("CAIRN_VAULT").ok());
+
+    let active_subcommand = matches.subcommand_name().unwrap_or("");
+    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins");
+
+    if needs_vault_guard {
+        let store = match registry_store() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cairn: registry path error — {e:#}");
+                return ExitCode::from(78);
+            }
+        };
+        let resolve_result = cairn_cli::vault::resolve_vault(cairn_cli::vault::ResolveOpts {
+            explicit: explicit_vault,
+            cwd: std::env::current_dir().ok(),
+            store: &store,
+        });
+        match resolve_result {
+            Ok(_vault_path) => {
+                // vault_path resolved; will be passed to store context in #9
+            }
+            Err(e) => {
+                // Hard-fail only for NotFound (explicit name that isn't registered).
+                // NoneResolved is tolerated — all verbs return Internal anyway until #9.
+                // NOTE: downcast_ref works only when no .context() wraps resolve_vault's error.
+                // If #9 adds .context(...) at this call site, NotFound will silently become
+                // tolerated. Update this guard when wiring the store.
+                let is_not_found = e
+                    .downcast_ref::<cairn_cli::vault::VaultError>()
+                    .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
+                if is_not_found {
+                    eprintln!("cairn: {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+                // NoneResolved and other errors are tolerated until the store is wired (#9).
+                let _e = e;
+            }
+        }
+    }
+
     match matches.subcommand() {
         Some(("ingest", sub)) => verbs::ingest::run(sub),
         Some(("search", sub)) => verbs::search::run(sub),
@@ -122,6 +266,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("vault", sub)) => run_vault(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -203,5 +348,166 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
             ExitCode::from(plugins::verify::exit_code(&report, strict))
         }
         _ => unreachable!("clap subcommand_required(true) on plugins ensures a subcommand is set"),
+    }
+}
+
+// Four subcommand branches (add/list/switch/remove) exceed the lint limit; split would add indirection for no gain.
+#[allow(clippy::too_many_lines)]
+fn run_vault(matches: &ArgMatches) -> ExitCode {
+    let store = match registry_store() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cairn vault: registry path error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    match matches.subcommand() {
+        Some(("add", sub)) => {
+            let path = std::path::PathBuf::from(
+                sub.get_one::<String>("path")
+                    .expect("invariant: path is required"),
+            );
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: --name is required")
+                .clone();
+            let label = sub.get_one::<String>("label").cloned();
+            let json = sub.get_flag("json");
+
+            match cairn_cli::vault::add_vault(&store, path, name, label) {
+                Ok(entry) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&entry)
+                                .expect("invariant: VaultEntry always serializes")
+                        );
+                    } else {
+                        println!(
+                            "cairn vault add: registered '{}' → {}",
+                            entry.name, entry.path
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cairn vault add: {e:#}");
+                    ExitCode::from(78) // EX_CONFIG
+                }
+            }
+        }
+        Some(("list", sub)) => {
+            let json = sub.get_flag("json");
+            let reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault list: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if json {
+                let arr: Vec<serde_json::Value> = reg
+                    .vaults
+                    .iter()
+                    .map(|v| {
+                        let mut obj = serde_json::to_value(v)
+                            .expect("invariant: VaultEntry always serializes to JSON");
+                        obj["is_default"] =
+                            serde_json::Value::Bool(reg.default.as_deref() == Some(&v.name));
+                        obj
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&arr)
+                        .expect("invariant: JSON array always serializes")
+                );
+            } else if reg.vaults.is_empty() {
+                println!("cairn vault list: no vaults registered");
+                println!("  add one with: cairn vault add <path> --name <name>");
+            } else {
+                for v in &reg.vaults {
+                    let marker = if reg.default.as_deref() == Some(&v.name) {
+                        "* "
+                    } else {
+                        "  "
+                    };
+                    let label = v
+                        .label
+                        .as_deref()
+                        .map(|l| format!("  — {l}"))
+                        .unwrap_or_default();
+                    println!("{marker}{:<20} {}{}", v.name, v.path, label);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Some(("switch", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault switch: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!("cairn vault switch: vault '{name}' not found — run `cairn vault list`");
+                return ExitCode::from(78);
+            }
+            reg.default = Some(name.clone());
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault switch: {e:#}");
+                return ExitCode::from(74); // EX_IOERR
+            }
+            if json {
+                println!("{}", serde_json::json!({ "default": name }));
+            } else {
+                println!("cairn vault switch: default vault is now '{name}'");
+            }
+            ExitCode::SUCCESS
+        }
+        Some(("remove", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault remove: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!("cairn vault remove: vault '{name}' not found — run `cairn vault list`");
+                return ExitCode::from(78);
+            }
+            if reg.default.as_deref() == Some(&name) {
+                reg.default = None;
+            }
+            reg.vaults.retain(|v| v.name != name);
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault remove: {e:#}");
+                return ExitCode::from(74);
+            }
+            if json {
+                println!("{}", serde_json::json!({ "removed": name }));
+            } else {
+                println!(
+                    "cairn vault remove: removed '{name}' from registry (vault files untouched)"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        _ => unreachable!("clap subcommand_required(true) on vault"),
     }
 }

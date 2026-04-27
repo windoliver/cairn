@@ -196,6 +196,7 @@ dependencies = [
  "serde_yaml",
  "temp-env",
  "tempfile",
+ "thiserror",
  "ulid",
 ]
 
