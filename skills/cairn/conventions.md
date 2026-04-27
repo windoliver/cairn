@@ -12,4 +12,14 @@ Verb ids in the contract:
 - `lint`
 - `forget`
 
-<!-- Kinds cheat-sheet integrates when #4 lands the taxonomy IDL slice. -->
+## Kind cheat-sheet (pick one — never invent new kinds)
+
+- `user` — preferences, working style, identity
+- `feedback` — corrections the user gave you
+- `rule` — invariants ("never X", "always Y")
+- `fact` — verifiable claims about the world
+- `entity` — people, projects, systems you encountered
+- `playbook` — reusable procedures with decision trees
+- `strategy_success` — an ad-hoc procedure that worked
+- `trace` — reasoning trajectories (auto-captured; don't call directly)
+
