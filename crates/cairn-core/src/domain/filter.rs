@@ -175,9 +175,12 @@ const MAX_FILTER_DEPTH: usize = 8;
 /// Maximum fanout for `and` / `or` nodes (matches the serde-layer cap).
 const MAX_FILTER_FANOUT: usize = 32;
 /// Maximum number of items in a set operand (`in`, `nin`, `array_contains_any`,
-/// `array_contains_all`). Keeps compiled `?` placeholder counts well below
-/// SQLite's default variable limit (999) even under heavy nesting.
+/// `array_contains_all`). Per-leaf limit; total params across the whole filter
+/// are further capped by `MAX_TOTAL_PARAMS`.
 const MAX_SET_OPERAND_SIZE: usize = 64;
+/// Maximum total `?` parameters compiled across the entire filter tree.
+/// Stays well below the `SQLITE_MAX_VARIABLE_NUMBER` default of `999`.
+const MAX_TOTAL_PARAMS: usize = 500;
 
 /// Validate a parsed [`SearchArgsFilters`] tree against the P0 field allowlist
 /// and per-type operator rules (§8.0.d).
@@ -189,10 +192,15 @@ const MAX_SET_OPERAND_SIZE: usize = 64;
 /// programmatically constructed trees cannot cause stack exhaustion or
 /// unbounded SQL generation.
 pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
-    validate_filter_inner(filter, 0)
+    let mut param_budget = MAX_TOTAL_PARAMS;
+    validate_filter_inner(filter, 0, &mut param_budget)
 }
 
-fn validate_filter_inner(filter: &SearchArgsFilters, depth: usize) -> Result<(), FilterError> {
+fn validate_filter_inner(
+    filter: &SearchArgsFilters,
+    depth: usize,
+    param_budget: &mut usize,
+) -> Result<(), FilterError> {
     if depth > MAX_FILTER_DEPTH {
         return Err(FilterError::MalformedLeaf(format!(
             "filter tree exceeds maximum nesting depth of {MAX_FILTER_DEPTH}"
@@ -210,7 +218,7 @@ fn validate_filter_inner(filter: &SearchArgsFilters, depth: usize) -> Result<(),
                 )));
             }
             for child in and {
-                validate_filter_inner(child, depth + 1)?;
+                validate_filter_inner(child, depth + 1, param_budget)?;
             }
             Ok(())
         }
@@ -225,19 +233,22 @@ fn validate_filter_inner(filter: &SearchArgsFilters, depth: usize) -> Result<(),
                 )));
             }
             for child in or {
-                validate_filter_inner(child, depth + 1)?;
+                validate_filter_inner(child, depth + 1, param_budget)?;
             }
             Ok(())
         }
-        SearchArgsFilters::Not { not } => validate_filter_inner(not, depth + 1),
-        SearchArgsFilters::Leaf(v) => validate_leaf(v),
+        SearchArgsFilters::Not { not } => validate_filter_inner(not, depth + 1, param_budget),
+        SearchArgsFilters::Leaf(v) => validate_leaf_with_budget(v, param_budget),
     }
 }
 
-/// Validate a single leaf.  Callers using the serde path will always receive
-/// well-formed leaves; callers constructing `SearchArgsFilters::Leaf` directly
-/// receive graceful `FilterError::MalformedLeaf` rather than a panic.
-fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
+/// Validate a single leaf, also deducting its expected `?` parameter count
+/// from `param_budget`. Returns `FilterError::MalformedLeaf` when the budget
+/// would go negative.
+fn validate_leaf_with_budget(
+    v: &serde_json::Value,
+    param_budget: &mut usize,
+) -> Result<(), FilterError> {
     let Some(obj) = v.as_object() else {
         return Err(FilterError::MalformedLeaf(
             "leaf value is not a JSON object".into(),
@@ -261,7 +272,32 @@ fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
 
     let ft = field_type(field).ok_or_else(|| FilterError::UnknownField(field.to_owned()))?;
     validate_op_for_type(field, op, ft)?;
-    validate_value_shape(field, op, ft, value)
+    validate_value_shape(field, op, ft, value)?;
+
+    let cost = leaf_param_count(op, value);
+    if cost > *param_budget {
+        return Err(FilterError::MalformedLeaf(format!(
+            "filter would require more than {MAX_TOTAL_PARAMS} total SQL parameters"
+        )));
+    }
+    *param_budget -= cost;
+    Ok(())
+}
+
+/// Estimate the number of `?` placeholders `compile_leaf` will emit for `op`.
+fn leaf_param_count(op: &str, value: &serde_json::Value) -> usize {
+    match op {
+        "in" | "nin" | "array_contains_any" => value.as_array().map_or(1, Vec::len),
+        "array_contains_all" => {
+            // N items + 1 count param
+            value.as_array().map_or(2, |a| a.len() + 1)
+        }
+        // between → 2 params; string_starts_with → substr(col, 1, length(?)) = ? → 2 params
+        "between" | "string_starts_with" => 2,
+        // substr(col, -length(?), length(?)) = ? → 3 params
+        "string_ends_with" => 3,
+        _ => 1, // eq, neq, lt, lte, gt, gte, string_contains, array_contains, array_size_eq
+    }
 }
 
 fn validate_op_for_type(field: &str, op: &str, ft: FieldType) -> Result<(), FilterError> {
