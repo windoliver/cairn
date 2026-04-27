@@ -54,8 +54,9 @@ pub async fn fix_markdown_handler(
                     .with_context(|| format!("create_dir_all {}", parent.display()))?;
             }
             // Write atomically via a temp file + rename so concurrent readers never see
-            // a partially-written file.
-            let tmp_path = abs_path.with_extension("md.tmp");
+            // a partially-written file. Include the PID in the temp name so concurrent
+            // lint invocations don't clobber each other's in-flight writes.
+            let tmp_path = abs_path.with_extension(format!("md.{}.tmp", std::process::id()));
             tokio::fs::write(&tmp_path, &projected.content)
                 .await
                 .with_context(|| format!("write tmp {}", tmp_path.display()))?;

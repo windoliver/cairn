@@ -104,11 +104,26 @@ pub async fn resync_handler(
 
     let outcome = projector.check_conflict(&parsed, current.as_ref());
 
+    // Fields emitted by project(); anything else in raw_frontmatter is extra.
+    const STANDARD_FIELDS: &[&str] = &[
+        "id", "version", "kind", "class", "visibility",
+        "scope", "confidence", "salience", "tags", "created", "updated",
+    ];
+    let extra_frontmatter: std::collections::BTreeMap<String, serde_json::Value> = parsed
+        .raw_frontmatter
+        .iter()
+        .filter(|(k, _)| !STANDARD_FIELDS.contains(&k.as_str()))
+        .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|jv| (k.clone(), jv)))
+        .collect();
+
     match outcome {
         ConflictOutcome::Clean => {
             if let Some(ref stored) = current {
                 // Check if mutable fields are already up to date
-                if stored.record.body == parsed.body && stored.record.tags == parsed.tags {
+                if stored.record.body == parsed.body
+                    && stored.record.tags == parsed.tags
+                    && stored.record.extra_frontmatter == extra_frontmatter
+                {
                     return Ok(ResyncResult {
                         status: "noop",
                         path: path.to_path_buf(),
@@ -120,6 +135,7 @@ pub async fn resync_handler(
                 let mut r = stored.record.clone();
                 r.body = parsed.body.clone();
                 r.tags = parsed.tags.clone();
+                r.extra_frontmatter = extra_frontmatter;
                 let new_stored = store.upsert(r).await.context("store: upsert")?;
                 Ok(ResyncResult {
                     status: "updated",
@@ -153,11 +169,38 @@ pub async fn resync_handler(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            let quarantine_path = quarantine_dir
-                .join(format!("{nanos}-{}.rejected", &parsed.target_id));
-            tokio::fs::write(&quarantine_path, &content)
-                .await
-                .with_context(|| format!("write quarantine {}", quarantine_path.display()))?;
+            // Use create-new semantics to avoid overwriting a prior quarantine file
+            // if two conflicts for the same record arrive within the same nanosecond.
+            let base_name = format!("{nanos}-{}.rejected", &parsed.target_id);
+            let mut q_path = quarantine_dir.join(&base_name);
+            let mut retry: u32 = 0;
+            loop {
+                match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&q_path)
+                    .await
+                {
+                    Ok(mut f) => {
+                        use tokio::io::AsyncWriteExt as _;
+                        f.write_all(content.as_bytes())
+                            .await
+                            .with_context(|| format!("write quarantine {}", q_path.display()))?;
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        retry += 1;
+                        q_path = quarantine_dir
+                            .join(format!("{nanos}-{}-{retry}.rejected", &parsed.target_id));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "write quarantine {}: {e}",
+                            q_path.display()
+                        ));
+                    }
+                }
+            }
 
             Err(anyhow::anyhow!(
                 "conflict: file version {file_version}, store version {store_version}; {marker}; \
