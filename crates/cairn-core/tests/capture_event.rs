@@ -524,25 +524,30 @@ fn proactive_sensor_agent_match_passes() {
 }
 
 #[test]
-fn captureevent_rejects_structurally_valid_but_unregistered_sensor() {
-    // `snr:local:hook:any-instance:v1` is structurally well-formed but
-    // is not in `P0_CANONICAL_LABELS`. `CaptureEvent::validate` must
-    // close that gap pre-#50 — otherwise a producer can mint trusted
-    // events under fabricated sensor identities.
+fn captureevent_accepts_structurally_valid_unregistered_sensor() {
+    // Schema-level admission is structural only:
+    // `local:<family>:<instance>(:<sub>)*:v<digits>` is sufficient.
+    // Closed-list / instance-version authorization belongs to the
+    // runtime sensor registry (#50) and the keychain-backed signing
+    // layer — `cairn-core` must not block host-specific instances or
+    // producer-side version bumps. Deployments that need a closed list
+    // pre-#50 can pair `validate_label_in_registry` at their ingress.
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:hook:any-instance:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:hook:any-instance:v1")];
-    let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+    ev.sensor_id = Identity::parse("snr:local:hook:custom-host:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:hook:custom-host:v1")];
+    ev.validate().expect("structurally valid sensor accepted");
 }
 
 #[test]
-fn captureevent_rejects_unregistered_proactive_agent() {
+fn captureevent_accepts_proactive_with_matching_slug() {
+    // Proactive binding is slug-match (sensor agent slug = author agent
+    // slug), not closed-list. Any `agt:<slug>:...` author paired with
+    // `snr:local:proactive:<slug>:v1` passes; cross-slug pairs fail
+    // (proven by `proactive_sensor_agent_must_match_author_agent`).
     let mut ev = proactive_event();
-    ev.sensor_id = Identity::parse("snr:local:proactive:rogue-agent:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "agt:rogue-agent:m:role:v1")];
-    let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+    ev.sensor_id = Identity::parse("snr:local:proactive:custom-agent:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "agt:custom-agent:m:role:v1")];
+    ev.validate().expect("matching slugs accepted");
 }
 
 #[test]
