@@ -513,6 +513,19 @@ BEGIN
   SELECT RAISE(ABORT,
     'wal_steps identity (operation_id, step_ord, step_kind) is immutable');
 END;
+
+-- Recovery treats wal_steps as the authoritative cursor (resume at
+-- the lowest non-DONE step). DELETE would erase that cursor and
+-- make recovery infer an incomplete graph. The only valid removal
+-- path is the ON DELETE CASCADE from wal_ops, which is itself
+-- blocked by wal_ops_no_delete — so this trigger blocks the direct
+-- DELETE path and closes the loop.
+CREATE TRIGGER wal_steps_no_delete
+  BEFORE DELETE ON wal_steps
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_steps is append-only; DELETE not permitted');
+END;
 ```
 
 #### 0003_replay.sql
@@ -808,6 +821,58 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   COMMITTED forget ops therefore do not auto-delete their fence
   rows — only failures do.
 
+  **Fence integrity triggers** keep the fence trustworthy as a
+  read barrier:
+
+  ```sql
+  -- Identity columns and the owning op are frozen post-insert.
+  CREATE TRIGGER reader_fence_identity_immutable
+    BEFORE UPDATE ON reader_fence
+    FOR EACH ROW
+    WHEN NEW.scope_kind IS NOT OLD.scope_kind
+      OR NEW.scope_key  IS NOT OLD.scope_key
+      OR NEW.op_id      IS NOT OLD.op_id
+      OR NEW.opened_at  IS NOT OLD.opened_at
+  BEGIN
+    SELECT RAISE(ABORT,
+      'reader_fence identity (scope_kind, scope_key, op_id, opened_at) is immutable');
+  END;
+
+  -- The state FSM is one-way: tombstoning -> closed only.
+  CREATE TRIGGER reader_fence_state_transition
+    BEFORE UPDATE OF state ON reader_fence
+    FOR EACH ROW
+    WHEN NEW.state IS NOT OLD.state
+     AND NOT (OLD.state = 'tombstoning' AND NEW.state = 'closed')
+  BEGIN
+    SELECT RAISE(ABORT,
+      'reader_fence.state transition not allowed (only tombstoning -> closed)');
+  END;
+
+  -- Direct DELETE is rejected. The legitimate deletion paths are:
+  --   (a) ON DELETE CASCADE from wal_ops -- already blocked because
+  --       wal_ops_no_delete prevents wal_ops deletes;
+  --   (b) reader_fence_clear_on_terminal_abort, which DELETEs from
+  --       within a trigger context (see exemption note below).
+  CREATE TRIGGER reader_fence_no_direct_delete
+    BEFORE DELETE ON reader_fence
+    FOR EACH ROW
+    -- The exemption: when the deletion is driven by
+    -- reader_fence_clear_on_terminal_abort, the wal_ops row whose
+    -- terminal-state UPDATE caused the cascade is already at state
+    -- IN ('ABORTED','REJECTED'). A direct caller-initiated DELETE
+    -- has no such row, so the predicate distinguishes the two.
+    WHEN NOT EXISTS (
+      SELECT 1 FROM wal_ops
+       WHERE operation_id = OLD.op_id
+         AND state IN ('ABORTED', 'REJECTED')
+    )
+  BEGIN
+    SELECT RAISE(ABORT,
+      'reader_fence DELETE is permitted only via terminal-abort cleanup');
+  END;
+  ```
+
 #### 0005_consent.sql
 
 ```sql
@@ -882,6 +947,9 @@ cairn_store_sqlite::open(path: &Path) -> Result<Connection, StoreError>
   ├─ migrations().to_latest(&mut conn)   -- idempotent on up-to-date DB
   ├─ verify_schema_integrity_at(&conn,   -- §5.1 shape check at HEAD after migration.
   │     head_user_version)?
+  ├─ verify_replay_ledger_consistency(   -- §5.3 data-integrity check tying
+  │     &conn)?                          -- issuer_seq to used. Only runs once
+  │                                      -- the schema has reached version >= 3.
   └─ Ok(conn)
 ```
 
@@ -1006,6 +1074,47 @@ unit test.
 > head. That history-level guarantee is provided separately by §5.2's
 > migration checksum table.
 
+### 5.3 Replay-ledger data consistency
+
+`issuer_seq.high_water` is the cached rewind guard for
+`used_sequence_must_advance`. Its in-process integrity is enforced
+by the trigger set (no DELETE, no UPDATE that doesn't match a `used`
+row, no INSERT without a backing ledger row). But a vault produced
+by an older binary, manual repair, or pre-trigger corruption could
+arrive with `issuer_seq.high_water` stale relative to
+`MAX(used.sequence)`. If lower unused sequences then start passing
+the rewind check, the replay window the design closes is reopened.
+
+`open()` runs a one-pass consistency check after migrations:
+
+```rust
+fn verify_replay_ledger_consistency(conn: &Connection) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare("
+        SELECT u.issuer,
+               MAX(u.sequence)            AS used_max,
+               COALESCE(s.high_water, -1) AS seq_high_water
+          FROM used u
+          LEFT JOIN issuer_seq s ON s.issuer = u.issuer
+         GROUP BY u.issuer
+    ")?;
+    for row in stmt.query_map([], /* ... */)? {
+        let (issuer, used_max, hw) = row?;
+        if hw < used_max {
+            return Err(StoreError::ReplayLedgerInconsistent {
+                issuer, used_max, issuer_seq_high_water: hw,
+            });
+        }
+    }
+    Ok(())
+}
+```
+
+The check is read-only — open() never silently repairs the cache.
+A diverged vault surfaces `StoreError::ReplayLedgerInconsistent`
+and the operator runs `cairn admin repair-replay-ledger` (a
+follow-up issue), which atomically rebuilds `issuer_seq` from
+`used` inside one transaction.
+
 ### 5.2 Migration checksum ledger (history-level guarantee)
 
 `rusqlite_migration` only tracks `user_version`; on its own it cannot
@@ -1125,6 +1234,13 @@ pub enum StoreError {
         expected:     &'static str,
         actual:       String,
     },
+
+    #[error("replay ledger inconsistency for issuer {issuer}: used.MAX(sequence)={used_max}, issuer_seq.high_water={issuer_seq_high_water}")]
+    ReplayLedgerInconsistent {
+        issuer: String,
+        used_max: i64,
+        issuer_seq_high_water: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -1171,6 +1287,10 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `wal_ops_envelope_immutable`, `wal_ops_terminal_immutable`,
     `wal_ops_no_delete`, `reader_fence_clear_on_terminal_abort`,
     `wal_steps_state_transition`, `wal_steps_identity_immutable`,
+    `wal_steps_no_delete`,
+    `reader_fence_identity_immutable`,
+    `reader_fence_state_transition`,
+    `reader_fence_no_direct_delete`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `wal_op_deps_no_delete`,
     `consent_journal_immutable`, `consent_journal_no_delete`,
@@ -1324,6 +1444,21 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   confirm the AFTER UPDATE trigger DELETE'd the fence row. Repeat
   for `'REJECTED'`. With `state = 'COMMITTED'` and a `closed` fence,
   confirm the fence is preserved (only failure paths auto-clear).
+- `reader_fence_integrity_locked` — insert a fence in
+  `'tombstoning'`. Attempt UPDATE on `scope_kind`, `scope_key`,
+  `op_id`, `opened_at`; each ABORTs. Attempt UPDATE state from
+  `'closed'` back to `'tombstoning'`; ABORT. Attempt direct
+  `DELETE FROM reader_fence WHERE …` while the owning op is still
+  PREPARED; ABORT via `reader_fence_no_direct_delete`. Then UPDATE
+  the wal_ops row to `'ABORTED'`; the cascade trigger DELETEs the
+  fence successfully (the predicate exemption).
+- `wal_steps_delete_blocked` — insert a `wal_steps` row; attempt
+  `DELETE FROM wal_steps WHERE …`; ABORT via `wal_steps_no_delete`.
+- `replay_ledger_consistency_check` — open a fresh vault, insert a
+  wal_ops + used row at `(issuer='alice', sequence=42)`; assert
+  `issuer_seq` has `(alice, 42)`. Manually corrupt `issuer_seq` to
+  `(alice, 5)` via fixture helper; close & reopen via `open()`;
+  expect `StoreError::ReplayLedgerInconsistent`.
 - `open_does_not_mutate_invalid_vault` — generate a fixture vault
   whose `schema_migrations` row 1 has a wrong `sql_blake3` (set via
   the test fixture helper that bypasses the immutability trigger);
