@@ -63,13 +63,12 @@ impl VaultRegistryStore {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let config_dir = std::env::var("XDG_CONFIG_HOME").ok().map_or_else(
-                || {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    PathBuf::from(home).join(".config")
-                },
-                PathBuf::from,
-            );
+            let config_dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg)
+            } else {
+                let home = std::env::var("HOME").context("HOME env var not set")?;
+                PathBuf::from(home).join(".config")
+            };
             Ok(config_dir.join("cairn").join("vaults.toml"))
         }
     }
@@ -138,9 +137,10 @@ pub struct ResolveOpts<'a> {
     pub store: &'a VaultRegistryStore,
 }
 
-/// Resolve the active vault path using the four-level precedence (§3.3):
+/// Resolve the active vault path using a three-level precedence (§3.3 — the
+/// caller merges `--vault` flag and `CAIRN_VAULT` env into `opts.explicit`):
 ///
-/// 1. `opts.explicit` (from `--vault` or `CAIRN_VAULT`) — path or name
+/// 1. `opts.explicit` (from `--vault` flag or `CAIRN_VAULT` env var, caller-merged)
 /// 2. Walk up from `opts.cwd` looking for `.cairn/`
 /// 3. Registry `default` entry
 ///
@@ -203,16 +203,13 @@ pub fn walk_up_to_vault(start: &Path) -> Option<PathBuf> {
             return Some(current);
         }
         let parent = current.parent()?.to_path_buf();
-        if parent == current {
-            return None;
-        }
         current = parent;
     }
 }
 
 /// Expand a leading `~` to `$HOME` (or `$USERPROFILE` on Windows).
 #[must_use]
-pub fn expand_tilde(path: &str) -> PathBuf {
+fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = home_dir().unwrap_or_default();
         home.join(rest)
