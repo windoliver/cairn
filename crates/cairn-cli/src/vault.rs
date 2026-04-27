@@ -183,6 +183,20 @@ fn write_once(
 ) -> Result<()> {
     use std::io::Write as _;
 
+    // Validate the parent directory first, before any path — including the
+    // early-return skip path.  A symlink-swapped parent (e.g. `.cairn`)
+    // would redirect every subsequent operation, so we reject it on every
+    // code path, not just the write path.
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "parent directory {} is a symlink — bootstrap will not write through it",
+                dir.display()
+            );
+        }
+    }
+
     // Inspect the final target without following symlinks.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         let ft = meta.file_type();
@@ -211,19 +225,6 @@ fn write_once(
     // A random name eliminates the predictable-temp-path symlink attack.
     // Both the force and non-force paths use this temp file; only the final
     // publish step differs.
-    //
-    // Re-validate the parent directory immediately before opening the temp
-    // file: a symlink swap of the parent after the directory-tree pass
-    // would otherwise let the write escape to the symlink target.
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    if let Ok(meta) = std::fs::symlink_metadata(dir) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "parent directory {} is a symlink — bootstrap will not write through it",
-                dir.display()
-            );
-        }
-    }
     let mut tmp = tempfile::Builder::new()
         .prefix(".bootstrap")
         .tempfile_in(dir)
