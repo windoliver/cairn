@@ -88,10 +88,15 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     // --- directory tree ---
     for rel in VAULT_DIRS {
         let dir = vault.join(rel);
-        if dir.exists() {
-            receipt.dirs_existing.push(dir.clone());
-        } else {
-            receipt.dirs_created.push(dir.clone());
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "{} is a symlink — bootstrap will not traverse it",
+                    dir.display()
+                );
+            }
+            Ok(_) => receipt.dirs_existing.push(dir.clone()),
+            Err(_) => receipt.dirs_created.push(dir.clone()),
         }
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -150,8 +155,8 @@ fn write_once(
 ) -> Result<()> {
     use std::io::Write as _;
 
-    // Reject symlinks regardless of force — writing through a symlink can
-    // affect paths outside the vault, which is never intended by bootstrap.
+    // Reject symlinks at the final target — writing through one can affect
+    // paths outside the vault. symlink_metadata does not follow symlinks.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
             anyhow::bail!(
@@ -163,51 +168,43 @@ fn write_once(
             receipt.files_skipped.push(path.to_owned());
             return Ok(());
         }
-        // force=true, file exists, not a symlink — fall through to atomic overwrite
+        // force=true, real file — fall through to atomic overwrite
     }
 
+    // Write to a randomly-named temp file in the same directory.
+    // A random name eliminates the predictable-temp-path symlink attack.
+    // Both the force and non-force paths use this temp file; only the final
+    // publish step differs.
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".bootstrap")
+        .tempfile_in(dir)
+        .with_context(|| format!("creating temp file in {}", dir.display()))?;
+    tmp.write_all(content.as_bytes())
+        .with_context(|| format!("writing temp file for {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("syncing temp file for {}", path.display()))?;
+
     if force {
-        // Atomic overwrite: write to a sibling temp file, sync, then rename.
-        // rename(2) is atomic on the same filesystem — the target sees either
-        // the old content or the new content, never a partial write.
-        let dir = path.parent().unwrap_or(std::path::Path::new("."));
-        let tmp_name = format!(
-            ".{}.bootstrap.tmp",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
-        );
-        let tmp = dir.join(tmp_name);
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
-            f.write_all(content.as_bytes())
-                .with_context(|| format!("writing {}", tmp.display()))?;
-            f.sync_all()
-                .with_context(|| format!("syncing {}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+        // Atomic overwrite: persist renames the temp file over the target.
+        // rename(2) is atomic on the same filesystem — no partial-write window.
+        tmp.persist(path)
+            .map_err(|e| e.error)
+            .with_context(|| format!("persisting to {}", path.display()))?;
     } else {
-        // Non-force: exclusive create eliminates the TOCTOU race between the
-        // existence check and the write for concurrent bootstrap invocations.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(mut f) => {
-                f.write_all(content.as_bytes())
-                    .with_context(|| format!("writing {}", path.display()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        // Atomic exclusive create: persist_noclobber fails if the target
+        // appeared between the symlink_metadata check above and now, so a
+        // partial write can never be left at the final path.
+        match tmp.persist_noclobber(path) {
+            Ok(_) => {}
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 receipt.files_skipped.push(path.to_owned());
                 return Ok(());
             }
             Err(e) => {
-                return Err(e).with_context(|| format!("creating {}", path.display()));
+                return Err(anyhow::Error::from(e.error))
+                    .with_context(|| format!("persisting to {}", path.display()));
             }
         }
     }
