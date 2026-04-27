@@ -116,6 +116,17 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
             Err(_) => receipt.dirs_created.push(dir.clone()),
         }
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        // Post-creation check: a symlink swap between the lstat above and
+        // create_dir_all would make the created path land in the link target.
+        // Re-lstat immediately after creation to catch persistent symlinks.
+        let post = std::fs::symlink_metadata(&dir)
+            .with_context(|| format!("verifying {} after creation", dir.display()))?;
+        if post.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} became a symlink during creation — possible race attack",
+                dir.display()
+            );
+        }
     }
 
     // --- placeholder files ---
