@@ -16,10 +16,12 @@ readme = "README.md"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "sync"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "json", "fmt"] }
 anyhow = "1"
 async-trait = "0.1"
+rmcp = { version = "1.5.0", default-features = false, features = ["server", "transport-io"] }
 insta = { version = "1.40", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false }
 proptest = "1"
