@@ -316,4 +316,200 @@ mod tests {
             );
         }
     }
+
+    // Task 7: idempotency and version-same skip tests
+
+    #[test]
+    fn install_idempotent_same_version_skips_generated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("skills/cairn");
+        let opts = InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        };
+
+        // First install.
+        install(&opts).expect("first install");
+
+        // Second install — same version, no --force.
+        let receipt2 = install(&opts).expect("second install");
+
+        // Generated files should be in files_skipped on the second run.
+        let skipped_names: Vec<_> = receipt2
+            .files_skipped
+            .iter()
+            .filter_map(|p| p.file_name())
+            .collect();
+        assert!(
+            skipped_names.contains(&std::ffi::OsStr::new("SKILL.md")),
+            "SKILL.md should be skipped on same-version reinstall"
+        );
+        assert!(
+            skipped_names.contains(&std::ffi::OsStr::new("conventions.md")),
+            "conventions.md should be skipped"
+        );
+        assert!(
+            skipped_names.contains(&std::ffi::OsStr::new(".version")),
+            ".version should be skipped"
+        );
+    }
+
+    #[test]
+    fn install_force_overwrites_generated_even_on_same_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("skills/cairn");
+
+        // First install.
+        install(&InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        })
+        .expect("first install");
+
+        // Second install with --force.
+        let receipt2 = install(&InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: true,
+        })
+        .expect("second install with force");
+
+        let created_names: Vec<_> = receipt2
+            .files_created
+            .iter()
+            .filter_map(|p| p.file_name())
+            .collect();
+
+        assert!(
+            created_names.contains(&std::ffi::OsStr::new("SKILL.md")),
+            "SKILL.md should be recreated with --force"
+        );
+        // Examples must still be skipped even with --force.
+        let skipped_names: Vec<_> = receipt2
+            .files_skipped
+            .iter()
+            .filter_map(|p| p.file_name())
+            .collect();
+        assert!(
+            skipped_names.contains(&std::ffi::OsStr::new("01-remember-preference.md")),
+            "example stubs must not be overwritten even with --force"
+        );
+    }
+
+    // Task 8: version upgrade and downgrade tests
+
+    #[test]
+    fn install_upgrades_when_older_version_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("skills/cairn");
+        std::fs::create_dir_all(target.join("examples")).expect("create dir");
+
+        // Write a stale .version file with an older idl version.
+        std::fs::write(
+            target.join(".version"),
+            "contract: cairn.mcp.v1\ncairn-idl: 0.0.0\n",
+        )
+        .expect("write stale version");
+
+        let opts = InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        };
+        let receipt = install(&opts).expect("upgrade install");
+
+        // Generated files must be in created (not skipped) because version differs.
+        let created_names: Vec<_> = receipt
+            .files_created
+            .iter()
+            .filter_map(|p| p.file_name())
+            .collect();
+        assert!(
+            created_names.contains(&std::ffi::OsStr::new("SKILL.md")),
+            "SKILL.md should be updated on version upgrade"
+        );
+    }
+
+    #[test]
+    fn install_downgrade_proceeds_with_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("skills/cairn");
+        std::fs::create_dir_all(target.join("examples")).expect("create dir");
+
+        // Write a .version file with a higher idl version (simulated downgrade).
+        std::fs::write(
+            target.join(".version"),
+            "contract: cairn.mcp.v1\ncairn-idl: 999.0.0\n",
+        )
+        .expect("write future version");
+
+        let opts = InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        };
+
+        // Downgrade should succeed (not error).
+        let result = install(&opts);
+        assert!(
+            result.is_ok(),
+            "downgrade should proceed without error, got: {result:?}"
+        );
+
+        // Generated files should be updated (overwritten).
+        let receipt = result.unwrap();
+        let created_names: Vec<_> = receipt
+            .files_created
+            .iter()
+            .filter_map(|p| p.file_name())
+            .collect();
+        assert!(
+            created_names.contains(&std::ffi::OsStr::new("SKILL.md")),
+            "SKILL.md should be overwritten on downgrade"
+        );
+    }
+
+    #[test]
+    fn parse_idl_version_extracts_version() {
+        let version_file = "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\n";
+        assert_eq!(parse_idl_version(version_file), Some("1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn compare_versions_ordering() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("0.0.1", "0.0.2"), Ordering::Less);
+        assert_eq!(compare_versions("1.0.0", "0.9.9"), Ordering::Greater);
+        assert_eq!(compare_versions("0.0.1", "0.0.1"), Ordering::Equal);
+    }
+
+    // Task 9: symlink rejection test
+
+    #[test]
+    #[cfg(unix)]
+    fn install_rejects_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir_all(&real_dir).expect("create real dir");
+
+        let link = tmp.path().join("link");
+        symlink(&real_dir, &link).expect("create symlink");
+
+        let opts = InstallOpts {
+            target_dir: link.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        };
+        let result = install(&opts);
+        assert!(result.is_err(), "install into a symlinked dir must fail");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("symlink"),
+            "error message should mention symlink — got: {msg}"
+        );
+    }
 }
