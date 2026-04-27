@@ -4,11 +4,27 @@
 use std::sync::Arc;
 
 use cairn_core::config::CairnConfig;
+use cairn_core::contract::agent_provider::{
+    AgentProvider, AgentProviderCapabilities, AgentProviderPlugin,
+};
+use cairn_core::contract::frontend_adapter::{
+    FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin,
+};
+use cairn_core::contract::llm_provider::{
+    LLMProvider, LLMProviderCapabilities, LLMProviderPlugin,
+};
+use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 use cairn_core::contract::memory_store::{
     CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
 };
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
+use cairn_core::contract::sensor_ingress::{
+    SensorIngress, SensorIngressCapabilities, SensorIngressPlugin,
+};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::contract::workflow_orchestrator::{
+    WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
+};
 use cairn_core::register_plugin;
 use cairn_core::register_plugin_with;
 
@@ -341,4 +357,336 @@ fn register_plugin_macro_rejects_name_const_mismatch() {
         matches!(err, PluginError::IdentityMismatch { .. }),
         "expected IdentityMismatch, got {err:?}"
     );
+}
+
+// ── register_plugin_with! coverage for the remaining 6 contract arms ─────────
+
+mod llm_provider_factory_plugin {
+    use super::*;
+
+    pub struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl LLMProvider for StubLlm {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: false,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl LLMProviderPlugin for StubLlm {
+        const NAME: &'static str = "stub-llm-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    register_plugin_with!(LLMProvider, StubLlm, "stub-llm-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubLlm)
+    });
+}
+
+mod workflow_orchestrator_factory_plugin {
+    use super::*;
+
+    pub struct StubOrch;
+
+    #[async_trait::async_trait]
+    impl WorkflowOrchestrator for StubOrch {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &WorkflowOrchestratorCapabilities {
+            static CAPS: WorkflowOrchestratorCapabilities = WorkflowOrchestratorCapabilities {
+                durable: false,
+                crash_safe: false,
+                cron_schedules: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl WorkflowOrchestratorPlugin for StubOrch {
+        const NAME: &'static str = "stub-orch-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    register_plugin_with!(WorkflowOrchestrator, StubOrch, "stub-orch-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubOrch)
+    });
+}
+
+mod sensor_ingress_factory_plugin {
+    use super::*;
+
+    pub struct StubSensor;
+
+    #[async_trait::async_trait]
+    impl SensorIngress for StubSensor {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &SensorIngressCapabilities {
+            static CAPS: SensorIngressCapabilities = SensorIngressCapabilities {
+                batches: false,
+                streaming: false,
+                consent_aware: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl SensorIngressPlugin for StubSensor {
+        const NAME: &'static str = "stub-sensor-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    register_plugin_with!(SensorIngress, StubSensor, "stub-sensor-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubSensor)
+    });
+}
+
+mod mcp_server_factory_plugin {
+    use super::*;
+
+    pub struct StubMcp;
+
+    #[async_trait::async_trait]
+    impl MCPServer for StubMcp {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &MCPServerCapabilities {
+            static CAPS: MCPServerCapabilities = MCPServerCapabilities {
+                stdio: false,
+                sse: false,
+                http_streamable: false,
+                extensions: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl MCPServerPlugin for StubMcp {
+        const NAME: &'static str = "stub-mcp-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    register_plugin_with!(MCPServer, StubMcp, "stub-mcp-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubMcp)
+    });
+}
+
+mod frontend_adapter_factory_plugin {
+    use super::*;
+
+    pub struct StubFrontend;
+
+    #[async_trait::async_trait]
+    impl FrontendAdapter for StubFrontend {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &FrontendAdapterCapabilities {
+            static CAPS: FrontendAdapterCapabilities = FrontendAdapterCapabilities {
+                markdown_projection: false,
+                live_events: false,
+                reverse_edits: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl FrontendAdapterPlugin for StubFrontend {
+        const NAME: &'static str = "stub-frontend-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
+    }
+
+    register_plugin_with!(FrontendAdapter, StubFrontend, "stub-frontend-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubFrontend)
+    });
+}
+
+mod agent_provider_factory_plugin {
+    use super::*;
+
+    pub struct StubAgent;
+
+    #[async_trait::async_trait]
+    impl AgentProvider for StubAgent {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &AgentProviderCapabilities {
+            static CAPS: AgentProviderCapabilities = AgentProviderCapabilities {
+                honors_cost_budget: false,
+                scope_enforced: false,
+                mcp_tools: false,
+                cli_subprocess_tools: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl AgentProviderPlugin for StubAgent {
+        const NAME: &'static str = "stub-agent-factory";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
+    }
+
+    register_plugin_with!(AgentProvider, StubAgent, "stub-agent-factory", |_cfg: &cairn_core::config::CairnConfig| {
+        Ok::<_, std::convert::Infallible>(StubAgent)
+    });
+}
+
+// ── factory-error path ────────────────────────────────────────────────────────
+
+mod factory_error_plugin {
+    use super::*;
+
+    pub struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl MemoryStore for FailingStore {
+        fn name(&self) -> &str {
+            Self::NAME
+        }
+        fn capabilities(&self) -> &MemoryStoreCapabilities {
+            static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                fts: false,
+                vector: false,
+                graph_edges: false,
+                transactions: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            Self::SUPPORTED_VERSIONS
+        }
+    }
+
+    impl MemoryStorePlugin for FailingStore {
+        const NAME: &'static str = "failing-store";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    }
+
+    register_plugin_with!(MemoryStore, FailingStore, "failing-store", |_cfg: &cairn_core::config::CairnConfig| {
+        Err::<FailingStore, _>(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "db file missing",
+        ))
+    });
+}
+
+// ── new tests ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn register_plugin_with_llm_provider() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    llm_provider_factory_plugin::register(&mut reg, &cfg)
+        .expect("LLMProvider factory registers");
+    let name = PluginName::new("stub-llm-factory").expect("valid");
+    assert!(reg.llm_provider(&name).is_some());
+}
+
+#[test]
+fn register_plugin_with_workflow_orchestrator() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    workflow_orchestrator_factory_plugin::register(&mut reg, &cfg)
+        .expect("WorkflowOrchestrator factory registers");
+    let name = PluginName::new("stub-orch-factory").expect("valid");
+    assert!(reg.workflow_orchestrator(&name).is_some());
+}
+
+#[test]
+fn register_plugin_with_sensor_ingress() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    sensor_ingress_factory_plugin::register(&mut reg, &cfg)
+        .expect("SensorIngress factory registers");
+    let name = PluginName::new("stub-sensor-factory").expect("valid");
+    assert!(reg.sensor_ingress_plugin(&name).is_some());
+}
+
+#[test]
+fn register_plugin_with_mcp_server() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    mcp_server_factory_plugin::register(&mut reg, &cfg).expect("MCPServer factory registers");
+    let name = PluginName::new("stub-mcp-factory").expect("valid");
+    assert!(reg.mcp_server(&name).is_some());
+}
+
+#[test]
+fn register_plugin_with_frontend_adapter() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    frontend_adapter_factory_plugin::register(&mut reg, &cfg)
+        .expect("FrontendAdapter factory registers");
+    let name = PluginName::new("stub-frontend-factory").expect("valid");
+    assert!(reg.frontend_adapter(&name).is_some());
+}
+
+#[test]
+fn register_plugin_with_agent_provider() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    agent_provider_factory_plugin::register(&mut reg, &cfg)
+        .expect("AgentProvider factory registers");
+    let name = PluginName::new("stub-agent-factory").expect("valid");
+    assert!(reg.agent_provider(&name).is_some());
+}
+
+#[test]
+fn factory_error_propagates_as_plugin_error() {
+    let mut reg = PluginRegistry::new();
+    let cfg = CairnConfig::default();
+    let err = factory_error_plugin::register(&mut reg, &cfg)
+        .expect_err("failing factory must produce an error");
+    match err {
+        PluginError::FactoryError {
+            contract,
+            ref plugin,
+            ref source,
+        } => {
+            assert_eq!(contract, "MemoryStore");
+            assert_eq!(plugin.as_str(), "failing-store");
+            assert!(
+                source.to_string().contains("db file missing"),
+                "source: {source}"
+            );
+        }
+        other => panic!("expected FactoryError, got {other:?}"),
+    }
 }
