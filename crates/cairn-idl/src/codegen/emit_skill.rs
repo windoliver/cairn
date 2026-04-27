@@ -82,7 +82,22 @@ fn emit_conventions(doc: &Document) -> GeneratedFile {
     for verb in &doc.verbs {
         let _ = writeln!(s, "- `{}`", verb.id);
     }
-    s.push_str("\n<!-- Kinds cheat-sheet integrates when #4 lands the taxonomy IDL slice. -->\n");
+    s.push_str("\n## Kind cheat-sheet (pick one — never invent new kinds)\n\n");
+    // TODO(taxonomy-idl): generate from IDL when taxonomy slice lands
+    let kinds: &[(&str, &str)] = &[
+        ("user",             "preferences, working style, identity"),
+        ("feedback",         "corrections the user gave you"),
+        ("rule",             r#"invariants ("never X", "always Y")"#),
+        ("fact",             "verifiable claims about the world"),
+        ("entity",           "people, projects, systems you encountered"),
+        ("playbook",         "reusable procedures with decision trees"),
+        ("strategy_success", "an ad-hoc procedure that worked"),
+        ("trace",            "reasoning trajectories (auto-captured; don't call directly)"),
+    ];
+    for (kind, desc) in kinds {
+        let _ = writeln!(s, "- `{kind}` — {desc}");
+    }
+    s.push('\n');
     GeneratedFile {
         path: PathBuf::from("skills/cairn/conventions.md"),
         bytes: s.into_bytes(),
