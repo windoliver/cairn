@@ -853,10 +853,12 @@ pub struct CaptureEvent {
 impl std::fmt::Debug for CaptureEvent {
     /// Redacted `Debug`: prints structural metadata
     /// (`event_id`, `sensor_id`, `capture_mode`, `source_family`,
-    /// `captured_at`, `payload_hash`, `payload_ref`) plus the redacted
-    /// payload from [`CapturePayload`'s `Debug`]. Keeps `tracing`/panic
-    /// dumps free of user content. Use serde-JSON when a full dump is
-    /// intentionally needed at `trace`.
+    /// `captured_at`, `payload_hash`) plus the redacted payload from
+    /// [`CapturePayload`'s `Debug`]. `payload_ref` is replaced with
+    /// `<redacted>` because vault-relative paths can embed
+    /// producer-chosen filenames that may carry user-derived content.
+    /// Keeps `tracing`/panic dumps free of user content. Use serde-JSON
+    /// when a full dump is intentionally needed at `trace`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CaptureEvent")
             .field("event_id", &self.event_id)
@@ -865,7 +867,7 @@ impl std::fmt::Debug for CaptureEvent {
             .field("source_family", &self.source_family)
             .field("captured_at", &self.captured_at)
             .field("payload_hash", &self.payload_hash)
-            .field("payload_ref", &self.payload_ref)
+            .field("payload_ref", &"<redacted>")
             .field("payload", &self.payload)
             .finish_non_exhaustive()
     }

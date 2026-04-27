@@ -484,6 +484,25 @@ fn debug_redacts_sensitive_payload_fields() {
 }
 
 #[test]
+fn debug_redacts_payload_ref() {
+    // `payload_ref` is a vault-relative path whose filename portion is
+    // chosen by the producer and may carry user-derived content (e.g.
+    // `sources/cli/remember-my-ssn.txt`). The `Debug` impl must not
+    // leak it into tracing/panic dumps.
+    let mut ev = auto_event();
+    ev.payload_ref = "sources/hook/remember-my-ssn-123-45-6789.json".into();
+    let dump = format!("{ev:?}");
+    assert!(
+        !dump.contains("remember-my-ssn"),
+        "Debug must redact payload_ref: {dump}"
+    );
+    assert!(
+        !dump.contains("123-45-6789"),
+        "Debug must redact payload_ref: {dump}"
+    );
+}
+
+#[test]
 fn proactive_sensor_agent_must_match_author_agent() {
     // sensor_id = snr:local:proactive:claude-code:v1 but author is a
     // codex agent — must be rejected to block cross-agent spoofing.
