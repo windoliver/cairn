@@ -20,9 +20,10 @@ below).
 This document supersedes the historical matrix drafted inline in
 issue [#157](https://github.com/windoliver/cairn/issues/157). When
 this file merges, #157 closes and the issue body becomes a frozen
-historical record — the file in the repo is the only source of
-truth going forward, so PRs that change the brief can update
-coverage in the same diff.
+historical record — the file in the repo is the canonical
+reference for traceability, with the staleness caveats described in
+the "Enforcement" section below. It is not a release-signoff gate
+until automated enforcement is added.
 
 ## Column semantics
 
@@ -64,6 +65,7 @@ coverage in the same diff.
 
 | Design section | Implementation issues | Decisions / docs | Coverage notes |
 |---|---|---|---|
+| §0 Priority legend | _none_ | _none_ | Labels-only contract; the P0/P1/P2/P3 semantics live in the brief and are reflected through `priority:` and `phase:` GitHub labels. No code or doc owner — changes to the legend require a brief PR plus a sweep across labels. |
 | §1 Thesis / KISS / first principles | #3, #5, #7, #8, #9, #10, #11, #18, #19 | — | Contract-first, local-first, inspectable vault, and reference consumer covered. |
 | §2 Design principles | #3, #4, #5, #7, #8, #17, #18, #158 | #145 (resolved) | Non-negotiable boundaries enforced through architecture, schema, privacy, WAL, and plugin gates. |
 | §3 Vault layout / SQLite / Nexus | #5, #6, #20, #41–#49, #104–#106 | — | P0 authority remains SQLite; P1 Nexus is derived/additive. |
