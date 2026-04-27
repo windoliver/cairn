@@ -94,33 +94,10 @@ pub fn default_target_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cairn/skills/cairn"))
 }
 
-/// Parses the `cairn-idl: X.Y.Z` line from a `.version` file.
-///
-/// Returns `None` if the line is absent OR if the version string is not
-/// valid `X.Y.Z` (all three components must be non-negative integers with
-/// no trailing components). Callers treat `None` as malformed rather than
-/// absent so that `compare_versions` never receives an invalid input.
-fn parse_idl_version(version_file: &str) -> Option<String> {
-    for line in version_file.lines() {
-        if let Some(ver) = line.strip_prefix("cairn-idl: ") {
-            let ver = ver.trim();
-            // Only accept strict X.Y.Z to prevent malformed strings from
-            // silently falling through to compare_versions as "equal".
-            let mut parts = ver.splitn(4, '.');
-            let valid = parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
-                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
-                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
-                && parts.next().is_none();
-            return if valid { Some(ver.to_owned()) } else { None };
-        }
-    }
-    None
-}
-
 /// Compares two `X.Y.Z` version strings. Returns `Less` if `a < b`.
 ///
-/// Both inputs must be valid `X.Y.Z` (callers must pass output from
-/// `parse_idl_version`). Unparseable inputs map to `Equal` as a safe fallback.
+/// Inputs are expected to be valid `X.Y.Z`; unparseable values map to
+/// `Equal` as a safe fallback (avoids panics on unexpected input).
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(v: &str) -> Option<(u64, u64, u64)> {
         let mut it = v.split('.');
@@ -245,15 +222,41 @@ fn read_installed_version(
                 .context(format!("reading installed version from {}", version_path.display())))
         }
     };
-    // Exact match required: "contract: cairn.mcp.v1-extra" must not pass.
-    let has_contract = content.lines().any(|l| l == "contract: cairn.mcp.v1");
-    let idl_version = parse_idl_version(&content);
-    match (has_contract, idl_version) {
+    // Strict schema: exactly one 'contract: cairn.mcp.v1', exactly one valid
+    // 'cairn-idl: X.Y.Z', no other non-empty lines. Extra/duplicate fields would
+    // let a spoofed .version bypass the foreign-content preflight.
+    let mut contract_count = 0u32;
+    let mut idl_version: Option<String> = None;
+    let mut unknown_count = 0u32;
+    for line in content.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if line == "contract: cairn.mcp.v1" {
+            contract_count += 1;
+        } else if let Some(v) = line.strip_prefix("cairn-idl: ") {
+            let v = v.trim();
+            let mut parts = v.splitn(4, '.');
+            let valid = parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().is_none();
+            if valid {
+                idl_version = Some(v.to_owned());
+            } else {
+                unknown_count += 1;
+            }
+        } else {
+            unknown_count += 1;
+        }
+    }
+    let valid = contract_count == 1 && idl_version.is_some() && unknown_count == 0;
+    match (valid, idl_version) {
         (true, Some(v)) => Ok(Some(v)),
         _ if force => Ok(None),
         _ => anyhow::bail!(
-            "{} is not a valid Cairn .version file (must contain \
-             'contract: cairn.mcp.v1' and 'cairn-idl: X.Y.Z') — \
+            "{} is not a valid Cairn .version file (must contain exactly \
+             'contract: cairn.mcp.v1' and 'cairn-idl: X.Y.Z', nothing else) — \
              pass --force to overwrite it",
             version_path.display()
         ),
@@ -284,15 +287,33 @@ fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
                 dir.display()
             );
         }
-        // `examples` must be a real directory; a regular file there would cause
-        // writes to fail mid-install after generated files are already written.
+        // `examples` must be a real directory; validate its contents too so that
+        // a pre-existing `examples/` with arbitrary files does not bypass the guard.
         if name == "examples" {
-            let path = dir.join("examples");
-            if !std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+            const EXAMPLE_NAMES: &[&str] = &[
+                "01-remember-preference.md",
+                "02-forget-something.md",
+                "03-search-prior-decision.md",
+                "04-skillify-this.md",
+            ];
+            let examples_path = dir.join("examples");
+            if !std::fs::metadata(&examples_path).is_ok_and(|m| m.is_dir()) {
                 anyhow::bail!(
                     "{} exists but is not a directory — pass --force to overwrite",
-                    path.display()
+                    examples_path.display()
                 );
+            }
+            for ex_entry in std::fs::read_dir(&examples_path)
+                .with_context(|| format!("checking contents of {}", examples_path.display()))?
+            {
+                let ex_name = ex_entry.context("reading examples directory entry")?.file_name();
+                if !EXAMPLE_NAMES.iter().any(|&n| ex_name == n) {
+                    anyhow::bail!(
+                        "{} contains unexpected files but has no Cairn .version — \
+                         pass --force to install into this directory",
+                        examples_path.display()
+                    );
+                }
             }
         }
         // Byte-compare generated files against the embedded artifacts.
@@ -367,7 +388,16 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     create_dir_checked(&target.join("examples"))?;
 
     let skip_generated = match &installed_version {
-        Some(installed) if installed == current_idl_version && !opts.force => true,
+        Some(installed) if installed == current_idl_version && !opts.force => {
+            // Same version: still byte-check on-disk files against the embedded artifacts.
+            // Content can drift in development (e.g. two builds at the same version) and
+            // version equality alone is not sufficient proof of freshness.
+            let skill_current = std::fs::read_to_string(target.join("SKILL.md"))
+                .is_ok_and(|s| s == SKILL_MD);
+            let conventions_current = std::fs::read_to_string(target.join("conventions.md"))
+                .is_ok_and(|s| s == CONVENTIONS_MD);
+            skill_current && conventions_current
+        }
         Some(installed)
             if compare_versions(installed, current_idl_version) == std::cmp::Ordering::Greater =>
         {
@@ -735,9 +765,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_idl_version_extracts_version() {
-        let version_file = "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\n";
-        assert_eq!(parse_idl_version(version_file), Some("1.2.3".to_owned()));
+    fn read_installed_version_accepts_valid_schema() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vpath = tmp.path().join(".version");
+        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\n")
+            .expect("write");
+        let v = read_installed_version(&vpath, false).expect("parse");
+        assert_eq!(v, Some("1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn read_installed_version_rejects_malformed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let vpath = tmp.path().join(".version");
+        // Missing contract line.
+        std::fs::write(&vpath, "cairn-idl: 1.2.3\n").expect("write");
+        assert!(read_installed_version(&vpath, false).is_err());
+        // Malformed version string.
+        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: garbage\n").expect("write");
+        assert!(read_installed_version(&vpath, false).is_err());
+        // Extra unknown line.
+        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\nextra: field\n")
+            .expect("write");
+        assert!(read_installed_version(&vpath, false).is_err());
+        // --force overrides malformed content.
+        assert!(read_installed_version(&vpath, true).is_ok());
     }
 
     #[test]
