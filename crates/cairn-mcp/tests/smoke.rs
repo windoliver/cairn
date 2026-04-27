@@ -1,12 +1,12 @@
 // Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]
 
-// Force a real link edge on cairn-core so the boundary test exercises the
-// declared dependency, not just a Cargo.toml entry. `cairn-core` has no
-// public items yet, so we import it for its side effect only.
 use cairn_core as _;
 
+use cairn_mcp::error::McpTransportError;
+
 #[test]
-fn depends_on_core() {
-    assert_eq!(env!("CARGO_PKG_NAME"), "cairn-mcp");
+fn transport_error_displays() {
+    let e = McpTransportError::Initialize("handshake failed".to_owned());
+    assert!(e.to_string().contains("initialize"), "error display: {e}");
 }
