@@ -27,11 +27,15 @@ pub struct ParsedProjection {
     pub target_id: String,
     /// Version of the store snapshot this file was projected from.
     pub version: u32,
+    /// Memory kind — immutable after first write.
     pub kind: MemoryKind,
+    /// Memory class — immutable after first write.
     pub class: MemoryClass,
+    /// Visibility tier — immutable except via `promote`/`forget`.
     pub visibility: MemoryVisibility,
     /// Markdown body (everything after the closing `---`).
     pub body: String,
+    /// Free-form tags — mutable in resync.
     pub tags: Vec<String>,
     /// All frontmatter key/value pairs, including those not in the fixed set.
     pub raw_frontmatter: BTreeMap<String, serde_yaml::Value>,
@@ -41,11 +45,15 @@ pub struct ParsedProjection {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConflictOutcome {
+    /// Parsed edit has no version conflict and all immutable fields are unchanged.
     Clean,
+    /// Parsed edit conflicts with the current store state.
     Conflict {
-        /// Human-readable description for the quarantine file.
+        /// Human-readable description written to `.cairn/quarantine/`.
         marker: String,
+        /// Version the file claims to have been based on.
         file_version: u32,
+        /// Version currently held in the store.
         store_version: u32,
     },
 }
@@ -54,14 +62,20 @@ pub enum ConflictOutcome {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ResyncError {
+    /// Frontmatter YAML could not be parsed.
     #[error("failed to parse frontmatter: {0}")]
     ParseFailed(String),
+    /// Frontmatter is missing the required `id` field.
     #[error("frontmatter missing required field `id`")]
     MissingId,
+    /// Optimistic-concurrency or immutable-field conflict detected.
     #[error("version conflict (file={file_version}, store={store_version}): {reason}")]
     Conflict {
+        /// Version the file claims.
         file_version: u32,
+        /// Version currently in the store.
         store_version: u32,
+        /// Human-readable description of the conflict reason.
         reason: String,
     },
 }
@@ -89,6 +103,7 @@ struct FrontmatterDoc<'a> {
 
 impl MarkdownProjector {
     /// Render a `StoredRecord` to a markdown file.
+    #[must_use]
     pub fn project(&self, stored: &StoredRecord) -> ProjectedFile {
         let r = &stored.record;
         let doc = FrontmatterDoc {
@@ -107,8 +122,14 @@ impl MarkdownProjector {
         // pure struct, no Rc or custom Serialize — infallible
         #[allow(clippy::expect_used)]
         let yaml = serde_yaml::to_string(&doc).expect("FrontmatterDoc serializes infallibly");
-        // serde_yaml 0.9 prepends a "---\n" document-start marker; strip it
-        // so our format! string owns exactly one opening "---\n" fence.
+        // serde_yaml 0.9.34 does NOT prepend a "---\n" document-start marker for
+        // plain structs; debug_assert guards this so a version upgrade that adds
+        // the marker back fails fast rather than silently double-fencing.
+        debug_assert!(
+            !yaml.starts_with("---\n"),
+            "serde_yaml now prepends document-start marker; strip_prefix logic needs revisiting: {:?}",
+            &yaml[..yaml.len().min(60)]
+        );
         let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
         let content = format!("---\n{yaml}---\n\n{}", r.body);
         let path = PathBuf::from(format!("raw/{}_{}.md", r.kind.as_str(), r.id.as_str()));
@@ -125,6 +146,7 @@ impl MarkdownProjector {
     /// `current` is `None` when the record does not yet exist in the store
     /// (always `Clean`). When `current` is `Some`, checks version equality
     /// and immutable field mutations.
+    #[must_use]
     pub fn check_conflict(
         &self,
         _parsed: &ParsedProjection,
