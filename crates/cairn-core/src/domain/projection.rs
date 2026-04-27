@@ -223,10 +223,58 @@ impl MarkdownProjector {
     #[must_use]
     pub fn check_conflict(
         &self,
-        _parsed: &ParsedProjection,
-        _current: Option<&StoredRecord>,
+        parsed: &ParsedProjection,
+        current: Option<&StoredRecord>,
     ) -> ConflictOutcome {
-        todo!("Task 5")
+        let Some(current) = current else {
+            return ConflictOutcome::Clean;
+        };
+
+        // Immutable field check takes precedence over version rules.
+        if parsed.kind != current.record.kind {
+            return ConflictOutcome::Conflict {
+                marker: format!(
+                    "immutable field mutated: kind (file={}, store={})",
+                    parsed.kind.as_str(),
+                    current.record.kind.as_str()
+                ),
+                file_version: parsed.version,
+                store_version: current.version,
+            };
+        }
+        if parsed.class != current.record.class {
+            return ConflictOutcome::Conflict {
+                marker: format!(
+                    "immutable field mutated: class (file={}, store={})",
+                    parsed.class.as_str(),
+                    current.record.class.as_str()
+                ),
+                file_version: parsed.version,
+                store_version: current.version,
+            };
+        }
+        if parsed.visibility != current.record.visibility {
+            return ConflictOutcome::Conflict {
+                marker: format!(
+                    "immutable field mutated: visibility (file={}, store={})",
+                    parsed.visibility.as_str(),
+                    current.record.visibility.as_str()
+                ),
+                file_version: parsed.version,
+                store_version: current.version,
+            };
+        }
+
+        // Version check: only exact equality is clean.
+        if parsed.version == current.version {
+            ConflictOutcome::Clean
+        } else {
+            ConflictOutcome::Conflict {
+                marker: format!("stale: file={}, store={}", parsed.version, current.version),
+                file_version: parsed.version,
+                store_version: current.version,
+            }
+        }
     }
 }
 
@@ -318,5 +366,57 @@ mod tests {
         let content = "---\nid: 01HQZX9F5N0000000000000000\nversion: 1\n";
         let err = MarkdownProjector.parse(content).unwrap_err();
         assert!(matches!(err, ResyncError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn check_conflict_new_record_is_clean() {
+        let proj = MarkdownProjector;
+        // parsed.version = 1, current = None → Clean
+        let stored = crate::domain::record::tests::sample_stored_record(1);
+        let file = proj.project(&stored);
+        let parsed = proj.parse(&file.content).unwrap();
+        let outcome = proj.check_conflict(&parsed, None);
+        assert!(matches!(outcome, ConflictOutcome::Clean));
+    }
+
+    #[test]
+    fn check_conflict_version_match_is_clean() {
+        let proj = MarkdownProjector;
+        let stored = crate::domain::record::tests::sample_stored_record(3);
+        let file = proj.project(&stored);
+        let parsed = proj.parse(&file.content).unwrap();
+        // file version == store version → Clean
+        let outcome = proj.check_conflict(&parsed, Some(&stored));
+        assert!(matches!(outcome, ConflictOutcome::Clean));
+    }
+
+    #[test]
+    fn check_conflict_stale_file_is_conflict() {
+        let proj = MarkdownProjector;
+        // store is at version 5, file is at version 3 → Conflict
+        let stored_v5 = crate::domain::record::tests::sample_stored_record(5);
+        let stored_v3 = crate::domain::record::tests::sample_stored_record(3);
+        let file = proj.project(&stored_v3);
+        let parsed = proj.parse(&file.content).unwrap();
+        let outcome = proj.check_conflict(&parsed, Some(&stored_v5));
+        assert!(matches!(
+            outcome,
+            ConflictOutcome::Conflict { file_version: 3, store_version: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn check_conflict_immutable_field_mutation_is_conflict() {
+        let proj = MarkdownProjector;
+        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let file = proj.project(&stored);
+        // Tamper with kind in the content string (sample_record uses "user"; replace with valid "feedback")
+        let tampered = file.content.replace(
+            &format!("kind: {}", stored.record.kind.as_str()),
+            "kind: feedback",
+        );
+        let parsed = proj.parse(&tampered).unwrap();
+        let outcome = proj.check_conflict(&parsed, Some(&stored));
+        assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
     }
 }
