@@ -95,16 +95,32 @@ pub fn default_target_dir() -> Result<PathBuf> {
 }
 
 /// Parses the `cairn-idl: X.Y.Z` line from a `.version` file.
+///
+/// Returns `None` if the line is absent OR if the version string is not
+/// valid `X.Y.Z` (all three components must be non-negative integers with
+/// no trailing components). Callers treat `None` as malformed rather than
+/// absent so that `compare_versions` never receives an invalid input.
 fn parse_idl_version(version_file: &str) -> Option<String> {
     for line in version_file.lines() {
         if let Some(ver) = line.strip_prefix("cairn-idl: ") {
-            return Some(ver.trim().to_owned());
+            let ver = ver.trim();
+            // Only accept strict X.Y.Z to prevent malformed strings from
+            // silently falling through to compare_versions as "equal".
+            let mut parts = ver.splitn(4, '.');
+            let valid = parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().and_then(|s| s.parse::<u64>().ok()).is_some()
+                && parts.next().is_none();
+            return if valid { Some(ver.to_owned()) } else { None };
         }
     }
     None
 }
 
 /// Compares two `X.Y.Z` version strings. Returns `Less` if `a < b`.
+///
+/// Both inputs must be valid `X.Y.Z` (callers must pass output from
+/// `parse_idl_version`). Unparseable inputs map to `Equal` as a safe fallback.
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     fn parse(v: &str) -> Option<(u64, u64, u64)> {
         let mut it = v.split('.');
@@ -213,12 +229,17 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Reject symlinks anywhere in the target path (catches symlinked ancestors).
     reject_symlink_ancestors(target)?;
 
+    // Read .version before creating directories so a malformed/symlinked .version
+    // fails closed without leaving filesystem side effects behind.
+    let installed_version = read_installed_version(&target.join(".version"), opts.force)?;
+
     // Refuse to install into a non-empty directory that has no Cairn .version.
-    // Must run before create_dir_all so we see the pre-install state.
-    if !opts.force && target.is_dir() && !target.join(".version").exists() {
+    // Run before create_dir_all so we see the pre-install state.
+    // Fail closed on read_dir errors (permission errors are not proof of emptiness).
+    if !opts.force && installed_version.is_none() && target.is_dir() {
         let is_non_empty = std::fs::read_dir(target)
-            .ok()
-            .and_then(|mut e| e.next())
+            .with_context(|| format!("checking contents of {}", target.display()))?
+            .next()
             .is_some();
         if is_non_empty {
             anyhow::bail!(
@@ -232,8 +253,6 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Create target dir and examples/ subdir.
     std::fs::create_dir_all(target.join("examples"))
         .with_context(|| format!("creating {}", target.join("examples").display()))?;
-
-    let installed_version = read_installed_version(&target.join(".version"), opts.force)?;
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
