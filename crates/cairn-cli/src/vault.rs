@@ -72,6 +72,18 @@ const PURPOSE_MD: &str = "# Purpose\n\n<!-- Why does this vault exist? -->\n";
 /// written.
 pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     let vault = &opts.vault_path;
+
+    // Reject a symlinked vault root — all subsequent paths are derived from it,
+    // so a symlink here can route every write outside the intended directory.
+    if let Ok(meta) = std::fs::symlink_metadata(vault) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink — pass the real vault path to bootstrap",
+                vault.display()
+            );
+        }
+    }
+
     let config_path = vault.join(".cairn/config.yaml");
     let db_path = vault.join(".cairn/cairn.db");
 
@@ -155,12 +167,20 @@ fn write_once(
 ) -> Result<()> {
     use std::io::Write as _;
 
-    // Reject symlinks at the final target — writing through one can affect
-    // paths outside the vault. symlink_metadata does not follow symlinks.
+    // Inspect the final target without following symlinks.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
+        let ft = meta.file_type();
+        if ft.is_symlink() {
             anyhow::bail!(
                 "{} is a symlink — bootstrap will not write through it",
+                path.display()
+            );
+        }
+        if !ft.is_file() {
+            // A directory or special file at a placeholder path means the
+            // vault is in an inconsistent state; bootstrap cannot repair it.
+            anyhow::bail!(
+                "{} exists but is not a regular file — bootstrap cannot overwrite it",
                 path.display()
             );
         }
@@ -168,7 +188,7 @@ fn write_once(
             receipt.files_skipped.push(path.to_owned());
             return Ok(());
         }
-        // force=true, real file — fall through to atomic overwrite
+        // force=true, regular file — fall through to atomic overwrite
     }
 
     // Write to a randomly-named temp file in the same directory.
