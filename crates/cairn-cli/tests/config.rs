@@ -1,6 +1,6 @@
 //! Integration tests for the cairn-cli config loader (brief §3.1, §6.5).
 
-use cairn_cli::config::{CliOverrides, load, write_default};
+use cairn_cli::config::{CliOverrides, load};
 use cairn_core::config::{CairnConfig, StoreKind};
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
@@ -88,27 +88,14 @@ fn invalid_config_returns_error() {
 // ── Bootstrap ─────────────────────────────────────────────────────────────
 
 #[test]
-fn bootstrap_writes_config_file() {
+fn bootstrap_config_round_trips() {
+    use cairn_cli::vault::{BootstrapOpts, bootstrap};
     let dir = tempfile::tempdir().unwrap();
-    write_default(dir.path()).unwrap();
-    assert!(dir.path().join(".cairn/config.yaml").exists());
-}
-
-#[test]
-fn bootstrap_round_trips_to_default() {
-    let dir = tempfile::tempdir().unwrap();
-    write_default(dir.path()).unwrap();
+    bootstrap(&BootstrapOpts {
+        vault_path: dir.path().to_path_buf(),
+        force: false,
+    })
+    .unwrap();
     let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(config, CairnConfig::default());
-}
-
-#[test]
-fn bootstrap_fails_if_file_already_exists() {
-    let dir = tempfile::tempdir().unwrap();
-    write_yaml(dir.path(), "vault:\n  name: existing\n");
-    let err = write_default(dir.path()).unwrap_err();
-    assert!(
-        format!("{err}").contains("already exists"),
-        "should describe the conflict: {err}"
-    );
+    assert_eq!(config, cairn_core::config::CairnConfig::default());
 }
