@@ -235,6 +235,9 @@ fn main() -> ExitCode {
             Err(e) => {
                 // Hard-fail only for NotFound (explicit name that isn't registered).
                 // NoneResolved is tolerated — all verbs return Internal anyway until #9.
+                // NOTE: downcast_ref works only when no .context() wraps resolve_vault's error.
+                // If #9 adds .context(...) at this call site, NotFound will silently become
+                // tolerated. Update this guard when wiring the store.
                 let is_not_found = e
                     .downcast_ref::<cairn_cli::vault::VaultError>()
                     .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
@@ -243,7 +246,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(78); // EX_CONFIG
                 }
                 // NoneResolved and other errors are tolerated until the store is wired (#9).
-                let _ = e;
+                let _e = e;
             }
         }
     }
