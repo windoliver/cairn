@@ -294,6 +294,8 @@ mod tests {
         assert_eq!(parsed.kind, original.record.kind);
         assert_eq!(parsed.body, original.record.body);
         assert_eq!(parsed.tags, original.record.tags);
+        assert_eq!(parsed.class, original.record.class);
+        assert_eq!(parsed.visibility, original.record.visibility);
     }
 
     #[test]
