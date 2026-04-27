@@ -252,14 +252,14 @@ CREATE INDEX wal_steps_resume_idx
 
 > **Brief deviation, called out for review.** The brief shows `used (...,
 > UNIQUE(operation_id, nonce))`. This spec strengthens it to
-> `operation_id PRIMARY KEY` plus `UNIQUE(issuer, sequence)` and
-> `UNIQUE(issuer, nonce)`, so SQLite alone — independent of caller code
-> — guarantees one ledger row per `operation_id`, monotonic issuer
-> sequences, and per-issuer nonce uniqueness. This is consistent with
-> §5.6's claim that "operation_id is the idempotency key" and with
-> `wal_ops.operation_id` being a PK. Flagging as a brief refinement to
-> propose; if the brief is intentionally weaker, revert to the original
-> constraint.
+> `operation_id PRIMARY KEY` + `UNIQUE(issuer, sequence)` +
+> `UNIQUE(issuer, nonce)` + a deferred FK to `wal_ops`, plus the two
+> sequence-monotonicity triggers above so SQLite — not caller code —
+> rejects rewinds and keeps `issuer_seq.high_water` in lock-step with
+> the ledger. This is consistent with §5.6's claim that "operation_id
+> is the idempotency key" and with `wal_ops.operation_id` being a PK.
+> Flag as a brief refinement; revert if the brief intentionally permits
+> non-advancing sequences.
 
 ```sql
 -- Replay-attack ledger (§4.2). The schema enforces every anti-replay
@@ -274,14 +274,40 @@ CREATE TABLE used (
   issuer        TEXT NOT NULL,
   sequence      INTEGER NOT NULL CHECK (sequence >= 0),
   committed_at  INTEGER NOT NULL,
-  UNIQUE (issuer, sequence),    -- anti-rewind: each issuer's sequence is monotonic + unique
+  UNIQUE (issuer, sequence),    -- per-issuer sequence uniqueness (no duplicate values)
   UNIQUE (issuer, nonce),       -- nonce uniqueness scoped to the issuer's trust boundary
-  -- A replay-ledger row may only exist for a real WAL op. Deferred so the
-  -- §5.6 P0 single-transaction model can insert wal_ops + used in either
-  -- order within one BEGIN IMMEDIATE … COMMIT.
   FOREIGN KEY (operation_id) REFERENCES wal_ops(operation_id)
     DEFERRABLE INITIALLY DEFERRED
 );
+
+-- Anti-rewind: an insert into `used` must strictly advance
+-- issuer_seq.high_water. UNIQUE alone prevents reusing a sequence value
+-- but not rewinding to an unused-but-lower one (e.g., commit seq 5 after
+-- seq 10). The trigger atomically rejects non-advancing inserts and
+-- writes the new high-water in the same transaction.
+CREATE TRIGGER used_sequence_must_advance
+  BEFORE INSERT ON used
+  FOR EACH ROW
+  WHEN EXISTS (
+    SELECT 1 FROM issuer_seq
+     WHERE issuer = NEW.issuer
+       AND high_water >= NEW.sequence
+  )
+BEGIN
+  SELECT RAISE(ABORT,
+    'used.sequence must strictly advance issuer_seq.high_water');
+END;
+
+CREATE TRIGGER used_advance_high_water
+  AFTER INSERT ON used
+  FOR EACH ROW
+BEGIN
+  INSERT INTO issuer_seq (issuer, high_water)
+    VALUES (NEW.issuer, NEW.sequence)
+    ON CONFLICT(issuer) DO UPDATE
+      SET high_water = excluded.high_water
+      WHERE excluded.high_water > issuer_seq.high_water;
+END;
 
 CREATE TABLE issuer_seq (
   issuer      TEXT NOT NULL PRIMARY KEY,
@@ -313,6 +339,26 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
 - Index `lock_holders_reclaim_idx ON lock_holders(reclaim_deadline)` —
   GC step in the acquisition transaction filters by deadline (§5.6
   acquisition protocol, step 1).
+- **Sync triggers** keep `locks.holder_count` consistent with the
+  number of `lock_holders` rows. The brief stores the count
+  redundantly because the §5.6 acquisition protocol reads it inside
+  the same transaction as the holder rows; without sync triggers the
+  two can diverge across crash recovery, retry bugs, or hand repair,
+  and the lock manager would make decisions from contradictory state.
+  - `lock_holders_count_after_insert` — `AFTER INSERT ON lock_holders`
+    sets `locks.holder_count = (SELECT COUNT(*) FROM lock_holders WHERE
+    scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key)`.
+  - `lock_holders_count_after_delete` — `AFTER DELETE ON lock_holders`
+    same recomputation against `OLD`. Includes the case
+    `holder_count = 0` (`mode` is also flipped to `'free'` by the
+    storage impl in #46; the trigger only enforces the count).
+  - The triggers reject negative counts via the table's
+    `CHECK (holder_count >= 0)`.
+
+  Result: any insert or delete on `lock_holders` is paired in the same
+  SQLite write with `locks.holder_count` reflecting reality. Drift is
+  detected at the `verify_schema_integrity_at` allowlist (the triggers
+  are app-owned objects that must be present).
 - `daemon_incarnation` singleton — `only_one INTEGER PRIMARY KEY CHECK
   (only_one = 1)`, `incarnation TEXT NOT NULL`, `boot_id TEXT NOT NULL`,
   `started_at INTEGER NOT NULL`.
@@ -360,8 +406,12 @@ cairn_store_sqlite::open(path: &Path) -> Result<Connection, StoreError>
   │                                      -- table. Skipped only if the DB has no
   │                                      -- schema_migrations table at all (i.e.,
   │                                      -- a fresh vault before any migration ran).
+  ├─ verify_schema_integrity_at(&conn,   -- §5.1 shape check at the CURRENT
+  │     current_user_version)?           -- user_version, before to_latest mutates.
+  │                                      -- Uses the per-version allowlist below.
   ├─ migrations().to_latest(&mut conn)   -- idempotent on up-to-date DB
-  ├─ verify_schema_integrity(&conn)?     -- §5.1 allowlist shape check
+  ├─ verify_schema_integrity_at(&conn,   -- §5.1 shape check at HEAD after migration.
+  │     head_user_version)?
   └─ Ok(conn)
 ```
 
@@ -392,29 +442,58 @@ struct ExpectedObject {
                                  // trailing-`;` stripped, lowercased keywords)
 }
 
-const EXPECTED_OBJECTS: &[ExpectedObject] = &[
-    // records + edges (0001)
-    ExpectedObject { object_type: "table",   name: "records",       sql_hash: "..." },
-    ExpectedObject { object_type: "index",   name: "records_active_target_idx", sql_hash: "..." },
-    // ... every app-owned object listed by name and hash ...
-    ExpectedObject { object_type: "view",    name: "records_latest", sql_hash: "..." },
-    ExpectedObject { object_type: "trigger", name: "records_fts_ai", sql_hash: "..." },
-    // records_fts is a virtual-table declaration only — its `sql` column is the
-    // CREATE VIRTUAL TABLE statement, which is stable. Its shadow tables
-    // (records_fts_data etc.) are NOT in this list.
+// One expected-object set per migration step. EXPECTED_BY_VERSION[N] is the
+// schema after migration N has applied (and before N+1 has). The pre-migration
+// check picks the entry matching the DB's current user_version; the
+// post-migration check picks the entry for the head version. A vault that
+// drifted at any earlier-than-head version is rejected before we mutate it.
+const EXPECTED_BY_VERSION: &[&[ExpectedObject]] = &[
+    &[],                             // version 0: empty DB, no objects
+    EXPECTED_AFTER_0001,             // version 1: records / fts / edges / triggers / view / schema_migrations
+    EXPECTED_AFTER_0002,             // version 2: + wal_ops, wal_op_deps, wal_steps + their indexes
+    EXPECTED_AFTER_0003,             // version 3: + replay tables + sequence triggers
+    EXPECTED_AFTER_0004,             // version 4: + locks, lock_holders, daemon_incarnation, reader_fence + sync triggers
+    EXPECTED_AFTER_0005,             // version 5 (= head): + consent_journal
 ];
 
-fn verify_schema_integrity(conn: &Connection) -> Result<(), StoreError> {
-    for obj in EXPECTED_OBJECTS {
+// Each EXPECTED_AFTER_NNNN is a hand-listed slice with one row per
+// app-owned object the migration adds, e.g.:
+//   const EXPECTED_AFTER_0001: &[ExpectedObject] = &[
+//       ExpectedObject { object_type: "table",   name: "schema_migrations", sql_hash: "..." },
+//       ExpectedObject { object_type: "table",   name: "records",           sql_hash: "..." },
+//       ExpectedObject { object_type: "index",   name: "records_active_target_idx", sql_hash: "..." },
+//       ExpectedObject { object_type: "view",    name: "records_latest",    sql_hash: "..." },
+//       ExpectedObject { object_type: "trigger", name: "records_fts_ai",    sql_hash: "..." },
+//       // ... all 0001 objects ...
+//   ];
+// records_fts is a virtual-table declaration only — its `sql` column is
+// the CREATE VIRTUAL TABLE statement, which is stable. Its shadow tables
+// (records_fts_data etc.) are NOT in this list.
+
+fn verify_schema_integrity_at(conn: &Connection, version: usize)
+    -> Result<(), StoreError>
+{
+    let expected = EXPECTED_BY_VERSION
+        .get(version)
+        .ok_or(StoreError::IncompatibleSchema { found: version, expected: HEAD })?;
+    for obj in expected.iter() {
         let actual_sql_hash = lookup_and_hash(conn, obj.object_type, obj.name)?;
         match actual_sql_hash {
             None => return Err(StoreError::SchemaDrift {
-                missing: Some(obj.name), .. }),
+                object: obj.name.into(),
+                kind: SchemaDriftKind::Missing,
+            }),
             Some(h) if h != obj.sql_hash => return Err(StoreError::SchemaDrift {
-                mismatch: Some(obj.name), .. }),
+                object: obj.name.into(),
+                kind: SchemaDriftKind::SqlMismatch {
+                    expected: obj.sql_hash, actual: h,
+                },
+            }),
             _ => {}
         }
     }
+    // Deny-by-default sweep over executable objects on app tables.
+    deny_unexpected_objects_on_app_tables(conn, expected)?;
     Ok(())
 }
 ```
@@ -429,13 +508,13 @@ Properties:
   altered view body, hand-edited `records` schema all surface as
   `SchemaDrift`.
 - **Executable objects on app tables are deny-by-default.** After the
-  allowlist pass, `verify_schema_integrity` runs a second sweep that
-  enumerates every `index`, `trigger`, and `view` in `sqlite_master`
-  whose `tbl_name` is an app-owned table (`records`, `edges`, `wal_*`,
-  `used`, `issuer_seq`, `outstanding_challenges`, `locks`,
-  `lock_holders`, `daemon_incarnation`, `reader_fence`,
-  `consent_journal`, `schema_migrations`) and rejects any that are not
-  in `EXPECTED_OBJECTS`. This closes the "operator added an
+  allowlist pass, `verify_schema_integrity_at` runs a second sweep
+  that enumerates every `index`, `trigger`, and `view` in
+  `sqlite_master` whose `tbl_name` is an app-owned table (`records`,
+  `edges`, `wal_*`, `used`, `issuer_seq`, `outstanding_challenges`,
+  `locks`, `lock_holders`, `daemon_incarnation`, `reader_fence`,
+  `consent_journal`, `schema_migrations`) and rejects any not in the
+  per-version expected slice. This closes the "operator added an
   `AFTER UPDATE` trigger on `records` that silently mutates rows" hole.
   Engine-owned `sqlite_autoindex_*` rows are still excluded by name
   prefix.
@@ -444,10 +523,11 @@ Properties:
   audit table the operator created in the same DB) does not trip the
   check.
 
-The `sql_hash` constants are generated and asserted by a unit test
-(`expected_objects_match_head`) that recomputes them from a freshly-
-migrated `:memory:` DB. Adding a migration regenerates the constants
-and must update `EXPECTED_OBJECTS` in the same commit; CI gates on the
+The `sql_hash` constants for every `EXPECTED_AFTER_NNNN` slice are
+generated and asserted by a unit test (`expected_objects_match_each_version`)
+that walks `EXPECTED_BY_VERSION`, applies migrations 0..=N to a fresh
+`:memory:` DB, and recomputes the hashes. Adding a migration appends a
+new `EXPECTED_AFTER_NNNN` slice in the same commit; CI gates on the
 unit test.
 
 > Note on residual risk: this is a **shape** check, not a **history**
@@ -584,7 +664,9 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   - views: `records_latest`
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
-    `edges_updates_immutable_after_insert`
+    `edges_updates_immutable_after_insert`,
+    `used_sequence_must_advance`, `used_advance_high_water`,
+    `lock_holders_count_after_insert`, `lock_holders_count_after_delete`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
@@ -670,6 +752,20 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `StoreError::MigrationHistoryMismatch` AND assert that
   `user_version` is still 2 (i.e., no further migrations were applied
   past the diverged history).
+- `shape_check_runs_before_apply` — apply migrations 1..=2; manually
+  `DROP TRIGGER records_fts_au`; call `open()`. Assert
+  `StoreError::SchemaDrift` and that `user_version` is still 2 — the
+  pre-migration shape check rejects drift before `to_latest` mutates
+  the vault.
+- `replay_sequence_rewind_rejected` — insert into `wal_ops` then
+  `used` with `(issuer='alice', sequence=10)`; expect success and
+  `issuer_seq.high_water = 10`. Insert another wal_ops + used row with
+  `(issuer='alice', sequence=5)`; expect ABORT via
+  `used_sequence_must_advance`. Insert with `sequence=11`; expect
+  success and `high_water = 11`.
+- `lock_holder_count_stays_in_sync` — insert two `lock_holders` rows
+  for the same scope; assert `locks.holder_count = 2`. Delete one;
+  assert `holder_count = 1`. Delete the other; assert `holder_count = 0`.
 
 ### 7.3 Snapshot tests (`insta`)
 
