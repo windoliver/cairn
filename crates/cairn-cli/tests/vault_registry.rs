@@ -668,3 +668,97 @@ mod cli_vault_remove {
         assert!(!reg.contains("solo"), "vault should be deregistered");
     }
 }
+
+mod cli_vault_flag {
+    use std::process::Command;
+
+    fn cairn() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_cairn"))
+    }
+
+    #[test]
+    fn vault_flag_unknown_name_exits_78() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["--vault", "nosuchvault", "search"])
+            .output()
+            .expect("cairn --vault nosuchvault search");
+        assert_eq!(
+            out.status.code(),
+            Some(78),
+            "expected EX_CONFIG(78) for unknown vault name, got: {:?}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("nosuchvault"),
+            "expected vault name in error: {stderr}"
+        );
+    }
+
+    #[test]
+    fn cairn_vault_env_resolves_by_name() {
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_dir.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let reg_path = reg_dir.path().join("vaults.toml");
+
+        // Register the vault
+        cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args([
+                "vault", "add",
+                vault_dir.path().to_str().unwrap(),
+                "--name", "envtest",
+            ])
+            .output()
+            .unwrap();
+
+        // Run a verb with CAIRN_VAULT set — it resolves OK but still returns
+        // Internal (store not wired) → exit 1, not 78
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .env("CAIRN_VAULT", "envtest")
+            .args(["search"])
+            .output()
+            .expect("CAIRN_VAULT=envtest cairn search");
+        assert_ne!(
+            out.status.code(),
+            Some(78),
+            "should not fail with EX_CONFIG(78) when vault resolves: {:?}",
+            out.status
+        );
+    }
+
+    #[test]
+    fn vault_flag_path_resolves_directly() {
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_dir.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args([
+                "--vault",
+                vault_dir.path().to_str().unwrap(),
+                "search",
+            ])
+            .output()
+            .expect("cairn --vault <path> search");
+        // Path resolution succeeds → verb may fail with Internal (1) but not 78
+        assert_ne!(
+            out.status.code(),
+            Some(78),
+            "path-based --vault should not error as EX_CONFIG: {:?}",
+            out.status
+        );
+    }
+}

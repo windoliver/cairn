@@ -20,6 +20,13 @@ fn build_command() -> clap::Command {
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
+        .arg(
+            clap::Arg::new("vault")
+                .long("vault")
+                .value_name("NAME_OR_PATH")
+                .global(true)
+                .help("Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)"),
+        )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
@@ -196,6 +203,50 @@ fn main() -> ExitCode {
             };
         }
     };
+
+    // Resolve --vault flag or CAIRN_VAULT env (§3.3 precedence 1 + 2).
+    // Skip for `vault` and `bootstrap` management subcommands — they operate on the
+    // registry/filesystem itself, not on a single vault's data.
+    let explicit_vault: Option<String> = matches
+        .get_one::<String>("vault")
+        .cloned()
+        .or_else(|| std::env::var("CAIRN_VAULT").ok());
+
+    let active_subcommand = matches.subcommand_name().unwrap_or("");
+    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins");
+
+    if needs_vault_guard {
+        let store = match registry_store() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cairn: registry path error — {e:#}");
+                return ExitCode::from(78);
+            }
+        };
+        let resolve_result = cairn_cli::vault::resolve_vault(cairn_cli::vault::ResolveOpts {
+            explicit: explicit_vault,
+            cwd: std::env::current_dir().ok(),
+            store: &store,
+        });
+        match resolve_result {
+            Ok(_vault_path) => {
+                // vault_path resolved; will be passed to store context in #9
+            }
+            Err(e) => {
+                // Hard-fail only for NotFound (explicit name that isn't registered).
+                // NoneResolved is tolerated — all verbs return Internal anyway until #9.
+                let is_not_found = e
+                    .downcast_ref::<cairn_cli::vault::VaultError>()
+                    .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
+                if is_not_found {
+                    eprintln!("cairn: {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+                // NoneResolved and other errors are tolerated until the store is wired (#9).
+                let _ = e;
+            }
+        }
+    }
 
     match matches.subcommand() {
         Some(("ingest", sub)) => verbs::ingest::run(sub),
