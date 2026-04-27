@@ -123,12 +123,12 @@ pub async fn resync_handler(
             tokio::fs::create_dir_all(&quarantine_dir)
                 .await
                 .with_context(|| format!("create quarantine dir {}", quarantine_dir.display()))?;
-            let timestamp = std::time::SystemTime::now()
+            let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
-            let quarantine_path =
-                quarantine_dir.join(format!("{timestamp}-{}.rejected", &parsed.target_id));
+                .as_nanos();
+            let quarantine_path = quarantine_dir
+                .join(format!("{nanos}-{}.rejected", &parsed.target_id));
             tokio::fs::write(&quarantine_path, &content)
                 .await
                 .with_context(|| format!("write quarantine {}", quarantine_path.display()))?;

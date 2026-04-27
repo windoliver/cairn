@@ -165,9 +165,14 @@ impl MarkdownProjector {
 
         let version = map
             .get("version")
-            .and_then(serde_yaml::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(1);
+            .ok_or_else(|| ResyncError::ParseFailed("missing `version` field".to_owned()))
+            .and_then(|v| {
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| {
+                        ResyncError::ParseFailed("invalid `version`: must be a non-negative integer within u32 range".to_owned())
+                    })
+            })?;
 
         let kind_str = map
             .get("kind")
@@ -271,6 +276,22 @@ impl MarkdownProjector {
                     parsed.visibility.as_str(),
                     current.record.visibility.as_str()
                 ),
+                file_version: parsed.version,
+                store_version: current.version,
+            };
+        }
+        // Compare scope via YAML value: project() serializes ScopeTuple into frontmatter,
+        // and parse() captures it in raw_frontmatter — compare them here to catch drift.
+        let store_scope_val =
+            serde_yaml::to_value(&current.record.scope).unwrap_or(serde_yaml::Value::Null);
+        let file_scope_val = parsed
+            .raw_frontmatter
+            .get("scope")
+            .cloned()
+            .unwrap_or(serde_yaml::Value::Null);
+        if file_scope_val != store_scope_val {
+            return ConflictOutcome::Conflict {
+                marker: "immutable field mutated: scope".to_owned(),
                 file_version: parsed.version,
                 store_version: current.version,
             };
