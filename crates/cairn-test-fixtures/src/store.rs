@@ -136,6 +136,9 @@ impl MemoryStore for FixtureStore {
     }
 
     async fn upsert(&self, record: MemoryRecord) -> Result<StoredRecord, StoreError> {
+        record
+            .validate()
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
         let mut guard = self
             .inner
             .lock()

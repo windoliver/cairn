@@ -74,6 +74,24 @@ pub async fn resync_handler(
         _ => anyhow::anyhow!("ingest --resync: {e:?}"),
     })?;
 
+    // Guard against ID misdirection: the filename encodes the record id (last `_`-delimited
+    // segment of the stem). If the id in the frontmatter doesn't match the filename, the file
+    // has been tampered with or mis-addressed and must not be applied.
+    // Validate that the frontmatter id matches the id embedded in the filename.
+    // project() encodes the record id as the last `_`-delimited segment of the stem.
+    let path_id_mismatch = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|stem| stem.rsplit_once('_').map(|(_, id)| id.to_owned()))
+        .is_some_and(|path_id| path_id != parsed.target_id.as_str());
+    if path_id_mismatch {
+        anyhow::bail!(
+            "ingest --resync: frontmatter id `{}` does not match id embedded in filename {}",
+            parsed.target_id,
+            path.display()
+        );
+    }
+
     let current = store.get(&parsed.target_id).await.context("store: get")?;
 
     let outcome = projector.check_conflict(&parsed, current.as_ref());
