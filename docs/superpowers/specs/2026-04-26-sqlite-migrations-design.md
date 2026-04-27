@@ -194,33 +194,20 @@ Verbatim from brief §3 (lines ~340-426):
   dies) creates a stale-read hazard where downstream readers observe
   conflicting "latest" facts depending on later lifecycle changes.
 
-  The dead-source-hides-live-dst concern from earlier review rounds
-  is closed at the schema level via the
-  `edges_drop_updates_when_src_tombstoned` trigger:
+  **Supersession is durable, even across forget of the source.**
+  An earlier review round proposed a trigger that deletes a
+  source's outgoing `updates` edges on tombstone — that has been
+  removed, because it contradicts the durable-supersession
+  invariant. Tombstoning the source does **not** revive the
+  superseded destination in `records_latest`; the `updates` edge
+  remains as durable supersession history.
 
-  ```sql
-  CREATE TRIGGER edges_drop_updates_when_src_tombstoned
-    AFTER UPDATE OF tombstoned ON records
-    FOR EACH ROW
-    WHEN NEW.tombstoned = 1 AND OLD.tombstoned = 0
-  BEGIN
-    DELETE FROM edges
-      WHERE src = NEW.record_id
-        AND kind = 'updates';
-  END;
-  ```
-
-  When the §5.6 forget pipeline sets `tombstoned = 1` on a source
-  row, this trigger atomically removes its outgoing `updates` edges
-  in the same SQLite transaction. A crash between the tombstone
-  write and the §5.6 Phase B `edges.drain` step is no longer
-  observable — the edge is gone before any reader could see the
-  inconsistent state. The trigger is keyed on the
-  `OLD.tombstoned = 0 → NEW.tombstoned = 1` transition specifically
-  so it does not refire on idempotent retries. The trigger only
-  removes the *src*'s outgoing `updates` edges; cleanup of edges
-  pointing at a tombstoned dst is unnecessary because dst remains
-  filtered out of `records_latest` by `tombstoned = 0` regardless.
+  The forget pipeline (§5.6 Phase B `edges.drain`) is the
+  authoritative path that removes edges; it operates as part of an
+  operation that *cascades* through both src and dst when needed.
+  A `forget_record(src)` that intends to revive `dst` must
+  explicitly include `dst` in its plan; merely tombstoning `src`
+  preserves the supersession.
 - `edges` table: columns `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
   `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`,
   plus referential integrity that the brief leaves implicit:
@@ -722,10 +709,34 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   )
   ```
 
-  **Both `mode` and `holder_count` are derived from `lock_holders`
-  via triggers** so caller statement ordering does not matter. The
-  schema reduces to: callers manage `lock_holders` rows; the
-  database derives `locks.(mode, holder_count)` automatically.
+  **`mode` and `holder_count` are derived from `lock_holders`
+  via triggers**, but the parent `locks` row itself must exist
+  before any `lock_holders` insert (FK dependency). The §5.6
+  acquisition protocol creates the parent row in the same
+  transaction:
+
+  ```sql
+  -- Path (a) "no row yet" (first acquisition for a new scope):
+  INSERT INTO locks (scope_kind, scope_key, mode, holder_count, epoch, ...)
+    VALUES (?, ?, 'free', 0, 1, ...);
+  -- Then insert the holder; the AFTER INSERT trigger derives the
+  -- correct (mode, holder_count) from the now-existing lock_holders set.
+  INSERT INTO lock_holders (..., mode_requested = 'exclusive');
+  ```
+
+  Inserting `('free', 0)` is the only initial state the joint CHECK
+  permits with zero holders. The holder insert immediately fires
+  the AFTER INSERT trigger which transitions the row to
+  `('exclusive', 1)` or `('shared', 1)` based on the holder's
+  `mode_requested`. Subsequent acquisitions (paths b, c) UPDATE
+  the existing row; the storage impl never has to manage `mode` or
+  `holder_count` directly.
+
+  Caller-side contract:
+  - First holder for a new scope: `INSERT locks (..., 'free', 0, ...)`
+    then `INSERT lock_holders`.
+  - Subsequent holders / reclaim: only `INSERT lock_holders` (or
+    DELETE on release). Triggers maintain `locks` from there.
 
   To do this, `lock_holders` carries a `mode_requested TEXT NOT NULL
   CHECK (mode_requested IN ('shared', 'exclusive'))` column (one
@@ -1131,21 +1142,19 @@ Properties:
 - **Drift cases caught.** Dropped trigger, dropped partial index,
   altered view body, hand-edited `records` schema all surface as
   `SchemaDrift`.
-- **Executable objects on app tables are deny-by-default.** After the
-  allowlist pass, `verify_schema_integrity_at` runs a second sweep
-  that enumerates every `index`, `trigger`, and `view` in
-  `sqlite_master` whose `tbl_name` is an app-owned table (`records`,
-  `edges`, `wal_*`, `used`, `issuer_seq`, `outstanding_challenges`,
-  `locks`, `lock_holders`, `daemon_incarnation`, `reader_fence`,
-  `consent_journal`, `schema_migrations`) and rejects any not in the
-  per-version expected slice. This closes the "operator added an
-  `AFTER UPDATE` trigger on `records` that silently mutates rows" hole.
-  Engine-owned `sqlite_autoindex_*` rows are still excluded by name
-  prefix.
-- **Standalone user objects are allowed.** A user-installed view, index,
-  or trigger whose `tbl_name` is *not* an app-owned table (e.g., an
-  audit table the operator created in the same DB) does not trip the
-  check.
+- **All unexpected triggers and views are rejected, regardless of
+  `tbl_name`.** A trigger attached to a user table can still
+  execute arbitrary `INSERT`/`UPDATE`/`DELETE` against app-owned
+  tables in its body, so scoping the deny check by `tbl_name`
+  alone is insufficient. The check enumerates every row in
+  `sqlite_master` of type `trigger` or `view` and rejects any that
+  is not in the per-version expected slice. Engine-owned
+  `sqlite_autoindex_*` rows are still excluded by name prefix.
+- **User-owned tables and indexes are allowed.** Tables and
+  indexes are inert (they cannot execute logic), so a
+  user-installed table or an index on a user table does not trip
+  the check. Indexes attached to *app* tables remain in the
+  allowlist as before.
 
 The `sql_hash` constants for every `EXPECTED_AFTER_NNNN` slice are
 generated and asserted by a unit test (`expected_objects_match_each_version`)
@@ -1458,7 +1467,6 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `schema_migrations_no_delete`, `schema_migrations_immutable`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
-    `edges_drop_updates_when_src_tombstoned`,
     `wal_ops_issued_seq_must_advance`, `wal_ops_state_transition`,
     `wal_ops_envelope_immutable`, `wal_ops_terminal_immutable`,
     `wal_ops_no_delete`, `reader_fence_clear_on_terminal_abort`,
@@ -1511,15 +1519,16 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `INSERT INTO records (...)` to force FTS5 to populate its shadow
   tables; reopen; expect success. Confirms FTS5 internals are not in
   the allowlist.
-- `extra_object_on_app_table_rejected` — after migrations, `CREATE
-  TRIGGER bad_audit AFTER UPDATE ON records BEGIN INSERT INTO ...; END;`;
-  reopen; expect `StoreError::SchemaDrift` (deny-by-default for
-  executable objects on app tables). Repeats with an extra index on
-  `consent_journal`, an extra trigger on `wal_ops`.
-- `extra_object_on_user_table_ok` — after migrations, `CREATE TABLE
-  user_audit (...); CREATE INDEX user_audit_ts_idx ON
-  user_audit(ts);`; reopen; expect success. Confirms standalone
-  user-owned tables are not policed.
+- `unexpected_trigger_or_view_rejected` — after migrations,
+  `CREATE TRIGGER bad_audit AFTER UPDATE ON records BEGIN ... END`;
+  reopen; expect `StoreError::SchemaDrift`. Then attach a trigger
+  to a *user* table whose body writes to `records`; reopen; still
+  expect `SchemaDrift` (the body's target doesn't matter — the
+  trigger itself is unexpected). Same for views.
+- `extra_user_tables_and_indexes_ok` — after migrations,
+  `CREATE TABLE user_audit (...); CREATE INDEX user_audit_ts_idx
+  ON user_audit(ts);`; reopen; expect success. Confirms tables and
+  user-table indexes are inert and permitted.
 - `migration_history_mismatch_rejected` — apply migrations to head;
   manually `UPDATE schema_migrations SET sql_blake3 = '00...00' WHERE
   migration_id = 3`; reopen; expect
@@ -1685,18 +1694,15 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   delete row 3; reopen via `open()`; expect
   `StoreError::MigrationHistoryMismatch` (contiguity branch). Repeat
   with a duplicated migration_id row.
-- `supersession_is_durable_until_src_tombstoned` — insert R1
-  (target T1, active=1, tombstoned=0) and R2 (target T2, active=1,
-  tombstoned=0); insert valid `updates` edge `(src=R1, dst=R2)`.
-  Confirm R2 is excluded from `records_latest`. Set R1.active=0;
-  R2 stays excluded (the supersede edge is still live). Now
-  `UPDATE records SET tombstoned = 1 WHERE record_id = R1.record_id`;
-  the AFTER UPDATE trigger atomically deletes the
-  `(R1, R2, 'updates')` edge in the same statement, and R2 reappears
-  in `records_latest`. Confirms (a) supersession persists across
-  ordinary lifecycle changes (active flip), (b) tombstoning the
-  source atomically clears the supersession, (c) the read view
-  cannot observe the inconsistent state.
+- `supersession_is_durable` — insert R1 (target T1, active=1,
+  tombstoned=0) and R2 (target T2, active=1, tombstoned=0); insert
+  valid `updates` edge `(src=R1, dst=R2)`. Confirm R2 is excluded
+  from `records_latest`. Set `R1.active=0`; R2 stays excluded.
+  Set `R1.tombstoned=1`; R2 **stays excluded** (durable
+  supersession). The only path that revives R2 is an explicit
+  `forget_record(src=R1)` operation that includes the edge cleanup
+  in its plan, which is operation-graph logic outside this spec's
+  scope.
 - `updates_edge_requires_non_tombstoned_endpoints` — insert R1 with
   `tombstoned=1`, R2 live; attempt `INSERT INTO edges (src=R1, dst=R2,
   kind='updates')`; expect ABORT via the supersede trigger
