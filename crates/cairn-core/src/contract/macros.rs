@@ -33,7 +33,7 @@
 /// # Examples
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
 /// use cairn_core::register_plugin;
 ///
@@ -42,7 +42,7 @@
 ///
 /// #[async_trait::async_trait]
 /// impl MemoryStore for MyStore {
-///     fn name(&self) -> &str { "acme-store" }
+///     fn name(&self) -> &str { Self::NAME }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {
 ///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
 ///             fts: false,
@@ -52,12 +52,15 @@
 ///         };
 ///         &CAPS
 ///     }
-///     fn supported_contract_versions(&self) -> VersionRange {
-///         VersionRange::new(
-///             ContractVersion::new(0, 1, 0),
-///             ContractVersion::new(0, 2, 0),
-///         )
-///     }
+///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+/// }
+///
+/// impl MemoryStorePlugin for MyStore {
+///     const NAME: &'static str = "acme-store";
+///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
+///         ContractVersion::new(0, 1, 0),
+///         ContractVersion::new(0, 2, 0),
+///     );
 /// }
 ///
 /// register_plugin!(MemoryStore, MyStore, "acme-store");
@@ -71,7 +74,7 @@
 /// # Manifest-aware form (preferred for bundled plugins)
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
 /// use cairn_core::register_plugin;
 ///
@@ -95,7 +98,7 @@
 ///
 /// #[async_trait::async_trait]
 /// impl MemoryStore for MyStore {
-///     fn name(&self) -> &str { "acme-store" }
+///     fn name(&self) -> &str { Self::NAME }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {
 ///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
 ///             fts: false,
@@ -105,12 +108,15 @@
 ///         };
 ///         &CAPS
 ///     }
-///     fn supported_contract_versions(&self) -> VersionRange {
-///         VersionRange::new(
-///             ContractVersion::new(0, 1, 0),
-///             ContractVersion::new(0, 2, 0),
-///         )
-///     }
+///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+/// }
+///
+/// impl MemoryStorePlugin for MyStore {
+///     const NAME: &'static str = "acme-store";
+///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
+///         ContractVersion::new(0, 1, 0),
+///         ContractVersion::new(0, 2, 0),
+///     );
 /// }
 ///
 /// register_plugin!(MemoryStore, MyStore, "acme-store", MANIFEST_TOML);
@@ -290,13 +296,11 @@ macro_rules! __register_plugin_helper {
             // Static identity check — no construction yet.
             let static_name = <$impl as $plugin_trait>::NAME;
             if static_name != $name {
-                return Err(
-                    $crate::contract::registry::PluginError::IdentityMismatch {
-                        contract: $contract,
-                        registered: name,
-                        runtime: static_name.to_owned(),
-                    },
-                );
+                return Err($crate::contract::registry::PluginError::IdentityMismatch {
+                    contract: $contract,
+                    registered: name,
+                    runtime: static_name.to_owned(),
+                });
             }
             reg.$method(
                 name,
@@ -345,7 +349,7 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///
 /// The closure receives `&CairnConfig` and returns `Result<Impl, E>` for any
 /// `E: std::error::Error + Send + Sync + 'static`. The macro boxes the error
-/// into [`PluginError::FactoryError`].
+/// into [`crate::contract::registry::PluginError::FactoryError`].
 ///
 /// # Examples
 ///
@@ -498,13 +502,11 @@ macro_rules! __register_plugin_with_helper {
             // Static identity check — factory NOT called yet.
             let static_name = <$impl as $plugin_trait>::NAME;
             if static_name != $name {
-                return Err(
-                    $crate::contract::registry::PluginError::IdentityMismatch {
-                        contract: $contract,
-                        registered: name,
-                        runtime: static_name.to_owned(),
-                    },
-                );
+                return Err($crate::contract::registry::PluginError::IdentityMismatch {
+                    contract: $contract,
+                    registered: name,
+                    runtime: static_name.to_owned(),
+                });
             }
             // All static checks passed. Call the factory.
             let plugin: $impl = ($factory)(cfg).map_err(|e| {
