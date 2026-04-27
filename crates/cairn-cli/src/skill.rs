@@ -55,6 +55,8 @@ const EXAMPLE_01: &str = include_str!("../../../skills/cairn/examples/01-remembe
 const EXAMPLE_02: &str = include_str!("../../../skills/cairn/examples/02-forget-something.md");
 const EXAMPLE_03: &str = include_str!("../../../skills/cairn/examples/03-search-prior-decision.md");
 const EXAMPLE_04: &str = include_str!("../../../skills/cairn/examples/04-skillify-this.md");
+const EXAMPLE_05: &str = include_str!("../../../skills/cairn/examples/05-retrieve-context.md");
+const EXAMPLE_06: &str = include_str!("../../../skills/cairn/examples/06-lint-memory.md");
 
 /// Options for [`install`].
 #[derive(Debug, Clone)]
@@ -292,6 +294,8 @@ fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
                 "02-forget-something.md",
                 "03-search-prior-decision.md",
                 "04-skillify-this.md",
+                "05-retrieve-context.md",
+                "06-lint-memory.md",
             ];
             let examples_path = dir.join("examples");
             if !std::fs::metadata(&examples_path).is_ok_and(|m| m.is_dir()) {
@@ -436,6 +440,8 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         ("02-forget-something.md", EXAMPLE_02),
         ("03-search-prior-decision.md", EXAMPLE_03),
         ("04-skillify-this.md", EXAMPLE_04),
+        ("05-retrieve-context.md", EXAMPLE_05),
+        ("06-lint-memory.md", EXAMPLE_06),
     ] {
         crate::vault::bootstrap::write_once(
             &examples_dir.join(name),
@@ -565,11 +571,11 @@ mod tests {
         assert!(!receipt.idl_version.is_empty());
         assert!(!receipt.registration_hint.is_empty());
 
-        // All 7 files must be created (SKILL.md, conventions.md, .version, 4 examples).
+        // All 9 files must be created (SKILL.md, conventions.md, .version, 6 examples).
         assert_eq!(
             receipt.files_created.len(),
-            7,
-            "expected 7 files on fresh install"
+            9,
+            "expected 9 files on fresh install"
         );
 
         // Hint for ClaudeCode must mention CLAUDE.md.
