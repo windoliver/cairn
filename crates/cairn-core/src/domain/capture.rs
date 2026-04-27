@@ -24,7 +24,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{ActorChainEntry, DomainError, Identity, IdentityKind, Rfc3339Timestamp};
+use crate::domain::{
+    ActorChainEntry, ChainRole, DomainError, Identity, IdentityKind, Rfc3339Timestamp,
+};
 
 /// ULID identifier for a single `CaptureEvent` (Crockford base32, 26 chars).
 ///
@@ -516,22 +518,32 @@ pub struct CaptureEvent {
 impl CaptureEvent {
     /// Run every invariant on the event:
     ///
-    /// 1. `payload_ref` non-empty.
+    /// 1. `payload_ref` is a non-empty `file://` URI rooted under
+    ///    `/sources/` and free of `..` segments. P0 vault layout (§3)
+    ///    keeps raw bytes under that subtree; rejecting other shapes
+    ///    closes off SSRF / off-vault dereferences in any downstream
+    ///    stage that resolves the URI.
     /// 2. `sensor_id` is a `snr:` identity (Mode B / C still flow through
     ///    a sensor surface).
     /// 3. `payload.source_family() == self.source_family`.
-    /// 4. `actor_chain` validates per §4.2
+    /// 4. `capture_mode` and `source_family` are a declared §5.0.a pair
+    ///    (Auto = sensor families, Explicit = `cli` / `mcp`,
+    ///    Proactive = `proactive`).
+    /// 5. `source_family` matches the family expected from the sensor
+    ///    label — a `local:cli:` sensor cannot emit a `screen` payload.
+    /// 6. `actor_chain` validates per §4.2
     ///    ([`super::actor_chain::validate_chain`]).
-    /// 5. `actor_chain` author matches `capture_mode` per §5.0.a
+    /// 7. `actor_chain` author matches `capture_mode` per §5.0.a
     ///    ([`super::capture_attribution::attribute`]).
-    /// 6. Sensor label is in the declared P0 manifest
+    /// 8. For Mode A captures, the `Author` entry's identity equals
+    ///    `sensor_id` (the sensor authors its own raw events). For any
+    ///    mode, if a `Sensor` role entry is present in the chain, it
+    ///    must equal `sensor_id`.
+    /// 9. Sensor label is in the declared P0 manifest
     ///    ([`super::capture_manifest::validate_label`]).
     pub fn validate(&self) -> Result<(), DomainError> {
-        if self.payload_ref.is_empty() {
-            return Err(DomainError::EmptyField {
-                field: "payload_ref",
-            });
-        }
+        validate_payload_ref(&self.payload_ref)?;
+
         if self.sensor_id.kind() != IdentityKind::Sensor {
             return Err(DomainError::MalformedCapture {
                 message: format!(
@@ -549,14 +561,160 @@ impl CaptureEvent {
                 ),
             });
         }
+        if !mode_allows_family(self.capture_mode, self.source_family) {
+            return Err(DomainError::MalformedCapture {
+                message: format!(
+                    "capture_mode `{}` is incompatible with source_family `{}`",
+                    self.capture_mode.as_str(),
+                    self.source_family.as_str()
+                ),
+            });
+        }
+
+        let label = SensorLabel::from_identity(&self.sensor_id)?;
+        super::capture_manifest::validate_label(&label)?;
+
+        if let Some(expected) = family_for_label(&label)
+            && expected != self.source_family
+        {
+            return Err(DomainError::MalformedCapture {
+                message: format!(
+                    "sensor `{}` declares family `{}` but event source_family is `{}`",
+                    self.sensor_id.as_str(),
+                    expected.as_str(),
+                    self.source_family.as_str()
+                ),
+            });
+        }
 
         super::actor_chain::validate_chain(&self.actor_chain)?;
         super::capture_attribution::attribute(self.capture_mode, &self.actor_chain)?;
 
-        let label = SensorLabel::from_identity(&self.sensor_id)?;
-        super::capture_manifest::validate_label(&label)?;
+        if self.capture_mode == CaptureMode::Auto {
+            let author = self
+                .actor_chain
+                .iter()
+                .find(|e| e.role == ChainRole::Author)
+                .ok_or_else(|| DomainError::MissingSignature {
+                    message: "actor_chain has no `author` entry".to_owned(),
+                })?;
+            if author.identity != self.sensor_id {
+                return Err(DomainError::AttributionMismatch {
+                    message: format!(
+                        "mode `auto` requires author identity `{}` to equal sensor_id `{}`",
+                        author.identity.as_str(),
+                        self.sensor_id.as_str()
+                    ),
+                });
+            }
+        }
+        for entry in &self.actor_chain {
+            if entry.role == ChainRole::Sensor && entry.identity != self.sensor_id {
+                return Err(DomainError::AttributionMismatch {
+                    message: format!(
+                        "actor_chain `sensor` entry `{}` does not match sensor_id `{}`",
+                        entry.identity.as_str(),
+                        self.sensor_id.as_str()
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
+}
+
+/// True iff a [`CaptureMode`] is permitted to carry events of a given
+/// [`SourceFamily`] per brief §5.0.a.
+const fn mode_allows_family(mode: CaptureMode, family: SourceFamily) -> bool {
+    matches!(
+        (mode, family),
+        (
+            CaptureMode::Auto,
+            SourceFamily::Hook
+                | SourceFamily::Ide
+                | SourceFamily::Terminal
+                | SourceFamily::Clipboard
+                | SourceFamily::Voice
+                | SourceFamily::Screen
+                | SourceFamily::RecordingBatch,
+        ) | (CaptureMode::Explicit, SourceFamily::Cli | SourceFamily::Mcp)
+            | (CaptureMode::Proactive, SourceFamily::Proactive)
+    )
+}
+
+/// Map a declared [`SensorLabel`] prefix to the [`SourceFamily`] its
+/// sensor produces. Returns `None` when the label has no canonical family
+/// pinned (e.g., `local:neuroskill:` produces structured tool-call traces
+/// shaped like Hook events but is not exclusively a hook channel — we
+/// don't pin its family yet so that future neuroskill payload variants
+/// don't require a manifest change).
+fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
+    let s = label.as_str();
+    if s.starts_with("local:hook:") {
+        Some(SourceFamily::Hook)
+    } else if s.starts_with("local:ide:") {
+        Some(SourceFamily::Ide)
+    } else if s.starts_with("local:terminal:") {
+        Some(SourceFamily::Terminal)
+    } else if s.starts_with("local:clipboard:") {
+        Some(SourceFamily::Clipboard)
+    } else if s.starts_with("local:voice:") {
+        Some(SourceFamily::Voice)
+    } else if s.starts_with("local:screen:") {
+        Some(SourceFamily::Screen)
+    } else if s.starts_with("local:recording:") {
+        Some(SourceFamily::RecordingBatch)
+    } else if s.starts_with("local:cli:") {
+        Some(SourceFamily::Cli)
+    } else if s.starts_with("local:mcp:") {
+        Some(SourceFamily::Mcp)
+    } else if s.starts_with("local:proactive:") {
+        Some(SourceFamily::Proactive)
+    } else {
+        None
+    }
+}
+
+/// Reject `payload_ref` strings that would let a downstream stage
+/// dereference bytes outside the managed `sources/` vault layer (§3).
+///
+/// The accepted shape is `file://<host>/<path>/sources/<rest>` with no
+/// `..` traversal segments, no query, and no fragment. Pure syntactic
+/// check — there is no filesystem access at this layer.
+fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
+    if raw.is_empty() {
+        return Err(DomainError::EmptyField {
+            field: "payload_ref",
+        });
+    }
+    let rest = raw
+        .strip_prefix("file://")
+        .ok_or_else(|| DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: must use `file://` scheme"),
+        })?;
+    if rest.contains('?') || rest.contains('#') {
+        return Err(DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: query/fragment not permitted"),
+        });
+    }
+    // After the `file://` prefix, the path must contain a `/sources/`
+    // segment so off-vault paths like `/etc/passwd` are rejected.
+    if !rest.contains("/sources/") {
+        return Err(DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: path must contain `/sources/`"),
+        });
+    }
+    // Reject `..` traversal segments. Match on segment boundaries so
+    // legitimate filenames like `foo..bar.json` aren't rejected.
+    for segment in rest.split('/') {
+        if segment == ".." {
+            return Err(DomainError::MalformedCapture {
+                message: format!("payload_ref `{raw}`: `..` traversal not permitted"),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

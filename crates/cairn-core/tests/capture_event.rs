@@ -195,6 +195,97 @@ fn validate_rejects_undeclared_sensor_in_event() {
 }
 
 #[test]
+fn mode_family_mismatch_rejected() {
+    // Mode A cannot carry an `cli` family (that's Mode B's surface).
+    let mut ev = explicit_event();
+    ev.capture_mode = CaptureMode::Auto;
+    // Patch the chain so the attribution check would otherwise pass —
+    // we want to prove the mode/family pairing is what catches this.
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:cli:default:v1")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn proactive_with_screen_family_rejected() {
+    let mut ev = auto_event();
+    ev.capture_mode = CaptureMode::Proactive;
+    ev.actor_chain = vec![entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn sensor_label_family_mismatch_rejected() {
+    // CLI sensor declaring a screen payload — declared family ≠ event family.
+    let mut ev = explicit_event();
+    ev.source_family = SourceFamily::Screen;
+    ev.payload = CapturePayload::Screen {
+        app: "com.apple.Safari".into(),
+        window_title: "spoof".into(),
+        url: None,
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn auto_mode_author_must_equal_sensor_id() {
+    // Sensor declared in `sensor_id` differs from the sensor that
+    // appears as `Author` in the chain — Mode A authorship spoofing.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:hook:other-host:v1").expect("valid");
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::AttributionMismatch { .. }));
+}
+
+#[test]
+fn chain_sensor_entry_must_match_sensor_id() {
+    // Mode B with a Sensor entry that points to a different sensor than
+    // the one declared in `sensor_id`.
+    let mut ev = explicit_event();
+    ev.actor_chain.push(ActorChainEntry {
+        role: ChainRole::Sensor,
+        identity: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
+        at: ts(),
+    });
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::AttributionMismatch { .. }));
+}
+
+#[test]
+fn payload_ref_must_be_file_scheme() {
+    let mut ev = auto_event();
+    ev.payload_ref = "https://example.com/sources/x.json".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_must_be_under_sources() {
+    let mut ev = auto_event();
+    ev.payload_ref = "file:///etc/passwd".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_dotdot_traversal() {
+    let mut ev = auto_event();
+    ev.payload_ref = "file:///vault/sources/../etc/passwd".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_query_and_fragment() {
+    let mut ev = auto_event();
+    ev.payload_ref = "file:///vault/sources/x.json?evil=1".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
 fn payload_family_mismatch_rejected() {
     let mut ev = auto_event();
     ev.source_family = SourceFamily::Voice;
