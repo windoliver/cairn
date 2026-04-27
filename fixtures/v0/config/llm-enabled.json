@@ -35,7 +35,7 @@
   "pipeline": {
     "extract": {
       "chain": [
-        { "worker": "regex", "kinds": [], "trigger": null, "budget": {"max_tokens": null,"max_wall_ms": null,"max_turns": null} },
+        { "worker": "regex", "kinds": ["feedback", "rule"], "trigger": null, "budget": {"max_tokens": null,"max_wall_ms": null,"max_turns": null} },
         { "worker": "llm", "kinds": [], "trigger": "confidence_below", "budget": {"max_tokens": 4096,"max_wall_ms": 10000,"max_turns": null} }
       ]
     }

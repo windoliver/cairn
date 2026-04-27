@@ -17,7 +17,7 @@ expression: "&f"
       "not": {
         "field": "visibility",
         "op": "eq",
-        "value": "public"
+        "value": "private"
       }
     }
   ]

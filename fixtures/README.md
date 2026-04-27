@@ -37,4 +37,4 @@ When a schema change is intentional:
 
 ## CI
 
-`cargo nextest run --workspace` runs `cairn_test_fixtures::tests::schema_fixtures` automatically. The `insta` snapshots act as a schema-drift gate: if a schema change breaks deserialization or shifts the wire form, the test fails and the snapshot diff is shown.
+`cargo nextest run --workspace` runs the `schema_fixtures` test binary automatically. The `insta` snapshots act as a schema-drift gate: if a schema change breaks deserialization or shifts the wire form, the test fails and the snapshot diff is shown.

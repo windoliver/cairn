@@ -68,7 +68,10 @@ expression: "&c"
       "chain": [
         {
           "worker": "regex",
-          "kinds": [],
+          "kinds": [
+            "feedback",
+            "rule"
+          ],
           "trigger": null,
           "budget": {
             "max_tokens": null,
