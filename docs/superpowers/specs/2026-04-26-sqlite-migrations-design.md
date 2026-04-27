@@ -150,13 +150,31 @@ Verbatim from brief §3 (lines ~340-426):
   silently hide the target from `records_latest` — that is a read-corruption
   hole the schema must close, not a caller-side concern.
 
-- `edges` integrity trigger `edges_updates_must_supersede` —
-  fires `BEFORE INSERT ON edges WHEN NEW.kind = 'updates'` and
-  raises `ABORT` unless `NEW.dst` exists in `records` with `tombstoned = 0`
-  and the source row's `target_id` differs from the dst row's `target_id`
-  (an `updates` edge is fact-supersession across distinct target_ids per
-  brief §3 line ~409). This makes "stray `updates` edge hides a live
-  record" unrepresentable at the storage level.
+- `edges` integrity triggers — three triggers cover insert, update,
+  and the bypass-via-mutation case:
+
+  - `edges_updates_supersede_insert` —
+    `BEFORE INSERT ON edges WHEN NEW.kind = 'updates'` raises `ABORT`
+    unless `NEW.dst` exists in `records` with `tombstoned = 0` and the
+    src row's `target_id` differs from the dst row's `target_id`
+    (an `updates` edge is fact-supersession across distinct target_ids
+    per brief §3 line ~409).
+  - `edges_updates_supersede_update` — same predicate, but
+    `BEFORE UPDATE ON edges WHEN NEW.kind = 'updates'`. Closes the
+    `UPDATE edges SET kind = 'updates' WHERE …` bypass.
+  - `edges_updates_immutable_after_insert` —
+    `BEFORE UPDATE ON edges WHEN OLD.kind = 'updates'` raises `ABORT`
+    if any of `src`, `dst`, or `kind` change. An existing `updates`
+    edge cannot be mutated to point elsewhere or downgraded to a
+    different kind; it must be `DELETE`d first (which the storage impl
+    does only via the §5.6 forget pipeline). Combined with the FK on
+    `src`/`dst`, this makes the edge's identity immutable for the
+    lifetime of the row.
+
+  These three triggers together close the read-corruption path: no
+  combination of `INSERT`, `UPDATE`, or kind-flip on `edges` can
+  conjure a stray `updates` row that hides a live record from
+  `records_latest`.
 
 - This is a deviation from the brief, called out for review: the brief
   shows `edges` with no FK declarations. The deviation strengthens
@@ -195,11 +213,16 @@ CREATE INDEX wal_ops_open_idx
   ON wal_ops(state, issued_at)
   WHERE state IN ('ISSUED','PREPARED');
 
--- Dependency lookup for the recovery DAG.
+-- Dependency lookup for the recovery DAG. Acyclicity is enforced
+-- structurally: operation_id and depends_on_op_id are ULIDs (per §5.6
+-- envelope), which sort lexicographically by their issuance time.
+-- Requiring depends_on_op_id < operation_id makes a cycle (or a
+-- self-edge) unrepresentable at the schema level.
 CREATE TABLE wal_op_deps (
   operation_id     TEXT NOT NULL,
   depends_on_op_id TEXT NOT NULL,
   PRIMARY KEY (operation_id, depends_on_op_id),
+  CHECK (depends_on_op_id < operation_id),     -- no self-edge, no AB-BA cycle (ULIDs are sortable)
   FOREIGN KEY (operation_id)     REFERENCES wal_ops(operation_id) ON DELETE CASCADE,
   FOREIGN KEY (depends_on_op_id) REFERENCES wal_ops(operation_id)
 );
@@ -332,8 +355,12 @@ cairn_store_sqlite::open(path: &Path) -> Result<Connection, StoreError>
   │
   ├─ rusqlite::Connection::open(path)
   ├─ apply_pragmas(&conn)                -- errored pragmas surface as StoreError::Pragma
+  ├─ verify_migration_history(&conn)?    -- §5.2 ledger checksum check, runs FIRST
+  │                                      -- against the existing schema_migrations
+  │                                      -- table. Skipped only if the DB has no
+  │                                      -- schema_migrations table at all (i.e.,
+  │                                      -- a fresh vault before any migration ran).
   ├─ migrations().to_latest(&mut conn)   -- idempotent on up-to-date DB
-  ├─ verify_migration_history(&conn)?    -- §5.2 ledger checksum check
   ├─ verify_schema_integrity(&conn)?     -- §5.1 allowlist shape check
   └─ Ok(conn)
 ```
@@ -455,13 +482,26 @@ INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
   VALUES (:id, :name, :hash, :now);
 ```
 
-`open()`, after `to_latest()` returns, validates that **every applied
-row's `sql_blake3` matches the compiled-in hash of the same migration
-file**. The compiled-in hashes live in a `MIGRATION_MANIFEST: &[(&str,
-&str)]` array in `migrations/mod.rs`, generated at build time by a
-`build.rs` script that BLAKE3-hashes each `migrations/sql/*.sql` and
-emits the manifest into `OUT_DIR`. No proc-macro, no runtime read of
-the SQL files in production binaries.
+`open()` calls `verify_migration_history(&conn)` **before**
+`to_latest()` so a known-diverged vault is rejected before any new
+forward-only DDL is applied. The check:
+
+1. If `schema_migrations` does not exist (fresh vault, no migrations
+   yet applied), skip — `to_latest()` will create the table via
+   migration `0001`.
+2. Otherwise, for every row in `schema_migrations`, look up the
+   matching `(name, sql_blake3)` in the compiled-in manifest. Mismatch
+   or unknown row → `StoreError::MigrationHistoryMismatch`. A row whose
+   `migration_id` exceeds the compiled manifest length is treated as
+   future-version and surfaces `IncompatibleSchema`.
+3. Only after every applied row matches does `to_latest()` run. Any
+   pending migration is then applied on top of validated history.
+
+The compiled-in manifest lives in a `MIGRATION_MANIFEST: &[(&str, &str)]`
+array in `migrations/mod.rs`, generated at build time by a `build.rs`
+script that BLAKE3-hashes each `migrations/sql/*.sql` and emits the
+manifest into `OUT_DIR`. No proc-macro, no runtime read of the SQL
+files in production binaries.
 
 Mismatch → `StoreError::MigrationHistoryMismatch { migration_id, name,
 expected, actual }`. This catches:
@@ -543,7 +583,8 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   - virtual tables: `records_fts`
   - views: `records_latest`
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
-    `edges_updates_must_supersede`
+    `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
+    `edges_updates_immutable_after_insert`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
@@ -606,6 +647,29 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   edge is fact-supersession across distinct target_ids, not a
   version-bump pointer). Then insert two records with *different*
   target_ids, retry, expect success.
+- `updates_edge_update_path_blocked` — insert a non-`updates` edge,
+  then attempt `UPDATE edges SET kind = 'updates' WHERE …`; assert the
+  `BEFORE UPDATE` trigger ABORTs unless the predicates are met. Repeat
+  with src/dst rotation showing the trigger fires on every UPDATE.
+- `updates_edge_immutable` — insert a valid `updates` edge; attempt
+  `UPDATE edges SET dst = ... WHERE kind = 'updates'`; assert ABORT
+  via `edges_updates_immutable_after_insert`. Repeat for `src` and
+  `kind` changes.
+- `wal_op_deps_rejects_cycles_and_self` — attempt
+  `INSERT INTO wal_op_deps (operation_id, depends_on_op_id) VALUES
+  ('01HQAA', '01HQAA')`; assert CHECK violation. Then `('01HQ01',
+  '01HQ02')` (depends_on > operation_id); assert CHECK violation.
+  Insert valid `('01HQ02', '01HQ01')`. Attempt to add `('01HQ01',
+  '01HQ02')` (would close a 2-cycle); assert CHECK violation. Proves
+  the lex-order CHECK suffices for both self-edges and arbitrary
+  cycles.
+- `migration_history_check_runs_before_apply` — generate a fixture
+  vault by applying migrations 1..=2 only; manually update
+  `schema_migrations` to set a wrong `sql_blake3` for migration 1;
+  call `open()` (which would otherwise apply migrations 3..=N); assert
+  `StoreError::MigrationHistoryMismatch` AND assert that
+  `user_version` is still 2 (i.e., no further migrations were applied
+  past the diverged history).
 
 ### 7.3 Snapshot tests (`insta`)
 
