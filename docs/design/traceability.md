@@ -17,9 +17,12 @@ PRs that change the brief are expected to update this matrix in the
 same diff, but no CI check enforces that today (see "Enforcement"
 below).
 
-The matrix originates from issue
-[#157](https://github.com/windoliver/cairn/issues/157) and lives here so
-PRs that change the brief can update coverage in the same diff.
+This document supersedes the historical matrix drafted inline in
+issue [#157](https://github.com/windoliver/cairn/issues/157). When
+this file merges, #157 closes and the issue body becomes a frozen
+historical record — the file in the repo is the only source of
+truth going forward, so PRs that change the brief can update
+coverage in the same diff.
 
 ## Column semantics
 
@@ -83,13 +86,13 @@ PRs that change the brief can update coverage in the same diff.
 | §15 Evaluation | #18, #24, #31, #97–#100, #116–#118, #136–#137 | #138 (docs freeze) | P0 replay and gates, P1 bench and SRE, v0.4 cassette and doc freeze. |
 | §16 Packaging | #18, #32, #100, #139–#142, #158 | — | Cargo and Homebrew, static smoke tests, desktop production packaging, release channels. |
 | §16.a Existing memory systems | #120, #151–#156 | — | Explicit P2 migration bridge epic and child issues. |
-| §17 Non-goals | _none_ | #138 (docs freeze) | No code deliverable; non-goals language is preserved through the documentation freeze checklist. |
+| §17 Non-goals | _none_ | _none_ | No code deliverable and no current docs owner; non-goals language is reviewed ad-hoc in design-brief PRs. |
 | §18 Success criteria / adoption / consumer blueprint | #11, #18, #19, #25, #31, #32, #68–#70, #97–#103, #119–#120, #139–#142 | #136, #137 | User stories, skill adoption, reference consumers, and production criteria. |
 | §18.d Cairn skill | #11, #68–#70 | — | Install, conventions, compatibility checks. |
 | §19 Sequencing | _none_ | — | Process-only row; phased milestones and `priority:` / `phase:` labels encode the sequence. |
 | §19.a KISS v0.1 subset | #3–#19, #33–#103 | #145, #146, #150 (resolved) | P0 substrate coverage with the resolved all-three-search-mode decision. |
 | §20 Open questions | _none_ | #147, #148, #149 (open); #145, #146, #150 (resolved) | Decision-only section by definition. |
-| Appendix glossary | _none_ | #138 (docs freeze) | No dedicated glossary owner; coherence is checked as part of the docs freeze. |
+| Appendix glossary | _none_ | _none_ | No dedicated glossary owner today; consistency is checked ad-hoc when terms change. |
 
 ## §20 open question decision status
 
