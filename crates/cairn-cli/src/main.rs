@@ -295,6 +295,7 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
     }
 }
 
+// Four subcommand branches (add/list/switch/remove) exceed the lint limit; split would add indirection for no gain.
 #[allow(clippy::too_many_lines)]
 fn run_vault(matches: &ArgMatches) -> ExitCode {
     let store = match registry_store() {
