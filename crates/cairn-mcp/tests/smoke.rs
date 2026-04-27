@@ -51,8 +51,14 @@ fn dispatch_unknown_verb_returns_rejected() {
 #[test]
 fn dispatch_all_eight_verbs_do_not_panic() {
     for name in [
-        "ingest", "search", "retrieve", "summarize",
-        "assemble_hot", "capture_trace", "lint", "forget",
+        "ingest",
+        "search",
+        "retrieve",
+        "summarize",
+        "assemble_hot",
+        "capture_trace",
+        "lint",
+        "forget",
     ] {
         let resp = cairn_mcp::dispatch::dispatch(name, None);
         assert_eq!(resp.contract, "cairn.mcp.v1", "bad contract for {name}");

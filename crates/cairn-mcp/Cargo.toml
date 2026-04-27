@@ -13,13 +13,10 @@ description = "MCP adapter surface for the Cairn verb layer."
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 rmcp = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true }
 ulid = { workspace = true }
-base64 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
@@ -29,6 +26,3 @@ insta = { workspace = true }
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
-[package.metadata.cargo-machete]
-ignored = ["serde", "serde_json"]

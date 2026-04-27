@@ -51,7 +51,9 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
     ]
 }
 
-fn tier2_initialize_and_list_tools(caps: crate::contract::mcp_server::MCPServerCapabilities) -> CaseOutcome {
+fn tier2_initialize_and_list_tools(
+    caps: crate::contract::mcp_server::MCPServerCapabilities,
+) -> CaseOutcome {
     let status = if caps.stdio {
         CaseStatus::Ok
     } else {

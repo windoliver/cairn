@@ -25,22 +25,42 @@ macro_rules! parity_test {
             let cli = cli_response($verb);
             let mcp = mcp_response($tool_name);
 
-            assert_eq!(cli.contract, mcp.contract, "contract mismatch for {}", $tool_name);
+            assert_eq!(
+                cli.contract, mcp.contract,
+                "contract mismatch for {}",
+                $tool_name
+            );
             assert_eq!(cli.verb, mcp.verb, "verb echo mismatch for {}", $tool_name);
             assert_eq!(cli.status, mcp.status, "status mismatch for {}", $tool_name);
             // Both must carry an Internal error at P0
-            let cli_code = cli.error.as_ref().and_then(|e| e["code"].as_str()).unwrap_or("");
-            let mcp_code = mcp.error.as_ref().and_then(|e| e["code"].as_str()).unwrap_or("");
+            let cli_code = cli
+                .error
+                .as_ref()
+                .and_then(|e| e["code"].as_str())
+                .unwrap_or("");
+            let mcp_code = mcp
+                .error
+                .as_ref()
+                .and_then(|e| e["code"].as_str())
+                .unwrap_or("");
             assert_eq!(cli_code, mcp_code, "error.code mismatch for {}", $tool_name);
         }
     };
 }
 
-parity_test!(parity_ingest,        "ingest",        ResponseVerb::Ingest);
-parity_test!(parity_search,        "search",        ResponseVerb::Search);
-parity_test!(parity_retrieve,      "retrieve",      ResponseVerb::Retrieve);
-parity_test!(parity_summarize,     "summarize",     ResponseVerb::Summarize);
-parity_test!(parity_assemble_hot,  "assemble_hot",  ResponseVerb::AssembleHot);
-parity_test!(parity_capture_trace, "capture_trace", ResponseVerb::CaptureTrace);
-parity_test!(parity_lint,          "lint",          ResponseVerb::Lint);
-parity_test!(parity_forget,        "forget",        ResponseVerb::Forget);
+parity_test!(parity_ingest, "ingest", ResponseVerb::Ingest);
+parity_test!(parity_search, "search", ResponseVerb::Search);
+parity_test!(parity_retrieve, "retrieve", ResponseVerb::Retrieve);
+parity_test!(parity_summarize, "summarize", ResponseVerb::Summarize);
+parity_test!(
+    parity_assemble_hot,
+    "assemble_hot",
+    ResponseVerb::AssembleHot
+);
+parity_test!(
+    parity_capture_trace,
+    "capture_trace",
+    ResponseVerb::CaptureTrace
+);
+parity_test!(parity_lint, "lint", ResponseVerb::Lint);
+parity_test!(parity_forget, "forget", ResponseVerb::Forget);

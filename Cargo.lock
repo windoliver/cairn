@@ -251,14 +251,12 @@ name = "cairn-mcp"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "base64",
  "cairn-core",
  "cairn-test-fixtures",
+ "insta",
  "rmcp",
- "serde",
  "serde_json",
  "thiserror",
- "tokio",
  "tracing",
  "ulid",
 ]

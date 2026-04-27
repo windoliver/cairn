@@ -8,8 +8,8 @@
 
 use cairn_core::generated::common::{Ed25519Signature, Identity, Nonce16Base64, Ulid};
 use cairn_core::generated::envelope::{
-    Response, ResponsePolicyTrace, ResponseStatus, ResponseVerb, SignedIntent,
-    SignedIntentScope, SignedIntentScopeTier,
+    Response, ResponsePolicyTrace, ResponseStatus, ResponseVerb, SignedIntent, SignedIntentScope,
+    SignedIntentScopeTier,
 };
 use cairn_core::verifier::verify_signed_intent;
 

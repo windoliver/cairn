@@ -44,10 +44,7 @@ impl CairnMcpHandler {
 impl ServerHandler for CairnMcpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                "cairn-mcp",
-                env!("CARGO_PKG_VERSION"),
-            ))
+            .with_server_info(Implementation::new("cairn-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(
                 "Cairn agent-memory framework — eight verbs over the cairn.mcp.v1 envelope.",
             )
@@ -61,9 +58,8 @@ impl ServerHandler for CairnMcpHandler {
         let tools = TOOLS
             .iter()
             .map(|decl| {
-                let schema_val: serde_json::Value =
-                    serde_json::from_slice(decl.input_schema)
-                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                let schema_val: serde_json::Value = serde_json::from_slice(decl.input_schema)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 let schema_obj = schema_val.as_object().cloned().unwrap_or_default();
                 Ok(Tool::new(decl.name, decl.description, Arc::new(schema_obj)))
             })
