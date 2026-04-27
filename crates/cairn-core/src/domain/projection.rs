@@ -280,21 +280,26 @@ impl MarkdownProjector {
                 store_version: current.version,
             };
         }
-        // Compare scope via YAML value: project() serializes ScopeTuple into frontmatter,
-        // and parse() captures it in raw_frontmatter — compare them here to catch drift.
-        let store_scope_val =
-            serde_yaml::to_value(&current.record.scope).unwrap_or(serde_yaml::Value::Null);
-        let file_scope_val = parsed
-            .raw_frontmatter
-            .get("scope")
-            .cloned()
-            .unwrap_or(serde_yaml::Value::Null);
-        if file_scope_val != store_scope_val {
-            return ConflictOutcome::Conflict {
-                marker: "immutable field mutated: scope".to_owned(),
-                file_version: parsed.version,
-                store_version: current.version,
-            };
+        // Compare backend-owned projected fields (scope, confidence, salience, created,
+        // updated) using the canonical projection as the reference so both sides go through
+        // the same serde_yaml round-trip. This avoids f32↔f64 precision mismatches and
+        // YAML-tagged timestamp subtleties.
+        let canonical = self.project(current);
+        // The canonical projection is always parseable; if it somehow isn't, skip the check.
+        if let Ok(canonical_parsed) = self.parse(&canonical.content) {
+            const BACKEND_FIELDS: &[&str] =
+                &["scope", "confidence", "salience", "created", "updated"];
+            for field in BACKEND_FIELDS {
+                let canonical_val = canonical_parsed.raw_frontmatter.get(*field);
+                let file_val = parsed.raw_frontmatter.get(*field);
+                if canonical_val != file_val {
+                    return ConflictOutcome::Conflict {
+                        marker: format!("read-only field mutated: {field}"),
+                        file_version: parsed.version,
+                        store_version: current.version,
+                    };
+                }
+            }
         }
 
         // Version check: only exact equality is clean.
