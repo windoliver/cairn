@@ -3,7 +3,7 @@
 //! Ships the embedded migration set (records + FTS5, WAL ops, replay
 //! ledger, locks, consent journal). Verb-level methods on the
 //! `MemoryStore` impl arrive in follow-up issues; this crate currently
-//! exposes [`open`], [`open_in_memory`], and the plugin manifest.
+//! exposes [`open()`], [`open_in_memory()`], and the plugin manifest.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
