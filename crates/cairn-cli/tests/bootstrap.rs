@@ -190,3 +190,27 @@ fn bootstrap_force_overwrites_files() {
         "force: no files should be skipped"
     );
 }
+
+#[test]
+fn bootstrap_reports_db_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
+    assert_eq!(receipt.db_path, dir.path().join(".cairn/cairn.db"));
+    // db is NOT created by bootstrap — only its path is reported
+    assert!(!dir.path().join(".cairn/cairn.db").exists());
+}
+
+#[test]
+fn bootstrap_receipt_serializes_to_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
+    let json = serde_json::to_string(&receipt).expect("receipt must serialize");
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(parsed.get("vault_path").is_some());
+    assert!(parsed.get("config_path").is_some());
+    assert!(parsed.get("db_path").is_some());
+    assert!(parsed.get("dirs_created").is_some());
+    assert!(parsed.get("dirs_existing").is_some());
+    assert!(parsed.get("files_created").is_some());
+    assert!(parsed.get("files_skipped").is_some());
+}
