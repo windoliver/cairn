@@ -1,12 +1,18 @@
-//! `SQLite` record store for Cairn (P0 scaffold).
+//! `SQLite` record store for Cairn.
 //!
-//! Schema, migrations, FTS5 and sqlite-vec integration arrive in
-//! follow-up issues (#46 and later). For now this crate ships only the
-//! plugin manifest, a stub `MemoryStore` impl with all capability flags
-//! `false`, and a `register()` entry point so the host can include it
-//! in `cairn plugins list/verify`.
+//! Ships the embedded migration set (records + FTS5, WAL ops, replay
+//! ledger, locks, consent journal). Verb-level methods on the
+//! `MemoryStore` impl arrive in follow-up issues; this crate currently
+//! exposes [`open`], [`open_in_memory`], and the plugin manifest.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod error;
+pub mod migrations;
+mod open;
+
+pub use error::StoreError;
+pub use open::{open, open_in_memory};
 
 use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};

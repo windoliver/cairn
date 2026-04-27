@@ -1,0 +1,20 @@
+//! Store-level error type.
+
+use thiserror::Error;
+
+/// Errors raised by the `SQLite` store adapter.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum StoreError {
+    /// Underlying `SQLite` failure.
+    #[error("sqlite error")]
+    Sqlite(#[from] rusqlite::Error),
+
+    /// Migration runner failure.
+    #[error("migration error")]
+    Migration(#[from] rusqlite_migration::Error),
+
+    /// Vault path is unusable (cannot create parent directory, etc.).
+    #[error("vault path error: {0}")]
+    VaultPath(String),
+}
