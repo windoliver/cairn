@@ -454,6 +454,80 @@ impl CapturePayload {
             Self::Proactive { .. } => SourceFamily::Proactive,
         }
     }
+
+    /// Per-variant invariants beyond `serde` shape: required identifier
+    /// strings are non-empty, scalars are in their documented range.
+    /// Returns the first failure as
+    /// [`DomainError::MalformedCapture`] / [`DomainError::OutOfRange`] /
+    /// [`DomainError::EmptyField`].
+    pub fn validate(&self) -> Result<(), DomainError> {
+        match self {
+            Self::Hook { hook_name, .. } => {
+                require_non_empty("hook_name", hook_name)?;
+            }
+            Self::Ide {
+                file_path,
+                event_kind,
+            } => {
+                require_non_empty("file_path", file_path)?;
+                require_non_empty("event_kind", event_kind)?;
+            }
+            Self::Terminal { command, .. } => {
+                require_non_empty("command", command)?;
+            }
+            Self::Clipboard { mime_type, .. } => {
+                require_non_empty("mime_type", mime_type)?;
+            }
+            Self::Voice {
+                speaker_id,
+                confidence,
+                ..
+            } => {
+                require_non_empty("speaker_id", speaker_id)?;
+                if !confidence.is_finite() || !(0.0..=1.0).contains(confidence) {
+                    return Err(DomainError::OutOfRange {
+                        field: "confidence",
+                        message: format!("expected `[0.0, 1.0]`, got `{confidence}`"),
+                    });
+                }
+            }
+            Self::Screen {
+                app, window_title, ..
+            } => {
+                require_non_empty("app", app)?;
+                require_non_empty("window_title", window_title)?;
+            }
+            Self::RecordingBatch {
+                recording_path,
+                segment_duration_ms,
+                ..
+            } => {
+                require_non_empty("recording_path", recording_path)?;
+                if *segment_duration_ms == 0 {
+                    return Err(DomainError::OutOfRange {
+                        field: "segment_duration_ms",
+                        message: "must be > 0".to_owned(),
+                    });
+                }
+            }
+            Self::Cli { kind_hint } | Self::Mcp { kind_hint } => {
+                require_non_empty("kind_hint", kind_hint)?;
+            }
+            Self::Proactive { kind, rationale } => {
+                require_non_empty("kind", kind)?;
+                require_non_empty("rationale", rationale)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn require_non_empty(field: &'static str, value: &str) -> Result<(), DomainError> {
+    if value.is_empty() {
+        Err(DomainError::EmptyField { field })
+    } else {
+        Ok(())
+    }
 }
 
 /// Optional turn / tool / session references that pin a capture event into
@@ -501,8 +575,11 @@ pub struct CaptureEvent {
     pub refs: Option<CaptureRefs>,
     /// SHA-256 of the raw payload bytes referenced by `payload_ref`.
     pub payload_hash: PayloadHash,
-    /// URI pointing into the `sources/` vault layer (brief §3) where the
-    /// raw bytes live. P0 stores everything as a `file://` URI.
+    /// Vault-relative path of the raw bytes, beginning with `sources/`
+    /// (brief §3). Storing a relative path — rather than an absolute
+    /// `file://` URI — keeps the trust boundary tight: a downstream
+    /// resolver joins this against the configured vault root, so the
+    /// envelope alone cannot point outside the managed vault.
     pub payload_ref: String,
     /// Wall-clock instant the sensor observed the event.
     pub captured_at: Rfc3339Timestamp,
@@ -518,29 +595,31 @@ pub struct CaptureEvent {
 impl CaptureEvent {
     /// Run every invariant on the event:
     ///
-    /// 1. `payload_ref` is a non-empty `file://` URI rooted under
-    ///    `/sources/` and free of `..` segments. P0 vault layout (§3)
-    ///    keeps raw bytes under that subtree; rejecting other shapes
-    ///    closes off SSRF / off-vault dereferences in any downstream
-    ///    stage that resolves the URI.
+    /// 1. `payload_ref` is a non-empty vault-relative path beginning
+    ///    with `sources/`, with no `..` segments, no leading `/`, no
+    ///    NUL bytes, and no scheme/authority — the resolver joins it
+    ///    against the configured vault root.
     /// 2. `sensor_id` is a `snr:` identity (Mode B / C still flow through
     ///    a sensor surface).
     /// 3. `payload.source_family() == self.source_family`.
-    /// 4. `capture_mode` and `source_family` are a declared §5.0.a pair
+    /// 4. Per-payload invariants
+    ///    ([`CapturePayload::validate`]) — required identifiers
+    ///    non-empty, `confidence` in `[0.0, 1.0]`, etc.
+    /// 5. `capture_mode` and `source_family` are a declared §5.0.a pair
     ///    (Auto = sensor families, Explicit = `cli` / `mcp`,
     ///    Proactive = `proactive`).
-    /// 5. `source_family` matches the family expected from the sensor
+    /// 6. `source_family` matches the family expected from the sensor
     ///    label — a `local:cli:` sensor cannot emit a `screen` payload.
-    /// 6. `actor_chain` validates per §4.2
+    /// 7. `actor_chain` validates per §4.2
     ///    ([`super::actor_chain::validate_chain`]).
-    /// 7. `actor_chain` author matches `capture_mode` per §5.0.a
+    /// 8. `actor_chain` author matches `capture_mode` per §5.0.a
     ///    ([`super::capture_attribution::attribute`]).
-    /// 8. For Mode A captures, the `Author` entry's identity equals
+    /// 9. For Mode A captures, the `Author` entry's identity equals
     ///    `sensor_id` (the sensor authors its own raw events). For any
     ///    mode, if a `Sensor` role entry is present in the chain, it
     ///    must equal `sensor_id`.
-    /// 9. Sensor label is in the declared P0 manifest
-    ///    ([`super::capture_manifest::validate_label`]).
+    /// 10. Sensor label is in the declared P0 manifest
+    ///     ([`super::capture_manifest::validate_label`]).
     pub fn validate(&self) -> Result<(), DomainError> {
         validate_payload_ref(&self.payload_ref)?;
 
@@ -561,6 +640,7 @@ impl CaptureEvent {
                 ),
             });
         }
+        self.payload.validate()?;
         if !mode_allows_family(self.capture_mode, self.source_family) {
             return Err(DomainError::MalformedCapture {
                 message: format!(
@@ -691,43 +771,50 @@ fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
 /// Reject `payload_ref` strings that would let a downstream stage
 /// dereference bytes outside the managed `sources/` vault layer (§3).
 ///
-/// Accepted shape: `file:///<abs-path>/sources/<rest>` — strictly empty
-/// authority (three slashes after `file:`), no query, no fragment, no
-/// `..` traversal. The path is percent-decoded before the traversal
-/// check so encoded escapes (`%2e%2e`) cannot bypass the rule. Pure
-/// syntactic check — no filesystem access at this layer.
+/// Accepted shape: a non-empty vault-relative path that begins with the
+/// literal prefix `sources/`, contains no `..` segment, no empty `//`
+/// segment, no leading `/`, no NUL byte, no scheme/authority marker
+/// (`://`), and no query or fragment. A downstream resolver joins this
+/// against the configured vault root, so the envelope alone cannot
+/// reference paths outside the vault. Pure syntactic check — no
+/// filesystem access at this layer.
 fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
     if raw.is_empty() {
         return Err(DomainError::EmptyField {
             field: "payload_ref",
         });
     }
-    // `file:///` rather than `file://`: require an empty authority so
-    // `file://attacker-host/sources/x` is rejected. The third `/` is the
-    // start of the absolute path.
-    let path = raw
-        .strip_prefix("file:///")
-        .ok_or_else(|| DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: must be a `file:///` URI with empty authority"),
-        })?;
-    if path.contains('?') || path.contains('#') {
+    if raw.contains('\0') {
+        return Err(DomainError::MalformedCapture {
+            message: "payload_ref: NUL byte not permitted".to_owned(),
+        });
+    }
+    if raw.contains("://") {
+        return Err(DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: scheme not permitted, use vault-relative path"),
+        });
+    }
+    if raw.starts_with('/') {
+        return Err(DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: must not be absolute"),
+        });
+    }
+    if !raw.starts_with("sources/") {
+        return Err(DomainError::MalformedCapture {
+            message: format!("payload_ref `{raw}`: must begin with `sources/`"),
+        });
+    }
+    if raw.contains('?') || raw.contains('#') {
         return Err(DomainError::MalformedCapture {
             message: format!("payload_ref `{raw}`: query/fragment not permitted"),
         });
     }
-    let decoded = percent_decode(path).ok_or_else(|| DomainError::MalformedCapture {
-        message: format!("payload_ref `{raw}`: malformed percent-encoding"),
-    })?;
-    // The decoded path must contain a `/sources/` segment so off-vault
-    // paths like `/etc/passwd` are rejected, and must have no `..`
-    // segments after decoding so percent-encoded traversals
-    // (`%2e%2e`) cannot escape the vault root.
-    if !decoded.contains("/sources/") && !decoded.starts_with("sources/") {
-        return Err(DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: path must contain `/sources/`"),
-        });
-    }
-    for segment in decoded.split('/') {
+    for segment in raw.split('/') {
+        if segment.is_empty() {
+            return Err(DomainError::MalformedCapture {
+                message: format!("payload_ref `{raw}`: empty path segment"),
+            });
+        }
         if segment == ".." {
             return Err(DomainError::MalformedCapture {
                 message: format!("payload_ref `{raw}`: `..` traversal not permitted"),
@@ -735,30 +822,6 @@ fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
         }
     }
     Ok(())
-}
-
-/// Decode `%XX` escapes in a URI path. Returns `None` if a `%` is not
-/// followed by two hex digits. Stays in `cairn-core` to avoid pulling
-/// `percent-encoding` for one decoder.
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            if i + 2 >= bytes.len() {
-                return None;
-            }
-            let hi = u8::try_from((bytes[i + 1] as char).to_digit(16)?).ok()?;
-            let lo = u8::try_from((bytes[i + 2] as char).to_digit(16)?).ok()?;
-            out.push(hi * 16 + lo);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]
@@ -799,7 +862,7 @@ mod tests {
                 tool_id: None,
             }),
             payload_hash: PayloadHash::parse(format!("sha256:{}", "ab".repeat(32))).expect("valid"),
-            payload_ref: "file:///vault/sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
+            payload_ref: "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
             captured_at: ts(),
             payload: CapturePayload::Hook {
                 hook_name: "PostToolUse".into(),

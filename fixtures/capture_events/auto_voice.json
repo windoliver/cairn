@@ -13,7 +13,7 @@
     "session_id": "sess-42"
   },
   "payload_hash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-  "payload_ref": "file:///vault/sources/voice/01ARZ3NDEKTSV4RRFFQ69G5FD0.wav",
+  "payload_ref": "sources/voice/01ARZ3NDEKTSV4RRFFQ69G5FD0.wav",
   "captured_at": "2026-04-22T14:02:11Z",
   "payload": {
     "source_family": "voice",

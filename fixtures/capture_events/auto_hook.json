@@ -15,7 +15,7 @@
     "tool_id": "tool-1"
   },
   "payload_hash": "sha256:abababababababababababababababababababababababababababababababab",
-  "payload_ref": "file:///vault/sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
+  "payload_ref": "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
   "captured_at": "2026-04-22T14:02:11Z",
   "payload": {
     "source_family": "hook",

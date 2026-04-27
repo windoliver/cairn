@@ -66,7 +66,7 @@ fn auto_event() -> CaptureEvent {
             tool_id: Some("tool-1".into()),
         }),
         payload_hash: hash(),
-        payload_ref: "file:///vault/sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
+        payload_ref: "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
         captured_at: ts(),
         payload: CapturePayload::Hook {
             hook_name: "PostToolUse".into(),
@@ -87,7 +87,7 @@ fn explicit_event() -> CaptureEvent {
         ],
         refs: None,
         payload_hash: hash(),
-        payload_ref: "file:///vault/sources/cli/01ARZ3NDEKTSV4RRFFQ69G5FB0.txt".into(),
+        payload_ref: "sources/cli/01ARZ3NDEKTSV4RRFFQ69G5FB0.txt".into(),
         captured_at: ts(),
         payload: CapturePayload::Cli {
             kind_hint: "user".into(),
@@ -111,7 +111,7 @@ fn proactive_event() -> CaptureEvent {
             tool_id: None,
         }),
         payload_hash: hash(),
-        payload_ref: "file:///vault/sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FCA.json".into(),
+        payload_ref: "sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FCA.json".into(),
         captured_at: ts(),
         payload: CapturePayload::Proactive {
             kind: "feedback".into(),
@@ -254,8 +254,14 @@ fn chain_sensor_entry_must_match_sensor_id() {
 }
 
 #[test]
-fn payload_ref_must_be_file_scheme() {
+fn payload_ref_rejects_uri_scheme() {
+    // Any scheme (file://, https://, ...) is rejected — payload_ref is a
+    // vault-relative path, not a URI.
     let mut ev = auto_event();
+    ev.payload_ref = "file:///vault/sources/x.json".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+
     ev.payload_ref = "https://example.com/sources/x.json".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
@@ -264,7 +270,15 @@ fn payload_ref_must_be_file_scheme() {
 #[test]
 fn payload_ref_must_be_under_sources() {
     let mut ev = auto_event();
-    ev.payload_ref = "file:///etc/passwd".into();
+    ev.payload_ref = "etc/passwd".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_absolute_path() {
+    let mut ev = auto_event();
+    ev.payload_ref = "/etc/passwd".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
 }
@@ -272,7 +286,15 @@ fn payload_ref_must_be_under_sources() {
 #[test]
 fn payload_ref_rejects_dotdot_traversal() {
     let mut ev = auto_event();
-    ev.payload_ref = "file:///vault/sources/../etc/passwd".into();
+    ev.payload_ref = "sources/../etc/passwd".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_double_slash() {
+    let mut ev = auto_event();
+    ev.payload_ref = "sources//hook/x.json".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
 }
@@ -280,46 +302,121 @@ fn payload_ref_rejects_dotdot_traversal() {
 #[test]
 fn payload_ref_rejects_query_and_fragment() {
     let mut ev = auto_event();
-    ev.payload_ref = "file:///vault/sources/x.json?evil=1".into();
+    ev.payload_ref = "sources/x.json?evil=1".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
 }
 
 #[test]
-fn payload_ref_rejects_non_empty_authority() {
-    // file://attacker-host/... must be rejected — the authority component
-    // can resolve to a different host on URI-aware consumers.
+fn payload_ref_rejects_nul_byte() {
     let mut ev = auto_event();
-    ev.payload_ref = "file://attacker-host/vault/sources/x.json".into();
+    ev.payload_ref = "sources/hook/x\0.json".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
 }
 
 #[test]
-fn payload_ref_rejects_localhost_authority() {
-    // Even `localhost` is rejected — we require empty authority for a
-    // single canonical local-file shape.
+fn voice_confidence_out_of_range_rejected() {
     let mut ev = auto_event();
-    ev.payload_ref = "file://localhost/vault/sources/x.json".into();
+    ev.sensor_id = Identity::parse("snr:local:voice:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:voice:default:v1")];
+    ev.source_family = SourceFamily::Voice;
+    ev.payload = CapturePayload::Voice {
+        speaker_id: "alice".into(),
+        duration_ms: 100,
+        confidence: 42.0,
+    };
     let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    assert!(matches!(
+        err,
+        DomainError::OutOfRange {
+            field: "confidence",
+            ..
+        }
+    ));
 }
 
 #[test]
-fn payload_ref_rejects_percent_encoded_traversal() {
-    // %2e%2e decodes to `..` — must not slip past the segment scan.
+fn voice_confidence_nan_rejected() {
     let mut ev = auto_event();
-    ev.payload_ref = "file:///vault/sources/%2e%2e/etc/passwd".into();
+    ev.sensor_id = Identity::parse("snr:local:voice:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:voice:default:v1")];
+    ev.source_family = SourceFamily::Voice;
+    ev.payload = CapturePayload::Voice {
+        speaker_id: "alice".into(),
+        duration_ms: 100,
+        confidence: f32::NAN,
+    };
     let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    assert!(matches!(
+        err,
+        DomainError::OutOfRange {
+            field: "confidence",
+            ..
+        }
+    ));
 }
 
 #[test]
-fn payload_ref_rejects_malformed_percent_encoding() {
+fn empty_hook_name_rejected() {
     let mut ev = auto_event();
-    ev.payload_ref = "file:///vault/sources/x%2".into();
+    ev.payload = CapturePayload::Hook {
+        hook_name: String::new(),
+        tool_name: None,
+    };
     let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    assert!(matches!(
+        err,
+        DomainError::EmptyField { field: "hook_name" }
+    ));
+}
+
+#[test]
+fn empty_cli_kind_hint_rejected() {
+    let mut ev = explicit_event();
+    ev.payload = CapturePayload::Cli {
+        kind_hint: String::new(),
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        DomainError::EmptyField { field: "kind_hint" }
+    ));
+}
+
+#[test]
+fn empty_proactive_rationale_rejected() {
+    let mut ev = proactive_event();
+    ev.payload = CapturePayload::Proactive {
+        kind: "feedback".into(),
+        rationale: String::new(),
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        DomainError::EmptyField { field: "rationale" }
+    ));
+}
+
+#[test]
+fn zero_recording_duration_rejected() {
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
+    ev.source_family = SourceFamily::RecordingBatch;
+    ev.payload = CapturePayload::RecordingBatch {
+        recording_path: "sources/recording/x.mp4".into(),
+        segment_start_ms: 0,
+        segment_duration_ms: 0,
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        DomainError::OutOfRange {
+            field: "segment_duration_ms",
+            ..
+        }
+    ));
 }
 
 #[test]

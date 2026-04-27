@@ -14,7 +14,7 @@
     "turn_id": "turn-7"
   },
   "payload_hash": "sha256:abababababababababababababababababababababababababababababababab",
-  "payload_ref": "file:///vault/sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FCA.json",
+  "payload_ref": "sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FCA.json",
   "captured_at": "2026-04-22T14:02:11Z",
   "payload": {
     "source_family": "proactive",

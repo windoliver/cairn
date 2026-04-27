@@ -10,7 +10,7 @@
     }
   ],
   "payload_hash": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
-  "payload_ref": "file:///vault/sources/screen/01ARZ3NDEKTSV4RRFFQ69G5FE0.png",
+  "payload_ref": "sources/screen/01ARZ3NDEKTSV4RRFFQ69G5FE0.png",
   "captured_at": "2026-04-22T14:02:11Z",
   "payload": {
     "source_family": "screen",
