@@ -10,6 +10,6 @@ cairn search "database schema decision" --limit 10 --json
 **Parse the JSON response:**
 ```json
 {"hits":[
-  {"id":"01HQZ...","kind":"fact","body":"decided to use sqlite-vec for ANN","score":0.91}
+{"id":"01HQZ...","kind":"fact","body":"decided to use sqlite-vec for ANN","score":0.91}
 ]}
 ```
