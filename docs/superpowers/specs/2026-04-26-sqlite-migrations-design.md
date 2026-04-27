@@ -5,6 +5,15 @@
 **Design sources:** brief §3.0 (storage topology), §3 (records-in-SQLite), §5.6 (WAL)
 **Date:** 2026-04-26
 
+> **Scope of this PR.** This is a design / spec PR only. The
+> implementation (Cargo deps, `migrations/sql/*.sql` files,
+> `open()`, `StoreError`, integration tests) lands in a follow-up
+> PR driven by the writing-plans skill that fires after this spec
+> is approved. The branch `feat/sqlite-migrations` is intentionally
+> docs-only at this point. Reviewers should evaluate the spec for
+> design correctness; "no migration code is shipped here" is
+> expected and not a finding.
+
 ---
 
 ## 1. Goal
@@ -290,6 +299,20 @@ BEGIN
     'wal_ops.issued_seq must strictly advance MAX(issued_seq)');
 END;
 
+-- Once an op enters a terminal state (COMMITTED, ABORTED, REJECTED)
+-- every column is frozen forever — including updated_at and reason
+-- — so the audit ledger cannot be retroactively rewritten. The
+-- envelope-immutable trigger above already pins identity columns;
+-- this trigger pins the FSM execution columns once we hit terminal.
+CREATE TRIGGER wal_ops_terminal_immutable
+  BEFORE UPDATE ON wal_ops
+  FOR EACH ROW
+  WHEN OLD.state IN ('COMMITTED', 'ABORTED', 'REJECTED')
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_ops rows in terminal states (COMMITTED/ABORTED/REJECTED) are fully immutable');
+END;
+
 -- FSM enforcement: state transitions must follow the §5.6 graph.
 -- Allowed edges:
 --   ISSUED   -> PREPARED | REJECTED
@@ -519,6 +542,22 @@ CREATE INDEX outstanding_challenges_exp_idx ON outstanding_challenges(expires_at
 -- issuer_seq.high_water. UNIQUE alone prevents reusing a sequence
 -- value but not rewinding to an unused-but-lower one (e.g., commit
 -- seq 5 after seq 10). This trigger rejects non-advancing inserts.
+-- Cross-table consistency: used.issuer MUST equal the issuer of the
+-- wal_ops row referenced by operation_id. Without this, a malformed
+-- insert could attribute one issuer's operation_id to another
+-- issuer's nonce/sequence space and burn or advance the wrong
+-- issuer's high-water mark.
+CREATE TRIGGER used_issuer_matches_wal
+  BEFORE INSERT ON used
+  FOR EACH ROW
+  WHEN NEW.issuer IS NOT (
+    SELECT issuer FROM wal_ops WHERE operation_id = NEW.operation_id
+  )
+BEGIN
+  SELECT RAISE(ABORT,
+    'used.issuer must match wal_ops.issuer for the referenced operation_id');
+END;
+
 CREATE TRIGGER used_sequence_must_advance
   BEFORE INSERT ON used
   FOR EACH ROW
@@ -1060,13 +1099,15 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `edges_updates_immutable_after_insert`,
     `edges_drop_updates_when_src_tombstoned`,
     `wal_ops_issued_seq_must_advance`, `wal_ops_state_transition`,
-    `wal_ops_envelope_immutable`, `wal_ops_no_delete`,
+    `wal_ops_envelope_immutable`, `wal_ops_terminal_immutable`,
+    `wal_ops_no_delete`,
     `wal_steps_state_transition`, `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `wal_op_deps_no_delete`,
     `consent_journal_immutable`, `consent_journal_no_delete`,
-    `used_sequence_must_advance`, `used_advance_high_water`,
-    `used_immutable`, `used_no_delete`, `issuer_seq_no_delete`,
+    `used_issuer_matches_wal`, `used_sequence_must_advance`,
+    `used_advance_high_water`, `used_immutable`, `used_no_delete`,
+    `issuer_seq_no_delete`,
     `issuer_seq_insert_must_match_ledger`, `issuer_seq_only_via_ledger`,
     `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
     `lock_holders_count_after_update`, `lock_holders_keys_immutable`
@@ -1195,6 +1236,17 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `wal_ops_state_transition`): COMMITTED→ISSUED,
   COMMITTED→PREPARED, ABORTED→COMMITTED, REJECTED→PREPARED,
   PREPARED→ISSUED, COMMITTED→ABORTED.
+- `wal_ops_terminal_fully_locked` — drive a row to `'COMMITTED'`;
+  attempt `UPDATE wal_ops SET reason = 'note'`; expect ABORT via
+  `wal_ops_terminal_immutable`. Repeat for `updated_at`. Repeat for
+  rows in `'ABORTED'` and `'REJECTED'`. Confirms terminal rows are
+  fully append-only; the audit ledger cannot be rewritten after
+  the fact.
+- `used_issuer_must_match_wal_ops` — insert a `wal_ops` row with
+  `issuer = 'alice'`; attempt `INSERT INTO used (operation_id = …,
+  issuer = 'mallory', …)` referencing alice's op; expect ABORT via
+  `used_issuer_matches_wal`. Then re-attempt with
+  `issuer = 'alice'`; expect success.
 - `wal_steps_fsm_transitions` — insert at `state='PENDING'`. Legal:
   PENDING→DONE, PENDING→FAILED, FAILED→PENDING (retry),
   FAILED→COMPENSATED, DONE→COMPENSATED. Illegal: DONE→PENDING,
