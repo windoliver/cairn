@@ -6,6 +6,7 @@ use clap::ValueEnum;
 use std::path::PathBuf;
 
 /// Supported harnesses for `cairn skill install`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub enum Harness {
     /// Claude Code harness — registers the skill via CLAUDE.md.
