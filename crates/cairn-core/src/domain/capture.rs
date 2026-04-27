@@ -36,9 +36,14 @@ use crate::domain::{
 pub struct CaptureEventId(String);
 
 impl CaptureEventId {
-    /// Parse a ULID. Returns [`DomainError::MalformedCapture`] if the input
-    /// is not exactly 26 Crockford base32 characters
-    /// (`0-9`, `A-H`, `J`, `K`, `M`, `N`, `P-T`, `V-Z`).
+    /// Parse a wire-form ULID.
+    ///
+    /// Length is 26, alphabet is Crockford base32 (uppercase, no
+    /// `I L O U`), and the first character is bounded to `[0..=7]`
+    /// because a ULID encodes a 128-bit integer and the high 5 bits of
+    /// the leading Crockford symbol must be zero — otherwise the value
+    /// overflows 128 bits and downstream ULID decoders will misorder or
+    /// reject it. Mirrors [`crate::domain::record::RecordId::parse`].
     pub fn parse(raw: impl Into<String>) -> Result<Self, DomainError> {
         let raw = raw.into();
         if raw.len() != 26 {
@@ -46,7 +51,15 @@ impl CaptureEventId {
                 message: format!("event_id `{raw}`: ULID must be exactly 26 chars"),
             });
         }
-        if !raw.bytes().all(is_crockford_base32) {
+        let bytes = raw.as_bytes();
+        if !matches!(bytes[0], b'0'..=b'7') {
+            return Err(DomainError::MalformedCapture {
+                message: format!(
+                    "event_id `{raw}`: first char must be `0`-`7` (128-bit ULID range)"
+                ),
+            });
+        }
+        if !bytes[1..].iter().copied().all(is_crockford_base32) {
             return Err(DomainError::MalformedCapture {
                 message: format!("event_id `{raw}`: non-Crockford-base32 character"),
             });
@@ -491,18 +504,22 @@ impl CapturePayload {
                     });
                 }
             }
-            Self::Screen {
-                app, window_title, ..
-            } => {
+            Self::Screen { app, .. } => {
+                // `window_title` is intentionally allowed to be empty —
+                // privacy-redacted captures and titleless OS surfaces
+                // (notifications, lock screens) submit `""` rather than
+                // forcing the sensor to invent a placeholder.
                 require_non_empty("app", app)?;
-                require_non_empty("window_title", window_title)?;
             }
             Self::RecordingBatch {
                 recording_path,
                 segment_duration_ms,
                 ..
             } => {
-                require_non_empty("recording_path", recording_path)?;
+                // Same trust boundary as `payload_ref` — a downstream
+                // batch extractor reopens this file, so it must be a
+                // vault-relative `sources/...` path.
+                validate_vault_relative_path("recording_path", recording_path)?;
                 if *segment_duration_ms == 0 {
                     return Err(DomainError::OutOfRange {
                         field: "segment_duration_ms",
@@ -779,45 +796,50 @@ fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
 /// reference paths outside the vault. Pure syntactic check — no
 /// filesystem access at this layer.
 fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
+    validate_vault_relative_path("payload_ref", raw)
+}
+
+/// Shared vault-relative path validator used by both `payload_ref` and
+/// per-payload path fields like `RecordingBatch.recording_path`. See the
+/// [`validate_payload_ref`] doc-comment for the accepted shape.
+fn validate_vault_relative_path(field: &'static str, raw: &str) -> Result<(), DomainError> {
     if raw.is_empty() {
-        return Err(DomainError::EmptyField {
-            field: "payload_ref",
-        });
+        return Err(DomainError::EmptyField { field });
     }
     if raw.contains('\0') {
         return Err(DomainError::MalformedCapture {
-            message: "payload_ref: NUL byte not permitted".to_owned(),
+            message: format!("{field}: NUL byte not permitted"),
         });
     }
     if raw.contains("://") {
         return Err(DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: scheme not permitted, use vault-relative path"),
+            message: format!("{field} `{raw}`: scheme not permitted, use vault-relative path"),
         });
     }
     if raw.starts_with('/') {
         return Err(DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: must not be absolute"),
+            message: format!("{field} `{raw}`: must not be absolute"),
         });
     }
     if !raw.starts_with("sources/") {
         return Err(DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: must begin with `sources/`"),
+            message: format!("{field} `{raw}`: must begin with `sources/`"),
         });
     }
     if raw.contains('?') || raw.contains('#') {
         return Err(DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: query/fragment not permitted"),
+            message: format!("{field} `{raw}`: query/fragment not permitted"),
         });
     }
     for segment in raw.split('/') {
         if segment.is_empty() {
             return Err(DomainError::MalformedCapture {
-                message: format!("payload_ref `{raw}`: empty path segment"),
+                message: format!("{field} `{raw}`: empty path segment"),
             });
         }
         if segment == ".." {
             return Err(DomainError::MalformedCapture {
-                message: format!("payload_ref `{raw}`: `..` traversal not permitted"),
+                message: format!("{field} `{raw}`: `..` traversal not permitted"),
             });
         }
     }

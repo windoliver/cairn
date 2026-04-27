@@ -420,6 +420,63 @@ fn zero_recording_duration_rejected() {
 }
 
 #[test]
+fn captureeventid_rejects_overflow_first_char() {
+    // ULID first char must be `0`-`7`. `8...` overflows 128 bits.
+    let err = CaptureEventId::parse("8ARZ3NDEKTSV4RRFFQ69G5FAVZ").unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn captureeventid_accepts_max_valid_first_char() {
+    CaptureEventId::parse("7ZZZZZZZZZZZZZZZZZZZZZZZZZ").expect("first char `7` is the max");
+}
+
+#[test]
+fn recording_path_must_be_vault_relative() {
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
+    ev.source_family = SourceFamily::RecordingBatch;
+    ev.payload = CapturePayload::RecordingBatch {
+        recording_path: "/tmp/attacker/x.mp4".into(),
+        segment_start_ms: 0,
+        segment_duration_ms: 1000,
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn recording_path_rejects_dotdot() {
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
+    ev.source_family = SourceFamily::RecordingBatch;
+    ev.payload = CapturePayload::RecordingBatch {
+        recording_path: "sources/recording/../../etc/passwd".into(),
+        segment_start_ms: 0,
+        segment_duration_ms: 1000,
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn screen_window_title_can_be_empty_for_redaction() {
+    // Privacy-redacted screen captures legitimately ship empty titles.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:screen:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:screen:default:v1")];
+    ev.source_family = SourceFamily::Screen;
+    ev.payload = CapturePayload::Screen {
+        app: "com.apple.Safari".into(),
+        window_title: String::new(),
+        url: None,
+    };
+    ev.validate().expect("redacted title must not block ingest");
+}
+
+#[test]
 fn neuroskill_sensor_pinned_to_hook_family() {
     // local:neuroskill:* is now pinned to Hook — emitting any other
     // family from a neuroskill sensor must fail.
