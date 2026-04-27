@@ -220,8 +220,26 @@ fn read_installed_version(
 /// Returns an error if a directory cannot be created or a file cannot be
 /// written. Symlinked paths are rejected.
 pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
-    let target = opts.target_dir.components().collect::<PathBuf>();
+    // Reject empty paths before any filesystem access.
+    if opts.target_dir.as_os_str().is_empty() {
+        anyhow::bail!("--target-dir must not be empty");
+    }
+
+    // Normalize to an absolute, lexically clean path so that:
+    //  - relative paths produce absolute registration hints
+    //  - the non-empty preflight sees the actual filesystem directory
+    //  - registration hints paste correctly from any working directory
+    let target = if opts.target_dir.is_absolute() {
+        opts.target_dir.components().collect::<PathBuf>()
+    } else {
+        std::env::current_dir()
+            .context("resolving current directory for target path")?
+            .join(&opts.target_dir)
+            .components()
+            .collect::<PathBuf>()
+    };
     let target = &target;
+
     // All workspace crates share a single version (see [workspace.package] in Cargo.toml),
     // so cairn-cli's CARGO_PKG_VERSION matches the cairn-idl version embedded in .version.
     let current_idl_version = env!("CARGO_PKG_VERSION");
@@ -253,6 +271,10 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Create target dir and examples/ subdir.
     std::fs::create_dir_all(target.join("examples"))
         .with_context(|| format!("creating {}", target.join("examples").display()))?;
+
+    // Re-validate after create_dir_all to mitigate TOCTOU symlink swaps
+    // that could redirect newly created ancestors between preflight and writes.
+    reject_symlink_ancestors(target)?;
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
