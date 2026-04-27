@@ -7,4 +7,5 @@
 
 pub mod config;
 pub mod plugins;
+pub mod vault;
 pub mod verbs;

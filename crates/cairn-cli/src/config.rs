@@ -95,36 +95,6 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
     Ok(config)
 }
 
-/// Write the serialized default config to `<vault_path>/.cairn/config.yaml`.
-///
-/// Creates `.cairn/` if it does not exist. Fails if the file already exists
-/// so that re-running bootstrap never silently overwrites user edits.
-///
-/// # Errors
-/// Returns an error if the config file already exists, the directory cannot be
-/// created, YAML serialization fails, or the file cannot be written.
-pub fn write_default(vault_path: &Path) -> Result<()> {
-    let config_dir = vault_path.join(".cairn");
-    let config_path = config_dir.join("config.yaml");
-
-    anyhow::ensure!(
-        !config_path.exists(),
-        "{} already exists; delete it first to re-bootstrap",
-        config_path.display()
-    );
-
-    std::fs::create_dir_all(&config_dir)
-        .with_context(|| format!("creating {}", config_dir.display()))?;
-
-    let yaml = serde_yaml::to_string(&CairnConfig::default())
-        .context("serializing default config to YAML")?;
-
-    std::fs::write(&config_path, yaml)
-        .with_context(|| format!("writing {}", config_path.display()))?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -177,3 +177,73 @@ fn unknown_argument_fails_closed() {
         "stderr missing clap usage marker: {stderr:?}",
     );
 }
+
+#[test]
+fn bootstrap_emits_json_with_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cli()
+        .args([
+            "bootstrap",
+            "--vault-path",
+            dir.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("cairn bootstrap --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--json must emit valid JSON");
+    assert!(
+        parsed.get("vault_path").is_some(),
+        "JSON missing vault_path"
+    );
+    assert!(
+        parsed.get("dirs_created").is_some(),
+        "JSON missing dirs_created"
+    );
+}
+
+#[test]
+fn bootstrap_force_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    // first run
+    cli()
+        .args(["bootstrap", "--vault-path", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    // second run with --force must succeed
+    let out = cli()
+        .args([
+            "bootstrap",
+            "--vault-path",
+            dir.path().to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("cairn bootstrap --force");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+}
+
+#[test]
+fn bootstrap_io_error_exits_74() {
+    // Point at a path we cannot write to — use a file as the vault path so
+    // create_dir_all fails.
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let out = cli()
+        .args(["bootstrap", "--vault-path", file.path().to_str().unwrap()])
+        .output()
+        .expect("cairn bootstrap <file-as-vault>");
+    assert_eq!(
+        out.status.code(),
+        Some(74),
+        "expected EX_IOERR(74), got: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

@@ -8,7 +8,6 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::config as cli_config;
 use cairn_cli::{plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
@@ -42,13 +41,25 @@ fn build_command() -> clap::Command {
 
 fn bootstrap_subcommand() -> clap::Command {
     clap::Command::new("bootstrap")
-        .about("Write a default .cairn/config.yaml to a vault directory")
+        .about("Initialize a vault directory tree with the §3 layout")
         .arg(
             clap::Arg::new("vault-path")
                 .long("vault-path")
                 .default_value(".")
                 .value_name("PATH")
                 .help("Vault root directory (default: current directory)"),
+        )
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .action(clap::ArgAction::SetTrue)
+                .help("Emit JSON receipt instead of human-readable output"),
+        )
+        .arg(
+            clap::Arg::new("force")
+                .long("force")
+                .action(clap::ArgAction::SetTrue)
+                .help("Overwrite existing placeholder files"),
         )
 }
 
@@ -124,21 +135,29 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
     let vault_path = std::path::PathBuf::from(
         matches
             .get_one::<String>("vault-path")
-            .expect("vault-path has a default value"),
+            .expect("invariant: vault-path has a default value"),
     );
+    let json = matches.get_flag("json");
+    let force = matches.get_flag("force");
 
-    match cli_config::write_default(&vault_path) {
-        Ok(()) => {
-            println!(
-                "cairn bootstrap: wrote default config to {}",
-                vault_path.join(".cairn/config.yaml").display()
-            );
+    let opts = cairn_cli::vault::BootstrapOpts { vault_path, force };
+
+    match cairn_cli::vault::bootstrap(&opts) {
+        Ok(receipt) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: BootstrapReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::vault::render_human(&receipt));
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            // EX_CONFIG (78) — bad config or file already exists
             eprintln!("cairn bootstrap: {e:#}");
-            ExitCode::from(78)
+            ExitCode::from(74) // EX_IOERR
         }
     }
 }
