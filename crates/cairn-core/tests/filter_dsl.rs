@@ -213,7 +213,10 @@ fn compile_string_nin() {
         "field": "category", "op": "nin", "value": ["draft", "archived"]
     }));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert_eq!(compiled.sql, "category NOT IN (?, ?)");
+    assert_eq!(
+        compiled.sql,
+        "json_extract(extra_frontmatter, '$.category') NOT IN (?, ?)"
+    );
     assert_eq!(compiled.params.len(), 2);
 }
 
@@ -221,7 +224,10 @@ fn compile_string_nin() {
 fn compile_string_contains_uses_instr() {
     let f = parse(serde_json::json!({"field": "title", "op": "string_contains", "value": "pg"}));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert_eq!(compiled.sql, "instr(title, ?) > 0");
+    assert_eq!(
+        compiled.sql,
+        "instr(json_extract(extra_frontmatter, '$.title'), ?) > 0"
+    );
     assert_eq!(compiled.params, vec![serde_json::json!("pg")]);
 }
 
@@ -232,7 +238,12 @@ fn compile_string_starts_with() {
     }));
     let compiled = compile_filter(validate_filter(&f).unwrap());
     // Uses substr/length for case-sensitive matching consistent with instr().
-    assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
+    assert!(
+        compiled
+            .sql
+            .contains("json_extract(extra_frontmatter, '$.title')")
+            && compiled.sql.contains("substr")
+    );
     // Two params: one for length(?), one for the equality check.
     assert_eq!(compiled.params.len(), 2);
     assert_eq!(compiled.params[0].as_str(), Some("migration"));
@@ -245,7 +256,12 @@ fn compile_string_ends_with() {
         "field": "title", "op": "string_ends_with", "value": "config"
     }));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
+    assert!(
+        compiled
+            .sql
+            .contains("json_extract(extra_frontmatter, '$.title')")
+            && compiled.sql.contains("substr")
+    );
     // Three params: two for length(?), one for the equality check.
     assert_eq!(compiled.params.len(), 3);
     assert_eq!(compiled.params[0].as_str(), Some("config"));
@@ -257,7 +273,10 @@ fn compile_string_ends_with() {
 fn compile_number_lt() {
     let f = parse(serde_json::json!({"field": "priority", "op": "lt", "value": 5}));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert_eq!(compiled.sql, "priority < ?");
+    assert_eq!(
+        compiled.sql,
+        "json_extract(extra_frontmatter, '$.priority') < ?"
+    );
     assert_eq!(compiled.params, vec![serde_json::json!(5)]);
 }
 
@@ -277,7 +296,10 @@ fn compile_number_between() {
 fn compile_boolean_eq() {
     let f = parse(serde_json::json!({"field": "is_static", "op": "eq", "value": false}));
     let compiled = compile_filter(validate_filter(&f).unwrap());
-    assert_eq!(compiled.sql, "is_static = ?");
+    assert_eq!(
+        compiled.sql,
+        "json_extract(extra_frontmatter, '$.is_static') = ?"
+    );
     assert_eq!(compiled.params, vec![serde_json::json!(false)]);
 }
 

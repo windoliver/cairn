@@ -1,9 +1,21 @@
 //! E2E execution tests for the metadata filter SQL compiler (§8.0.d).
 //!
-//! Creates an in-memory `SQLite` `records` table covering every P0 filter
-//! field, runs [`compile_filter`] output against it with real data, and
-//! asserts the correct rows are returned.  This validates SQL syntax AND
-//! semantics — not just structure.
+//! Creates an in-memory `SQLite` `records` table that mirrors the real
+//! `MemoryRecord` storage layout:
+//!
+//! - Scalar columns for direct `MemoryRecord` fields (`kind`, `class`,
+//!   `visibility`, `confidence`).
+//! - A `provenance TEXT` JSON column — `created_at` lives here as
+//!   `json_extract(provenance, '$.created_at')`.
+//! - A `tags TEXT` JSON column for the plain-string array.
+//! - An `actor_chain TEXT` JSON column storing `Vec<ActorChainEntry>` objects;
+//!   array ops filter on `json_extract(value, '$.identity')`.
+//! - An `extra_frontmatter TEXT` JSON column for all ingest-supplied fields
+//!   (`title`, `category`, `path`, `priority`, `version`, `is_static`,
+//!   `tombstoned`, `active`, `backlinks`).
+//!
+//! This validates SQL syntax AND semantics against the actual expression
+//! mapping in `field_col` — not just structure.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -17,23 +29,15 @@ fn open_db() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         "CREATE TABLE records (
-            id          TEXT    PRIMARY KEY,
-            kind        TEXT,
-            class       TEXT,
-            visibility  TEXT,
-            path        TEXT,
-            title       TEXT,
-            category    TEXT,
-            priority    INTEGER,
-            version     INTEGER,
-            created_at  TEXT,
-            confidence  REAL,
-            is_static   INTEGER,
-            tombstoned  INTEGER,
-            active      INTEGER,
-            tags        TEXT,
-            actor_chain TEXT,
-            backlinks   TEXT
+            id                TEXT PRIMARY KEY,
+            kind              TEXT,
+            class             TEXT,
+            visibility        TEXT,
+            confidence        REAL,
+            provenance        TEXT,
+            tags              TEXT,
+            actor_chain       TEXT,
+            extra_frontmatter TEXT
         );",
     )
     .unwrap();
@@ -92,58 +96,87 @@ fn run(conn: &Connection, filter_json: serde_json::Value) -> Vec<String> {
 fn seed_db() -> Connection {
     let conn = open_db();
 
+    // r1: kind=user, confidence=0.9, tags=["infra","migration"]
+    //     actor_chain=[{role:author,identity:agt:claude}]
+    //     extra_frontmatter: title, category=shipped, priority=8, is_static=0,
+    //                        tombstoned=0, active=1, backlinks=[], version=1
     insert(
         &conn,
         &[
             ("id", "r1"),
             ("kind", "user"),
-            ("title", "pg migration strategy"),
-            ("category", "shipped"),
-            ("priority", "8"),
+            ("class", "semantic"),
+            ("visibility", "private"),
             ("confidence", "0.9"),
-            ("is_static", "0"),
-            ("tombstoned", "0"),
-            ("active", "1"),
+            (
+                "provenance",
+                r#"{"created_at":"2026-04-01T10:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
+            ),
             ("tags", r#"["infra","migration"]"#),
-            ("actor_chain", r#"["agt:claude"]"#),
-            ("backlinks", r"[]"),
-            ("version", "1"),
+            (
+                "actor_chain",
+                r#"[{"role":"author","identity":"agt:claude","at":"2026-04-01T10:00:00Z"}]"#,
+            ),
+            (
+                "extra_frontmatter",
+                r#"{"title":"pg migration strategy","category":"shipped","priority":8,"version":1,"is_static":0,"tombstoned":0,"active":1,"backlinks":[]}"#,
+            ),
         ],
     );
+
+    // r2: kind=feedback, confidence=0.5, tags=["pref"]
+    //     actor_chain=[{role:author,identity:usr:tafeng}]
+    //     extra_frontmatter: title, category=draft, priority=3, is_static=1,
+    //                        tombstoned=0, active=1, backlinks=[], version=2
     insert(
         &conn,
         &[
             ("id", "r2"),
             ("kind", "feedback"),
-            ("title", "user prefers dark mode"),
-            ("category", "draft"),
-            ("priority", "3"),
+            ("class", "semantic"),
+            ("visibility", "private"),
             ("confidence", "0.5"),
-            ("is_static", "1"),
-            ("tombstoned", "0"),
-            ("active", "1"),
+            (
+                "provenance",
+                r#"{"created_at":"2026-04-02T11:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
+            ),
             ("tags", r#"["pref"]"#),
-            ("actor_chain", r#"["usr:tafeng"]"#),
-            ("backlinks", r"[]"),
-            ("version", "2"),
+            (
+                "actor_chain",
+                r#"[{"role":"author","identity":"usr:tafeng","at":"2026-04-02T11:00:00Z"}]"#,
+            ),
+            (
+                "extra_frontmatter",
+                r#"{"title":"user prefers dark mode","category":"draft","priority":3,"version":2,"is_static":1,"tombstoned":0,"active":1,"backlinks":[]}"#,
+            ),
         ],
     );
+
+    // r3: kind=rule, confidence=0.8, tags=["infra","db","backup"]
+    //     actor_chain=[{role:author,identity:agt:claude}]
+    //     extra_frontmatter: title, category=shipped, priority=9, is_static=0,
+    //                        tombstoned=1, active=0, backlinks=["r1"], version=1
     insert(
         &conn,
         &[
             ("id", "r3"),
             ("kind", "rule"),
-            ("title", "always use pg for backups"),
-            ("category", "shipped"),
-            ("priority", "9"),
+            ("class", "semantic"),
+            ("visibility", "private"),
             ("confidence", "0.8"),
-            ("is_static", "0"),
-            ("tombstoned", "1"),
-            ("active", "0"),
+            (
+                "provenance",
+                r#"{"created_at":"2026-04-03T09:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
+            ),
             ("tags", r#"["infra","db","backup"]"#),
-            ("actor_chain", r#"["agt:claude"]"#),
-            ("backlinks", r#"["r1"]"#),
-            ("version", "1"),
+            (
+                "actor_chain",
+                r#"[{"role":"author","identity":"agt:claude","at":"2026-04-03T09:00:00Z"}]"#,
+            ),
+            (
+                "extra_frontmatter",
+                r#"{"title":"always use pg for backups","category":"shipped","priority":9,"version":1,"is_static":0,"tombstoned":1,"active":0,"backlinks":["r1"]}"#,
+            ),
         ],
     );
 
@@ -292,7 +325,38 @@ fn exec_tombstoned_eq_true_returns_only_tombstoned() {
     assert_eq!(ids, vec!["r3"]);
 }
 
-// ── Array field ops ───────────────────────────────────────────────────────────
+// ── Timestamp field ops ───────────────────────────────────────────────────────
+
+#[test]
+fn exec_created_at_eq_matches_exact_timestamp() {
+    let conn = seed_db();
+    let ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "created_at",
+            "op": "eq",
+            "value": "2026-04-01T10:00:00Z"
+        }),
+    );
+    assert_eq!(ids, vec!["r1"]);
+}
+
+#[test]
+fn exec_created_at_in_set_matches_two() {
+    let conn = seed_db();
+    let mut ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "created_at",
+            "op": "in",
+            "value": ["2026-04-01T10:00:00Z", "2026-04-03T09:00:00Z"]
+        }),
+    );
+    ids.sort();
+    assert_eq!(ids, vec!["r1", "r3"]);
+}
+
+// ── Array field ops — tags (plain string array) ───────────────────────────────
 
 #[test]
 fn exec_array_contains_single() {
@@ -344,6 +408,81 @@ fn exec_array_size_eq_returns_matching_rows() {
     assert_eq!(ids, vec!["r2"]);
 }
 
+// ── Array field ops — actor_chain (struct array, filter on $.identity) ────────
+
+#[test]
+fn exec_actor_chain_contains_agent_identity() {
+    let conn = seed_db();
+    // r1 and r3 both have identity "agt:claude" in their actor_chain entries.
+    let mut ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "actor_chain",
+            "op": "array_contains",
+            "value": "agt:claude"
+        }),
+    );
+    ids.sort();
+    assert_eq!(ids, vec!["r1", "r3"]);
+}
+
+#[test]
+fn exec_actor_chain_contains_user_identity() {
+    let conn = seed_db();
+    let ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "actor_chain",
+            "op": "array_contains",
+            "value": "usr:tafeng"
+        }),
+    );
+    assert_eq!(ids, vec!["r2"]);
+}
+
+#[test]
+fn exec_actor_chain_contains_any_matches() {
+    let conn = seed_db();
+    let mut ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "actor_chain",
+            "op": "array_contains_any",
+            "value": ["usr:tafeng", "agt:other"]
+        }),
+    );
+    ids.sort();
+    assert_eq!(ids, vec!["r2"]);
+}
+
+// ── Array field ops — backlinks (JSON array in extra_frontmatter) ─────────────
+
+#[test]
+fn exec_backlinks_contains_ref() {
+    let conn = seed_db();
+    let ids = run(
+        &conn,
+        serde_json::json!({
+            "field": "backlinks",
+            "op": "array_contains",
+            "value": "r1"
+        }),
+    );
+    assert_eq!(ids, vec!["r3"]);
+}
+
+#[test]
+fn exec_backlinks_size_eq_zero_matches_empty() {
+    let conn = seed_db();
+    // r1 and r2 have empty backlinks arrays.
+    let mut ids = run(
+        &conn,
+        serde_json::json!({"field": "backlinks", "op": "array_size_eq", "value": 0}),
+    );
+    ids.sort();
+    assert_eq!(ids, vec!["r1", "r2"]);
+}
+
 // ── Boolean combinators ───────────────────────────────────────────────────────
 
 #[test]
@@ -365,7 +504,6 @@ fn exec_and_narrows_results() {
 #[test]
 fn exec_or_broadens_results() {
     let conn = seed_db();
-    // kind=user OR kind=rule → r1 and r3
     let mut ids = run(
         &conn,
         serde_json::json!({
@@ -382,7 +520,6 @@ fn exec_or_broadens_results() {
 #[test]
 fn exec_not_inverts_match() {
     let conn = seed_db();
-    // NOT category=draft → r1 and r3
     let mut ids = run(
         &conn,
         serde_json::json!({"not": {"field": "category", "op": "eq", "value": "draft"}}),
@@ -396,8 +533,6 @@ fn exec_not_inverts_match() {
 #[test]
 fn exec_brief_example_filter_returns_correct_rows() {
     let conn = seed_db();
-    // Adapted from §8.0.d: kind in [user, rule], is_static=false, tags contains infra,
-    // priority >= 7, category=shipped OR NOT category=draft, title contains pg.
     let ids = run(
         &conn,
         serde_json::json!({

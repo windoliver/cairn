@@ -637,12 +637,50 @@ fn compile_node(filter: &SearchArgsFilters, params: &mut Vec<serde_json::Value>)
     }
 }
 
-/// Map a validated field name to its SQL column expression in the `records` table.
-fn field_col(name: &str) -> &str {
-    // All P0 allowlisted fields map 1-to-1 to same-named columns on the
-    // `records` table.  Array fields (`tags`, `actor_chain`, `backlinks`) are
-    // stored as JSON text columns; array ops use `json_each()` sub-selects.
-    name
+/// Map a validated field name to its SQL column/expression in the `records` table.
+///
+/// Fields that are direct scalar columns on `MemoryRecord` map 1-to-1.
+/// Fields nested inside JSON blobs or stored in `extra_frontmatter` emit the
+/// appropriate `json_extract(...)` expression so the SQL is immediately correct
+/// when `cairn-store-sqlite` (#46) creates the schema. The store may additionally
+/// create indexed computed columns or partial indexes over these expressions
+/// for query performance — the filter SQL works with both approaches.
+fn field_col(name: &str) -> &'static str {
+    match name {
+        // ── Direct MemoryRecord scalar columns ────────────────────────────
+        "kind" => "kind",
+        "class" => "class",
+        "visibility" => "visibility",
+        "confidence" => "confidence",
+
+        // ── Nested inside the `provenance` JSON column ────────────────────
+        // `provenance.created_at` is the RFC3339 creation timestamp.
+        "created_at" => "json_extract(provenance, '$.created_at')",
+
+        // ── Direct JSON-array columns on MemoryRecord ─────────────────────
+        // `tags` is Vec<String> — flat string array; standard json_each works.
+        // `actor_chain` is Vec<ActorChainEntry> — struct array; see compile_array_op.
+        "tags" => "tags",
+        "actor_chain" => "actor_chain",
+
+        // ── Fields stored in the `extra_frontmatter` JSON column ──────────
+        // These fields come from the ingest call's frontmatter (§ schema
+        // verbs/ingest.json). The store (#46) might project frequently-queried
+        // ones as indexed computed columns; json_extract works regardless.
+        "title" => "json_extract(extra_frontmatter, '$.title')",
+        "category" => "json_extract(extra_frontmatter, '$.category')",
+        "path" => "json_extract(extra_frontmatter, '$.path')",
+        "priority" => "json_extract(extra_frontmatter, '$.priority')",
+        "version" => "json_extract(extra_frontmatter, '$.version')",
+        "is_static" => "json_extract(extra_frontmatter, '$.is_static')",
+        "tombstoned" => "json_extract(extra_frontmatter, '$.tombstoned')",
+        "active" => "json_extract(extra_frontmatter, '$.active')",
+        // `backlinks` is a JSON array inside extra_frontmatter.
+        "backlinks" => "json_extract(extra_frontmatter, '$.backlinks')",
+
+        // Unreachable: validate_filter rejects any name not in KNOWN_FIELDS.
+        _ => unreachable!("field not in KNOWN_FIELDS; validate_filter must be called first"),
+    }
 }
 
 fn compile_leaf(v: &serde_json::Value, params: &mut Vec<serde_json::Value>) -> String {
@@ -759,10 +797,19 @@ fn compile_array_op(
     value: &serde_json::Value,
     params: &mut Vec<serde_json::Value>,
 ) -> String {
+    // `actor_chain` stores Vec<ActorChainEntry> JSON objects. Callers filter by
+    // identity string (e.g. "agt:claude"), so extract the `identity` field from
+    // each element. All other array columns store plain strings.
+    let elem_expr = if col == "actor_chain" {
+        "json_extract(value, '$.identity')"
+    } else {
+        "value"
+    };
+
     match op {
         "array_contains" => {
             params.push(value.clone());
-            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE value = ?)")
+            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE {elem_expr} = ?)")
         }
         "array_contains_any" => {
             let Some(arr) = value.as_array() else {
@@ -773,7 +820,7 @@ fn compile_array_op(
             for v in arr {
                 params.push(v.clone());
             }
-            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN ({placeholders}))")
+            format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE {elem_expr} IN ({placeholders}))")
         }
         "array_contains_all" => {
             let Some(arr) = value.as_array() else {
@@ -795,7 +842,7 @@ fn compile_array_op(
                 n as u64,
             )));
             format!(
-                "(SELECT COUNT(DISTINCT value) FROM json_each({col}) WHERE value IN ({placeholders})) = ?"
+                "(SELECT COUNT(DISTINCT {elem_expr}) FROM json_each({col}) WHERE {elem_expr} IN ({placeholders})) = ?"
             )
         }
         "array_size_eq" => {
