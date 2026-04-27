@@ -645,16 +645,18 @@ BEGIN
   SELECT RAISE(ABORT, 'used rows are append-only; DELETE not permitted');
 END;
 
--- issuer_seq is the rewind guard for used_sequence_must_advance.
--- A DELETE wipes the high-water for an issuer, after which a fresh
--- `used` insert at any sequence (including a previously-rewound one)
--- would pass the rewind check and used_advance_high_water would
--- recreate issuer_seq at that lower value. Block DELETE outright.
+-- issuer_seq is the rewind cache for used_sequence_must_advance.
+-- DELETE is blocked only while `used` still has rows for the
+-- issuer; deleting an orphan row (no backing ledger) is permitted
+-- so the open-time auto-repair path can clean orphans through
+-- legal SQL.
 CREATE TRIGGER issuer_seq_no_delete
   BEFORE DELETE ON issuer_seq
   FOR EACH ROW
+  WHEN EXISTS (SELECT 1 FROM used WHERE issuer = OLD.issuer)
 BEGIN
-  SELECT RAISE(ABORT, 'issuer_seq is append-only; DELETE not permitted');
+  SELECT RAISE(ABORT,
+    'cannot delete issuer_seq while `used` has ledger rows for this issuer');
 END;
 
 -- Direct INSERT INTO issuer_seq is rejected unless the (issuer,
@@ -674,20 +676,27 @@ BEGIN
     'issuer_seq INSERT must correspond to a row in `used`');
 END;
 
--- issuer_seq mirrors `used`: every advance must correspond to a real
--- ledger row. Cannot rewind, cannot leap ahead.
+-- issuer_seq.high_water must equal MAX(used.sequence) for the
+-- issuer at every committed state. This single invariant covers:
+--   * normal advance via used_advance_high_water (after a `used`
+--     insert, the new MAX is the freshly-inserted sequence),
+--   * cache repair from Stale (high_water < used_max — UPDATE up
+--     to used_max passes),
+--   * cache repair from OverAdvanced (high_water > used_max —
+--     UPDATE down to used_max passes),
+--   * rejection of arbitrary mid-range or future values
+--     (any value not equal to MAX(used.sequence) is rejected).
+-- The previous "advance-only via existing sequence" version
+-- subsumed by this stricter rule.
 CREATE TRIGGER issuer_seq_only_via_ledger
   BEFORE UPDATE ON issuer_seq
   FOR EACH ROW
-  WHEN NEW.high_water <= OLD.high_water
-    OR NOT EXISTS (
-      SELECT 1 FROM used
-        WHERE issuer = NEW.issuer
-          AND sequence = NEW.high_water
-    )
+  WHEN NEW.high_water IS NOT (
+    SELECT MAX(sequence) FROM used WHERE issuer = NEW.issuer
+  )
 BEGIN
   SELECT RAISE(ABORT,
-    'issuer_seq.high_water can only advance to a sequence already in `used`');
+    'issuer_seq.high_water must equal MAX(used.sequence) for the issuer');
 END;
 
 ```
@@ -792,24 +801,39 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   two can diverge across crash recovery, retry bugs, or hand repair,
   and the lock manager would make decisions from contradictory state.
   - `lock_holders_count_after_insert` — `AFTER INSERT ON lock_holders`
-    sets `locks.holder_count = (SELECT COUNT(*) FROM lock_holders
-    WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key)`.
-    The storage impl is responsible for setting `locks.mode` to the
-    correct value (`'shared'` or `'exclusive'`) in the same
-    transaction; the lock CHECK rejects mismatches at COMMIT.
-  - `lock_holders_count_after_delete` — `AFTER DELETE ON lock_holders`
-    recomputes the count against `OLD` and **flips `mode` to `'free'`
-    when the count drops to 0**. This keeps the
-    `(mode, holder_count)` invariant on the release path without
-    requiring the storage impl to remember to update `mode`. When the
-    count drops from N≥2 to N≥1 the mode stays as it was (the
-    remaining shared holders keep `mode = 'shared'`).
+    derives both `holder_count` and `mode` from the holder set:
+    ```sql
+    UPDATE locks
+      SET holder_count = (SELECT COUNT(*) FROM lock_holders
+                            WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key),
+          mode = CASE
+            WHEN NOT EXISTS (SELECT 1 FROM lock_holders
+                              WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key)
+              THEN 'free'
+            WHEN EXISTS (SELECT 1 FROM lock_holders
+                          WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key
+                            AND mode_requested = 'exclusive')
+              THEN 'exclusive'
+            ELSE 'shared'
+          END
+      WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key;
+    ```
+    The CASE matches the joint CHECK on `locks` so the row is
+    consistent at every per-statement boundary.
+  - `lock_holders_count_after_delete` — same body, against `OLD`.
+  - `lock_holders_count_after_update` — same body for both
+    `OLD.(scope_kind, scope_key)` and `NEW.(scope_kind, scope_key)`.
   - `lock_holders_keys_immutable` — `BEFORE UPDATE ON lock_holders`
-    raises ABORT if any of `scope_kind`, `scope_key`, `holder_id`, or
-    `acquired_epoch` changes. The §5.6 acquisition protocol never
-    re-keys a holder; reclaim is DELETE + INSERT. Blocking key
-    mutations forecloses the "operator UPDATEs scope_kind to point a
-    holder elsewhere, count drifts on both old and new scopes" path.
+    raises ABORT if any of `scope_kind`, `scope_key`, `holder_id`,
+    `acquired_epoch`, **or `mode_requested`** changes. The §5.6
+    acquisition protocol never re-keys a holder, and a holder's
+    requested mode is fixed at acquisition time — upgrading shared
+    to exclusive requires releasing and re-acquiring. Blocking
+    `mode_requested` mutation closes the bypass where an UPDATE
+    on an existing holder could violate exclusivity without
+    triggering the `lock_holders_exclusive_only_alone` /
+    `lock_holders_shared_blocked_by_exclusive` checks (which only
+    fire on INSERT).
   - `lock_holders_count_after_update` — `AFTER UPDATE ON lock_holders`
     recomputes the count for both `OLD.(scope_kind, scope_key)` and
     `NEW.(scope_kind, scope_key)` (defense-in-depth: even though the
@@ -1219,31 +1243,39 @@ by construction):
 ```rust
 fn repair_replay_ledger(conn: &Connection) -> Result<(), StoreError> {
     let txn = conn.transaction()?;
-    txn.execute_batch("
-        DELETE FROM issuer_seq;
+    // 1. Clean orphans: issuer_seq rows whose issuer has no `used`
+    //    rows. The relaxed `issuer_seq_no_delete` trigger permits
+    //    DELETE only when used has no rows for this issuer.
+    txn.execute("
+        DELETE FROM issuer_seq
+         WHERE issuer NOT IN (SELECT DISTINCT issuer FROM used)
+    ", [])?;
+
+    // 2. UPSERT every issuer's high_water to MAX(used.sequence).
+    //    The `issuer_seq_insert_must_match_ledger` trigger requires
+    //    NEW.high_water exist in `used` — MAX(used.sequence) does.
+    //    The relaxed `issuer_seq_only_via_ledger` trigger requires
+    //    NEW.high_water == MAX(used.sequence) — by construction.
+    txn.execute("
         INSERT INTO issuer_seq (issuer, high_water)
-          SELECT issuer, MAX(sequence) FROM used GROUP BY issuer;
-    ")?;
+        SELECT issuer, MAX(sequence) FROM used GROUP BY issuer
+        ON CONFLICT(issuer) DO UPDATE
+          SET high_water = excluded.high_water
+          WHERE excluded.high_water != issuer_seq.high_water
+    ", [])?;
     txn.commit()?;
     Ok(())
 }
 ```
 
+Every statement uses **only legal SQL**: no trigger-disabling
+pragma, no FK-toggling, no ad-hoc bypass. The trigger redesign
+above (orphan-aware no_delete; "must equal MAX(used.sequence)"
+constraint) is what makes legal repair representable.
+
 The repair is gated behind a `repair_inconsistent_caches: bool`
 flag on `open()` (default `true` for embedded vaults; tests pass
-`false` to assert the inconsistency without auto-fixing). The
-fixture-bypass path that is the only way to *create* an
-inconsistency is itself test-only, so production opens never
-trigger the repair branch unless the underlying corruption was
-introduced by an older binary or out-of-band tool.
-
-The DELETE+INSERT happens inside a single transaction with foreign
-keys + the `issuer_seq_*` triggers temporarily disabled (via a
-session-scoped pragma flip the storage impl owns); the rebuild
-restores invariants before the transaction commits, so any
-concurrent reader sees the old or the new cache, never partial
-state. A repair event surfaces in `metrics.jsonl` with the
-divergence kind so operators can investigate the root cause.
+`false` to assert the inconsistency without auto-fixing).
 
 If `repair_inconsistent_caches` is `false`, `open()` returns
 `StoreError::ReplayLedgerInconsistent` with one of `Stale`,
@@ -1717,6 +1749,17 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   exclusive holder; attempt to INSERT a shared holder for the same
   scope; ABORT via `lock_holders_shared_blocked_by_exclusive`.
   Schema enforces mutual exclusion independently of caller logic.
+- `lock_holder_mode_immutable` — insert a shared holder; attempt
+  `UPDATE lock_holders SET mode_requested = 'exclusive' WHERE …`;
+  expect ABORT via `lock_holders_keys_immutable` (mode_requested
+  branch). Confirms exclusivity cannot be sneaked in via UPDATE.
+- `replay_ledger_auto_repair_round_trip` — fixture-create each of
+  the four corruption kinds; call `open()` with default
+  `repair_inconsistent_caches = true`; confirm `open()` succeeds
+  and `issuer_seq` matches `MAX(used.sequence) GROUP BY issuer`
+  exactly. Confirm a `metrics.jsonl` line records the divergence
+  kind. Run `open()` again; confirm second open is a no-op (no
+  divergence to repair).
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
