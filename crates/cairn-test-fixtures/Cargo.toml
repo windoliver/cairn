@@ -23,8 +23,3 @@ toml = { workspace = true }
 
 [lints]
 workspace = true
-
-# async-trait, cairn-core, and tokio are used by src/store.rs.
-# cargo-machete may flag them if it scans only integration-test usage; keep in ignore.
-[package.metadata.cargo-machete]
-ignored = ["async-trait", "cairn-core", "tokio"]

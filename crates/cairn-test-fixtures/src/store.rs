@@ -203,12 +203,17 @@ mod tests {
     async fn fixture_store_list_active_returns_all() {
         let store = FixtureStore::default();
         let r1 = sample_record();
-        // sample_record() always produces the same id, so a single insert
-        // is the minimal meaningful test for list_active.
+        let mut r2 = sample_record();
+        r2.id = cairn_core::domain::record::RecordId::parse("01HQZX9F5N0000000000000001")
+            .expect("valid ULID");
         store.upsert(r1.clone()).await.unwrap();
+        store.upsert(r2.clone()).await.unwrap();
         let active = store.list_active().await.unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].record.id, r1.id);
+        assert_eq!(active.len(), 2);
+        let ids: std::collections::HashSet<_> =
+            active.iter().map(|s| s.record.id.as_str()).collect();
+        assert!(ids.contains(r1.id.as_str()));
+        assert!(ids.contains(r2.id.as_str()));
     }
 
     #[tokio::test]
