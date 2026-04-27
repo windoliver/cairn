@@ -226,23 +226,36 @@ BEGIN
     'wal_ops.issued_seq must strictly advance MAX(issued_seq)');
 END;
 
--- The DAG's authoritative ordering is wal_ops.issued_seq, and the
--- linearization key is wal_ops.operation_id. Both must be immutable
--- post-insert; otherwise an UPDATE could invalidate every
--- wal_op_deps row whose acyclicity was checked against the old value.
--- State / envelope / updated_at / reason ARE expected to mutate as
--- the FSM progresses; this trigger only freezes identity + order.
-CREATE TRIGGER wal_ops_identity_immutable
+-- Treat the issued envelope as append-only. Every column that
+-- describes WHAT operation was authorized — identity, ordering, and
+-- the signed envelope material — is frozen post-insert. Only the FSM
+-- execution columns mutate as the op progresses through
+-- ISSUED → PREPARED → COMMITTED / ABORTED / REJECTED:
+--   * state         — driven by the FSM
+--   * updated_at    — bumped on every state transition
+--   * reason        — populated for REJECTED / ABORTED
+-- All other columns (operation_id, issued_seq, kind, envelope, issuer,
+-- principal, target_hash, scope_json, plan_ref, expires_at, signature,
+-- issued_at) are immutable. This closes "operator UPDATEs target_hash
+-- mid-op" and similar control-plane integrity holes.
+CREATE TRIGGER wal_ops_envelope_immutable
   BEFORE UPDATE ON wal_ops
   FOR EACH ROW
   WHEN NEW.operation_id IS NOT OLD.operation_id
     OR NEW.issued_seq   IS NOT OLD.issued_seq
-    OR NEW.issuer       IS NOT OLD.issuer
     OR NEW.kind         IS NOT OLD.kind
+    OR NEW.envelope     IS NOT OLD.envelope
+    OR NEW.issuer       IS NOT OLD.issuer
+    OR NEW.principal    IS NOT OLD.principal
+    OR NEW.target_hash  IS NOT OLD.target_hash
+    OR NEW.scope_json   IS NOT OLD.scope_json
+    OR NEW.plan_ref     IS NOT OLD.plan_ref
+    OR NEW.expires_at   IS NOT OLD.expires_at
+    OR NEW.signature    IS NOT OLD.signature
     OR NEW.issued_at    IS NOT OLD.issued_at
 BEGIN
   SELECT RAISE(ABORT,
-    'wal_ops identity columns (operation_id, issued_seq, issuer, kind, issued_at) are immutable');
+    'wal_ops envelope columns are immutable; only state/updated_at/reason may change');
 END;
 
 -- Recovery scans for non-terminal ops on boot (§5.6 step 1).
@@ -304,6 +317,24 @@ CREATE TABLE wal_steps (
 -- Recovery resumes at the lowest non-DONE step per op (§5.6 step 4).
 CREATE INDEX wal_steps_resume_idx
   ON wal_steps(operation_id, state, step_ord);
+
+-- A step's identity (which op it belongs to, its position in the
+-- step graph, and what it does) is fixed at creation. Recovery walks
+-- the step graph from step_ord = 0 upward; renumbering or re-keying
+-- a step would silently rewrite the recovery order. Only execution
+-- state mutates: state, attempts, last_error, started_at,
+-- finished_at, pre_image (which is staged once and may be
+-- subsequently cleared on COMPENSATED).
+CREATE TRIGGER wal_steps_identity_immutable
+  BEFORE UPDATE ON wal_steps
+  FOR EACH ROW
+  WHEN NEW.operation_id IS NOT OLD.operation_id
+    OR NEW.step_ord     IS NOT OLD.step_ord
+    OR NEW.step_kind    IS NOT OLD.step_kind
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_steps identity (operation_id, step_ord, step_kind) is immutable');
+END;
 ```
 
 #### 0003_replay.sql
@@ -669,6 +700,23 @@ CREATE TABLE schema_migrations (
   sql_blake3    TEXT    NOT NULL,                         -- 64-hex BLAKE3 of the .sql file bytes
   applied_at    INTEGER NOT NULL                          -- unix ms
 );
+
+-- The ledger must be append-only and contiguous. Block DELETE and
+-- UPDATE so deleting row 3 or rewriting row 1's hash cannot bypass
+-- verify_migration_history's contiguity + checksum check.
+CREATE TRIGGER schema_migrations_no_delete
+  BEFORE DELETE ON schema_migrations
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'schema_migrations is append-only; DELETE not permitted');
+END;
+
+CREATE TRIGGER schema_migrations_immutable
+  BEFORE UPDATE ON schema_migrations
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'schema_migrations rows are immutable');
+END;
 ```
 
 Each migration's last statement is:
@@ -685,13 +733,26 @@ forward-only DDL is applied. The check:
 1. If `schema_migrations` does not exist (fresh vault, no migrations
    yet applied), skip — `to_latest()` will create the table via
    migration `0001`.
-2. Otherwise, for every row in `schema_migrations`, look up the
-   matching `(name, sql_blake3)` in the compiled-in manifest. Mismatch
-   or unknown row → `StoreError::MigrationHistoryMismatch`. A row whose
-   `migration_id` exceeds the compiled manifest length is treated as
-   future-version and surfaces `IncompatibleSchema`.
-3. Only after every applied row matches does `to_latest()` run. Any
-   pending migration is then applied on top of validated history.
+2. Read `PRAGMA user_version` and `SELECT migration_id, name, sql_blake3
+   FROM schema_migrations ORDER BY migration_id`. Reject as
+   `MigrationHistoryMismatch` if **any** of these hold:
+   - row count != `user_version` (a row was deleted or duplicated),
+   - the `migration_id` sequence is not exactly `1..=user_version` (gap
+     or out-of-order),
+   - any row's `(name, sql_blake3)` does not match the compiled manifest
+     entry at the same position,
+   - `user_version` exceeds the compiled manifest length (treated as
+     future-version `IncompatibleSchema`).
+3. Only after the ledger is contiguous and every entry matches does
+   `to_latest()` run. Any pending migration is applied on top of
+   validated history.
+
+Per-vault tampering protection is layered with structural protection:
+the migration in `0001_records.sql` adds two triggers on
+`schema_migrations` (`schema_migrations_no_delete` and
+`schema_migrations_immutable`) that block both `DELETE` and `UPDATE` on
+the ledger, so even an in-process bug cannot silently break the
+contiguity invariant the open-time check enforces.
 
 The compiled-in manifest lives in a `MIGRATION_MANIFEST: &[(&str, &str)]`
 array in `migrations/mod.rs`, generated at build time by a `build.rs`
@@ -779,9 +840,11 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   - virtual tables: `records_fts`
   - views: `records_latest`
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
+    `schema_migrations_no_delete`, `schema_migrations_immutable`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
-    `wal_ops_issued_seq_must_advance`, `wal_ops_identity_immutable`,
+    `wal_ops_issued_seq_must_advance`, `wal_ops_envelope_immutable`,
+    `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `used_sequence_must_advance`, `used_advance_high_water`,
     `used_immutable`, `used_no_delete`, `issuer_seq_only_via_ledger`,
@@ -891,11 +954,29 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `used` row at sequence 999999; ABORT via `issuer_seq_only_via_ledger`
   (no-matching-ledger branch). Attempt `DELETE FROM used WHERE
   operation_id = '…'`; ABORT via `used_no_delete`.
-- `wal_ops_identity_locked` — insert a `wal_ops` row; UPDATE the
+- `wal_ops_envelope_locked` — insert a `wal_ops` row; UPDATE the
   `state` column from `'ISSUED'` to `'PREPARED'`; expect success
-  (state is mutable). UPDATE `issued_seq`; expect ABORT. UPDATE
-  `operation_id`; expect ABORT. UPDATE `issuer`, `kind`, `issued_at`;
+  (state mutable). UPDATE `updated_at`; expect success. UPDATE
+  `reason`; expect success. UPDATE `target_hash`, `scope_json`,
+  `signature`, `principal`, `expires_at`, `plan_ref`, `envelope`,
+  `operation_id`, `issued_seq`, `kind`, `issuer`, `issued_at`; each
+  one ABORTs via `wal_ops_envelope_immutable`.
+- `wal_steps_identity_locked` — insert a `wal_steps` row; UPDATE
+  `state` from `'PENDING'` to `'DONE'`; expect success. UPDATE
+  `attempts`, `last_error`, `started_at`, `finished_at`, `pre_image`;
+  each succeeds. UPDATE `operation_id`, `step_ord`, or `step_kind`;
   each ABORTs.
+- `schema_migrations_tamper_blocked` — apply migrations to head;
+  attempt `DELETE FROM schema_migrations WHERE migration_id = 3`;
+  expect ABORT via `schema_migrations_no_delete`. Attempt
+  `UPDATE schema_migrations SET sql_blake3 = '00…' WHERE migration_id
+  = 3`; expect ABORT via `schema_migrations_immutable`.
+- `migration_history_rejects_gap` — apply migrations to head; bypass
+  the trigger by temporarily disabling it via a fixture helper
+  (test-only) to simulate a tampered vault from another binary;
+  delete row 3; reopen via `open()`; expect
+  `StoreError::MigrationHistoryMismatch` (contiguity branch). Repeat
+  with a duplicated migration_id row.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
