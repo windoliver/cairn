@@ -75,6 +75,11 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
 
     // Reject a symlinked vault root — all subsequent paths are derived from it,
     // so a symlink here can route every write outside the intended directory.
+    // Canonicalize the component count to strip trailing separators and `.`
+    // segments; `symlink_metadata("link/")` follows the link on POSIX, so
+    // we must operate on the clean form.
+    let vault = vault.components().collect::<PathBuf>();
+    let vault = &vault;
     if let Ok(meta) = std::fs::symlink_metadata(vault) {
         if meta.file_type().is_symlink() {
             anyhow::bail!(
@@ -219,8 +224,22 @@ fn write_once(
         match tmp.persist_noclobber(path) {
             Ok(_) => {}
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                receipt.files_skipped.push(path.to_owned());
-                return Ok(());
+                // Re-check: a race may have placed a symlink or non-regular
+                // file at the path between our initial check and now.
+                match std::fs::symlink_metadata(path) {
+                    Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
+                        "{} is a symlink — bootstrap will not write through it",
+                        path.display()
+                    ),
+                    Ok(m) if !m.file_type().is_file() => anyhow::bail!(
+                        "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                        path.display()
+                    ),
+                    _ => {
+                        receipt.files_skipped.push(path.to_owned());
+                        return Ok(());
+                    }
+                }
             }
             Err(e) => {
                 return Err(anyhow::Error::from(e.error))
