@@ -120,18 +120,31 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// Rejects symlinks in user-space ancestors and the final target itself.
+/// Rejects symlinks anywhere in the target path, including ancestors.
 ///
-/// OS-managed root symlinks (e.g. `/var → /private/var` on macOS) are skipped;
-/// only components under `$HOME` and the target itself are checked.
+/// Relative paths are made absolute first so that relative symlink ancestors
+/// (e.g. `./link/cairn`) are caught. The first two components after root are
+/// skipped to accommodate OS-managed root symlinks (`/var → /private/var` on
+/// macOS); all deeper components and the final target itself are always checked.
 fn reject_symlink_ancestors(path: &std::path::Path) -> Result<()> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolving current directory for symlink check")?
+            .join(path)
+    };
+
     let mut check = PathBuf::new();
-    for component in path.components() {
+    let mut depth = 0usize;
+    for component in abs.components() {
         check.push(component);
-        let under_home = home.as_deref().is_some_and(|h| check.starts_with(h));
-        let is_final = check == path;
-        if (under_home || is_final)
+        depth += 1;
+        // depth 1 = root `/`; depth 2 = first Normal (e.g. `var`, `Users`, `home`).
+        // These are OS-managed on macOS and skipped to prevent false positives from
+        // `/var → /private/var`; everything deeper is user-controlled.
+        let is_final = check == abs;
+        if (depth > 2 || is_final)
             && std::fs::symlink_metadata(&check)
                 .ok()
                 .is_some_and(|m| m.file_type().is_symlink())
@@ -187,6 +200,21 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         .with_context(|| format!("creating {}", target.join("examples").display()))?;
 
     let installed_version = read_installed_version(&target.join(".version"))?;
+
+    // If no .version exists but generated filenames are already present, the target
+    // is not empty and not a known Cairn install. Refuse to overwrite without --force
+    // to prevent silently clobbering unrelated files in a mistyped --target-dir.
+    if installed_version.is_none() && !opts.force {
+        for name in ["SKILL.md", "conventions.md"] {
+            if target.join(name).exists() {
+                anyhow::bail!(
+                    "{}/{name} exists but no Cairn .version was found — \
+                     pass --force to overwrite",
+                    target.display()
+                );
+            }
+        }
+    }
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
