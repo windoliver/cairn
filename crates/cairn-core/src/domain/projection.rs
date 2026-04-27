@@ -190,15 +190,24 @@ impl MarkdownProjector {
         let visibility = MemoryVisibility::parse(vis_str)
             .map_err(|_| ResyncError::ParseFailed(format!("unknown visibility: `{vis_str}`")))?;
 
-        let tags = map
-            .get("tags")
-            .and_then(|v| v.as_sequence())
-            .map(|seq| {
+        let tags = match map.get("tags") {
+            None => Vec::new(),
+            Some(v) => {
+                let seq = v.as_sequence().ok_or_else(|| {
+                    ResyncError::ParseFailed("`tags` must be a YAML sequence".to_owned())
+                })?;
                 seq.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .enumerate()
+                    .map(|(i, entry)| {
+                        entry.as_str().map(str::to_owned).ok_or_else(|| {
+                            ResyncError::ParseFailed(format!(
+                                "`tags[{i}]` must be a string"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
 
         let raw_frontmatter = map
             .iter()
@@ -367,6 +376,22 @@ mod tests {
     #[test]
     fn parse_malformed_yaml_returns_parse_failed() {
         let content = "---\n: bad: yaml: [\n---\n\nbody";
+        let err = MarkdownProjector.parse(content).unwrap_err();
+        assert!(matches!(err, ResyncError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn parse_non_sequence_tags_returns_parse_failed() {
+        // `tags: pref` is a scalar, not a sequence — should hard-fail, not silently become []
+        let content = "---\nid: 01HQZX9F5N0000000000000000\nversion: 1\nkind: user\nclass: semantic\nvisibility: private\ntags: pref\n---\n\nbody";
+        let err = MarkdownProjector.parse(content).unwrap_err();
+        assert!(matches!(err, ResyncError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn parse_non_string_tag_entry_returns_parse_failed() {
+        // `tags: [42]` — integer entry should fail, not be silently dropped
+        let content = "---\nid: 01HQZX9F5N0000000000000000\nversion: 1\nkind: user\nclass: semantic\nvisibility: private\ntags: [42]\n---\n\nbody";
         let err = MarkdownProjector.parse(content).unwrap_err();
         assert!(matches!(err, ResyncError::ParseFailed(_)));
     }
