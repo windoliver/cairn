@@ -38,6 +38,18 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(mcp_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp")
+        .about("MCP server operations")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("serve")
+                .about("Start the Cairn MCP stdio server (reads requests from stdin, writes responses to stdout)"),
+        )
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -111,12 +123,20 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("mcp", sub)) => run_mcp(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
             eprintln!("cairn: unknown subcommand '{verb}'");
             ExitCode::from(64)
         }
+    }
+}
+
+fn run_mcp(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("serve", _)) => verbs::mcp_serve::run(),
+        _ => unreachable!("clap subcommand_required(true) on mcp ensures a subcommand is set"),
     }
 }
 

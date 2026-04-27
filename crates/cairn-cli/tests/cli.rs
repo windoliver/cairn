@@ -177,3 +177,12 @@ fn unknown_argument_fails_closed() {
         "stderr missing clap usage marker: {stderr:?}",
     );
 }
+
+#[test]
+fn mcp_serve_subcommand_exists_in_help() {
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .args(["mcp", "serve", "--help"])
+        .status()
+        .expect("cairn binary must be reachable");
+    assert!(status.success(), "mcp serve --help must exit 0");
+}

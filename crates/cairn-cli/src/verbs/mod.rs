@@ -7,6 +7,7 @@ pub mod forget;
 pub mod handshake;
 pub mod ingest;
 pub mod lint;
+pub mod mcp_serve;
 pub mod retrieve;
 pub mod search;
 pub mod status;
