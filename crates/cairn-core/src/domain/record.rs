@@ -697,6 +697,7 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 #[cfg(test)]
+/// Test helpers for [`MemoryRecord`] and [`StoredRecord`] construction.
 pub mod tests {
     use super::*;
     use crate::domain::{ActorChainEntry, ChainRole, Identity};

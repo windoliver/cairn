@@ -450,4 +450,34 @@ mod tests {
         let outcome = proj.check_conflict(&parsed, Some(&stored));
         assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
     }
+
+    #[test]
+    fn check_conflict_class_mutation_is_conflict() {
+        let proj = MarkdownProjector;
+        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let file = proj.project(&stored);
+        // sample_record uses class: semantic — replace with episodic
+        let tampered = file.content.replace(
+            &format!("class: {}", stored.record.class.as_str()),
+            "class: episodic",
+        );
+        let parsed = proj.parse(&tampered).unwrap();
+        let outcome = proj.check_conflict(&parsed, Some(&stored));
+        assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
+    }
+
+    #[test]
+    fn check_conflict_visibility_mutation_is_conflict() {
+        let proj = MarkdownProjector;
+        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let file = proj.project(&stored);
+        // sample_record uses visibility: private — replace with session
+        let tampered = file.content.replace(
+            &format!("visibility: {}", stored.record.visibility.as_str()),
+            "visibility: session",
+        );
+        let parsed = proj.parse(&tampered).unwrap();
+        let outcome = proj.check_conflict(&parsed, Some(&stored));
+        assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
+    }
 }

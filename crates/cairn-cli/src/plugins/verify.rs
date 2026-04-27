@@ -353,6 +353,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // comprehensive table-driven test covering multiple plugin configurations
     fn cross_contract_same_name_orphan_is_failed() {
         // Regression for the round-3 review finding: a single PluginName
         // registered for two different contracts (one with a manifest,

@@ -350,7 +350,7 @@ mod tests {
         // Quarantine file should exist.
         let entries: Vec<_> = std::fs::read_dir(&quarantine_dir)
             .expect("quarantine dir should exist after conflict")
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert!(
             !entries.is_empty(),
