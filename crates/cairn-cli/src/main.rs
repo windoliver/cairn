@@ -295,6 +295,7 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_vault(matches: &ArgMatches) -> ExitCode {
     let store = match registry_store() {
         Ok(s) => s,
@@ -385,15 +386,72 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Some(("switch", _sub)) => {
-            // implemented in Task 6
-            eprintln!("cairn vault switch: not yet implemented");
-            ExitCode::from(1)
+        Some(("switch", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault switch: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!(
+                    "cairn vault switch: vault '{name}' not found — run `cairn vault list`"
+                );
+                return ExitCode::from(78);
+            }
+            reg.default = Some(name.clone());
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault switch: {e:#}");
+                return ExitCode::from(74); // EX_IOERR
+            }
+            if json {
+                println!("{}", serde_json::json!({ "default": name }));
+            } else {
+                println!("cairn vault switch: default vault is now '{name}'");
+            }
+            ExitCode::SUCCESS
         }
-        Some(("remove", _sub)) => {
-            // implemented in Task 6
-            eprintln!("cairn vault remove: not yet implemented");
-            ExitCode::from(1)
+        Some(("remove", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault remove: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!(
+                    "cairn vault remove: vault '{name}' not found — run `cairn vault list`"
+                );
+                return ExitCode::from(78);
+            }
+            if reg.default.as_deref() == Some(&name) {
+                reg.default = None;
+            }
+            reg.vaults.retain(|v| v.name != name);
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault remove: {e:#}");
+                return ExitCode::from(74);
+            }
+            if json {
+                println!("{}", serde_json::json!({ "removed": name }));
+            } else {
+                println!("cairn vault remove: removed '{name}' from registry (vault files untouched)");
+            }
+            ExitCode::SUCCESS
         }
         _ => unreachable!("clap subcommand_required(true) on vault"),
     }

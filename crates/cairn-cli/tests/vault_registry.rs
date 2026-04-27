@@ -480,3 +480,160 @@ mod cli_vault_list {
         insta::assert_snapshot!(stdout);
     }
 }
+
+mod cli_vault_switch {
+    use std::process::Command;
+    use cairn_cli::vault::VaultRegistryStore;
+    use cairn_core::config::{VaultEntry, VaultRegistry};
+
+    fn cairn() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_cairn"))
+    }
+
+    fn setup_two_vaults(reg_dir: &tempfile::TempDir) -> (tempfile::TempDir, tempfile::TempDir) {
+        let a = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a.path().join(".cairn")).unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(b.path().join(".cairn")).unwrap();
+        let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+        let mut reg = VaultRegistry::default();
+        reg.default = Some("alpha".into());
+        reg.vaults.push(VaultEntry::new("alpha", a.path().to_str().unwrap(), None, None));
+        reg.vaults.push(VaultEntry::new("beta", b.path().to_str().unwrap(), None, None));
+        store.save(&reg).unwrap();
+        (a, b)
+    }
+
+    #[test]
+    fn switch_changes_default() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let (_a, _b) = setup_two_vaults(&reg_dir);
+        let reg_path = reg_dir.path().join("vaults.toml");
+
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args(["vault", "switch", "beta"])
+            .output()
+            .expect("cairn vault switch");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let store = VaultRegistryStore::new(reg_path);
+        let reg = store.load().unwrap();
+        assert_eq!(reg.default.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn switch_unknown_name_errors() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let (_a, _b) = setup_two_vaults(&reg_dir);
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "switch", "ghost"])
+            .output()
+            .expect("cairn vault switch unknown");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("ghost"), "missing name: {stderr}");
+    }
+
+    #[test]
+    fn switch_json_emits_name() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let (_a, _b) = setup_two_vaults(&reg_dir);
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "switch", "beta", "--json"])
+            .output()
+            .expect("cairn vault switch --json");
+        assert!(out.status.success());
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert_eq!(v["default"], "beta");
+    }
+}
+
+mod cli_vault_remove {
+    use std::process::Command;
+    use cairn_cli::vault::VaultRegistryStore;
+    use cairn_core::config::VaultEntry;
+
+    fn cairn() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_cairn"))
+    }
+
+    fn setup_vault(reg_dir: &tempfile::TempDir, name: &str) -> tempfile::TempDir {
+        let v = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(v.path().join(".cairn")).unwrap();
+        let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+        let mut reg = store.load().unwrap();
+        reg.vaults.push(VaultEntry::new(name, v.path().to_str().unwrap(), None, None));
+        store.save(&reg).unwrap();
+        v
+    }
+
+    #[test]
+    fn remove_deregisters_vault() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let reg_path = reg_dir.path().join("vaults.toml");
+        let _v = setup_vault(&reg_dir, "todelete");
+
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args(["vault", "remove", "todelete"])
+            .output()
+            .expect("cairn vault remove");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let store = VaultRegistryStore::new(reg_path);
+        let reg = store.load().unwrap();
+        assert!(!reg.contains("todelete"));
+    }
+
+    #[test]
+    fn remove_does_not_delete_files() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let vdir = setup_vault(&reg_dir, "keeper");
+        let cairn_dir = vdir.path().join(".cairn");
+
+        cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "remove", "keeper"])
+            .output()
+            .unwrap();
+
+        assert!(cairn_dir.is_dir(), ".cairn/ should survive vault remove");
+    }
+
+    #[test]
+    fn remove_unknown_name_errors() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "remove", "nosuchvault"])
+            .output()
+            .expect("cairn vault remove unknown");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("nosuchvault"), "missing name: {stderr}");
+    }
+}
