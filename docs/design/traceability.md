@@ -70,6 +70,7 @@ until automated enforcement is added.
 | §2 Design principles | #3, #4, #5, #7, #8, #17, #18, #158 | #145 (resolved) | Non-negotiable boundaries enforced through architecture, schema, privacy, WAL, and plugin gates. |
 | §3 Vault layout / SQLite / Nexus | #5, #6, #20, #41–#49, #104–#106 | — | P0 authority remains SQLite; P1 Nexus is derived/additive. |
 | §4 Contracts / plugins / identity | #3, #7, #10, #23, #27, #50–#53, #113, #124, #143 | — | Plugin registry and conformance covered. |
+| §4.1 Plugin architecture | #177 | — | `XxxPlugin` companion traits with `NAME` and `SUPPORTED_VERSIONS` static pre-construction checks; `register_plugin_with!` factory variant. |
 | §5 Pipeline / WAL / sessions | #8, #12, #13, #16, #54–#58, #71–#79, #89–#92 | #146 (resolved) | Capture, extract, filter, classify, plan/apply, WAL, hooks, and session capture covered. |
 | §6 Taxonomy / provenance | #4, #37–#40 | — | Canonical kinds, classes, visibility, and provenance owned by core schema. |
 | §6.a Multi-modal memory | #15, #29, #84–#88, #130–#132 | — | P0 local sensors plus P2 connectors and aggregate memory. |
