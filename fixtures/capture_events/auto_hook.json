@@ -1,0 +1,26 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "sensor_id": "snr:local:hook:cc-session:v1",
+  "capture_mode": "auto",
+  "actor_chain": [
+    {
+      "role": "author",
+      "identity": "snr:local:hook:cc-session:v1",
+      "at": "2026-04-22T14:02:11Z"
+    }
+  ],
+  "refs": {
+    "session_id": "sess-42",
+    "turn_id": "turn-7",
+    "tool_id": "tool-1"
+  },
+  "payload_hash": "sha256:abababababababababababababababababababababababababababababababab",
+  "payload_ref": "file:///vault/sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json",
+  "captured_at": "2026-04-22T14:02:11Z",
+  "payload": {
+    "source_family": "hook",
+    "hook_name": "PostToolUse",
+    "tool_name": "Read"
+  },
+  "source_family": "hook"
+}

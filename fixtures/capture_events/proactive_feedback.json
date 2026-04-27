@@ -1,0 +1,25 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FCA",
+  "sensor_id": "snr:local:proactive:claude-code:v1",
+  "capture_mode": "proactive",
+  "actor_chain": [
+    {
+      "role": "author",
+      "identity": "agt:claude-code:opus-4-7:reviewer:v1",
+      "at": "2026-04-22T14:02:11Z"
+    }
+  ],
+  "refs": {
+    "session_id": "sess-42",
+    "turn_id": "turn-7"
+  },
+  "payload_hash": "sha256:abababababababababababababababababababababababababababababababab",
+  "payload_ref": "file:///vault/sources/proactive/01ARZ3NDEKTSV4RRFFQ69G5FCA.json",
+  "captured_at": "2026-04-22T14:02:11Z",
+  "payload": {
+    "source_family": "proactive",
+    "kind": "feedback",
+    "rationale": "user corrected the agent — high-salience"
+  },
+  "source_family": "proactive"
+}

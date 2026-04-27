@@ -1,0 +1,22 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FE0",
+  "sensor_id": "snr:local:screen:default:v1",
+  "capture_mode": "auto",
+  "actor_chain": [
+    {
+      "role": "author",
+      "identity": "snr:local:screen:default:v1",
+      "at": "2026-04-22T14:02:11Z"
+    }
+  ],
+  "payload_hash": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "payload_ref": "file:///vault/sources/screen/01ARZ3NDEKTSV4RRFFQ69G5FE0.png",
+  "captured_at": "2026-04-22T14:02:11Z",
+  "payload": {
+    "source_family": "screen",
+    "app": "com.apple.Safari",
+    "window_title": "Cairn — design brief",
+    "url": "https://cairn.dev/docs/design"
+  },
+  "source_family": "screen"
+}

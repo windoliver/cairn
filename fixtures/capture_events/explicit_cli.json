@@ -1,0 +1,25 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+  "sensor_id": "snr:local:cli:default:v1",
+  "capture_mode": "explicit",
+  "actor_chain": [
+    {
+      "role": "delegator",
+      "identity": "agt:claude-code:opus-4-7:main:v1",
+      "at": "2026-04-22T14:02:11Z"
+    },
+    {
+      "role": "author",
+      "identity": "usr:tafeng",
+      "at": "2026-04-22T14:02:11Z"
+    }
+  ],
+  "payload_hash": "sha256:abababababababababababababababababababababababababababababababab",
+  "payload_ref": "file:///vault/sources/cli/01ARZ3NDEKTSV4RRFFQ69G5FB0.txt",
+  "captured_at": "2026-04-22T14:02:11Z",
+  "payload": {
+    "source_family": "cli",
+    "kind_hint": "user"
+  },
+  "source_family": "cli"
+}

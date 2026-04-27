@@ -1,0 +1,25 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FD0",
+  "sensor_id": "snr:local:voice:default:v1",
+  "capture_mode": "auto",
+  "actor_chain": [
+    {
+      "role": "author",
+      "identity": "snr:local:voice:default:v1",
+      "at": "2026-04-22T14:02:11Z"
+    }
+  ],
+  "refs": {
+    "session_id": "sess-42"
+  },
+  "payload_hash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "payload_ref": "file:///vault/sources/voice/01ARZ3NDEKTSV4RRFFQ69G5FD0.wav",
+  "captured_at": "2026-04-22T14:02:11Z",
+  "payload": {
+    "source_family": "voice",
+    "speaker_id": "unknown_speaker_01HQZ",
+    "duration_ms": 4200,
+    "confidence": 0.82
+  },
+  "source_family": "voice"
+}
