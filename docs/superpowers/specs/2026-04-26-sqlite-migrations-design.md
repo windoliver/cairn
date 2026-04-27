@@ -159,16 +159,32 @@ Verbatim from brief §3 (lines ~340-426):
   conflicting "latest" facts depending on later lifecycle changes.
 
   The dead-source-hides-live-dst concern from earlier review rounds
-  is mitigated runtime-side: the §5.6 forget pipeline is the only
-  legitimate path that tombstones a source row, and Phase B step
-  `edges.drain` removes the source's outgoing edges (including its
-  `updates` edges) atomically with the tombstone. Schema cannot
-  enforce this because edge cleanup is operation-graph-specific
-  (only `forget_*` removes edges; ordinary supersession does not).
-  An `updates` edge from a tombstoned source is a transient state
-  during forget Phase B that lasts at most one chunk; the
-  reader_fence + `tombstoned = 1` filter on the dst prevent any
-  observable resurrection.
+  is closed at the schema level via the
+  `edges_drop_updates_when_src_tombstoned` trigger:
+
+  ```sql
+  CREATE TRIGGER edges_drop_updates_when_src_tombstoned
+    AFTER UPDATE OF tombstoned ON records
+    FOR EACH ROW
+    WHEN NEW.tombstoned = 1 AND OLD.tombstoned = 0
+  BEGIN
+    DELETE FROM edges
+      WHERE src = NEW.record_id
+        AND kind = 'updates';
+  END;
+  ```
+
+  When the §5.6 forget pipeline sets `tombstoned = 1` on a source
+  row, this trigger atomically removes its outgoing `updates` edges
+  in the same SQLite transaction. A crash between the tombstone
+  write and the §5.6 Phase B `edges.drain` step is no longer
+  observable — the edge is gone before any reader could see the
+  inconsistent state. The trigger is keyed on the
+  `OLD.tombstoned = 0 → NEW.tombstoned = 1` transition specifically
+  so it does not refire on idempotent retries. The trigger only
+  removes the *src*'s outgoing `updates` edges; cleanup of edges
+  pointing at a tombstoned dst is unnecessary because dst remains
+  filtered out of `records_latest` by `tombstoned = 0` regardless.
 - `edges` table: columns `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
   `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`,
   plus referential integrity that the brief leaves implicit:
@@ -465,11 +481,12 @@ END;
 > non-advancing sequences.
 
 ```sql
--- Replay-attack ledger (§4.2). The schema enforces every anti-replay
--- invariant at the database level so caller logic is not the sole
--- defence: an issuer cannot reuse a sequence number, cannot reuse a
--- nonce, and cannot bind two operations to the same (issuer, nonce)
--- pair regardless of operation_id.
+-- Replay-attack ledger (§4.2). All three tables are created before
+-- any triggers, since `CREATE TRIGGER ... ON <name>` requires the
+-- table to exist. Triggers cross-reference all three tables (e.g.,
+-- used_sequence_must_advance reads issuer_seq), but trigger-body
+-- references are bound at fire time, not at creation.
+
 CREATE TABLE used (
   operation_id  TEXT NOT NULL PRIMARY KEY,                  -- one ledger row per op_id;
                                                             -- coheres with wal_ops.operation_id PK
@@ -483,11 +500,25 @@ CREATE TABLE used (
     DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE TABLE issuer_seq (
+  issuer      TEXT NOT NULL PRIMARY KEY,
+  high_water  INTEGER NOT NULL CHECK (high_water >= 0)
+);
+
+CREATE TABLE outstanding_challenges (
+  issuer      TEXT NOT NULL,
+  challenge   BLOB NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  PRIMARY KEY (issuer, challenge)
+);
+CREATE INDEX outstanding_challenges_exp_idx ON outstanding_challenges(expires_at);
+
+-- ===== triggers (declared after all tables) =====
+
 -- Anti-rewind: an insert into `used` must strictly advance
--- issuer_seq.high_water. UNIQUE alone prevents reusing a sequence value
--- but not rewinding to an unused-but-lower one (e.g., commit seq 5 after
--- seq 10). The trigger atomically rejects non-advancing inserts and
--- writes the new high-water in the same transaction.
+-- issuer_seq.high_water. UNIQUE alone prevents reusing a sequence
+-- value but not rewinding to an unused-but-lower one (e.g., commit
+-- seq 5 after seq 10). This trigger rejects non-advancing inserts.
 CREATE TRIGGER used_sequence_must_advance
   BEFORE INSERT ON used
   FOR EACH ROW
@@ -501,6 +532,9 @@ BEGIN
     'used.sequence must strictly advance issuer_seq.high_water');
 END;
 
+-- Atomically advance issuer_seq.high_water on every successful `used`
+-- INSERT. The matching `used` row is already visible to the BEFORE
+-- INSERT trigger on issuer_seq below, so this passes its match check.
 CREATE TRIGGER used_advance_high_water
   AFTER INSERT ON used
   FOR EACH ROW
@@ -512,23 +546,31 @@ BEGIN
       WHERE excluded.high_water > issuer_seq.high_water;
 END;
 
--- Direct INSERT INTO issuer_seq is rejected unless the (issuer,
--- high_water) tuple exists in `used` — i.e., the only legitimate
--- inserter is `used_advance_high_water` (which runs AFTER INSERT on
--- `used`, so by the time this BEFORE INSERT trigger fires the matching
--- ledger row is already visible). A repair script attempting
--- `INSERT INTO issuer_seq (issuer='alice', high_water=1_000_000)`
--- without a corresponding `used` row is rejected outright; combined
--- with issuer_seq_only_via_ledger this pins issuer_seq.high_water to
--- a value the ledger proves was actually committed.
--- issuer_seq is the rewind guard for `used_sequence_must_advance`.
+-- The replay ledger is append-only. UPDATE would re-open the rewind /
+-- divergence cases the INSERT path is hardened against. DELETE would
+-- free the (issuer, nonce) slot while issuer_seq.high_water stays
+-- put, opening the same nonce/sequence to be replayed under a
+-- different operation_id. Repair must record state in a separate
+-- audit table, not mutate the ledger.
+CREATE TRIGGER used_immutable
+  BEFORE UPDATE ON used
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'used rows are append-only; UPDATE not permitted');
+END;
+
+CREATE TRIGGER used_no_delete
+  BEFORE DELETE ON used
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'used rows are append-only; DELETE not permitted');
+END;
+
+-- issuer_seq is the rewind guard for used_sequence_must_advance.
 -- A DELETE wipes the high-water for an issuer, after which a fresh
 -- `used` insert at any sequence (including a previously-rewound one)
--- would pass the rewind check and `used_advance_high_water` would
+-- would pass the rewind check and used_advance_high_water would
 -- recreate issuer_seq at that lower value. Block DELETE outright.
--- The legitimate path for clearing an issuer's history is to leave
--- both `used` and `issuer_seq` rows in place; there is no operational
--- reason to delete from issuer_seq.
 CREATE TRIGGER issuer_seq_no_delete
   BEFORE DELETE ON issuer_seq
   FOR EACH ROW
@@ -536,6 +578,10 @@ BEGIN
   SELECT RAISE(ABORT, 'issuer_seq is append-only; DELETE not permitted');
 END;
 
+-- Direct INSERT INTO issuer_seq is rejected unless the (issuer,
+-- high_water) tuple exists in `used`. The only legitimate inserter
+-- is used_advance_high_water (AFTER INSERT on used), which runs
+-- after the matching `used` row is visible.
 CREATE TRIGGER issuer_seq_insert_must_match_ledger
   BEFORE INSERT ON issuer_seq
   FOR EACH ROW
@@ -549,25 +595,8 @@ BEGIN
     'issuer_seq INSERT must correspond to a row in `used`');
 END;
 
--- The replay ledger is append-only. Updating any column would re-open
--- the rewind / divergence cases the INSERT path is hardened against,
--- so block UPDATE entirely. Operator-driven repair must DELETE the
--- offending row and re-INSERT through the trigger pipeline.
-CREATE TRIGGER used_immutable
-  BEFORE UPDATE ON used
-  FOR EACH ROW
-BEGIN
-  SELECT RAISE(ABORT, 'used rows are append-only; UPDATE not permitted');
-END;
-
--- issuer_seq is mirrored from `used`: every advance must correspond to
--- a real ledger row inserted in the same transaction. Direct
--- UPDATE issuer_seq SET high_water = <arbitrary> is rejected because
--- no matching `used` row exists. Combined with the rewind check, this
--- pins issuer_seq.high_water to the actual ledger:
---   * cannot rewind (NEW.high_water > OLD.high_water required),
---   * cannot leap ahead (NEW.high_water must equal some used.sequence
---     for this issuer — produced moments earlier by used_advance_high_water).
+-- issuer_seq mirrors `used`: every advance must correspond to a real
+-- ledger row. Cannot rewind, cannot leap ahead.
 CREATE TRIGGER issuer_seq_only_via_ledger
   BEFORE UPDATE ON issuer_seq
   FOR EACH ROW
@@ -582,31 +611,6 @@ BEGIN
     'issuer_seq.high_water can only advance to a sequence already in `used`');
 END;
 
--- `used` is the durable replay-attack ledger; deleting a row would
--- free the (issuer, nonce) slot while issuer_seq.high_water stays
--- where it was, opening the same nonce/sequence to be replayed under
--- a different operation_id. Block DELETE outright. Compensating
--- repair must record state in a separate audit table, not erase
--- ledger evidence.
-CREATE TRIGGER used_no_delete
-  BEFORE DELETE ON used
-  FOR EACH ROW
-BEGIN
-  SELECT RAISE(ABORT, 'used rows are append-only; DELETE not permitted');
-END;
-
-CREATE TABLE issuer_seq (
-  issuer      TEXT NOT NULL PRIMARY KEY,
-  high_water  INTEGER NOT NULL CHECK (high_water >= 0)
-);
-
-CREATE TABLE outstanding_challenges (
-  issuer      TEXT NOT NULL,
-  challenge   BLOB NOT NULL,
-  expires_at  INTEGER NOT NULL,
-  PRIMARY KEY (issuer, challenge)
-);
-CREATE INDEX outstanding_challenges_exp_idx ON outstanding_challenges(expires_at);
 ```
 
 #### 0004_locks.sql
@@ -1054,6 +1058,7 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `schema_migrations_no_delete`, `schema_migrations_immutable`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
+    `edges_drop_updates_when_src_tombstoned`,
     `wal_ops_issued_seq_must_advance`, `wal_ops_state_transition`,
     `wal_ops_envelope_immutable`, `wal_ops_no_delete`,
     `wal_steps_state_transition`, `wal_steps_identity_immutable`,
@@ -1078,7 +1083,13 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
 - `idempotent_reopen` — `open()` twice on the same path; both succeed and
   `user_version` is stable between calls.
 - `partial_migration_resume` — apply migrations 1..=3 manually via the
-  runner, then call `open()`; assert all six are applied.
+  runner, then call `open()`; assert all are applied.
+- `each_migration_applies_in_isolation` — for each `N` in `1..=HEAD`,
+  apply migrations `1..=N-1` to a fresh `:memory:` DB, then apply
+  exactly migration `N`. Each step succeeds and `user_version`
+  advances by exactly one. Catches DDL ordering bugs like
+  "trigger created before its target table" specifically for the
+  step at which the failure would manifest.
 - `forward_only_rejects_future_schema` — open a fresh DB, manually
   `PRAGMA user_version = 999`; call `open()`; assert `StoreError::IncompatibleSchema`.
 - `same_version_drift_is_rejected` — call `open()` to bring the DB to
@@ -1204,12 +1215,18 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   delete row 3; reopen via `open()`; expect
   `StoreError::MigrationHistoryMismatch` (contiguity branch). Repeat
   with a duplicated migration_id row.
-- `supersession_is_durable` — insert R1 (target T1, active=1,
-  tombstoned=0) and R2 (target T2, active=1, tombstoned=0); insert
-  valid `updates` edge `(src=R1, dst=R2)`. Confirm R2 is excluded
-  from `records_latest`. Tombstone R1; **R2 must remain excluded**
-  (matches the brief's durable-supersession semantics). Set
-  R1.active=0; R2 still excluded.
+- `supersession_is_durable_until_src_tombstoned` — insert R1
+  (target T1, active=1, tombstoned=0) and R2 (target T2, active=1,
+  tombstoned=0); insert valid `updates` edge `(src=R1, dst=R2)`.
+  Confirm R2 is excluded from `records_latest`. Set R1.active=0;
+  R2 stays excluded (the supersede edge is still live). Now
+  `UPDATE records SET tombstoned = 1 WHERE record_id = R1.record_id`;
+  the AFTER UPDATE trigger atomically deletes the
+  `(R1, R2, 'updates')` edge in the same statement, and R2 reappears
+  in `records_latest`. Confirms (a) supersession persists across
+  ordinary lifecycle changes (active flip), (b) tombstoning the
+  source atomically clears the supersession, (c) the read view
+  cannot observe the inconsistent state.
 - `updates_edge_requires_non_tombstoned_endpoints` — insert R1 with
   `tombstoned=1`, R2 live; attempt `INSERT INTO edges (src=R1, dst=R2,
   kind='updates')`; expect ABORT via the supersede trigger
