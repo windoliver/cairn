@@ -12,6 +12,7 @@
 
 use thiserror::Error;
 
+use crate::domain::timestamp::Rfc3339Timestamp;
 use crate::generated::verbs::search::SearchArgsFilters;
 
 // ── Field allowlist ───────────────────────────────────────────────────────────
@@ -123,6 +124,39 @@ pub enum FilterError {
         expected: &'static str,
         /// What shape was actually received.
         got: &'static str,
+    },
+
+    /// A timestamp operand is a string but not a valid RFC3339 value.
+    #[error("field `{field}` op `{op}` has invalid RFC3339 timestamp `{value}`: {reason}")]
+    InvalidTimestamp {
+        /// Field that was queried.
+        field: String,
+        /// Operator that was rejected.
+        op: String,
+        /// The offending value.
+        value: String,
+        /// Parse failure description.
+        reason: String,
+    },
+
+    /// An array operand must be non-empty but was empty.
+    #[error("field `{field}` op `{op}` requires a non-empty array")]
+    EmptyArray {
+        /// Field that was queried.
+        field: String,
+        /// Operator that was rejected.
+        op: String,
+    },
+
+    /// `array_size_eq` operand must be a non-negative integer.
+    #[error("field `{field}` op `{op}` requires a non-negative integer, got `{value}`")]
+    InvalidArraySize {
+        /// Field that was queried.
+        field: String,
+        /// Operator that was rejected.
+        op: String,
+        /// The offending value.
+        value: String,
     },
 }
 
@@ -262,6 +296,12 @@ fn validate_value_shape(
                 let arr = value
                     .as_array()
                     .ok_or_else(|| scalar_err("array of strings"))?;
+                if arr.is_empty() {
+                    return Err(FilterError::EmptyArray {
+                        field: field.to_owned(),
+                        op: op.to_owned(),
+                    });
+                }
                 require_array_of(
                     field,
                     op,
@@ -281,25 +321,9 @@ fn validate_value_shape(
             .then_some(())
             .ok_or_else(|| scalar_err("boolean")),
         FieldType::Array => validate_array_field_value(field, op, value, scalar_err),
-        // Timestamp: eq/neq require a single string; in/nin require array of strings.
-        FieldType::Timestamp => match op {
-            "in" | "nin" => {
-                let arr = value
-                    .as_array()
-                    .ok_or_else(|| scalar_err("array of RFC3339 strings"))?;
-                require_array_of(
-                    field,
-                    op,
-                    arr,
-                    "array of RFC3339 strings",
-                    serde_json::Value::is_string,
-                )
-            }
-            _ => value
-                .is_string()
-                .then_some(())
-                .ok_or_else(|| scalar_err("RFC3339 string")),
-        },
+        // Timestamp: eq/neq require a valid RFC3339 string; in/nin require
+        // a non-empty array of valid RFC3339 strings.
+        FieldType::Timestamp => validate_timestamp_value(field, op, value, scalar_err),
     }
 }
 
@@ -314,6 +338,12 @@ fn validate_number_value(
             let arr = value
                 .as_array()
                 .ok_or_else(|| scalar_err("array of numbers"))?;
+            if arr.is_empty() {
+                return Err(FilterError::EmptyArray {
+                    field: field.to_owned(),
+                    op: op.to_owned(),
+                });
+            }
             require_array_of(
                 field,
                 op,
@@ -351,6 +381,12 @@ fn validate_array_field_value(
             let arr = value
                 .as_array()
                 .ok_or_else(|| scalar_err("array of strings"))?;
+            if arr.is_empty() {
+                return Err(FilterError::EmptyArray {
+                    field: field.to_owned(),
+                    op: op.to_owned(),
+                });
+            }
             require_array_of(
                 field,
                 op,
@@ -359,11 +395,66 @@ fn validate_array_field_value(
                 serde_json::Value::is_string,
             )
         }
-        "array_size_eq" => value
-            .is_number()
-            .then_some(())
-            .ok_or_else(|| scalar_err("number")),
+        "array_size_eq" => {
+            let n = value.as_u64();
+            if n.is_none() {
+                return Err(FilterError::InvalidArraySize {
+                    field: field.to_owned(),
+                    op: op.to_owned(),
+                    value: value.to_string(),
+                });
+            }
+            Ok(())
+        }
         _ => unreachable!("op validated by validate_op_for_type"),
+    }
+}
+
+fn validate_ts(field: &str, op: &str, s: &str) -> Result<(), FilterError> {
+    Rfc3339Timestamp::parse(s)
+        .map(|_| ())
+        .map_err(|e| FilterError::InvalidTimestamp {
+            field: field.to_owned(),
+            op: op.to_owned(),
+            value: s.to_owned(),
+            reason: e.to_string(),
+        })
+}
+
+fn validate_timestamp_value(
+    field: &str,
+    op: &str,
+    value: &serde_json::Value,
+    scalar_err: impl Fn(&'static str) -> FilterError,
+) -> Result<(), FilterError> {
+    match op {
+        "in" | "nin" => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| scalar_err("array of RFC3339 strings"))?;
+            if arr.is_empty() {
+                return Err(FilterError::EmptyArray {
+                    field: field.to_owned(),
+                    op: op.to_owned(),
+                });
+            }
+            for item in arr {
+                let Some(s) = item.as_str() else {
+                    return Err(FilterError::WrongValueShape {
+                        field: field.to_owned(),
+                        op: op.to_owned(),
+                        expected: "array of RFC3339 strings",
+                        got: json_type_name(item),
+                    });
+                };
+                validate_ts(field, op, s)?;
+            }
+            Ok(())
+        }
+        _ => {
+            let s = value.as_str().ok_or_else(|| scalar_err("RFC3339 string"))?;
+            validate_ts(field, op, s)
+        }
     }
 }
 
