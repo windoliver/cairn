@@ -415,14 +415,14 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
 
     // Generated files: overwrite unless skip_generated.
     let gen_force = opts.force || !skip_generated;
-    crate::vault::write_once(
+    crate::vault::bootstrap::write_once(
         &target.join("SKILL.md"),
         SKILL_MD,
         gen_force,
         &mut files_created,
         &mut files_skipped,
     )?;
-    crate::vault::write_once(
+    crate::vault::bootstrap::write_once(
         &target.join("conventions.md"),
         CONVENTIONS_MD,
         gen_force,
@@ -438,7 +438,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         ("03-search-prior-decision.md", EXAMPLE_03),
         ("04-skillify-this.md", EXAMPLE_04),
     ] {
-        crate::vault::write_once(
+        crate::vault::bootstrap::write_once(
             &examples_dir.join(name),
             content,
             false, // never force-overwrite examples
@@ -449,7 +449,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
 
     // Write .version last so a partial failure (e.g. in examples/) never
     // leaves a version-stamped incomplete install.
-    crate::vault::write_once(
+    crate::vault::bootstrap::write_once(
         &target.join(".version"),
         VERSION_FILE,
         gen_force,
