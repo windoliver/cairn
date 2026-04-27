@@ -163,8 +163,9 @@ impl MarkdownProjector {
 
         let version = map
             .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1) as u32;
+            .and_then(serde_yaml::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(1);
 
         let kind_str = map
             .get("kind")
