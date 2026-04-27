@@ -158,6 +158,14 @@ pub enum FilterError {
         /// The offending value.
         value: String,
     },
+
+    /// An `and` or `or` node has an empty children array.
+    #[error("`{0}` node must contain at least one child filter")]
+    EmptyOperator(&'static str),
+
+    /// A leaf node is structurally invalid (missing or wrong-typed `field`/`op`/`value`).
+    #[error("malformed leaf filter: {0}")]
+    MalformedLeaf(String),
 }
 
 // ── validate_filter ───────────────────────────────────────────────────────────
@@ -170,12 +178,18 @@ pub enum FilterError {
 pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
     match filter {
         SearchArgsFilters::And { and } => {
+            if and.is_empty() {
+                return Err(FilterError::EmptyOperator("and"));
+            }
             for child in and {
                 validate_filter(child)?;
             }
             Ok(())
         }
         SearchArgsFilters::Or { or } => {
+            if or.is_empty() {
+                return Err(FilterError::EmptyOperator("or"));
+            }
             for child in or {
                 validate_filter(child)?;
             }
@@ -186,21 +200,30 @@ pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
     }
 }
 
-/// Validate a single leaf.  The serde parser (`validate_filter_leaf_shape`)
-/// already verified that `field`, `op`, and `value` are present and that the
-/// op is shape-valid; here we enforce the field allowlist, type-op matrix,
-/// and value-shape compatibility.
+/// Validate a single leaf.  Callers using the serde path will always receive
+/// well-formed leaves; callers constructing `SearchArgsFilters::Leaf` directly
+/// receive graceful `FilterError::MalformedLeaf` rather than a panic.
 fn validate_leaf(v: &serde_json::Value) -> Result<(), FilterError> {
     let Some(obj) = v.as_object() else {
-        unreachable!("leaf is always a JSON object after parsing");
+        return Err(FilterError::MalformedLeaf(
+            "leaf value is not a JSON object".into(),
+        ));
     };
-    let Some(field) = obj["field"].as_str() else {
-        unreachable!("field is always a string after parsing");
+    let Some(field) = obj.get("field").and_then(|f| f.as_str()) else {
+        return Err(FilterError::MalformedLeaf(
+            "leaf missing string `field` key".into(),
+        ));
     };
-    let Some(op) = obj["op"].as_str() else {
-        unreachable!("op is always a string after parsing");
+    let Some(op) = obj.get("op").and_then(|o| o.as_str()) else {
+        return Err(FilterError::MalformedLeaf(
+            "leaf missing string `op` key".into(),
+        ));
     };
-    let value = &obj["value"];
+    let Some(value) = obj.get("value") else {
+        return Err(FilterError::MalformedLeaf(
+            "leaf missing `value` key".into(),
+        ));
+    };
 
     let ft = field_type(field).ok_or_else(|| FilterError::UnknownField(field.to_owned()))?;
     validate_op_for_type(field, op, ft)?;
