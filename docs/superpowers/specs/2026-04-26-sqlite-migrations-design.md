@@ -713,33 +713,75 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   )
   ```
 
-  **The §5.6 acquisition protocol satisfies this CHECK at every
-  per-statement boundary** because each path writes `mode` and
-  `holder_count` consistently in the **same** locks UPDATE/INSERT
-  before any `lock_holders` insert:
+  **Both `mode` and `holder_count` are derived from `lock_holders`
+  via triggers** so caller statement ordering does not matter. The
+  schema reduces to: callers manage `lock_holders` rows; the
+  database derives `locks.(mode, holder_count)` automatically.
 
-  - Path (a) "no row yet": `INSERT INTO locks (mode='X',
-    holder_count=1, ...)` — passes CHECK directly. Subsequent
-    `INSERT INTO lock_holders` fires the AFTER INSERT trigger which
-    recomputes `holder_count = COUNT(*) = 1`, a no-op write that
-    leaves the row at `(X, 1)` — still passes CHECK.
-  - Path (b) "live=0 reclaim": `UPDATE locks SET mode='X',
-    holder_count=1, epoch=epoch+1` — passes CHECK. Then
-    lock_holders insert triggers a no-op recompute. Passes.
-  - Path (c) "shared compatible": `UPDATE locks SET
-    holder_count=live+1` (mode stays `'shared'`) — passes. Insert
-    triggers the no-op recompute. Passes.
-  - Release: `DELETE FROM lock_holders` fires AFTER DELETE which
-    sets `holder_count = COUNT(*) = live-1` and flips `mode` to
-    `'free'` if zero — atomic UPDATE, passes CHECK at the boundary.
+  To do this, `lock_holders` carries a `mode_requested TEXT NOT NULL
+  CHECK (mode_requested IN ('shared', 'exclusive'))` column (one
+  per holder, captured at acquisition). The sync triggers compute:
+  - `holder_count = (SELECT COUNT(*) FROM lock_holders WHERE
+    scope_kind = ? AND scope_key = ?)`,
+  - `mode = CASE
+      WHEN holder_count = 0 THEN 'free'
+      WHEN EXISTS (SELECT 1 FROM lock_holders WHERE ... AND
+                   mode_requested = 'exclusive') THEN 'exclusive'
+      ELSE 'shared'
+    END`.
 
-  The CHECK is therefore not in tension with the protocol; it
-  rejects exactly the malformed states (manual `UPDATE locks SET
-  holder_count = 999`) that the database is supposed to reject.
+  An additional CHECK on `lock_holders` rejects an exclusive
+  request when another holder already exists for the same scope
+  (regardless of mode), enforcing exclusivity at write time:
+  ```sql
+  CREATE TRIGGER lock_holders_exclusive_only_alone
+    BEFORE INSERT ON lock_holders
+    FOR EACH ROW
+    WHEN NEW.mode_requested = 'exclusive'
+     AND EXISTS (
+       SELECT 1 FROM lock_holders
+        WHERE scope_kind = NEW.scope_kind
+          AND scope_key  = NEW.scope_key
+     )
+  BEGIN
+    SELECT RAISE(ABORT,
+      'exclusive lock cannot coexist with any other holder');
+  END;
+  ```
+
+  And reject a shared request when an exclusive holder already
+  exists:
+  ```sql
+  CREATE TRIGGER lock_holders_shared_blocked_by_exclusive
+    BEFORE INSERT ON lock_holders
+    FOR EACH ROW
+    WHEN NEW.mode_requested = 'shared'
+     AND EXISTS (
+       SELECT 1 FROM lock_holders
+        WHERE scope_kind = NEW.scope_kind
+          AND scope_key  = NEW.scope_key
+          AND mode_requested = 'exclusive'
+     )
+  BEGIN
+    SELECT RAISE(ABORT,
+      'shared lock cannot be acquired while exclusive holder exists');
+  END;
+  ```
+
+  With these triggers `locks.(mode, holder_count)` is fully derived
+  and **the joint CHECK is automatically maintained**. The §5.6
+  acquisition protocol simplifies: the storage impl only inserts /
+  deletes `lock_holders` rows (with the appropriate
+  `mode_requested`), and the database manages the summary row. The
+  CHECK on `locks` is retained as an extra layer that must always
+  hold; the §15 concurrency invariant test asserts it does.
 - `lock_holders` — every column from the brief block (`holder_id`,
-  `acquired_epoch`, `owner_incarnation`, `boot_id`, `reclaim_deadline`),
+  `acquired_epoch`, `owner_incarnation`, `boot_id`, `reclaim_deadline`)
+  **plus** `mode_requested TEXT NOT NULL CHECK (mode_requested IN
+  ('shared','exclusive'))` for trigger-driven mode derivation,
   `PRIMARY KEY (scope_kind, scope_key, holder_id)`,
   `FOREIGN KEY (scope_kind, scope_key) REFERENCES locks(scope_kind, scope_key)`.
+  This is a brief deviation called out in §10.
 - Index `lock_holders_reclaim_idx ON lock_holders(reclaim_deadline)` —
   GC step in the acquisition transaction filters by deadline (§5.6
   acquisition protocol, step 1).
@@ -792,10 +834,28 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
     op_id       TEXT NOT NULL,
     state       TEXT NOT NULL CHECK (state IN ('tombstoning','closed')),
     opened_at   INTEGER NOT NULL,
-    PRIMARY KEY (scope_kind, scope_key),
+    PRIMARY KEY (scope_kind, scope_key, op_id),
     FOREIGN KEY (op_id) REFERENCES wal_ops(operation_id)
   );
+
+  -- At most one live (tombstoning) fence per scope, but multiple
+  -- closed fences per scope are allowed as audit history. A second
+  -- forget on the same scope inserts a new (..., op_id_2,
+  -- 'tombstoning') row alongside the prior closed fence.
+  CREATE UNIQUE INDEX reader_fence_one_live_per_scope
+    ON reader_fence(scope_kind, scope_key)
+    WHERE state = 'tombstoning';
   ```
+  Keying by `(scope_kind, scope_key, op_id)` lets a closed fence
+  remain as audit history while a fresh forget on the same scope
+  inserts a new `tombstoning` row. The partial unique index ensures
+  at most one concurrent forget per scope (which §5.6 enforces via
+  the exclusive session lock anyway, but the schema makes it
+  unrepresentable independently).
+
+  Read plans join on `reader_fence WHERE state='tombstoning'` —
+  closed fences never affect reader visibility.
+
   The FK ties every fence row to a real WAL op so a malformed insert
   cannot block a scope behind a nonexistent operation.
 
@@ -1147,12 +1207,47 @@ fn verify_replay_ledger_consistency(conn: &Connection) -> Result<(), StoreError>
 }
 ```
 
-The check is read-only — open() never silently repairs the cache.
-A diverged vault surfaces `StoreError::ReplayLedgerInconsistent`
-with one of `Stale`, `OverAdvanced`, `OrphanedHighWater`, or
-`MissingHighWater`; the operator runs `cairn admin
-repair-replay-ledger` (a follow-up issue) which atomically rebuilds
-`issuer_seq` from `used` inside one transaction.
+**Same-release repair path.** Hard-failing every corruption case
+without a recovery path would turn cache divergence into a
+service-blocking outage. `used` is the authoritative ledger;
+`issuer_seq` is a derived cache. `open()` therefore auto-repairs
+in one transaction when the schema-level triggers prove `used` is
+internally consistent (which they do — UNIQUE(issuer, sequence)
+and the no-DELETE / no-UPDATE triggers make `used` tamper-resistant
+by construction):
+
+```rust
+fn repair_replay_ledger(conn: &Connection) -> Result<(), StoreError> {
+    let txn = conn.transaction()?;
+    txn.execute_batch("
+        DELETE FROM issuer_seq;
+        INSERT INTO issuer_seq (issuer, high_water)
+          SELECT issuer, MAX(sequence) FROM used GROUP BY issuer;
+    ")?;
+    txn.commit()?;
+    Ok(())
+}
+```
+
+The repair is gated behind a `repair_inconsistent_caches: bool`
+flag on `open()` (default `true` for embedded vaults; tests pass
+`false` to assert the inconsistency without auto-fixing). The
+fixture-bypass path that is the only way to *create* an
+inconsistency is itself test-only, so production opens never
+trigger the repair branch unless the underlying corruption was
+introduced by an older binary or out-of-band tool.
+
+The DELETE+INSERT happens inside a single transaction with foreign
+keys + the `issuer_seq_*` triggers temporarily disabled (via a
+session-scoped pragma flip the storage impl owns); the rebuild
+restores invariants before the transaction commits, so any
+concurrent reader sees the old or the new cache, never partial
+state. A repair event surfaces in `metrics.jsonl` with the
+divergence kind so operators can investigate the root cause.
+
+If `repair_inconsistent_caches` is `false`, `open()` returns
+`StoreError::ReplayLedgerInconsistent` with one of `Stale`,
+`OverAdvanced`, `OrphanedHighWater`, or `MissingHighWater`.
 
 ### 5.2 Migration checksum ledger (history-level guarantee)
 
@@ -1348,7 +1443,9 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `issuer_seq_no_delete`,
     `issuer_seq_insert_must_match_ledger`, `issuer_seq_only_via_ledger`,
     `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
-    `lock_holders_count_after_update`, `lock_holders_keys_immutable`
+    `lock_holders_count_after_update`, `lock_holders_keys_immutable`,
+    `lock_holders_exclusive_only_alone`,
+    `lock_holders_shared_blocked_by_exclusive`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
@@ -1487,6 +1584,13 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `issuer = 'alice'`; expect success.
 - `reader_fence_orphan_rejected` — attempt `INSERT INTO reader_fence
   (..., op_id = 'no-such-op', ...)`; expect FK violation at COMMIT.
+- `reader_fence_supports_repeat_forget` — open a fence
+  `(scope='session:S', op_id=A, state='tombstoning')`; close it.
+  Insert a second fence `(scope='session:S', op_id=B,
+  state='tombstoning')`; expect success (PK now includes op_id).
+  Confirm read plans see only the one live tombstoning row via the
+  partial unique index. Closes the previous round's
+  single-use-per-scope failure mode.
 - `reader_fence_clears_on_op_abort` — insert a `wal_ops` row with
   `state = 'PREPARED'`; insert a `reader_fence` row referencing it
   with `state = 'tombstoning'`. UPDATE `wal_ops.state = 'ABORTED'`;
@@ -1592,18 +1696,27 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   expect ABORT via `consent_journal_immutable`. Attempt
   `DELETE FROM consent_journal WHERE row_id = …`; expect ABORT via
   `consent_journal_no_delete`.
-- `lock_acquisition_round_trip` — exercise the §5.6 acquisition
-  pattern against the migrated schema: start with no `locks` row;
-  in one txn, `INSERT INTO locks` with `mode='exclusive',
-  holder_count=1`, then `INSERT INTO lock_holders`. Confirm
-  `(exclusive, 1)`. Release: confirm `(free, 0)`. Repeat for
-  shared with two holders.
+- `lock_acquisition_round_trip` — start with no `locks` row;
+  insert a `locks` row in `mode='free', holder_count=0`. Insert
+  one `lock_holders` row with `mode_requested='exclusive'`; the
+  sync triggers drive `locks` to `(exclusive, 1)`. Insert a second
+  exclusive holder for the same scope; expect ABORT via
+  `lock_holders_exclusive_only_alone`. Release the first holder;
+  `locks` returns to `(free, 0)`. Insert two `mode_requested='shared'`
+  holders; `locks` becomes `(shared, 2)`. Try inserting an exclusive
+  while shared holders exist; ABORT. Release both shared; `(free, 0)`.
 - `lock_state_invariants_enforced` — attempt
   `UPDATE locks SET holder_count = 5 WHERE mode = 'exclusive'`;
   expect CHECK violation. Attempt `UPDATE locks SET mode = 'free'
-  WHERE holder_count > 0`; expect CHECK violation. Attempt
-  `INSERT INTO locks VALUES ('entity','x','shared',0,0,NULL,NULL)`;
-  expect CHECK violation.
+  WHERE holder_count > 0`; expect CHECK violation. Confirms the
+  CHECK still rejects manual tampering even though the normal write
+  path is trigger-driven.
+- `lock_exclusivity_enforced_by_schema` — insert a shared holder;
+  then attempt to INSERT an exclusive holder for the same scope;
+  ABORT via `lock_holders_exclusive_only_alone`. Insert an
+  exclusive holder; attempt to INSERT a shared holder for the same
+  scope; ABORT via `lock_holders_shared_blocked_by_exclusive`.
+  Schema enforces mutual exclusion independently of caller logic.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
