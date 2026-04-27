@@ -1,4 +1,4 @@
-//! Verb dispatch for the MCP stdio transport (brief §8, §4 MCPServer contract).
+//! Verb dispatch for the MCP stdio transport (brief §8, §4 `MCPServer` contract).
 //!
 //! All tool calls flow through `verify_signed_intent` before reaching the
 //! verb layer, satisfying CLAUDE.md invariant 5 (WAL + two-phase apply).
@@ -19,6 +19,7 @@ use cairn_core::verifier::verify_signed_intent;
 /// `name` is the MCP tool name (one of the eight verbs).
 /// `args_json` is the raw tool arguments from the MCP client (unused at P0;
 /// real arg parsing lands when the store is wired in issue #9).
+#[must_use]
 pub fn dispatch(
     name: &str,
     _args_json: Option<&serde_json::Map<String, serde_json::Value>>,
