@@ -170,19 +170,43 @@ pub enum FilterError {
 
 // ── validate_filter ───────────────────────────────────────────────────────────
 
+/// Maximum nesting depth for a filter tree (matches the serde-layer cap).
+const MAX_FILTER_DEPTH: usize = 8;
+/// Maximum fanout for `and` / `or` nodes (matches the serde-layer cap).
+const MAX_FILTER_FANOUT: usize = 32;
+
 /// Validate a parsed [`SearchArgsFilters`] tree against the P0 field allowlist
 /// and per-type operator rules (§8.0.d).
 ///
 /// Call this before [`compile_filter`] and before dispatching to any store.
 /// Returns the first [`FilterError`] found, depth-first left-to-right.
+///
+/// Enforces the same depth/fanout caps as the serde parser so that
+/// programmatically constructed trees cannot cause stack exhaustion or
+/// unbounded SQL generation.
 pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
+    validate_filter_inner(filter, 0)
+}
+
+fn validate_filter_inner(filter: &SearchArgsFilters, depth: usize) -> Result<(), FilterError> {
+    if depth > MAX_FILTER_DEPTH {
+        return Err(FilterError::MalformedLeaf(format!(
+            "filter tree exceeds maximum nesting depth of {MAX_FILTER_DEPTH}"
+        )));
+    }
     match filter {
         SearchArgsFilters::And { and } => {
             if and.is_empty() {
                 return Err(FilterError::EmptyOperator("and"));
             }
+            if and.len() > MAX_FILTER_FANOUT {
+                return Err(FilterError::MalformedLeaf(format!(
+                    "`and` node has {} children; maximum is {MAX_FILTER_FANOUT}",
+                    and.len()
+                )));
+            }
             for child in and {
-                validate_filter(child)?;
+                validate_filter_inner(child, depth + 1)?;
             }
             Ok(())
         }
@@ -190,12 +214,18 @@ pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
             if or.is_empty() {
                 return Err(FilterError::EmptyOperator("or"));
             }
+            if or.len() > MAX_FILTER_FANOUT {
+                return Err(FilterError::MalformedLeaf(format!(
+                    "`or` node has {} children; maximum is {MAX_FILTER_FANOUT}",
+                    or.len()
+                )));
+            }
             for child in or {
-                validate_filter(child)?;
+                validate_filter_inner(child, depth + 1)?;
             }
             Ok(())
         }
-        SearchArgsFilters::Not { not } => validate_filter(not),
+        SearchArgsFilters::Not { not } => validate_filter_inner(not, depth + 1),
         SearchArgsFilters::Leaf(v) => validate_leaf(v),
     }
 }
@@ -278,6 +308,16 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
+fn require_nonempty_string(field: &str, op: &str, s: &str) -> Result<(), FilterError> {
+    if s.is_empty() {
+        Err(FilterError::MalformedLeaf(format!(
+            "field `{field}` op `{op}` value must not be an empty string"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 /// Check that every element in `arr` satisfies `pred`; return `WrongValueShape`
 /// pointing at the first offending element if not.
 fn require_array_of(
@@ -325,18 +365,23 @@ fn validate_value_shape(
                         op: op.to_owned(),
                     });
                 }
-                require_array_of(
-                    field,
-                    op,
-                    arr,
-                    "array of strings",
-                    serde_json::Value::is_string,
-                )
+                for item in arr {
+                    let s = item.as_str().ok_or_else(|| FilterError::WrongValueShape {
+                        field: field.to_owned(),
+                        op: op.to_owned(),
+                        expected: "array of strings",
+                        got: json_type_name(item),
+                    })?;
+                    require_nonempty_string(field, op, s)?;
+                }
+                Ok(())
             }
-            _ => value
-                .is_string()
-                .then_some(())
-                .ok_or_else(|| scalar_err("string")),
+            _ => {
+                let s = value
+                    .as_str()
+                    .ok_or_else(|| scalar_err("non-empty string"))?;
+                require_nonempty_string(field, op, s)
+            }
         },
         FieldType::Number => validate_number_value(field, op, value, scalar_err),
         FieldType::Boolean => value
@@ -396,10 +441,12 @@ fn validate_array_field_value(
     scalar_err: impl Fn(&'static str) -> FilterError,
 ) -> Result<(), FilterError> {
     match op {
-        "array_contains" => value
-            .is_string()
-            .then_some(())
-            .ok_or_else(|| scalar_err("string")),
+        "array_contains" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| scalar_err("non-empty string"))?;
+            require_nonempty_string(field, op, s)
+        }
         "array_contains_any" | "array_contains_all" => {
             let arr = value
                 .as_array()
@@ -410,13 +457,16 @@ fn validate_array_field_value(
                     op: op.to_owned(),
                 });
             }
-            require_array_of(
-                field,
-                op,
-                arr,
-                "array of strings",
-                serde_json::Value::is_string,
-            )
+            for item in arr {
+                let s = item.as_str().ok_or_else(|| FilterError::WrongValueShape {
+                    field: field.to_owned(),
+                    op: op.to_owned(),
+                    expected: "array of strings",
+                    got: json_type_name(item),
+                })?;
+                require_nonempty_string(field, op, s)?;
+            }
+            Ok(())
         }
         "array_size_eq" => {
             let n = value.as_u64();
