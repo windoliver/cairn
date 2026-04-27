@@ -1,7 +1,7 @@
 //! `cairn skill install` — writes the Cairn skill bundle to the harness skill
 //! directory (§8.0.a-bis, §18.d).
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::ValueEnum;
 use std::path::PathBuf;
 
@@ -41,21 +41,14 @@ pub fn registration_hint(harness: &Harness) -> &'static str {
 
 // Embedded at compile time from the committed generated artifacts.
 // The CI `--check` gate catches drift between these and what cairn-codegen emits.
-#[allow(dead_code)] // used in install() (Task 6)
 const SKILL_MD: &str = include_str!("../../../skills/cairn/SKILL.md");
-#[allow(dead_code)] // used in install() (Task 6)
 const CONVENTIONS_MD: &str = include_str!("../../../skills/cairn/conventions.md");
-#[allow(dead_code)] // used in install() (Task 6)
 const VERSION_FILE: &str = include_str!("../../../skills/cairn/.version");
 
 // Static example stubs — written once on install; user may edit after.
-#[allow(dead_code)] // used in install() (Task 6)
 const EXAMPLE_01: &str = include_str!("../../../skills/cairn/examples/01-remember-preference.md");
-#[allow(dead_code)] // used in install() (Task 6)
 const EXAMPLE_02: &str = include_str!("../../../skills/cairn/examples/02-forget-something.md");
-#[allow(dead_code)] // used in install() (Task 6)
 const EXAMPLE_03: &str = include_str!("../../../skills/cairn/examples/03-search-prior-decision.md");
-#[allow(dead_code)] // used in install() (Task 6)
 const EXAMPLE_04: &str = include_str!("../../../skills/cairn/examples/04-skillify-this.md");
 
 /// Options for [`install`].
@@ -96,9 +89,188 @@ pub fn default_target_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".cairn/skills/cairn"))
 }
 
+/// Parses the `cairn-idl: X.Y.Z` line from a `.version` file.
+fn parse_idl_version(version_file: &str) -> Option<String> {
+    for line in version_file.lines() {
+        if let Some(ver) = line.strip_prefix("cairn-idl: ") {
+            return Some(ver.trim().to_owned());
+        }
+    }
+    None
+}
+
+/// Compares two `X.Y.Z` version strings. Returns `Less` if `a < b`.
+fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    fn parse(v: &str) -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.');
+        Some((
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        ))
+    }
+    match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Installs the Cairn skill bundle at `opts.target_dir`.
+///
+/// Idempotent and version-aware. See the spec (§8.0.a-bis, §18.d) for the
+/// full decision tree.
+///
+/// # Errors
+/// Returns an error if a directory cannot be created or a file cannot be
+/// written. Symlinked paths are rejected.
+pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
+    let target = &opts.target_dir;
+    let current_idl_version = env!("CARGO_PKG_VERSION");
+
+    // Reject symlinked target root.
+    if let Ok(meta) = std::fs::symlink_metadata(target)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "{} is a symlink — cairn will not write through it",
+            target.display()
+        );
+    }
+
+    // Create target dir and examples/ subdir.
+    std::fs::create_dir_all(target.join("examples"))
+        .with_context(|| format!("creating {}", target.join("examples").display()))?;
+
+    // Version check.
+    let installed_version = std::fs::read_to_string(target.join(".version"))
+        .ok()
+        .and_then(|s| parse_idl_version(&s));
+
+    let skip_generated = match &installed_version {
+        Some(installed) if installed == current_idl_version && !opts.force => true,
+        Some(installed)
+            if compare_versions(installed, current_idl_version) == std::cmp::Ordering::Greater =>
+        {
+            eprintln!(
+                "cairn skill install: warning — installed version ({installed}) is newer \
+                 than this binary ({current_idl_version}); proceeding with downgrade"
+            );
+            false
+        }
+        _ => false,
+    };
+
+    let mut files_created: Vec<PathBuf> = Vec::new();
+    let mut files_skipped: Vec<PathBuf> = Vec::new();
+
+    // Generated files: overwrite unless skip_generated.
+    let gen_force = opts.force || !skip_generated;
+    crate::vault::write_once(
+        &target.join("SKILL.md"),
+        SKILL_MD,
+        gen_force,
+        &mut files_created,
+        &mut files_skipped,
+    )?;
+    crate::vault::write_once(
+        &target.join("conventions.md"),
+        CONVENTIONS_MD,
+        gen_force,
+        &mut files_created,
+        &mut files_skipped,
+    )?;
+    crate::vault::write_once(
+        &target.join(".version"),
+        VERSION_FILE,
+        gen_force,
+        &mut files_created,
+        &mut files_skipped,
+    )?;
+
+    // Example stubs: write-once, never overwrite (user may have edited).
+    let examples_dir = target.join("examples");
+    for (name, content) in [
+        ("01-remember-preference.md", EXAMPLE_01),
+        ("02-forget-something.md", EXAMPLE_02),
+        ("03-search-prior-decision.md", EXAMPLE_03),
+        ("04-skillify-this.md", EXAMPLE_04),
+    ] {
+        crate::vault::write_once(
+            &examples_dir.join(name),
+            content,
+            false, // never force-overwrite examples
+            &mut files_created,
+            &mut files_skipped,
+        )?;
+    }
+
+    let hint = registration_hint(&opts.harness).to_owned();
+
+    // Parse contract version from embedded .version file for the receipt.
+    let contract_version = VERSION_FILE
+        .lines()
+        .find_map(|l| l.strip_prefix("contract: ").map(str::to_owned))
+        .unwrap_or_else(|| "cairn.mcp.v1".to_owned());
+
+    Ok(InstallReceipt {
+        target_dir: target.clone(),
+        contract_version,
+        idl_version: current_idl_version.to_owned(),
+        files_created,
+        files_skipped,
+        registration_hint: hint,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_fresh_creates_expected_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("skills/cairn");
+        let opts = InstallOpts {
+            target_dir: target.clone(),
+            harness: Harness::ClaudeCode,
+            force: false,
+        };
+
+        let receipt = install(&opts).expect("fresh install");
+
+        // Generated files must exist.
+        assert!(target.join("SKILL.md").exists(), "SKILL.md missing");
+        assert!(
+            target.join("conventions.md").exists(),
+            "conventions.md missing"
+        );
+        assert!(target.join(".version").exists(), ".version missing");
+
+        // Example stubs must exist.
+        assert!(
+            target.join("examples/01-remember-preference.md").exists(),
+            "example 01 missing"
+        );
+        assert!(
+            target.join("examples/04-skillify-this.md").exists(),
+            "example 04 missing"
+        );
+
+        // Fresh install: nothing skipped.
+        assert!(
+            receipt.files_skipped.is_empty(),
+            "expected no skips on fresh install"
+        );
+        assert!(
+            !receipt.files_created.is_empty(),
+            "expected files to be created"
+        );
+
+        // Receipt fields are populated.
+        assert_eq!(receipt.contract_version, "cairn.mcp.v1");
+        assert!(!receipt.idl_version.is_empty());
+        assert!(!receipt.registration_hint.is_empty());
+    }
 
     #[test]
     fn registration_hint_covers_all_harnesses() {
