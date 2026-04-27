@@ -1,5 +1,8 @@
 //! Integration tests for vault bootstrap (brief §3.1, issue #41).
 
+// 19 = VAULT_DIRS.len() in vault.rs (brief §3.1 directory tree)
+// 4  = placeholder files: .cairn/config.yaml, purpose.md, index.md, log.md
+
 use std::path::Path;
 
 use cairn_cli::vault::{BootstrapOpts, bootstrap};
@@ -82,8 +85,16 @@ fn bootstrap_creates_placeholder_files() {
 fn bootstrap_receipt_counts_files() {
     let dir = tempfile::tempdir().unwrap();
     let receipt = bootstrap(&opts(dir.path())).unwrap();
-    assert_eq!(receipt.files_created.len(), 4);
-    assert_eq!(receipt.files_skipped.len(), 0);
+    assert_eq!(
+        receipt.files_created.len(),
+        4,
+        "first run: all 4 placeholder files should be created"
+    );
+    assert_eq!(
+        receipt.files_skipped.len(),
+        0,
+        "first run: no files should be skipped"
+    );
 }
 
 #[test]
@@ -95,12 +106,28 @@ fn bootstrap_idempotent() {
     let receipt = bootstrap(&opts(dir.path())).unwrap();
 
     // dirs: all existing, none created
-    assert_eq!(receipt.dirs_created.len(), 0);
-    assert_eq!(receipt.dirs_existing.len(), 19);
+    assert_eq!(
+        receipt.dirs_created.len(),
+        0,
+        "second run: no new dirs should be created"
+    );
+    assert_eq!(
+        receipt.dirs_existing.len(),
+        19,
+        "second run: all 19 dirs should already exist"
+    );
 
     // files: all skipped, none created
-    assert_eq!(receipt.files_created.len(), 0);
-    assert_eq!(receipt.files_skipped.len(), 4);
+    assert_eq!(
+        receipt.files_created.len(),
+        0,
+        "second run: no files should be created"
+    );
+    assert_eq!(
+        receipt.files_skipped.len(),
+        4,
+        "second run: all 4 files should be skipped"
+    );
 
     // vault is still intact
     assert!(dir.path().join(".cairn/config.yaml").is_file());
@@ -117,11 +144,18 @@ fn bootstrap_skips_user_edited_purpose() {
     std::fs::write(&purpose, "# My vault\n\nPersonal knowledge base.\n").unwrap();
 
     // second run without --force
-    bootstrap(&opts(dir.path())).unwrap();
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
 
     // user's content must survive
     let content = std::fs::read_to_string(&purpose).unwrap();
     assert_eq!(content, "# My vault\n\nPersonal knowledge base.\n");
+
+    // receipt must report all 4 files skipped
+    assert_eq!(
+        receipt.files_skipped.len(),
+        4,
+        "second run: all 4 files should be skipped"
+    );
 }
 
 #[test]
@@ -138,12 +172,21 @@ fn bootstrap_force_overwrites_files() {
 
     // purpose.md is overwritten with the template
     let content = std::fs::read_to_string(&purpose).unwrap();
+    // must match PURPOSE_MD in vault.rs
     assert_eq!(
         content,
         "# Purpose\n\n<!-- Why does this vault exist? -->\n"
     );
 
     // receipt shows all 4 files created
-    assert_eq!(receipt.files_created.len(), 4);
-    assert_eq!(receipt.files_skipped.len(), 0);
+    assert_eq!(
+        receipt.files_created.len(),
+        4,
+        "force: all 4 files should be overwritten"
+    );
+    assert_eq!(
+        receipt.files_skipped.len(),
+        0,
+        "force: no files should be skipped"
+    );
 }
