@@ -5,12 +5,18 @@ use std::path::Path;
 use cairn_cli::vault::{BootstrapOpts, bootstrap};
 
 fn opts(dir: &Path) -> BootstrapOpts {
-    BootstrapOpts { vault_path: dir.to_path_buf(), force: false }
+    BootstrapOpts {
+        vault_path: dir.to_path_buf(),
+        force: false,
+    }
 }
 
 #[allow(dead_code)]
 fn forced(dir: &Path) -> BootstrapOpts {
-    BootstrapOpts { vault_path: dir.to_path_buf(), force: true }
+    BootstrapOpts {
+        vault_path: dir.to_path_buf(),
+        force: true,
+    }
 }
 
 #[test]
@@ -40,10 +46,7 @@ fn bootstrap_creates_full_tree() {
         ".cairn/models",
     ];
     for rel in &expected_dirs {
-        assert!(
-            dir.path().join(rel).is_dir(),
-            "expected dir missing: {rel}"
-        );
+        assert!(dir.path().join(rel).is_dir(), "expected dir missing: {rel}");
     }
 }
 
@@ -51,6 +54,10 @@ fn bootstrap_creates_full_tree() {
 fn bootstrap_receipt_counts_dirs() {
     let dir = tempfile::tempdir().unwrap();
     let receipt = bootstrap(&opts(dir.path())).unwrap();
-    assert_eq!(receipt.dirs_created.len(), 19, "first run: all 19 dirs should be created");
+    assert_eq!(
+        receipt.dirs_created.len(),
+        19,
+        "first run: all 19 dirs should be created"
+    );
     assert_eq!(receipt.dirs_existing.len(), 0);
 }
