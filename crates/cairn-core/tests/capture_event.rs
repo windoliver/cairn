@@ -420,6 +420,35 @@ fn zero_recording_duration_rejected() {
 }
 
 #[test]
+fn payload_ref_rejects_backslash_traversal() {
+    // sources/..\..\Windows\win.ini — backslash-separated parent hops
+    // would slip past a forward-slash-only segment scan.
+    let mut ev = auto_event();
+    ev.payload_ref = "sources/..\\..\\Windows\\win.ini".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_pure_backslash() {
+    let mut ev = auto_event();
+    ev.payload_ref = "sources\\hook\\x.json".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn arbitrary_suffix_under_declared_family_rejected() {
+    // `snr:local:hook:anything` has the right family prefix but no
+    // version segment — must not pass manifest validation.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:hook:anything").expect("valid syntactic");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:hook:anything")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+}
+
+#[test]
 fn captureeventid_rejects_overflow_first_char() {
     // ULID first char must be `0`-`7`. `8...` overflows 128 bits.
     let err = CaptureEventId::parse("8ARZ3NDEKTSV4RRFFQ69G5FAVZ").unwrap_err();

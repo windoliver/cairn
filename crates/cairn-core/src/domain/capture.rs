@@ -362,10 +362,18 @@ impl std::fmt::Display for SourceFamily {
 /// Modality-specific payload metadata for a [`CaptureEvent`].
 ///
 /// The variant **must agree** with the event's [`SourceFamily`] —
-/// validation enforces this. Bodies are deliberately metadata-only: raw
-/// content (utterances, frames, clipboard text) lives behind `payload_ref`
-/// and is hashed by `payload_hash` so the envelope can be logged at
-/// `info` without leaking source bytes (CLAUDE.md §6.6, brief §14).
+/// validation enforces this. Raw content (utterances, frames, clipboard
+/// text) stays behind `payload_ref` + `payload_hash` rather than inline.
+///
+/// **Treat the envelope as sensitive, not log-safe.** Several variants
+/// carry high-signal user metadata that must not be emitted to
+/// structured logs at `info` or above (CLAUDE.md §6.6, brief §14):
+/// `Terminal.command`, `Screen.window_title`, `Screen.url`,
+/// `Ide.file_path`, `Voice.speaker_id`, `Proactive.rationale`. A
+/// downstream observer needs a redacted projection of the envelope —
+/// not a structured-log dump of the raw struct — before any of these
+/// fields leave `trace`. A separate sanitized log type is out of scope
+/// for this issue and tracked as a follow-up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source_family", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
@@ -809,6 +817,15 @@ fn validate_vault_relative_path(field: &'static str, raw: &str) -> Result<(), Do
     if raw.contains('\0') {
         return Err(DomainError::MalformedCapture {
             message: format!("{field}: NUL byte not permitted"),
+        });
+    }
+    // Reject backslashes regardless of host platform — vault paths are
+    // forward-slash canonical. This blocks `sources/..\\..\\Win\\x` from
+    // smuggling a parent-dir hop through a single segment on consumers
+    // that normalize backslashes.
+    if raw.contains('\\') {
+        return Err(DomainError::MalformedCapture {
+            message: format!("{field} `{raw}`: backslash not permitted"),
         });
     }
     if raw.contains("://") {
