@@ -636,4 +636,35 @@ mod cli_vault_remove {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("nosuchvault"), "missing name: {stderr}");
     }
+
+    #[test]
+    fn remove_clears_default_when_removed_is_default() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_dir.path().join(".cairn")).unwrap();
+
+        let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+        let mut reg = cairn_core::config::VaultRegistry::default();
+        reg.default = Some("solo".into());
+        reg.vaults.push(VaultEntry::new("solo", vault_dir.path().to_str().unwrap(), None, None));
+        store.save(&reg).unwrap();
+
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_dir.path().join("vaults.toml").to_str().unwrap())
+            .args(["vault", "remove", "solo"])
+            .output()
+            .expect("cairn vault remove default vault");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let reg = store.load().unwrap();
+        assert!(
+            reg.default.is_none(),
+            "default should be None after removing the default vault"
+        );
+        assert!(!reg.contains("solo"), "vault should be deregistered");
+    }
 }
