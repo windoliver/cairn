@@ -10,9 +10,7 @@ use cairn_core::contract::agent_provider::{
 use cairn_core::contract::frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin,
 };
-use cairn_core::contract::llm_provider::{
-    LLMProvider, LLMProviderCapabilities, LLMProviderPlugin,
-};
+use cairn_core::contract::llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 use cairn_core::contract::memory_store::{
     CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
@@ -390,9 +388,12 @@ mod llm_provider_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(LLMProvider, StubLlm, "stub-llm-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubLlm)
-    });
+    register_plugin_with!(
+        LLMProvider,
+        StubLlm,
+        "stub-llm-factory",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(StubLlm) }
+    );
 }
 
 mod workflow_orchestrator_factory_plugin {
@@ -424,9 +425,12 @@ mod workflow_orchestrator_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(WorkflowOrchestrator, StubOrch, "stub-orch-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubOrch)
-    });
+    register_plugin_with!(
+        WorkflowOrchestrator,
+        StubOrch,
+        "stub-orch-factory",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(StubOrch) }
+    );
 }
 
 mod sensor_ingress_factory_plugin {
@@ -458,9 +462,12 @@ mod sensor_ingress_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(SensorIngress, StubSensor, "stub-sensor-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubSensor)
-    });
+    register_plugin_with!(
+        SensorIngress,
+        StubSensor,
+        "stub-sensor-factory",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(StubSensor) }
+    );
 }
 
 mod mcp_server_factory_plugin {
@@ -493,9 +500,12 @@ mod mcp_server_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(MCPServer, StubMcp, "stub-mcp-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubMcp)
-    });
+    register_plugin_with!(
+        MCPServer,
+        StubMcp,
+        "stub-mcp-factory",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(StubMcp) }
+    );
 }
 
 mod frontend_adapter_factory_plugin {
@@ -527,9 +537,14 @@ mod frontend_adapter_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
     }
 
-    register_plugin_with!(FrontendAdapter, StubFrontend, "stub-frontend-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubFrontend)
-    });
+    register_plugin_with!(
+        FrontendAdapter,
+        StubFrontend,
+        "stub-frontend-factory",
+        |_cfg: &cairn_core::config::CairnConfig| {
+            Ok::<_, std::convert::Infallible>(StubFrontend)
+        }
+    );
 }
 
 mod agent_provider_factory_plugin {
@@ -562,9 +577,12 @@ mod agent_provider_factory_plugin {
             VersionRange::new(ContractVersion::new(0, 0, 1), ContractVersion::new(0, 1, 0));
     }
 
-    register_plugin_with!(AgentProvider, StubAgent, "stub-agent-factory", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(StubAgent)
-    });
+    register_plugin_with!(
+        AgentProvider,
+        StubAgent,
+        "stub-agent-factory",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(StubAgent) }
+    );
 }
 
 // ── factory-error path ────────────────────────────────────────────────────────
@@ -599,12 +617,17 @@ mod factory_error_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(MemoryStore, FailingStore, "failing-store", |_cfg: &cairn_core::config::CairnConfig| {
-        Err::<FailingStore, _>(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "db file missing",
-        ))
-    });
+    register_plugin_with!(
+        MemoryStore,
+        FailingStore,
+        "failing-store",
+        |_cfg: &cairn_core::config::CairnConfig| {
+            Err::<FailingStore, _>(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "db file missing",
+            ))
+        }
+    );
 }
 
 // ── new tests ─────────────────────────────────────────────────────────────────
@@ -613,8 +636,7 @@ mod factory_error_plugin {
 fn register_plugin_with_llm_provider() {
     let mut reg = PluginRegistry::new();
     let cfg = CairnConfig::default();
-    llm_provider_factory_plugin::register(&mut reg, &cfg)
-        .expect("LLMProvider factory registers");
+    llm_provider_factory_plugin::register(&mut reg, &cfg).expect("LLMProvider factory registers");
     let name = PluginName::new("stub-llm-factory").expect("valid");
     assert!(reg.llm_provider(&name).is_some());
 }
