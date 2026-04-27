@@ -11,7 +11,7 @@ use rmcp::model::{
     PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
-use rmcp::{Error as McpError, RoleServer, ServiceExt as _};
+use rmcp::{ErrorData as McpError, RoleServer, ServiceExt as _};
 use tracing::instrument;
 
 use cairn_core::config::CairnConfig;
@@ -58,15 +58,16 @@ impl ServerHandler for CairnMcpHandler {
         _params: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools: Vec<Tool> = TOOLS
+        let tools = TOOLS
             .iter()
             .map(|decl| {
-                let schema_val: serde_json::Value = serde_json::from_slice(decl.input_schema)
-                    .expect("invariant: generated schema bytes are valid JSON");
+                let schema_val: serde_json::Value =
+                    serde_json::from_slice(decl.input_schema)
+                        .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
                 let schema_obj = schema_val.as_object().cloned().unwrap_or_default();
-                Tool::new(decl.name, decl.description, Arc::new(schema_obj))
+                Ok(Tool::new(decl.name, decl.description, Arc::new(schema_obj)))
             })
-            .collect();
+            .collect::<Result<Vec<Tool>, McpError>>()?;
         Ok(ListToolsResult::with_all_items(tools))
     }
 
@@ -78,7 +79,7 @@ impl ServerHandler for CairnMcpHandler {
     ) -> Result<CallToolResult, McpError> {
         let response = dispatch::dispatch(&params.name, params.arguments.as_ref());
         let json = serde_json::to_string(&response)
-            .expect("invariant: Response is always JSON-serializable");
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         tracing::info!(
             operation_id = %response.operation_id.0,
             status = ?response.status,
