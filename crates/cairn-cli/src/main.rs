@@ -22,6 +22,15 @@ fn build_command() -> clap::Command {
         .about("Cairn — agent memory framework")
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(mcp_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp").about(
+        "Start an MCP stdio server. Reads MCP frames from stdin, \
+             dispatches to the eight cairn verbs, writes responses to \
+             stdout. Blocks until stdin closes.",
+    )
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -87,6 +96,7 @@ fn main() -> ExitCode {
     match matches.subcommand() {
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some((verb, _)) => {
             eprintln!(
                 "cairn {verb}: not yet implemented in this P0 scaffold. \

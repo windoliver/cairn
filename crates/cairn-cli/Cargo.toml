@@ -43,11 +43,11 @@ workspace = true
 # Forward-declared scaffold deps. anyhow lands its first call site when
 # the verb layer is wired up in a follow-up issue. clap was dropped from
 # this list in Task 17 once main.rs adopted it (Task 13). serde is now
-# used by CliOverrides. Drop anyhow once its first call site exists.
+# used by CliOverrides. tokio is now used in mcp.rs. Drop anyhow once its
+# first call site exists.
 [package.metadata.cargo-machete]
 ignored = [
     "anyhow",
-    "tokio",
 ]
 
 [lib]
