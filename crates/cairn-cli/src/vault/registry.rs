@@ -245,6 +245,7 @@ pub fn add_vault(
     name: String,
     label: Option<String>,
 ) -> anyhow::Result<VaultEntry> {
+    // Note: not atomic with respect to filesystem mutations between check and save.
     if !path.join(".cairn").is_dir() {
         return Err(VaultError::NotAVault { path }.into());
     }
@@ -252,6 +253,7 @@ pub fn add_vault(
     if reg.contains(&name) {
         return Err(VaultError::DuplicateName { name }.into());
     }
+    // Non-UTF-8 path bytes are replaced with U+FFFD — acceptable for P0 single-user offline use.
     let entry = VaultEntry::new(name, path.to_string_lossy(), label, None::<String>);
     reg.vaults.push(entry.clone());
     store.save(&reg)?;
