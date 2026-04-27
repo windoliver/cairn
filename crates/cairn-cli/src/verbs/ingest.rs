@@ -21,7 +21,8 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     let has_body = sub.get_one::<String>("body").is_some();
     let has_file = sub.get_one::<std::path::PathBuf>("file").is_some();
     let has_url = sub.get_one::<String>("url").is_some();
-    let source_count = u8::from(has_source) + u8::from(has_body) + u8::from(has_file) + u8::from(has_url);
+    let source_count =
+        u8::from(has_source) + u8::from(has_body) + u8::from(has_file) + u8::from(has_url);
     if source_count != 1 {
         eprintln!(
             "cairn ingest: exactly one of [source, --body, --file, --url] is required (got {source_count})"
@@ -34,7 +35,11 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         if src == "-" {
             let mut buf = String::new();
             // Cap at 4 MiB to avoid unbounded allocation in the stubbed path.
-            if std::io::stdin().take(4 * 1024 * 1024).read_to_string(&mut buf).is_err() {
+            if std::io::stdin()
+                .take(4 * 1024 * 1024)
+                .read_to_string(&mut buf)
+                .is_err()
+            {
                 let r = unimplemented_response(ResponseVerb::Ingest);
                 if json {
                     emit_json(&r);
