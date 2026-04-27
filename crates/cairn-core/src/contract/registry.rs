@@ -122,9 +122,7 @@ pub enum PluginError {
     ///
     /// The source is boxed to break the circular type reference with `ConfigError`
     /// (which already contains `PluginError` via `InvalidPluginName`).
-    #[error(
-        "plugin {plugin} for contract {contract} failed to construct: {source}"
-    )]
+    #[error("plugin {plugin} for contract {contract} failed to construct: {source}")]
     FactoryError {
         /// Contract under which construction was attempted.
         contract: &'static str,
@@ -544,10 +542,10 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::llm_provider::LLMProviderPlugin;
     use crate::contract::memory_store::{
         CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
     };
-    use crate::contract::llm_provider::LLMProviderPlugin;
 
     // -- PluginName tests -------------------------------------------------
 
@@ -913,6 +911,7 @@ patch = 0
 
     #[test]
     fn factory_error_display() {
+        use std::error::Error;
         use std::fmt;
 
         #[derive(Debug)]
@@ -932,7 +931,6 @@ patch = 0
         let msg = err.to_string();
         assert!(msg.contains("some-store"), "message: {msg}");
         assert!(msg.contains("db open failed"), "message: {msg}");
-        use std::error::Error;
         assert!(err.source().is_some());
     }
 }

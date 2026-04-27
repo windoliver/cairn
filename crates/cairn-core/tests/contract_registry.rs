@@ -3,10 +3,12 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::memory_store::{
+    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
+};
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::config::CairnConfig;
 use cairn_core::register_plugin;
 use cairn_core::register_plugin_with;
 
@@ -75,8 +77,10 @@ mod future_plugin {
 
     impl MemoryStorePlugin for FutureStore {
         const NAME: &'static str = "fake-future";
-        const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(9, 9, 0), ContractVersion::new(10, 0, 0));
+        const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
+            ContractVersion::new(9, 9, 0),
+            ContractVersion::new(10, 0, 0),
+        );
     }
 
     register_plugin!(MemoryStore, FutureStore, "fake-future");
@@ -211,13 +215,20 @@ mod incompatible_factory_plugin {
 
     impl MemoryStorePlugin for NeverBuilt {
         const NAME: &'static str = "never-built";
-        const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(9, 9, 0), ContractVersion::new(10, 0, 0));
+        const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
+            ContractVersion::new(9, 9, 0),
+            ContractVersion::new(10, 0, 0),
+        );
     }
 
-    register_plugin_with!(MemoryStore, NeverBuilt, "never-built", |_cfg: &cairn_core::config::CairnConfig| -> Result<NeverBuilt, std::convert::Infallible> {
-        panic!("factory must NOT be called for incompatible plugin versions")
-    });
+    register_plugin_with!(
+        MemoryStore,
+        NeverBuilt,
+        "never-built",
+        |_cfg: &cairn_core::config::CairnConfig| -> Result<NeverBuilt, std::convert::Infallible> {
+            panic!("factory must NOT be called for incompatible plugin versions")
+        }
+    );
 }
 
 mod config_driven_plugin {
@@ -250,9 +261,12 @@ mod config_driven_plugin {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
-    register_plugin_with!(MemoryStore, PathStore, "path-store", |_cfg: &cairn_core::config::CairnConfig| {
-        Ok::<_, std::convert::Infallible>(PathStore)
-    });
+    register_plugin_with!(
+        MemoryStore,
+        PathStore,
+        "path-store",
+        |_cfg: &cairn_core::config::CairnConfig| { Ok::<_, std::convert::Infallible>(PathStore) }
+    );
 }
 
 mod name_mismatch_plugin {
@@ -321,8 +335,8 @@ fn register_plugin_macro_rejects_name_const_mismatch() {
     // Verifies the new static identity pre-check in register_plugin! fires
     // before Default::default() is called.
     let mut reg = PluginRegistry::new();
-    let err = name_mismatch_plugin::register(&mut reg)
-        .expect_err("NAME/literal mismatch must fail");
+    let err =
+        name_mismatch_plugin::register(&mut reg).expect_err("NAME/literal mismatch must fail");
     assert!(
         matches!(err, PluginError::IdentityMismatch { .. }),
         "expected IdentityMismatch, got {err:?}"
