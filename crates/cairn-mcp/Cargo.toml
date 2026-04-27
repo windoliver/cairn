@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+insta = { workspace = true }
 
 [lints]
 workspace = true
