@@ -132,15 +132,34 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     // --- placeholder files ---
     let config_yaml = serde_yaml::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
-    write_once(&config_path, &config_yaml, opts.force, &mut receipt)?;
+    write_once(
+        &config_path,
+        &config_yaml,
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
     write_once(
         &vault.join("purpose.md"),
         PURPOSE_MD,
         opts.force,
-        &mut receipt,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
     )?;
-    write_once(&vault.join("index.md"), "", opts.force, &mut receipt)?;
-    write_once(&vault.join("log.md"), "", opts.force, &mut receipt)?;
+    write_once(
+        &vault.join("index.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
+    write_once(
+        &vault.join("log.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
 
     Ok(receipt)
 }
@@ -175,11 +194,12 @@ pub fn render_human(receipt: &BootstrapReceipt) -> String {
     )
 }
 
-fn write_once(
+pub(crate) fn write_once(
     path: &std::path::Path,
     content: &str,
     force: bool,
-    receipt: &mut BootstrapReceipt,
+    created: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
 ) -> Result<()> {
     use std::io::Write as _;
 
@@ -215,7 +235,7 @@ fn write_once(
             );
         }
         if !force {
-            receipt.files_skipped.push(path.to_owned());
+            skipped.push(path.to_owned());
             return Ok(());
         }
         // force=true, regular file — fall through to atomic overwrite
@@ -263,7 +283,7 @@ fn write_once(
                     ),
                     Ok(_) => {
                         // is_file() is the only remaining case after the arms above.
-                        receipt.files_skipped.push(path.to_owned());
+                        skipped.push(path.to_owned());
                         return Ok(());
                     }
                     Err(re) => {
@@ -280,6 +300,6 @@ fn write_once(
         }
     }
 
-    receipt.files_created.push(path.to_owned());
+    created.push(path.to_owned());
     Ok(())
 }
