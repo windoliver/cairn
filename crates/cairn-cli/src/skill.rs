@@ -24,18 +24,22 @@ pub enum Harness {
     Custom,
 }
 
-/// Returns the harness-specific registration hint printed after install.
+/// Returns the harness-specific registration hint for the actual install path.
+///
+/// The hint uses `target_dir` so that `--target-dir` installs produce a hint
+/// that points at the real installed location, not the default path.
 #[must_use]
-pub fn registration_hint(harness: &Harness) -> &'static str {
+pub fn registration_hint(harness: &Harness, target_dir: &std::path::Path) -> String {
+    let skill_path = target_dir.join("SKILL.md").display().to_string();
     match harness {
-        Harness::ClaudeCode => "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md",
-        Harness::Codex => "# Add to your AGENTS.md:\n@~/.cairn/skills/cairn/SKILL.md",
-        Harness::Gemini => "# Add to your GEMINI.md:\n@~/.cairn/skills/cairn/SKILL.md",
-        Harness::Opencode => {
-            "# Add to your opencode config skills path:\n~/.cairn/skills/cairn/SKILL.md"
-        }
-        Harness::Cursor => "# Add to your .cursorrules:\n@~/.cairn/skills/cairn/SKILL.md",
-        Harness::Custom => "# Skill bundle written. Register it with your harness manually.",
+        Harness::ClaudeCode => format!("# Add to your CLAUDE.md:\n@{skill_path}"),
+        Harness::Codex => format!("# Add to your AGENTS.md:\n@{skill_path}"),
+        Harness::Gemini => format!("# Add to your GEMINI.md:\n@{skill_path}"),
+        Harness::Opencode => format!("# Add to your opencode config skills path:\n{skill_path}"),
+        Harness::Cursor => format!("# Add to your .cursorrules:\n@{skill_path}"),
+        Harness::Custom => format!(
+            "# Skill bundle written to {skill_path}. Register it with your harness manually."
+        ),
     }
 }
 
@@ -116,6 +120,50 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
+/// Rejects symlinks in user-space ancestors and the final target itself.
+///
+/// OS-managed root symlinks (e.g. `/var → /private/var` on macOS) are skipped;
+/// only components under `$HOME` and the target itself are checked.
+fn reject_symlink_ancestors(path: &std::path::Path) -> Result<()> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut check = PathBuf::new();
+    for component in path.components() {
+        check.push(component);
+        let under_home = home.as_deref().is_some_and(|h| check.starts_with(h));
+        let is_final = check == path;
+        if (under_home || is_final)
+            && std::fs::symlink_metadata(&check)
+                .ok()
+                .is_some_and(|m| m.file_type().is_symlink())
+        {
+            anyhow::bail!(
+                "{} is a symlink — cairn will not write through it",
+                check.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reads the installed IDL version from `.version`, distinguishing `NotFound`
+/// (fresh install) from permission/IO errors (fail closed).
+fn read_installed_version(version_path: &std::path::Path) -> Result<Option<String>> {
+    if let Ok(meta) = std::fs::symlink_metadata(version_path)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "{} is a symlink — cairn will not read through it",
+            version_path.display()
+        );
+    }
+    match std::fs::read_to_string(version_path) {
+        Ok(s) => Ok(parse_idl_version(&s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e)
+            .context(format!("reading installed version from {}", version_path.display()))),
+    }
+}
+
 /// Installs the Cairn skill bundle at `opts.target_dir`.
 ///
 /// Idempotent and version-aware. See the spec (§8.0.a-bis, §18.d) for the
@@ -131,24 +179,14 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // so cairn-cli's CARGO_PKG_VERSION matches the cairn-idl version embedded in .version.
     let current_idl_version = env!("CARGO_PKG_VERSION");
 
-    // Reject symlinked target root.
-    if let Ok(meta) = std::fs::symlink_metadata(target)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!(
-            "{} is a symlink — cairn will not write through it",
-            target.display()
-        );
-    }
+    // Reject symlinks anywhere in the target path (catches symlinked ancestors).
+    reject_symlink_ancestors(target)?;
 
     // Create target dir and examples/ subdir.
     std::fs::create_dir_all(target.join("examples"))
         .with_context(|| format!("creating {}", target.join("examples").display()))?;
 
-    // Version check.
-    let installed_version = std::fs::read_to_string(target.join(".version"))
-        .ok()
-        .and_then(|s| parse_idl_version(&s));
+    let installed_version = read_installed_version(&target.join(".version"))?;
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
@@ -208,7 +246,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         )?;
     }
 
-    let hint = registration_hint(&opts.harness).to_owned();
+    let hint = registration_hint(&opts.harness, target);
 
     // Parse contract version from embedded .version file for the receipt.
     let contract_version = VERSION_FILE
@@ -343,6 +381,7 @@ mod tests {
 
     #[test]
     fn registration_hint_covers_all_harnesses() {
+        let dir = std::path::Path::new("/home/user/.cairn/skills/cairn");
         let cases = [
             (Harness::ClaudeCode, "CLAUDE.md"),
             (Harness::Codex, "AGENTS.md"),
@@ -352,7 +391,7 @@ mod tests {
             (Harness::Custom, "manually"),
         ];
         for (harness, expected_fragment) in &cases {
-            let hint = registration_hint(harness);
+            let hint = registration_hint(harness, dir);
             assert!(
                 hint.contains(expected_fragment),
                 "hint for {harness:?} should mention '{expected_fragment}' — got: {hint:?}"
