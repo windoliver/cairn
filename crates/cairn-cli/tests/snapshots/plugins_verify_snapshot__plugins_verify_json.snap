@@ -28,8 +28,7 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "reason": "real impl pending",
-          "status": "pending",
+          "status": "ok",
           "tier": 2
         }
       ],
@@ -147,7 +146,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 16,
-    "pending": 6
+    "ok": 17,
+    "pending": 5
   }
 }

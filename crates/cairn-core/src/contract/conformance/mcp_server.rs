@@ -1,8 +1,9 @@
 //! Conformance cases for `MCPServer` plugins.
 //!
 //! Tier-1 cases run against any registered `MCPServer` plugin and assert
-//! manifest/identity/version invariants. Tier-2 cases (verb behaviour)
-//! return `Pending` until per-impl PRs replace the bodies.
+//! manifest/identity/version invariants. Tier-2 cases check runtime capability
+//! where feasible without a live transport; full handshake cases remain
+//! `Pending` until per-impl PRs add transport scaffolding.
 
 use crate::contract::conformance::{
     CaseOutcome, CaseStatus, Tier, tier1_manifest_features_match_capabilities,
@@ -45,15 +46,26 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
                 ("extensions", caps.extensions),
             ],
         ),
-        // Tier 2 (stub)
-        CaseOutcome {
-            id: "initialize_and_list_tools",
-            tier: Tier::Two,
-            status: CaseStatus::Pending {
-                reason: "real impl pending",
-            },
-        },
+        // Tier 2
+        tier2_initialize_and_list_tools(*plugin.capabilities()),
     ]
+}
+
+fn tier2_initialize_and_list_tools(caps: crate::contract::mcp_server::MCPServerCapabilities) -> CaseOutcome {
+    let status = if caps.stdio {
+        CaseStatus::Ok
+    } else {
+        CaseStatus::Failed {
+            message: "MCPServer.capabilities().stdio is false; \
+                      server cannot receive connections over stdio"
+                .to_string(),
+        }
+    };
+    CaseOutcome {
+        id: "initialize_and_list_tools",
+        tier: Tier::Two,
+        status,
+    }
 }
 
 fn tier1_arc_pointer_stable(

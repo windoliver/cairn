@@ -186,3 +186,26 @@ fn mcp_serve_subcommand_exists_in_help() {
         .expect("cairn binary must be reachable");
     assert!(status.success(), "mcp serve --help must exit 0");
 }
+
+#[test]
+fn mcp_server_conformance_has_no_pending_tier2_cases() {
+    use cairn_core::contract::conformance::CaseStatus;
+    use cairn_core::contract::registry::PluginName;
+
+    let mut registry = cairn_core::contract::registry::PluginRegistry::new();
+    cairn_mcp::register(&mut registry).expect("registers ok");
+
+    let name = PluginName::new("cairn-mcp").expect("valid plugin name");
+    let outcomes = cairn_core::contract::conformance::mcp_server::run(&registry, &name);
+
+    let pending: Vec<_> = outcomes
+        .iter()
+        .filter(|o| matches!(o.status, CaseStatus::Pending { .. }))
+        .collect();
+
+    assert!(
+        pending.is_empty(),
+        "conformance suite has pending tier-2 cases: {:?}",
+        pending.iter().map(|o| o.id).collect::<Vec<_>>()
+    );
+}
