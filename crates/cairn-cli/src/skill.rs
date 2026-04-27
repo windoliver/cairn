@@ -174,7 +174,7 @@ fn create_dir_checked(path: &std::path::Path) -> Result<()> {
             }
             Err(e) => {
                 return Err(anyhow::Error::from(e)
-                    .context(format!("creating directory {}", check.display())))
+                    .context(format!("creating directory {}", check.display())));
             }
         }
         // Same depth-2 skip as reject_symlink_ancestors for macOS /var.
@@ -202,10 +202,7 @@ fn create_dir_checked(path: &std::path::Path) -> Result<()> {
 /// - File exists but invalid schema + `!force` → `Err` (fail closed; corrupt metadata).
 /// - File exists but invalid schema + `force` → `Ok(None)` (user explicitly overrides).
 /// - Symlink → always `Err`.
-fn read_installed_version(
-    version_path: &std::path::Path,
-    force: bool,
-) -> Result<Option<String>> {
+fn read_installed_version(version_path: &std::path::Path, force: bool) -> Result<Option<String>> {
     if let Ok(meta) = std::fs::symlink_metadata(version_path)
         && meta.file_type().is_symlink()
     {
@@ -218,8 +215,10 @@ fn read_installed_version(
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            return Err(anyhow::Error::from(e)
-                .context(format!("reading installed version from {}", version_path.display())))
+            return Err(anyhow::Error::from(e).context(format!(
+                "reading installed version from {}",
+                version_path.display()
+            )));
         }
     };
     // Strict schema: exactly one 'contract: cairn.mcp.v1', exactly one valid
@@ -272,10 +271,8 @@ fn read_installed_version(
 /// prevents silent overwrites while still allowing idempotent retry.
 fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
     const CAIRN_ENTRIES: &[&str] = &["SKILL.md", "conventions.md", ".version", "examples"];
-    const GENERATED_FILES: &[(&str, &str)] = &[
-        ("SKILL.md", SKILL_MD),
-        ("conventions.md", CONVENTIONS_MD),
-    ];
+    const GENERATED_FILES: &[(&str, &str)] =
+        &[("SKILL.md", SKILL_MD), ("conventions.md", CONVENTIONS_MD)];
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("checking contents of {}", dir.display()))?
     {
@@ -306,7 +303,9 @@ fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
             for ex_entry in std::fs::read_dir(&examples_path)
                 .with_context(|| format!("checking contents of {}", examples_path.display()))?
             {
-                let ex_name = ex_entry.context("reading examples directory entry")?.file_name();
+                let ex_name = ex_entry
+                    .context("reading examples directory entry")?
+                    .file_name();
                 if !EXAMPLE_NAMES.iter().any(|&n| ex_name == n) {
                     anyhow::bail!(
                         "{} contains unexpected files but has no Cairn .version — \
@@ -392,8 +391,8 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
             // Same version: still byte-check on-disk files against the embedded artifacts.
             // Content can drift in development (e.g. two builds at the same version) and
             // version equality alone is not sufficient proof of freshness.
-            let skill_current = std::fs::read_to_string(target.join("SKILL.md"))
-                .is_ok_and(|s| s == SKILL_MD);
+            let skill_current =
+                std::fs::read_to_string(target.join("SKILL.md")).is_ok_and(|s| s == SKILL_MD);
             let conventions_current = std::fs::read_to_string(target.join("conventions.md"))
                 .is_ok_and(|s| s == CONVENTIONS_MD);
             skill_current && conventions_current
@@ -768,8 +767,7 @@ mod tests {
     fn read_installed_version_accepts_valid_schema() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let vpath = tmp.path().join(".version");
-        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\n")
-            .expect("write");
+        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\n").expect("write");
         let v = read_installed_version(&vpath, false).expect("parse");
         assert_eq!(v, Some("1.2.3".to_owned()));
     }
@@ -785,8 +783,11 @@ mod tests {
         std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: garbage\n").expect("write");
         assert!(read_installed_version(&vpath, false).is_err());
         // Extra unknown line.
-        std::fs::write(&vpath, "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\nextra: field\n")
-            .expect("write");
+        std::fs::write(
+            &vpath,
+            "contract: cairn.mcp.v1\ncairn-idl: 1.2.3\nextra: field\n",
+        )
+        .expect("write");
         assert!(read_installed_version(&vpath, false).is_err());
         // --force overrides malformed content.
         assert!(read_installed_version(&vpath, true).is_ok());
