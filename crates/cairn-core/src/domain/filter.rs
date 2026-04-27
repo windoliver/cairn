@@ -21,12 +21,17 @@ use crate::generated::verbs::search::SearchArgsFilters;
 pub enum FieldType {
     /// Single string value (`kind`, `class`, `visibility`, `path`, `title`, `category`, …).
     Str,
-    /// Numeric value (`priority`, `version`, `created_at`, `confidence`).
+    /// Numeric value (`priority`, `version`, `confidence`).
     Number,
     /// Boolean flag (`is_static`, `tombstoned`, `active`).
     Boolean,
     /// JSON-array column (`tags`, `actor_chain`, `backlinks`).
     Array,
+    /// RFC3339 timestamp (`created_at`). Only exact/membership ops are valid;
+    /// range ordering over raw RFC3339 strings is unreliable due to timezone
+    /// offsets, so `lt/lte/gt/gte/between` are rejected until a normalized
+    /// epoch column is available in the store.
+    Timestamp,
 }
 
 impl FieldType {
@@ -36,12 +41,19 @@ impl FieldType {
             Self::Number => "number",
             Self::Boolean => "boolean",
             Self::Array => "array",
+            Self::Timestamp => "timestamp",
         }
     }
 }
 
 // Ordered list of (field_name, type) pairs.  All P0 allowlisted fields are here;
 // any field not in this list is rejected by `validate_filter`.
+//
+// P0 contract: every field listed here MUST exist as a same-named physical column
+// (or addressable expression) on the `records` table in `cairn-store-sqlite`.
+// When the store migration is implemented, this list must be reconciled with the
+// actual schema; fields stored inside a JSON blob need an explicit expression in
+// `field_col` rather than the identity mapping.
 const KNOWN_FIELDS: &[(&str, FieldType)] = &[
     // String fields — direct `records` table columns.
     ("kind", FieldType::Str),
@@ -54,15 +66,13 @@ const KNOWN_FIELDS: &[(&str, FieldType)] = &[
     ("priority", FieldType::Number),
     ("version", FieldType::Number),
     ("confidence", FieldType::Number),
-    // Timestamp field — stored as RFC3339 text; ISO8601 is lexicographically
-    // sortable, so string ops (eq/neq/in/nin/string_contains/starts_with) work
-    // correctly against the stored representation.
-    ("created_at", FieldType::Str),
+    // Timestamp — stored as RFC3339 text; only exact/membership ops accepted.
+    ("created_at", FieldType::Timestamp),
     // Boolean fields.
     ("is_static", FieldType::Boolean),
     ("tombstoned", FieldType::Boolean),
     ("active", FieldType::Boolean),
-    // Array fields — stored as JSON columns.
+    // Array fields — stored as JSON text columns.
     ("tags", FieldType::Array),
     ("actor_chain", FieldType::Array),
     ("backlinks", FieldType::Array),
@@ -185,6 +195,9 @@ fn validate_op_for_type(field: &str, op: &str, ft: FieldType) -> Result<(), Filt
             op,
             "array_contains" | "array_contains_any" | "array_contains_all" | "array_size_eq"
         ),
+        // Range ops are rejected for Timestamp until a normalized epoch column
+        // exists in the store; raw RFC3339 strings are not reliably ordered.
+        FieldType::Timestamp => matches!(op, "eq" | "neq" | "in" | "nin"),
     };
     if valid {
         Ok(())
@@ -268,6 +281,25 @@ fn validate_value_shape(
             .then_some(())
             .ok_or_else(|| scalar_err("boolean")),
         FieldType::Array => validate_array_field_value(field, op, value, scalar_err),
+        // Timestamp: eq/neq require a single string; in/nin require array of strings.
+        FieldType::Timestamp => match op {
+            "in" | "nin" => {
+                let arr = value
+                    .as_array()
+                    .ok_or_else(|| scalar_err("array of RFC3339 strings"))?;
+                require_array_of(
+                    field,
+                    op,
+                    arr,
+                    "array of RFC3339 strings",
+                    serde_json::Value::is_string,
+                )
+            }
+            _ => value
+                .is_string()
+                .then_some(())
+                .ok_or_else(|| scalar_err("RFC3339 string")),
+        },
     }
 }
 
@@ -413,19 +445,6 @@ fn compile_leaf(v: &serde_json::Value, params: &mut Vec<serde_json::Value>) -> S
     }
 }
 
-/// Escape `%` and `_` in a LIKE operand so they are treated as literals.
-/// The caller must also emit `ESCAPE '\'` in the SQL fragment.
-fn escape_like(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        if matches!(ch, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
-}
-
 fn compile_scalar_op(
     col: &str,
     op: &str,
@@ -493,20 +512,19 @@ fn compile_scalar_op(
             format!("instr({col}, ?) > 0")
         }
         "string_starts_with" => {
-            let Some(s) = value.as_str() else {
-                unreachable!("string_starts_with value is a string after validation");
-            };
-            let escaped = escape_like(s);
-            params.push(serde_json::Value::String(format!("{escaped}%")));
-            format!("{col} LIKE ? ESCAPE '\\'")
+            // Use substr/length for case-sensitive, metachar-safe prefix matching
+            // consistent with instr() used by string_contains.
+            params.push(value.clone());
+            params.push(value.clone());
+            format!("substr({col}, 1, length(?)) = ?")
         }
         "string_ends_with" => {
-            let Some(s) = value.as_str() else {
-                unreachable!("string_ends_with value is a string after validation");
-            };
-            let escaped = escape_like(s);
-            params.push(serde_json::Value::String(format!("%{escaped}")));
-            format!("{col} LIKE ? ESCAPE '\\'")
+            // Use substr/length for case-sensitive, metachar-safe suffix matching.
+            // Three ?'s: length(?) twice, then the equality value.
+            params.push(value.clone());
+            params.push(value.clone());
+            params.push(value.clone());
+            format!("substr({col}, -length(?), length(?)) = ?")
         }
         _ => unreachable!("op was validated by validate_filter before compile_filter"),
     }

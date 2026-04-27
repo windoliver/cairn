@@ -231,12 +231,12 @@ fn compile_string_starts_with() {
         "field": "title", "op": "string_starts_with", "value": "migration"
     }));
     let compiled = compile_filter(&f);
-    // LIKE with trailing %; value is the pattern param
-    assert!(compiled.sql.contains("title") && compiled.sql.contains("LIKE"));
-    assert_eq!(compiled.params.len(), 1);
-    let param = compiled.params[0].as_str().expect("param is a string");
-    assert!(param.ends_with('%'), "starts_with param must end with %");
-    assert!(param.starts_with("migration"));
+    // Uses substr/length for case-sensitive matching consistent with instr().
+    assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
+    // Two params: one for length(?), one for the equality check.
+    assert_eq!(compiled.params.len(), 2);
+    assert_eq!(compiled.params[0].as_str(), Some("migration"));
+    assert_eq!(compiled.params[1].as_str(), Some("migration"));
 }
 
 #[test]
@@ -245,11 +245,12 @@ fn compile_string_ends_with() {
         "field": "title", "op": "string_ends_with", "value": "config"
     }));
     let compiled = compile_filter(&f);
-    assert!(compiled.sql.contains("title") && compiled.sql.contains("LIKE"));
-    assert_eq!(compiled.params.len(), 1);
-    let param = compiled.params[0].as_str().expect("param is a string");
-    assert!(param.starts_with('%'), "ends_with param must start with %");
-    assert!(param.ends_with("config"));
+    assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
+    // Three params: two for length(?), one for the equality check.
+    assert_eq!(compiled.params.len(), 3);
+    assert_eq!(compiled.params[0].as_str(), Some("config"));
+    assert_eq!(compiled.params[1].as_str(), Some("config"));
+    assert_eq!(compiled.params[2].as_str(), Some("config"));
 }
 
 #[test]
