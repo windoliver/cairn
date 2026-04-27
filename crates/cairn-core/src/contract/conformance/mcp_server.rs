@@ -118,10 +118,7 @@ fn tier1_capability_self_consistency_floor(
     }
 }
 
-fn tier2_tool_availability(
-    registry: &PluginRegistry,
-    name: &PluginName,
-) -> CaseOutcome {
+fn tier2_tool_availability(registry: &PluginRegistry, name: &PluginName) -> CaseOutcome {
     // cairn-core cannot depend on cairn-mcp (wrong dependency direction),
     // so this tier-2 case checks the capability advertisement rather than
     // calling list_tools() directly. If stdio=true is advertised, the
