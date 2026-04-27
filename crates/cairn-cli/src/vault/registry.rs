@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use cairn_core::config::{VaultRegistry};
+use cairn_core::config::{VaultEntry, VaultRegistry};
 
 /// Errors that can occur during vault resolution or registry operations.
 #[derive(Debug, thiserror::Error)]
@@ -229,4 +229,31 @@ fn home_dir() -> Option<PathBuf> {
     {
         std::env::var("HOME").ok().map(PathBuf::from)
     }
+}
+
+/// Add a vault to the registry.
+///
+/// Verifies the path is a cairn vault (has `.cairn/`), rejects duplicate
+/// names, then persists.
+///
+/// # Errors
+/// - [`VaultError::NotAVault`] if `path/.cairn/` does not exist.
+/// - [`VaultError::DuplicateName`] if a vault with `name` is already registered.
+pub fn add_vault(
+    store: &VaultRegistryStore,
+    path: PathBuf,
+    name: String,
+    label: Option<String>,
+) -> anyhow::Result<VaultEntry> {
+    if !path.join(".cairn").is_dir() {
+        return Err(VaultError::NotAVault { path }.into());
+    }
+    let mut reg = store.load()?;
+    if reg.contains(&name) {
+        return Err(VaultError::DuplicateName { name }.into());
+    }
+    let entry = VaultEntry::new(name, path.to_string_lossy(), label, None::<String>);
+    reg.vaults.push(entry.clone());
+    store.save(&reg)?;
+    Ok(entry)
 }

@@ -217,3 +217,128 @@ fn two_vaults_resolve_to_different_paths() {
     assert_eq!(a, vault_a.path());
     assert_eq!(b, vault_b.path());
 }
+
+// ── cairn vault add ──────────────────────────────────────────────────────────
+
+mod cli_vault_add {
+    use std::process::Command;
+
+    fn cairn() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_cairn"))
+    }
+
+    #[test]
+    fn add_registers_vault_and_lists_it() {
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_dir.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let reg_path = reg_dir.path().join("vaults.toml");
+
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args([
+                "vault",
+                "add",
+                vault_dir.path().to_str().unwrap(),
+                "--name",
+                "mywork",
+                "--label",
+                "test vault",
+            ])
+            .output()
+            .expect("cairn vault add");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // vault is persisted
+        let store = cairn_cli::vault::VaultRegistryStore::new(reg_path);
+        let reg = store.load().unwrap();
+        assert!(reg.contains("mywork"));
+    }
+
+    #[test]
+    fn add_duplicate_name_fails() {
+        let vault_a = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_a.path().join(".cairn")).unwrap();
+        let vault_b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_b.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let reg_path = reg_dir.path().join("vaults.toml");
+
+        cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args([
+                "vault", "add", vault_a.path().to_str().unwrap(), "--name", "dup",
+            ])
+            .output()
+            .unwrap();
+
+        let out = cairn()
+            .env("CAIRN_REGISTRY", reg_path.to_str().unwrap())
+            .args([
+                "vault", "add", vault_b.path().to_str().unwrap(), "--name", "dup",
+            ])
+            .output()
+            .expect("cairn vault add duplicate");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("dup"),
+            "expected name in error: {stderr}"
+        );
+    }
+
+    #[test]
+    fn add_non_vault_path_fails() {
+        let not_a_vault = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args([
+                "vault",
+                "add",
+                not_a_vault.path().to_str().unwrap(),
+                "--name",
+                "bad",
+            ])
+            .output()
+            .expect("cairn vault add non-vault");
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(".cairn") || stderr.contains("not a cairn vault"),
+            "stderr: {stderr}"
+        );
+    }
+
+    #[test]
+    fn add_json_emits_vault_entry() {
+        let vault_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault_dir.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args([
+                "vault",
+                "add",
+                vault_dir.path().to_str().unwrap(),
+                "--name",
+                "jsontest",
+                "--json",
+            ])
+            .output()
+            .expect("cairn vault add --json");
+        assert!(out.status.success());
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(v["name"], "jsontest");
+    }
+}

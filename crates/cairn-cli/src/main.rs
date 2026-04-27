@@ -37,6 +37,7 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(vault_subcommand())
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -61,6 +62,93 @@ fn bootstrap_subcommand() -> clap::Command {
                 .action(clap::ArgAction::SetTrue)
                 .help("Overwrite existing placeholder files"),
         )
+}
+
+fn vault_subcommand() -> clap::Command {
+    clap::Command::new("vault")
+        .about("Manage the vault registry (brief §3.3)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("add")
+                .about("Register a vault in the registry")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Filesystem path to the vault root"),
+                )
+                .arg(
+                    clap::Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Short identifier for the vault"),
+                )
+                .arg(
+                    clap::Arg::new("label")
+                        .long("label")
+                        .value_name("LABEL")
+                        .help("Human-readable description"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("list")
+                .about("List registered vaults")
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("switch")
+                .about("Set the default vault")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to make default"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("remove")
+                .about("Remove a vault from the registry (does not delete files)")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to remove"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+}
+
+fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
+    let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
+        std::path::PathBuf::from(p)
+    } else {
+        cairn_cli::vault::VaultRegistryStore::default_path()?
+    };
+    Ok(cairn_cli::vault::VaultRegistryStore::new(path))
 }
 
 fn plugins_subcommand() -> clap::Command {
@@ -122,6 +210,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("vault", sub)) => run_vault(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -203,5 +292,68 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
             ExitCode::from(plugins::verify::exit_code(&report, strict))
         }
         _ => unreachable!("clap subcommand_required(true) on plugins ensures a subcommand is set"),
+    }
+}
+
+fn run_vault(matches: &ArgMatches) -> ExitCode {
+    let store = match registry_store() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cairn vault: registry path error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    match matches.subcommand() {
+        Some(("add", sub)) => {
+            let path = std::path::PathBuf::from(
+                sub.get_one::<String>("path")
+                    .expect("invariant: path is required"),
+            );
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: --name is required")
+                .clone();
+            let label = sub.get_one::<String>("label").cloned();
+            let json = sub.get_flag("json");
+
+            match cairn_cli::vault::add_vault(&store, path, name, label) {
+                Ok(entry) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&entry)
+                                .expect("invariant: VaultEntry always serializes")
+                        );
+                    } else {
+                        println!(
+                            "cairn vault add: registered '{}' → {}",
+                            entry.name, entry.path
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cairn vault add: {e:#}");
+                    ExitCode::from(78) // EX_CONFIG
+                }
+            }
+        }
+        Some(("list", _sub)) => {
+            // implemented in Task 5
+            eprintln!("cairn vault list: not yet implemented");
+            ExitCode::from(1)
+        }
+        Some(("switch", _sub)) => {
+            // implemented in Task 6
+            eprintln!("cairn vault switch: not yet implemented");
+            ExitCode::from(1)
+        }
+        Some(("remove", _sub)) => {
+            // implemented in Task 6
+            eprintln!("cairn vault remove: not yet implemented");
+            ExitCode::from(1)
+        }
+        _ => unreachable!("clap subcommand_required(true) on vault"),
     }
 }
