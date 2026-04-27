@@ -1,12 +1,28 @@
-// Integration test files are not public API; doc-comments are not required.
+//! MCP transport smoke tests.
+//!
+//! Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]
 
-// Force a real link edge on cairn-core so the boundary test exercises the
-// declared dependency, not just a Cargo.toml entry. `cairn-core` has no
-// public items yet, so we import it for its side effect only.
-use cairn_core as _;
+use cairn_mcp::error::TransportError;
 
 #[test]
-fn depends_on_core() {
-    assert_eq!(env!("CARGO_PKG_NAME"), "cairn-mcp");
+fn transport_error_is_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TransportError>();
+}
+
+#[test]
+fn transport_error_io_display() {
+    let e = TransportError::Io(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "broken pipe",
+    ));
+    assert!(e.to_string().contains("stdio I/O error"));
+}
+
+#[test]
+fn transport_error_service_display() {
+    let e = TransportError::Service("service failed".to_string());
+    assert!(e.to_string().contains("MCP service error"));
+    assert!(e.to_string().contains("service failed"));
 }
