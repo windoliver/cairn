@@ -274,6 +274,26 @@ BEGIN
     'wal_ops.issued_seq must strictly advance MAX(issued_seq)');
 END;
 
+-- FSM enforcement: state transitions must follow the §5.6 graph.
+-- Allowed edges:
+--   ISSUED   -> PREPARED | REJECTED
+--   PREPARED -> COMMITTED | ABORTED
+--   COMMITTED, ABORTED, REJECTED -> (terminal, no outgoing edges)
+-- The CHECK on the column already restricts state to the closed
+-- enum; this trigger restricts allowed transitions between values.
+CREATE TRIGGER wal_ops_state_transition
+  BEFORE UPDATE OF state ON wal_ops
+  FOR EACH ROW
+  WHEN NEW.state IS NOT OLD.state
+   AND NOT (
+        (OLD.state = 'ISSUED'   AND NEW.state IN ('PREPARED','REJECTED'))
+     OR (OLD.state = 'PREPARED' AND NEW.state IN ('COMMITTED','ABORTED'))
+   )
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_ops.state transition not allowed by §5.6 FSM');
+END;
+
 -- Treat the issued envelope as append-only. Every column that
 -- describes WHAT operation was authorized — identity, ordering, and
 -- the signed envelope material — is frozen post-insert. Only the FSM
@@ -400,6 +420,25 @@ CREATE INDEX wal_steps_resume_idx
 -- state mutates: state, attempts, last_error, started_at,
 -- finished_at, pre_image (which is staged once and may be
 -- subsequently cleared on COMPENSATED).
+-- Step FSM enforcement. Allowed edges:
+--   PENDING -> DONE | FAILED
+--   FAILED  -> PENDING (retry)        | COMPENSATED
+--   DONE    -> COMPENSATED            (rollback after a downstream abort)
+--   COMPENSATED -> (terminal)
+CREATE TRIGGER wal_steps_state_transition
+  BEFORE UPDATE OF state ON wal_steps
+  FOR EACH ROW
+  WHEN NEW.state IS NOT OLD.state
+   AND NOT (
+        (OLD.state = 'PENDING'     AND NEW.state IN ('DONE','FAILED'))
+     OR (OLD.state = 'FAILED'      AND NEW.state IN ('PENDING','COMPENSATED'))
+     OR (OLD.state = 'DONE'        AND NEW.state = 'COMPENSATED')
+   )
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_steps.state transition not allowed');
+END;
+
 CREATE TRIGGER wal_steps_identity_immutable
   BEFORE UPDATE ON wal_steps
   FOR EACH ROW
@@ -482,6 +521,21 @@ END;
 -- without a corresponding `used` row is rejected outright; combined
 -- with issuer_seq_only_via_ledger this pins issuer_seq.high_water to
 -- a value the ledger proves was actually committed.
+-- issuer_seq is the rewind guard for `used_sequence_must_advance`.
+-- A DELETE wipes the high-water for an issuer, after which a fresh
+-- `used` insert at any sequence (including a previously-rewound one)
+-- would pass the rewind check and `used_advance_high_water` would
+-- recreate issuer_seq at that lower value. Block DELETE outright.
+-- The legitimate path for clearing an issuer's history is to leave
+-- both `used` and `issuer_seq` rows in place; there is no operational
+-- reason to delete from issuer_seq.
+CREATE TRIGGER issuer_seq_no_delete
+  BEFORE DELETE ON issuer_seq
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'issuer_seq is append-only; DELETE not permitted');
+END;
+
 CREATE TRIGGER issuer_seq_insert_must_match_ledger
   BEFORE INSERT ON issuer_seq
   FOR EACH ROW
@@ -563,30 +617,42 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   ('shared','exclusive','free')`, `holder_count INTEGER NOT NULL
   CHECK (holder_count >= 0)`, `epoch INTEGER NOT NULL CHECK (epoch >= 0)`,
   `waiters BLOB`, `last_heartbeat_at INTEGER`,
-  `PRIMARY KEY (scope_kind, scope_key)`. The `(mode, holder_count)`
-  consistency invariant is **not** enforced as a row-level CHECK,
-  because SQLite enforces CHECKs per statement (not deferred to
-  COMMIT) and the §5.6 acquisition protocol writes the two columns
-  with different values across two statements (lock_holders insert
-  triggers a recompute of `holder_count`, while `mode` was set by the
-  prior locks UPDATE). Encoding the joint invariant as an immediate
-  CHECK would make the protocol's well-formed transitions
-  unrepresentable. Instead the invariant is enforced **at every
-  acquisition's final commit point** by the storage impl
-  (acquisition is one `BEGIN IMMEDIATE … COMMIT` per §5.6) and
-  cross-checked by:
-  - the `lock_holders_count_after_*` triggers, which always set
-    `holder_count = (SELECT COUNT(*) FROM lock_holders ...)`, and on
-    delete-to-zero flip `mode` to `'free'`;
-  - the §15 concurrency invariant test (CI gate) that runs random
-    schedules of acquire/heartbeat/release/reclaim and asserts no
-    `(mode, holder_count)` pair outside `{(free,0), (exclusive,1),
-    (shared,N≥1)}` ever observes at COMMIT.
+  `PRIMARY KEY (scope_kind, scope_key)`. A row-level CHECK ties the
+  two state columns together so contradictory states (`free` with
+  holders, `exclusive` with > 1, `shared` with 0) are
+  unrepresentable:
 
-  This is a deliberate tradeoff: schema CHECK gives no value here
-  because the well-formed write path would itself trip it; the
-  invariant is verifiable by behavioral test, which is what §5.6's
-  concurrency test is for.
+  ```sql
+  CHECK (
+    (mode = 'free'      AND holder_count = 0) OR
+    (mode = 'exclusive' AND holder_count = 1) OR
+    (mode = 'shared'    AND holder_count >= 1)
+  )
+  ```
+
+  **The §5.6 acquisition protocol satisfies this CHECK at every
+  per-statement boundary** because each path writes `mode` and
+  `holder_count` consistently in the **same** locks UPDATE/INSERT
+  before any `lock_holders` insert:
+
+  - Path (a) "no row yet": `INSERT INTO locks (mode='X',
+    holder_count=1, ...)` — passes CHECK directly. Subsequent
+    `INSERT INTO lock_holders` fires the AFTER INSERT trigger which
+    recomputes `holder_count = COUNT(*) = 1`, a no-op write that
+    leaves the row at `(X, 1)` — still passes CHECK.
+  - Path (b) "live=0 reclaim": `UPDATE locks SET mode='X',
+    holder_count=1, epoch=epoch+1` — passes CHECK. Then
+    lock_holders insert triggers a no-op recompute. Passes.
+  - Path (c) "shared compatible": `UPDATE locks SET
+    holder_count=live+1` (mode stays `'shared'`) — passes. Insert
+    triggers the no-op recompute. Passes.
+  - Release: `DELETE FROM lock_holders` fires AFTER DELETE which
+    sets `holder_count = COUNT(*) = live-1` and flips `mode` to
+    `'free'` if zero — atomic UPDATE, passes CHECK at the boundary.
+
+  The CHECK is therefore not in tension with the protocol; it
+  rejects exactly the malformed states (manual `UPDATE locks SET
+  holder_count = 999`) that the database is supposed to reject.
 - `lock_holders` — every column from the brief block (`holder_id`,
   `acquired_epoch`, `owner_incarnation`, `boot_id`, `reclaim_deadline`),
   `PRIMARY KEY (scope_kind, scope_key, holder_id)`,
@@ -988,13 +1054,14 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `schema_migrations_no_delete`, `schema_migrations_immutable`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
-    `wal_ops_issued_seq_must_advance`, `wal_ops_envelope_immutable`,
-    `wal_ops_no_delete`, `wal_steps_identity_immutable`,
+    `wal_ops_issued_seq_must_advance`, `wal_ops_state_transition`,
+    `wal_ops_envelope_immutable`, `wal_ops_no_delete`,
+    `wal_steps_state_transition`, `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `wal_op_deps_no_delete`,
     `consent_journal_immutable`, `consent_journal_no_delete`,
     `used_sequence_must_advance`, `used_advance_high_water`,
-    `used_immutable`, `used_no_delete`,
+    `used_immutable`, `used_no_delete`, `issuer_seq_no_delete`,
     `issuer_seq_insert_must_match_ledger`, `issuer_seq_only_via_ledger`,
     `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
     `lock_holders_count_after_update`, `lock_holders_keys_immutable`
@@ -1101,7 +1168,9 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `UPDATE issuer_seq SET high_water = 999999` for an issuer with no
   `used` row at sequence 999999; ABORT via `issuer_seq_only_via_ledger`
   (no-matching-ledger branch). Attempt `DELETE FROM used WHERE
-  operation_id = '…'`; ABORT via `used_no_delete`.
+  operation_id = '…'`; ABORT via `used_no_delete`. Attempt
+  `DELETE FROM issuer_seq WHERE issuer = '…'`; ABORT via
+  `issuer_seq_no_delete`.
 - `wal_ops_envelope_locked` — insert a `wal_ops` row; UPDATE the
   `state` column from `'ISSUED'` to `'PREPARED'`; expect success
   (state mutable). UPDATE `updated_at`; expect success. UPDATE
@@ -1109,6 +1178,16 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `signature`, `principal`, `expires_at`, `plan_ref`, `envelope`,
   `operation_id`, `issued_seq`, `kind`, `issuer`, `issued_at`; each
   one ABORTs via `wal_ops_envelope_immutable`.
+- `wal_ops_fsm_transitions` — insert at `state='ISSUED'`. Legal:
+  ISSUED→PREPARED, PREPARED→COMMITTED, ISSUED→REJECTED,
+  PREPARED→ABORTED. Illegal (each ABORTs via
+  `wal_ops_state_transition`): COMMITTED→ISSUED,
+  COMMITTED→PREPARED, ABORTED→COMMITTED, REJECTED→PREPARED,
+  PREPARED→ISSUED, COMMITTED→ABORTED.
+- `wal_steps_fsm_transitions` — insert at `state='PENDING'`. Legal:
+  PENDING→DONE, PENDING→FAILED, FAILED→PENDING (retry),
+  FAILED→COMPENSATED, DONE→COMPENSATED. Illegal: DONE→PENDING,
+  COMPENSATED→PENDING, COMPENSATED→DONE, PENDING→COMPENSATED.
 - `wal_steps_identity_locked` — insert a `wal_steps` row; UPDATE
   `state` from `'PENDING'` to `'DONE'`; expect success. UPDATE
   `attempts`, `last_error`, `started_at`, `finished_at`, `pre_image`;
@@ -1163,16 +1242,17 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `DELETE FROM consent_journal WHERE row_id = …`; expect ABORT via
   `consent_journal_no_delete`.
 - `lock_acquisition_round_trip` — exercise the §5.6 acquisition
-  pattern against the migrated schema (without the storage impl):
-  start with no `locks` row; in one `BEGIN IMMEDIATE … COMMIT`,
-  `INSERT INTO locks (...)` with `mode='exclusive', holder_count=1`,
-  then `INSERT INTO lock_holders (...)`. Confirm the row state at
-  COMMIT is `(exclusive, 1)`. In a second transaction, DELETE the
-  holder; confirm AFTER DELETE trigger drove the row to `(free, 0)`.
-  In a third, INSERT two shared holders (preceded by the shared-mode
-  UPDATE in each); confirm `(shared, 2)`; release both; confirm
-  `(free, 0)`. (This replaces the prior negative CHECK test, which
-  the immediate-CHECK approach was unable to support correctly.)
+  pattern against the migrated schema: start with no `locks` row;
+  in one txn, `INSERT INTO locks` with `mode='exclusive',
+  holder_count=1`, then `INSERT INTO lock_holders`. Confirm
+  `(exclusive, 1)`. Release: confirm `(free, 0)`. Repeat for
+  shared with two holders.
+- `lock_state_invariants_enforced` — attempt
+  `UPDATE locks SET holder_count = 5 WHERE mode = 'exclusive'`;
+  expect CHECK violation. Attempt `UPDATE locks SET mode = 'free'
+  WHERE holder_count > 0`; expect CHECK violation. Attempt
+  `INSERT INTO locks VALUES ('entity','x','shared',0,0,NULL,NULL)`;
+  expect CHECK violation.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
