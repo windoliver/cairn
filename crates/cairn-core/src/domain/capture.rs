@@ -555,6 +555,104 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), DomainError
     }
 }
 
+/// Mode A: the chain `Author` identity must equal `sensor_id` — the
+/// sensor authors its own raw events.
+fn bind_auto_author(chain: &[ActorChainEntry], sensor_id: &Identity) -> Result<(), DomainError> {
+    let author = chain
+        .iter()
+        .find(|e| e.role == ChainRole::Author)
+        .ok_or_else(|| DomainError::MissingSignature {
+            message: "actor_chain has no `author` entry".to_owned(),
+        })?;
+    if &author.identity != sensor_id {
+        return Err(DomainError::AttributionMismatch {
+            message: format!(
+                "mode `auto` requires author identity `{}` to equal sensor_id `{}`",
+                author.identity.as_str(),
+                sensor_id.as_str()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Mode C: the proactive sensor label carries the agent slug
+/// (`local:proactive:<agent>:v<N>`); the chain author must be an
+/// `agt:<agent>:...` whose slug matches. Blocks cross-agent spoofing.
+fn bind_proactive_author(
+    chain: &[ActorChainEntry],
+    sensor_id: &Identity,
+    label: &str,
+) -> Result<(), DomainError> {
+    let author = chain
+        .iter()
+        .find(|e| e.role == ChainRole::Author)
+        .ok_or_else(|| DomainError::MissingSignature {
+            message: "actor_chain has no `author` entry".to_owned(),
+        })?;
+    let sensor_agent =
+        sensor_label_proactive_agent(label).ok_or_else(|| DomainError::MalformedCapture {
+            message: format!(
+                "proactive sensor_id `{}` does not encode an agent slug",
+                sensor_id.as_str()
+            ),
+        })?;
+    let author_agent = identity_agent_slug(author.identity.as_str()).ok_or_else(|| {
+        DomainError::AttributionMismatch {
+            message: format!(
+                "proactive author `{}` is not an `agt:<slug>:...` identity",
+                author.identity.as_str()
+            ),
+        }
+    })?;
+    if sensor_agent != author_agent {
+        return Err(DomainError::AttributionMismatch {
+            message: format!(
+                "proactive sensor agent `{sensor_agent}` does not match author agent \
+                 `{author_agent}`"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Any `Sensor`-role entry in the chain must equal `sensor_id`.
+fn bind_chain_sensor_entries(
+    chain: &[ActorChainEntry],
+    sensor_id: &Identity,
+) -> Result<(), DomainError> {
+    for entry in chain {
+        if entry.role == ChainRole::Sensor && &entry.identity != sensor_id {
+            return Err(DomainError::AttributionMismatch {
+                message: format!(
+                    "actor_chain `sensor` entry `{}` does not match sensor_id `{}`",
+                    entry.identity.as_str(),
+                    sensor_id.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Extract the `<agent>` slug from a `local:proactive:<agent>:v<N>`
+/// sensor label. Returns `None` for non-proactive labels.
+fn sensor_label_proactive_agent(label: &str) -> Option<&str> {
+    let rest = label.strip_prefix("local:proactive:")?;
+    let (agent, _) = rest.split_once(':')?;
+    if agent.is_empty() { None } else { Some(agent) }
+}
+
+/// Extract the `<slug>` from an `agt:<slug>:...` identity. Returns
+/// `None` if the identity is not an agent identity. The slug is the
+/// vendor / product key that pairs with proactive sensor labels — for
+/// `agt:claude-code:opus-4-7:main:v1` the slug is `claude-code`.
+fn identity_agent_slug(identity: &str) -> Option<&str> {
+    let rest = identity.strip_prefix("agt:")?;
+    let slug = rest.split(':').next()?;
+    if slug.is_empty() { None } else { Some(slug) }
+}
+
 /// Optional turn / tool / session references that pin a capture event into
 /// the per-session timeline. Absent when the source is a one-off batch
 /// (clipboard, recording) with no live session context.
@@ -697,35 +795,16 @@ impl CaptureEvent {
         super::actor_chain::validate_chain(&self.actor_chain)?;
         super::capture_attribution::attribute(self.capture_mode, &self.actor_chain)?;
 
-        if self.capture_mode == CaptureMode::Auto {
-            let author = self
-                .actor_chain
-                .iter()
-                .find(|e| e.role == ChainRole::Author)
-                .ok_or_else(|| DomainError::MissingSignature {
-                    message: "actor_chain has no `author` entry".to_owned(),
-                })?;
-            if author.identity != self.sensor_id {
-                return Err(DomainError::AttributionMismatch {
-                    message: format!(
-                        "mode `auto` requires author identity `{}` to equal sensor_id `{}`",
-                        author.identity.as_str(),
-                        self.sensor_id.as_str()
-                    ),
-                });
+        match self.capture_mode {
+            CaptureMode::Auto => {
+                bind_auto_author(&self.actor_chain, &self.sensor_id)?;
             }
-        }
-        for entry in &self.actor_chain {
-            if entry.role == ChainRole::Sensor && entry.identity != self.sensor_id {
-                return Err(DomainError::AttributionMismatch {
-                    message: format!(
-                        "actor_chain `sensor` entry `{}` does not match sensor_id `{}`",
-                        entry.identity.as_str(),
-                        self.sensor_id.as_str()
-                    ),
-                });
+            CaptureMode::Proactive => {
+                bind_proactive_author(&self.actor_chain, &self.sensor_id, label.as_str())?;
             }
+            CaptureMode::Explicit => {}
         }
+        bind_chain_sensor_entries(&self.actor_chain, &self.sensor_id)?;
 
         Ok(())
     }

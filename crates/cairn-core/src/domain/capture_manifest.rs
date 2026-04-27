@@ -1,34 +1,26 @@
-//! Sensor-label manifest — the closed set of `SensorLabel` shapes
-//! Cairn's P0 binary will accept on incoming `CaptureEvent`s (brief
-//! §9.1).
+//! Sensor-label manifest — the closed set of `SensorLabel`s Cairn's P0
+//! binary will accept on incoming `CaptureEvent`s (brief §9.1).
 //!
-//! A sensor that hasn't been registered cannot emit events: this enforces
-//! the §9 invariant that "every sensor enables via config" and keeps
-//! capture under human or harness control. The check is purely
-//! syntactic — an enabled sensor still needs the runtime
-//! `SensorIdentity` provisioning from issue #50 (keychain-backed keys)
-//! before the resulting record can be signed.
+//! A sensor that hasn't been registered cannot emit events: this
+//! enforces the §9 invariant that "every sensor enables via config"
+//! and keeps capture under human or harness control.
 //!
-//! ## Required shape
+//! ## What this layer is
 //!
-//! `local:<family>:<instance>(:<sub>)*:v<digits>` — at minimum four
-//! colon-separated parts (`local`, family, one instance segment,
-//! version), with optional further instance segments (host, harness)
-//! between the family and the version. Family must be one of
-//! [`P0_SENSOR_FAMILIES`]. Each non-version segment is non-empty and
-//! restricted to `[A-Za-z0-9._-]+`. Version is `v` followed by one or
-//! more ASCII digits.
+//! [`P0_CANONICAL_LABELS`] is a *closed allowlist* of full sensor
+//! labels — every label Cairn's P0 binary admits without any runtime
+//! provisioning. [`validate_label`] rejects anything not in that list.
 //!
-//! Example accepted forms:
-//! - `local:hook:cc-session:v1`
-//! - `local:hook:cc-session:host-42:v3`
-//! - `local:proactive:claude-code:v1`
+//! ## What this layer is NOT
 //!
-//! Rejected because the suffix is structurally invalid (not because the
-//! family is unknown):
-//! - `local:hook:anything`            — missing version
-//! - `local:hook:cc-session:vx`       — version not numeric
-//! - `local:hook::v1`                 — empty instance segment
+//! The schema-level allowlist is a *defence in depth*, not the
+//! authoritative trust boundary. Per-instance sensor authentication
+//! (keychain-backed Ed25519 signing) lives at the `SignedIntent`
+//! layer and lands with issue #50. When #50 ships, the runtime
+//! registry can extend [`P0_CANONICAL_LABELS`] with provisioned
+//! entries; until then, only the canonical labels are allowed and
+//! arbitrary instance names like `local:hook:evil-host:v1` are
+//! rejected.
 
 use crate::domain::{DomainError, SensorLabel};
 
@@ -51,8 +43,10 @@ pub const P0_SENSOR_FAMILIES: &[&str] = &[
     "proactive",
 ];
 
-/// Backwards-compatibility view of [`P0_SENSOR_FAMILIES`] as
-/// `local:<family>:` prefixes.
+/// `local:<family>:` prefixes derived from [`P0_SENSOR_FAMILIES`].
+/// Retained as a public view for callers that want family-level
+/// reasoning; full-label admission goes through
+/// [`P0_CANONICAL_LABELS`].
 pub const P0_SENSOR_LABEL_PREFIXES: &[&str] = &[
     "local:hook:",
     "local:ide:",
@@ -67,54 +61,46 @@ pub const P0_SENSOR_LABEL_PREFIXES: &[&str] = &[
     "local:proactive:",
 ];
 
-/// Validate `label` against the structural rule documented in the module
-/// header. Returns [`DomainError::UndeclaredSensor`] for any deviation.
-/// Pure function — no I/O, no global state.
+/// Closed allowlist of full sensor labels accepted by P0 without any
+/// runtime registration. Adding a label is a brief-level change —
+/// declare it here and update §9.1 of the design brief in the same PR.
+///
+/// Per-harness hook + neuroskill sensors are listed for the three
+/// cooperating harnesses (Claude Code, Codex, Gemini); proactive
+/// surfaces are listed per agent. Generic local sensors (IDE, terminal,
+/// clipboard, voice, screen, recording, CLI, MCP) use a `default`
+/// instance.
+pub const P0_CANONICAL_LABELS: &[&str] = &[
+    "local:hook:cc-session:v1",
+    "local:hook:codex-session:v1",
+    "local:hook:gemini-session:v1",
+    "local:neuroskill:cc-session:v1",
+    "local:neuroskill:codex-session:v1",
+    "local:neuroskill:gemini-session:v1",
+    "local:ide:default:v1",
+    "local:terminal:default:v1",
+    "local:clipboard:default:v1",
+    "local:voice:default:v1",
+    "local:screen:default:v1",
+    "local:recording:batch:v1",
+    "local:cli:default:v1",
+    "local:mcp:default:v1",
+    "local:proactive:claude-code:v1",
+    "local:proactive:codex:v1",
+    "local:proactive:gemini:v1",
+];
+
+/// Validate `label` against the closed [`P0_CANONICAL_LABELS`] list.
+/// Returns [`DomainError::UndeclaredSensor`] on any miss. Pure function
+/// — no I/O, no global state.
 pub fn validate_label(label: &SensorLabel) -> Result<(), DomainError> {
-    let s = label.as_str();
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() < 4 {
-        return Err(reject(s));
-    }
-    if parts[0] != "local" {
-        return Err(reject(s));
-    }
-    if !P0_SENSOR_FAMILIES.contains(&parts[1]) {
-        return Err(reject(s));
-    }
-    let version = parts[parts.len() - 1];
-    if !is_version(version) {
-        return Err(reject(s));
-    }
-    // Every segment between family and version is a non-empty instance
-    // identifier (`[A-Za-z0-9._-]+`).
-    for segment in &parts[2..parts.len() - 1] {
-        if segment.is_empty() || !is_instance_segment(segment) {
-            return Err(reject(s));
-        }
-    }
-    Ok(())
-}
-
-fn reject(label: &str) -> DomainError {
-    DomainError::UndeclaredSensor {
-        label: label.to_owned(),
-    }
-}
-
-fn is_version(s: &str) -> bool {
-    if let Some(rest) = s.strip_prefix('v') {
-        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+    if P0_CANONICAL_LABELS.contains(&label.as_str()) {
+        Ok(())
     } else {
-        false
+        Err(DomainError::UndeclaredSensor {
+            label: label.as_str().to_owned(),
+        })
     }
-}
-
-fn is_instance_segment(s: &str) -> bool {
-    s.bytes().all(|b| {
-        matches!(b,
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
-    })
 }
 
 #[cfg(test)]
@@ -126,10 +112,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_each_declared_family() {
-        for family in P0_SENSOR_FAMILIES {
-            let raw = format!("local:{family}:example:v1");
-            validate_label(&label(&raw)).expect("declared family accepted");
+    fn accepts_every_canonical_label() {
+        for canonical in P0_CANONICAL_LABELS {
+            validate_label(&label(canonical)).expect("canonical label accepted");
         }
     }
 
@@ -147,14 +132,16 @@ mod tests {
 
     #[test]
     fn rejects_typo_in_family() {
-        // "scren" is not "screen".
-        let err = validate_label(&label("local:scren:host:v1")).unwrap_err();
+        let err = validate_label(&label("local:scren:default:v1")).unwrap_err();
         assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
     }
 
     #[test]
-    fn accepts_multi_segment_instance() {
-        validate_label(&label("local:hook:cc-session:host-42:v1")).expect("valid");
+    fn rejects_arbitrary_instance_under_known_family() {
+        // Known family, unknown instance — pre-#50 the closed list is
+        // authoritative.
+        let err = validate_label(&label("local:hook:evil-host:v1")).unwrap_err();
+        assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
     }
 
     #[test]
@@ -164,29 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_numeric_version() {
-        let err = validate_label(&label("local:hook:cc-session:vx")).unwrap_err();
+    fn rejects_unknown_proactive_agent() {
+        let err = validate_label(&label("local:proactive:other-agent:v1")).unwrap_err();
         assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
     }
 
     #[test]
-    fn rejects_missing_v_prefix_on_version() {
-        let err = validate_label(&label("local:hook:cc-session:1")).unwrap_err();
-        assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
-    }
-
-    #[test]
-    fn rejects_empty_instance_segment() {
-        // `SensorLabel::parse` accepts the syntactic shape (no empty
-        // chars), so we go straight through the public manifest API.
-        let err = validate_label(&label("local:hook::v1")).unwrap_err();
-        assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
-    }
-
-    #[test]
-    fn rejects_only_three_parts() {
-        // `local:hook:v1` has no instance segment.
-        let err = validate_label(&label("local:hook:v1")).unwrap_err();
+    fn rejects_version_drift() {
+        // Canonical entries are pinned at v1; v2 is a brief change away.
+        let err = validate_label(&label("local:hook:cc-session:v2")).unwrap_err();
         assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
     }
 }

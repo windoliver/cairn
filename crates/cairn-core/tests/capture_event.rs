@@ -234,7 +234,9 @@ fn auto_mode_author_must_equal_sensor_id() {
     // Sensor declared in `sensor_id` differs from the sensor that
     // appears as `Author` in the chain — Mode A authorship spoofing.
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:hook:other-host:v1").expect("valid");
+    // Use a *different* canonical hook label to prove the author-vs-sensor
+    // mismatch is what catches this, not a manifest miss.
+    ev.sensor_id = Identity::parse("snr:local:hook:codex-session:v1").expect("valid");
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::AttributionMismatch { .. }));
 }
@@ -438,6 +440,27 @@ fn payload_ref_rejects_pure_backslash() {
 }
 
 #[test]
+fn proactive_sensor_agent_must_match_author_agent() {
+    // sensor_id = snr:local:proactive:claude-code:v1 but author is a
+    // codex agent — must be rejected to block cross-agent spoofing.
+    let mut ev = proactive_event();
+    ev.actor_chain = vec![entry(ChainRole::Author, "agt:codex:gpt-5:main:v1")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::AttributionMismatch { .. }));
+}
+
+#[test]
+fn proactive_sensor_agent_match_passes() {
+    // Aligned agent — claude-code label, claude-code author.
+    let mut ev = proactive_event();
+    ev.actor_chain = vec![entry(
+        ChainRole::Author,
+        "agt:claude-code:opus-4-7:reviewer:v2",
+    )];
+    ev.validate().expect("agent slugs match");
+}
+
+#[test]
 fn arbitrary_suffix_under_declared_family_rejected() {
     // `snr:local:hook:anything` has the right family prefix but no
     // version segment — must not pass manifest validation.
@@ -510,8 +533,11 @@ fn neuroskill_sensor_pinned_to_hook_family() {
     // local:neuroskill:* is now pinned to Hook — emitting any other
     // family from a neuroskill sensor must fail.
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:neuroskill:harness:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:neuroskill:harness:v1")];
+    ev.sensor_id = Identity::parse("snr:local:neuroskill:cc-session:v1").expect("valid");
+    ev.actor_chain = vec![entry(
+        ChainRole::Author,
+        "snr:local:neuroskill:cc-session:v1",
+    )];
     // Hook payload — should pass.
     ev.validate().expect("neuroskill emitting Hook is valid");
 
