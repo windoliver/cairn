@@ -17,4 +17,9 @@ pub enum StoreError {
     /// Vault path is unusable (cannot create parent directory, etc.).
     #[error("vault path error: {0}")]
     VaultPath(String),
+
+    /// On-disk schema diverged from the binary's expected manifest
+    /// (missing trigger, mutated migration row, extra object, etc.).
+    #[error("schema drift: {0}")]
+    SchemaDrift(String),
 }

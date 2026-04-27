@@ -29,5 +29,5 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal is append-only');
 END;
 
-INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
+INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (5, '0005_consent', '', strftime('%s','now') * 1000);

@@ -6,6 +6,7 @@ use rusqlite::Connection;
 
 use crate::error::StoreError;
 use crate::migrations::migrations;
+use crate::verify::{verify_migration_history, verify_schema_fingerprint};
 
 /// Open (or create) the Cairn store at `path` and bring it to schema head.
 ///
@@ -26,6 +27,8 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, StoreError> {
     let mut conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrations().to_latest(&mut conn)?;
+    verify_migration_history(&conn)?;
+    verify_schema_fingerprint(&conn)?;
     Ok(conn)
 }
 
@@ -37,6 +40,8 @@ pub fn open_in_memory() -> Result<Connection, StoreError> {
     let mut conn = Connection::open_in_memory()?;
     apply_pragmas(&conn)?;
     migrations().to_latest(&mut conn)?;
+    verify_migration_history(&conn)?;
+    verify_schema_fingerprint(&conn)?;
     Ok(conn)
 }
 

@@ -10,6 +10,7 @@
 pub mod error;
 pub mod migrations;
 mod open;
+mod verify;
 
 pub use error::StoreError;
 pub use open::{open, open_in_memory};

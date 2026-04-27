@@ -160,5 +160,5 @@ BEGIN
   SELECT RAISE(ABORT, 'wal_steps is append-only; DELETE not permitted');
 END;
 
-INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
+INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (2, '0002_wal', '', strftime('%s','now') * 1000);
