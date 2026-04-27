@@ -200,7 +200,19 @@ fn write_once(
     // A random name eliminates the predictable-temp-path symlink attack.
     // Both the force and non-force paths use this temp file; only the final
     // publish step differs.
+    //
+    // Re-validate the parent directory immediately before opening the temp
+    // file: a symlink swap of the parent after the directory-tree pass
+    // would otherwise let the write escape to the symlink target.
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "parent directory {} is a symlink — bootstrap will not write through it",
+                dir.display()
+            );
+        }
+    }
     let mut tmp = tempfile::Builder::new()
         .prefix(".bootstrap")
         .tempfile_in(dir)
@@ -226,6 +238,8 @@ fn write_once(
             Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 // Re-check: a race may have placed a symlink or non-regular
                 // file at the path between our initial check and now.
+                // Only skip if symlink_metadata confirms a regular file;
+                // propagate all other outcomes (errors, NotFound, non-regular).
                 match std::fs::symlink_metadata(path) {
                     Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
                         "{} is a symlink — bootstrap will not write through it",
@@ -235,9 +249,15 @@ fn write_once(
                         "{} exists but is not a regular file — bootstrap cannot overwrite it",
                         path.display()
                     ),
-                    _ => {
+                    Ok(_) => {
+                        // is_file() is the only remaining case after the arms above.
                         receipt.files_skipped.push(path.to_owned());
                         return Ok(());
+                    }
+                    Err(re) => {
+                        return Err(anyhow::Error::from(re)).with_context(|| {
+                            format!("revalidating {} after AlreadyExists race", path.display())
+                        });
                     }
                 }
             }
