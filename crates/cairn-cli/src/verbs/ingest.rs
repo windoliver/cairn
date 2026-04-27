@@ -20,6 +20,7 @@ use clap::ArgMatches;
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
 /// Result of a successful `ingest --resync` operation.
+#[must_use]
 #[derive(Debug, serde::Serialize)]
 pub struct ResyncResult {
     /// `"updated"` when the record was written; `"noop"` when the file
@@ -70,7 +71,7 @@ pub async fn resync_handler(
         ResyncError::Conflict { file_version, store_version, ref reason } => anyhow::anyhow!(
             "ingest --resync: unexpected conflict during parse (file={file_version}, store={store_version}): {reason}"
         ),
-        _ => anyhow::anyhow!("ingest --resync: {e}"),
+        _ => anyhow::anyhow!("ingest --resync: {e:?}"),
     })?;
 
     let current = store
@@ -82,32 +83,38 @@ pub async fn resync_handler(
 
     match outcome {
         ConflictOutcome::Clean => {
-            // Merge mutable fields (body, tags) onto the existing record, or
-            // construct a new record when one does not yet exist in the store.
-            let record = if let Some(ref stored) = current {
+            if let Some(ref stored) = current {
+                // Check if mutable fields are already up to date
+                if stored.record.body == parsed.body && stored.record.tags == parsed.tags {
+                    return Ok(ResyncResult {
+                        status: "noop",
+                        path: path.to_path_buf(),
+                        target_id: parsed.target_id,
+                        version: stored.version,
+                    });
+                }
+                // Merge mutable fields and upsert
                 let mut r = stored.record.clone();
                 r.body = parsed.body.clone();
                 r.tags = parsed.tags.clone();
-                r
+                let new_stored = store.upsert(r).await.context("store: upsert")?;
+                Ok(ResyncResult {
+                    status: "updated",
+                    path: path.to_path_buf(),
+                    target_id: parsed.target_id,
+                    version: new_stored.version,
+                })
             } else {
-                // New record path: build a MemoryRecord from the parsed
-                // projection.  This relies on all immutable fields being
-                // present in the frontmatter (kind, class, visibility are
-                // required by the parser). Fields that do not round-trip
-                // through the projection (scope, provenance, actor_chain,
-                // signature, evidence, scalars) are taken from the
-                // sample_record template so that the new record is valid
-                // until the full ingest pipeline (WAL + signing) is wired
-                // in #46.
-                build_record_from_parsed(&parsed)?
-            };
-            let stored = store.upsert(record).await.context("store: upsert")?;
-            Ok(ResyncResult {
-                status: "updated",
-                path: path.to_path_buf(),
-                target_id: parsed.target_id,
-                version: stored.version,
-            })
+                // New record — build_record_from_parsed (deferred to #46)
+                let record = build_record_from_parsed(&parsed)?;
+                let new_stored = store.upsert(record).await.context("store: upsert")?;
+                Ok(ResyncResult {
+                    status: "updated",
+                    path: path.to_path_buf(),
+                    target_id: parsed.target_id,
+                    version: new_stored.version,
+                })
+            }
         }
         ConflictOutcome::Conflict { ref marker, file_version, store_version } => {
             // Write a quarantine file so the editor's changes are not lost.
@@ -255,7 +262,37 @@ mod tests {
         let stored = sample_stored_record(1);
         store.upsert(stored.record.clone()).await.unwrap();
 
-        // Project to markdown and resync it — version match → Clean → upsert.
+        // Project to markdown, then modify the body so the resync is a real
+        // edit (not a noop).  Version still matches → Clean → upsert.
+        let proj = MarkdownProjector;
+        let file = proj.project(&stored);
+        // Append " edited" to the body so body != stored body → triggers upsert.
+        let modified_content = file.content.replace(&stored.record.body, &format!("{} edited", stored.record.body));
+        let vault_root = tempfile::tempdir().unwrap();
+        let abs_path = vault_root.path().join(&file.path);
+        tokio::fs::create_dir_all(abs_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&abs_path, &modified_content).await.unwrap();
+
+        let result = resync_handler(&store, &abs_path, vault_root.path())
+            .await
+            .unwrap();
+        assert_eq!(result.target_id, stored.record.id.as_str());
+        // Store started at version 1 (one upsert above); resync does another
+        // upsert → version 2.
+        assert_eq!(result.version, 2);
+        assert_eq!(result.status, "updated");
+    }
+
+    #[tokio::test]
+    async fn resync_noop_when_content_unchanged() {
+        let store = FixtureStore::default();
+        // Pre-populate store with version 1.
+        let stored = sample_stored_record(1);
+        store.upsert(stored.record.clone()).await.unwrap();
+
+        // Project to markdown and resync it — body/tags are identical → noop.
         let proj = MarkdownProjector;
         let file = proj.project(&stored);
         let vault_root = tempfile::tempdir().unwrap();
@@ -268,11 +305,10 @@ mod tests {
         let result = resync_handler(&store, &abs_path, vault_root.path())
             .await
             .unwrap();
+        assert_eq!(result.status, "noop");
+        // Version should be unchanged at 1 — no upsert was performed.
+        assert_eq!(result.version, 1);
         assert_eq!(result.target_id, stored.record.id.as_str());
-        // Store started at version 1 (one upsert above); resync does another
-        // upsert → version 2.
-        assert_eq!(result.version, 2);
-        assert_eq!(result.status, "updated");
     }
 
     #[tokio::test]
