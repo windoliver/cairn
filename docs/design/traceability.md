@@ -1,13 +1,21 @@
 # Cairn Design-to-Issue Traceability Matrix
 
-This document maps each section of the Cairn design brief
-(`docs/design/design-brief.md`) to the GitHub issues that own its
-implementation, decisions, or documentation. It is the auditable
-source of roadmap coverage — not a claim that every sentence is
-built, and not a claim that every section has an implementation
-owner. Sections without an owning implementation issue are recorded
-with `_none_` and listed in the residual-risk section so the gap is
-visible rather than hidden.
+This document maps top-level numbered sections of the Cairn design
+brief (`docs/design/design-brief.md`), plus a curated list of
+subsections that have their own dedicated issue threads, to the
+GitHub issues that own their implementation, decisions, or
+documentation. It is a roadmap coverage aid — not a guarantee that
+every sentence in the brief is built, that every numbered subsection
+is individually tracked, or that every section has an implementation
+owner. Subsections inherit the ownership of their parent unless an
+explicit row is listed below.
+
+Sections without an owning implementation issue are recorded with
+`_none_` and listed in the residual-risk section so the gap is
+visible rather than hidden. Coverage is maintained by convention:
+PRs that change the brief are expected to update this matrix in the
+same diff, but no CI check enforces that today (see "Enforcement"
+below).
 
 The matrix originates from issue
 [#157](https://github.com/windoliver/cairn/issues/157) and lives here so
@@ -93,6 +101,16 @@ PRs that change the brief can update coverage in the same diff.
 | #148 | Skillify artifact format and compatibility policy | Open |
 | #149 | Propagation transport boundary | Open |
 | #150 | Screen sensor packaging and opt-in model | Resolved ([ADR 0003](decisions/0003-screen-sensor-packaging.md) — PR #168) |
+
+## Enforcement
+
+There is currently no automated check that pairs a `design-brief.md`
+edit with a `traceability.md` update. Until such a guardrail exists
+(for example, a CI step that fails when one file changes without the
+other, or a PR-template checkbox), this document should be treated
+as best-effort coverage rather than a hard release-signoff control.
+Reviewers can compensate by inspecting the matrix on any PR that
+touches `docs/design/design-brief.md`.
 
 ## Residual risk
 
