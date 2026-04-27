@@ -2,9 +2,12 @@
 
 This document maps each section of the Cairn design brief
 (`docs/design/design-brief.md`) to the GitHub issues that own its
-implementation. It is the auditable source of roadmap coverage —
-not a claim that every sentence is built, but a claim that every
-major design surface has at least one owning issue path.
+implementation, decisions, or documentation. It is the auditable
+source of roadmap coverage — not a claim that every sentence is
+built, and not a claim that every section has an implementation
+owner. Sections without an owning implementation issue are recorded
+with `_none_` and listed in the residual-risk section so the gap is
+visible rather than hidden.
 
 The matrix originates from issue
 [#157](https://github.com/windoliver/cairn/issues/157) and lives here so
