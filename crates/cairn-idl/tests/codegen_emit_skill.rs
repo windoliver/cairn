@@ -99,22 +99,14 @@ fn skill_md_contains_non_negotiable_rules() {
 #[test]
 fn examples_include_retrieve_context_and_lint_memory() {
     let files = emit_skill::emit(&doc()).unwrap();
-    let has_retrieve = files
-        .iter()
-        .any(|f| f.path.ends_with("examples/05-retrieve-context.md"));
-    let has_lint = files
-        .iter()
-        .any(|f| f.path.ends_with("examples/06-lint-memory.md"));
-    assert!(has_retrieve, "missing 05-retrieve-context.md example");
-    assert!(has_lint, "missing 06-lint-memory.md example");
     let retrieve = files
         .iter()
         .find(|f| f.path.ends_with("examples/05-retrieve-context.md"))
-        .unwrap();
+        .expect("missing 05-retrieve-context.md example");
     let lint = files
         .iter()
         .find(|f| f.path.ends_with("examples/06-lint-memory.md"))
-        .unwrap();
+        .expect("missing 06-lint-memory.md example");
     let retrieve_body = std::str::from_utf8(&retrieve.bytes).unwrap();
     let lint_body = std::str::from_utf8(&lint.bytes).unwrap();
     assert!(retrieve_body.contains("assemble_hot"), "retrieve example must call assemble_hot");
