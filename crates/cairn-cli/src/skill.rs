@@ -256,11 +256,17 @@ fn read_installed_version(
 
 /// Checks that `dir` contains only Cairn-created entries (or is empty).
 ///
-/// Allows idempotent retry after a partial install (entries Cairn would write
-/// are expected); rejects directories with foreign content to prevent accidental
-/// installs into unrelated user directories. Fail closed on any `read_dir` error.
+/// For generated files (`SKILL.md`, `conventions.md`), byte-compares the
+/// existing content against the embedded Cairn artifacts. A matching file
+/// is from a partial install and safe to retry; a differing file (e.g. a
+/// user's own SKILL.md) is treated as foreign and triggers a bail. This
+/// prevents silent overwrites while still allowing idempotent retry.
 fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
     const CAIRN_ENTRIES: &[&str] = &["SKILL.md", "conventions.md", ".version", "examples"];
+    const GENERATED_FILES: &[(&str, &str)] = &[
+        ("SKILL.md", SKILL_MD),
+        ("conventions.md", CONVENTIONS_MD),
+    ];
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("checking contents of {}", dir.display()))?
     {
@@ -271,6 +277,21 @@ fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
                  pass --force to install into this directory",
                 dir.display()
             );
+        }
+        // Byte-compare generated files against the embedded artifacts.
+        // A file with different content is not Cairn-produced and must not
+        // be silently overwritten.
+        if let Some((_, expected)) = GENERATED_FILES.iter().find(|(n, _)| name == *n) {
+            let path = dir.join(&name);
+            let actual = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            if actual.as_str() != *expected {
+                anyhow::bail!(
+                    "{} exists with content that does not match the Cairn artifact — \
+                     pass --force to overwrite",
+                    path.display()
+                );
+            }
         }
     }
     Ok(())
