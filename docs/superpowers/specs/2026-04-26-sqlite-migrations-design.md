@@ -1,4 +1,10 @@
-# SQLite Migrations for Records, Indexes, WAL, Replay, Consent, Locks, and Jobs
+# SQLite Migrations for Records, Indexes, WAL, Replay, Consent, and Locks
+
+> Note on title: issue #45 reads "Records, Indexes, WAL, Replay,
+> Consent, Locks, and Jobs". This spec drops "and Jobs" from the
+> title because `workflow_jobs` is intentionally deferred (see §2 +
+> §10). The follow-up issue that lands `workflow_jobs` will be filed
+> with the PR.
 
 **Issue:** [#45](https://github.com/windoliver/cairn/issues/45) — P0
 **Parent epic:** #6 (SQLite record store with FTS5 + sqlite-vec + local embeddings)
@@ -103,18 +109,37 @@ crates/cairn-store-sqlite/
         0005_consent.sql      -- consent_journal
 ```
 
-### 4.3 Pragmas applied on open (before migrations)
+### 4.3 Pragmas applied on open
+
+Split into two groups by whether the pragma mutates persistent
+on-disk state. The split lets `open()` validate compatibility
+**before** any persistent change (§5 flow).
+
+**Read-only pragmas (applied first, before validation):**
 
 ```
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous  = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 PRAGMA temp_store   = MEMORY;
 ```
 
-`user_version` is owned by `rusqlite_migration` and advances as migrations
-apply.
+Connection-only; no writes to the DB.
+
+**Persistent pragmas (applied after validation, before migrations):**
+
+```
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous  = NORMAL;
+```
+
+`journal_mode` lives in the database header and persists across
+opens; setting it on a damaged vault could leave `-wal`/`-shm`
+files behind. Deferring this pragma until after
+`verify_migration_history` + `verify_schema_integrity_at` keeps the
+failure boundary clean.
+
+`user_version` is owned by `rusqlite_migration` and advances as
+migrations apply.
 
 ### 4.4 SQL contents per file
 
@@ -744,10 +769,44 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
 - `daemon_incarnation` singleton — `only_one INTEGER PRIMARY KEY CHECK
   (only_one = 1)`, `incarnation TEXT NOT NULL`, `boot_id TEXT NOT NULL`,
   `started_at INTEGER NOT NULL`.
-- `reader_fence (scope_kind TEXT NOT NULL, scope_key TEXT NOT NULL,
-  op_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN
-  ('tombstoning','closed')), opened_at INTEGER NOT NULL,
-  PRIMARY KEY (scope_kind, scope_key))`.
+- `reader_fence`:
+  ```sql
+  CREATE TABLE reader_fence (
+    scope_kind  TEXT NOT NULL,
+    scope_key   TEXT NOT NULL,
+    op_id       TEXT NOT NULL,
+    state       TEXT NOT NULL CHECK (state IN ('tombstoning','closed')),
+    opened_at   INTEGER NOT NULL,
+    PRIMARY KEY (scope_kind, scope_key),
+    FOREIGN KEY (op_id) REFERENCES wal_ops(operation_id)
+  );
+  ```
+  The FK ties every fence row to a real WAL op so a malformed insert
+  cannot block a scope behind a nonexistent operation.
+
+  **Stale-fence cleanup** is enforced by a trigger that auto-clears
+  fence rows whose owning op reaches a terminal failure state
+  (`ABORTED` or `REJECTED`). Without this, a forget op that aborts
+  in Phase A would leave a permanent read barrier on the scope:
+
+  ```sql
+  CREATE TRIGGER reader_fence_clear_on_terminal_abort
+    AFTER UPDATE OF state ON wal_ops
+    FOR EACH ROW
+    WHEN NEW.state IN ('ABORTED', 'REJECTED')
+     AND OLD.state NOT IN ('ABORTED', 'REJECTED')
+  BEGIN
+    DELETE FROM reader_fence
+      WHERE op_id = NEW.operation_id;
+  END;
+  ```
+
+  A successfully completed forget op leaves its fence in `state =
+  'closed'` (set by the §5.6 Phase A fence-close chunk); a
+  reopen-time recovery walker only re-evaluates `'tombstoning'`
+  fences, so closed fences are inert and safe to leave behind.
+  COMMITTED forget ops therefore do not auto-delete their fence
+  rows — only failures do.
 
 #### 0005_consent.sql
 
@@ -801,15 +860,25 @@ caller (cli / tests)
 cairn_store_sqlite::open(path: &Path) -> Result<Connection, StoreError>
   │
   ├─ rusqlite::Connection::open(path)
-  ├─ apply_pragmas(&conn)                -- errored pragmas surface as StoreError::Pragma
-  ├─ verify_migration_history(&conn)?    -- §5.2 ledger checksum check, runs FIRST
-  │                                      -- against the existing schema_migrations
-  │                                      -- table. Skipped only if the DB has no
-  │                                      -- schema_migrations table at all (i.e.,
-  │                                      -- a fresh vault before any migration ran).
+  │
+  ├─ apply_read_only_pragmas(&conn)      -- foreign_keys=ON, busy_timeout=5000,
+  │                                      -- temp_store=MEMORY. None of these
+  │                                      -- mutate persistent on-disk state.
+  │
+  ├─ verify_migration_history(&conn)?    -- §5.2 ledger checksum + contiguity check.
+  │                                      -- Runs BEFORE any persistent state change
+  │                                      -- so a diverged vault is rejected before
+  │                                      -- journal mode flips or DDL applies.
+  │
   ├─ verify_schema_integrity_at(&conn,   -- §5.1 shape check at the CURRENT
-  │     current_user_version)?           -- user_version, before to_latest mutates.
-  │                                      -- Uses the per-version allowlist below.
+  │     current_user_version)?           -- user_version. Drift rejected before
+  │                                      -- to_latest mutates.
+  │
+  ├─ apply_persistent_pragmas(&conn)     -- journal_mode=WAL, synchronous=NORMAL.
+  │                                      -- These persist across opens and may
+  │                                      -- create -wal/-shm side files; only run
+  │                                      -- after the vault is proved compatible.
+  │
   ├─ migrations().to_latest(&mut conn)   -- idempotent on up-to-date DB
   ├─ verify_schema_integrity_at(&conn,   -- §5.1 shape check at HEAD after migration.
   │     head_user_version)?
@@ -1100,7 +1169,7 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `edges_drop_updates_when_src_tombstoned`,
     `wal_ops_issued_seq_must_advance`, `wal_ops_state_transition`,
     `wal_ops_envelope_immutable`, `wal_ops_terminal_immutable`,
-    `wal_ops_no_delete`,
+    `wal_ops_no_delete`, `reader_fence_clear_on_terminal_abort`,
     `wal_steps_state_transition`, `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `wal_op_deps_no_delete`,
@@ -1247,6 +1316,21 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   issuer = 'mallory', …)` referencing alice's op; expect ABORT via
   `used_issuer_matches_wal`. Then re-attempt with
   `issuer = 'alice'`; expect success.
+- `reader_fence_orphan_rejected` — attempt `INSERT INTO reader_fence
+  (..., op_id = 'no-such-op', ...)`; expect FK violation at COMMIT.
+- `reader_fence_clears_on_op_abort` — insert a `wal_ops` row with
+  `state = 'PREPARED'`; insert a `reader_fence` row referencing it
+  with `state = 'tombstoning'`. UPDATE `wal_ops.state = 'ABORTED'`;
+  confirm the AFTER UPDATE trigger DELETE'd the fence row. Repeat
+  for `'REJECTED'`. With `state = 'COMMITTED'` and a `closed` fence,
+  confirm the fence is preserved (only failure paths auto-clear).
+- `open_does_not_mutate_invalid_vault` — generate a fixture vault
+  whose `schema_migrations` row 1 has a wrong `sql_blake3` (set via
+  the test fixture helper that bypasses the immutability trigger);
+  capture the file's mtime. Call `open()`; expect
+  `MigrationHistoryMismatch`. Confirm the file's mtime is unchanged
+  AND no `-wal`/`-shm` side files exist next to it. Verifies the
+  read-only-pragmas-first ordering.
 - `wal_steps_fsm_transitions` — insert at `state='PENDING'`. Legal:
   PENDING→DONE, PENDING→FAILED, FAILED→PENDING (retry),
   FAILED→COMPENSATED, DONE→COMPENSATED. Illegal: DONE→PENDING,
