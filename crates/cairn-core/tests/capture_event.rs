@@ -440,6 +440,50 @@ fn payload_ref_rejects_pure_backslash() {
 }
 
 #[test]
+fn deserialize_runs_validate() {
+    // A JSON event whose mode/family pair would violate §5.0.a must be
+    // rejected at `serde_json::from_str` time, not silently materialized
+    // into a `CaptureEvent`. This proves the `try_from` gate works.
+    let mut ev = explicit_event();
+    ev.capture_mode = CaptureMode::Auto;
+    let json = serde_json::to_string(&ev).expect("ser");
+    let res: Result<CaptureEvent, _> = serde_json::from_str(&json);
+    assert!(res.is_err(), "deserialization must run validate()");
+}
+
+#[test]
+fn deserialize_rejects_undeclared_sensor() {
+    let mut ev = auto_event();
+    // Construct an envelope whose sensor label does not match the
+    // structural rule (no version segment).
+    ev.sensor_id = Identity::parse("snr:local:hook:bare").expect("syntactic");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:hook:bare")];
+    let json = serde_json::to_string(&ev).expect("ser");
+    let res: Result<CaptureEvent, _> = serde_json::from_str(&json);
+    assert!(res.is_err());
+}
+
+#[test]
+fn debug_redacts_sensitive_payload_fields() {
+    // Any of `Terminal.command`, `Screen.window_title/url`, or
+    // `Proactive.rationale` reaching a `Debug` dump would be a
+    // user-data leak. The Debug impl must not contain the secret.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:terminal:default:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:terminal:default:v1")];
+    ev.source_family = SourceFamily::Terminal;
+    ev.payload = CapturePayload::Terminal {
+        command: "echo SUPER_SECRET_TOKEN_42".into(),
+        exit_code: Some(0),
+    };
+    let dump = format!("{ev:?}");
+    assert!(
+        !dump.contains("SUPER_SECRET_TOKEN_42"),
+        "Debug must redact terminal command: {dump}"
+    );
+}
+
+#[test]
 fn proactive_sensor_agent_must_match_author_agent() {
     // sensor_id = snr:local:proactive:claude-code:v1 but author is a
     // codex agent — must be rejected to block cross-agent spoofing.

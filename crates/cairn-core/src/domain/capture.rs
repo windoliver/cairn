@@ -374,7 +374,7 @@ impl std::fmt::Display for SourceFamily {
 /// not a structured-log dump of the raw struct — before any of these
 /// fields leave `trace`. A separate sanitized log type is out of scope
 /// for this issue and tracked as a follow-up.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source_family", rename_all = "snake_case", deny_unknown_fields)]
 #[non_exhaustive]
 pub enum CapturePayload {
@@ -456,6 +456,69 @@ pub enum CapturePayload {
         /// Short rationale string the agent attached to the emission.
         rationale: String,
     },
+}
+
+impl std::fmt::Debug for CapturePayload {
+    /// Redacted `Debug`: prints the variant name plus only the
+    /// non-sensitive scalar fields. Identifier strings, command lines,
+    /// titles, URLs, and rationale text are replaced with `<redacted>`
+    /// so accidental `tracing`/panic dumps cannot leak user metadata
+    /// (CLAUDE.md §6.6, brief §14). Use `serde_json::to_string` (which
+    /// preserves all fields) when a full dump is intentionally needed
+    /// at `trace`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hook { .. } => f
+                .debug_struct("CapturePayload::Hook")
+                .finish_non_exhaustive(),
+            Self::Ide { .. } => f
+                .debug_struct("CapturePayload::Ide")
+                .finish_non_exhaustive(),
+            Self::Terminal { exit_code, .. } => f
+                .debug_struct("CapturePayload::Terminal")
+                .field("exit_code", exit_code)
+                .finish_non_exhaustive(),
+            Self::Clipboard {
+                mime_type,
+                byte_len,
+            } => f
+                .debug_struct("CapturePayload::Clipboard")
+                .field("mime_type", mime_type)
+                .field("byte_len", byte_len)
+                .finish(),
+            Self::Voice {
+                duration_ms,
+                confidence,
+                ..
+            } => f
+                .debug_struct("CapturePayload::Voice")
+                .field("duration_ms", duration_ms)
+                .field("confidence", confidence)
+                .finish_non_exhaustive(),
+            Self::Screen { .. } => f
+                .debug_struct("CapturePayload::Screen")
+                .finish_non_exhaustive(),
+            Self::RecordingBatch {
+                segment_start_ms,
+                segment_duration_ms,
+                ..
+            } => f
+                .debug_struct("CapturePayload::RecordingBatch")
+                .field("segment_start_ms", segment_start_ms)
+                .field("segment_duration_ms", segment_duration_ms)
+                .finish_non_exhaustive(),
+            Self::Cli { .. } => f
+                .debug_struct("CapturePayload::Cli")
+                .finish_non_exhaustive(),
+            Self::Mcp { .. } => f
+                .debug_struct("CapturePayload::Mcp")
+                .finish_non_exhaustive(),
+            Self::Proactive { kind, .. } => f
+                .debug_struct("CapturePayload::Proactive")
+                .field("kind", kind)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 impl CapturePayload {
@@ -678,8 +741,58 @@ pub struct CaptureRefs {
 /// to the raw bytes stored under `sources/`, and the `actor_chain` carries
 /// the §4.2 attribution that downstream pipeline stages check against
 /// [`super::capture_attribution::attribute`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Wire-form mirror of [`CaptureEvent`] used as the deserialization
+/// target. `serde(try_from = "CaptureEventRaw")` on `CaptureEvent`
+/// routes every JSON payload through this struct first, then runs
+/// [`CaptureEvent::validate`] before yielding the typed envelope. That
+/// makes invalid states unconstructable at the trust boundary —
+/// callers cannot accidentally skip validation by going through
+/// `serde_json::from_str` (or any other format that uses serde).
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CaptureEventRaw {
+    event_id: CaptureEventId,
+    sensor_id: Identity,
+    capture_mode: CaptureMode,
+    actor_chain: Vec<ActorChainEntry>,
+    #[serde(default)]
+    refs: Option<CaptureRefs>,
+    payload_hash: PayloadHash,
+    payload_ref: String,
+    captured_at: Rfc3339Timestamp,
+    payload: CapturePayload,
+    source_family: SourceFamily,
+}
+
+impl TryFrom<CaptureEventRaw> for CaptureEvent {
+    type Error = DomainError;
+
+    fn try_from(raw: CaptureEventRaw) -> Result<Self, Self::Error> {
+        let event = Self {
+            event_id: raw.event_id,
+            sensor_id: raw.sensor_id,
+            capture_mode: raw.capture_mode,
+            actor_chain: raw.actor_chain,
+            refs: raw.refs,
+            payload_hash: raw.payload_hash,
+            payload_ref: raw.payload_ref,
+            captured_at: raw.captured_at,
+            payload: raw.payload,
+            source_family: raw.source_family,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+/// The unified capture envelope (brief §5.0.a, §9). See module-level
+/// docs for the full validation contract — including the §5.0.a
+/// attribution rule, the closed source-family list, and the trust
+/// boundary on `payload_ref`. JSON deserialization runs
+/// [`CaptureEvent::validate`] via `serde(try_from = "CaptureEventRaw")`,
+/// so malformed events cannot enter the type at the wire boundary.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "CaptureEventRaw")]
 pub struct CaptureEvent {
     /// ULID identifying this event.
     pub event_id: CaptureEventId,
@@ -713,6 +826,27 @@ pub struct CaptureEvent {
     /// reader that only inspects the envelope (without parsing the
     /// payload) can still route the event.
     pub source_family: SourceFamily,
+}
+
+impl std::fmt::Debug for CaptureEvent {
+    /// Redacted `Debug`: prints structural metadata
+    /// (`event_id`, `sensor_id`, `capture_mode`, `source_family`,
+    /// `captured_at`, `payload_hash`, `payload_ref`) plus the redacted
+    /// payload from [`CapturePayload`'s `Debug`]. Keeps `tracing`/panic
+    /// dumps free of user content. Use serde-JSON when a full dump is
+    /// intentionally needed at `trace`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaptureEvent")
+            .field("event_id", &self.event_id)
+            .field("sensor_id", &self.sensor_id)
+            .field("capture_mode", &self.capture_mode)
+            .field("source_family", &self.source_family)
+            .field("captured_at", &self.captured_at)
+            .field("payload_hash", &self.payload_hash)
+            .field("payload_ref", &self.payload_ref)
+            .field("payload", &self.payload)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CaptureEvent {

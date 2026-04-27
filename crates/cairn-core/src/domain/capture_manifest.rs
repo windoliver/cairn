@@ -1,26 +1,30 @@
-//! Sensor-label manifest — the closed set of `SensorLabel`s Cairn's P0
-//! binary will accept on incoming `CaptureEvent`s (brief §9.1).
-//!
-//! A sensor that hasn't been registered cannot emit events: this
-//! enforces the §9 invariant that "every sensor enables via config"
-//! and keeps capture under human or harness control.
+//! Sensor-label manifest — the structural rule for `SensorLabel`s Cairn
+//! accepts on incoming `CaptureEvent`s (brief §9.1).
 //!
 //! ## What this layer is
 //!
-//! [`P0_CANONICAL_LABELS`] is a *closed allowlist* of full sensor
-//! labels — every label Cairn's P0 binary admits without any runtime
-//! provisioning. [`validate_label`] rejects anything not in that list.
+//! [`validate_label`] enforces a structural rule
+//! `local:<family>:<instance>(:<sub>)*:v<digits>` — declared family,
+//! version pattern, valid segment characters. This is the schema-level
+//! shape gate: it rejects garbage strings and blocks non-`local:`
+//! roots, but it does not enumerate which sensor *instances* are
+//! authorized.
+//!
+//! [`P0_CANONICAL_LABELS`] is a public list of well-known default
+//! sensor labels (the cooperating harnesses, the per-agent proactive
+//! surfaces, and the generic local sensors). [`validate_label_in_registry`]
+//! pairs the structural check with closed-list membership when a
+//! caller has a fixed registry to enforce.
 //!
 //! ## What this layer is NOT
 //!
-//! The schema-level allowlist is a *defence in depth*, not the
-//! authoritative trust boundary. Per-instance sensor authentication
-//! (keychain-backed Ed25519 signing) lives at the `SignedIntent`
-//! layer and lands with issue #50. When #50 ships, the runtime
-//! registry can extend [`P0_CANONICAL_LABELS`] with provisioned
-//! entries; until then, only the canonical labels are allowed and
-//! arbitrary instance names like `local:hook:evil-host:v1` are
-//! rejected.
+//! Schema validation is **defence in depth**, not authorization. Real
+//! sensor-instance trust comes from keychain-backed Ed25519 signing at
+//! the `SignedIntent` layer, landing with issue #50. Per-deployment
+//! closed-list enforcement (rejecting `local:hook:evil-host:v1`) is the
+//! caller's choice — pass the configured registry to
+//! [`validate_label_in_registry`] when running in a strict-deployment
+//! mode.
 
 use crate::domain::{DomainError, SensorLabel};
 
@@ -90,17 +94,78 @@ pub const P0_CANONICAL_LABELS: &[&str] = &[
     "local:proactive:gemini:v1",
 ];
 
-/// Validate `label` against the closed [`P0_CANONICAL_LABELS`] list.
-/// Returns [`DomainError::UndeclaredSensor`] on any miss. Pure function
-/// — no I/O, no global state.
+/// Validate `label` against the structural rule
+/// `local:<family>:<instance>(:<sub>)*:v<digits>`.
+///
+/// Returns [`DomainError::UndeclaredSensor`] for any deviation. Pure
+/// function — no I/O, no global state.
+///
+/// **Schema-only.** This is shape validation, not authorization. The
+/// keychain-backed identity provisioning (#50) and the deploy-time
+/// configured sensor registry are the authoritative trust gates;
+/// callers that need closed-list enforcement at this layer can pair
+/// this with [`validate_label_in_registry`] using their configured
+/// registry, or with [`P0_CANONICAL_LABELS`] for the default set.
 pub fn validate_label(label: &SensorLabel) -> Result<(), DomainError> {
-    if P0_CANONICAL_LABELS.contains(&label.as_str()) {
+    let s = label.as_str();
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 4 {
+        return Err(reject(s));
+    }
+    if parts[0] != "local" {
+        return Err(reject(s));
+    }
+    if !P0_SENSOR_FAMILIES.contains(&parts[1]) {
+        return Err(reject(s));
+    }
+    let version = parts[parts.len() - 1];
+    if !is_version(version) {
+        return Err(reject(s));
+    }
+    for segment in &parts[2..parts.len() - 1] {
+        if segment.is_empty() || !is_instance_segment(segment) {
+            return Err(reject(s));
+        }
+    }
+    Ok(())
+}
+
+/// Stricter check: structural rule + closed-list membership against
+/// `registry`. Use this when a deployment has a known sensor registry
+/// (e.g., the runtime registry from #50, or a hand-curated test-time
+/// list). Returns the same [`DomainError::UndeclaredSensor`] for both
+/// shape and membership failures.
+pub fn validate_label_in_registry(
+    label: &SensorLabel,
+    registry: &[&str],
+) -> Result<(), DomainError> {
+    validate_label(label)?;
+    if registry.contains(&label.as_str()) {
         Ok(())
     } else {
-        Err(DomainError::UndeclaredSensor {
-            label: label.as_str().to_owned(),
-        })
+        Err(reject(label.as_str()))
     }
+}
+
+fn reject(label: &str) -> DomainError {
+    DomainError::UndeclaredSensor {
+        label: label.to_owned(),
+    }
+}
+
+fn is_version(s: &str) -> bool {
+    if let Some(rest) = s.strip_prefix('v') {
+        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+fn is_instance_segment(s: &str) -> bool {
+    s.bytes().all(|b| {
+        matches!(b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
+    })
 }
 
 #[cfg(test)]
@@ -137,11 +202,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_arbitrary_instance_under_known_family() {
-        // Known family, unknown instance — pre-#50 the closed list is
-        // authoritative.
-        let err = validate_label(&label("local:hook:evil-host:v1")).unwrap_err();
+    fn accepts_arbitrary_instance_with_valid_shape() {
+        // Schema layer is shape-only; trust comes from #50 / signature
+        // verification. Any well-shaped label passes here.
+        validate_label(&label("local:hook:any-instance:v1")).expect("structurally valid");
+    }
+
+    #[test]
+    fn registry_check_rejects_unregistered_instance() {
+        // The stricter API enforces the closed list when callers need
+        // it.
+        let err =
+            validate_label_in_registry(&label("local:hook:evil-host:v1"), P0_CANONICAL_LABELS)
+                .unwrap_err();
         assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+    }
+
+    #[test]
+    fn registry_check_accepts_canonical() {
+        validate_label_in_registry(&label("local:hook:cc-session:v1"), P0_CANONICAL_LABELS)
+            .expect("canonical");
     }
 
     #[test]
@@ -151,15 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_proactive_agent() {
-        let err = validate_label(&label("local:proactive:other-agent:v1")).unwrap_err();
+    fn rejects_non_numeric_version() {
+        let err = validate_label(&label("local:hook:cc-session:vx")).unwrap_err();
         assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
     }
 
     #[test]
-    fn rejects_version_drift() {
-        // Canonical entries are pinned at v1; v2 is a brief change away.
-        let err = validate_label(&label("local:hook:cc-session:v2")).unwrap_err();
-        assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+    fn accepts_multi_segment_instance() {
+        validate_label(&label("local:hook:cc-session:host-42:v1")).expect("valid");
     }
 }
