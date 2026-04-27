@@ -354,6 +354,19 @@ BEGIN
   SELECT RAISE(ABORT, 'wal_op_deps rows are immutable');
 END;
 
+-- Dependency edges are part of the durable recovery DAG. DELETE would
+-- silently weaken ordering guarantees: the boot-time replay walk
+-- could then schedule a child op as if it were independent. Block
+-- DELETE outright; the only way wal_op_deps rows disappear is via
+-- the ON DELETE CASCADE from wal_ops — which is itself blocked by
+-- wal_ops_no_delete.
+CREATE TRIGGER wal_op_deps_no_delete
+  BEFORE DELETE ON wal_op_deps
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_op_deps is append-only; DELETE not permitted');
+END;
+
 CREATE TABLE wal_steps (
   operation_id  TEXT NOT NULL,
   step_ord      INTEGER NOT NULL CHECK (step_ord >= 0),
@@ -543,7 +556,18 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   ('shared','exclusive','free')`, `holder_count INTEGER NOT NULL
   CHECK (holder_count >= 0)`, `epoch INTEGER NOT NULL CHECK (epoch >= 0)`,
   `waiters BLOB`, `last_heartbeat_at INTEGER`,
-  `PRIMARY KEY (scope_kind, scope_key)`.
+  `PRIMARY KEY (scope_kind, scope_key)`. A row-level CHECK ties the
+  two state columns together so contradictory states (e.g.,
+  `mode='free'` with holders, `mode='exclusive'` with > 1 holder) are
+  unrepresentable:
+
+  ```sql
+  CHECK (
+    (mode = 'free'      AND holder_count = 0) OR
+    (mode = 'exclusive' AND holder_count = 1) OR
+    (mode = 'shared'    AND holder_count >= 1)
+  )
+  ```
 - `lock_holders` — every column from the brief block (`holder_id`,
   `acquired_epoch`, `owner_incarnation`, `boot_id`, `reclaim_deadline`),
   `PRIMARY KEY (scope_kind, scope_key, holder_id)`,
@@ -558,12 +582,18 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
   two can diverge across crash recovery, retry bugs, or hand repair,
   and the lock manager would make decisions from contradictory state.
   - `lock_holders_count_after_insert` — `AFTER INSERT ON lock_holders`
-    sets `locks.holder_count = (SELECT COUNT(*) FROM lock_holders WHERE
-    scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key)`.
+    sets `locks.holder_count = (SELECT COUNT(*) FROM lock_holders
+    WHERE scope_kind = NEW.scope_kind AND scope_key = NEW.scope_key)`.
+    The storage impl is responsible for setting `locks.mode` to the
+    correct value (`'shared'` or `'exclusive'`) in the same
+    transaction; the lock CHECK rejects mismatches at COMMIT.
   - `lock_holders_count_after_delete` — `AFTER DELETE ON lock_holders`
-    same recomputation against `OLD`. Includes the case
-    `holder_count = 0` (`mode` is also flipped to `'free'` by the
-    storage impl in #46; the trigger only enforces the count).
+    recomputes the count against `OLD` and **flips `mode` to `'free'`
+    when the count drops to 0**. This keeps the
+    `(mode, holder_count)` invariant on the release path without
+    requiring the storage impl to remember to update `mode`. When the
+    count drops from N≥2 to N≥1 the mode stays as it was (the
+    remaining shared holders keep `mode = 'shared'`).
   - `lock_holders_keys_immutable` — `BEFORE UPDATE ON lock_holders`
     raises ABORT if any of `scope_kind`, `scope_key`, `holder_id`, or
     `acquired_epoch` changes. The §5.6 acquisition protocol never
@@ -607,6 +637,25 @@ CREATE TABLE consent_journal (
 -- The async consent_log_materializer tails this table by row_id
 -- (§5.6 upsert step 7). An index on op_id supports lint cross-checks.
 CREATE INDEX consent_journal_op_idx ON consent_journal(op_id);
+
+-- The consent journal is the durable audit surface; the materializer
+-- tails it by row_id and trusts that prior rows are stable. Block
+-- UPDATE so a tailed row cannot be retroactively rewritten. Block
+-- DELETE so a row cannot be removed before the materializer (or an
+-- auditor) reads it. Source-of-truth append-only, not just convention.
+CREATE TRIGGER consent_journal_immutable
+  BEFORE UPDATE ON consent_journal
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal rows are immutable');
+END;
+
+CREATE TRIGGER consent_journal_no_delete
+  BEFORE DELETE ON consent_journal
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal is append-only; DELETE not permitted');
+END;
 ```
 
 > The closed-set CHECK constraints (`wal_ops.kind`, `wal_ops.state`,
@@ -923,6 +972,8 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `wal_ops_issued_seq_must_advance`, `wal_ops_envelope_immutable`,
     `wal_ops_no_delete`, `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
+    `wal_op_deps_no_delete`,
+    `consent_journal_immutable`, `consent_journal_no_delete`,
     `used_sequence_must_advance`, `used_advance_high_water`,
     `used_immutable`, `used_no_delete`,
     `issuer_seq_insert_must_match_ledger`, `issuer_seq_only_via_ledger`,
@@ -1084,6 +1135,23 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   retry with records-first ordering inside the same transaction
   pattern; expect success. Documents the records-before-edges contract
   for `updates` edges.
+- `wal_op_deps_delete_blocked` — insert two `wal_ops` rows and a
+  valid `wal_op_deps` edge between them. Attempt
+  `DELETE FROM wal_op_deps WHERE …`; expect ABORT via
+  `wal_op_deps_no_delete`.
+- `consent_journal_append_only` — insert a `consent_journal` row;
+  attempt `UPDATE consent_journal SET payload = '{}' WHERE row_id = …`;
+  expect ABORT via `consent_journal_immutable`. Attempt
+  `DELETE FROM consent_journal WHERE row_id = …`; expect ABORT via
+  `consent_journal_no_delete`.
+- `lock_state_invariants_enforced` — attempt
+  `INSERT INTO locks VALUES ('entity','x','free',1,0,NULL,NULL)`;
+  expect CHECK violation (free with holders). Attempt
+  `INSERT INTO locks VALUES ('entity','x','exclusive',2,0,NULL,NULL)`;
+  expect CHECK violation (multi-holder exclusive). Attempt
+  `INSERT INTO locks VALUES ('entity','x','shared',0,0,NULL,NULL)`;
+  expect CHECK violation (shared without holders). Insert valid
+  `('entity','x','shared',2,0,NULL,NULL)`; expect success.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
