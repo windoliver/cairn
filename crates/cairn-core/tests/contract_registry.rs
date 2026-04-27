@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
@@ -31,6 +31,12 @@ mod compatible_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
+    }
+
+    impl MemoryStorePlugin for FakeStore {
+        const NAME: &'static str = "fake-compat";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-compat");
@@ -63,6 +69,12 @@ mod future_plugin {
                 ContractVersion::new(10, 0, 0),
             )
         }
+    }
+
+    impl MemoryStorePlugin for FutureStore {
+        const NAME: &'static str = "fake-future";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(9, 9, 0), ContractVersion::new(10, 0, 0));
     }
 
     register_plugin!(MemoryStore, FutureStore, "fake-future");
@@ -146,6 +158,12 @@ patch = 0
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
+    }
+
+    impl MemoryStorePlugin for FakeStore {
+        const NAME: &'static str = "fake-with-manifest";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-with-manifest", MANIFEST_TOML);
