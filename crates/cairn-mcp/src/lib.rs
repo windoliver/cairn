@@ -11,6 +11,7 @@
 
 pub mod error;
 pub mod generated;
+pub mod handler;
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
