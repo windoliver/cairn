@@ -46,7 +46,16 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp").about(
+        "Start an MCP stdio server. Reads MCP frames from stdin, \
+             dispatches to the eight cairn verbs, writes responses to \
+             stdout. Blocks until stdin closes.",
+    )
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -215,7 +224,7 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins");
+    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -266,6 +275,7 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
