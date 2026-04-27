@@ -29,7 +29,16 @@ mod compatible_plugin {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        }
+        async fn get(&self, _: &str) -> Result<Option<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn upsert(&self, _: cairn_core::domain::record::MemoryRecord) -> Result<cairn_core::contract::memory_store::StoredRecord, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn list_active(&self) -> Result<Vec<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
         }
     }
 
@@ -62,6 +71,15 @@ mod future_plugin {
                 ContractVersion::new(9, 9, 0),
                 ContractVersion::new(10, 0, 0),
             )
+        }
+        async fn get(&self, _: &str) -> Result<Option<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn upsert(&self, _: cairn_core::domain::record::MemoryRecord) -> Result<cairn_core::contract::memory_store::StoredRecord, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn list_active(&self) -> Result<Vec<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
         }
     }
 
@@ -117,12 +135,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 "#;
 
@@ -144,7 +162,16 @@ patch = 0
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        }
+        async fn get(&self, _: &str) -> Result<Option<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn upsert(&self, _: cairn_core::domain::record::MemoryRecord) -> Result<cairn_core::contract::memory_store::StoredRecord, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn list_active(&self) -> Result<Vec<cairn_core::contract::memory_store::StoredRecord>, cairn_core::contract::memory_store::StoreError> {
+            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
         }
     }
 
