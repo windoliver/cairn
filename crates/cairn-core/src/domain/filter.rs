@@ -191,10 +191,19 @@ const MAX_TOTAL_PARAMS: usize = 500;
 /// Enforces the same depth/fanout caps as the serde parser so that
 /// programmatically constructed trees cannot cause stack exhaustion or
 /// unbounded SQL generation.
-pub fn validate_filter(filter: &SearchArgsFilters) -> Result<(), FilterError> {
+pub fn validate_filter(filter: &SearchArgsFilters) -> Result<ValidatedFilter<'_>, FilterError> {
     let mut param_budget = MAX_TOTAL_PARAMS;
-    validate_filter_inner(filter, 0, &mut param_budget)
+    validate_filter_inner(filter, 0, &mut param_budget)?;
+    Ok(ValidatedFilter(filter))
 }
+
+/// A filter that has passed all [`validate_filter`] checks.
+///
+/// The only way to produce a `ValidatedFilter` is through [`validate_filter`].
+/// [`compile_filter`] requires this type so the budget and semantic checks
+/// cannot be bypassed through the public API.
+#[derive(Clone, Copy, Debug)]
+pub struct ValidatedFilter<'a>(&'a SearchArgsFilters);
 
 fn validate_filter_inner(
     filter: &SearchArgsFilters,
@@ -599,18 +608,15 @@ pub struct CompiledFilter {
     pub params: Vec<serde_json::Value>,
 }
 
-/// Compile a validated [`SearchArgsFilters`] tree to a parameterized `SQLite`
-/// `WHERE` fragment.
+/// Compile a [`ValidatedFilter`] to a parameterized `SQLite` `WHERE` fragment.
 ///
-/// # Caller contract
-/// [`validate_filter`] must have returned `Ok` for `filter` before calling
-/// this function.  Calling on an unvalidated filter may produce incorrect SQL
-/// for unknown fields (they pass through as column names) or `unreachable!`
-/// for unexpected op values.
+/// Accepts only a [`ValidatedFilter`] produced by [`validate_filter`],
+/// guaranteeing that all semantic checks and the parameter budget have
+/// already passed.
 #[must_use]
-pub fn compile_filter(filter: &SearchArgsFilters) -> CompiledFilter {
+pub fn compile_filter(filter: ValidatedFilter<'_>) -> CompiledFilter {
     let mut params = Vec::new();
-    let sql = compile_node(filter, &mut params);
+    let sql = compile_node(filter.0, &mut params);
     CompiledFilter { sql, params }
 }
 

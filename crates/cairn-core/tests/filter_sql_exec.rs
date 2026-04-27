@@ -77,8 +77,7 @@ fn to_sql_params(params: &[serde_json::Value]) -> Vec<SqlVal> {
 /// Run a compiled filter against the `records` table and return matching `id`s.
 fn run(conn: &Connection, filter_json: serde_json::Value) -> Vec<String> {
     let f: SearchArgsFilters = serde_json::from_value(filter_json).unwrap();
-    validate_filter(&f).unwrap();
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     let sql = format!("SELECT id FROM records WHERE {}", compiled.sql);
     let sql_params = to_sql_params(&compiled.params);
     let mut stmt = conn.prepare(&sql).unwrap();

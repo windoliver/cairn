@@ -182,7 +182,7 @@ fn validate_accepts_deep_nested_valid_filter() {
 #[test]
 fn compile_string_eq_produces_parameterized_sql() {
     let f = parse(serde_json::json!({"field": "kind", "op": "eq", "value": "note"}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "kind = ?");
     assert_eq!(compiled.params, vec![serde_json::json!("note")]);
 }
@@ -190,7 +190,7 @@ fn compile_string_eq_produces_parameterized_sql() {
 #[test]
 fn compile_string_neq() {
     let f = parse(serde_json::json!({"field": "kind", "op": "neq", "value": "draft"}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "kind != ?");
     assert_eq!(compiled.params.len(), 1);
 }
@@ -200,7 +200,7 @@ fn compile_string_in() {
     let f = parse(serde_json::json!({
         "field": "kind", "op": "in", "value": ["strategy_success", "playbook"]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "kind IN (?, ?)");
     assert_eq!(compiled.params.len(), 2);
     assert_eq!(compiled.params[0], serde_json::json!("strategy_success"));
@@ -212,7 +212,7 @@ fn compile_string_nin() {
     let f = parse(serde_json::json!({
         "field": "category", "op": "nin", "value": ["draft", "archived"]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "category NOT IN (?, ?)");
     assert_eq!(compiled.params.len(), 2);
 }
@@ -220,7 +220,7 @@ fn compile_string_nin() {
 #[test]
 fn compile_string_contains_uses_instr() {
     let f = parse(serde_json::json!({"field": "title", "op": "string_contains", "value": "pg"}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "instr(title, ?) > 0");
     assert_eq!(compiled.params, vec![serde_json::json!("pg")]);
 }
@@ -230,7 +230,7 @@ fn compile_string_starts_with() {
     let f = parse(serde_json::json!({
         "field": "title", "op": "string_starts_with", "value": "migration"
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     // Uses substr/length for case-sensitive matching consistent with instr().
     assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
     // Two params: one for length(?), one for the equality check.
@@ -244,7 +244,7 @@ fn compile_string_ends_with() {
     let f = parse(serde_json::json!({
         "field": "title", "op": "string_ends_with", "value": "config"
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(compiled.sql.contains("title") && compiled.sql.contains("substr"));
     // Three params: two for length(?), one for the equality check.
     assert_eq!(compiled.params.len(), 3);
@@ -256,7 +256,7 @@ fn compile_string_ends_with() {
 #[test]
 fn compile_number_lt() {
     let f = parse(serde_json::json!({"field": "priority", "op": "lt", "value": 5}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "priority < ?");
     assert_eq!(compiled.params, vec![serde_json::json!(5)]);
 }
@@ -266,7 +266,7 @@ fn compile_number_between() {
     let f = parse(serde_json::json!({
         "field": "confidence", "op": "between", "value": [0.5, 0.9]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "confidence BETWEEN ? AND ?");
     assert_eq!(compiled.params.len(), 2);
     assert_eq!(compiled.params[0], serde_json::json!(0.5));
@@ -276,7 +276,7 @@ fn compile_number_between() {
 #[test]
 fn compile_boolean_eq() {
     let f = parse(serde_json::json!({"field": "is_static", "op": "eq", "value": false}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "is_static = ?");
     assert_eq!(compiled.params, vec![serde_json::json!(false)]);
 }
@@ -284,7 +284,7 @@ fn compile_boolean_eq() {
 #[test]
 fn compile_array_contains() {
     let f = parse(serde_json::json!({"field": "tags", "op": "array_contains", "value": "infra"}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.contains("json_each(tags)") && compiled.sql.contains("value = ?"),
         "array_contains must use json_each, got: {}",
@@ -298,7 +298,7 @@ fn compile_array_contains_any() {
     let f = parse(serde_json::json!({
         "field": "tags", "op": "array_contains_any", "value": ["infra", "db"]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.contains("json_each(tags)") && compiled.sql.contains("IN"),
         "array_contains_any must use json_each + IN, got: {}",
@@ -312,7 +312,7 @@ fn compile_array_contains_all() {
     let f = parse(serde_json::json!({
         "field": "tags", "op": "array_contains_all", "value": ["infra", "migration"]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.contains("json_each(tags)"),
         "array_contains_all must use json_each, got: {}",
@@ -330,7 +330,7 @@ fn compile_array_contains_all() {
 #[test]
 fn compile_array_size_eq() {
     let f = parse(serde_json::json!({"field": "tags", "op": "array_size_eq", "value": 3}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert_eq!(compiled.sql, "json_array_length(tags) = ?");
     assert_eq!(compiled.params, vec![serde_json::json!(3)]);
 }
@@ -345,7 +345,7 @@ fn compile_and_wraps_children_with_and() {
             {"field": "is_static", "op": "eq", "value": false},
         ]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.starts_with('(') && compiled.sql.ends_with(')'),
         "and must be wrapped in parens, got: {}",
@@ -367,7 +367,7 @@ fn compile_or_wraps_children_with_or() {
             {"field": "category", "op": "eq", "value": "released"},
         ]
     }));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.contains(" OR "),
         "or must use OR keyword, got: {}",
@@ -379,7 +379,7 @@ fn compile_or_wraps_children_with_or() {
 #[test]
 fn compile_not_wraps_child_with_not() {
     let f = parse(serde_json::json!({"not": {"field": "kind", "op": "eq", "value": "draft"}}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         compiled.sql.contains("NOT"),
         "not must use NOT keyword, got: {}",
@@ -394,7 +394,7 @@ fn compile_params_never_contain_sql_in_string_value() {
     // bound parameter — never spliced into the SQL fragment itself.
     let malicious = "'; DROP TABLE records; --";
     let f = parse(serde_json::json!({"field": "title", "op": "eq", "value": malicious}));
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     assert!(
         !compiled.sql.contains("DROP"),
         "SQL injection payload must not appear in the sql fragment, got: {}",
@@ -422,7 +422,7 @@ fn compile_brief_example_filter() {
         ]
     }));
     validate_filter(&f).expect("brief example filter must validate");
-    let compiled = compile_filter(&f);
+    let compiled = compile_filter(validate_filter(&f).unwrap());
     // Should have produced a non-empty SQL fragment.
     assert!(!compiled.sql.is_empty());
     // Parameters must be bound (not interpolated).
