@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// One entry in the vault registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VaultEntry {
     /// Short human identifier, e.g. `"work"` or `"personal"`.
     pub name: String,
@@ -15,6 +16,24 @@ pub struct VaultEntry {
     /// ISO 8601 date after which the vault is considered expired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+impl VaultEntry {
+    /// Construct a new vault entry.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        label: Option<String>,
+        expires_at: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            label,
+            expires_at,
+        }
+    }
 }
 
 /// Parsed content of `~/.config/cairn/vaults.toml` (§3.3).
@@ -29,12 +48,13 @@ pub struct VaultEntry {
 /// label = "day job"
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VaultRegistry {
     /// Name of the active default vault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
     /// Known vaults. TOML key is `vault` (array of tables).
-    #[serde(default, rename = "vault")]
+    #[serde(default, rename = "vault", skip_serializing_if = "Vec::is_empty")]
     pub vaults: Vec<VaultEntry>,
 }
 
