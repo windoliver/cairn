@@ -18,6 +18,12 @@ PRs that change the brief can update coverage in the same diff.
 - When an issue is split or renumbered, update the matrix in the same PR.
 - PRs that touch `docs/design/design-brief.md` should state in the
   description whether this matrix needs an update, and link the row(s).
+- The `Owning issues` column lists implementation work only. Audit,
+  tracking, and meta issues (such as #157, which owns this document
+  itself) are intentionally excluded so coverage cannot be self-justifying.
+- A row that has no implementation owner yet should keep the section
+  listed with an empty `Owning issues` cell and a coverage note
+  explaining the gap, rather than borrowing an unrelated issue.
 
 ## Resolved decisions baked into the matrix
 
@@ -32,7 +38,7 @@ PRs that change the brief can update coverage in the same diff.
 
 | Design section | Owning issues | Coverage notes |
 |---|---|---|
-| §0 Priority legend | #3–#32, #143–#157 | Labels and milestones encode phase and priority. |
+| §0 Priority legend | #3–#32, #143–#156 | Labels and milestones encode phase and priority. |
 | §1 Thesis / KISS / first principles | #3, #5, #7, #8, #9, #10, #11, #18, #19 | Contract-first, local-first, inspectable vault, and reference consumer are covered. |
 | §2 Design principles | #3, #4, #5, #7, #8, #17, #18, #143, #158 | Non-negotiable boundaries enforced through architecture, schema, privacy, WAL, and plugin gates. |
 | §3 Vault layout / SQLite / Nexus | #5, #6, #20, #41–#49, #104–#106 | P0 authority remains SQLite; P1 Nexus is derived/additive. |
@@ -52,14 +58,14 @@ PRs that change the brief can update coverage in the same diff.
 | §12.a Distribution model | #26, #29, #121–#123, #130–#132, #148 | ReBAC, share links, propagation, connectors, aggregate memory. |
 | §13 UI / frontend | #5, #23, #32, #43–#44, #113–#115, #139, #146 | P0 markdown, P1 GUI alpha, P3 desktop GA. |
 | §14 Privacy and consent | #17, #26, #58, #88, #93–#96, #121–#122 | Redaction, consent, policy traces, lint, forget, ReBAC, share consent. |
-| §15 Evaluation | #18, #24, #31, #97–#100, #116–#118, #136–#138, #154 | P0 replay and gates, P1 bench and SRE, v0.4 cassette and doc freeze. |
+| §15 Evaluation | #18, #24, #31, #97–#100, #116–#118, #136–#138 | P0 replay and gates, P1 bench and SRE, v0.4 cassette and doc freeze. |
 | §16 Packaging | #18, #32, #100, #158, #139–#142 | Cargo and Homebrew, static smoke tests, desktop production packaging, release channels. |
 | §16.a Existing memory systems | #120, #151–#156 | Explicit P2 migration bridge epic and child issues. |
-| §17 Non-goals | #138, #154 | Documentation freeze and traceability audit preserve non-goals. |
+| §17 Non-goals | #138 | Documentation freeze preserves non-goals language. |
 | §18 Success criteria / adoption / consumer blueprint | #11, #18, #19, #25, #31, #32, #68–#70, #97–#103, #119–#120, #136–#142 | User stories, skill adoption, reference consumers, and production criteria. |
 | §18.d Cairn skill | #11, #68–#70 | Install, conventions, compatibility checks. |
 | §19 Sequencing | #3–#32, #33–#158 | Phased milestones and parent and sub-issue hierarchy encode sequence. |
-| §19.a KISS v0.1 subset | #3–#19, #33–#103, #143–#146, #150, #157, #158 | P0 substrate coverage with the resolved all-three-search-mode decision. |
+| §19.a KISS v0.1 subset | #3–#19, #33–#103, #143–#146, #150, #158 | P0 substrate coverage with the resolved all-three-search-mode decision. |
 | §20 Open questions | #145–#150 | Every open question has a decision issue with a recommended default. |
 | Appendix glossary | #138 | Docs freeze owns glossary consistency. |
 
@@ -67,12 +73,12 @@ PRs that change the brief can update coverage in the same diff.
 
 | # | Title | Status |
 |---|---|---|
-| #145 | Monorepo governance and maintainer model | Resolved (ADR 0001 — PR #166) |
-| #146 | Default LLM setup for local tier | Resolved (PR #165) |
+| #145 | Monorepo governance and maintainer model | Resolved ([ADR 0002](decisions/0002-monorepo-governance.md) — PR #166) |
+| #146 | Default LLM setup for local tier | Resolved ([ADR 0001](decisions/0001-llm-default.md) — PR #165) |
 | #147 | Desktop GUI alpha timing and scope | Open |
 | #148 | Skillify artifact format and compatibility policy | Open |
 | #149 | Propagation transport boundary | Open |
-| #150 | Screen sensor packaging and opt-in model | Resolved (ADR 0003 — PR #168) |
+| #150 | Screen sensor packaging and opt-in model | Resolved ([ADR 0003](decisions/0003-screen-sensor-packaging.md) — PR #168) |
 
 ## Residual risk
 
