@@ -146,7 +146,9 @@ impl MarkdownProjector {
             .split_once("\n---\n")
             .ok_or_else(|| ResyncError::ParseFailed("no closing `---` delimiter".to_owned()))?;
 
-        let body = body_raw.trim_start_matches('\n').to_owned();
+        // Strip only the single structural blank line after the closing `---`, not any
+        // leading blank lines that are part of the body content itself.
+        let body = body_raw.strip_prefix('\n').unwrap_or(body_raw).to_owned();
 
         let val: serde_yaml::Value =
             serde_yaml::from_str(yaml_part).map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
@@ -374,6 +376,16 @@ mod tests {
         let content = "---\nid: 01HQZX9F5N0000000000000000\nversion: 1\n";
         let err = MarkdownProjector.parse(content).unwrap_err();
         assert!(matches!(err, ResyncError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn parse_preserves_leading_blank_lines_in_body() {
+        let proj = MarkdownProjector;
+        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        stored.record.body = "\n\nLeading blank lines.".to_owned();
+        let file = proj.project(&stored);
+        let parsed = proj.parse(&file.content).unwrap();
+        assert_eq!(parsed.body, "\n\nLeading blank lines.");
     }
 
     #[test]

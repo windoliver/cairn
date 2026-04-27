@@ -18,7 +18,11 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Raw plugin manifest TOML, embedded at compile time from `plugin.toml`.
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract version range this crate supports (`[0.2.0, 0.3.0)`).
+/// Contract version range this crate acknowledges (`[0.2.0, 0.3.0)`).
+///
+/// **P0 stub:** `get`, `upsert`, and `list_active` all return
+/// [`StoreError::Unimplemented`]. Callers must treat those errors as
+/// `CapabilityUnavailable` until the full schema lands in #46.
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
