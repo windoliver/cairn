@@ -406,8 +406,8 @@ fn zero_recording_duration_rejected() {
     ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
     ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
     ev.source_family = SourceFamily::RecordingBatch;
+    ev.payload_ref = "sources/recording/x.mp4".into();
     ev.payload = CapturePayload::RecordingBatch {
-        recording_path: "sources/recording/x.mp4".into(),
         segment_start_ms: 0,
         segment_duration_ms: 0,
     };
@@ -550,33 +550,77 @@ fn captureeventid_accepts_max_valid_first_char() {
 }
 
 #[test]
-fn recording_path_must_be_vault_relative() {
+fn recording_payload_ref_must_be_vault_relative() {
+    // The source recording is now bound to the envelope-level
+    // `payload_ref` — its trust boundary is the same shared check.
     let mut ev = auto_event();
     ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
     ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
     ev.source_family = SourceFamily::RecordingBatch;
     ev.payload = CapturePayload::RecordingBatch {
-        recording_path: "/tmp/attacker/x.mp4".into(),
         segment_start_ms: 0,
         segment_duration_ms: 1000,
     };
+    ev.payload_ref = "/tmp/attacker/x.mp4".into();
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::MalformedCapture { .. }));
 }
 
 #[test]
-fn recording_path_rejects_dotdot() {
+fn empty_string_session_ref_rejected() {
+    // CaptureRefs absences are `None`; `Some("")` is malformed because
+    // downstream ordering/dedup keys off these values.
     let mut ev = auto_event();
-    ev.sensor_id = Identity::parse("snr:local:recording:batch:v1").expect("valid");
-    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:recording:batch:v1")];
-    ev.source_family = SourceFamily::RecordingBatch;
-    ev.payload = CapturePayload::RecordingBatch {
-        recording_path: "sources/recording/../../etc/passwd".into(),
-        segment_start_ms: 0,
-        segment_duration_ms: 1000,
-    };
+    ev.refs = Some(CaptureRefs {
+        session_id: Some(String::new()),
+        ..Default::default()
+    });
     let err = ev.validate().unwrap_err();
-    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+    assert!(matches!(
+        err,
+        DomainError::EmptyField {
+            field: "refs.session_id"
+        }
+    ));
+}
+
+#[test]
+fn whitespace_only_turn_ref_rejected() {
+    let mut ev = auto_event();
+    ev.refs = Some(CaptureRefs {
+        turn_id: Some("   ".into()),
+        ..Default::default()
+    });
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(
+        err,
+        DomainError::EmptyField {
+            field: "refs.turn_id"
+        }
+    ));
+}
+
+#[test]
+fn try_new_runs_validate() {
+    // Smart constructor enforces every invariant — caller cannot skip
+    // it the way field-literal construction would.
+    let res = CaptureEvent::try_new(
+        ulid_a(),
+        Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),
+        CaptureMode::Auto,
+        vec![entry(ChainRole::Author, "snr:local:hook:cc-session:v1")],
+        None,
+        hash(),
+        // Off-vault path — must be rejected.
+        "/etc/passwd".into(),
+        ts(),
+        CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: None,
+        },
+        SourceFamily::Hook,
+    );
+    assert!(matches!(res, Err(DomainError::MalformedCapture { .. })));
 }
 
 #[test]

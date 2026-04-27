@@ -429,10 +429,13 @@ pub enum CapturePayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
-    /// Aligned segment from a batch recording (brief §9.1.a).
+    /// Aligned segment from a batch recording (brief §9.1.a). The
+    /// source recording file is referenced by the envelope-level
+    /// `payload_ref` (and bound to `payload_hash`); this variant only
+    /// carries the segment offsets within that file. Keeping a single
+    /// canonical source reference prevents drift between the hashed
+    /// bytes and the bytes a downstream batch extractor reopens.
     RecordingBatch {
-        /// Path of the source recording file (under `sources/`).
-        recording_path: String,
         /// Segment start offset within the recording, in milliseconds.
         segment_start_ms: u64,
         /// Segment duration in milliseconds.
@@ -501,12 +504,11 @@ impl std::fmt::Debug for CapturePayload {
             Self::RecordingBatch {
                 segment_start_ms,
                 segment_duration_ms,
-                ..
             } => f
                 .debug_struct("CapturePayload::RecordingBatch")
                 .field("segment_start_ms", segment_start_ms)
                 .field("segment_duration_ms", segment_duration_ms)
-                .finish_non_exhaustive(),
+                .finish(),
             Self::Cli { .. } => f
                 .debug_struct("CapturePayload::Cli")
                 .finish_non_exhaustive(),
@@ -583,14 +585,9 @@ impl CapturePayload {
                 require_non_empty("app", app)?;
             }
             Self::RecordingBatch {
-                recording_path,
                 segment_duration_ms,
                 ..
             } => {
-                // Same trust boundary as `payload_ref` — a downstream
-                // batch extractor reopens this file, so it must be a
-                // vault-relative `sources/...` path.
-                validate_vault_relative_path("recording_path", recording_path)?;
                 if *segment_duration_ms == 0 {
                     return Err(DomainError::OutOfRange {
                         field: "segment_duration_ms",
@@ -719,6 +716,12 @@ fn identity_agent_slug(identity: &str) -> Option<&str> {
 /// Optional turn / tool / session references that pin a capture event into
 /// the per-session timeline. Absent when the source is a one-off batch
 /// (clipboard, recording) with no live session context.
+///
+/// Each ref, when present, must be a non-empty, non-whitespace string —
+/// downstream ordering, dedup, and replay tooling keys off these
+/// values, so admitting `Some("")` or `Some("   ")` would create
+/// orphaned timeline entries indistinguishable from valid ones at the
+/// type level. Use `None` for absence.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureRefs {
@@ -731,6 +734,25 @@ pub struct CaptureRefs {
     /// Per-turn tool-call id, if the event was emitted under one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_id: Option<String>,
+}
+
+impl CaptureRefs {
+    /// Reject empty or whitespace-only ref values. Absent refs use
+    /// `None`; `Some("")` is malformed.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        require_non_blank_opt("refs.session_id", self.session_id.as_deref())?;
+        require_non_blank_opt("refs.turn_id", self.turn_id.as_deref())?;
+        require_non_blank_opt("refs.tool_id", self.tool_id.as_deref())?;
+        Ok(())
+    }
+}
+
+fn require_non_blank_opt(field: &'static str, value: Option<&str>) -> Result<(), DomainError> {
+    match value {
+        None => Ok(()),
+        Some(s) if !s.trim().is_empty() => Ok(()),
+        Some(_) => Err(DomainError::EmptyField { field }),
+    }
 }
 
 /// The unified capture envelope.
@@ -850,6 +872,44 @@ impl std::fmt::Debug for CaptureEvent {
 }
 
 impl CaptureEvent {
+    /// Build a [`CaptureEvent`] from typed parts, running every
+    /// invariant via [`Self::validate`] before yielding the value.
+    /// In-process callers that want construction-time enforcement (the
+    /// same guarantee `serde(try_from = "CaptureEventRaw")` gives the
+    /// wire-deserialization path) should prefer this over field
+    /// literals. Direct field construction is allowed — this matches
+    /// the [`crate::domain::MemoryRecord`] convention — but it is the
+    /// caller's responsibility to call [`Self::validate`] before
+    /// trusting the value at any boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        event_id: CaptureEventId,
+        sensor_id: Identity,
+        capture_mode: CaptureMode,
+        actor_chain: Vec<ActorChainEntry>,
+        refs: Option<CaptureRefs>,
+        payload_hash: PayloadHash,
+        payload_ref: String,
+        captured_at: Rfc3339Timestamp,
+        payload: CapturePayload,
+        source_family: SourceFamily,
+    ) -> Result<Self, DomainError> {
+        let event = Self {
+            event_id,
+            sensor_id,
+            capture_mode,
+            actor_chain,
+            refs,
+            payload_hash,
+            payload_ref,
+            captured_at,
+            payload,
+            source_family,
+        };
+        event.validate()?;
+        Ok(event)
+    }
+
     /// Run every invariant on the event:
     ///
     /// 1. `payload_ref` is a non-empty vault-relative path beginning
@@ -898,6 +958,9 @@ impl CaptureEvent {
             });
         }
         self.payload.validate()?;
+        if let Some(refs) = &self.refs {
+            refs.validate()?;
+        }
         if !mode_allows_family(self.capture_mode, self.source_family) {
             return Err(DomainError::MalformedCapture {
                 message: format!(
