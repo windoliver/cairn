@@ -28,5 +28,9 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 workspace = true
 
 # Forward-declared scaffold deps. Drop entries as their first call site lands.
+# serde: no direct call site yet (used transitively via serde_json in handler.rs).
+# tokio: used transitively — rmcp::transport::io::stdio() returns tokio::io types;
+#   direct tokio usage lands when cairn-cli wires the runtime.
+# tracing-subscriber: no call site yet — wired in cairn-cli, kept here for future use.
 [package.metadata.cargo-machete]
-ignored = ["serde", "serde_json", "rmcp", "tokio", "thiserror", "tracing-subscriber"]
+ignored = ["serde", "tokio", "tracing-subscriber"]
