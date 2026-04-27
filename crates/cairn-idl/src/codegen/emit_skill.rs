@@ -53,15 +53,21 @@ fn push_trigger_table(s: &mut String) {
     s.push_str("## When to call cairn\n\n");
     s.push_str("| Situation | Command |\n");
     s.push_str("|---|---|\n");
-    s.push_str("| \"remember that I prefer X\" | `cairn ingest --kind user --body \"prefers X\"` |\n");
+    s.push_str(
+        "| \"remember that I prefer X\" | `cairn ingest --kind user --body \"prefers X\"` |\n",
+    );
     s.push_str("| \"remember: never do Y\" | `cairn ingest --kind rule --body \"never do Y\"` |\n");
-    s.push_str("| \"correction: it's actually Z\" | `cairn ingest --kind feedback --body \"Z\"` |\n");
+    s.push_str(
+        "| \"correction: it's actually Z\" | `cairn ingest --kind feedback --body \"Z\"` |\n",
+    );
     s.push_str("| \"forget what I said about W\" | `cairn forget --record $(cairn search \"W\" --limit 1 --json \\| jq -r '.hits[0].id')` |\n");
     s.push_str("| \"what do you know about K?\" | `cairn search \"K\" --limit 10 --json` |\n");
     s.push_str("| \"load my preferences for this session\" | `cairn assemble_hot --session ${SESSION_ID} --json` |\n");
     s.push_str("| before answering any non-trivial question | `cairn search \"$USER_INTENT\" --limit 5 --json` |\n");
     s.push_str("| after completing an ad-hoc procedure | `cairn ingest --kind strategy_success --body \"...\"` |\n");
-    s.push_str("| before ending the session | `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` |\n");
+    s.push_str(
+        "| before ending the session | `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` |\n",
+    );
     s.push('\n');
 }
 
@@ -86,9 +92,15 @@ fn push_output_format(s: &mut String) {
 
 fn push_non_negotiable_rules(s: &mut String) {
     s.push_str("## Non-negotiable rules\n\n");
-    s.push_str("1. Never invent record IDs. Always get them from `cairn search` or `cairn retrieve`.\n");
-    s.push_str("2. Never call `cairn forget` without confirming with the user — forget is irreversible.\n");
-    s.push_str("3. If a command fails, show the user `stderr` verbatim. Don't paper over errors.\n");
+    s.push_str(
+        "1. Never invent record IDs. Always get them from `cairn search` or `cairn retrieve`.\n",
+    );
+    s.push_str(
+        "2. Never call `cairn forget` without confirming with the user — forget is irreversible.\n",
+    );
+    s.push_str(
+        "3. If a command fails, show the user `stderr` verbatim. Don't paper over errors.\n",
+    );
     s.push_str("4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.\n");
     s.push_str("5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.\n");
     s.push('\n');
