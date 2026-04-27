@@ -24,23 +24,25 @@
 
 ## 1. Goal
 
-Land the schema-only DDL for `.cairn/cairn.db` covering the **records,
-control-plane, and audit surface** specified in brief §3 and §5.6,
-applied through a forward-only migration runner that opens cleanly on a
-fresh vault and re-opens idempotently on an up-to-date one. **Verb
-implementations, the sqlite-vec extension, and the workflow_jobs
-table** are explicitly out of scope — they land in dedicated follow-up
-issues (see §2).
+Land the schema-only DDL for `.cairn/cairn.db` covering the
+**records, WAL, replay, consent, and locks** surface specified in
+brief §3 and §5.6 — five of the six checklist items in issue #45.
+The sixth item (`workflow_jobs`) is **scoped to a separate sibling
+P0 issue** (filed before this PR merges) so each issue's
+forward-only DDL can be grounded in pinned-down brief sections.
 
-This issue ships the file-on-disk shape for everything except
-`workflow_jobs` (whose schema the brief has not yet pinned), plus the
-open-time pragmas, the migration runner, and the
-shape/history/migration-checksum integrity checks. Issue #45's checklist
-line for "workflow jobs" is consciously deferred to keep this PR's
-forward-only DDL grounded in pinned-down brief sections; the deferral
-is called out in the PR description and the follow-up issue is filed
-before merge. A subsequent issue extends the migration set by adding
-`0006_jobs.sql` once the workflow host's invariants are specified.
+The result of merging this issue: a vault has every P0 control-plane
+table the brief has specified DDL for. The `workflow_jobs` table
+joins the head schema in the immediately-following sibling issue,
+which lands `0006_jobs.sql` once the workflow host's leasing /
+retry / dedupe invariants are specified.
+
+> **Why split?** Brief §3 + §5.6 give exact DDL for records, WAL,
+> replay, consent, and locks. The brief is silent on `workflow_jobs`.
+> Forward-only migrations make a placeholder schema irreversibly
+> persistent on every vault; the cost of guessing is permanent, the
+> cost of splitting the issue is one extra PR. The split is the
+> conservative choice.
 
 This issue does *not* ship `MemoryStore` verb impls, the sqlite-vec C
 extension, or any Nexus projection.
@@ -1087,22 +1089,58 @@ the rewind check, the replay window the design closes is reopened.
 
 `open()` runs a one-pass consistency check after migrations:
 
+The check requires **exact** agreement between
+`issuer_seq.high_water` and `MAX(used.sequence)` for every issuer,
+and it rejects orphaned `issuer_seq` rows that have no backing
+`used` history — both stale (`high_water < used_max`) and
+over-advanced (`high_water > used_max`) caches are corruption
+modes. An over-advanced cache is the more dangerous one: it
+permanently rejects every legitimate replay-ledger insert at or
+below the inflated value, a durable denial-of-service.
+
 ```rust
 fn verify_replay_ledger_consistency(conn: &Connection) -> Result<(), StoreError> {
+    // FULL OUTER JOIN via UNION ALL: SQLite has no FULL OUTER, but a
+    // LEFT JOIN from `used` plus a separate "orphan in issuer_seq" pass
+    // covers every issuer present in either table.
     let mut stmt = conn.prepare("
-        SELECT u.issuer,
+        SELECT u.issuer                   AS issuer,
                MAX(u.sequence)            AS used_max,
-               COALESCE(s.high_water, -1) AS seq_high_water
+               s.high_water               AS seq_high_water,   -- NULL if missing
+               1                          AS source_used
           FROM used u
           LEFT JOIN issuer_seq s ON s.issuer = u.issuer
          GROUP BY u.issuer
+        UNION ALL
+        SELECT s.issuer, NULL, s.high_water, 0
+          FROM issuer_seq s
+         WHERE NOT EXISTS (
+             SELECT 1 FROM used u WHERE u.issuer = s.issuer
+         )
     ")?;
     for row in stmt.query_map([], /* ... */)? {
-        let (issuer, used_max, hw) = row?;
-        if hw < used_max {
-            return Err(StoreError::ReplayLedgerInconsistent {
-                issuer, used_max, issuer_seq_high_water: hw,
-            });
+        let (issuer, used_max, seq_hw, source_used) = row?;
+        match (used_max, seq_hw) {
+            // Orphaned cache row: no backing ledger.
+            (None, Some(hw)) => return Err(StoreError::ReplayLedgerInconsistent {
+                issuer, kind: ReplayLedgerKind::OrphanedHighWater { high_water: hw },
+            }),
+            // Missing cache row: ledger has rows but no high_water.
+            (Some(used_max), None) => return Err(StoreError::ReplayLedgerInconsistent {
+                issuer, kind: ReplayLedgerKind::MissingHighWater { used_max },
+            }),
+            // Mismatch in either direction.
+            (Some(used_max), Some(hw)) if hw != used_max => {
+                return Err(StoreError::ReplayLedgerInconsistent {
+                    issuer,
+                    kind: if hw < used_max {
+                        ReplayLedgerKind::Stale { used_max, high_water: hw }
+                    } else {
+                        ReplayLedgerKind::OverAdvanced { used_max, high_water: hw }
+                    },
+                });
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1111,9 +1149,10 @@ fn verify_replay_ledger_consistency(conn: &Connection) -> Result<(), StoreError>
 
 The check is read-only — open() never silently repairs the cache.
 A diverged vault surfaces `StoreError::ReplayLedgerInconsistent`
-and the operator runs `cairn admin repair-replay-ledger` (a
-follow-up issue), which atomically rebuilds `issuer_seq` from
-`used` inside one transaction.
+with one of `Stale`, `OverAdvanced`, `OrphanedHighWater`, or
+`MissingHighWater`; the operator runs `cairn admin
+repair-replay-ledger` (a follow-up issue) which atomically rebuilds
+`issuer_seq` from `used` inside one transaction.
 
 ### 5.2 Migration checksum ledger (history-level guarantee)
 
@@ -1235,12 +1274,22 @@ pub enum StoreError {
         actual:       String,
     },
 
-    #[error("replay ledger inconsistency for issuer {issuer}: used.MAX(sequence)={used_max}, issuer_seq.high_water={issuer_seq_high_water}")]
-    ReplayLedgerInconsistent {
-        issuer: String,
-        used_max: i64,
-        issuer_seq_high_water: i64,
-    },
+    #[error("replay ledger inconsistency for issuer {issuer}: {kind:?}")]
+    ReplayLedgerInconsistent { issuer: String, kind: ReplayLedgerKind },
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ReplayLedgerKind {
+    /// `issuer_seq.high_water < MAX(used.sequence)`: cache lags ledger.
+    Stale          { used_max: i64, high_water: i64 },
+    /// `issuer_seq.high_water > MAX(used.sequence)`: cache has been
+    /// inflated past any committed value, blocking future writes.
+    OverAdvanced   { used_max: i64, high_water: i64 },
+    /// `issuer_seq` row exists with no backing `used` history.
+    OrphanedHighWater { high_water: i64 },
+    /// `used` rows exist for this issuer but no `issuer_seq` row.
+    MissingHighWater  { used_max: i64 },
 }
 
 #[derive(Debug)]
@@ -1454,11 +1503,25 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   fence successfully (the predicate exemption).
 - `wal_steps_delete_blocked` — insert a `wal_steps` row; attempt
   `DELETE FROM wal_steps WHERE …`; ABORT via `wal_steps_no_delete`.
-- `replay_ledger_consistency_check` — open a fresh vault, insert a
-  wal_ops + used row at `(issuer='alice', sequence=42)`; assert
-  `issuer_seq` has `(alice, 42)`. Manually corrupt `issuer_seq` to
-  `(alice, 5)` via fixture helper; close & reopen via `open()`;
-  expect `StoreError::ReplayLedgerInconsistent`.
+- `replay_ledger_consistency_check` — exercise all four corruption
+  branches:
+  - **Stale:** insert wal_ops + used at `(alice, seq=42)`; manually
+    set `issuer_seq.high_water = 5`; reopen; expect
+    `ReplayLedgerInconsistent { kind: Stale { used_max: 42,
+    high_water: 5 } }`.
+  - **OverAdvanced:** same setup but set
+    `issuer_seq.high_water = 9999`; reopen; expect
+    `ReplayLedgerInconsistent { kind: OverAdvanced { used_max: 42,
+    high_water: 9999 } }`.
+  - **OrphanedHighWater:** insert just `issuer_seq (mallory, 100)`
+    via fixture helper (bypassing the match-ledger trigger), no
+    `used` rows for mallory; reopen; expect
+    `ReplayLedgerInconsistent { kind: OrphanedHighWater {
+    high_water: 100 } }`.
+  - **MissingHighWater:** insert wal_ops + used for `(bob, 7)`,
+    then DELETE the `issuer_seq` row for bob via fixture (bypassing
+    the no-delete trigger); reopen; expect
+    `ReplayLedgerInconsistent { kind: MissingHighWater { used_max: 7 } }`.
 - `open_does_not_mutate_invalid_vault` — generate a fixture vault
   whose `schema_migrations` row 1 has a wrong `sql_blake3` (set via
   the test fixture helper that bypasses the immutability trigger);
