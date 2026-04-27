@@ -174,11 +174,49 @@ fn reject_symlink_ancestors(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Creates each directory component one at a time, checking immediately after
+/// each `mkdir` that the created (or pre-existing) entry is not a symlink.
+///
+/// Narrows the TOCTOU window compared to `create_dir_all` + a single preflight,
+/// while still respecting the macOS depth-2 skip (OS-managed root symlinks).
+fn create_dir_checked(path: &std::path::Path) -> Result<()> {
+    let mut check = PathBuf::new();
+    let mut depth = 0usize;
+    for component in path.components() {
+        check.push(component);
+        depth += 1;
+        match std::fs::create_dir(&check) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e)
+                    .context(format!("creating directory {}", check.display())))
+            }
+        }
+        // Same depth-2 skip as reject_symlink_ancestors for macOS /var.
+        let is_final = check == path;
+        if (depth > 2 || is_final)
+            && std::fs::symlink_metadata(&check)
+                .ok()
+                .is_some_and(|m| m.file_type().is_symlink())
+        {
+            anyhow::bail!(
+                "{} is a symlink — cairn will not create directories through it",
+                check.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Reads the installed IDL version from `.version`.
 ///
+/// Requires both `contract: cairn.mcp.v1` and `cairn-idl: X.Y.Z` to be present
+/// and valid; any other content is treated as malformed.
+///
 /// - `NotFound` → `Ok(None)` (fresh install, no prior Cairn install).
-/// - File exists but unparseable + `!force` → `Err` (fail closed; corrupt metadata).
-/// - File exists but unparseable + `force` → `Ok(None)` (user explicitly overrides).
+/// - File exists but invalid schema + `!force` → `Err` (fail closed; corrupt metadata).
+/// - File exists but invalid schema + `force` → `Ok(None)` (user explicitly overrides).
 /// - Symlink → always `Err`.
 fn read_installed_version(
     version_path: &std::path::Path,
@@ -200,15 +238,42 @@ fn read_installed_version(
                 .context(format!("reading installed version from {}", version_path.display())))
         }
     };
-    match parse_idl_version(&content) {
-        Some(v) => Ok(Some(v)),
-        None if force => Ok(None),
-        None => anyhow::bail!(
-            "{} exists but contains no parseable cairn-idl version — \
+    let has_contract = content
+        .lines()
+        .any(|l| l.starts_with("contract: cairn.mcp.v1"));
+    let idl_version = parse_idl_version(&content);
+    match (has_contract, idl_version) {
+        (true, Some(v)) => Ok(Some(v)),
+        _ if force => Ok(None),
+        _ => anyhow::bail!(
+            "{} is not a valid Cairn .version file (must contain \
+             'contract: cairn.mcp.v1' and 'cairn-idl: X.Y.Z') — \
              pass --force to overwrite it",
             version_path.display()
         ),
     }
+}
+
+/// Checks that `dir` contains only Cairn-created entries (or is empty).
+///
+/// Allows idempotent retry after a partial install (entries Cairn would write
+/// are expected); rejects directories with foreign content to prevent accidental
+/// installs into unrelated user directories. Fail closed on any `read_dir` error.
+fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
+    const CAIRN_ENTRIES: &[&str] = &["SKILL.md", "conventions.md", ".version", "examples"];
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("checking contents of {}", dir.display()))?
+    {
+        let name = entry.context("reading directory entry")?.file_name();
+        if !CAIRN_ENTRIES.iter().any(|&n| name == n) {
+            anyhow::bail!(
+                "{} contains non-Cairn files but has no Cairn .version — \
+                 pass --force to install into this directory",
+                dir.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Installs the Cairn skill bundle at `opts.target_dir`.
@@ -251,30 +316,17 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // fails closed without leaving filesystem side effects behind.
     let installed_version = read_installed_version(&target.join(".version"), opts.force)?;
 
-    // Refuse to install into a non-empty directory that has no Cairn .version.
-    // Run before create_dir_all so we see the pre-install state.
-    // Fail closed on read_dir errors (permission errors are not proof of emptiness).
+    // Refuse to install into a non-empty directory that contains non-Cairn files
+    // and has no Cairn .version. Foreign-content check allows retry after a partial
+    // install (e.g. crash before .version is written) while blocking accidental
+    // installs into user directories.
     if !opts.force && installed_version.is_none() && target.is_dir() {
-        let is_non_empty = std::fs::read_dir(target)
-            .with_context(|| format!("checking contents of {}", target.display()))?
-            .next()
-            .is_some();
-        if is_non_empty {
-            anyhow::bail!(
-                "{} exists and is non-empty but has no Cairn .version — \
-                 pass --force to install into this directory",
-                target.display()
-            );
-        }
+        check_no_foreign_content(target)?;
     }
 
-    // Create target dir and examples/ subdir.
-    std::fs::create_dir_all(target.join("examples"))
-        .with_context(|| format!("creating {}", target.join("examples").display()))?;
-
-    // Re-validate after create_dir_all to mitigate TOCTOU symlink swaps
-    // that could redirect newly created ancestors between preflight and writes.
-    reject_symlink_ancestors(target)?;
+    // Create target dir and examples/ subdir component-by-component, validating
+    // each entry for symlinks immediately after creation to narrow the TOCTOU window.
+    create_dir_checked(&target.join("examples"))?;
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
