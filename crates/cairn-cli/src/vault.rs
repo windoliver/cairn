@@ -8,6 +8,7 @@ use serde::Serialize;
 use cairn_core::config::CairnConfig;
 
 /// Options for [`bootstrap`].
+#[derive(Debug, Clone)]
 pub struct BootstrapOpts {
     /// The root directory for the vault.
     pub vault_path: PathBuf,
@@ -92,15 +93,19 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
         } else {
             receipt.dirs_created.push(dir.clone());
         }
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     }
 
     // --- placeholder files ---
     let config_yaml = serde_yaml::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
     write_once(&config_path, &config_yaml, opts.force, &mut receipt)?;
-    write_once(&vault.join("purpose.md"), PURPOSE_MD, opts.force, &mut receipt)?;
+    write_once(
+        &vault.join("purpose.md"),
+        PURPOSE_MD,
+        opts.force,
+        &mut receipt,
+    )?;
     write_once(&vault.join("index.md"), "", opts.force, &mut receipt)?;
     write_once(&vault.join("log.md"), "", opts.force, &mut receipt)?;
 
@@ -147,8 +152,7 @@ fn write_once(
         receipt.files_skipped.push(path.to_owned());
         return Ok(());
     }
-    std::fs::write(path, content)
-        .with_context(|| format!("writing {}", path.display()))?;
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
     receipt.files_created.push(path.to_owned());
     Ok(())
 }
