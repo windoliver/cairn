@@ -214,3 +214,23 @@ fn bootstrap_receipt_serializes_to_json() {
     assert!(parsed.get("files_created").is_some());
     assert!(parsed.get("files_skipped").is_some());
 }
+
+#[test]
+fn bootstrap_human_output_first_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
+    let output = cairn_cli::vault::render_human(&receipt);
+    // normalize absolute path so the snapshot is stable across machines
+    let normalized = output.replace(dir.path().to_str().unwrap(), "<vault>");
+    insta::assert_snapshot!(normalized);
+}
+
+#[test]
+fn bootstrap_human_output_second_run() {
+    let dir = tempfile::tempdir().unwrap();
+    cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
+    let receipt = cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
+    let output = cairn_cli::vault::render_human(&receipt);
+    let normalized = output.replace(dir.path().to_str().unwrap(), "<vault>");
+    insta::assert_snapshot!(normalized);
+}
