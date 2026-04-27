@@ -245,6 +245,7 @@ dependencies = [
  "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
+ "insta",
  "rmcp",
  "serde",
  "serde_json",
