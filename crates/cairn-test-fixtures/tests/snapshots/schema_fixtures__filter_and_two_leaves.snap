@@ -1,0 +1,18 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&f"
+---
+{
+  "and": [
+    {
+      "field": "visibility",
+      "op": "eq",
+      "value": "private"
+    },
+    {
+      "field": "salience",
+      "op": "gte",
+      "value": 0.5
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&a"
+---
+{
+  "citations": "compact",
+  "filters": {
+    "and": [
+      {
+        "field": "kind",
+        "op": "eq",
+        "value": "user"
+      },
+      {
+        "field": "visibility",
+        "op": "eq",
+        "value": "private"
+      }
+    ]
+  },
+  "limit": 10,
+  "mode": "keyword",
+  "query": "dark mode vim keybindings"
+}

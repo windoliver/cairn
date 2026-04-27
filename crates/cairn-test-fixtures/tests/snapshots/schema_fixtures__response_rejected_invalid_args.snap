@@ -1,0 +1,19 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&r"
+---
+{
+  "contract": "cairn.mcp.v1",
+  "error": {
+    "code": "InvalidArgs",
+    "data": {
+      "field": "query",
+      "reason": "must not be empty"
+    },
+    "message": "query must not be empty"
+  },
+  "operation_id": "01HQZX9F5N0000000000000007",
+  "policy_trace": [],
+  "status": "rejected",
+  "verb": "search"
+}

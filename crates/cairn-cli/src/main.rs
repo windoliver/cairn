@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+use cairn_cli::config as cli_config;
 use cairn_cli::{plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
@@ -36,6 +37,19 @@ fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
+        .subcommand(bootstrap_subcommand())
+}
+
+fn bootstrap_subcommand() -> clap::Command {
+    clap::Command::new("bootstrap")
+        .about("Write a default .cairn/config.yaml to a vault directory")
+        .arg(
+            clap::Arg::new("vault-path")
+                .long("vault-path")
+                .default_value(".")
+                .value_name("PATH")
+                .help("Vault root directory (default: current directory)"),
+        )
 }
 
 fn plugins_subcommand() -> clap::Command {
@@ -96,11 +110,35 @@ fn main() -> ExitCode {
         Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
+        Some(("bootstrap", sub)) => run_bootstrap(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
             eprintln!("cairn: unknown subcommand '{verb}'");
             ExitCode::from(64)
+        }
+    }
+}
+
+fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
+    let vault_path = std::path::PathBuf::from(
+        matches
+            .get_one::<String>("vault-path")
+            .expect("vault-path has a default value"),
+    );
+
+    match cli_config::write_default(&vault_path) {
+        Ok(()) => {
+            println!(
+                "cairn bootstrap: wrote default config to {}",
+                vault_path.join(".cairn/config.yaml").display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // EX_CONFIG (78) — bad config or file already exists
+            eprintln!("cairn bootstrap: {e:#}");
+            ExitCode::from(78)
         }
     }
 }

@@ -1,0 +1,22 @@
+{
+  "contract": "cairn.mcp.v1",
+  "data": {
+    "hits": [
+      {
+        "record_id": "01HQZX9F5N0000000000000000",
+        "score": 0.92,
+        "trust": "unverified",
+        "snippet": "user prefers dark mode and vim keybindings"
+      }
+    ]
+  },
+  "operation_id": "01HQZX9F5N0000000000000006",
+  "policy_trace": [
+    {
+      "gate": "consent.check",
+      "result": "pass"
+    }
+  ],
+  "status": "committed",
+  "verb": "search"
+}

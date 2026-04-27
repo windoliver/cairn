@@ -1,0 +1,22 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&si"
+---
+{
+  "chain_parents": [],
+  "expires_at": "2026-04-26T01:00:00Z",
+  "issued_at": "2026-04-26T00:00:00Z",
+  "issuer": "usr:tafeng",
+  "key_version": 1,
+  "nonce": "AAAAAAAAAAAAAAAAAAAAAA==",
+  "operation_id": "01HQZX9F5N0000000000000000",
+  "scope": {
+    "entity": "cairn",
+    "tenant": "acme",
+    "tier": "project",
+    "workspace": "main"
+  },
+  "sequence": 1,
+  "signature": "ed25519:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "target_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

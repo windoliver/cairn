@@ -1,0 +1,87 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&c"
+---
+{
+  "vault": {
+    "name": "my-vault",
+    "tier": "local",
+    "layout": {
+      "sources": "sources",
+      "records": "raw",
+      "wiki": "wiki",
+      "skills": "skills",
+      "enabled_kinds": [
+        "user",
+        "feedback",
+        "fact",
+        "rule"
+      ],
+      "file_naming": "{kind}_{slug}.md",
+      "index": {
+        "max_lines": 200,
+        "max_bytes": 25600
+      }
+    },
+    "hot_memory": {
+      "recipe": [
+        "purpose",
+        "index",
+        "pinned_feedback"
+      ],
+      "max_bytes": 8192
+    },
+    "retention": {
+      "raw/sensor_observation_*.md": "7d",
+      "raw/trace_*.md": "30d"
+    },
+    "schema_files": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      "GEMINI.md"
+    ]
+  },
+  "store": {
+    "kind": "custom:cairn-store-qdrant"
+  },
+  "llm": {
+    "provider": null,
+    "base_url": null,
+    "model": null,
+    "api_key": null
+  },
+  "sensors": {
+    "hooks": {
+      "enabled": true
+    },
+    "ide": {
+      "enabled": true
+    },
+    "screen": {
+      "enabled": false
+    },
+    "slack": {
+      "enabled": false,
+      "scope": []
+    }
+  },
+  "workflows": {
+    "orchestrator": "local"
+  },
+  "pipeline": {
+    "extract": {
+      "chain": [
+        {
+          "worker": "regex",
+          "kinds": [],
+          "trigger": null,
+          "budget": {
+            "max_tokens": null,
+            "max_wall_ms": null,
+            "max_turns": null
+          }
+        }
+      ]
+    }
+  }
+}

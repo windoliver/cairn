@@ -31,3 +31,9 @@ pub fn fixtures_dir() -> &'static Path {
     })
     .as_path()
 }
+
+/// Absolute path to the versioned P0 fixture directory (`fixtures/v0/`).
+#[must_use]
+pub fn fixture_v0_dir() -> std::path::PathBuf {
+    fixtures_dir().join("v0")
+}
