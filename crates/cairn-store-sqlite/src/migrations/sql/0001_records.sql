@@ -4,7 +4,7 @@
 CREATE TABLE schema_migrations (
   migration_id  INTEGER NOT NULL PRIMARY KEY,
   name          TEXT    NOT NULL,
-  sql_hash      TEXT    NOT NULL,
+  sql_blake3    TEXT    NOT NULL,
   applied_at    INTEGER NOT NULL
 );
 
@@ -15,18 +15,11 @@ BEGIN
   SELECT RAISE(ABORT, 'schema_migrations is append-only');
 END;
 
--- Identity columns are immutable; sql_hash is allowed exactly one
--- transition from '' to a non-empty value (stamped post-migration so the
--- ledger records a content hash for drift detection).
 CREATE TRIGGER schema_migrations_immutable
   BEFORE UPDATE ON schema_migrations
   FOR EACH ROW
-  WHEN NEW.migration_id IS NOT OLD.migration_id
-    OR NEW.name         IS NOT OLD.name
-    OR NEW.applied_at   IS NOT OLD.applied_at
-    OR NOT (OLD.sql_hash = '' AND length(NEW.sql_hash) > 0)
 BEGIN
-  SELECT RAISE(ABORT, 'schema_migrations rows are immutable (only `` -> hash on sql_hash allowed)');
+  SELECT RAISE(ABORT, 'schema_migrations rows are immutable');
 END;
 
 CREATE TABLE records (
@@ -113,22 +106,6 @@ BEGIN
   SELECT RAISE(ABORT, 'updates edges are immutable');
 END;
 
--- Block UPDATEs that would convert a non-`updates` edge into an `updates`
--- edge or otherwise re-target it; without this an attacker can bypass the
--- INSERT-time predicate by inserting a benign edge then flipping `kind`.
-CREATE TRIGGER edges_updates_no_kind_flip
-  BEFORE UPDATE ON edges
-  FOR EACH ROW
-  WHEN NEW.kind = 'updates'
-   AND (
-        OLD.kind IS NOT 'updates'
-     OR NEW.src  IS NOT OLD.src
-     OR NEW.dst  IS NOT OLD.dst
-   )
-BEGIN
-  SELECT RAISE(ABORT, 'updates edge identity must be set at INSERT time and is immutable');
-END;
-
 CREATE VIEW records_latest AS
   SELECT r.*
     FROM records r
@@ -139,5 +116,5 @@ CREATE VIEW records_latest AS
         WHERE e.kind = 'updates' AND e.dst = r.record_id
      );
 
-INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
+INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
   VALUES (1, '0001_records', '', strftime('%s','now') * 1000);

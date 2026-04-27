@@ -111,5 +111,5 @@ BEGIN
   SELECT RAISE(ABORT, 'issuer_seq.high_water must equal MAX(used.sequence) for the issuer');
 END;
 
-INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
+INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
   VALUES (3, '0003_replay', '', strftime('%s','now') * 1000);

@@ -146,5 +146,5 @@ BEGIN
   SELECT RAISE(ABORT, 'reader_fence rows can only be deleted after the linked op terminates');
 END;
 
-INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
+INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
   VALUES (4, '0004_locks', '', strftime('%s','now') * 1000);
