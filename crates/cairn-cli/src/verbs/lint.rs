@@ -33,10 +33,7 @@ pub async fn fix_markdown_handler(
     vault_root: &Path,
 ) -> anyhow::Result<FixMarkdownResult> {
     let projector = MarkdownProjector;
-    let records = store
-        .list_active()
-        .await
-        .context("store: list_active")?;
+    let records = store.list_active().await.context("store: list_active")?;
     let mut written = Vec::new();
     let mut already_current: usize = 0;
 
@@ -47,12 +44,7 @@ pub async fn fix_markdown_handler(
         let needs_write = match tokio::fs::read_to_string(&abs_path).await {
             Ok(existing) => existing != projected.content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "cannot read {}: {e}",
-                    abs_path.display()
-                ))
-            }
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", abs_path.display())),
         };
 
         if needs_write {
@@ -70,7 +62,10 @@ pub async fn fix_markdown_handler(
         }
     }
 
-    Ok(FixMarkdownResult { written, already_current })
+    Ok(FixMarkdownResult {
+        written,
+        already_current,
+    })
 }
 
 /// Run `cairn lint`.
@@ -128,7 +123,10 @@ mod tests {
 
     #[test]
     fn fix_markdown_result_empty() {
-        let result = FixMarkdownResult { written: vec![], already_current: 0 };
+        let result = FixMarkdownResult {
+            written: vec![],
+            already_current: 0,
+        };
         assert!(result.written.is_empty());
         assert_eq!(result.already_current, 0);
     }
@@ -142,13 +140,17 @@ mod tests {
         store.upsert(record).await.unwrap();
 
         let vault_root = tempfile::tempdir().unwrap();
-        let result = fix_markdown_handler(&store, vault_root.path()).await.unwrap();
+        let result = fix_markdown_handler(&store, vault_root.path())
+            .await
+            .unwrap();
 
         assert_eq!(result.written.len(), 1);
         assert_eq!(result.already_current, 0);
 
         // Running again should report already_current=1, written=0
-        let result2 = fix_markdown_handler(&store, vault_root.path()).await.unwrap();
+        let result2 = fix_markdown_handler(&store, vault_root.path())
+            .await
+            .unwrap();
         assert_eq!(result2.written.len(), 0);
         assert_eq!(result2.already_current, 1);
     }

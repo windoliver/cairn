@@ -594,13 +594,30 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             self.range
         }
-        async fn get(&self, _: &str) -> Result<Option<crate::contract::memory_store::StoredRecord>, crate::contract::memory_store::StoreError> {
+        async fn get(
+            &self,
+            _: &str,
+        ) -> Result<
+            Option<crate::contract::memory_store::StoredRecord>,
+            crate::contract::memory_store::StoreError,
+        > {
             Err(crate::contract::memory_store::StoreError::Unimplemented)
         }
-        async fn upsert(&self, _: crate::domain::record::MemoryRecord) -> Result<crate::contract::memory_store::StoredRecord, crate::contract::memory_store::StoreError> {
+        async fn upsert(
+            &self,
+            _: crate::domain::record::MemoryRecord,
+        ) -> Result<
+            crate::contract::memory_store::StoredRecord,
+            crate::contract::memory_store::StoreError,
+        > {
             Err(crate::contract::memory_store::StoreError::Unimplemented)
         }
-        async fn list_active(&self) -> Result<Vec<crate::contract::memory_store::StoredRecord>, crate::contract::memory_store::StoreError> {
+        async fn list_active(
+            &self,
+        ) -> Result<
+            Vec<crate::contract::memory_store::StoredRecord>,
+            crate::contract::memory_store::StoreError,
+        > {
             Err(crate::contract::memory_store::StoreError::Unimplemented)
         }
     }

@@ -148,12 +148,12 @@ impl MarkdownProjector {
 
         let body = body_raw.trim_start_matches('\n').to_owned();
 
-        let val: serde_yaml::Value = serde_yaml::from_str(yaml_part)
-            .map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
+        let val: serde_yaml::Value =
+            serde_yaml::from_str(yaml_part).map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
 
-        let map = val
-            .as_mapping()
-            .ok_or_else(|| ResyncError::ParseFailed("frontmatter must be a YAML mapping".to_owned()))?;
+        let map = val.as_mapping().ok_or_else(|| {
+            ResyncError::ParseFailed("frontmatter must be a YAML mapping".to_owned())
+        })?;
 
         let target_id = map
             .get("id")
@@ -285,7 +285,10 @@ mod tests {
     use crate::domain::record::tests::sample_record;
 
     fn stored(version: u32) -> StoredRecord {
-        StoredRecord { record: sample_record(), version }
+        StoredRecord {
+            record: sample_record(),
+            version,
+        }
     }
 
     #[test]
@@ -297,7 +300,11 @@ mod tests {
     #[test]
     fn project_starts_with_yaml_fence() {
         let pf = MarkdownProjector.project(&stored(1));
-        assert!(pf.content.starts_with("---\n"), "content: {:?}", &pf.content[..40.min(pf.content.len())]);
+        assert!(
+            pf.content.starts_with("---\n"),
+            "content: {:?}",
+            &pf.content[..40.min(pf.content.len())]
+        );
     }
 
     #[test]
@@ -349,7 +356,8 @@ mod tests {
 
     #[test]
     fn parse_missing_id_returns_error() {
-        let content = "---\nversion: 1\nkind: user\nclass: semantic\nvisibility: private\n---\n\nbody";
+        let content =
+            "---\nversion: 1\nkind: user\nclass: semantic\nvisibility: private\n---\n\nbody";
         let err = MarkdownProjector.parse(content).unwrap_err();
         assert!(matches!(err, ResyncError::MissingId));
     }
@@ -401,7 +409,11 @@ mod tests {
         let outcome = proj.check_conflict(&parsed, Some(&stored_v5));
         assert!(matches!(
             outcome,
-            ConflictOutcome::Conflict { file_version: 3, store_version: 5, .. }
+            ConflictOutcome::Conflict {
+                file_version: 3,
+                store_version: 5,
+                ..
+            }
         ));
     }
 
@@ -416,7 +428,11 @@ mod tests {
         let outcome = proj.check_conflict(&parsed, Some(&stored_v2));
         assert!(matches!(
             outcome,
-            ConflictOutcome::Conflict { file_version: 5, store_version: 2, .. }
+            ConflictOutcome::Conflict {
+                file_version: 5,
+                store_version: 2,
+                ..
+            }
         ));
     }
 

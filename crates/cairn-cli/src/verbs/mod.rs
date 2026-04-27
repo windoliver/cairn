@@ -37,9 +37,7 @@ pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
         clap::Arg::new("fix-markdown")
             .long("fix-markdown")
             .action(clap::ArgAction::SetTrue)
-            .help(
-                "Regenerate missing or stale markdown projections for all active records",
-            ),
+            .help("Regenerate missing or stale markdown projections for all active records"),
     )
 }
 

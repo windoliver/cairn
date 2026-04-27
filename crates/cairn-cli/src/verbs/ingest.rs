@@ -74,10 +74,7 @@ pub async fn resync_handler(
         _ => anyhow::anyhow!("ingest --resync: {e:?}"),
     })?;
 
-    let current = store
-        .get(&parsed.target_id)
-        .await
-        .context("store: get")?;
+    let current = store.get(&parsed.target_id).await.context("store: get")?;
 
     let outcome = projector.check_conflict(&parsed, current.as_ref());
 
@@ -116,14 +113,16 @@ pub async fn resync_handler(
                 })
             }
         }
-        ConflictOutcome::Conflict { ref marker, file_version, store_version } => {
+        ConflictOutcome::Conflict {
+            ref marker,
+            file_version,
+            store_version,
+        } => {
             // Write a quarantine file so the editor's changes are not lost.
             let quarantine_dir = vault_root.join(".cairn/quarantine");
             tokio::fs::create_dir_all(&quarantine_dir)
                 .await
-                .with_context(|| {
-                    format!("create quarantine dir {}", quarantine_dir.display())
-                })?;
+                .with_context(|| format!("create quarantine dir {}", quarantine_dir.display()))?;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -267,13 +266,18 @@ mod tests {
         let proj = MarkdownProjector;
         let file = proj.project(&stored);
         // Append " edited" to the body so body != stored body → triggers upsert.
-        let modified_content = file.content.replace(&stored.record.body, &format!("{} edited", stored.record.body));
+        let modified_content = file.content.replace(
+            &stored.record.body,
+            &format!("{} edited", stored.record.body),
+        );
         let vault_root = tempfile::tempdir().unwrap();
         let abs_path = vault_root.path().join(&file.path);
         tokio::fs::create_dir_all(abs_path.parent().unwrap())
             .await
             .unwrap();
-        tokio::fs::write(&abs_path, &modified_content).await.unwrap();
+        tokio::fs::write(&abs_path, &modified_content)
+            .await
+            .unwrap();
 
         let result = resync_handler(&store, &abs_path, vault_root.path())
             .await
@@ -348,6 +352,9 @@ mod tests {
             .expect("quarantine dir should exist after conflict")
             .filter_map(|e| e.ok())
             .collect();
-        assert!(!entries.is_empty(), "quarantine file should have been written");
+        assert!(
+            !entries.is_empty(),
+            "quarantine file should have been written"
+        );
     }
 }

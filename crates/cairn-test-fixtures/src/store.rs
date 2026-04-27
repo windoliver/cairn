@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cairn_core::contract::memory_store::{
-    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, StoredRecord, StoreError,
+    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, StoreError, StoredRecord,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
@@ -21,12 +21,12 @@ mod sample_helpers {
     use std::collections::BTreeMap;
 
     use cairn_core::contract::memory_store::StoredRecord;
+    use cairn_core::domain::EvidenceVector;
+    use cairn_core::domain::record::{Ed25519Signature, MemoryRecord, RecordId};
+    use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
     use cairn_core::domain::{
         ActorChainEntry, ChainRole, Identity, Provenance, Rfc3339Timestamp, ScopeTuple,
     };
-    use cairn_core::domain::record::{Ed25519Signature, MemoryRecord, RecordId};
-    use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
-    use cairn_core::domain::EvidenceVector;
 
     /// Returns a deterministic [`MemoryRecord`] for use in tests.
     ///
@@ -56,8 +56,7 @@ mod sample_helpers {
                 consent_ref: "consent:01HQZ".to_owned(),
                 llm_id_if_any: None,
             },
-            updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z")
-                .expect("valid timestamp"),
+            updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid timestamp"),
             evidence: EvidenceVector::default(),
             salience: 0.5,
             confidence: 0.7,
@@ -76,7 +75,10 @@ mod sample_helpers {
     /// Returns a [`StoredRecord`] wrapping [`sample_record`] at the given version.
     #[must_use]
     pub fn sample_stored_record(version: u32) -> StoredRecord {
-        StoredRecord { record: sample_record(), version }
+        StoredRecord {
+            record: sample_record(),
+            version,
+        }
     }
 }
 
@@ -223,9 +225,11 @@ mod tests {
         let caps = store.capabilities();
         assert!(!caps.fts);
         assert!(!caps.vector);
-        assert!(store
-            .supported_contract_versions()
-            .accepts(CONTRACT_VERSION));
+        assert!(
+            store
+                .supported_contract_versions()
+                .accepts(CONTRACT_VERSION)
+        );
     }
 
     #[tokio::test]

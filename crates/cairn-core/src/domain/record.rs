@@ -704,7 +704,10 @@ pub mod tests {
     /// Returns a [`crate::contract::memory_store::StoredRecord`] wrapping [`sample_record`] at the given version.
     #[must_use]
     pub fn sample_stored_record(version: u32) -> crate::contract::memory_store::StoredRecord {
-        crate::contract::memory_store::StoredRecord { record: sample_record(), version }
+        crate::contract::memory_store::StoredRecord {
+            record: sample_record(),
+            version,
+        }
     }
 
     /// Returns a deterministic `MemoryRecord` for use in tests.
