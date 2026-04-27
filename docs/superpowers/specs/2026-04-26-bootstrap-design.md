@@ -120,7 +120,7 @@ Human output (no `--json`):
 cairn bootstrap: vault initialized at /path/to/vault
   config    /path/to/vault/.cairn/config.yaml  [created]
   db        /path/to/vault/.cairn/cairn.db  (created on first ingest)
-  dirs      14 created, 0 existing
+  dirs      19 created, 0 existing
   files     4 created, 0 skipped
 ```
 
@@ -130,7 +130,7 @@ Second run (no `--force`):
 cairn bootstrap: vault already initialized at /path/to/vault
   config    /path/to/vault/.cairn/config.yaml  [existing]
   db        /path/to/vault/.cairn/cairn.db  (created on first ingest)
-  dirs      0 created, 14 existing
+  dirs      0 created, 19 existing
   files     0 created, 4 skipped
 ```
 
