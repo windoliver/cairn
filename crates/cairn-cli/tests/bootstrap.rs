@@ -11,7 +11,6 @@ fn opts(dir: &Path) -> BootstrapOpts {
     }
 }
 
-#[allow(dead_code)]
 fn forced(dir: &Path) -> BootstrapOpts {
     BootstrapOpts {
         vault_path: dir.to_path_buf(),
@@ -60,4 +59,91 @@ fn bootstrap_receipt_counts_dirs() {
         "first run: all 19 dirs should be created"
     );
     assert_eq!(receipt.dirs_existing.len(), 0);
+}
+
+#[test]
+fn bootstrap_creates_placeholder_files() {
+    let dir = tempfile::tempdir().unwrap();
+    bootstrap(&opts(dir.path())).unwrap();
+
+    assert!(
+        dir.path().join(".cairn/config.yaml").is_file(),
+        "config.yaml missing"
+    );
+    assert!(
+        dir.path().join("purpose.md").is_file(),
+        "purpose.md missing"
+    );
+    assert!(dir.path().join("index.md").is_file(), "index.md missing");
+    assert!(dir.path().join("log.md").is_file(), "log.md missing");
+}
+
+#[test]
+fn bootstrap_receipt_counts_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
+    assert_eq!(receipt.files_created.len(), 4);
+    assert_eq!(receipt.files_skipped.len(), 0);
+}
+
+#[test]
+fn bootstrap_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // second run
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
+
+    // dirs: all existing, none created
+    assert_eq!(receipt.dirs_created.len(), 0);
+    assert_eq!(receipt.dirs_existing.len(), 19);
+
+    // files: all skipped, none created
+    assert_eq!(receipt.files_created.len(), 0);
+    assert_eq!(receipt.files_skipped.len(), 4);
+
+    // vault is still intact
+    assert!(dir.path().join(".cairn/config.yaml").is_file());
+    assert!(dir.path().join("purpose.md").is_file());
+}
+
+#[test]
+fn bootstrap_skips_user_edited_purpose() {
+    let dir = tempfile::tempdir().unwrap();
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // user edits purpose.md
+    let purpose = dir.path().join("purpose.md");
+    std::fs::write(&purpose, "# My vault\n\nPersonal knowledge base.\n").unwrap();
+
+    // second run without --force
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // user's content must survive
+    let content = std::fs::read_to_string(&purpose).unwrap();
+    assert_eq!(content, "# My vault\n\nPersonal knowledge base.\n");
+}
+
+#[test]
+fn bootstrap_force_overwrites_files() {
+    let dir = tempfile::tempdir().unwrap();
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // user edits purpose.md
+    let purpose = dir.path().join("purpose.md");
+    std::fs::write(&purpose, "# My vault\n\nPersonal knowledge base.\n").unwrap();
+
+    // --force run
+    let receipt = bootstrap(&forced(dir.path())).unwrap();
+
+    // purpose.md is overwritten with the template
+    let content = std::fs::read_to_string(&purpose).unwrap();
+    assert_eq!(
+        content,
+        "# Purpose\n\n<!-- Why does this vault exist? -->\n"
+    );
+
+    // receipt shows all 4 files created
+    assert_eq!(receipt.files_created.len(), 4);
+    assert_eq!(receipt.files_skipped.len(), 0);
 }
