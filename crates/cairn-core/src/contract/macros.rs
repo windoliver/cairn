@@ -330,3 +330,191 @@ macro_rules! __register_plugin_with_manifest_helper {
         }
     };
 }
+
+/// Emit a config-driven
+/// `register(&mut PluginRegistry, &CairnConfig) -> Result<(), PluginError>`
+/// function for plugins that require runtime configuration at construction time.
+///
+/// # Key guarantee
+///
+/// The factory closure is called **only after** the static version and identity
+/// checks pass. Callers can prove this by supplying a factory that panics — the
+/// test will not panic for an incompatible plugin.
+///
+/// # Factory type
+///
+/// The closure receives `&CairnConfig` and returns `Result<Impl, E>` for any
+/// `E: std::error::Error + Send + Sync + 'static`. The macro boxes the error
+/// into [`PluginError::FactoryError`].
+///
+/// # Examples
+///
+/// ```
+/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+/// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// use cairn_core::register_plugin_with;
+///
+/// struct ConfigStore { vault_name: String }
+///
+/// #[async_trait::async_trait]
+/// impl MemoryStore for ConfigStore {
+///     fn name(&self) -> &str { Self::NAME }
+///     fn capabilities(&self) -> &MemoryStoreCapabilities {
+///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+///             fts: false, vector: false, graph_edges: false, transactions: false,
+///         };
+///         &CAPS
+///     }
+///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+/// }
+///
+/// impl MemoryStorePlugin for ConfigStore {
+///     const NAME: &'static str = "config-store";
+///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
+///         ContractVersion::new(0, 1, 0),
+///         ContractVersion::new(0, 2, 0),
+///     );
+/// }
+///
+/// register_plugin_with!(MemoryStore, ConfigStore, "config-store", |cfg: &cairn_core::config::CairnConfig| {
+///     Ok::<_, std::convert::Infallible>(ConfigStore { vault_name: cfg.vault.name.clone() })
+/// });
+///
+/// let mut reg = cairn_core::contract::registry::PluginRegistry::new();
+/// let cfg = cairn_core::config::CairnConfig::default();
+/// register(&mut reg, &cfg).expect("config-driven plugin registers");
+/// ```
+#[macro_export]
+macro_rules! register_plugin_with {
+    (MemoryStore, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_memory_store,
+            $crate::contract::memory_store::MemoryStorePlugin,
+            "MemoryStore",
+            $crate::contract::memory_store::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (LLMProvider, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_llm_provider,
+            $crate::contract::llm_provider::LLMProviderPlugin,
+            "LLMProvider",
+            $crate::contract::llm_provider::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (WorkflowOrchestrator, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_workflow_orchestrator,
+            $crate::contract::workflow_orchestrator::WorkflowOrchestratorPlugin,
+            "WorkflowOrchestrator",
+            $crate::contract::workflow_orchestrator::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (SensorIngress, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_sensor_ingress,
+            $crate::contract::sensor_ingress::SensorIngressPlugin,
+            "SensorIngress",
+            $crate::contract::sensor_ingress::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (MCPServer, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_mcp_server,
+            $crate::contract::mcp_server::MCPServerPlugin,
+            "MCPServer",
+            $crate::contract::mcp_server::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (FrontendAdapter, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_frontend_adapter,
+            $crate::contract::frontend_adapter::FrontendAdapterPlugin,
+            "FrontendAdapter",
+            $crate::contract::frontend_adapter::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+    (AgentProvider, $impl:ty, $name:literal, $factory:expr) => {
+        $crate::__register_plugin_with_helper!(
+            register_agent_provider,
+            $crate::contract::agent_provider::AgentProviderPlugin,
+            "AgentProvider",
+            $crate::contract::agent_provider::CONTRACT_VERSION,
+            $impl,
+            $name,
+            $factory
+        );
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __register_plugin_with_helper {
+    ($method:ident, $plugin_trait:path, $contract:literal, $host_version:expr, $impl:ty, $name:literal, $factory:expr) => {
+        /// Config-driven plugin entry point.
+        ///
+        /// # Errors
+        /// Returns [`cairn_core::contract::registry::PluginError`] when the
+        /// name is invalid, the static `SUPPORTED_VERSIONS` const rejects the
+        /// host version, the static `NAME` const disagrees with the registered
+        /// name, the factory closure fails, or another plugin already holds
+        /// this name.
+        pub fn register(
+            reg: &mut $crate::contract::registry::PluginRegistry,
+            cfg: &$crate::config::CairnConfig,
+        ) -> ::core::result::Result<(), $crate::contract::registry::PluginError> {
+            let name = $crate::contract::registry::PluginName::new($name)?;
+            // Static version check — factory NOT called yet.
+            let supported = <$impl as $plugin_trait>::SUPPORTED_VERSIONS;
+            let host = $host_version;
+            if !supported.accepts(host) {
+                return Err(
+                    $crate::contract::registry::PluginError::UnsupportedContractVersion {
+                        contract: $contract,
+                        plugin: name,
+                        plugin_range: supported,
+                        host,
+                    },
+                );
+            }
+            // Static identity check — factory NOT called yet.
+            let static_name = <$impl as $plugin_trait>::NAME;
+            if static_name != $name {
+                return Err(
+                    $crate::contract::registry::PluginError::IdentityMismatch {
+                        contract: $contract,
+                        registered: name,
+                        runtime: static_name.to_owned(),
+                    },
+                );
+            }
+            // All static checks passed. Call the factory.
+            let plugin: $impl = ($factory)(cfg).map_err(|e| {
+                $crate::contract::registry::PluginError::FactoryError {
+                    contract: $contract,
+                    plugin: name.clone(),
+                    source: ::std::boxed::Box::new(e),
+                }
+            })?;
+            reg.$method(name, ::std::sync::Arc::new(plugin))
+        }
+    };
+}
