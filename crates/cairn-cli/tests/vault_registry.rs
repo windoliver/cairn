@@ -417,7 +417,19 @@ mod cli_vault_list {
         let v: serde_json::Value =
             serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
         assert!(v.is_array(), "expected JSON array");
-        assert_eq!(v.as_array().unwrap().len(), 2);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        // alpha is the default in reg_with_two_vaults(); beta is not
+        assert_eq!(arr[0]["name"], "alpha");
+        assert!(
+            arr[0]["is_default"].as_bool().unwrap_or(false),
+            "alpha should be is_default=true"
+        );
+        assert_eq!(arr[1]["name"], "beta");
+        assert!(
+            !arr[1]["is_default"].as_bool().unwrap_or(true),
+            "beta should be is_default=false"
+        );
     }
 
     #[test]
@@ -436,17 +448,21 @@ mod cli_vault_list {
 
     #[test]
     fn list_human_output_snapshot() {
+        let a = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a.path().join(".cairn")).unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(b.path().join(".cairn")).unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
         let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
         let mut reg = VaultRegistry::default();
         reg.default = Some("work".into());
-        reg.vaults.push(VaultEntry::new(
+        reg.vaults.push(cairn_core::config::VaultEntry::new(
             "work",
             "/home/alice/vaults/work",
             Some("day job".into()),
             None,
         ));
-        reg.vaults.push(VaultEntry::new(
+        reg.vaults.push(cairn_core::config::VaultEntry::new(
             "personal",
             "/home/alice/vaults/personal",
             None,
@@ -454,13 +470,13 @@ mod cli_vault_list {
         ));
         store.save(&reg).unwrap();
 
-        let reg2 = store.load().unwrap();
-        let mut lines = Vec::new();
-        for v in &reg2.vaults {
-            let marker = if reg2.default.as_deref() == Some(&v.name) { "* " } else { "  " };
-            let label = v.label.as_deref().map(|l| format!("  — {l}")).unwrap_or_default();
-            lines.push(format!("{marker}{:<20} {}{}", v.name, v.path, label));
-        }
-        insta::assert_snapshot!(lines.join("\n"));
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+            .env("CAIRN_REGISTRY", reg_dir.path().join("vaults.toml").to_str().unwrap())
+            .args(["vault", "list"])
+            .output()
+            .expect("cairn vault list");
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        insta::assert_snapshot!(stdout);
     }
 }
