@@ -158,9 +158,16 @@ fn reject_symlink_ancestors(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Reads the installed IDL version from `.version`, distinguishing `NotFound`
-/// (fresh install) from permission/IO errors (fail closed).
-fn read_installed_version(version_path: &std::path::Path) -> Result<Option<String>> {
+/// Reads the installed IDL version from `.version`.
+///
+/// - `NotFound` → `Ok(None)` (fresh install, no prior Cairn install).
+/// - File exists but unparseable + `!force` → `Err` (fail closed; corrupt metadata).
+/// - File exists but unparseable + `force` → `Ok(None)` (user explicitly overrides).
+/// - Symlink → always `Err`.
+fn read_installed_version(
+    version_path: &std::path::Path,
+    force: bool,
+) -> Result<Option<String>> {
     if let Ok(meta) = std::fs::symlink_metadata(version_path)
         && meta.file_type().is_symlink()
     {
@@ -169,11 +176,22 @@ fn read_installed_version(version_path: &std::path::Path) -> Result<Option<Strin
             version_path.display()
         );
     }
-    match std::fs::read_to_string(version_path) {
-        Ok(s) => Ok(parse_idl_version(&s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow::Error::from(e)
-            .context(format!("reading installed version from {}", version_path.display()))),
+    let content = match std::fs::read_to_string(version_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(anyhow::Error::from(e)
+                .context(format!("reading installed version from {}", version_path.display())))
+        }
+    };
+    match parse_idl_version(&content) {
+        Some(v) => Ok(Some(v)),
+        None if force => Ok(None),
+        None => anyhow::bail!(
+            "{} exists but contains no parseable cairn-idl version — \
+             pass --force to overwrite it",
+            version_path.display()
+        ),
     }
 }
 
@@ -195,26 +213,27 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Reject symlinks anywhere in the target path (catches symlinked ancestors).
     reject_symlink_ancestors(target)?;
 
+    // Refuse to install into a non-empty directory that has no Cairn .version.
+    // Must run before create_dir_all so we see the pre-install state.
+    if !opts.force && target.is_dir() && !target.join(".version").exists() {
+        let is_non_empty = std::fs::read_dir(target)
+            .ok()
+            .and_then(|mut e| e.next())
+            .is_some();
+        if is_non_empty {
+            anyhow::bail!(
+                "{} exists and is non-empty but has no Cairn .version — \
+                 pass --force to install into this directory",
+                target.display()
+            );
+        }
+    }
+
     // Create target dir and examples/ subdir.
     std::fs::create_dir_all(target.join("examples"))
         .with_context(|| format!("creating {}", target.join("examples").display()))?;
 
-    let installed_version = read_installed_version(&target.join(".version"))?;
-
-    // If no .version exists but generated filenames are already present, the target
-    // is not empty and not a known Cairn install. Refuse to overwrite without --force
-    // to prevent silently clobbering unrelated files in a mistyped --target-dir.
-    if installed_version.is_none() && !opts.force {
-        for name in ["SKILL.md", "conventions.md"] {
-            if target.join(name).exists() {
-                anyhow::bail!(
-                    "{}/{name} exists but no Cairn .version was found — \
-                     pass --force to overwrite",
-                    target.display()
-                );
-            }
-        }
-    }
+    let installed_version = read_installed_version(&target.join(".version"), opts.force)?;
 
     let skip_generated = match &installed_version {
         Some(installed) if installed == current_idl_version && !opts.force => true,
@@ -249,13 +268,6 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         &mut files_created,
         &mut files_skipped,
     )?;
-    crate::vault::write_once(
-        &target.join(".version"),
-        VERSION_FILE,
-        gen_force,
-        &mut files_created,
-        &mut files_skipped,
-    )?;
 
     // Example stubs: write-once, never overwrite (user may have edited).
     let examples_dir = target.join("examples");
@@ -273,6 +285,16 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
             &mut files_skipped,
         )?;
     }
+
+    // Write .version last so a partial failure (e.g. in examples/) never
+    // leaves a version-stamped incomplete install.
+    crate::vault::write_once(
+        &target.join(".version"),
+        VERSION_FILE,
+        gen_force,
+        &mut files_created,
+        &mut files_skipped,
+    )?;
 
     let hint = registration_hint(&opts.harness, target);
 
