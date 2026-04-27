@@ -212,7 +212,7 @@ pub(crate) fn write_once(
         && meta.file_type().is_symlink()
     {
         anyhow::bail!(
-            "parent directory {} is a symlink — bootstrap will not write through it",
+            "parent directory {} is a symlink — cairn will not write through it",
             dir.display()
         );
     }
@@ -222,15 +222,15 @@ pub(crate) fn write_once(
         let ft = meta.file_type();
         if ft.is_symlink() {
             anyhow::bail!(
-                "{} is a symlink — bootstrap will not write through it",
+                "{} is a symlink — cairn will not write through it",
                 path.display()
             );
         }
         if !ft.is_file() {
             // A directory or special file at a placeholder path means the
-            // vault is in an inconsistent state; bootstrap cannot repair it.
+            // vault is in an inconsistent state; cairn cannot repair it.
             anyhow::bail!(
-                "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                "{} exists but is not a regular file — cairn cannot overwrite it",
                 path.display()
             );
         }
@@ -274,11 +274,11 @@ pub(crate) fn write_once(
                 // propagate all other outcomes (errors, NotFound, non-regular).
                 match std::fs::symlink_metadata(path) {
                     Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
-                        "{} is a symlink — bootstrap will not write through it",
+                        "{} is a symlink — cairn will not write through it",
                         path.display()
                     ),
                     Ok(m) if !m.file_type().is_file() => anyhow::bail!(
-                        "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                        "{} exists but is not a regular file — cairn cannot overwrite it",
                         path.display()
                     ),
                     Ok(_) => {
