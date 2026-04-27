@@ -12,9 +12,13 @@ pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemoryStoreCapabilities {
+    /// Whether the store supports full-text search (FTS5 or equivalent).
     pub fts: bool,
+    /// Whether the store supports vector similarity search.
     pub vector: bool,
+    /// Whether the store supports graph-edge traversal queries.
     pub graph_edges: bool,
+    /// Whether the store supports multi-statement transactions.
     pub transactions: bool,
 }
 
@@ -25,6 +29,7 @@ pub struct MemoryStoreCapabilities {
 /// checks without touching the DB row directly.
 #[derive(Debug, Clone)]
 pub struct StoredRecord {
+    /// The stored memory record.
     pub record: MemoryRecord,
     /// Monotonic version counter. `1` for a record's first write.
     pub version: u32,
@@ -34,20 +39,25 @@ pub struct StoredRecord {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StoreError {
+    /// The store has not yet implemented the requested operation.
     #[error("store not yet implemented")]
     Unimplemented,
+    /// An internal store error with a descriptive message.
     #[error("store internal error: {0}")]
     Internal(String),
 }
 
 /// Storage contract — typed CRUD over `MemoryRecord`.
 ///
-/// Brief §4 row 1. Method bodies arrive in #46 (SQLite impl);
+/// Brief §4 row 1. Method bodies arrive in #46 (`SQLite` impl);
 /// `FixtureStore` in `cairn-test-fixtures` serves tests.
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
+    /// Returns the store's human-readable name (e.g., `"sqlite"`, `"fixture"`).
     fn name(&self) -> &str;
+    /// Returns the static capability advertisement for this store instance.
     fn capabilities(&self) -> &MemoryStoreCapabilities;
+    /// Returns the range of contract versions this store implementation accepts.
     fn supported_contract_versions(&self) -> VersionRange;
 
     /// Return the active `StoredRecord` for `target_id`, or `None` if absent.
