@@ -22,7 +22,7 @@ cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "fs"] }
 figment = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }

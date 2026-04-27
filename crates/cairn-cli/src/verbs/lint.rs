@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::projection::MarkdownProjector;
 use cairn_core::generated::envelope::ResponseVerb;
@@ -11,7 +12,7 @@ use clap::ArgMatches;
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
 /// Result of a `lint --fix-markdown` run.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct FixMarkdownResult {
     /// Vault-relative paths that were written or updated.
     pub written: Vec<PathBuf>,
@@ -35,7 +36,7 @@ pub async fn fix_markdown_handler(
     let records = store
         .list_active()
         .await
-        .map_err(|e| anyhow::anyhow!("store error: {e}"))?;
+        .context("store: list_active")?;
     let mut written = Vec::new();
     let mut already_current: usize = 0;
 
@@ -43,16 +44,26 @@ pub async fn fix_markdown_handler(
         let projected = projector.project(&stored);
         let abs_path = vault_root.join(&projected.path);
 
-        let needs_write = match std::fs::read_to_string(&abs_path) {
+        let needs_write = match tokio::fs::read_to_string(&abs_path).await {
             Ok(existing) => existing != projected.content,
-            Err(_) => true, // file missing or unreadable
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "cannot read {}: {e}",
+                    abs_path.display()
+                ))
+            }
         };
 
         if needs_write {
             if let Some(parent) = abs_path.parent() {
-                std::fs::create_dir_all(parent)?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("create_dir_all {}", parent.display()))?;
             }
-            std::fs::write(&abs_path, &projected.content)?;
+            tokio::fs::write(&abs_path, &projected.content)
+                .await
+                .with_context(|| format!("write {}", abs_path.display()))?;
             written.push(projected.path);
         } else {
             already_current += 1;
@@ -120,5 +131,25 @@ mod tests {
         let result = FixMarkdownResult { written: vec![], already_current: 0 };
         assert!(result.written.is_empty());
         assert_eq!(result.already_current, 0);
+    }
+
+    #[tokio::test]
+    async fn fix_markdown_handler_writes_missing_files() {
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
+
+        let store = FixtureStore::default();
+        let record = sample_record();
+        store.upsert(record).await.unwrap();
+
+        let vault_root = tempfile::tempdir().unwrap();
+        let result = fix_markdown_handler(&store, vault_root.path()).await.unwrap();
+
+        assert_eq!(result.written.len(), 1);
+        assert_eq!(result.already_current, 0);
+
+        // Running again should report already_current=1, written=0
+        let result2 = fix_markdown_handler(&store, vault_root.path()).await.unwrap();
+        assert_eq!(result2.written.len(), 0);
+        assert_eq!(result2.already_current, 1);
     }
 }

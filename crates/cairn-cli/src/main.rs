@@ -14,21 +14,6 @@ use clap::ArgMatches;
 
 mod generated;
 
-/// Add `--fix-markdown` flag to the `lint` subcommand.
-///
-/// Augments the generated subcommand builder without touching generated files,
-/// using the same pattern as `verbs::with_json`.
-fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
-    cmd.arg(
-        clap::Arg::new("fix-markdown")
-            .long("fix-markdown")
-            .action(clap::ArgAction::SetTrue)
-            .help(
-                "Regenerate missing or stale markdown projections for all active records",
-            ),
-    )
-}
-
 fn build_command() -> clap::Command {
     clap::Command::new("cairn")
         .about("Cairn — agent memory framework (cairn.mcp.v1)")
@@ -53,7 +38,7 @@ fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(
             generated::verbs::capture_trace_subcommand(),
         ))
-        .subcommand(verbs::with_json(with_fix_markdown(
+        .subcommand(verbs::with_json(verbs::with_fix_markdown(
             generated::verbs::lint_subcommand(),
         )))
         .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))

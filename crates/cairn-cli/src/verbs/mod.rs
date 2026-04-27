@@ -26,3 +26,19 @@ pub fn with_json(cmd: clap::Command) -> clap::Command {
             .help("Emit machine-readable JSON response envelope to stdout"),
     )
 }
+
+/// Add `--fix-markdown` flag to the `lint` subcommand.
+///
+/// Augments the generated subcommand builder without touching generated files,
+/// using the same pattern as `with_json`.
+#[must_use]
+pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("fix-markdown")
+            .long("fix-markdown")
+            .action(clap::ArgAction::SetTrue)
+            .help(
+                "Regenerate missing or stale markdown projections for all active records",
+            ),
+    )
+}
