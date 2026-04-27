@@ -169,12 +169,21 @@ Verbatim from brief §3 (lines ~340-426):
   - `FOREIGN KEY (src) REFERENCES records(record_id) DEFERRABLE INITIALLY DEFERRED`
   - `FOREIGN KEY (dst) REFERENCES records(record_id) DEFERRABLE INITIALLY DEFERRED`
 
-  Both FKs are deferred so that an `upsert`'s atomic `BEGIN IMMEDIATE … COMMIT`
-  can insert the `version=N+1` records row alongside its edges in either
-  order. Without these FKs, a stray `('updates', some_record_id,
-  some_other_record_id)` row could be inserted with no real successor and
-  silently hide the target from `records_latest` — that is a read-corruption
-  hole the schema must close, not a caller-side concern.
+  Both FKs are deferred so that an `upsert`'s atomic
+  `BEGIN IMMEDIATE … COMMIT` can insert the `version=N+1` records row
+  alongside its non-`updates` edges (links, backlinks, requires,
+  provides, extends, derives) in either order — those edges only need
+  the FK to resolve by commit. **`updates` edges are the exception:**
+  the supersede invariant must check src/dst liveness at edge-INSERT
+  time (see triggers below), so the storage impl must INSERT the
+  records row before any `updates` edge that references it. That is a
+  caller-side contract, not a deferred-FK guarantee.
+
+  Without these FKs, a stray `('updates', some_record_id,
+  some_other_record_id)` row could be inserted with no real successor
+  and silently hide the target from `records_latest` — that is a
+  read-corruption hole the schema must close, not a caller-side
+  concern.
 
 - `edges` integrity triggers — three triggers cover insert, update,
   and the bypass-via-mutation case:
@@ -185,10 +194,12 @@ Verbatim from brief §3 (lines ~340-426):
     `active = 1` and `tombstoned = 0`, and the src row's `target_id`
     differs from the dst row's `target_id` (an `updates` edge is
     fact-supersession across distinct target_ids per brief §3 line
-    ~409). Requiring a live source at insertion time means a
-    just-inserted edge is meaningful at write time; subsequent
-    src-tombstoning is handled by `records_latest` excluding edges
-    from dead sources at read time.
+    ~409). Because this check runs at INSERT time (SQLite has no
+    deferred triggers), callers must INSERT the new records row
+    before any `updates` edge that references it — see the edges
+    description above for the contract. Subsequent src-tombstoning
+    is handled by `records_latest` excluding edges from dead sources
+    at read time.
   - `edges_updates_supersede_update` — same predicate, but
     `BEFORE UPDATE ON edges WHEN NEW.kind = 'updates'`. Closes the
     `UPDATE edges SET kind = 'updates' WHERE …` bypass.
@@ -268,6 +279,20 @@ END;
 -- principal, target_hash, scope_json, plan_ref, expires_at, signature,
 -- issued_at) are immutable. This closes "operator UPDATEs target_hash
 -- mid-op" and similar control-plane integrity holes.
+-- The WAL is the authoritative linearization + audit ledger. Block
+-- DELETE so terminal-state cleanup cannot erase recovery / replay
+-- history. Cascading deletes (wal_steps and wal_op_deps both have
+-- ON DELETE CASCADE on operation_id) make a single DELETE
+-- catastrophic without this guard. Archival, when needed, must move
+-- rows to a separate audit table with its own retention policy, not
+-- erase the ledger.
+CREATE TRIGGER wal_ops_no_delete
+  BEFORE DELETE ON wal_ops
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_ops is append-only; DELETE not permitted');
+END;
+
 CREATE TRIGGER wal_ops_envelope_immutable
   BEFORE UPDATE ON wal_ops
   FOR EACH ROW
@@ -896,7 +921,7 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
     `wal_ops_issued_seq_must_advance`, `wal_ops_envelope_immutable`,
-    `wal_steps_identity_immutable`,
+    `wal_ops_no_delete`, `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `used_sequence_must_advance`, `used_advance_high_water`,
     `used_immutable`, `used_no_delete`,
@@ -1047,6 +1072,18 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   Insert a wal_ops + used row with `(issuer='alice', sequence=42)`;
   confirm `issuer_seq` now has `(alice, 42)` (auto-populated by the
   AFTER INSERT trigger on `used`, which is the legitimate path).
+- `wal_ops_delete_blocked` — insert a `wal_ops` row in COMMITTED
+  state; attempt `DELETE FROM wal_ops WHERE operation_id = '…'`;
+  expect ABORT via `wal_ops_no_delete`. Confirm child rows in
+  `wal_steps` and `wal_op_deps` are still present (the cascade never
+  fired because the parent delete was rejected).
+- `updates_edge_records_first_contract` — within one
+  `BEGIN IMMEDIATE … COMMIT`, attempt `INSERT INTO edges (..., kind =
+  'updates')` BEFORE inserting the `records` row referenced by
+  `NEW.src`; expect ABORT via `edges_updates_supersede_insert`. Then
+  retry with records-first ordering inside the same transaction
+  pattern; expect success. Documents the records-before-edges contract
+  for `updates` edges.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
