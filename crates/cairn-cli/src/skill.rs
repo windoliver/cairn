@@ -225,6 +225,48 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     })
 }
 
+/// Renders a human-readable summary of an install receipt.
+#[must_use]
+pub fn render_human(receipt: &InstallReceipt) -> String {
+    let header = if receipt.files_created.is_empty() && receipt.files_skipped.is_empty() {
+        format!(
+            "cairn skill install: nothing to do at {}",
+            receipt.target_dir.display()
+        )
+    } else if receipt.files_created.is_empty() {
+        format!(
+            "cairn skill install: already up to date at {} (v{})\n  (pass --force to overwrite generated files)",
+            receipt.target_dir.display(),
+            receipt.idl_version,
+        )
+    } else {
+        format!(
+            "cairn skill install: skill bundle installed at {}",
+            receipt.target_dir.display()
+        )
+    };
+
+    let mut lines = vec![header];
+    for path in &receipt.files_created {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        lines.push(format!("  {name}  [created]"));
+    }
+    for path in &receipt.files_skipped {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        lines.push(format!("  {name}  [skipped]"));
+    }
+
+    if !receipt.registration_hint.is_empty() {
+        lines.push(String::new());
+        lines.push("Registration hint:".to_owned());
+        for hint_line in receipt.registration_hint.lines() {
+            lines.push(format!("  {hint_line}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,6 +528,59 @@ mod tests {
     }
 
     // Task 9: symlink rejection test
+
+    // Task 10: render_human snapshot tests
+
+    #[test]
+    fn render_human_snapshot_fresh_install() {
+        let receipt = InstallReceipt {
+            target_dir: PathBuf::from("/home/user/.cairn/skills/cairn"),
+            contract_version: "cairn.mcp.v1".to_owned(),
+            idl_version: "0.0.1".to_owned(),
+            files_created: vec![
+                PathBuf::from("/home/user/.cairn/skills/cairn/SKILL.md"),
+                PathBuf::from("/home/user/.cairn/skills/cairn/conventions.md"),
+                PathBuf::from("/home/user/.cairn/skills/cairn/.version"),
+                PathBuf::from("/home/user/.cairn/skills/cairn/examples/01-remember-preference.md"),
+            ],
+            files_skipped: vec![],
+            registration_hint: "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md"
+                .to_owned(),
+        };
+        insta::assert_snapshot!(render_human(&receipt));
+    }
+
+    #[test]
+    fn render_human_snapshot_already_installed() {
+        let receipt = InstallReceipt {
+            target_dir: PathBuf::from("/home/user/.cairn/skills/cairn"),
+            contract_version: "cairn.mcp.v1".to_owned(),
+            idl_version: "0.0.1".to_owned(),
+            files_created: vec![],
+            files_skipped: vec![
+                PathBuf::from("/home/user/.cairn/skills/cairn/SKILL.md"),
+                PathBuf::from("/home/user/.cairn/skills/cairn/conventions.md"),
+                PathBuf::from("/home/user/.cairn/skills/cairn/.version"),
+            ],
+            registration_hint: "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md"
+                .to_owned(),
+        };
+        insta::assert_snapshot!(render_human(&receipt));
+    }
+
+    #[test]
+    fn receipt_json_snapshot() {
+        let receipt = InstallReceipt {
+            target_dir: PathBuf::from("/home/user/.cairn/skills/cairn"),
+            contract_version: "cairn.mcp.v1".to_owned(),
+            idl_version: "0.0.1".to_owned(),
+            files_created: vec![PathBuf::from("/home/user/.cairn/skills/cairn/SKILL.md")],
+            files_skipped: vec![],
+            registration_hint: "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md"
+                .to_owned(),
+        };
+        insta::assert_json_snapshot!(receipt);
+    }
 
     #[test]
     #[cfg(unix)]
