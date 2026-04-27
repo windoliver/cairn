@@ -187,7 +187,14 @@ fn create_dir_checked(path: &std::path::Path) -> Result<()> {
         depth += 1;
         match std::fs::create_dir(&check) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // AlreadyExists only succeeds if the entry is a real directory;
+                // a regular file at this path would cause later writes to fail
+                // mid-install, leaving a partial install without .version.
+                if !std::fs::metadata(&check).is_ok_and(|m| m.is_dir()) {
+                    anyhow::bail!("{} exists but is not a directory", check.display());
+                }
+            }
             Err(e) => {
                 return Err(anyhow::Error::from(e)
                     .context(format!("creating directory {}", check.display())))
@@ -238,9 +245,8 @@ fn read_installed_version(
                 .context(format!("reading installed version from {}", version_path.display())))
         }
     };
-    let has_contract = content
-        .lines()
-        .any(|l| l.starts_with("contract: cairn.mcp.v1"));
+    // Exact match required: "contract: cairn.mcp.v1-extra" must not pass.
+    let has_contract = content.lines().any(|l| l == "contract: cairn.mcp.v1");
     let idl_version = parse_idl_version(&content);
     match (has_contract, idl_version) {
         (true, Some(v)) => Ok(Some(v)),
@@ -277,6 +283,17 @@ fn check_no_foreign_content(dir: &std::path::Path) -> Result<()> {
                  pass --force to install into this directory",
                 dir.display()
             );
+        }
+        // `examples` must be a real directory; a regular file there would cause
+        // writes to fail mid-install after generated files are already written.
+        if name == "examples" {
+            let path = dir.join("examples");
+            if !std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+                anyhow::bail!(
+                    "{} exists but is not a directory — pass --force to overwrite",
+                    path.display()
+                );
+            }
         }
         // Byte-compare generated files against the embedded artifacts.
         // A file with different content is not Cairn-produced and must not
