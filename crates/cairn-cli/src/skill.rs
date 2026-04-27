@@ -1,7 +1,9 @@
 //! `cairn skill install` — writes the Cairn skill bundle to the harness skill
 //! directory (§8.0.a-bis, §18.d).
 
+use anyhow::Result;
 use clap::ValueEnum;
+use std::path::PathBuf;
 
 /// Supported harnesses for `cairn skill install`.
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
@@ -34,6 +36,63 @@ pub fn registration_hint(harness: &Harness) -> &'static str {
         Harness::Cursor => "# Add to your .cursorrules:\n@~/.cairn/skills/cairn/SKILL.md",
         Harness::Custom => "# Skill bundle written. Register it with your harness manually.",
     }
+}
+
+// Embedded at compile time from the committed generated artifacts.
+// The CI `--check` gate catches drift between these and what cairn-codegen emits.
+#[allow(dead_code)] // used in install() (Task 6)
+const SKILL_MD: &str = include_str!("../../../skills/cairn/SKILL.md");
+#[allow(dead_code)] // used in install() (Task 6)
+const CONVENTIONS_MD: &str = include_str!("../../../skills/cairn/conventions.md");
+#[allow(dead_code)] // used in install() (Task 6)
+const VERSION_FILE: &str = include_str!("../../../skills/cairn/.version");
+
+// Static example stubs — written once on install; user may edit after.
+#[allow(dead_code)] // used in install() (Task 6)
+const EXAMPLE_01: &str = include_str!("../../../skills/cairn/examples/01-remember-preference.md");
+#[allow(dead_code)] // used in install() (Task 6)
+const EXAMPLE_02: &str = include_str!("../../../skills/cairn/examples/02-forget-something.md");
+#[allow(dead_code)] // used in install() (Task 6)
+const EXAMPLE_03: &str = include_str!("../../../skills/cairn/examples/03-search-prior-decision.md");
+#[allow(dead_code)] // used in install() (Task 6)
+const EXAMPLE_04: &str = include_str!("../../../skills/cairn/examples/04-skillify-this.md");
+
+/// Options for [`install`].
+#[derive(Debug, Clone)]
+pub struct InstallOpts {
+    /// Target directory. Default: `~/.cairn/skills/cairn/`.
+    pub target_dir: PathBuf,
+    /// Which harness to generate the registration hint for.
+    pub harness: Harness,
+    /// If `true`, overwrite generated files even if the version matches.
+    pub force: bool,
+}
+
+/// Result of a skill install run.
+#[derive(Debug, serde::Serialize)]
+pub struct InstallReceipt {
+    /// The directory where the skill was installed.
+    pub target_dir: PathBuf,
+    /// Version string from the contract (cairn-idl crate version).
+    pub contract_version: String,
+    /// Version string from the IDL / SKILL.md.
+    pub idl_version: String,
+    /// Paths to files created during the install.
+    pub files_created: Vec<PathBuf>,
+    /// Paths to files skipped (already present, version match).
+    pub files_skipped: Vec<PathBuf>,
+    /// Harness-specific registration hint for the user.
+    pub registration_hint: String,
+}
+
+/// Resolves the default install directory (`~/.cairn/skills/cairn/`).
+///
+/// # Errors
+/// Returns an error if `HOME` is not set in the environment.
+pub fn default_target_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .map_err(|_| anyhow::anyhow!("HOME environment variable is not set"))?;
+    Ok(PathBuf::from(home).join(".cairn/skills/cairn"))
 }
 
 #[cfg(test)]
