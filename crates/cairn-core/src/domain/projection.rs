@@ -86,12 +86,12 @@ struct FrontmatterDoc<'a> {
 
 impl MarkdownProjector {
     /// Render a `StoredRecord` to a markdown file.
-    pub fn project(&self, stored: &StoredRecord) -> ProjectedFile {
+    pub fn project(&self, _stored: &StoredRecord) -> ProjectedFile {
         todo!("Task 3")
     }
 
     /// Parse a projected markdown file's content.
-    pub fn parse(&self, content: &str) -> Result<ParsedProjection, ResyncError> {
+    pub fn parse(&self, _content: &str) -> Result<ParsedProjection, ResyncError> {
         todo!("Task 4")
     }
 
@@ -102,8 +102,8 @@ impl MarkdownProjector {
     /// and immutable field mutations.
     pub fn check_conflict(
         &self,
-        parsed: &ParsedProjection,
-        current: Option<&StoredRecord>,
+        _parsed: &ParsedProjection,
+        _current: Option<&StoredRecord>,
     ) -> ConflictOutcome {
         todo!("Task 5")
     }
