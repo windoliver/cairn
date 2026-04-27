@@ -45,7 +45,8 @@ const SKILL_MD: &str = include_str!("../../../skills/cairn/SKILL.md");
 const CONVENTIONS_MD: &str = include_str!("../../../skills/cairn/conventions.md");
 const VERSION_FILE: &str = include_str!("../../../skills/cairn/.version");
 
-// Static example stubs — written once on install; user may edit after.
+// Example stubs — codegen owns the source-of-truth copy in skills/cairn/examples/;
+// installed copies are written once and user-editable afterwards.
 const EXAMPLE_01: &str = include_str!("../../../skills/cairn/examples/01-remember-preference.md");
 const EXAMPLE_02: &str = include_str!("../../../skills/cairn/examples/02-forget-something.md");
 const EXAMPLE_03: &str = include_str!("../../../skills/cairn/examples/03-search-prior-decision.md");
