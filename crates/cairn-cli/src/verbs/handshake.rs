@@ -1,32 +1,50 @@
-//! `cairn handshake` handler — P0 stub.
+//! `cairn handshake` handler — fresh challenge mint (§8.0.a).
 //!
-//! Challenge authentication requires persisting the issued nonce into
-//! `outstanding_challenges` so the server can consume it as a single-use
-//! token on the signed intent path. That storage lands in issue #9.
+//! Emits a typed `HandshakeResponse` conforming to the generated handshake
+//! schema. Every call produces a unique nonce (§8.0.a point d).
 //!
-//! Emitting an ephemeral challenge that can never be validated server-side
-//! would mislead callers into believing challenge-auth is available, so this
-//! handler returns `Internal aborted` until the store is wired.
+//! **P0 caveat:** The issued nonce is ephemeral — it is NOT persisted into
+//! `outstanding_challenges` and cannot be consumed server-side. Challenge-mode
+//! signed intents will therefore be rejected until the store is wired in #9.
+//! Callers should not rely on challenge authentication in this build.
 
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::envelope::{emit_json, human_error, new_operation_id};
+use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
 
-/// Run `cairn handshake`. Exits 1 until challenge storage is wired (issue #9).
+use super::envelope::{emit_json, new_nonce};
+
+const CHALLENGE_TTL_MS: u64 = 60_000;
+
+/// Run `cairn handshake`. Exits 0 with a typed `HandshakeResponse`.
 #[must_use]
 pub fn run(json: bool) -> ExitCode {
-    let op = new_operation_id();
-    let msg = "challenge storage not wired in P0 — handshake authentication lands in #9";
+    let nonce = new_nonce();
+    #[allow(clippy::cast_possible_truncation)]
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("invariant: system clock is after Unix epoch")
+        .as_millis() as u64;
+    let expires_at = now_ms + CHALLENGE_TTL_MS;
+
+    let resp = HandshakeResponse {
+        contract: "cairn.mcp.v1".to_owned(),
+        challenge: HandshakeResponseChallenge {
+            nonce: nonce.clone(),
+            expires_at,
+        },
+    };
+
     if json {
-        emit_json(&serde_json::json!({
-            "contract": "cairn.mcp.v1",
-            "status": "aborted",
-            "error": { "code": "Internal", "message": msg },
-            "operation_id": op.0,
-            "policy_trace": [],
-        }));
+        emit_json(&resp);
     } else {
-        human_error("handshake", "Internal", msg, &op);
+        println!("contract:   {}", resp.contract);
+        println!("nonce:      {}", nonce.0);
+        println!(
+            "expires_at: {} (epoch-ms, TTL 60 s, P0: challenge not persisted)",
+            resp.challenge.expires_at
+        );
     }
-    ExitCode::FAILURE
+    ExitCode::SUCCESS
 }

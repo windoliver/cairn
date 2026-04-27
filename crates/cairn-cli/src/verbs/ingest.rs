@@ -33,7 +33,8 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     let _body_resolved: Option<String> = if let Some(src) = sub.get_one::<String>("source") {
         if src == "-" {
             let mut buf = String::new();
-            if std::io::stdin().read_to_string(&mut buf).is_err() {
+            // Cap at 4 MiB to avoid unbounded allocation in the stubbed path.
+            if std::io::stdin().take(4 * 1024 * 1024).read_to_string(&mut buf).is_err() {
                 let r = unimplemented_response(ResponseVerb::Ingest);
                 if json {
                     emit_json(&r);

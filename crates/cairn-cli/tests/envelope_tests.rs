@@ -33,11 +33,6 @@ fn assert_aborted_internal(verb_args: &[&str]) {
 }
 
 #[test]
-fn handshake_returns_aborted_internal() {
-    assert_aborted_internal(&["handshake", "--json"]);
-}
-
-#[test]
 fn ingest_returns_aborted_internal() {
     assert_aborted_internal(&["ingest", "--kind", "user", "--body", "hello", "--json"]);
 }
