@@ -1,5 +1,8 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod vault_registry;
+pub use vault_registry::{VaultEntry, VaultRegistry};
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

@@ -1,10 +1,11 @@
 //! End-to-end CLI smoke tests. Invokes the built `cairn` binary and asserts
-//! the P0 stub behaviour: help succeeds, verbs without dispatch fail closed.
+//! the P0 stub behaviour: help succeeds, verbs fail closed with `Internal`.
 //!
-//! The CLI tree itself is generated from the IDL by `cairn-codegen`; verb
-//! dispatch lands in #59 / #9. Exit-code contract (spec §5.2):
-//! - simple verb stubs (`ingest`, `search`, …) reach our dispatch and exit 2
-//!   with a not-implemented marker.
+//! The CLI tree is generated from the IDL by `cairn-codegen`; the store is
+//! not wired yet (lands in #9), so every verb returns an `aborted` envelope
+//! with `code: "Internal"`. Exit-code contract (spec §5.2):
+//! - simple verb stubs (`ingest`, `search`, …) → exit 1, stderr contains
+//!   `Internal`, or `--json` → stdout contains `"status":"aborted"`.
 //! - clap usage errors (unknown flag, unknown subcommand, missing required
 //!   `ArgGroup`, bare invocation with `subcommand_required`) → 64
 //!   (`EX_USAGE`).
@@ -69,11 +70,12 @@ fn no_args_prints_help_and_fails_closed() {
 }
 
 #[test]
-fn simple_verb_fails_closed_with_not_implemented_marker() {
-    // Verbs whose Args are not a tagged union accept a bare invocation and
-    // reach the scaffold dispatch in main.rs, which exits 2 with a marker.
+fn simple_verb_human_mode_exits_one_with_internal() {
+    // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
+    // and print "Internal" to stderr in human mode.
+    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
+    // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
     for verb in [
-        "ingest",
         "search",
         "summarize",
         "assemble_hot",
@@ -83,15 +85,64 @@ fn simple_verb_fails_closed_with_not_implemented_marker() {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
-            "verb {verb} exited OK — should fail closed"
+            "verb {verb} exited OK — should fail with Internal"
         );
-        assert_eq!(out.status.code(), Some(2), "verb {verb} wrong exit code");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "verb {verb} wrong exit code (want 1)"
+        );
         let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
         assert!(
-            stderr.contains("not yet implemented"),
-            "verb {verb} stderr missing not-implemented marker: {stderr:?}",
+            stderr.contains("Internal"),
+            "verb {verb} stderr missing Internal error code: {stderr:?}",
         );
     }
+}
+
+#[test]
+fn simple_verb_json_mode_emits_aborted_internal_envelope() {
+    let out = cli()
+        .args(["ingest", "--kind", "user", "--body", "hi", "--json"])
+        .output()
+        .expect("cairn ingest --json");
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("expected valid JSON on stdout");
+    assert_eq!(v["contract"], "cairn.mcp.v1");
+    assert_eq!(v["status"], "aborted");
+    assert_eq!(v["error"]["code"], "Internal");
+}
+
+#[test]
+fn ingest_with_no_source_exits_64() {
+    // Bare `cairn ingest` (no body/file/url/source) must fail with usage error, not Internal.
+    let out = cli().arg("ingest").output().expect("cairn ingest");
+    assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+}
+
+#[test]
+fn ingest_with_conflicting_sources_exits_64() {
+    // Providing both --body and --file violates the IDL exactly-one-of constraint.
+    let out = cli()
+        .args([
+            "ingest",
+            "--kind",
+            "user",
+            "--body",
+            "a",
+            "--file",
+            "/dev/null",
+        ])
+        .output()
+        .expect("cairn ingest --body --file");
+    assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("exactly one"),
+        "stderr missing constraint message: {stderr:?}"
+    );
 }
 
 #[test]
@@ -124,5 +175,75 @@ fn unknown_argument_fails_closed() {
     assert!(
         stderr.contains("unexpected argument"),
         "stderr missing clap usage marker: {stderr:?}",
+    );
+}
+
+#[test]
+fn bootstrap_emits_json_with_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = cli()
+        .args([
+            "bootstrap",
+            "--vault-path",
+            dir.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("cairn bootstrap --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("--json must emit valid JSON");
+    assert!(
+        parsed.get("vault_path").is_some(),
+        "JSON missing vault_path"
+    );
+    assert!(
+        parsed.get("dirs_created").is_some(),
+        "JSON missing dirs_created"
+    );
+}
+
+#[test]
+fn bootstrap_force_flag_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    // first run
+    cli()
+        .args(["bootstrap", "--vault-path", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    // second run with --force must succeed
+    let out = cli()
+        .args([
+            "bootstrap",
+            "--vault-path",
+            dir.path().to_str().unwrap(),
+            "--force",
+        ])
+        .output()
+        .expect("cairn bootstrap --force");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+}
+
+#[test]
+fn bootstrap_io_error_exits_74() {
+    // Point at a path we cannot write to — use a file as the vault path so
+    // create_dir_all fails.
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let out = cli()
+        .args(["bootstrap", "--vault-path", file.path().to_str().unwrap()])
+        .output()
+        .expect("cairn bootstrap <file-as-vault>");
+    assert_eq!(
+        out.status.code(),
+        Some(74),
+        "expected EX_IOERR(74), got: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
     );
 }

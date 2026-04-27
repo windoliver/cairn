@@ -21,6 +21,7 @@ Shorter companion docs:
 
 - `docs/design/architecture.md` — crate topology and plugin boundary
 - `docs/design/2026-04-23-rust-workspace-scaffold-design.md` — workspace scaffold rationale
+- `docs/design/traceability.md` — design-section to issue map; update in any PR that materially changes the brief
 - `README.md` — public-facing intro + P0 scope
 
 **Rule of thumb for agents:** before proposing a data model, API shape, or
@@ -378,6 +379,7 @@ cairn/
 │   ├── design/
 │   │   ├── design-brief.md         ← SOURCE OF TRUTH
 │   │   ├── architecture.md         ← crate topology summary
+│   │   ├── traceability.md         ← design-section → issue map
 │   │   └── 2026-04-23-rust-workspace-scaffold-design.md
 │   └── superpowers/
 ├── scripts/
