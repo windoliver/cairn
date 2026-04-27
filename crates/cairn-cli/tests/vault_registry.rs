@@ -342,3 +342,125 @@ mod cli_vault_add {
         assert_eq!(v["name"], "jsontest");
     }
 }
+
+mod cli_vault_list {
+    use std::process::Command;
+    use cairn_cli::vault::VaultRegistryStore;
+    use cairn_core::config::{VaultEntry, VaultRegistry};
+
+    fn cairn() -> Command {
+        Command::new(env!("CARGO_BIN_EXE_cairn"))
+    }
+
+    fn reg_with_two_vaults() -> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir) {
+        let a = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(a.path().join(".cairn")).unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(b.path().join(".cairn")).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+        let mut reg = VaultRegistry::default();
+        reg.default = Some("alpha".into());
+        reg.vaults.push(VaultEntry::new("alpha", a.path().to_str().unwrap(), Some("first vault".into()), None));
+        reg.vaults.push(VaultEntry::new("beta", b.path().to_str().unwrap(), None, None));
+        store.save(&reg).unwrap();
+        (a, b, reg_dir)
+    }
+
+    #[test]
+    fn list_shows_both_vaults() {
+        let (_a, _b, reg_dir) = reg_with_two_vaults();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "list"])
+            .output()
+            .expect("cairn vault list");
+        assert!(out.status.success());
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("alpha"), "missing alpha: {stdout}");
+        assert!(stdout.contains("beta"), "missing beta: {stdout}");
+    }
+
+    #[test]
+    fn list_marks_default() {
+        let (_a, _b, reg_dir) = reg_with_two_vaults();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "list"])
+            .output()
+            .expect("cairn vault list");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            stdout.contains('*') || stdout.contains("default"),
+            "default not marked: {stdout}"
+        );
+    }
+
+    #[test]
+    fn list_json_emits_array() {
+        let (_a, _b, reg_dir) = reg_with_two_vaults();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "list", "--json"])
+            .output()
+            .expect("cairn vault list --json");
+        assert!(out.status.success());
+        let v: serde_json::Value =
+            serde_json::from_str(&String::from_utf8(out.stdout).unwrap()).unwrap();
+        assert!(v.is_array(), "expected JSON array");
+        assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn list_empty_registry_succeeds() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let out = cairn()
+            .env(
+                "CAIRN_REGISTRY",
+                reg_dir.path().join("vaults.toml").to_str().unwrap(),
+            )
+            .args(["vault", "list"])
+            .output()
+            .expect("cairn vault list empty");
+        assert!(out.status.success());
+    }
+
+    #[test]
+    fn list_human_output_snapshot() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+        let mut reg = VaultRegistry::default();
+        reg.default = Some("work".into());
+        reg.vaults.push(VaultEntry::new(
+            "work",
+            "/home/alice/vaults/work",
+            Some("day job".into()),
+            None,
+        ));
+        reg.vaults.push(VaultEntry::new(
+            "personal",
+            "/home/alice/vaults/personal",
+            None,
+            None,
+        ));
+        store.save(&reg).unwrap();
+
+        let reg2 = store.load().unwrap();
+        let mut lines = Vec::new();
+        for v in &reg2.vaults {
+            let marker = if reg2.default.as_deref() == Some(&v.name) { "* " } else { "  " };
+            let label = v.label.as_deref().map(|l| format!("  — {l}")).unwrap_or_default();
+            lines.push(format!("{marker}{:<20} {}{}", v.name, v.path, label));
+        }
+        insta::assert_snapshot!(lines.join("\n"));
+    }
+}

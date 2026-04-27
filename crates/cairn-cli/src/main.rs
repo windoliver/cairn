@@ -339,10 +339,51 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
                 }
             }
         }
-        Some(("list", _sub)) => {
-            // implemented in Task 5
-            eprintln!("cairn vault list: not yet implemented");
-            ExitCode::from(1)
+        Some(("list", sub)) => {
+            let json = sub.get_flag("json");
+            let reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault list: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if json {
+                let arr: Vec<serde_json::Value> = reg
+                    .vaults
+                    .iter()
+                    .map(|v| {
+                        let mut obj = serde_json::to_value(v)
+                            .expect("invariant: VaultEntry always serializes to JSON");
+                        obj["is_default"] =
+                            serde_json::Value::Bool(reg.default.as_deref() == Some(&v.name));
+                        obj
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&arr)
+                        .expect("invariant: JSON array always serializes")
+                );
+            } else if reg.vaults.is_empty() {
+                println!("cairn vault list: no vaults registered");
+                println!("  add one with: cairn vault add <path> --name <name>");
+            } else {
+                for v in &reg.vaults {
+                    let marker = if reg.default.as_deref() == Some(&v.name) {
+                        "* "
+                    } else {
+                        "  "
+                    };
+                    let label = v
+                        .label
+                        .as_deref()
+                        .map(|l| format!("  — {l}"))
+                        .unwrap_or_default();
+                    println!("{marker}{:<20} {}{}", v.name, v.path, label);
+                }
+            }
+            ExitCode::SUCCESS
         }
         Some(("switch", _sub)) => {
             // implemented in Task 6

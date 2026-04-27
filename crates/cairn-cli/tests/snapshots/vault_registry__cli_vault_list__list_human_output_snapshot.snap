@@ -1,0 +1,6 @@
+---
+source: crates/cairn-cli/tests/vault_registry.rs
+expression: "lines.join(\"\\n\")"
+---
+* work                 /home/alice/vaults/work  — day job
+  personal             /home/alice/vaults/personal
