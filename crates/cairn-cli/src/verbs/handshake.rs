@@ -1,45 +1,32 @@
-//! `cairn handshake` handler — fresh challenge mint (§8.0.a).
+//! `cairn handshake` handler — P0 stub.
 //!
-//! Every call produces a different nonce. The nonce is single-use and would
-//! be stored in `outstanding_challenges` once the store is wired (`issue #9`).
+//! Challenge authentication requires persisting the issued nonce into
+//! `outstanding_challenges` so the server can consume it as a single-use
+//! token on the signed intent path. That storage lands in issue #9.
+//!
+//! Emitting an ephemeral challenge that can never be validated server-side
+//! would mislead callers into believing challenge-auth is available, so this
+//! handler returns `Internal aborted` until the store is wired.
 
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
+use super::envelope::{emit_json, human_error, new_operation_id};
 
-use super::envelope::{emit_json, new_nonce};
-
-const CHALLENGE_TTL_MS: u64 = 60_000;
-
-/// Run `cairn handshake`. Exits 0 on success.
+/// Run `cairn handshake`. Exits 1 until challenge storage is wired (issue #9).
 #[must_use]
 pub fn run(json: bool) -> ExitCode {
-    let nonce = new_nonce();
-    #[allow(clippy::cast_possible_truncation)]
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("invariant: system clock is after Unix epoch")
-        .as_millis() as u64;
-    let expires_at = now_ms + CHALLENGE_TTL_MS;
-
-    let resp = HandshakeResponse {
-        contract: "cairn.mcp.v1".to_owned(),
-        challenge: HandshakeResponseChallenge {
-            nonce: nonce.clone(),
-            expires_at,
-        },
-    };
-
+    let op = new_operation_id();
+    let msg = "challenge storage not wired in P0 — handshake authentication lands in #9";
     if json {
-        emit_json(&resp);
+        emit_json(&serde_json::json!({
+            "contract": "cairn.mcp.v1",
+            "status": "aborted",
+            "error": { "code": "Internal", "message": msg },
+            "operation_id": op.0,
+            "policy_trace": [],
+        }));
     } else {
-        println!("contract:   {}", resp.contract);
-        println!("nonce:      {}", nonce.0);
-        println!(
-            "expires_at: {} (epoch-ms, TTL 60 s)",
-            resp.challenge.expires_at
-        );
+        human_error("handshake", "Internal", msg, &op);
     }
-    ExitCode::SUCCESS
+    ExitCode::FAILURE
 }

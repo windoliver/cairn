@@ -16,6 +16,19 @@ use super::envelope::{emit_json, human_error, unimplemented_response};
 pub fn run(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
 
+    // Enforce IDL exactly-one-of: body/file/url (positional `source` counts as one).
+    let has_source = sub.get_one::<String>("source").is_some();
+    let has_body = sub.get_one::<String>("body").is_some();
+    let has_file = sub.get_one::<std::path::PathBuf>("file").is_some();
+    let has_url = sub.get_one::<String>("url").is_some();
+    let source_count = u8::from(has_source) + u8::from(has_body) + u8::from(has_file) + u8::from(has_url);
+    if source_count != 1 {
+        eprintln!(
+            "cairn ingest: exactly one of [source, --body, --file, --url] is required (got {source_count})"
+        );
+        return ExitCode::from(64);
+    }
+
     // Resolve body: positional `source` wins if set; --body/--file/--url otherwise.
     let _body_resolved: Option<String> = if let Some(src) = sub.get_one::<String>("source") {
         if src == "-" {

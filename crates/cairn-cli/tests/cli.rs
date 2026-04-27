@@ -73,14 +73,9 @@ fn no_args_prints_help_and_fails_closed() {
 fn simple_verb_human_mode_exits_one_with_internal() {
     // After dispatch wiring: verbs with no store adapter exit 1 (generic failure)
     // and print "Internal" to stderr in human mode.
-    for verb in [
-        "ingest",
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
-    ] {
+    // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
+    // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
+    for verb in ["search", "summarize", "assemble_hot", "capture_trace", "lint"] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
@@ -112,6 +107,38 @@ fn simple_verb_json_mode_emits_aborted_internal_envelope() {
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "aborted");
     assert_eq!(v["error"]["code"], "Internal");
+}
+
+#[test]
+fn ingest_with_no_source_exits_64() {
+    // Bare `cairn ingest` (no body/file/url/source) must fail with usage error, not Internal.
+    let out = cli().arg("ingest").output().expect("cairn ingest");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "exit: {:?}",
+        out.status
+    );
+}
+
+#[test]
+fn ingest_with_conflicting_sources_exits_64() {
+    // Providing both --body and --file violates the IDL exactly-one-of constraint.
+    let out = cli()
+        .args(["ingest", "--kind", "user", "--body", "a", "--file", "/dev/null"])
+        .output()
+        .expect("cairn ingest --body --file");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "exit: {:?}",
+        out.status
+    );
+    let stderr = String::from_utf8(out.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("exactly one"),
+        "stderr missing constraint message: {stderr:?}"
+    );
 }
 
 #[test]
