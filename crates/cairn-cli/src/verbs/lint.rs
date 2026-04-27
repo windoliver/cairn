@@ -53,18 +53,30 @@ pub async fn fix_markdown_handler(
                     .await
                     .with_context(|| format!("create_dir_all {}", parent.display()))?;
             }
-            // Write atomically via a temp file + rename so concurrent readers never see
-            // a partially-written file. Include the PID in the temp name so concurrent
-            // lint invocations don't clobber each other's in-flight writes.
-            let tmp_path = abs_path.with_extension(format!("md.{}.tmp", std::process::id()));
-            tokio::fs::write(&tmp_path, &projected.content)
-                .await
-                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
-            tokio::fs::rename(&tmp_path, &abs_path)
-                .await
-                .with_context(|| {
-                    format!("rename {} -> {}", tmp_path.display(), abs_path.display())
+            // Write atomically via a unique temp file + rename. tempfile::Builder
+            // assigns a random suffix so concurrent calls in the same process never
+            // share a temp path; rename(2) is atomic for readers.
+            let content = projected.content.clone();
+            let dest = abs_path.clone();
+            let parent_buf = abs_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                use std::io::Write as _;
+                let mut tmp = tempfile::Builder::new()
+                    .suffix(".md.tmp")
+                    .tempfile_in(&parent_buf)
+                    .with_context(|| format!("create temp file in {}", parent_buf.display()))?;
+                tmp.write_all(content.as_bytes())
+                    .with_context(|| format!("write temp {}", tmp.path().display()))?;
+                tmp.persist(&dest).map_err(|e| {
+                    anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error)
                 })?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .with_context(|| format!("spawn_blocking write {}", abs_path.display()))??;
             written.push(projected.path);
         } else {
             already_current += 1;

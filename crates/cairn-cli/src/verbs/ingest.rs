@@ -13,7 +13,9 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::projection::{ConflictOutcome, MarkdownProjector, ResyncError};
+use cairn_core::domain::projection::{
+    ConflictOutcome, MarkdownProjector, PROJECTED_STANDARD_FIELDS, ResyncError,
+};
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
 
@@ -104,15 +106,12 @@ pub async fn resync_handler(
 
     let outcome = projector.check_conflict(&parsed, current.as_ref());
 
-    // Fields emitted by project(); anything else in raw_frontmatter is extra.
-    const STANDARD_FIELDS: &[&str] = &[
-        "id", "version", "kind", "class", "visibility",
-        "scope", "confidence", "salience", "tags", "created", "updated",
-    ];
+    // Separate standard projected fields from user-editable extras using the
+    // same constant that project() uses, so the two sides always agree.
     let extra_frontmatter: std::collections::BTreeMap<String, serde_json::Value> = parsed
         .raw_frontmatter
         .iter()
-        .filter(|(k, _)| !STANDARD_FIELDS.contains(&k.as_str()))
+        .filter(|(k, _)| !PROJECTED_STANDARD_FIELDS.contains(&k.as_str()))
         .filter_map(|(k, v)| serde_json::to_value(v).ok().map(|jv| (k.clone(), jv)))
         .collect();
 
@@ -160,48 +159,11 @@ pub async fn resync_handler(
             file_version,
             store_version,
         } => {
-            // Write a quarantine file so the editor's changes are not lost.
             let quarantine_dir = vault_root.join(".cairn/quarantine");
             tokio::fs::create_dir_all(&quarantine_dir)
                 .await
                 .with_context(|| format!("create quarantine dir {}", quarantine_dir.display()))?;
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            // Use create-new semantics to avoid overwriting a prior quarantine file
-            // if two conflicts for the same record arrive within the same nanosecond.
-            let base_name = format!("{nanos}-{}.rejected", &parsed.target_id);
-            let mut q_path = quarantine_dir.join(&base_name);
-            let mut retry: u32 = 0;
-            loop {
-                match tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&q_path)
-                    .await
-                {
-                    Ok(mut f) => {
-                        use tokio::io::AsyncWriteExt as _;
-                        f.write_all(content.as_bytes())
-                            .await
-                            .with_context(|| format!("write quarantine {}", q_path.display()))?;
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        retry += 1;
-                        q_path = quarantine_dir
-                            .join(format!("{nanos}-{}-{retry}.rejected", &parsed.target_id));
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "write quarantine {}: {e}",
-                            q_path.display()
-                        ));
-                    }
-                }
-            }
-
+            write_quarantine(&quarantine_dir, &parsed.target_id, &content).await?;
             Err(anyhow::anyhow!(
                 "conflict: file version {file_version}, store version {store_version}; {marker}; \
                  rejected content saved to .cairn/quarantine/"
@@ -211,6 +173,49 @@ pub async fn resync_handler(
         _ => Err(anyhow::anyhow!(
             "ingest --resync: unexpected conflict outcome"
         )),
+    }
+}
+
+/// Write `content` to `.cairn/quarantine/<nanos>-<target_id>.rejected` using
+/// create-new semantics so concurrent conflicts for the same record id never
+/// overwrite each other's preserved content.
+async fn write_quarantine(
+    quarantine_dir: &Path,
+    target_id: &str,
+    content: &str,
+) -> anyhow::Result<()> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut q_path = quarantine_dir.join(format!("{nanos}-{target_id}.rejected"));
+    let mut retry: u32 = 0;
+    loop {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&q_path)
+            .await
+        {
+            Ok(mut f) => {
+                use tokio::io::AsyncWriteExt as _;
+                f.write_all(content.as_bytes())
+                    .await
+                    .with_context(|| format!("write quarantine {}", q_path.display()))?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                retry += 1;
+                q_path =
+                    quarantine_dir.join(format!("{nanos}-{target_id}-{retry}.rejected"));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "write quarantine {}: {e}",
+                    q_path.display()
+                ));
+            }
+        }
     }
 }
 

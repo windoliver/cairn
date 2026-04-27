@@ -80,11 +80,20 @@ pub enum ResyncError {
     },
 }
 
+/// Keys emitted by [`MarkdownProjector::project`] that are not part of
+/// `extra_frontmatter`. Used by the resync handler to separate standard
+/// projected fields from user-editable extras.
+pub const PROJECTED_STANDARD_FIELDS: &[&str] = &[
+    "id", "version", "kind", "class", "visibility",
+    "scope", "confidence", "salience", "tags", "created", "updated",
+];
+
 /// Pure projection functions — render, parse, and conflict-check.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MarkdownProjector;
 
-// Internal serde helper for project().
+// Internal serde helper for project() — covers the fixed schema fields only.
+// extra_frontmatter is merged into the YAML mapping after serialization.
 #[derive(Serialize)]
 struct FrontmatterDoc<'a> {
     id: &'a str,
@@ -119,12 +128,29 @@ impl MarkdownProjector {
             created: r.provenance.created_at.as_str(),
             updated: r.updated_at.as_str(),
         };
-        // pure struct, no Rc or custom Serialize — infallible
+        // Serialize standard fields first, then append extra_frontmatter entries.
+        // Using the mapping API keeps key order stable: standard fields first (struct
+        // declaration order), then extras (BTreeMap alphabetical order).
         #[allow(clippy::expect_used)]
-        let yaml = serde_yaml::to_string(&doc).expect("FrontmatterDoc serializes infallibly");
+        let mut yaml_map = serde_yaml::to_value(&doc)
+            .expect("FrontmatterDoc serializes infallibly")
+            .as_mapping()
+            .expect("FrontmatterDoc serializes as a YAML mapping")
+            .clone();
+        for (k, v) in &r.extra_frontmatter {
+            // Skip collisions with schema-owned keys; allow everything else.
+            if !PROJECTED_STANDARD_FIELDS.contains(&k.as_str())
+                && let Ok(yaml_val) = serde_yaml::to_value(v)
+            {
+                yaml_map.insert(serde_yaml::Value::String(k.clone()), yaml_val);
+            }
+        }
+        #[allow(clippy::expect_used)]
+        let yaml = serde_yaml::to_string(&yaml_map)
+            .expect("YAML mapping serializes infallibly");
         // serde_yaml 0.9.34 does NOT prepend a "---\n" document-start marker for
-        // plain structs; debug_assert guards this so a version upgrade that adds
-        // the marker back fails fast rather than silently double-fencing.
+        // plain structs or mappings; debug_assert guards against a future version
+        // change that would silently double-fence the output.
         debug_assert!(
             !yaml.starts_with("---\n"),
             "serde_yaml now prepends document-start marker; strip_prefix logic needs revisiting: {:?}",
@@ -527,6 +553,58 @@ mod tests {
         let parsed = proj.parse(&tampered).unwrap();
         let outcome = proj.check_conflict(&parsed, Some(&stored));
         assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
+    }
+
+    #[test]
+    fn project_emits_extra_frontmatter_keys() {
+        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        stored.record.extra_frontmatter.insert(
+            "category".to_owned(),
+            serde_json::Value::String("tool".to_owned()),
+        );
+        let pf = MarkdownProjector.project(&stored);
+        assert!(
+            pf.content.contains("category: tool"),
+            "extra frontmatter key missing from projection: {:?}",
+            &pf.content
+        );
+    }
+
+    #[test]
+    fn project_extra_frontmatter_round_trips_through_parse() {
+        let proj = MarkdownProjector;
+        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        stored.record.extra_frontmatter.insert(
+            "category".to_owned(),
+            serde_json::Value::String("tool".to_owned()),
+        );
+        let pf = proj.project(&stored);
+        let parsed = proj.parse(&pf.content).expect("parse");
+        // "category" is not a standard field, so it ends up in raw_frontmatter.
+        assert_eq!(
+            parsed.raw_frontmatter.get("category").and_then(|v| v.as_str()),
+            Some("tool"),
+            "extra_frontmatter key not preserved through parse"
+        );
+        // Standard fields must not bleed into extra territory.
+        assert!(!parsed.raw_frontmatter.contains_key("extra_frontmatter_overlap_sentinel"),
+            "sentinel key should not appear");
+    }
+
+    #[test]
+    fn project_standard_fields_not_duplicated_by_extra_frontmatter() {
+        // If extra_frontmatter contains a key that collides with a standard field
+        // (e.g. "id"), project() must skip it so the output is well-formed.
+        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        stored.record.extra_frontmatter.insert(
+            "id".to_owned(),
+            serde_json::Value::String("injected".to_owned()),
+        );
+        let pf = MarkdownProjector.project(&stored);
+        // The real id should appear exactly once; "injected" must not appear.
+        let occurrences = pf.content.matches("id:").count();
+        assert_eq!(occurrences, 1, "id key appeared more than once: {:?}", &pf.content);
+        assert!(!pf.content.contains("injected"), "colliding extra key was not filtered");
     }
 
     #[test]
