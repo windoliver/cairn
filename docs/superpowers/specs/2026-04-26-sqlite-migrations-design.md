@@ -190,6 +190,10 @@ point. Concrete DDL:
 ```sql
 CREATE TABLE wal_ops (
   operation_id   TEXT NOT NULL PRIMARY KEY,                 -- ULID, idempotency key
+  issued_seq     INTEGER NOT NULL UNIQUE,                   -- AUTOINCREMENT-like monotonic order;
+                                                            -- the authoritative happens-before for the
+                                                            -- wal_op_deps DAG. Strictly increasing on
+                                                            -- every INSERT; never reused or reordered.
   kind           TEXT NOT NULL CHECK (kind IN (              -- closed set per §5.6 envelope
                    'upsert','delete','promote','expire',
                    'forget_session','forget_record','evolve')),
@@ -207,6 +211,20 @@ CREATE TABLE wal_ops (
   updated_at     INTEGER NOT NULL,                          -- last state transition time
   reason         TEXT                                       -- populated for REJECTED/ABORTED
 );
+-- issued_seq is filled by the storage impl as
+--   COALESCE((SELECT MAX(issued_seq) FROM wal_ops), 0) + 1
+-- inside the same BEGIN IMMEDIATE that inserts the row. AUTOINCREMENT is
+-- INTEGER PRIMARY KEY-only in SQLite, so we hand-roll the monotonic
+-- counter; UNIQUE NOT NULL prevents duplicates and a BEFORE INSERT
+-- trigger rejects values that don't strictly advance MAX().
+CREATE TRIGGER wal_ops_issued_seq_must_advance
+  BEFORE INSERT ON wal_ops
+  FOR EACH ROW
+  WHEN NEW.issued_seq <= COALESCE((SELECT MAX(issued_seq) FROM wal_ops), 0)
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_ops.issued_seq must strictly advance MAX(issued_seq)');
+END;
 
 -- Recovery scans for non-terminal ops on boot (§5.6 step 1).
 CREATE INDEX wal_ops_open_idx
@@ -214,19 +232,40 @@ CREATE INDEX wal_ops_open_idx
   WHERE state IN ('ISSUED','PREPARED');
 
 -- Dependency lookup for the recovery DAG. Acyclicity is enforced
--- structurally: operation_id and depends_on_op_id are ULIDs (per §5.6
--- envelope), which sort lexicographically by their issuance time.
--- Requiring depends_on_op_id < operation_id makes a cycle (or a
--- self-edge) unrepresentable at the schema level.
+-- against wal_ops.issued_seq, the authoritative monotonic ordering — NOT
+-- against ULID lexicographic order, which is unreliable within the
+-- same millisecond.
 CREATE TABLE wal_op_deps (
   operation_id     TEXT NOT NULL,
   depends_on_op_id TEXT NOT NULL,
   PRIMARY KEY (operation_id, depends_on_op_id),
-  CHECK (depends_on_op_id < operation_id),     -- no self-edge, no AB-BA cycle (ULIDs are sortable)
+  CHECK (operation_id != depends_on_op_id),    -- no self-edge
   FOREIGN KEY (operation_id)     REFERENCES wal_ops(operation_id) ON DELETE CASCADE,
   FOREIGN KEY (depends_on_op_id) REFERENCES wal_ops(operation_id)
 );
 CREATE INDEX wal_op_deps_reverse_idx ON wal_op_deps(depends_on_op_id);
+
+-- DAG enforcement: dependency must point to an op with a strictly
+-- smaller issued_seq. CHECK can't run subqueries in SQLite, so a
+-- BEFORE INSERT trigger does the lookup. Combined with the FK on
+-- both sides and the strictly-monotonic issued_seq, this makes
+-- self-edges and arbitrary cycles unrepresentable.
+CREATE TRIGGER wal_op_deps_must_be_acyclic
+  BEFORE INSERT ON wal_op_deps
+  FOR EACH ROW
+  WHEN (SELECT issued_seq FROM wal_ops WHERE operation_id = NEW.depends_on_op_id)
+       >= (SELECT issued_seq FROM wal_ops WHERE operation_id = NEW.operation_id)
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_op_deps.depends_on_op_id must have a strictly smaller issued_seq');
+END;
+
+CREATE TRIGGER wal_op_deps_immutable
+  BEFORE UPDATE ON wal_op_deps
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_op_deps rows are immutable');
+END;
 
 CREATE TABLE wal_steps (
   operation_id  TEXT NOT NULL,
@@ -309,6 +348,29 @@ BEGIN
       WHERE excluded.high_water > issuer_seq.high_water;
 END;
 
+-- The replay ledger is append-only. Updating any column would re-open
+-- the rewind / divergence cases the INSERT path is hardened against,
+-- so block UPDATE entirely. Operator-driven repair must DELETE the
+-- offending row and re-INSERT through the trigger pipeline.
+CREATE TRIGGER used_immutable
+  BEFORE UPDATE ON used
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'used rows are append-only; UPDATE not permitted');
+END;
+
+-- Same rule for issuer_seq: only the AFTER INSERT trigger above may
+-- advance high_water. A direct UPDATE is rejected so a manual repair
+-- cannot rewind issuer_seq.high_water below what `used` proves was
+-- already committed.
+CREATE TRIGGER issuer_seq_only_advances
+  BEFORE UPDATE ON issuer_seq
+  FOR EACH ROW
+  WHEN NEW.high_water <= OLD.high_water
+BEGIN
+  SELECT RAISE(ABORT, 'issuer_seq.high_water can only advance');
+END;
+
 CREATE TABLE issuer_seq (
   issuer      TEXT NOT NULL PRIMARY KEY,
   high_water  INTEGER NOT NULL CHECK (high_water >= 0)
@@ -352,6 +414,18 @@ Verbatim from brief §5.6 lock-table block (lines ~1820-1865):
     same recomputation against `OLD`. Includes the case
     `holder_count = 0` (`mode` is also flipped to `'free'` by the
     storage impl in #46; the trigger only enforces the count).
+  - `lock_holders_keys_immutable` — `BEFORE UPDATE ON lock_holders`
+    raises ABORT if any of `scope_kind`, `scope_key`, `holder_id`, or
+    `acquired_epoch` changes. The §5.6 acquisition protocol never
+    re-keys a holder; reclaim is DELETE + INSERT. Blocking key
+    mutations forecloses the "operator UPDATEs scope_kind to point a
+    holder elsewhere, count drifts on both old and new scopes" path.
+  - `lock_holders_count_after_update` — `AFTER UPDATE ON lock_holders`
+    recomputes the count for both `OLD.(scope_kind, scope_key)` and
+    `NEW.(scope_kind, scope_key)` (defense-in-depth: even though the
+    keys-immutable trigger means OLD == NEW for the key fields, this
+    keeps the count synced if the keys-immutable trigger is ever
+    relaxed for a future migration).
   - The triggers reject negative counts via the table's
     `CHECK (holder_count >= 0)`.
 
@@ -665,8 +739,12 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
+    `wal_ops_issued_seq_must_advance`,
+    `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `used_sequence_must_advance`, `used_advance_high_water`,
-    `lock_holders_count_after_insert`, `lock_holders_count_after_delete`
+    `used_immutable`, `issuer_seq_only_advances`,
+    `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
+    `lock_holders_count_after_update`, `lock_holders_keys_immutable`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
@@ -737,14 +815,10 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `UPDATE edges SET dst = ... WHERE kind = 'updates'`; assert ABORT
   via `edges_updates_immutable_after_insert`. Repeat for `src` and
   `kind` changes.
-- `wal_op_deps_rejects_cycles_and_self` — attempt
+- `wal_op_deps_rejects_self` — insert two valid `wal_ops` rows; attempt
   `INSERT INTO wal_op_deps (operation_id, depends_on_op_id) VALUES
-  ('01HQAA', '01HQAA')`; assert CHECK violation. Then `('01HQ01',
-  '01HQ02')` (depends_on > operation_id); assert CHECK violation.
-  Insert valid `('01HQ02', '01HQ01')`. Attempt to add `('01HQ01',
-  '01HQ02')` (would close a 2-cycle); assert CHECK violation. Proves
-  the lex-order CHECK suffices for both self-edges and arbitrary
-  cycles.
+  ('A', 'A')`; assert CHECK violation. Cycle rejection is covered by
+  `wal_op_deps_uses_issued_seq` below.
 - `migration_history_check_runs_before_apply` — generate a fixture
   vault by applying migrations 1..=2 only; manually update
   `schema_migrations` to set a wrong `sql_blake3` for migration 1;
@@ -766,6 +840,23 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
 - `lock_holder_count_stays_in_sync` — insert two `lock_holders` rows
   for the same scope; assert `locks.holder_count = 2`. Delete one;
   assert `holder_count = 1`. Delete the other; assert `holder_count = 0`.
+- `replay_ledger_update_blocked` — insert into `used`; attempt
+  `UPDATE used SET sequence = sequence + 1` and `UPDATE used SET
+  issuer = 'mallory'`; both ABORT via `used_immutable`. Attempt
+  `UPDATE issuer_seq SET high_water = high_water - 1`; ABORT via
+  `issuer_seq_only_advances`.
+- `lock_holders_keys_locked` — insert a holder; attempt
+  `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
+  Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
+- `wal_op_deps_uses_issued_seq` — insert two `wal_ops` rows in two
+  separate transactions; the second has a strictly larger
+  `issued_seq`. Insert the legitimate dep `(later, earlier)`; expect
+  success. Attempt `(earlier, later)`; expect ABORT (not based on
+  ULID order — based on issued_seq). Attempt
+  `INSERT INTO wal_ops (..., issued_seq=1, ...)` after a row with
+  `issued_seq=5` exists; expect ABORT via
+  `wal_ops_issued_seq_must_advance`. Attempt to UPDATE an existing
+  `wal_op_deps` row; expect ABORT via `wal_op_deps_immutable`.
 
 ### 7.3 Snapshot tests (`insta`)
 
