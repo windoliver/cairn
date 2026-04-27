@@ -1,0 +1,9 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&f"
+---
+{
+  "field": "kind",
+  "op": "eq",
+  "value": "user"
+}

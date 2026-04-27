@@ -1,0 +1,24 @@
+---
+source: crates/cairn-test-fixtures/tests/schema_fixtures.rs
+expression: "&f"
+---
+{
+  "or": [
+    {
+      "field": "kind",
+      "op": "in",
+      "value": [
+        "user",
+        "feedback",
+        "rule"
+      ]
+    },
+    {
+      "not": {
+        "field": "visibility",
+        "op": "eq",
+        "value": "private"
+      }
+    }
+  ]
+}
