@@ -89,8 +89,30 @@ struct FrontmatterDoc<'a> {
 
 impl MarkdownProjector {
     /// Render a `StoredRecord` to a markdown file.
-    pub fn project(&self, _stored: &StoredRecord) -> ProjectedFile {
-        todo!("Task 3")
+    pub fn project(&self, stored: &StoredRecord) -> ProjectedFile {
+        let r = &stored.record;
+        let doc = FrontmatterDoc {
+            id: r.id.as_str(),
+            version: stored.version,
+            kind: r.kind.as_str(),
+            class: r.class.as_str(),
+            visibility: r.visibility.as_str(),
+            scope: &r.scope,
+            confidence: r.confidence,
+            salience: r.salience,
+            tags: &r.tags,
+            created: r.provenance.created_at.as_str(),
+            updated: r.updated_at.as_str(),
+        };
+        // pure struct, no Rc or custom Serialize — infallible
+        #[allow(clippy::expect_used)]
+        let yaml = serde_yaml::to_string(&doc).expect("FrontmatterDoc serializes infallibly");
+        // serde_yaml 0.9 prepends a "---\n" document-start marker; strip it
+        // so our format! string owns exactly one opening "---\n" fence.
+        let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
+        let content = format!("---\n{yaml}---\n\n{}", r.body);
+        let path = PathBuf::from(format!("raw/{}_{}.md", r.kind.as_str(), r.id.as_str()));
+        ProjectedFile { path, content }
     }
 
     /// Parse a projected markdown file's content.
@@ -115,10 +137,55 @@ impl MarkdownProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::memory_store::StoredRecord;
+    use crate::domain::record::tests::sample_record;
+
+    fn stored(version: u32) -> StoredRecord {
+        StoredRecord { record: sample_record(), version }
+    }
 
     #[test]
     fn types_exist() {
         let _: ResyncError = ResyncError::MissingId;
         let _: ConflictOutcome = ConflictOutcome::Clean;
+    }
+
+    #[test]
+    fn project_starts_with_yaml_fence() {
+        let pf = MarkdownProjector.project(&stored(1));
+        assert!(pf.content.starts_with("---\n"), "content: {:?}", &pf.content[..40.min(pf.content.len())]);
+    }
+
+    #[test]
+    fn project_contains_id() {
+        let stored = stored(1);
+        let pf = MarkdownProjector.project(&stored);
+        assert!(pf.content.contains(stored.record.id.as_str()));
+    }
+
+    #[test]
+    fn project_contains_version() {
+        let pf = MarkdownProjector.project(&stored(7));
+        assert!(pf.content.contains("version: 7"));
+    }
+
+    #[test]
+    fn project_body_follows_closing_fence() {
+        let stored = stored(1);
+        let pf = MarkdownProjector.project(&stored);
+        let parts: Vec<&str> = pf.content.splitn(3, "---\n").collect();
+        // parts[0] = "", parts[1] = yaml, parts[2] = "\nbody..."
+        assert_eq!(parts.len(), 3, "expected three ---\\n-delimited sections");
+        let body_section = parts[2].trim_start_matches('\n');
+        assert_eq!(body_section, stored.record.body);
+    }
+
+    #[test]
+    fn project_path_contains_kind_and_id() {
+        let stored = stored(1);
+        let pf = MarkdownProjector.project(&stored);
+        let path_str = pf.path.to_string_lossy();
+        assert!(path_str.contains(stored.record.kind.as_str()));
+        assert!(path_str.contains(stored.record.id.as_str()));
     }
 }

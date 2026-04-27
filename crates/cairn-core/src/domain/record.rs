@@ -697,11 +697,11 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
-    pub(crate) fn sample_record() -> MemoryRecord {
+    pub fn sample_record() -> MemoryRecord {
         // Single human author at P0: scope.user, originating_agent_id, and
         // chain author all bind to `usr:tafeng`. Delegation chains arrive
         // with P2 countersignatures.
