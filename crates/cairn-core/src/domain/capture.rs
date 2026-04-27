@@ -574,14 +574,16 @@ impl CaptureEvent {
         let label = SensorLabel::from_identity(&self.sensor_id)?;
         super::capture_manifest::validate_label(&label)?;
 
-        if let Some(expected) = family_for_label(&label)
-            && expected != self.source_family
-        {
+        let expected_family =
+            family_for_label(&label).ok_or_else(|| DomainError::UndeclaredSensor {
+                label: label.as_str().to_owned(),
+            })?;
+        if expected_family != self.source_family {
             return Err(DomainError::MalformedCapture {
                 message: format!(
                     "sensor `{}` declares family `{}` but event source_family is `{}`",
                     self.sensor_id.as_str(),
-                    expected.as_str(),
+                    expected_family.as_str(),
                     self.source_family.as_str()
                 ),
             });
@@ -644,14 +646,24 @@ const fn mode_allows_family(mode: CaptureMode, family: SourceFamily) -> bool {
 }
 
 /// Map a declared [`SensorLabel`] prefix to the [`SourceFamily`] its
-/// sensor produces. Returns `None` when the label has no canonical family
-/// pinned (e.g., `local:neuroskill:` produces structured tool-call traces
-/// shaped like Hook events but is not exclusively a hook channel — we
-/// don't pin its family yet so that future neuroskill payload variants
-/// don't require a manifest change).
+/// sensor is allowed to emit. Every prefix in
+/// [`super::capture_manifest::P0_SENSOR_LABEL_PREFIXES`] has a fixed
+/// family — a sensor cannot impersonate another capture surface.
+///
+/// `local:neuroskill:` is pinned to [`SourceFamily::Hook`] because brief
+/// §9.1 describes it as "structured agent tool-call traces emitted by
+/// the harness itself" — semantically the same channel as harness
+/// `PostToolUse`/`PreToolUse` hooks, just emitted directly by the
+/// harness's neuroskill protocol. If a future payload variant needs a
+/// different family, add it to [`SourceFamily`] and pin the prefix
+/// here in the same PR.
+///
+/// Returns `None` only for labels not in the manifest — callers should
+/// run [`super::capture_manifest::validate_label`] before this so an
+/// unpinned label is impossible at the call site.
 fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
     let s = label.as_str();
-    if s.starts_with("local:hook:") {
+    if s.starts_with("local:hook:") || s.starts_with("local:neuroskill:") {
         Some(SourceFamily::Hook)
     } else if s.starts_with("local:ide:") {
         Some(SourceFamily::Ide)
@@ -679,35 +691,43 @@ fn family_for_label(label: &SensorLabel) -> Option<SourceFamily> {
 /// Reject `payload_ref` strings that would let a downstream stage
 /// dereference bytes outside the managed `sources/` vault layer (§3).
 ///
-/// The accepted shape is `file://<host>/<path>/sources/<rest>` with no
-/// `..` traversal segments, no query, and no fragment. Pure syntactic
-/// check — there is no filesystem access at this layer.
+/// Accepted shape: `file:///<abs-path>/sources/<rest>` — strictly empty
+/// authority (three slashes after `file:`), no query, no fragment, no
+/// `..` traversal. The path is percent-decoded before the traversal
+/// check so encoded escapes (`%2e%2e`) cannot bypass the rule. Pure
+/// syntactic check — no filesystem access at this layer.
 fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
     if raw.is_empty() {
         return Err(DomainError::EmptyField {
             field: "payload_ref",
         });
     }
-    let rest = raw
-        .strip_prefix("file://")
+    // `file:///` rather than `file://`: require an empty authority so
+    // `file://attacker-host/sources/x` is rejected. The third `/` is the
+    // start of the absolute path.
+    let path = raw
+        .strip_prefix("file:///")
         .ok_or_else(|| DomainError::MalformedCapture {
-            message: format!("payload_ref `{raw}`: must use `file://` scheme"),
+            message: format!("payload_ref `{raw}`: must be a `file:///` URI with empty authority"),
         })?;
-    if rest.contains('?') || rest.contains('#') {
+    if path.contains('?') || path.contains('#') {
         return Err(DomainError::MalformedCapture {
             message: format!("payload_ref `{raw}`: query/fragment not permitted"),
         });
     }
-    // After the `file://` prefix, the path must contain a `/sources/`
-    // segment so off-vault paths like `/etc/passwd` are rejected.
-    if !rest.contains("/sources/") {
+    let decoded = percent_decode(path).ok_or_else(|| DomainError::MalformedCapture {
+        message: format!("payload_ref `{raw}`: malformed percent-encoding"),
+    })?;
+    // The decoded path must contain a `/sources/` segment so off-vault
+    // paths like `/etc/passwd` are rejected, and must have no `..`
+    // segments after decoding so percent-encoded traversals
+    // (`%2e%2e`) cannot escape the vault root.
+    if !decoded.contains("/sources/") && !decoded.starts_with("sources/") {
         return Err(DomainError::MalformedCapture {
             message: format!("payload_ref `{raw}`: path must contain `/sources/`"),
         });
     }
-    // Reject `..` traversal segments. Match on segment boundaries so
-    // legitimate filenames like `foo..bar.json` aren't rejected.
-    for segment in rest.split('/') {
+    for segment in decoded.split('/') {
         if segment == ".." {
             return Err(DomainError::MalformedCapture {
                 message: format!("payload_ref `{raw}`: `..` traversal not permitted"),
@@ -715,6 +735,30 @@ fn validate_payload_ref(raw: &str) -> Result<(), DomainError> {
         }
     }
     Ok(())
+}
+
+/// Decode `%XX` escapes in a URI path. Returns `None` if a `%` is not
+/// followed by two hex digits. Stays in `cairn-core` to avoid pulling
+/// `percent-encoding` for one decoder.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = u8::try_from((bytes[i + 1] as char).to_digit(16)?).ok()?;
+            let lo = u8::try_from((bytes[i + 2] as char).to_digit(16)?).ok()?;
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 #[cfg(test)]

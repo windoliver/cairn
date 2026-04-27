@@ -286,6 +286,64 @@ fn payload_ref_rejects_query_and_fragment() {
 }
 
 #[test]
+fn payload_ref_rejects_non_empty_authority() {
+    // file://attacker-host/... must be rejected — the authority component
+    // can resolve to a different host on URI-aware consumers.
+    let mut ev = auto_event();
+    ev.payload_ref = "file://attacker-host/vault/sources/x.json".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_localhost_authority() {
+    // Even `localhost` is rejected — we require empty authority for a
+    // single canonical local-file shape.
+    let mut ev = auto_event();
+    ev.payload_ref = "file://localhost/vault/sources/x.json".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_percent_encoded_traversal() {
+    // %2e%2e decodes to `..` — must not slip past the segment scan.
+    let mut ev = auto_event();
+    ev.payload_ref = "file:///vault/sources/%2e%2e/etc/passwd".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn payload_ref_rejects_malformed_percent_encoding() {
+    let mut ev = auto_event();
+    ev.payload_ref = "file:///vault/sources/x%2".into();
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
+fn neuroskill_sensor_pinned_to_hook_family() {
+    // local:neuroskill:* is now pinned to Hook — emitting any other
+    // family from a neuroskill sensor must fail.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:neuroskill:harness:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:neuroskill:harness:v1")];
+    // Hook payload — should pass.
+    ev.validate().expect("neuroskill emitting Hook is valid");
+
+    // Now flip to a Voice payload + family. Neuroskill must be rejected.
+    ev.source_family = SourceFamily::Voice;
+    ev.payload = CapturePayload::Voice {
+        speaker_id: "x".into(),
+        duration_ms: 0,
+        confidence: 1.0,
+    };
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::MalformedCapture { .. }));
+}
+
+#[test]
 fn payload_family_mismatch_rejected() {
     let mut ev = auto_event();
     ev.source_family = SourceFamily::Voice;
