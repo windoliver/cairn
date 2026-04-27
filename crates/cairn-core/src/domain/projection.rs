@@ -256,7 +256,7 @@ impl MarkdownProjector {
         if parsed.visibility != current.record.visibility {
             return ConflictOutcome::Conflict {
                 marker: format!(
-                    "immutable field mutated: visibility (file={}, store={})",
+                    "read-only in resync path: visibility (use `cairn promote` or `cairn forget`) (file={}, store={})",
                     parsed.visibility.as_str(),
                     current.record.visibility.as_str()
                 ),
@@ -402,6 +402,21 @@ mod tests {
         assert!(matches!(
             outcome,
             ConflictOutcome::Conflict { file_version: 3, store_version: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn check_conflict_future_file_version_is_conflict() {
+        let proj = MarkdownProjector;
+        // store is at version 2, file claims version 5 → frontend cannot increment versions → Conflict
+        let stored_v2 = crate::domain::record::tests::sample_stored_record(2);
+        let stored_v5 = crate::domain::record::tests::sample_stored_record(5);
+        let file = proj.project(&stored_v5);
+        let parsed = proj.parse(&file.content).unwrap();
+        let outcome = proj.check_conflict(&parsed, Some(&stored_v2));
+        assert!(matches!(
+            outcome,
+            ConflictOutcome::Conflict { file_version: 5, store_version: 2, .. }
         ));
     }
 

@@ -707,6 +707,8 @@ pub mod tests {
         crate::contract::memory_store::StoredRecord { record: sample_record(), version }
     }
 
+    /// Returns a deterministic `MemoryRecord` for use in tests.
+    #[must_use]
     pub fn sample_record() -> MemoryRecord {
         // Single human author at P0: scope.user, originating_agent_id, and
         // chain author all bind to `usr:tafeng`. Delegation chains arrive
