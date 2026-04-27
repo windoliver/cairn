@@ -9,16 +9,26 @@
 
 ## 1. Goal
 
-Land the schema-only DDL for `.cairn/cairn.db`: every P0 table, index, FTS5
-virtual table + triggers, and view from brief §3 and §5.6, applied through a
-forward-only migration runner that opens cleanly on a fresh vault and
-re-opens idempotently on an up-to-date one. **Verb implementations and the
-sqlite-vec extension are explicitly out of scope** — they land with the
-storage implementation in #46.
+Land the schema-only DDL for `.cairn/cairn.db` covering the **records,
+control-plane, and audit surface** specified in brief §3 and §5.6,
+applied through a forward-only migration runner that opens cleanly on a
+fresh vault and re-opens idempotently on an up-to-date one. **Verb
+implementations, the sqlite-vec extension, and the workflow_jobs
+table** are explicitly out of scope — they land in dedicated follow-up
+issues (see §2).
+
+This issue ships the file-on-disk shape for everything except
+`workflow_jobs` (whose schema the brief has not yet pinned), plus the
+open-time pragmas, the migration runner, and the
+shape/history/migration-checksum integrity checks. Issue #45's checklist
+line for "workflow jobs" is consciously deferred to keep this PR's
+forward-only DDL grounded in pinned-down brief sections; the deferral
+is called out in the PR description and the follow-up issue is filed
+before merge. A subsequent issue extends the migration set by adding
+`0006_jobs.sql` once the workflow host's invariants are specified.
 
 This issue does *not* ship `MemoryStore` verb impls, the sqlite-vec C
-extension, or any Nexus projection. It only ships the file-on-disk shape and
-the open-time pragmas, plus enough Rust to apply them.
+extension, or any Nexus projection.
 
 ## 2. Non-goals
 
@@ -127,8 +137,32 @@ Verbatim from brief §3 (lines ~340-426):
   FTS5 in sync.
 - `records_latest` view: filters `active = 1 AND tombstoned = 0` and
   `NOT EXISTS` an `updates` edge pointing to the row.
-- `edges` table: `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
-  `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`.
+- `edges` table: columns `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
+  `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`,
+  plus referential integrity that the brief leaves implicit:
+  - `FOREIGN KEY (src) REFERENCES records(record_id) DEFERRABLE INITIALLY DEFERRED`
+  - `FOREIGN KEY (dst) REFERENCES records(record_id) DEFERRABLE INITIALLY DEFERRED`
+
+  Both FKs are deferred so that an `upsert`'s atomic `BEGIN IMMEDIATE … COMMIT`
+  can insert the `version=N+1` records row alongside its edges in either
+  order. Without these FKs, a stray `('updates', some_record_id,
+  some_other_record_id)` row could be inserted with no real successor and
+  silently hide the target from `records_latest` — that is a read-corruption
+  hole the schema must close, not a caller-side concern.
+
+- `edges` integrity trigger `edges_updates_must_supersede` —
+  fires `BEFORE INSERT ON edges WHEN NEW.kind = 'updates'` and
+  raises `ABORT` unless `NEW.dst` exists in `records` with `tombstoned = 0`
+  and the source row's `target_id` differs from the dst row's `target_id`
+  (an `updates` edge is fact-supersession across distinct target_ids per
+  brief §3 line ~409). This makes "stray `updates` edge hides a live
+  record" unrepresentable at the storage level.
+
+- This is a deviation from the brief, called out for review: the brief
+  shows `edges` with no FK declarations. The deviation strengthens
+  invariants without changing semantics; flag in PR. Revert the FKs +
+  trigger if the brief intentionally permits dangling edges (e.g., for
+  bulk import staging).
 
 #### 0002_wal.sql
 
@@ -218,7 +252,12 @@ CREATE TABLE used (
   sequence      INTEGER NOT NULL CHECK (sequence >= 0),
   committed_at  INTEGER NOT NULL,
   UNIQUE (issuer, sequence),    -- anti-rewind: each issuer's sequence is monotonic + unique
-  UNIQUE (issuer, nonce)        -- nonce uniqueness scoped to the issuer's trust boundary
+  UNIQUE (issuer, nonce),       -- nonce uniqueness scoped to the issuer's trust boundary
+  -- A replay-ledger row may only exist for a real WAL op. Deferred so the
+  -- §5.6 P0 single-transaction model can insert wal_ops + used in either
+  -- order within one BEGIN IMMEDIATE … COMMIT.
+  FOREIGN KEY (operation_id) REFERENCES wal_ops(operation_id)
+    DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE issuer_seq (
@@ -503,7 +542,8 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `daemon_incarnation`, `reader_fence`, `consent_journal`
   - virtual tables: `records_fts`
   - views: `records_latest`
-  - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`
+  - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
+    `edges_updates_must_supersede`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
@@ -552,6 +592,20 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   returns a CHECK constraint failure. Repeats for `wal_steps.state`,
   `locks.mode`, `reader_fence.state`. Proves the closed-set CHECKs are
   load-bearing.
+- `orphan_replay_row_rejected` — `PRAGMA foreign_keys = ON`; attempt
+  `INSERT INTO used (operation_id, nonce, issuer, sequence,
+  committed_at) VALUES ('orphan', ...)` with no matching `wal_ops` row;
+  assert FK violation at COMMIT (deferred). Then insert the wal_ops row
+  first, retry, expect success.
+- `dangling_edge_rejected` — `PRAGMA foreign_keys = ON`; attempt
+  `INSERT INTO edges VALUES ('missing-src', 'missing-dst', 'link',
+  NULL)`; assert FK violation at COMMIT.
+- `updates_edge_must_supersede` — insert two records with the *same*
+  `target_id` and different versions; insert `edges (src, dst, kind)`
+  with `kind = 'updates'`; assert the trigger ABORTs (an `updates`
+  edge is fact-supersession across distinct target_ids, not a
+  version-bump pointer). Then insert two records with *different*
+  target_ids, retry, expect success.
 
 ### 7.3 Snapshot tests (`insta`)
 
