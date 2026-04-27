@@ -124,7 +124,10 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 /// Returns an error if a directory cannot be created or a file cannot be
 /// written. Symlinked paths are rejected.
 pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
-    let target = &opts.target_dir;
+    let target = opts.target_dir.components().collect::<PathBuf>();
+    let target = &target;
+    // All workspace crates share a single version (see [workspace.package] in Cargo.toml),
+    // so cairn-cli's CARGO_PKG_VERSION matches the cairn-idl version embedded in .version.
     let current_idl_version = env!("CARGO_PKG_VERSION");
 
     // Reject symlinked target root.
@@ -270,6 +273,29 @@ mod tests {
         assert_eq!(receipt.contract_version, "cairn.mcp.v1");
         assert!(!receipt.idl_version.is_empty());
         assert!(!receipt.registration_hint.is_empty());
+
+        // All 7 files must be created (SKILL.md, conventions.md, .version, 4 examples).
+        assert_eq!(
+            receipt.files_created.len(),
+            7,
+            "expected 7 files on fresh install"
+        );
+
+        // Hint for ClaudeCode must mention CLAUDE.md.
+        assert!(
+            receipt.registration_hint.contains("CLAUDE.md"),
+            "hint for ClaudeCode must mention CLAUDE.md"
+        );
+
+        // All 4 examples must exist.
+        assert!(
+            target.join("examples/02-forget-something.md").exists(),
+            "example 02 missing"
+        );
+        assert!(
+            target.join("examples/03-search-prior-decision.md").exists(),
+            "example 03 missing"
+        );
     }
 
     #[test]
