@@ -148,11 +148,70 @@ fn write_once(
     force: bool,
     receipt: &mut BootstrapReceipt,
 ) -> Result<()> {
-    if path.exists() && !force {
-        receipt.files_skipped.push(path.to_owned());
-        return Ok(());
+    use std::io::Write as _;
+
+    // Reject symlinks regardless of force — writing through a symlink can
+    // affect paths outside the vault, which is never intended by bootstrap.
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "{} is a symlink — bootstrap will not write through it",
+                path.display()
+            );
+        }
+        if !force {
+            receipt.files_skipped.push(path.to_owned());
+            return Ok(());
+        }
+        // force=true, file exists, not a symlink — fall through to atomic overwrite
     }
-    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
+
+    if force {
+        // Atomic overwrite: write to a sibling temp file, sync, then rename.
+        // rename(2) is atomic on the same filesystem — the target sees either
+        // the old content or the new content, never a partial write.
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let tmp_name = format!(
+            ".{}.bootstrap.tmp",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        );
+        let tmp = dir.join(tmp_name);
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)
+                .with_context(|| format!("creating temp file {}", tmp.display()))?;
+            f.write_all(content.as_bytes())
+                .with_context(|| format!("writing {}", tmp.display()))?;
+            f.sync_all()
+                .with_context(|| format!("syncing {}", tmp.display()))?;
+        }
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
+    } else {
+        // Non-force: exclusive create eliminates the TOCTOU race between the
+        // existence check and the write for concurrent bootstrap invocations.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut f) => {
+                f.write_all(content.as_bytes())
+                    .with_context(|| format!("writing {}", path.display()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                receipt.files_skipped.push(path.to_owned());
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("creating {}", path.display()));
+            }
+        }
+    }
+
     receipt.files_created.push(path.to_owned());
     Ok(())
 }
