@@ -53,9 +53,17 @@ pub async fn fix_markdown_handler(
                     .await
                     .with_context(|| format!("create_dir_all {}", parent.display()))?;
             }
-            tokio::fs::write(&abs_path, &projected.content)
+            // Write atomically via a temp file + rename so concurrent readers never see
+            // a partially-written file.
+            let tmp_path = abs_path.with_extension("md.tmp");
+            tokio::fs::write(&tmp_path, &projected.content)
                 .await
-                .with_context(|| format!("write {}", abs_path.display()))?;
+                .with_context(|| format!("write tmp {}", tmp_path.display()))?;
+            tokio::fs::rename(&tmp_path, &abs_path)
+                .await
+                .with_context(|| {
+                    format!("rename {} -> {}", tmp_path.display(), abs_path.display())
+                })?;
             written.push(projected.path);
         } else {
             already_current += 1;

@@ -79,14 +79,22 @@ pub async fn resync_handler(
     // has been tampered with or mis-addressed and must not be applied.
     // Validate that the frontmatter id matches the id embedded in the filename.
     // project() encodes the record id as the last `_`-delimited segment of the stem.
-    let path_id_mismatch = path
+    // Require the projected filename format `<kind>_<id>.md` and verify the id matches
+    // frontmatter. Fail closed if the name doesn't match — arbitrary-path files are not
+    // safe to resync without this check.
+    let path_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .and_then(|stem| stem.rsplit_once('_').map(|(_, id)| id.to_owned()))
-        .is_some_and(|path_id| path_id != parsed.target_id.as_str());
-    if path_id_mismatch {
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "ingest --resync: filename does not match expected `<kind>_<id>.md` format: {}",
+                path.display()
+            )
+        })?;
+    if path_id != parsed.target_id.as_str() {
         anyhow::bail!(
-            "ingest --resync: frontmatter id `{}` does not match id embedded in filename {}",
+            "ingest --resync: frontmatter id `{}` does not match filename id `{path_id}` in {}",
             parsed.target_id,
             path.display()
         );
