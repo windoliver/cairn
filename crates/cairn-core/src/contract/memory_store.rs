@@ -1,47 +1,63 @@
 //! `MemoryStore` contract (brief §4 row 1).
-//!
-//! P0 scaffold: surface only — `name`, `capabilities`,
-//! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
+use crate::domain::record::MemoryRecord;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
 /// Static capability declaration for a `MemoryStore` impl.
-///
-/// Cairn queries this before dispatching ANN-, FTS-, or graph-using verbs;
-/// missing capability → `CapabilityUnavailable` (brief §4.1).
 // Four capability flags mirror the four distinct store dimensions; a state
 // machine would add indirection with no gain here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemoryStoreCapabilities {
-    /// Whether full-text search (FTS5) is supported.
     pub fts: bool,
-    /// Whether vector/ANN search is supported.
     pub vector: bool,
-    /// Whether graph edge storage and traversal is supported.
     pub graph_edges: bool,
-    /// Whether ACID transactions are supported.
     pub transactions: bool,
 }
 
-/// Storage contract — typed CRUD + ANN + FTS + graph over `MemoryRecord`.
+/// A `MemoryRecord` at a specific store version.
 ///
-/// Brief §4 row 1: P0 default is pure `SQLite` + FTS5; P1 default is the
-/// Nexus sandbox profile. Method bodies arrive in #46 once `MemoryRecord`
-/// (sub-issue #37) lands.
+/// `version` is the monotonic per-`target_id` counter from the DB COW model
+/// (brief §3.0). Projection and resync use it for optimistic concurrency
+/// checks without touching the DB row directly.
+#[derive(Debug, Clone)]
+pub struct StoredRecord {
+    pub record: MemoryRecord,
+    /// Monotonic version counter. `1` for a record's first write.
+    pub version: u32,
+}
+
+/// Errors returned by `MemoryStore` methods.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("store not yet implemented")]
+    Unimplemented,
+    #[error("store I/O: {0}")]
+    Io(String),
+}
+
+/// Storage contract — typed CRUD over `MemoryRecord`.
+///
+/// Brief §4 row 1. Method bodies arrive in #46 (SQLite impl);
+/// `FixtureStore` in `cairn-test-fixtures` serves tests.
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Stable identifier of the registered plugin instance.
     fn name(&self) -> &str;
-
-    /// Static capability advertisement (brief §4.1).
     fn capabilities(&self) -> &MemoryStoreCapabilities;
-
-    /// Range of `MemoryStore::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+
+    /// Return the active `StoredRecord` for `target_id`, or `None` if absent.
+    async fn get(&self, target_id: &str) -> Result<Option<StoredRecord>, StoreError>;
+
+    /// Write a record. If a record with the same `id` already exists, bumps
+    /// its version. Returns the stored version.
+    async fn upsert(&self, record: MemoryRecord) -> Result<StoredRecord, StoreError>;
+
+    /// Return all active (non-tombstoned) records.
+    async fn list_active(&self) -> Result<Vec<StoredRecord>, StoreError>;
 }
 
 #[cfg(test)]
@@ -65,7 +81,16 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        }
+        async fn get(&self, _: &str) -> Result<Option<StoredRecord>, StoreError> {
+            Err(StoreError::Unimplemented)
+        }
+        async fn upsert(&self, _: MemoryRecord) -> Result<StoredRecord, StoreError> {
+            Err(StoreError::Unimplemented)
+        }
+        async fn list_active(&self) -> Result<Vec<StoredRecord>, StoreError> {
+            Err(StoreError::Unimplemented)
         }
     }
 
