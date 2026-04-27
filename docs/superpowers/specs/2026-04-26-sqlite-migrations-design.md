@@ -193,6 +193,17 @@ CREATE INDEX wal_steps_resume_idx
 
 #### 0003_replay.sql
 
+> **Brief deviation, called out for review.** The brief shows `used (...,
+> UNIQUE(operation_id, nonce))`. This spec strengthens it to
+> `operation_id PRIMARY KEY` plus `UNIQUE(issuer, sequence)` and
+> `UNIQUE(issuer, nonce)`, so SQLite alone — independent of caller code
+> — guarantees one ledger row per `operation_id`, monotonic issuer
+> sequences, and per-issuer nonce uniqueness. This is consistent with
+> §5.6's claim that "operation_id is the idempotency key" and with
+> `wal_ops.operation_id` being a PK. Flagging as a brief refinement to
+> propose; if the brief is intentionally weaker, revert to the original
+> constraint.
+
 ```sql
 -- Replay-attack ledger (§4.2). The schema enforces every anti-replay
 -- invariant at the database level so caller logic is not the sole
@@ -200,12 +211,12 @@ CREATE INDEX wal_steps_resume_idx
 -- nonce, and cannot bind two operations to the same (issuer, nonce)
 -- pair regardless of operation_id.
 CREATE TABLE used (
-  operation_id  TEXT NOT NULL,
+  operation_id  TEXT NOT NULL PRIMARY KEY,                  -- one ledger row per op_id;
+                                                            -- coheres with wal_ops.operation_id PK
   nonce         BLOB NOT NULL,
   issuer        TEXT NOT NULL,
   sequence      INTEGER NOT NULL CHECK (sequence >= 0),
   committed_at  INTEGER NOT NULL,
-  UNIQUE (operation_id, nonce),
   UNIQUE (issuer, sequence),    -- anti-rewind: each issuer's sequence is monotonic + unique
   UNIQUE (issuer, nonce)        -- nonce uniqueness scoped to the issuer's trust boundary
 );
@@ -348,12 +359,24 @@ Properties:
   shadow set (`records_fts_data`, `_idx`, `_content`, `_docsize`,
   `_config`) are never queried; SQLite version upgrades that change them
   do not fail the check.
-- **Extra objects allowed.** A user-installed view or audit trigger does
-  not trip the check — only the listed app objects must be present and
-  matching.
 - **Drift cases caught.** Dropped trigger, dropped partial index,
   altered view body, hand-edited `records` schema all surface as
   `SchemaDrift`.
+- **Executable objects on app tables are deny-by-default.** After the
+  allowlist pass, `verify_schema_integrity` runs a second sweep that
+  enumerates every `index`, `trigger`, and `view` in `sqlite_master`
+  whose `tbl_name` is an app-owned table (`records`, `edges`, `wal_*`,
+  `used`, `issuer_seq`, `outstanding_challenges`, `locks`,
+  `lock_holders`, `daemon_incarnation`, `reader_fence`,
+  `consent_journal`, `schema_migrations`) and rejects any that are not
+  in `EXPECTED_OBJECTS`. This closes the "operator added an
+  `AFTER UPDATE` trigger on `records` that silently mutates rows" hole.
+  Engine-owned `sqlite_autoindex_*` rows are still excluded by name
+  prefix.
+- **Standalone user objects are allowed.** A user-installed view, index,
+  or trigger whose `tbl_name` is *not* an app-owned table (e.g., an
+  audit table the operator created in the same DB) does not trip the
+  check.
 
 The `sql_hash` constants are generated and asserted by a unit test
 (`expected_objects_match_head`) that recomputes them from a freshly-
@@ -508,10 +531,15 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `INSERT INTO records (...)` to force FTS5 to populate its shadow
   tables; reopen; expect success. Confirms FTS5 internals are not in
   the allowlist.
-- `extra_user_object_ok` — after migrations, `CREATE INDEX
-  user_audit_idx ON consent_journal(committed_at)`; reopen; expect
-  success. Confirms the allowlist is "must-be-present", not
-  "must-be-only".
+- `extra_object_on_app_table_rejected` — after migrations, `CREATE
+  TRIGGER bad_audit AFTER UPDATE ON records BEGIN INSERT INTO ...; END;`;
+  reopen; expect `StoreError::SchemaDrift` (deny-by-default for
+  executable objects on app tables). Repeats with an extra index on
+  `consent_journal`, an extra trigger on `wal_ops`.
+- `extra_object_on_user_table_ok` — after migrations, `CREATE TABLE
+  user_audit (...); CREATE INDEX user_audit_ts_idx ON
+  user_audit(ts);`; reopen; expect success. Confirms standalone
+  user-owned tables are not policed.
 - `migration_history_mismatch_rejected` — apply migrations to head;
   manually `UPDATE schema_migrations SET sql_blake3 = '00...00' WHERE
   migration_id = 3`; reopen; expect
