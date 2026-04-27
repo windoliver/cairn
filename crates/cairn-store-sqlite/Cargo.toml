@@ -21,6 +21,7 @@ sha2 = { workspace = true }
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

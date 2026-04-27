@@ -249,6 +249,7 @@ dependencies = [
  "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
+ "proptest",
  "rusqlite",
  "rusqlite_migration",
  "sha2",
