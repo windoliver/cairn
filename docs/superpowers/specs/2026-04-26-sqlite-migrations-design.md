@@ -136,7 +136,33 @@ Verbatim from brief §3 (lines ~340-426):
 - Triggers `records_fts_ai`, `records_fts_ad`, `records_fts_au` keeping
   FTS5 in sync.
 - `records_latest` view: filters `active = 1 AND tombstoned = 0` and
-  `NOT EXISTS` an `updates` edge pointing to the row.
+  `NOT EXISTS` an `updates` edge pointing to the row **whose source
+  record is itself active and not tombstoned**:
+
+  ```sql
+  CREATE VIEW records_latest AS
+    SELECT r.*
+      FROM records r
+     WHERE r.active = 1
+       AND r.tombstoned = 0
+       AND NOT EXISTS (
+         SELECT 1
+           FROM edges e
+           JOIN records src ON src.record_id = e.src
+          WHERE e.kind   = 'updates'
+            AND e.dst    = r.record_id
+            AND src.active     = 1
+            AND src.tombstoned = 0
+       );
+  ```
+
+  **Brief deviation, called out for review.** The brief's view (§3
+  ~line 418) checks only `NOT EXISTS (SELECT 1 FROM edges WHERE
+  kind='updates' AND dst=r.record_id)`. That hides a live destination
+  even when the supersession source has itself been tombstoned or
+  superseded — a stale `updates` edge from a dead row keeps suppressing
+  the live target. The strengthened view ignores such stale edges.
+  Revert if the brief intentionally wants suppressions to be sticky.
 - `edges` table: columns `src TEXT NOT NULL`, `dst TEXT NOT NULL`,
   `kind TEXT NOT NULL`, `weight REAL`, `PRIMARY KEY (src, dst, kind)`,
   plus referential integrity that the brief leaves implicit:
@@ -155,10 +181,14 @@ Verbatim from brief §3 (lines ~340-426):
 
   - `edges_updates_supersede_insert` —
     `BEFORE INSERT ON edges WHEN NEW.kind = 'updates'` raises `ABORT`
-    unless `NEW.dst` exists in `records` with `tombstoned = 0` and the
-    src row's `target_id` differs from the dst row's `target_id`
-    (an `updates` edge is fact-supersession across distinct target_ids
-    per brief §3 line ~409).
+    unless **both** `NEW.src` and `NEW.dst` exist in `records` with
+    `active = 1` and `tombstoned = 0`, and the src row's `target_id`
+    differs from the dst row's `target_id` (an `updates` edge is
+    fact-supersession across distinct target_ids per brief §3 line
+    ~409). Requiring a live source at insertion time means a
+    just-inserted edge is meaningful at write time; subsequent
+    src-tombstoning is handled by `records_latest` excluding edges
+    from dead sources at read time.
   - `edges_updates_supersede_update` — same predicate, but
     `BEFORE UPDATE ON edges WHEN NEW.kind = 'updates'`. Closes the
     `UPDATE edges SET kind = 'updates' WHERE …` bypass.
@@ -396,6 +426,28 @@ BEGIN
     ON CONFLICT(issuer) DO UPDATE
       SET high_water = excluded.high_water
       WHERE excluded.high_water > issuer_seq.high_water;
+END;
+
+-- Direct INSERT INTO issuer_seq is rejected unless the (issuer,
+-- high_water) tuple exists in `used` — i.e., the only legitimate
+-- inserter is `used_advance_high_water` (which runs AFTER INSERT on
+-- `used`, so by the time this BEFORE INSERT trigger fires the matching
+-- ledger row is already visible). A repair script attempting
+-- `INSERT INTO issuer_seq (issuer='alice', high_water=1_000_000)`
+-- without a corresponding `used` row is rejected outright; combined
+-- with issuer_seq_only_via_ledger this pins issuer_seq.high_water to
+-- a value the ledger proves was actually committed.
+CREATE TRIGGER issuer_seq_insert_must_match_ledger
+  BEFORE INSERT ON issuer_seq
+  FOR EACH ROW
+  WHEN NOT EXISTS (
+    SELECT 1 FROM used
+      WHERE issuer = NEW.issuer
+        AND sequence = NEW.high_water
+  )
+BEGIN
+  SELECT RAISE(ABORT,
+    'issuer_seq INSERT must correspond to a row in `used`');
 END;
 
 -- The replay ledger is append-only. Updating any column would re-open
@@ -847,7 +899,8 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
     `wal_steps_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `used_sequence_must_advance`, `used_advance_high_water`,
-    `used_immutable`, `used_no_delete`, `issuer_seq_only_via_ledger`,
+    `used_immutable`, `used_no_delete`,
+    `issuer_seq_insert_must_match_ledger`, `issuer_seq_only_via_ledger`,
     `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
     `lock_holders_count_after_update`, `lock_holders_keys_immutable`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
@@ -977,6 +1030,23 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   delete row 3; reopen via `open()`; expect
   `StoreError::MigrationHistoryMismatch` (contiguity branch). Repeat
   with a duplicated migration_id row.
+- `dead_source_updates_edge_does_not_hide_dst` — insert two records
+  R1 (target T1) and R2 (target T2), both `active=1, tombstoned=0`.
+  Insert valid `updates` edge (src=R1, dst=R2). Confirm R2 disappears
+  from `records_latest`. Now `UPDATE records SET tombstoned = 1
+  WHERE record_id = R1.record_id`; reselect from `records_latest`;
+  R2 should reappear (the dead source's stale edge no longer hides
+  it). Repeat with `active = 0` instead of tombstoning.
+- `updates_edge_requires_live_source` — insert R1 (src) with
+  `active = 0`; insert R2 (dst) live; attempt `INSERT INTO edges
+  (src=R1, dst=R2, kind='updates')`; expect ABORT via
+  `edges_updates_supersede_insert` (live-source predicate).
+- `issuer_seq_direct_insert_rejected` — attempt `INSERT INTO
+  issuer_seq (issuer='mallory', high_water=99999999)` with no matching
+  `used` row; expect ABORT via `issuer_seq_insert_must_match_ledger`.
+  Insert a wal_ops + used row with `(issuer='alice', sequence=42)`;
+  confirm `issuer_seq` now has `(alice, 42)` (auto-populated by the
+  AFTER INSERT trigger on `used`, which is the legitimate path).
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
