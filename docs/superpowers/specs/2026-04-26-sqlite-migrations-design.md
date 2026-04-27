@@ -194,17 +194,21 @@ CREATE INDEX wal_steps_resume_idx
 #### 0003_replay.sql
 
 ```sql
--- Replay-attack ledger (§4.2). UNIQUE(operation_id, nonce) is the
--- collision check; lookup by issuer+sequence drives anti-rewind.
+-- Replay-attack ledger (§4.2). The schema enforces every anti-replay
+-- invariant at the database level so caller logic is not the sole
+-- defence: an issuer cannot reuse a sequence number, cannot reuse a
+-- nonce, and cannot bind two operations to the same (issuer, nonce)
+-- pair regardless of operation_id.
 CREATE TABLE used (
   operation_id  TEXT NOT NULL,
   nonce         BLOB NOT NULL,
   issuer        TEXT NOT NULL,
   sequence      INTEGER NOT NULL CHECK (sequence >= 0),
   committed_at  INTEGER NOT NULL,
-  UNIQUE (operation_id, nonce)
+  UNIQUE (operation_id, nonce),
+  UNIQUE (issuer, sequence),    -- anti-rewind: each issuer's sequence is monotonic + unique
+  UNIQUE (issuer, nonce)        -- nonce uniqueness scoped to the issuer's trust boundary
 );
-CREATE INDEX used_issuer_seq_idx ON used(issuer, sequence);
 
 CREATE TABLE issuer_seq (
   issuer      TEXT NOT NULL PRIMARY KEY,
@@ -279,7 +283,8 @@ cairn_store_sqlite::open(path: &Path) -> Result<Connection, StoreError>
   ├─ rusqlite::Connection::open(path)
   ├─ apply_pragmas(&conn)                -- errored pragmas surface as StoreError::Pragma
   ├─ migrations().to_latest(&mut conn)   -- idempotent on up-to-date DB
-  ├─ verify_schema_fingerprint(&conn)?   -- same-version drift detector (see below)
+  ├─ verify_migration_history(&conn)?    -- §5.2 ledger checksum check
+  ├─ verify_schema_integrity(&conn)?     -- §5.1 allowlist shape check
   └─ Ok(conn)
 ```
 
@@ -287,37 +292,127 @@ Re-opening an up-to-date DB is a no-op past pragma application. Opening a
 DB whose `user_version` is *higher* than `migrations().count()` returns
 `StoreError::IncompatibleSchema` — forward-only is enforced.
 
-### 5.1 Schema fingerprint (same-version drift detection)
+### 5.1 Schema integrity check (same-version drift detection)
 
 `rusqlite_migration` only checks `user_version`; it does not detect a
 manually-tampered schema at the same version (e.g., a dropped FTS
 trigger or a missing partial index would silently leave the vault
-limping along). To close that gap, `open()` runs a fingerprint check
-**after** migrations apply:
+limping along). To close that gap, `open()` runs a **targeted-allowlist**
+integrity check after migrations apply.
+
+Hashing every `sqlite_master` row would sweep up engine-owned objects
+(`sqlite_*` autoindexes, FTS5 shadow tables `records_fts_data`,
+`records_fts_idx`, `records_fts_content`, `records_fts_docsize`,
+`records_fts_config`, future SQLite-version internals) — a benign
+SQLite upgrade could then fail-closed an otherwise healthy vault. So
+the check operates on a static, app-owned **allowlist** instead:
 
 ```rust
-fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreError> {
-    // Canonical dump: every row of sqlite_master for tables / indexes /
-    // triggers / views, ordered by (type, name), `sql` column normalized
-    // (whitespace-collapsed, trailing-`;` stripped). Hash with BLAKE3.
-    let actual = compute_fingerprint(conn)?;
-    if actual != EXPECTED_FINGERPRINT_AT_HEAD {
-        return Err(StoreError::SchemaDrift {
-            expected: EXPECTED_FINGERPRINT_AT_HEAD,
-            actual,
-        });
+struct ExpectedObject {
+    object_type: &'static str,   // 'table' | 'index' | 'trigger' | 'view'
+    name:        &'static str,
+    sql_hash:    &'static str,   // BLAKE3 of normalized `sql` (whitespace-collapsed,
+                                 // trailing-`;` stripped, lowercased keywords)
+}
+
+const EXPECTED_OBJECTS: &[ExpectedObject] = &[
+    // records + edges (0001)
+    ExpectedObject { object_type: "table",   name: "records",       sql_hash: "..." },
+    ExpectedObject { object_type: "index",   name: "records_active_target_idx", sql_hash: "..." },
+    // ... every app-owned object listed by name and hash ...
+    ExpectedObject { object_type: "view",    name: "records_latest", sql_hash: "..." },
+    ExpectedObject { object_type: "trigger", name: "records_fts_ai", sql_hash: "..." },
+    // records_fts is a virtual-table declaration only — its `sql` column is the
+    // CREATE VIRTUAL TABLE statement, which is stable. Its shadow tables
+    // (records_fts_data etc.) are NOT in this list.
+];
+
+fn verify_schema_integrity(conn: &Connection) -> Result<(), StoreError> {
+    for obj in EXPECTED_OBJECTS {
+        let actual_sql_hash = lookup_and_hash(conn, obj.object_type, obj.name)?;
+        match actual_sql_hash {
+            None => return Err(StoreError::SchemaDrift {
+                missing: Some(obj.name), .. }),
+            Some(h) if h != obj.sql_hash => return Err(StoreError::SchemaDrift {
+                mismatch: Some(obj.name), .. }),
+            _ => {}
+        }
     }
     Ok(())
 }
 ```
 
-`EXPECTED_FINGERPRINT_AT_HEAD` is a `&'static str` (hex-encoded BLAKE3)
-generated by a unit test that prints the canonical dump on first run and
-asserts equality afterwards. Updating the constant when adding a new
-migration is part of the migration's PR — same-version drift in the
-field is then a pure `SchemaDrift` error and the daemon fails closed.
-This is the same primitive that catches "the user manually deleted
-`records_fts_au` to silence a confused error message."
+Properties:
+
+- **Engine-owned objects ignored.** `sqlite_*` autoindexes and the FTS5
+  shadow set (`records_fts_data`, `_idx`, `_content`, `_docsize`,
+  `_config`) are never queried; SQLite version upgrades that change them
+  do not fail the check.
+- **Extra objects allowed.** A user-installed view or audit trigger does
+  not trip the check — only the listed app objects must be present and
+  matching.
+- **Drift cases caught.** Dropped trigger, dropped partial index,
+  altered view body, hand-edited `records` schema all surface as
+  `SchemaDrift`.
+
+The `sql_hash` constants are generated and asserted by a unit test
+(`expected_objects_match_head`) that recomputes them from a freshly-
+migrated `:memory:` DB. Adding a migration regenerates the constants
+and must update `EXPECTED_OBJECTS` in the same commit; CI gates on the
+unit test.
+
+> Note on residual risk: this is a **shape** check, not a **history**
+> check. It catches drift at head but does not detect that an earlier
+> historical migration was edited and re-applied to produce the same
+> head. That history-level guarantee is provided separately by §5.2's
+> migration checksum table.
+
+### 5.2 Migration checksum ledger (history-level guarantee)
+
+`rusqlite_migration` only tracks `user_version`; on its own it cannot
+detect that migration `0003_replay.sql` was edited after a vault
+applied an older version of it. To make the acceptance criterion
+"fails on checksum mismatch" load-bearing, the first migration creates
+a checksum ledger and every migration appends to it inside the same
+transaction that applies its DDL:
+
+```sql
+-- Created by 0001_records.sql, populated by every migration.
+CREATE TABLE schema_migrations (
+  migration_id  INTEGER NOT NULL PRIMARY KEY,            -- 1, 2, 3, ...
+  name          TEXT    NOT NULL,                         -- e.g. '0001_records'
+  sql_blake3    TEXT    NOT NULL,                         -- 64-hex BLAKE3 of the .sql file bytes
+  applied_at    INTEGER NOT NULL                          -- unix ms
+);
+```
+
+Each migration's last statement is:
+
+```sql
+INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
+  VALUES (:id, :name, :hash, :now);
+```
+
+`open()`, after `to_latest()` returns, validates that **every applied
+row's `sql_blake3` matches the compiled-in hash of the same migration
+file**. The compiled-in hashes live in a `MIGRATION_MANIFEST: &[(&str,
+&str)]` array in `migrations/mod.rs`, generated at build time by a
+`build.rs` script that BLAKE3-hashes each `migrations/sql/*.sql` and
+emits the manifest into `OUT_DIR`. No proc-macro, no runtime read of
+the SQL files in production binaries.
+
+Mismatch → `StoreError::MigrationHistoryMismatch { migration_id, name,
+expected, actual }`. This catches:
+
+- An operator hand-edited `0003_replay.sql` and re-installed cairn
+  expecting the change to apply on existing vaults.
+- A vault applied a buggy older migration that has since been
+  superseded by a fix; the binary refuses to open it instead of
+  silently running on the diverged history.
+
+The checksum ledger plus the §5.1 shape check together cover both
+*history* drift (what was applied) and *current state* drift (what is
+installed now).
 
 ## 6. Error handling
 
@@ -338,8 +433,23 @@ pub enum StoreError {
     #[error("schema is at user_version {found}, ahead of compiled head {expected}")]
     IncompatibleSchema { found: usize, expected: usize },
 
-    #[error("schema fingerprint mismatch (drift at user_version head): expected {expected}, got {actual}")]
-    SchemaDrift { expected: &'static str, actual: String },
+    #[error("schema drift: object {object} {kind}")]
+    SchemaDrift { object: String, kind: SchemaDriftKind },
+
+    #[error("migration history mismatch at id {migration_id} ({name}): expected {expected}, got {actual}")]
+    MigrationHistoryMismatch {
+        migration_id: i64,
+        name:         String,
+        expected:     &'static str,
+        actual:       String,
+    },
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SchemaDriftKind {
+    Missing,
+    SqlMismatch { expected: &'static str, actual: String },
 }
 ```
 
@@ -364,19 +474,21 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
 
 - `fresh_vault_opens_to_head` — call `open()` on a tmp path; query
   `sqlite_master` and assert the full P0 set is present:
-  - tables: `records`, `edges`, `wal_ops`, `wal_op_deps`, `wal_steps`,
-    `used`, `issuer_seq`, `outstanding_challenges`, `locks`,
-    `lock_holders`, `daemon_incarnation`, `reader_fence`,
-    `consent_journal`
+  - tables: `schema_migrations`, `records`, `edges`, `wal_ops`,
+    `wal_op_deps`, `wal_steps`, `used`, `issuer_seq`,
+    `outstanding_challenges`, `locks`, `lock_holders`,
+    `daemon_incarnation`, `reader_fence`, `consent_journal`
   - virtual tables: `records_fts`
   - views: `records_latest`
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
     `records_kind_idx`, `records_visibility_idx`, `records_scope_idx`
   - control-plane indexes: `wal_ops_open_idx`, `wal_op_deps_reverse_idx`,
-    `wal_steps_resume_idx`, `used_issuer_seq_idx`,
-    `outstanding_challenges_exp_idx`, `lock_holders_reclaim_idx`,
-    `consent_journal_op_idx`
+    `wal_steps_resume_idx`, `outstanding_challenges_exp_idx`,
+    `lock_holders_reclaim_idx`, `consent_journal_op_idx`
+    (the `used` table's `(issuer, sequence)` and `(issuer, nonce)`
+    lookup paths are served by the table's own UNIQUE constraints —
+    no explicit secondary index needed)
 - `pragmas_applied` — assert `PRAGMA journal_mode` returns `wal`,
   `foreign_keys` returns 1.
 - `idempotent_reopen` — `open()` twice on the same path; both succeed and
@@ -387,9 +499,23 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `PRAGMA user_version = 999`; call `open()`; assert `StoreError::IncompatibleSchema`.
 - `same_version_drift_is_rejected` — call `open()` to bring the DB to
   head; manually `DROP TRIGGER records_fts_au`; call `open()` again on
-  the same path; assert `StoreError::SchemaDrift`. A second variant
-  drops `records_path_idx` and asserts the same error. This is the
+  the same path; assert `StoreError::SchemaDrift` with kind `Missing`.
+  Second variant drops `records_path_idx` (same expected error). Third
+  variant rewrites a view's `sql` via `UPDATE sqlite_master` (or
+  recreates with different text); expect `SqlMismatch`. This is the
   drift case `user_version` alone does not catch.
+- `engine_owned_schema_changes_ok` — after migrations apply, run
+  `INSERT INTO records (...)` to force FTS5 to populate its shadow
+  tables; reopen; expect success. Confirms FTS5 internals are not in
+  the allowlist.
+- `extra_user_object_ok` — after migrations, `CREATE INDEX
+  user_audit_idx ON consent_journal(committed_at)`; reopen; expect
+  success. Confirms the allowlist is "must-be-present", not
+  "must-be-only".
+- `migration_history_mismatch_rejected` — apply migrations to head;
+  manually `UPDATE schema_migrations SET sql_blake3 = '00...00' WHERE
+  migration_id = 3`; reopen; expect
+  `StoreError::MigrationHistoryMismatch { migration_id: 3, .. }`.
 - `fts_round_trip` — minimal smoke: `INSERT INTO records (...)` then
   `SELECT body FROM records_fts WHERE records_fts MATCH '...'` returns the
   row, proving the trigger wired up correctly.
@@ -410,7 +536,7 @@ Snapshot lives at `crates/cairn-store-sqlite/tests/snapshots/migrations__schema.
 | AC | How it's verified |
 |----|--------------------|
 | Fresh vault opens with all P0 tables and pragmas | `fresh_vault_opens_to_head` + `pragmas_applied` |
-| Migration history is visible and fails on checksum mismatch | `rusqlite_migration` tracks `user_version`; `forward_only_rejects_future_schema` covers future-version skew; `same_version_drift_is_rejected` covers the same-version tampered-schema case (closes the dropped-trigger / dropped-index gap that `user_version` alone misses). |
+| Migration history is visible and fails on checksum mismatch | `schema_migrations` ledger records each applied migration's BLAKE3 hash; `verify_migration_history()` runs at every open and `migration_history_mismatch_rejected` proves it rejects edited history. `forward_only_rejects_future_schema` catches future-version skew, `same_version_drift_is_rejected` catches same-version state drift. |
 | No P0 authoritative state outside `.cairn/cairn.db` except rebuildable mirrors/caches | Structural — this PR adds nothing outside the SQLite file. Reviewer confirms. |
 | Migration tests on empty and pre-migrated fixtures | `fresh_vault_opens_to_head` + `partial_migration_resume` |
 | Inspect SQLite schema for required tables and FTS/vector indexes | Snapshot test + explicit `sqlite_master` assertions (vector indexes deferred to #46 per scope) |
