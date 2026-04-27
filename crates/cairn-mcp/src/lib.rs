@@ -12,6 +12,9 @@
 pub mod dispatch;
 pub mod error;
 pub mod generated;
+pub mod server;
+
+pub use server::serve_stdio;
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -41,7 +44,7 @@ impl MCPServer for CairnMcpServer {
 
     fn capabilities(&self) -> &MCPServerCapabilities {
         static CAPS: MCPServerCapabilities = MCPServerCapabilities {
-            stdio: false,
+            stdio: true,
             sse: false,
             http_streamable: false,
             extensions: false,

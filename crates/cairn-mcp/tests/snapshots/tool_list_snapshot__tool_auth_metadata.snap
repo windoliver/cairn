@@ -1,0 +1,62 @@
+---
+source: crates/cairn-mcp/tests/tool_list_snapshot.rs
+expression: metadata
+---
+[
+  {
+    "auth": "signed_chain",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 0,
+    "name": "ingest"
+  },
+  {
+    "auth": "rebac",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 3,
+    "name": "search"
+  },
+  {
+    "auth": "rebac",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 6,
+    "name": "retrieve"
+  },
+  {
+    "auth": "rebac",
+    "auth_overrides_count": 1,
+    "capability": null,
+    "capability_overrides_count": 0,
+    "name": "summarize"
+  },
+  {
+    "auth": "rebac",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 0,
+    "name": "assemble_hot"
+  },
+  {
+    "auth": "signed_chain",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 0,
+    "name": "capture_trace"
+  },
+  {
+    "auth": "read_only",
+    "auth_overrides_count": 1,
+    "capability": null,
+    "capability_overrides_count": 0,
+    "name": "lint"
+  },
+  {
+    "auth": "forget_capability",
+    "auth_overrides_count": 0,
+    "capability": null,
+    "capability_overrides_count": 3,
+    "name": "forget"
+  }
+]

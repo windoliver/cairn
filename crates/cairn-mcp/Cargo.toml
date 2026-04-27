@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
+insta = { workspace = true }
 
 [lints]
 workspace = true
