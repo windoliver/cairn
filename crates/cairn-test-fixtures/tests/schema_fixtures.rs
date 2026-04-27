@@ -9,16 +9,14 @@
 
 fn load_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) -> T {
     let path = path.as_ref();
-    let raw = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 fn load_toml_str(path: impl AsRef<std::path::Path>) -> String {
     let path = path.as_ref();
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 fn v0() -> std::path::PathBuf {
@@ -31,7 +29,13 @@ fn v0() -> std::path::PathBuf {
 fn v0_directory_structure_exists() {
     let base = v0();
     assert!(base.exists(), "fixtures/v0 must exist: {base:?}");
-    for sub in &["records", "config", "envelopes", "search-filters", "manifests"] {
+    for sub in &[
+        "records",
+        "config",
+        "envelopes",
+        "search-filters",
+        "manifests",
+    ] {
         let p = base.join(sub);
         assert!(p.is_dir(), "fixtures/v0/{sub} must be a directory: {p:?}");
     }
@@ -48,28 +52,32 @@ fn records_dir() -> std::path::PathBuf {
 #[test]
 fn record_semantic_private_deserializes_and_validates() {
     let r: MemoryRecord = load_json(records_dir().join("semantic_private_user.json"));
-    r.validate().expect("semantic_private_user must pass validate()");
+    r.validate()
+        .expect("semantic_private_user must pass validate()");
     insta::assert_json_snapshot!("record_semantic_private_user", &r);
 }
 
 #[test]
 fn record_episodic_session_deserializes_and_validates() {
     let r: MemoryRecord = load_json(records_dir().join("episodic_session_trace.json"));
-    r.validate().expect("episodic_session_trace must pass validate()");
+    r.validate()
+        .expect("episodic_session_trace must pass validate()");
     insta::assert_json_snapshot!("record_episodic_session_trace", &r);
 }
 
 #[test]
 fn record_procedural_project_deserializes_and_validates() {
     let r: MemoryRecord = load_json(records_dir().join("procedural_project_playbook.json"));
-    r.validate().expect("procedural_project_playbook must pass validate()");
+    r.validate()
+        .expect("procedural_project_playbook must pass validate()");
     insta::assert_json_snapshot!("record_procedural_project_playbook", &r);
 }
 
 #[test]
 fn record_graph_team_deserializes_and_validates() {
     let r: MemoryRecord = load_json(records_dir().join("graph_team_entity.json"));
-    r.validate().expect("graph_team_entity must pass validate()");
+    r.validate()
+        .expect("graph_team_entity must pass validate()");
     insta::assert_json_snapshot!("record_graph_team_entity", &r);
 }
 
@@ -113,14 +121,16 @@ fn envelopes_dir() -> std::path::PathBuf {
 #[test]
 fn signed_intent_sequence_deserializes() {
     let si: SignedIntent = load_json(envelopes_dir().join("signed-intent-sequence.json"));
-    si.validate().expect("signed-intent-sequence must pass validate()");
+    si.validate()
+        .expect("signed-intent-sequence must pass validate()");
     insta::assert_json_snapshot!("signed_intent_sequence", &si);
 }
 
 #[test]
 fn signed_intent_challenge_deserializes() {
     let si: SignedIntent = load_json(envelopes_dir().join("signed-intent-challenge.json"));
-    si.validate().expect("signed-intent-challenge must pass validate()");
+    si.validate()
+        .expect("signed-intent-challenge must pass validate()");
     insta::assert_json_snapshot!("signed_intent_challenge", &si);
 }
 
