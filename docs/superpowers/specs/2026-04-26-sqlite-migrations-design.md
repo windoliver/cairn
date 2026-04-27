@@ -226,6 +226,25 @@ BEGIN
     'wal_ops.issued_seq must strictly advance MAX(issued_seq)');
 END;
 
+-- The DAG's authoritative ordering is wal_ops.issued_seq, and the
+-- linearization key is wal_ops.operation_id. Both must be immutable
+-- post-insert; otherwise an UPDATE could invalidate every
+-- wal_op_deps row whose acyclicity was checked against the old value.
+-- State / envelope / updated_at / reason ARE expected to mutate as
+-- the FSM progresses; this trigger only freezes identity + order.
+CREATE TRIGGER wal_ops_identity_immutable
+  BEFORE UPDATE ON wal_ops
+  FOR EACH ROW
+  WHEN NEW.operation_id IS NOT OLD.operation_id
+    OR NEW.issued_seq   IS NOT OLD.issued_seq
+    OR NEW.issuer       IS NOT OLD.issuer
+    OR NEW.kind         IS NOT OLD.kind
+    OR NEW.issued_at    IS NOT OLD.issued_at
+BEGIN
+  SELECT RAISE(ABORT,
+    'wal_ops identity columns (operation_id, issued_seq, issuer, kind, issued_at) are immutable');
+END;
+
 -- Recovery scans for non-terminal ops on boot (§5.6 step 1).
 CREATE INDEX wal_ops_open_idx
   ON wal_ops(state, issued_at)
@@ -359,16 +378,39 @@ BEGIN
   SELECT RAISE(ABORT, 'used rows are append-only; UPDATE not permitted');
 END;
 
--- Same rule for issuer_seq: only the AFTER INSERT trigger above may
--- advance high_water. A direct UPDATE is rejected so a manual repair
--- cannot rewind issuer_seq.high_water below what `used` proves was
--- already committed.
-CREATE TRIGGER issuer_seq_only_advances
+-- issuer_seq is mirrored from `used`: every advance must correspond to
+-- a real ledger row inserted in the same transaction. Direct
+-- UPDATE issuer_seq SET high_water = <arbitrary> is rejected because
+-- no matching `used` row exists. Combined with the rewind check, this
+-- pins issuer_seq.high_water to the actual ledger:
+--   * cannot rewind (NEW.high_water > OLD.high_water required),
+--   * cannot leap ahead (NEW.high_water must equal some used.sequence
+--     for this issuer — produced moments earlier by used_advance_high_water).
+CREATE TRIGGER issuer_seq_only_via_ledger
   BEFORE UPDATE ON issuer_seq
   FOR EACH ROW
   WHEN NEW.high_water <= OLD.high_water
+    OR NOT EXISTS (
+      SELECT 1 FROM used
+        WHERE issuer = NEW.issuer
+          AND sequence = NEW.high_water
+    )
 BEGIN
-  SELECT RAISE(ABORT, 'issuer_seq.high_water can only advance');
+  SELECT RAISE(ABORT,
+    'issuer_seq.high_water can only advance to a sequence already in `used`');
+END;
+
+-- `used` is the durable replay-attack ledger; deleting a row would
+-- free the (issuer, nonce) slot while issuer_seq.high_water stays
+-- where it was, opening the same nonce/sequence to be replayed under
+-- a different operation_id. Block DELETE outright. Compensating
+-- repair must record state in a separate audit table, not erase
+-- ledger evidence.
+CREATE TRIGGER used_no_delete
+  BEFORE DELETE ON used
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'used rows are append-only; DELETE not permitted');
 END;
 
 CREATE TABLE issuer_seq (
@@ -739,10 +781,10 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   - triggers: `records_fts_ai`, `records_fts_ad`, `records_fts_au`,
     `edges_updates_supersede_insert`, `edges_updates_supersede_update`,
     `edges_updates_immutable_after_insert`,
-    `wal_ops_issued_seq_must_advance`,
+    `wal_ops_issued_seq_must_advance`, `wal_ops_identity_immutable`,
     `wal_op_deps_must_be_acyclic`, `wal_op_deps_immutable`,
     `used_sequence_must_advance`, `used_advance_high_water`,
-    `used_immutable`, `issuer_seq_only_advances`,
+    `used_immutable`, `used_no_delete`, `issuer_seq_only_via_ledger`,
     `lock_holders_count_after_insert`, `lock_holders_count_after_delete`,
     `lock_holders_count_after_update`, `lock_holders_keys_immutable`
   - partial indexes: `records_active_target_idx`, `records_path_idx`,
@@ -844,7 +886,16 @@ Uses `tempfile::tempdir()` (already a workspace dev-dep via
   `UPDATE used SET sequence = sequence + 1` and `UPDATE used SET
   issuer = 'mallory'`; both ABORT via `used_immutable`. Attempt
   `UPDATE issuer_seq SET high_water = high_water - 1`; ABORT via
-  `issuer_seq_only_advances`.
+  `issuer_seq_only_via_ledger` (rewind branch). Attempt
+  `UPDATE issuer_seq SET high_water = 999999` for an issuer with no
+  `used` row at sequence 999999; ABORT via `issuer_seq_only_via_ledger`
+  (no-matching-ledger branch). Attempt `DELETE FROM used WHERE
+  operation_id = '…'`; ABORT via `used_no_delete`.
+- `wal_ops_identity_locked` — insert a `wal_ops` row; UPDATE the
+  `state` column from `'ISSUED'` to `'PREPARED'`; expect success
+  (state is mutable). UPDATE `issued_seq`; expect ABORT. UPDATE
+  `operation_id`; expect ABORT. UPDATE `issuer`, `kind`, `issued_at`;
+  each ABORTs.
 - `lock_holders_keys_locked` — insert a holder; attempt
   `UPDATE lock_holders SET scope_key = '…' WHERE …`; ABORT.
   Repeats for `scope_kind`, `holder_id`, `acquired_epoch`.
