@@ -1,24 +1,28 @@
 //! `cairn skill install` — writes the Cairn skill bundle to the harness skill
 //! directory (§8.0.a-bis, §18.d).
 
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 /// Supported harnesses for `cairn skill install`.
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 pub enum Harness {
+    /// Claude Code harness — registers the skill via CLAUDE.md.
     #[value(name = "claude-code")]
     ClaudeCode,
+    /// Codex harness — registers the skill via AGENTS.md.
     Codex,
+    /// Gemini CLI harness — registers the skill via GEMINI.md.
     Gemini,
+    /// `OpenCode` harness — registers the skill via the opencode config skills path.
     Opencode,
+    /// Cursor harness — registers the skill via .cursorrules.
     Cursor,
+    /// Custom or unknown harness — prints a generic registration hint.
     Custom,
 }
 
 /// Returns the harness-specific registration hint printed after install.
+#[must_use]
 pub fn registration_hint(harness: &Harness) -> &'static str {
     match harness {
         Harness::ClaudeCode => "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md",
