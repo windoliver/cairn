@@ -1,0 +1,12 @@
+---
+source: crates/cairn-mcp/tests/tool_list_snapshot.rs
+expression: "summary.join(\"\\n\")"
+---
+ingest: `ingest` — verb ingest.
+search: `search` — verb search.
+retrieve: `retrieve` — verb retrieve.
+summarize: `summarize` — verb summarize.
+assemble_hot: `assemble_hot` — verb assemble_hot.
+capture_trace: `capture_trace` — verb capture_trace.
+lint: `lint` — verb lint.
+forget: `forget` — verb forget.

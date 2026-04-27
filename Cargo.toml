@@ -16,10 +16,12 @@ readme = "README.md"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "sync"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "json", "fmt"] }
 anyhow = "1"
 async-trait = "0.1"
+rmcp = { version = "1.5.0", default-features = false, features = ["server", "transport-io"] }
 insta = { version = "1.40", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false }
 proptest = "1"
@@ -33,6 +35,7 @@ serde_yaml = "0.9"
 temp-env = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
+rusqlite_migration = "1"
 ulid = { version = "1.1", default-features = false, features = ["std"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 

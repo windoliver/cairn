@@ -50,7 +50,58 @@ fn build_command() -> clap::Command {
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
         .subcommand(bootstrap_subcommand())
+        .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
+        .subcommand(skill_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp").about(
+        "Start an MCP stdio server. Reads MCP frames from stdin, \
+             dispatches to the eight cairn verbs, writes responses to \
+             stdout. Blocks until stdin closes.",
+    )
+}
+
+fn skill_subcommand() -> clap::Command {
+    clap::Command::new("skill")
+        .about("Manage the Cairn skill bundle")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("install")
+                .about("Install the Cairn skill bundle into the harness skill directory (§18.d)")
+                .arg(
+                    clap::Arg::new("harness")
+                        .long("harness")
+                        .required(true)
+                        .value_name("HARNESS")
+                        .value_parser(
+                            clap::builder::EnumValueParser::<cairn_cli::skill::Harness>::new(),
+                        )
+                        .help(
+                            "Target harness (claude-code, codex, gemini, opencode, cursor, custom)",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("target-dir")
+                        .long("target-dir")
+                        .value_name("PATH")
+                        .help("Override the default install path (~/.cairn/skills/cairn/)"),
+                )
+                .arg(
+                    clap::Arg::new("force")
+                        .long("force")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Overwrite generated files even if the version matches"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON receipt instead of human-readable output"),
+                ),
+        )
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -219,7 +270,7 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins");
+    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -270,7 +321,9 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
+        Some(("skill", sub)) => run_skill(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -306,6 +359,62 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cairn bootstrap: {e:#}");
+            ExitCode::from(74) // EX_IOERR
+        }
+    }
+}
+
+fn run_skill(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("install", sub)) => run_skill_install(sub),
+        _ => unreachable!(
+            "clap subcommand_required(true) on skill ensures a subcommand is always present"
+        ),
+    }
+}
+
+fn run_skill_install(matches: &ArgMatches) -> ExitCode {
+    let harness = matches
+        .get_one::<cairn_cli::skill::Harness>("harness")
+        .expect("invariant: --harness is required by clap")
+        .clone();
+
+    let target_dir = if let Some(path) = matches.get_one::<String>("target-dir") {
+        std::path::PathBuf::from(path)
+    } else {
+        match cairn_cli::skill::default_target_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("cairn skill install: {e:#}");
+                return ExitCode::from(69); // EX_UNAVAILABLE
+            }
+        }
+    };
+
+    let force = matches.get_flag("force");
+    let json = matches.get_flag("json");
+
+    let opts = cairn_cli::skill::InstallOpts {
+        target_dir,
+        harness,
+        force,
+    };
+
+    match cairn_cli::skill::install(&opts) {
+        Ok(receipt) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: InstallReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::skill::render_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn skill install: {e:#}");
             ExitCode::from(74) // EX_IOERR
         }
     }

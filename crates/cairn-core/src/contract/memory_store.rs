@@ -7,18 +7,21 @@ use crate::domain::record::MemoryRecord;
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
 /// Static capability declaration for a `MemoryStore` impl.
+///
+/// Cairn queries this before dispatching ANN-, FTS-, or graph-using verbs;
+/// missing capability → `CapabilityUnavailable` (brief §4.1).
 // Four capability flags mirror the four distinct store dimensions; a state
 // machine would add indirection with no gain here.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemoryStoreCapabilities {
-    /// Whether the store supports full-text search (FTS5 or equivalent).
+    /// Whether full-text search (FTS5) is supported.
     pub fts: bool,
-    /// Whether the store supports vector similarity search.
+    /// Whether vector/ANN search is supported.
     pub vector: bool,
-    /// Whether the store supports graph-edge traversal queries.
+    /// Whether graph edge storage and traversal is supported.
     pub graph_edges: bool,
-    /// Whether the store supports multi-statement transactions.
+    /// Whether ACID transactions are supported.
     pub transactions: bool,
 }
 
@@ -71,6 +74,34 @@ pub trait MemoryStore: Send + Sync {
     async fn list_active(&self) -> Result<Vec<StoredRecord>, StoreError>;
 }
 
+/// Static identity descriptor for a [`MemoryStore`] plugin (§4.1).
+///
+/// This companion trait carries the two associated consts that the
+/// `register_plugin_with!` macro checks **before construction** — the
+/// stable plugin name and the supported contract-version range.
+///
+/// Separating these consts from [`MemoryStore`] is required by stable Rust:
+/// associated consts in a trait break `dyn` compatibility unless gated by
+/// `where Self: Sized` (an unstable feature as of 1.95). Placing them in a
+/// `Sized`-bounded companion trait keeps `dyn MemoryStore` valid while still
+/// allowing the macro to enforce `<Impl as MemoryStorePlugin>::NAME ==
+/// registered_name` at compile time.
+///
+/// Every concrete [`MemoryStore`] implementation should also implement
+/// `MemoryStorePlugin`. The blanket-compatible methods `fn name` and
+/// `fn supported_contract_versions` on [`MemoryStore`] should delegate to
+/// these consts (e.g. `fn name(&self) -> &str { Self::NAME }`).
+pub trait MemoryStorePlugin: MemoryStore + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    ///
+    /// Must match the `name` literal passed to `register_plugin!` /
+    /// `register_plugin_with!`.
+    const NAME: &'static str;
+
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +111,7 @@ mod tests {
     #[async_trait::async_trait]
     impl MemoryStore for StubStore {
         fn name(&self) -> &'static str {
-            "stub"
+            Self::NAME
         }
         fn capabilities(&self) -> &MemoryStoreCapabilities {
             static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
@@ -92,7 +123,7 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+            Self::SUPPORTED_VERSIONS
         }
         async fn get(&self, _: &str) -> Result<Option<StoredRecord>, StoreError> {
             Err(StoreError::Unimplemented)
@@ -105,6 +136,12 @@ mod tests {
         }
     }
 
+    impl MemoryStorePlugin for StubStore {
+        const NAME: &'static str = "stub";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+    }
+
     #[tokio::test]
     async fn dyn_compatible() {
         let s: Box<dyn MemoryStore> = Box::new(StubStore);
@@ -113,5 +150,11 @@ mod tests {
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
         assert!(s.get("x").await.is_err());
         assert!(s.list_active().await.is_err());
+    }
+
+    #[test]
+    fn static_consts_accessible() {
+        assert_eq!(StubStore::NAME, "stub");
+        assert!(StubStore::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
     }
 }

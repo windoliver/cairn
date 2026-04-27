@@ -132,15 +132,34 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     // --- placeholder files ---
     let config_yaml = serde_yaml::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
-    write_once(&config_path, &config_yaml, opts.force, &mut receipt)?;
+    write_once(
+        &config_path,
+        &config_yaml,
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
     write_once(
         &vault.join("purpose.md"),
         PURPOSE_MD,
         opts.force,
-        &mut receipt,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
     )?;
-    write_once(&vault.join("index.md"), "", opts.force, &mut receipt)?;
-    write_once(&vault.join("log.md"), "", opts.force, &mut receipt)?;
+    write_once(
+        &vault.join("index.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
+    write_once(
+        &vault.join("log.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
 
     Ok(receipt)
 }
@@ -175,11 +194,12 @@ pub fn render_human(receipt: &BootstrapReceipt) -> String {
     )
 }
 
-fn write_once(
+pub(crate) fn write_once(
     path: &std::path::Path,
     content: &str,
     force: bool,
-    receipt: &mut BootstrapReceipt,
+    created: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
 ) -> Result<()> {
     use std::io::Write as _;
 
@@ -192,7 +212,7 @@ fn write_once(
         && meta.file_type().is_symlink()
     {
         anyhow::bail!(
-            "parent directory {} is a symlink — bootstrap will not write through it",
+            "parent directory {} is a symlink — cairn will not write through it",
             dir.display()
         );
     }
@@ -202,20 +222,20 @@ fn write_once(
         let ft = meta.file_type();
         if ft.is_symlink() {
             anyhow::bail!(
-                "{} is a symlink — bootstrap will not write through it",
+                "{} is a symlink — cairn will not write through it",
                 path.display()
             );
         }
         if !ft.is_file() {
             // A directory or special file at a placeholder path means the
-            // vault is in an inconsistent state; bootstrap cannot repair it.
+            // vault is in an inconsistent state; cairn cannot repair it.
             anyhow::bail!(
-                "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                "{} exists but is not a regular file — cairn cannot overwrite it",
                 path.display()
             );
         }
         if !force {
-            receipt.files_skipped.push(path.to_owned());
+            skipped.push(path.to_owned());
             return Ok(());
         }
         // force=true, regular file — fall through to atomic overwrite
@@ -254,16 +274,16 @@ fn write_once(
                 // propagate all other outcomes (errors, NotFound, non-regular).
                 match std::fs::symlink_metadata(path) {
                     Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
-                        "{} is a symlink — bootstrap will not write through it",
+                        "{} is a symlink — cairn will not write through it",
                         path.display()
                     ),
                     Ok(m) if !m.file_type().is_file() => anyhow::bail!(
-                        "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                        "{} exists but is not a regular file — cairn cannot overwrite it",
                         path.display()
                     ),
                     Ok(_) => {
                         // is_file() is the only remaining case after the arms above.
-                        receipt.files_skipped.push(path.to_owned());
+                        skipped.push(path.to_owned());
                         return Ok(());
                     }
                     Err(re) => {
@@ -280,6 +300,6 @@ fn write_once(
         }
     }
 
-    receipt.files_created.push(path.to_owned());
+    created.push(path.to_owned());
     Ok(())
 }

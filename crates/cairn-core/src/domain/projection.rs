@@ -84,8 +84,17 @@ pub enum ResyncError {
 /// `extra_frontmatter`. Used by the resync handler to separate standard
 /// projected fields from user-editable extras.
 pub const PROJECTED_STANDARD_FIELDS: &[&str] = &[
-    "id", "version", "kind", "class", "visibility",
-    "scope", "confidence", "salience", "tags", "created", "updated",
+    "id",
+    "version",
+    "kind",
+    "class",
+    "visibility",
+    "scope",
+    "confidence",
+    "salience",
+    "tags",
+    "created",
+    "updated",
 ];
 
 /// Pure projection functions — render, parse, and conflict-check.
@@ -146,8 +155,7 @@ impl MarkdownProjector {
             }
         }
         #[allow(clippy::expect_used)]
-        let yaml = serde_yaml::to_string(&yaml_map)
-            .expect("YAML mapping serializes infallibly");
+        let yaml = serde_yaml::to_string(&yaml_map).expect("YAML mapping serializes infallibly");
         // serde_yaml 0.9.34 does NOT prepend a "---\n" document-start marker for
         // plain structs or mappings; debug_assert guards against a future version
         // change that would silently double-fence the output.
@@ -196,7 +204,10 @@ impl MarkdownProjector {
                 v.as_u64()
                     .and_then(|n| u32::try_from(n).ok())
                     .ok_or_else(|| {
-                        ResyncError::ParseFailed("invalid `version`: must be a non-negative integer within u32 range".to_owned())
+                        ResyncError::ParseFailed(
+                            "invalid `version`: must be a non-negative integer within u32 range"
+                                .to_owned(),
+                        )
                     })
             })?;
 
@@ -231,9 +242,7 @@ impl MarkdownProjector {
                     .enumerate()
                     .map(|(i, entry)| {
                         entry.as_str().map(str::to_owned).ok_or_else(|| {
-                            ResyncError::ParseFailed(format!(
-                                "`tags[{i}]` must be a string"
-                            ))
+                            ResyncError::ParseFailed(format!("`tags[{i}]` must be a string"))
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -582,13 +591,20 @@ mod tests {
         let parsed = proj.parse(&pf.content).expect("parse");
         // "category" is not a standard field, so it ends up in raw_frontmatter.
         assert_eq!(
-            parsed.raw_frontmatter.get("category").and_then(|v| v.as_str()),
+            parsed
+                .raw_frontmatter
+                .get("category")
+                .and_then(|v| v.as_str()),
             Some("tool"),
             "extra_frontmatter key not preserved through parse"
         );
         // Standard fields must not bleed into extra territory.
-        assert!(!parsed.raw_frontmatter.contains_key("extra_frontmatter_overlap_sentinel"),
-            "sentinel key should not appear");
+        assert!(
+            !parsed
+                .raw_frontmatter
+                .contains_key("extra_frontmatter_overlap_sentinel"),
+            "sentinel key should not appear"
+        );
     }
 
     #[test]
@@ -603,8 +619,15 @@ mod tests {
         let pf = MarkdownProjector.project(&stored);
         // The real id should appear exactly once; "injected" must not appear.
         let occurrences = pf.content.matches("id:").count();
-        assert_eq!(occurrences, 1, "id key appeared more than once: {:?}", &pf.content);
-        assert!(!pf.content.contains("injected"), "colliding extra key was not filtered");
+        assert_eq!(
+            occurrences, 1,
+            "id key appeared more than once: {:?}",
+            &pf.content
+        );
+        assert!(
+            !pf.content.contains("injected"),
+            "colliding extra key was not filtered"
+        );
     }
 
     #[test]

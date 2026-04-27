@@ -13,15 +13,20 @@ description = "MCP adapter surface for the Cairn verb layer."
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+insta = { workspace = true }
 
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
+# tokio: used transitively — rmcp::transport::io::stdio() returns tokio::io types;
+#   direct tokio usage lands when cairn-cli wires the runtime.
 [package.metadata.cargo-machete]
-ignored = ["serde", "serde_json"]
+ignored = ["tokio"]

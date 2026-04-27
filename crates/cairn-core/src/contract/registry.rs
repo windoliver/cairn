@@ -117,6 +117,21 @@ pub enum PluginError {
         /// The name the manifest actually declares.
         manifest: PluginName,
     },
+
+    /// A config-driven factory closure returned an error during plugin construction.
+    ///
+    /// The source is boxed to break the circular type reference with `ConfigError`
+    /// (which already contains `PluginError` via `InvalidPluginName`).
+    #[error("plugin {plugin} for contract {contract} failed to construct: {source}")]
+    FactoryError {
+        /// Contract under which construction was attempted.
+        contract: &'static str,
+        /// The plugin being constructed.
+        plugin: PluginName,
+        /// The underlying construction error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
 use crate::contract::{
@@ -527,7 +542,10 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+    use crate::contract::llm_provider::LLMProviderPlugin;
+    use crate::contract::memory_store::{
+        CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
+    };
 
     // -- PluginName tests -------------------------------------------------
 
@@ -620,6 +638,12 @@ mod tests {
         > {
             Err(crate::contract::memory_store::StoreError::Unimplemented)
         }
+    }
+
+    impl MemoryStorePlugin for StubStore {
+        const NAME: &'static str = "stub-store";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     fn compatible() -> VersionRange {
@@ -783,6 +807,11 @@ patch = 0
                 self.range
             }
         }
+        impl LLMProviderPlugin for StubLlm {
+            const NAME: &'static str = "cairn-store-sqlite";
+            const SUPPORTED_VERSIONS: VersionRange =
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+        }
 
         let mut reg = PluginRegistry::new();
         let name = PluginName::new("cairn-store-sqlite").expect("valid");
@@ -856,6 +885,11 @@ patch = 0
                 self.range
             }
         }
+        impl LLMProviderPlugin for StubLlm {
+            const NAME: &'static str = "cairn-store-sqlite";
+            const SUPPORTED_VERSIONS: VersionRange =
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+        }
 
         let llm_manifest_text = r#"
 name = "cairn-store-sqlite"
@@ -899,5 +933,30 @@ patch = 0
             )
             .expect_err("cross-contract duplicate must fail");
         assert!(matches!(err, PluginError::DuplicateName { .. }));
+    }
+
+    #[test]
+    fn factory_error_display() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct FakeErr;
+        impl fmt::Display for FakeErr {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "db open failed")
+            }
+        }
+        impl std::error::Error for FakeErr {}
+
+        let err = PluginError::FactoryError {
+            contract: "MemoryStore",
+            plugin: PluginName::new("some-store").unwrap(),
+            source: Box::new(FakeErr),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("some-store"), "message: {msg}");
+        assert!(msg.contains("db open failed"), "message: {msg}");
+        assert!(err.source().is_some());
     }
 }

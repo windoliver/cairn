@@ -19,6 +19,9 @@
 
 pub mod actor_chain;
 pub mod canonical;
+pub mod capture;
+pub mod capture_attribution;
+pub mod capture_manifest;
 pub mod error;
 pub mod evidence;
 pub mod filter;
@@ -31,8 +34,14 @@ pub mod scope;
 pub mod taxonomy;
 pub mod timestamp;
 
-pub use actor_chain::{ActorChainEntry, ChainRole};
+pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use canonical::CanonicalRecordHash;
+pub use capture::{
+    CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
+    SensorLabel, SourceFamily,
+};
+pub use capture_attribution::attribute;
+pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};

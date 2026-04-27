@@ -6,6 +6,8 @@
 //! tolerated here per CLAUDE.md §6.2 (bins/tests).
 
 pub mod config;
+pub mod mcp;
 pub mod plugins;
+pub mod skill;
 pub mod vault;
 pub mod verbs;

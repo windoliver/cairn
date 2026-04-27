@@ -206,8 +206,7 @@ async fn write_quarantine(
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 retry += 1;
-                q_path =
-                    quarantine_dir.join(format!("{nanos}-{target_id}-{retry}.rejected"));
+                q_path = quarantine_dir.join(format!("{nanos}-{target_id}-{retry}.rejected"));
             }
             Err(e) => {
                 return Err(anyhow::anyhow!(
