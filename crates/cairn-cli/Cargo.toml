@@ -29,6 +29,7 @@ serde_json = { workspace = true }
 ulid = { workspace = true }
 base64 = { workspace = true }
 serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
@@ -42,8 +43,9 @@ tempfile = { workspace = true }
 workspace = true
 
 # anyhow is declared now; its first call site lands when verb logic is wired in #9.
+# tokio is declared now; its first call site lands when verb logic is wired in Task 5.
 [package.metadata.cargo-machete]
-ignored = ["anyhow"]
+ignored = ["anyhow", "tokio"]
 
 [lib]
 name = "cairn_cli"
