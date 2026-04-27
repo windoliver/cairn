@@ -909,7 +909,17 @@ impl CaptureEvent {
         }
 
         let label = SensorLabel::from_identity(&self.sensor_id)?;
-        super::capture_manifest::validate_label(&label)?;
+        // Schema-level admission enforces both the structural rule and
+        // membership in the default canonical registry. Pre-#50 there is
+        // no runtime sensor provisioning to extend the registry, so
+        // accepting an unregistered-but-shape-valid label like
+        // `snr:local:hook:evil-host:v1` would let an attacker mint
+        // trusted events. When #50 ships, the call site switches to the
+        // runtime registry.
+        super::capture_manifest::validate_label_in_registry(
+            &label,
+            super::capture_manifest::P0_CANONICAL_LABELS,
+        )?;
 
         let expected_family =
             family_for_label(&label).ok_or_else(|| DomainError::UndeclaredSensor {

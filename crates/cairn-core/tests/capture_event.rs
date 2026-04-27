@@ -505,6 +505,28 @@ fn proactive_sensor_agent_match_passes() {
 }
 
 #[test]
+fn captureevent_rejects_structurally_valid_but_unregistered_sensor() {
+    // `snr:local:hook:any-instance:v1` is structurally well-formed but
+    // is not in `P0_CANONICAL_LABELS`. `CaptureEvent::validate` must
+    // close that gap pre-#50 — otherwise a producer can mint trusted
+    // events under fabricated sensor identities.
+    let mut ev = auto_event();
+    ev.sensor_id = Identity::parse("snr:local:hook:any-instance:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:hook:any-instance:v1")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+}
+
+#[test]
+fn captureevent_rejects_unregistered_proactive_agent() {
+    let mut ev = proactive_event();
+    ev.sensor_id = Identity::parse("snr:local:proactive:rogue-agent:v1").expect("valid");
+    ev.actor_chain = vec![entry(ChainRole::Author, "agt:rogue-agent:m:role:v1")];
+    let err = ev.validate().unwrap_err();
+    assert!(matches!(err, DomainError::UndeclaredSensor { .. }));
+}
+
+#[test]
 fn arbitrary_suffix_under_declared_family_rejected() {
     // `snr:local:hook:anything` has the right family prefix but no
     // version segment — must not pass manifest validation.
