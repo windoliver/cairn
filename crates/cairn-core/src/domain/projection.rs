@@ -21,7 +21,7 @@ pub struct ProjectedFile {
 }
 
 /// Parsed content of a projected markdown file — the resync direction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParsedProjection {
     /// Stable record identity (`MemoryRecord.id`).
     pub target_id: String,
@@ -39,6 +39,7 @@ pub struct ParsedProjection {
 
 /// Result of the optimistic-concurrency conflict check.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConflictOutcome {
     Clean,
     Conflict {
@@ -51,6 +52,7 @@ pub enum ConflictOutcome {
 
 /// Errors from parsing or conflict detection in the resync path.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResyncError {
     #[error("failed to parse frontmatter: {0}")]
     ParseFailed(String),
@@ -65,6 +67,7 @@ pub enum ResyncError {
 }
 
 /// Pure projection functions — render, parse, and conflict-check.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MarkdownProjector;
 
 // Internal serde helper for project().
