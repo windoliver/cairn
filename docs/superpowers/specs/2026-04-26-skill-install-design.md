@@ -92,7 +92,8 @@ cairn skill install --harness claude-code
   │
   ├─ version check
   │    read target_dir/.version (if exists)
-  │    same version + !force  →  skip all writes, return receipt (files_skipped)
+  │    same version + !force  →  skip generated file writes, return receipt (files_skipped)
+  │    same version + force   →  overwrite generated files (examples still write_once)
   │    newer version           →  warn to stderr, proceed (downgrade is user's call)
   │    older / absent          →  proceed (upgrade or fresh install)
   │
