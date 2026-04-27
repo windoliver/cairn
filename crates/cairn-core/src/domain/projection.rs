@@ -137,8 +137,81 @@ impl MarkdownProjector {
     }
 
     /// Parse a projected markdown file's content.
-    pub fn parse(&self, _content: &str) -> Result<ParsedProjection, ResyncError> {
-        todo!("Task 4")
+    pub fn parse(&self, content: &str) -> Result<ParsedProjection, ResyncError> {
+        let after_open = content
+            .strip_prefix("---\n")
+            .ok_or_else(|| ResyncError::ParseFailed("file must start with `---`".to_owned()))?;
+
+        let (yaml_part, body_raw) = after_open
+            .split_once("\n---\n")
+            .ok_or_else(|| ResyncError::ParseFailed("no closing `---` delimiter".to_owned()))?;
+
+        let body = body_raw.trim_start_matches('\n').to_owned();
+
+        let val: serde_yaml::Value = serde_yaml::from_str(yaml_part)
+            .map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
+
+        let map = val
+            .as_mapping()
+            .ok_or_else(|| ResyncError::ParseFailed("frontmatter must be a YAML mapping".to_owned()))?;
+
+        let target_id = map
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or(ResyncError::MissingId)?
+            .to_owned();
+
+        let version = map
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
+
+        let kind_str = map
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ResyncError::ParseFailed("missing `kind`".to_owned()))?;
+        let kind = MemoryKind::parse(kind_str)
+            .map_err(|_| ResyncError::ParseFailed(format!("unknown kind: `{kind_str}`")))?;
+
+        let class_str = map
+            .get("class")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ResyncError::ParseFailed("missing `class`".to_owned()))?;
+        let class = MemoryClass::parse(class_str)
+            .map_err(|_| ResyncError::ParseFailed(format!("unknown class: `{class_str}`")))?;
+
+        let vis_str = map
+            .get("visibility")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ResyncError::ParseFailed("missing `visibility`".to_owned()))?;
+        let visibility = MemoryVisibility::parse(vis_str)
+            .map_err(|_| ResyncError::ParseFailed(format!("unknown visibility: `{vis_str}`")))?;
+
+        let tags = map
+            .get("tags")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let raw_frontmatter = map
+            .iter()
+            .filter_map(|(k, v)| k.as_str().map(|s| (s.to_owned(), v.clone())))
+            .collect();
+
+        Ok(ParsedProjection {
+            target_id,
+            version,
+            kind,
+            class,
+            visibility,
+            body,
+            tags,
+            raw_frontmatter,
+        })
     }
 
     /// Optimistic-concurrency conflict check.
@@ -209,5 +282,38 @@ mod tests {
         let path_str = pf.path.to_string_lossy();
         assert!(path_str.contains(stored.record.kind.as_str()));
         assert!(path_str.contains(stored.record.id.as_str()));
+    }
+
+    #[test]
+    fn parse_round_trip_preserves_mutable_fields() {
+        let original = stored(3);
+        let pf = MarkdownProjector.project(&original);
+        let parsed = MarkdownProjector.parse(&pf.content).expect("parse");
+        assert_eq!(parsed.target_id, original.record.id.as_str());
+        assert_eq!(parsed.version, 3);
+        assert_eq!(parsed.kind, original.record.kind);
+        assert_eq!(parsed.body, original.record.body);
+        assert_eq!(parsed.tags, original.record.tags);
+    }
+
+    #[test]
+    fn parse_missing_id_returns_error() {
+        let content = "---\nversion: 1\nkind: user\nclass: semantic\nvisibility: private\n---\n\nbody";
+        let err = MarkdownProjector.parse(content).unwrap_err();
+        assert!(matches!(err, ResyncError::MissingId));
+    }
+
+    #[test]
+    fn parse_malformed_yaml_returns_parse_failed() {
+        let content = "---\n: bad: yaml: [\n---\n\nbody";
+        let err = MarkdownProjector.parse(content).unwrap_err();
+        assert!(matches!(err, ResyncError::ParseFailed(_)));
+    }
+
+    #[test]
+    fn parse_no_closing_fence_returns_parse_failed() {
+        let content = "---\nid: 01HQZX9F5N0000000000000000\nversion: 1\n";
+        let err = MarkdownProjector.parse(content).unwrap_err();
+        assert!(matches!(err, ResyncError::ParseFailed(_)));
     }
 }
