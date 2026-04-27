@@ -80,13 +80,13 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     // we must operate on the clean form.
     let vault = vault.components().collect::<PathBuf>();
     let vault = &vault;
-    if let Ok(meta) = std::fs::symlink_metadata(vault) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "{} is a symlink — pass the real vault path to bootstrap",
-                vault.display()
-            );
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(vault)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "{} is a symlink — pass the real vault path to bootstrap",
+            vault.display()
+        );
     }
 
     let config_path = vault.join(".cairn/config.yaml");
@@ -188,13 +188,13 @@ fn write_once(
     // would redirect every subsequent operation, so we reject it on every
     // code path, not just the write path.
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    if let Ok(meta) = std::fs::symlink_metadata(dir) {
-        if meta.file_type().is_symlink() {
-            anyhow::bail!(
-                "parent directory {} is a symlink — bootstrap will not write through it",
-                dir.display()
-            );
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(dir)
+        && meta.file_type().is_symlink()
+    {
+        anyhow::bail!(
+            "parent directory {} is a symlink — bootstrap will not write through it",
+            dir.display()
+        );
     }
 
     // Inspect the final target without following symlinks.
