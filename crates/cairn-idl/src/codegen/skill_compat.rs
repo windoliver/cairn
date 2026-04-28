@@ -286,33 +286,68 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         && let Some(verb_def) = verb_def
         && let Some(cmd) = cmds.first()
     {
-        // Single-shape verb: enforce schema-required fields directly so an
-        // example missing a required arg (`cairn ingest` with no kind) trips
-        // the gate just like the CLI would.
-        let spec = single_required_spec(verb_def);
-        let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
-        let satisfied = |field: &String| {
-            used_field_names.contains(field)
-                || (positional_count > 0 && positional_name == Some(field.as_str()))
-        };
-        for field in &spec.base {
-            if !satisfied(field) {
-                return Err(CompatError::Malformed {
-                    kind: "cli",
-                    detail: format!("verb `{verb}` missing required field `{field}`"),
-                    line: source_line,
-                });
-            }
-        }
-        if !spec.any_of.is_empty()
-            && !spec
-                .any_of
-                .iter()
-                .any(|branch| branch.iter().all(satisfied))
-        {
+        validate_single_shape_required(
+            verb,
+            verb_def,
+            cmd,
+            &used_field_names,
+            positional_count,
+            source_line,
+        )?;
+    }
+    Ok(())
+}
+
+/// Single-shape verb: enforce schema-required fields, anyOf (≥1), and
+/// oneOf (==1) directly so an example missing a required arg or violating
+/// exclusivity trips the gate just like the CLI would.
+fn validate_single_shape_required(
+    verb: &str,
+    verb_def: &VerbDef,
+    cmd: &CliCommand,
+    used_field_names: &BTreeSet<String>,
+    positional_count: usize,
+    source_line: usize,
+) -> Result<(), CompatError> {
+    let spec = single_required_spec(verb_def);
+    let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
+    let satisfied = |field: &String| {
+        used_field_names.contains(field)
+            || (positional_count > 0 && positional_name == Some(field.as_str()))
+    };
+    for field in &spec.base {
+        if !satisfied(field) {
             return Err(CompatError::Malformed {
                 kind: "cli",
-                detail: format!("verb `{verb}` missing required field from anyOf branches"),
+                detail: format!("verb `{verb}` missing required field `{field}`"),
+                line: source_line,
+            });
+        }
+    }
+    if !spec.any_of.is_empty()
+        && !spec
+            .any_of
+            .iter()
+            .any(|branch| branch.iter().all(satisfied))
+    {
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: format!("verb `{verb}` missing required field from anyOf branches"),
+            line: source_line,
+        });
+    }
+    if !spec.one_of.is_empty() {
+        let matched = spec
+            .one_of
+            .iter()
+            .filter(|branch| branch.iter().all(satisfied))
+            .count();
+        if matched != 1 {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: format!(
+                    "verb `{verb}` must satisfy exactly one oneOf branch (matched {matched})"
+                ),
                 line: source_line,
             });
         }
@@ -333,6 +368,7 @@ fn single_required_spec(verb_def: &VerbDef) -> VariantSpec {
     VariantSpec {
         base: required_excluding_const(args),
         any_of: any_of_required_branches(args),
+        one_of: one_of_required_branches(args),
     }
 }
 
@@ -522,7 +558,7 @@ fn count_matching_variants(
         .enumerate()
         .filter(|(idx, cmd)| {
             let spec = &specs[*idx];
-            if spec.base.is_empty() && spec.any_of.is_empty() {
+            if spec.base.is_empty() && spec.any_of.is_empty() && spec.one_of.is_empty() {
                 return false;
             }
             let variant_flag_names: BTreeSet<&str> =
@@ -547,6 +583,17 @@ fn count_matching_variants(
             {
                 return false;
             }
+            // 2b. If oneOf branches exist, exactly one must be fully satisfied.
+            if !spec.one_of.is_empty() {
+                let matched = spec
+                    .one_of
+                    .iter()
+                    .filter(|branch| branch.iter().all(satisfied))
+                    .count();
+                if matched != 1 {
+                    return false;
+                }
+            }
             // 3. No foreign flags — every used flag belongs to this variant.
             if !used_field_names
                 .iter()
@@ -567,11 +614,14 @@ fn count_matching_variants(
 
 /// Per-variant required-field decomposition: `base` is the schema-required
 /// set after stripping const discriminators (and lifting the discriminator
-/// flag); `any_of` is the optional set of disjunctive branches.
+/// flag); `any_of` is the inclusive-or branches (≥1 satisfied); `one_of` is
+/// the exclusive-or branches (exactly 1 satisfied — JSON Schema `oneOf`
+/// semantics, e.g., `ingest`'s `body | file | url`).
 #[derive(Debug, Default)]
 pub(crate) struct VariantSpec {
     pub base: BTreeSet<String>,
     pub any_of: Vec<BTreeSet<String>>,
+    pub one_of: Vec<BTreeSet<String>>,
 }
 
 /// Pull `required: [...]` from a JSON-Schema object, dropping any field whose
@@ -596,30 +646,36 @@ pub(crate) fn required_excluding_const(schema: &serde_json::Value) -> BTreeSet<S
         .collect()
 }
 
-/// Extract every disjunctive branch's `required` field set from a schema.
-/// Handles both `anyOf` (e.g., `ArgsProfile`'s user-or-agent constraint) and
-/// `oneOf` whose entries are inline `{required:[…]}` objects rather than
-/// `$ref`s (e.g., `ingest`'s body|file|url constraint). `oneOf` arms that
-/// are `$ref`s are taxonomy-level dispatch, not branch constraints, so they
-/// aren't returned here.
+/// Extract `anyOf` branches' `required` field sets (inclusive-or — ≥1 must
+/// be satisfied). E.g., `ArgsProfile`'s user-or-agent constraint.
 pub(crate) fn any_of_required_branches(schema: &serde_json::Value) -> Vec<BTreeSet<String>> {
+    branch_required_sets(schema, "anyOf")
+}
+
+/// Extract inline `oneOf` branches' `required` field sets (exclusive-or —
+/// exactly 1 must be satisfied). E.g., `ingest`'s `body | file | url`. Arms
+/// that are `$ref`s are taxonomy-level dispatch, not exclusivity branches,
+/// so they aren't returned here.
+pub(crate) fn one_of_required_branches(schema: &serde_json::Value) -> Vec<BTreeSet<String>> {
+    branch_required_sets(schema, "oneOf")
+}
+
+fn branch_required_sets(schema: &serde_json::Value, key: &str) -> Vec<BTreeSet<String>> {
+    let Some(arr) = schema.get(key).and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for key in ["anyOf", "oneOf"] {
-        let Some(arr) = schema.get(key).and_then(serde_json::Value::as_array) else {
+    for branch in arr {
+        if branch.get("$ref").is_some() {
             continue;
-        };
-        for branch in arr {
-            if branch.get("$ref").is_some() {
-                continue;
-            }
-            if let Some(req) = branch.get("required").and_then(serde_json::Value::as_array) {
-                out.push(
-                    req.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect::<BTreeSet<String>>(),
-                );
-            }
+        }
+        if let Some(req) = branch.get("required").and_then(serde_json::Value::as_array) {
+            out.push(
+                req.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<BTreeSet<String>>(),
+            );
         }
     }
     out
@@ -689,7 +745,12 @@ pub(crate) fn variant_required_specs(verb_def: &VerbDef, cmds: &[&CliCommand]) -
                 base.insert(flag.name.clone());
             }
             let any_of = any_of_required_branches(variant_schema);
-            VariantSpec { base, any_of }
+            let one_of = one_of_required_branches(variant_schema);
+            VariantSpec {
+                base,
+                any_of,
+                one_of,
+            }
         })
         .collect()
 }

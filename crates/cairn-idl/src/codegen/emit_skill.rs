@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use super::ir::{CliCommand, CliShape, Document, VerbDef};
 use super::skill_compat::{
-    any_of_required_branches, required_excluding_const, variant_required_specs,
+    any_of_required_branches, one_of_required_branches, required_excluding_const,
+    variant_required_specs,
 };
 use super::{CodegenError, GeneratedFile};
 
@@ -176,16 +177,22 @@ fn required_args_per_command(verb: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTreeS
                 if let Some(first) = spec.any_of.into_iter().next() {
                     required.extend(first);
                 }
+                if let Some(first) = spec.one_of.into_iter().next() {
+                    required.extend(first);
+                }
                 required
             })
             .collect();
     }
 
     // Single-shape: required lives on $defs/Args itself, and we lift the
-    // first `anyOf` branch in so the rendered example satisfies it (matching
-    // the validator's disjunctive check).
+    // first `anyOf` and first `oneOf` branch in so the rendered example
+    // satisfies both the disjunctive (≥1) and exclusive (==1) checks.
     let mut required = required_excluding_const(args);
     if let Some(first) = any_of_required_branches(args).into_iter().next() {
+        required.extend(first);
+    }
+    if let Some(first) = one_of_required_branches(args).into_iter().next() {
         required.extend(first);
     }
     let mut out = Vec::with_capacity(cmd_count);

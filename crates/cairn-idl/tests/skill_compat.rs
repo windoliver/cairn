@@ -147,6 +147,25 @@ fn cli_validator_rejects_excess_positional_args() {
 }
 
 #[test]
+fn cli_validator_rejects_multiple_one_of_branches_satisfied() {
+    // `ingest`'s `$defs/Args` declares `oneOf: [body, file, url]` — exactly
+    // one source must be provided. Supplying both `--body` and `--file` is
+    // ambiguous and must trip the gate (regression for the round-9 finding
+    // that downgraded `oneOf` to `anyOf`).
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND --body BODY --file PATH".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("two oneOf branches satisfied at once must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
