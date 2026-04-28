@@ -350,6 +350,88 @@ mod tests {
         );
     }
 
+    /// Run the real emitter, mutate the resulting SKILL bytes via
+    /// `mutate`, and assert `check_skill_compat` rejects the mutated
+    /// bytes. This is the e2e drift-injection harness — without it we
+    /// only know the gate accepts the live SKILL, not that it would
+    /// catch a corruption.
+    fn assert_drift_rejected(label: &str, mutate: impl FnOnce(String) -> String) -> CodegenError {
+        let d = doc();
+        let mut skill_files = emit_skill::emit(&d).expect("emit_skill");
+        let skill = skill_files
+            .iter_mut()
+            .find(|f| f.path.ends_with("skills/cairn/SKILL.md"))
+            .expect("emitter produces SKILL.md");
+        let original = std::str::from_utf8(&skill.bytes)
+            .expect("SKILL is utf8")
+            .to_string();
+        let mutated = mutate(original);
+        skill.bytes = mutated.into_bytes();
+        check_skill_compat(&d, &skill_files)
+            .err()
+            .unwrap_or_else(|| panic!("drift `{label}` must be rejected by compat gate"))
+    }
+
+    #[test]
+    fn drift_injection_unknown_flag_blocks_codegen() {
+        // Inject a stale flag into the first ingest example. The compat
+        // gate must surface it as UnknownFlag (Emit error) so codegen's
+        // --check fails.
+        let err = assert_drift_rejected("unknown flag", |body| {
+            body.replacen(
+                "cairn ingest --kind",
+                "cairn ingest --bogus-stale --kind",
+                1,
+            )
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("--bogus-stale") || m.contains("bogus-stale")),
+            "expected emit error mentioning bogus-stale, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_renamed_verb_blocks_codegen() {
+        // Pretend a verb got renamed in the IDL but the SKILL still
+        // references the old name. The gate must reject it as
+        // UnknownVerb.
+        let err = assert_drift_rejected("renamed verb", |body| {
+            // Mutate inside a fenced example, not the section heading.
+            body.replacen("cairn search --mode", "cairn searchx --mode", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("searchx")),
+            "expected emit error mentioning searchx, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_inline_prelude_break_blocks_codegen() {
+        // SKILL.md uses inline `cairn handshake --json` / `cairn status
+        // --json` as protocol preludes. A drift that renames `--json`
+        // must be caught at the inline-span path.
+        let err = assert_drift_rejected("inline prelude rename", |body| {
+            body.replacen("`cairn handshake --json`", "`cairn handshake --jsno`", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("jsno")),
+            "expected emit error mentioning typo'd flag, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_compound_shell_form_blocks_codegen() {
+        // A maintainer wraps a real example in a subshell. The fail-closed
+        // catch-all must reject it (round-8 invariant).
+        let err = assert_drift_rejected("subshell wrap", |body| {
+            body.replacen("cairn assemble_hot\n", "(cairn assemble_hot)\n", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("compound") || m.contains("no cairn invocation") || m.contains("could be extracted")),
+            "expected emit error citing fail-closed catch-all, got: {err:?}"
+        );
+    }
+
     #[test]
     fn check_skill_compat_ignores_unsupported_fence_without_cairn_token() {
         // The gate must only fail closed for blocks that actually contain a

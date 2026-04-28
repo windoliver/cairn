@@ -1265,3 +1265,127 @@ fn live_skill_md_passes_compat_checks() {
         }
     }
 }
+
+// ─────────────── Tokenizer + wrapper corner-case sweep ───────────────
+
+/// Each row: (label, body, expected outcome).
+/// `"ok"` — must validate; `"malformed"` — must fail with `Malformed` (parser
+/// or fail-closed catch-all); `"unknown_flag"` — must fail with `UnknownFlag`.
+fn run_corner_cases(cases: &[(&str, &str, &str)]) {
+    let d = doc();
+    for (label, body, expect) in cases {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: (*body).to_string(),
+            line: 1,
+        };
+        let result = validate_cli_block(&block, &d);
+        let pass = matches!(
+            (*expect, &result),
+            ("ok", Ok(()))
+                | ("malformed", Err(CompatError::Malformed { .. }))
+                | ("unknown_flag", Err(CompatError::UnknownFlag { .. }))
+        );
+        assert!(
+            pass,
+            "case `{label}` body `{body}` expected `{expect}`, got: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn tokenizer_corner_cases_quotes_and_escapes() {
+    run_corner_cases(&[
+        // Single quotes inside double quotes are literal characters.
+        (
+            "single inside double",
+            r#"cairn ingest --kind KIND --body "it's fine""#,
+            "ok",
+        ),
+        // Double quotes inside single quotes are literal.
+        (
+            "double inside single",
+            r#"cairn ingest --kind KIND --body 'say "hi"'"#,
+            "ok",
+        ),
+        // Backslash escape outside quotes.
+        (
+            "escaped space",
+            r"cairn ingest --kind KIND --body two\ words",
+            "ok",
+        ),
+        // Unterminated double quote → Malformed.
+        (
+            "unterminated double",
+            r#"cairn ingest --kind KIND --body "open"#,
+            "malformed",
+        ),
+        // Unterminated single quote → Malformed.
+        (
+            "unterminated single",
+            "cairn ingest --kind KIND --body 'open",
+            "malformed",
+        ),
+        // Trailing backslash is a line-continuation (bash semantics):
+        // join_continuations drops it and concatenates with next line.
+        // For a single-line body, this is effectively equivalent to no
+        // backslash — valid.
+        (
+            "trailing backslash continuation",
+            r"cairn ingest --kind KIND --body x\",
+            "ok",
+        ),
+    ]);
+}
+
+#[test]
+fn tokenizer_corner_cases_inline_value_forms() {
+    run_corner_cases(&[
+        // Inline `--flag=value` for non-bool flag.
+        ("inline =", "cairn search --mode=keyword QUERY", "ok"),
+        // Inline `--flag=` with empty value violates minLength.
+        (
+            "inline empty value",
+            "cairn search --mode= QUERY",
+            "malformed",
+        ),
+        // Repeated inline form for same single-value flag — last wins,
+        // but the parser still validates each occurrence.
+        (
+            "repeated single-value flag",
+            "cairn search --mode=keyword --mode=hybrid QUERY",
+            "ok",
+        ),
+    ]);
+}
+
+#[test]
+fn wrapper_corner_cases_chained_and_terminator() {
+    run_corner_cases(&[
+        // Chained wrappers: env then sudo then cairn.
+        (
+            "env + sudo chain",
+            "env DEBUG=1 sudo -u alice cairn search --mode keyword Q",
+            "ok",
+        ),
+        // Wrapper followed by `--` terminator before cairn.
+        (
+            "sudo -- cairn",
+            "sudo -- cairn search --mode keyword Q",
+            "ok",
+        ),
+        // Env-var assignment after wrapper but before cairn.
+        (
+            "sudo + env assignment + cairn",
+            "sudo -u alice DEBUG=1 cairn search --mode keyword Q",
+            "ok",
+        ),
+        // Wrapper with `--` then a non-cairn command — should be skipped
+        // by parser and then caught by the fail-closed catch-all.
+        (
+            "sudo -- non-cairn but body mentions cairn",
+            "sudo -- ls cairn",
+            "malformed",
+        ),
+    ]);
+}
