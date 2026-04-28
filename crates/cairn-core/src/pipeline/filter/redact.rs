@@ -55,6 +55,10 @@ pub enum RedactionTag {
     /// Context-keyed secret in `key=value` form
     /// (`api_key=...`, `secret=...`, `token=...`, `password=...`).
     ContextKeyedSecret,
+    /// Multi-line PEM-armored private-key block
+    /// (`-----BEGIN OPENSSH PRIVATE KEY-----` … `-----END OPENSSH PRIVATE KEY-----`,
+    /// also `RSA`, `EC`, `DSA`, plain `PRIVATE KEY`).
+    PrivateKeyBlock,
 }
 
 impl RedactionTag {
@@ -73,6 +77,7 @@ impl RedactionTag {
             Self::HexSecret => "hex_secret",
             Self::OpaqueApiKey => "opaque_api_key",
             Self::ContextKeyedSecret => "context_keyed_secret",
+            Self::PrivateKeyBlock => "private_key_block",
         }
     }
 }
@@ -165,6 +170,18 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
         // the sort in `redact` resolves overlap by start-then-length, so
         // ordering here is mostly cosmetic, but kept structural-first.
         vec![
+            (
+                // PEM-armored private-key block. Covers `OPENSSH`,
+                // `RSA`, `EC`, `DSA`, `ENCRYPTED`, and plain
+                // `PRIVATE KEY` shapes through the matching END
+                // marker. The regex spans multiple lines (`(?s)`)
+                // and is non-greedy so two adjacent blocks don't
+                // collapse into one.
+                RedactionTag::PrivateKeyBlock,
+                build(
+                    r"(?s)-----BEGIN (?:[A-Z][A-Z0-9 ]*)?PRIVATE KEY-----.*?-----END (?:[A-Z][A-Z0-9 ]*)?PRIVATE KEY-----",
+                ),
+            ),
             (
                 RedactionTag::Jwt,
                 build(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b"),
@@ -771,6 +788,58 @@ mod tests {
         assert!(
             !r.text.contains("abcdef1234567890longsigvalue"),
             "SAS leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_openssh_private_key_block() {
+        // Round 10 codex: a raw pasted `-----BEGIN OPENSSH PRIVATE KEY-----`
+        // block had no detector. The body would persist verbatim.
+        let key = "\
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAd
+ZHJ5LWtleS1ib2R5LWZha2Utbm90LXJlYWxseS1zZWNyZXQtbGVha2VkLWNvbnRl
+bnRzLWhlcmU
+-----END OPENSSH PRIVATE KEY-----";
+        let input = format!("logs:\n{key}\nend");
+        let r = redact(&input);
+        assert!(!r.spans.is_empty(), "no span for OPENSSH PEM block");
+        assert!(
+            !r.text.contains("ZHJ5LWtleS1ib2R5LWZha2U"),
+            "PEM body leaked: {}",
+            r.text
+        );
+        assert_eq!(r.spans[0].tag, RedactionTag::PrivateKeyBlock);
+    }
+
+    #[test]
+    fn redacts_rsa_private_key_block() {
+        let key = "\
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAfakeRSAkeydatabodyandmorebytesthatlooklikebase64
+encodedRSAprivatekeystringthatshouldnotpersistunredactedinanyform
+-----END RSA PRIVATE KEY-----";
+        let r = redact(key);
+        assert!(!r.spans.is_empty(), "no span for RSA PEM block");
+        assert!(
+            !r.text.contains("MIIEpAIBAAKCAQEA"),
+            "RSA PEM leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_generic_pem_private_key_block() {
+        let key = "\
+-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDbody-fake-pem
+-----END PRIVATE KEY-----";
+        let r = redact(key);
+        assert!(!r.spans.is_empty(), "no span for generic PEM block");
+        assert!(
+            !r.text.contains("MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj"),
+            "generic PEM leaked: {}",
             r.text
         );
     }
