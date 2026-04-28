@@ -102,10 +102,12 @@ pub fn aggregate_folders(
             let entry = subtree_last_update
                 .entry(d.to_path_buf())
                 .or_insert_with(|| stored.record.updated_at.clone());
-            // Lexical comparison is correct for UTC timestamps (all `Z`-form);
-            // callers that ingest mixed-offset timestamps must normalise to UTC
-            // before calling this function.
-            if stored.record.updated_at.as_str() > entry.as_str() {
+            // Chronological comparison: lexical comparison of the raw string
+            // disagrees with chronological order once offsets are involved
+            // (e.g. `+02:00` happens before `Z` for the same wall-clock
+            // hour).  `Rfc3339Timestamp::cmp_chronological` parses both
+            // sides and applies the offset.
+            if stored.record.updated_at.cmp_chronological(entry).is_gt() {
                 *entry = stored.record.updated_at.clone();
             }
             cur = d.parent();
@@ -181,19 +183,24 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
     use std::fmt::Write as _;
 
     let folder_str = state.path.to_string_lossy();
+    // Chronological max: `Rfc3339Timestamp` deliberately doesn't implement
+    // `Ord` because lexical order disagrees with wall-clock order across
+    // timezone offsets.  Reduce by `cmp_chronological` instead.
     let updated_at = state
         .records
         .iter()
-        .map(|r| r.record.record.updated_at.as_str())
+        .map(|r| &r.record.record.updated_at)
         .chain(
             state
                 .subfolders
                 .iter()
-                .filter_map(|s| s.last_updated.as_ref().map(Rfc3339Timestamp::as_str)),
+                .filter_map(|s| s.last_updated.as_ref()),
         )
-        .max()
-        .unwrap_or("1970-01-01T00:00:00Z")
-        .to_owned();
+        .max_by(|a, b| a.cmp_chronological(b))
+        .map_or_else(
+            || "1970-01-01T00:00:00Z".to_owned(),
+            |t| t.as_str().to_owned(),
+        );
 
     let mut frontmatter = String::new();
     frontmatter.push_str("---\n");
