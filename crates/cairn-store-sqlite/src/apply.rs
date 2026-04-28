@@ -50,26 +50,39 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
 
             let mut tx = SqliteApplyTx { conn: conn.clone() };
 
-            // Phase 2: run the user closure. Each method acquires/releases the
-            // Mutex independently; the SQLite write lock from BEGIN IMMEDIATE
-            // serializes writes at the DB level.
-            let outcome = f(&mut tx as &mut dyn MemoryStoreApplyTx);
+            // Phase 2: run the user closure inside catch_unwind so a panic in `f`
+            // still triggers a ROLLBACK before propagating. Without this, a panic
+            // in the closure would leave an open transaction on the pooled connection,
+            // blocking all subsequent writes until the connection is dropped.
+            //
+            // `AssertUnwindSafe` is sound here: the closure is `Send + 'static` (the
+            // trait bound), `SqliteApplyTx` holds only an `Arc<Mutex<Connection>>`,
+            // and we propagate the panic payload unchanged via `resume_unwind`, so
+            // callers observe the same abort semantics they would without the wrapper.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                f(&mut tx as &mut dyn MemoryStoreApplyTx)
+            }));
 
-            // Phase 3: commit or rollback.
-            {
-                let guard = conn.blocking_lock();
-                match outcome {
-                    Ok(v) => {
-                        guard.execute_batch("COMMIT").map_err(store_err)?;
-                        Ok(v)
-                    }
-                    Err(e) => {
-                        let _ = guard.execute_batch("ROLLBACK");
-                        Err(e)
-                    }
+            // Phase 3: commit, rollback on error, or rollback + re-panic.
+            let guard = conn.blocking_lock();
+            match outcome {
+                Ok(Ok(v)) => {
+                    guard.execute_batch("COMMIT").map_err(store_err)?;
+                    Ok(v)
                 }
-                // `guard` drops here.
+                Ok(Err(e)) => {
+                    let _ = guard.execute_batch("ROLLBACK");
+                    Err(e)
+                }
+                Err(payload) => {
+                    let _ = guard.execute_batch("ROLLBACK");
+                    // `guard` drops before resume so the lock is not held across
+                    // the unwind.
+                    drop(guard);
+                    std::panic::resume_unwind(payload);
+                }
             }
+            // `guard` drops here for the Ok/Err arms.
         })
         .await
         .map_err(|e| StoreError::Backend(Box::new(e)))?
@@ -100,9 +113,13 @@ impl Sealed for SqliteApplyTx {}
 // interleaving at the database level.
 
 impl MemoryStoreApplyTx for SqliteApplyTx {
-    fn stage_version(&mut self, record: &MemoryRecord) -> Result<RecordId, StoreError> {
+    fn stage_version(
+        &mut self,
+        target_id: &TargetId,
+        record: &MemoryRecord,
+    ) -> Result<RecordId, StoreError> {
         let conn = self.conn.blocking_lock();
-        stage_version_impl(&conn, record)
+        stage_version_impl(&conn, target_id, record)
     }
 
     fn activate_version(
@@ -171,8 +188,12 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
 // Implementation functions (take &Connection directly)
 // ---------------------------------------------------------------------------
 
-fn stage_version_impl(conn: &Connection, record: &MemoryRecord) -> Result<RecordId, StoreError> {
-    let target_id_str = record.id.as_str();
+fn stage_version_impl(
+    conn: &Connection,
+    target_id: &TargetId,
+    record: &MemoryRecord,
+) -> Result<RecordId, StoreError> {
+    let target_id_str = target_id.as_str();
 
     let next: i64 = conn
         .query_row(
@@ -183,8 +204,7 @@ fn stage_version_impl(conn: &Connection, record: &MemoryRecord) -> Result<Record
         .map_err(store_err)?;
     let version = u64::try_from(next).unwrap_or(1);
 
-    let target_id = TargetId(target_id_str.to_owned());
-    let record_id = RecordId::from_target_version(&target_id, version);
+    let record_id = RecordId::from_target_version(target_id, version);
 
     let body = &record.body;
     let provenance = serde_json::to_string(&record.provenance)?;

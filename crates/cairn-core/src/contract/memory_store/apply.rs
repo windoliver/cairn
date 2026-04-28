@@ -70,13 +70,22 @@ pub trait MemoryStoreApply: private::Sealed + Send + Sync {
 pub trait MemoryStoreApplyTx: private::Sealed + Send {
     /// Stage a new version of a record with `active = 0`.
     ///
-    /// The caller computes `version = max(existing) + 1`. The deterministic
-    /// per-version `record_id = BLAKE3(target_id || '#' || version)` is
-    /// computed inside this method. Returns the generated `RecordId`.
+    /// `target_id` is the stable logical identity for the record across all
+    /// versions. The caller must supply it explicitly — `MemoryRecord` does not
+    /// carry a `target_id` field, so deriving it from `record.id` would assign
+    /// each call a fresh logical identity and break copy-on-write versioning.
+    ///
+    /// The store computes `version = max(existing) + 1` internally. The
+    /// deterministic per-version `record_id = BLAKE3(target_id || '#' || version)`
+    /// is computed inside this method. Returns the generated `RecordId`.
     ///
     /// On `(target_id, version)` collision returns
     /// `StoreError::Conflict { kind: VersionAlreadyStaged }`.
-    fn stage_version(&mut self, record: &MemoryRecord) -> Result<RecordId, StoreError>;
+    fn stage_version(
+        &mut self,
+        target_id: &TargetId,
+        record: &MemoryRecord,
+    ) -> Result<RecordId, StoreError>;
 
     /// Atomically flip `active` so exactly one version of `target_id` is
     /// active.

@@ -79,7 +79,7 @@ async fn stage_activate_get_roundtrip() {
             let record = record.clone();
             let target = target.clone();
             move |tx| {
-                let _rid = tx.stage_version(&record)?;
+                let _rid = tx.stage_version(&target, &record)?;
                 tx.activate_version(&target, 1, None)?;
                 Ok(())
             }
@@ -142,7 +142,7 @@ async fn non_owner_cannot_read_private_record() {
             let record = record.clone();
             let target = target.clone();
             move |tx| {
-                tx.stage_version(&record)?;
+                tx.stage_version(&target, &record)?;
                 tx.activate_version(&target, 1, None)?;
                 Ok(())
             }
@@ -159,4 +159,85 @@ async fn non_owner_cannot_read_private_record() {
     let list = store.list(&ListQuery::new(bob)).await.expect("list");
     assert_eq!(list.rows.len(), 0, "bob sees 0 rows");
     assert_eq!(list.hidden, 1, "1 row hidden from bob");
+}
+
+/// Verify that staging v2 under the same `target_id` as v1 correctly increments
+/// the version counter rather than colliding. Prior to the `target_id` fix,
+/// `stage_version` used `record.id` (domain ULID) as the store `target_id`,
+/// so v1 and v2 of the *same* logical target would be stored under *different*
+/// target identities — COW versioning was silently broken.
+#[tokio::test]
+async fn multi_version_cow_same_target() {
+    let dir = tempdir().expect("tempdir");
+    let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
+        .await
+        .expect("open");
+
+    let record_v1 = make_record("user prefers dark mode");
+    // Use a stable, deterministic target_id that is distinct from record.id.
+    let target = TargetId::new("test-target-cow-1");
+
+    // Stage v1 + activate.
+    store
+        .with_apply_tx(test_apply_token(), {
+            let record = record_v1.clone();
+            let target = target.clone();
+            move |tx| {
+                let rid = tx.stage_version(&target, &record)?;
+                assert!(
+                    !rid.as_str().is_empty(),
+                    "stage_version returned a record_id"
+                );
+                tx.activate_version(&target, 1, None)?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("stage v1");
+
+    // Read back v1.
+    let principal = Principal::system();
+    let got_v1 = store
+        .get(&principal, &target)
+        .await
+        .expect("get v1")
+        .expect("v1 present");
+    assert_eq!(got_v1.body, record_v1.body, "v1 body matches");
+
+    // Stage v2 (updated body) under the same target_id.
+    let mut record_v2 = make_record("user prefers light mode");
+    // Give the domain record a different id so the BLAKE3 inputs differ.
+    record_v2.id = RecordId::parse("01HQZX9F5N0000000000000001").expect("valid");
+
+    store
+        .with_apply_tx(test_apply_token(), {
+            let record = record_v2.clone();
+            let target = target.clone();
+            move |tx| {
+                let rid = tx.stage_version(&target, &record)?;
+                assert!(
+                    !rid.as_str().is_empty(),
+                    "stage_version v2 returned a record_id"
+                );
+                tx.activate_version(&target, 2, Some(1))?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("stage v2");
+
+    // Read back active version — must be v2.
+    let got_v2 = store
+        .get(&principal, &target)
+        .await
+        .expect("get v2")
+        .expect("v2 present");
+    assert_eq!(
+        got_v2.body, record_v2.body,
+        "active body must be v2 after COW"
+    );
+
+    // list must still return exactly 1 active row.
+    let list = store.list(&ListQuery::new(principal)).await.expect("list");
+    assert_eq!(list.rows.len(), 1, "list returns 1 active row");
 }
