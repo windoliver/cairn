@@ -24,8 +24,8 @@ use rusqlite::{Transaction, params};
 use tracing::instrument;
 
 use crate::error::StoreError;
-use crate::store::SqliteMemoryStore;
 use crate::store::projection::{ProjectedRow, body_hash_from_str};
+use crate::store::{SqliteMemoryStore, current_unix_ms};
 
 /// Active-row tuple as read out of the `records` table:
 /// `(record_id, version, body_hash)`. Only the active row for a given
@@ -257,14 +257,3 @@ fn mint_record_id() -> Result<RecordId, StoreError> {
     })
 }
 
-/// Wall-clock epoch-milliseconds. `SystemTime::now() < UNIX_EPOCH` cannot
-/// happen on real hardware (the platform clock would have to predate 1970);
-/// we still return `0` rather than panic so a misconfigured VM clock cannot
-/// crash the store. Saturating the millis cast at `i64::MAX` is a similar
-/// belt-and-braces guard for the y292000 problem.
-fn current_unix_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-}

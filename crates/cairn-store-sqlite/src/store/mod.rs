@@ -56,3 +56,18 @@ impl std::fmt::Debug for SqliteMemoryStore {
             .finish_non_exhaustive()
     }
 }
+
+/// Wall-clock epoch-milliseconds, shared by every mutation path that needs
+/// to stamp a row's `created_at` / `updated_at`.
+///
+/// `SystemTime::now() < UNIX_EPOCH` cannot happen on real hardware (the
+/// platform clock would have to predate 1970); we still return `0` rather
+/// than panic so a misconfigured VM clock cannot crash the store.
+/// Saturating the millis cast at `i64::MAX` is a similar belt-and-braces
+/// guard for the y292000 problem.
+pub(crate) fn current_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
