@@ -292,9 +292,63 @@ identity (not just one) without restarting a long-lived process
 command; `init-defaults` and `provision` use the same engine but
 scoped to a single target.
 
-This satisfies CLAUDE.md invariant 5 ("WAL + two-phase apply for every
-mutation") in spirit even though identity mutations don’t enter the
-record-WAL: the two-phase pattern lives inside this module.
+**Identity WAL.** CLAUDE.md invariant 5 requires every mutation to go
+through "WAL + two-phase apply" — the brief §5.6 state machine. The
+record WAL is keyed by `RecordId`, so identity mutations cannot share
+its rows directly. Issue #50 introduces a parallel identity_wal table
+with the **identical** two-phase state machine and durability
+guarantees as §5.6, so identity mutations meet the invariant
+mechanically rather than "in spirit":
+
+```sql
+CREATE TABLE identity_wal (
+    rowid INTEGER PRIMARY KEY,
+    op_id BLOB NOT NULL UNIQUE,            -- ULID, monotonic per process
+    op_kind TEXT NOT NULL CHECK (op_kind IN (
+        'reserve_first_identity', 'reserve_identity', 'activate_identity',
+        'delete_pending', 'apply_rotation', 'begin_revocation',
+        'finalise_revocation', 'mark_purge_pending', 'finalise_purge',
+        'clear_pending_eviction', 'clear_pending_key_disable')),
+    target_identity TEXT NOT NULL,
+    intent_payload BLOB NOT NULL,           -- canonical JSON of full request
+    state TEXT NOT NULL CHECK (state IN ('intent', 'applied', 'failed')),
+    intent_at TEXT NOT NULL,
+    applied_at TEXT,
+    failure TEXT
+);
+CREATE INDEX idx_identity_wal_target ON identity_wal(target_identity);
+CREATE INDEX idx_identity_wal_open ON identity_wal(state) WHERE state = 'intent';
+```
+
+Every `IdentityRegistry` mutation method runs in two phases inside
+the same SQLite transaction:
+
+1. **Intent.** Insert an `identity_wal` row in state `intent` with the
+   canonical request payload. Commit the row before any other
+   mutation.
+2. **Apply.** Perform the actual state mutations (insert
+   `identity_keys`, update `identities`, etc.). On success update the
+   WAL row to `applied` and stamp `applied_at`. On failure update to
+   `failed` and stamp `failure`.
+
+Both phases run in the **same** transaction so the WAL row and the
+applied state are durably consistent: a crash either rolls back both
+or commits both. After-crash recovery scans `identity_wal` for rows
+in `intent` (which never happen because of the same-transaction
+guarantee, but the column exists so the schema mirrors §5.6 exactly)
+and `applied` rows whose post-commit cross-store work (keystore
+eviction, retained-ring disable) is still pending — that pending
+state lives on the `identity_receipts` flags `pending_eviction` and
+`pending_key_disable` already specified in §3.6 / §3.10. The
+canonical recovery driver is `cairn identity reconcile`, which
+converges from `applied + pending_eviction = 1` or `applied +
+pending_key_disable = 1` to fully-applied.
+
+Effect: every identity mutation is observable as a WAL row; replay,
+rollback (by deleting an `intent` row that never reached `applied`),
+and cross-verb ordering all work the same way as §5.6's record WAL.
+The two WALs are intentionally separate tables to keep schemas
+typed, but the contract is shared.
 
 ### 3.6 Key retention model (private keys ring-bounded, public keys immortal)
 
@@ -435,9 +489,10 @@ detect that the namespace may be claimed.
 
 | Where | What | Lifetime |
 |---|---|---|
-| Filesystem | `.cairn/vault.binding` containing `sha256(witness)` | **Written first**, before any keychain or DB write. Bootstrap reads this file as a sentinel without opening the DB or keychain. |
+| Filesystem (pre-DB) | `.cairn/vault.binding.pending` containing the raw 32-byte witness, mode 0600 | **Written first**, before any keychain or DB write. The witness-bearing pending sentinel; the **only** filesystem artefact present before the DB transaction commits. Recovery reads it to re-drive a crashed first-bind. |
 | Keychain | service `cairn:<vault_id>`, account `__vault_witness__`, secret = the 32-byte witness | Written second. Never rotated, never deleted (separate from the per-identity ring). |
-| SQLite | `vault_meta(witness_sha256 BLOB NOT NULL)` row, set by migration `0002_identity.sql` during the same transaction that reserves the first identity | Written third, in the transaction that reserves the first pending identity. Authoritative copy used by recovery. |
+| SQLite | `vault_meta(witness_sha256 BLOB NOT NULL)` row, written by `IdentityRegistry::reserve_first_identity` (migration `0002_identity.sql` defines the schema; only the first-bind transaction inserts the row). The adapter `stat`s `.cairn/vault.binding.pending` and re-hashes its bytes inside the transaction. | Written third, in the transaction that reserves the first pending identity. Authoritative copy used by recovery. |
+| Filesystem (post-DB) | `.cairn/vault.binding` containing `sha256(witness)`, hash-only | Written **fourth**, by atomic rename / overwrite of `.cairn/vault.binding.pending` after the registry transaction commits. Witness bytes are gone from disk after this step; only the hash remains. The final sentinel is bootstrap's "this vault is bound" signal. |
 
 **Cross-process serialization.** `commit_first_identity` and
 `finalise-binding` both acquire an exclusive advisory file lock on
@@ -1001,16 +1056,41 @@ P0 split, all gate-aware:
    sufficient: any local code path with keystore access could still
    call `Keystore::load_signing_key` for a revoked identity and sign
    payloads, so the registry-only flip is a porous trust boundary.
-   `IdentityService::revoke_identity` therefore runs a two-phase
-   cross-store flow analogous to rotation:
+   `IdentityService::revoke_identity` therefore runs a **two-phase
+   tombstone state machine** analogous to purge, with a transitional
+   `revoke_pending` state. Signer eligibility (and the
+   `IdentityService::sign` gate that wraps every keystore-backed
+   signing call) treats `revoke_pending` and `revoked` identically as
+   non-signing — the gate refuses **before** consulting the
+   keystore. This means stale keystore material left behind by an
+   incomplete keystore-side disable cannot be used to sign even in
+   the window before reconciliation completes; the trust boundary is
+   the registry state, and the keystore cleanup is defence-in-depth
+   that closes the longer-tail risk of out-of-process keystore
+   access.
 
-   1. **Atomic registry transition.**
-      `IdentityRegistry::apply_revocation(receipt)` flips
-      `provisioning_state = revoked`, stamps `revoked_at`, and
-      persists the `RevocationReceipt`. After this commit signer
-      eligibility checks reject the identity in every gate
-      (`require_attributable_signer` and the `Operational`
-      visibility filter both treat `revoked` as non-signing).
+   The state machine:
+
+   ```
+   active → revoke_pending → revoked
+   ```
+
+   Steps:
+
+   1. **Begin revocation.**
+      `IdentityRegistry::begin_revocation(receipt)` runs a single
+      SQLite transaction that flips `provisioning_state = revoke_pending`,
+      stamps `revoked_at` (the trust-state mutation timestamp; the
+      key is no longer authorised to sign as of this instant),
+      persists the `RevocationReceipt` to `identity_receipts` with
+      `pending_key_disable = 1`, and writes the identity_wal row.
+      After this commit signer eligibility checks reject the identity
+      in every gate: `require_attributable_signer`, the `Operational`
+      visibility filter, and the `IdentityService::sign` wrapper all
+      treat `revoke_pending` and `revoked` identically as non-signing.
+      A revoked identity therefore cannot sign **even if** step 2
+      below has not yet started, even if it crashes mid-loop, and
+      even if a stale keystore handle survives indefinitely.
    2. **Delete + verify every key version that has ever existed.**
       Iterate **all** `identity_keys` rows for the target identity
       (not just the retained ring). For each version: call
@@ -1046,7 +1126,21 @@ P0 split, all gate-aware:
       witness is also untouched (vault binding is independent of any
       single identity's lifecycle).
 
-   The result: a `revoked` identity has no recoverable private signing
+   3. **Finalise revocation.** Once every version has been
+      verified-deleted from the keystore, call
+      `IdentityRegistry::finalise_revocation(id)` which flips
+      `provisioning_state` from `revoke_pending` to `revoked` and
+      clears `pending_key_disable` on the receipt in a single SQLite
+      transaction. `cairn identity reconcile` re-runs this step
+      whenever it observes a `revoke_pending` row plus a verified-clean
+      keystore. Because gates treat `revoke_pending` and `revoked`
+      identically as non-signing, the distinction matters only for
+      forensics and reconciliation drivers; the trust boundary closed
+      at step 1.
+
+   The result: a `revoke_pending`/`revoked` identity has no usable
+   signing path even before reconciliation completes (the registry-
+   level gate refuses), and no recoverable private signing material
    material once reconciliation completes, while every record signed
    under that identity prior to revocation remains verifiable. This
    closes the gap where revocation enforced trust state only at the
@@ -1121,6 +1215,7 @@ P0 split, all gate-aware:
       surfaced are deleted-and-verified before finalisation, and an
       unsupported backend records `keystore_enumeration = "unsupported"`
       on the purge receipt. Per-version steps:
+
       a. `Keystore::delete_keypair(handle)`. If the call returns
          `KeystoreError::NotFound` **and** `key_version` is outside
          the retained ring (i.e. older than `current_key_version - 2`),
@@ -1341,21 +1436,29 @@ pub trait IdentityRegistry: Send + Sync {
     //     `identities.current_key_version`, mark the predecessor row's
     //     `superseded_at`, and persist the `RotationReceipt` to
     //     `identity_receipts`.
-    //   * `apply_revocation`: flip `identities.provisioning_state` to
-    //     `revoked`, stamp `revoked_at`, and persist the
-    //     `RevocationReceipt` to `identity_receipts`. The
-    //     keystore-side disable of retained private keys is run by
-    //     `IdentityService::revoke_identity` immediately after this
-    //     transaction commits (§3.10 step 2 of the revocation flow);
-    //     the registry trait does not own that step because keystore
-    //     and SQLite cannot transact together.
+    //   * `begin_revocation` / `finalise_revocation` (defined below):
+    //     two-phase tombstone that interposes a `revoke_pending`
+    //     state between `active` and `revoked`. Signer gates refuse
+    //     both transitional and terminal states identically, so the
+    //     trust boundary closes at `begin_revocation`. `apply_rotation`
+    //     remains single-phase because rotation is not a tombstone:
+    //     the new key is the canonical signer immediately after
+    //     commit, and any prior-key cleanup is captured by
+    //     `pending_eviction`.
     // Splitting receipt-write from state-mutation as separate trait
     // methods would let an adapter persist authorization without
     // applying the change (or vice versa); the trait does not allow
     // that. Conformance tests assert post-call invariants on every
     // mutated row plus signature re-verification.
     async fn apply_rotation(&self, receipt: &RotationReceipt, expected_current: KeyVersion) -> Result<(), RegistryError>;
-    async fn apply_revocation(&self, receipt: &RevocationReceipt) -> Result<(), RegistryError>;
+    // Two-phase revocation tombstone (§3.10). `begin_revocation` flips
+    // active → revoke_pending; `finalise_revocation` flips
+    // revoke_pending → revoked once the keystore-side disable is
+    // verified clean. Signer eligibility gates treat both states
+    // identically as non-signing — the trust boundary lands at step 1.
+    async fn begin_revocation(&self, receipt: &RevocationReceipt) -> Result<(), RegistryError>;
+    async fn finalise_revocation(&self, id: &Identity) -> Result<(), RegistryError>;
+    async fn list_revoke_pending(&self) -> Result<Vec<RevokePendingEntry>, RegistryError>;
 
     // First-bind transaction. Atomically inserts the `vault_meta` row
     // (with vault_id + witness_sha256 + binding_path) and the first
@@ -1434,7 +1537,12 @@ pub trait IdentityRegistry: Send + Sync {
 
 - `Operational` — `active` and `revoked` only. Default for every verb
   that issues a signed envelope or produces a user-visible record;
-  filters all transitional and tombstoned states.
+  filters `pending`, `revoke_pending`, `purge_pending`, and `purged`.
+  Signer eligibility (the gate enforced by
+  `IdentityService::require_attributable_signer` and the
+  `IdentityService::sign` wrapper) is a stricter filter again:
+  `active` only — `revoked` is visible for verification of historical
+  receipts but cannot sign new ones.
 - `IncludingPending` — adds `pending`. Used by §3.5 reconciliation.
 - `IncludingPurgePending` — adds `purge_pending`. Used by
   `cairn identity purge --resume`.
@@ -1506,6 +1614,8 @@ pub enum FirstBindState {
 evict_version: KeyVersion, rotated_at: DateTime<Utc> }`.
 `PendingKeyDisableEntry { receipt_id: ReceiptId, identity: Identity,
 revoked_at: DateTime<Utc>, retained_versions: Vec<KeyVersion> }`.
+`RevokePendingEntry { identity: Identity, revoked_at: DateTime<Utc>,
+receipt_id: ReceiptId }`.
 
 `IdentityServiceError` (top-level error returned by `IdentityService`,
 wraps the two adapter errors plus the cross-cutting cases):
@@ -1577,7 +1687,7 @@ CREATE TABLE identities (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('human', 'agent', 'sensor')),
     current_key_version INTEGER NOT NULL,
-    provisioning_state TEXT NOT NULL CHECK (provisioning_state IN ('pending', 'active', 'revoked', 'purge_pending', 'purged')),
+    provisioning_state TEXT NOT NULL CHECK (provisioning_state IN ('pending', 'active', 'revoke_pending', 'revoked', 'purge_pending', 'purged')),
     created_at TEXT NOT NULL,
     activated_at TEXT,
     revoked_at TEXT,
