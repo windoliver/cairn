@@ -11,7 +11,10 @@ readme.workspace = true
 description = "Shared test helpers and fixture loaders for Cairn crates."
 
 [dependencies]
-cairn-core = { workspace = true }
+cairn-core = { workspace = true, features = ["test-fixtures"] }
+cairn-store-sqlite = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
@@ -21,9 +24,3 @@ toml = { workspace = true }
 
 [lints]
 workspace = true
-
-# cairn-core is used only in integration tests (tests/), not in src/. cargo-machete
-# scans library source, so it cannot see the integration-test usage and flags it as
-# unused. This ignore is permanent for this crate.
-[package.metadata.cargo-machete]
-ignored = ["cairn-core"]

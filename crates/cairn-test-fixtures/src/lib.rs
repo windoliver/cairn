@@ -37,3 +37,49 @@ pub fn fixtures_dir() -> &'static Path {
 pub fn fixture_v0_dir() -> std::path::PathBuf {
     fixtures_dir().join("v0")
 }
+
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_store_sqlite::SqliteMemoryStore;
+use tempfile::TempDir;
+
+/// Deterministic [`MemoryRecord`] keyed off `seed`. Body, id, and target are
+/// derived from the seed so distinct seeds always produce distinct rows.
+///
+/// # Panics
+/// Panics if the seed-derived ULID strings fail to parse — should never
+/// happen because the format is fixed and uses only Crockford-valid hex.
+#[must_use]
+#[allow(clippy::expect_used)]
+pub fn sample_record(seed: u64) -> MemoryRecord {
+    let mut r = cairn_core::domain::record::tests_export::sample_record();
+    let suffix = format!("{seed:020X}");
+    let id_str = format!("01HQZX9F5N0{}", &suffix[..15]);
+    r.id = RecordId::parse(id_str.clone()).expect("seed-derived id");
+    r.target_id = TargetId::parse(id_str).expect("seed-derived target");
+    r.body = format!("seeded body {seed}");
+    r
+}
+
+/// File-backed store in a fresh temp dir. Caller keeps `TempDir` alive
+/// for the duration of the test.
+///
+/// # Panics
+/// Panics if the temp dir or store cannot be created.
+#[allow(clippy::expect_used)]
+pub async fn tempstore() -> (TempDir, SqliteMemoryStore) {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("cairn.db");
+    let store = cairn_store_sqlite::open(path).await.expect("open");
+    (dir, store)
+}
+
+/// In-memory store. For fast tests that don't need a path on disk.
+///
+/// # Panics
+/// Panics if the in-memory store cannot be opened.
+#[allow(clippy::expect_used)]
+pub async fn memstore() -> SqliteMemoryStore {
+    cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("memstore")
+}
