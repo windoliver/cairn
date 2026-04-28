@@ -134,24 +134,17 @@ fn parse_markdown(source_path: &Path, raw: &str) -> Option<RawLink> {
         Some((t, a)) => (t, Some(a.to_owned())),
         None => (raw, None),
     };
-    // Markdown link target resolution:
-    //   - `./foo.md` / `../foo.md`     → source-relative (explicit nav)
-    //   - bare `foo.md` (no `/`)       → source-relative (same-folder common case)
-    //   - `dir/foo.md` (contains `/`)  → vault-relative (intentional, tested:
-    //     records routinely write fully-qualified paths like `raw/alice.md`,
-    //     and switching to source-relative there would double-prefix)
+    // Markdown link target resolution per standard CommonMark semantics:
+    //   - `/foo.md`                  → vault-root-relative (explicit absolute)
+    //   - `./foo.md` / `../foo.md`   → source-relative (explicit nav)
+    //   - `foo.md` / `dir/foo.md`    → source-relative (default; standard
+    //                                  Markdown resolves relative paths
+    //                                  against the document's own folder)
+    //
+    // Note: `resolve_source_relative` already strips the leading slash for
+    // absolute targets, so a single dispatch handles every case.
     let target = Path::new(target_str);
-    let target_path = {
-        use std::path::Component;
-        let first = target.components().next();
-        let is_nav = matches!(first, Some(Component::CurDir | Component::ParentDir));
-        let has_separator = target_str.contains('/');
-        if is_nav || !has_separator {
-            resolve_source_relative(source_path, target)
-        } else {
-            normalize(target)
-        }
-    };
+    let target_path = resolve_source_relative(source_path, target);
     Some(RawLink {
         target_path,
         anchor,
@@ -223,11 +216,37 @@ mod tests {
 
     #[test]
     fn markdown_link_label_discarded() {
+        // Standard Markdown: relative path resolves against source folder.
+        // `raw/a.md` linking to `alice.md` means the same folder.
         let src = Path::new("raw/a.md");
-        let links = extract_links(src, "see [Alice](raw/alice.md) for details");
+        let links = extract_links(src, "see [Alice](alice.md) for details");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_path, PathBuf::from("raw/alice.md"));
         assert!(links[0].anchor.is_none());
+    }
+
+    #[test]
+    fn markdown_link_with_leading_slash_is_vault_relative() {
+        // Explicit vault-root form: `/raw/alice.md` means start from the
+        // vault root regardless of the source file's location.
+        let src = Path::new("wiki/entities/bob.md");
+        let links = extract_links(src, "see [Alice](/raw/alice.md)");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target_path, PathBuf::from("raw/alice.md"));
+    }
+
+    #[test]
+    fn markdown_link_nested_relative_resolves_against_source_folder() {
+        // `[Alice](people/alice.md)` from `wiki/entities/bob.md` must
+        // resolve to `wiki/entities/people/alice.md` per standard Markdown
+        // semantics, NOT to vault-root `people/alice.md`.
+        let src = Path::new("wiki/entities/bob.md");
+        let links = extract_links(src, "see [Alice](people/alice.md)");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target_path,
+            PathBuf::from("wiki/entities/people/alice.md"),
+        );
     }
 
     #[test]
@@ -258,12 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn slash_path_remains_vault_relative() {
-        // Paths with `/` are vault-relative by intent — records routinely
-        // write fully-qualified paths like `raw/alice.md`. Source-relative
-        // here would double-prefix.
-        let src = Path::new("raw/r1.md");
-        let links = extract_links(src, "[Alice](raw/alice.md)");
+    fn slash_prefixed_path_is_vault_relative() {
+        // Leading `/` means vault-root regardless of source location.
+        let src = Path::new("wiki/entities/bob.md");
+        let links = extract_links(src, "[Alice](/raw/alice.md)");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_path, PathBuf::from("raw/alice.md"));
     }
@@ -290,7 +307,7 @@ mod tests {
     #[test]
     fn code_fenced_links_are_ignored() {
         let src = Path::new("raw/a.md");
-        let body = "before\n```\n[Alice](raw/alice.md)\n```\nafter [Bob](raw/bob.md)";
+        let body = "before\n```\n[Alice](alice.md)\n```\nafter [Bob](bob.md)";
         let links = extract_links(src, body);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_path, PathBuf::from("raw/bob.md"));
@@ -325,7 +342,7 @@ mod tests {
 
     #[test]
     fn materialize_emits_backlink_for_existing_target() {
-        let r1 = record_with_body(1, "see [Alice](raw/alice.md)");
+        let r1 = record_with_body(1, "see [Alice](alice.md)");
         let mut paths = BTreeMap::new();
         paths.insert(r1.record.id.clone(), PathBuf::from("raw/r1.md"));
         let map = materialize_backlinks(&[r1], &paths);
@@ -336,7 +353,7 @@ mod tests {
 
     #[test]
     fn materialize_includes_dangling_links() {
-        let r1 = record_with_body(1, "[ghost](raw/missing.md)");
+        let r1 = record_with_body(1, "[ghost](missing.md)");
         let mut paths = BTreeMap::new();
         paths.insert(r1.record.id.clone(), PathBuf::from("raw/r1.md"));
         let map = materialize_backlinks(&[r1], &paths);
@@ -345,8 +362,8 @@ mod tests {
 
     #[test]
     fn materialize_two_sources_to_same_target_sorted() {
-        let r1 = record_with_body(1, "[a](raw/alice.md)");
-        let mut r2 = record_with_body(1, "[a](raw/alice.md)");
+        let r1 = record_with_body(1, "[a](alice.md)");
+        let mut r2 = record_with_body(1, "[a](alice.md)");
         // Mutate id so paths differ.
         r2.record.id = RecordId::parse("01HQZX9F5N0000000000000ZZZ".to_owned()).expect("valid");
         let mut paths = BTreeMap::new();

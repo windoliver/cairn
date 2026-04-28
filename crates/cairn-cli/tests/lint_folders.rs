@@ -97,6 +97,38 @@ async fn sibling_subtree_unaffected_by_broken_policy() {
 }
 
 #[tokio::test]
+async fn corrupt_non_utf8_index_is_overwritten() {
+    // A pre-existing `_index.md` that contains non-UTF-8 bytes (e.g. a
+    // partial write left behind by a crash, or a binary file dropped by
+    // accident) must NOT abort the run with an InvalidData error — the
+    // whole point of `--fix-folders` is to recover state. We byte-compare
+    // instead of `read_to_string`, so the corrupt file is simply marked
+    // stale and overwritten atomically.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+    // Plant invalid UTF-8 bytes at the destination.
+    std::fs::write(
+        vault.path().join("raw/_index.md"),
+        [0xFF, 0xFE, 0xFD, 0xFC].as_slice(),
+    )
+    .unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await.unwrap();
+    assert!(
+        !result.written.is_empty(),
+        "expected the corrupt index to be replaced",
+    );
+    let content = std::fs::read_to_string(vault.path().join("raw/_index.md")).unwrap();
+    assert!(
+        content.contains("kind: folder_index"),
+        "corrupt content was not replaced: {content:?}"
+    );
+}
+
+#[tokio::test]
 async fn atomic_writes_overwrite_stale_and_leave_no_tmp() {
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();

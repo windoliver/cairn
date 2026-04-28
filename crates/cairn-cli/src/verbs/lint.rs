@@ -186,8 +186,13 @@ pub async fn fix_folders_handler(
             .await
             .with_context(|| format!("spawn_blocking validate {}", abs.display()))??;
         }
-        let needs_write = match tokio::fs::read_to_string(&abs).await {
-            Ok(existing) => existing != projected.content,
+        // Byte-compare, NOT `read_to_string`.  A pre-existing `_index.md`
+        // containing non-UTF-8 bytes (corruption, manual binary write,
+        // partially-written tempfile that survived a crash) would otherwise
+        // surface as `InvalidData` and abort the entire rebuild — exactly
+        // the recovery case `lint --fix-folders` should handle.
+        let needs_write = match tokio::fs::read(&abs).await {
+            Ok(existing) => existing != projected.content.as_bytes(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
             Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", abs.display())),
         };
