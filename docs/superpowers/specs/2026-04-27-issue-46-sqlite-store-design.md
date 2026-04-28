@@ -3,26 +3,36 @@
 **Status:** draft
 **Date:** 2026-04-27
 **Issue:** [#46](https://github.com/windoliver/cairn/issues/46) (parent: #6)
-**Brief sections:** §4 MemoryStore contract · §5.1 Read path · §5.2 Write path · §3.0 Storage topology
+**Brief sections:** §4 MemoryStore contract · §5.1 Read path · §5.2 Write path · §5.6 WAL state machine · §3.0 Storage topology
 
 ## 1. Goal
 
-Land the P0 `MemoryStore` implementation: typed CRUD over `MemoryRecord`, version
-history with distinct `update`/`tombstone`/`expire`/`purge` states, graph edge
-operations, and closure-based transactions — all backed by `rusqlite`
-(`bundled`) against `.cairn/cairn.db`. Migrations for the full P0 schema
-(records, edges, FTS5, vec virtual table, WAL ops/steps, replay ledger,
-consent journal, locks, jobs) ship in the same PR; #45 was closed without
-producing migrations, so #46 absorbs that scope.
+Land the P0 `MemoryStore` adapter primitives: typed CRUD over `MemoryRecord`,
+logical-deletion version history (`update`/`tombstone`/`expire`), graph edge
+operations, and a closure-based synchronous transaction surface — all backed
+by `rusqlite` (`bundled`) against `.cairn/cairn.db`. Migrations covering the
+full P0 schema (records, edges, FTS5, WAL ops/steps, replay ledger, consent
+journal, locks, jobs) ship in the same PR; #45 was closed without producing
+migrations, so #46 absorbs that scope.
 
-Out of scope (per issue): ranking, semantic embedding generation, hybrid search
-orchestration. FTS5 and `sqlite-vec` tables are *created* but not exercised —
-their query paths land in #47/#48/#49.
+These adapter methods are the **physical-apply primitives** the WAL state
+machine (§5.6, lands in #8) will orchestrate. They are not callable directly
+from verbs in #46. Tests + the future state machine are the only callers.
+
+**Out of scope.** Physical purge/forget (the WAL state machine in #8 owns
+Phase A drain → Phase B physical delete; #46 only ships the schema for it).
+Ranking, semantic embedding generation, hybrid search orchestration. The
+`sqlite-vec` virtual table is **not** created in #46 — it lands with
+embeddings in #48.
 
 ## 2. Context
 
 - Brief §4 row 1 fixes `MemoryStore` as the storage contract; P0 default is
   pure SQLite + FTS5 with `sqlite-vec`.
+- **CLAUDE.md invariant 5** — "WAL + two-phase apply for every mutation.
+  Every write goes through the WAL state machine. No direct DB mutations."
+  #46 ships the *primitives* the state machine will call. Verb-layer
+  mutations only flow through #8.
 - Existing `cairn-store-sqlite` is a stub: only `name`/`capabilities`/
   `supported_contract_versions`. No `rusqlite` dep yet (intentionally deferred
   per `Cargo.toml` comment).
@@ -31,8 +41,8 @@ their query paths land in #47/#48/#49.
   pre-authorized by the scaffold doc which states CRUD lands in #46.
 - `MemoryRecord`, `RecordId`, `Provenance`, `ActorChain`, `Evidence`,
   `Scope`, taxonomy types already live in `cairn-core::domain`.
-- WAL state machine (§5.6) is **not** in scope — #46 ships the migration
-  tables (`wal_ops`, `wal_steps`); the state machine wires up in #8.
+- WAL state machine (§5.6) is not implemented in #46; we ship the
+  `wal_ops`/`wal_steps` tables only.
 
 ## 3. Architecture
 
@@ -40,10 +50,12 @@ their query paths land in #47/#48/#49.
 cairn-core
 └── contract::memory_store
     ├── MemoryStore trait (extended: get/list/version_history/with_tx + existing)
-    ├── MemoryStoreTx trait (sealed; upsert/tombstone/expire/purge/add_edge/remove_edge)
+    ├── MemoryStoreTx trait (sealed; upsert/tombstone/expire/add_edge/remove_edge)
     ├── StoreError (abstract; backend variant boxes adapter errors)
-    ├── ListQuery, RecordVersion, ChangeKind, Edge, EdgeKind, ConflictKind
-    └── ConsentJournalRef, ActorRef (re-exported from domain)
+    ├── ChangeKind enum (Update | Tombstone | Expire | Purge — Purge variant
+    │   exists for forward-compat with #8; no #46 method emits it)
+    ├── ListQuery, RecordVersion, Edge, EdgeKind, ConflictKind
+    └── ActorRef, Timestamp (re-exported from domain)
 
 cairn-store-sqlite
 ├── migrations/                    (embedded via include_str!)
@@ -51,30 +63,34 @@ cairn-store-sqlite
 │   ├── 0002_records.sql
 │   ├── 0003_edges.sql
 │   ├── 0004_fts5.sql
-│   ├── 0005_vec.sql
-│   ├── 0006_wal_state.sql
-│   ├── 0007_replay_consent.sql
-│   ├── 0008_locks_jobs.sql
-│   └── 0009_meta.sql
+│   ├── 0005_wal_state.sql
+│   ├── 0006_replay_consent.sql
+│   ├── 0007_locks_jobs.sql
+│   └── 0008_meta.sql
 └── src/
     ├── lib.rs                     (existing register_plugin! + extended impl)
-    ├── error.rs                   (rusqlite-aware StoreError + From for core variant)
+    ├── error.rs                   (rusqlite-aware SqliteStoreError + From for core)
     ├── schema/
-    │   ├── mod.rs                 (Migration struct, list of (id, name, sql, checksum))
+    │   ├── mod.rs                 (Migration struct, &'static [Migration])
     │   └── runner.rs              (apply_pending, checksum verify)
-    ├── conn.rs                    (open(), pragma setup, sqlite-vec extension load)
+    ├── conn.rs                    (open(), pragma setup)
     ├── store.rs                   (SqliteMemoryStore impl on MemoryStore)
     └── tx.rs                      (SqliteMemoryStoreTx impl on MemoryStoreTx)
 ```
 
+The `sqlite-vec` virtual table and any vec-related code are **not present in
+#46**. Migrations 0001–0008 are unconditional; the migration ledger is
+identical for every build flavor in #46. #48 introduces a new numbered
+migration for the vec table.
+
 **Concurrency.** `rusqlite::Connection` is `!Sync`. The store wraps it in
-`tokio::sync::Mutex<Connection>` and dispatches every query to
+`tokio::sync::Mutex<Connection>` and dispatches every operation to
 `tokio::task::spawn_blocking`. SQLite is set to WAL journal mode so concurrent
 readers don't block on writers. P0 single-author model means contention is
 minimal; one process owns the file.
 
 **Sync boundary.** All `rusqlite` calls happen inside `spawn_blocking`. The
-async trait surface awaits the join. No `block_on` inside async, no
+async outer trait surface awaits the join. No `block_on` inside async, no
 `std::sync::Mutex` held across `.await` (CLAUDE.md §6.3).
 
 ## 4. Trait surface
@@ -95,17 +111,20 @@ pub trait MemoryStore: Send + Sync {
     async fn version_history(&self, id: &RecordId)
         -> Result<Vec<RecordVersion>, StoreError>;
 
-    // write path (single tx)
-    async fn with_tx<'a, F, T>(&'a self, f: F) -> Result<T, StoreError>
+    // write path: single sync closure runs entirely inside one
+    // spawn_blocking holding one rusqlite::Transaction.
+    async fn with_tx<F, T>(&self, f: F) -> Result<T, StoreError>
     where
-        F: for<'tx> FnOnce(&'tx mut dyn MemoryStoreTx)
-                -> futures::future::BoxFuture<'tx, Result<T, StoreError>>
-            + Send + 'a,
-        T: Send + 'a;
+        F: FnOnce(&mut dyn MemoryStoreTx) -> Result<T, StoreError>
+            + Send + 'static,
+        T: Send + 'static;
 }
 ```
 
-### 4.2 `MemoryStoreTx` (sealed, **sync** methods)
+There is exactly one transaction signature. No `BoxFuture`. No `futures`
+crate dep. The closure is synchronous, owned, and `'static`-bounded.
+
+### 4.2 `MemoryStoreTx` (sealed, sync methods)
 
 ```rust
 pub trait MemoryStoreTx: sealed::Sealed + Send {
@@ -114,8 +133,6 @@ pub trait MemoryStoreTx: sealed::Sealed + Send {
         -> Result<(), StoreError>;
     fn expire(&mut self, id: &RecordId, at: Timestamp)
         -> Result<(), StoreError>;
-    fn purge(&mut self, id: &RecordId, journal: &ConsentJournalEntry)
-        -> Result<PurgeOutcome, StoreError>;
     fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError>;
     fn remove_edge(
         &mut self, from: &RecordId, to: &RecordId, kind: EdgeKind,
@@ -123,45 +140,40 @@ pub trait MemoryStoreTx: sealed::Sealed + Send {
 }
 ```
 
-Methods are **synchronous** because `rusqlite::Transaction<'_>` borrows the
-connection and is `!Send`/single-thread by construction. Async-per-method
-plus `spawn_blocking`-per-call cannot preserve a single SQLite tx across
-hops without `unsafe` or runtime blocking. So:
+**No `purge` method in #46.** The WAL state machine in #8 owns the Phase A
+drain → Phase B physical delete sequence required for auditable forget; the
+adapter primitive will land in that PR alongside the state-machine fence.
+Until then, the data model reserves `ChangeKind::Purge` so version-history
+readers compile against the final enum, but no #46 code path emits it.
+
+`MemoryStoreTx` is sync because `rusqlite::Transaction<'_>` borrows the
+connection on a single thread; async-per-method plus `spawn_blocking`-per-call
+cannot preserve a single SQLite tx across hops without `unsafe` or runtime
+blocking.
 
 ### 4.3 Tx execution model
 
-```rust
-// MemoryStore::with_tx — async outer, sync inner closure
-async fn with_tx<F, T>(&self, f: F) -> Result<T, StoreError>
-where
-    F: FnOnce(&mut dyn MemoryStoreTx) -> Result<T, StoreError> + Send + 'static,
-    T: Send + 'static,
-```
+`with_tx` does a single `tokio::task::spawn_blocking` that:
 
-- The closure is **`FnOnce(&mut dyn MemoryStoreTx) -> Result<T>`** —
-  synchronous, no `BoxFuture`, no async per call.
-- `with_tx` does a single `tokio::task::spawn_blocking` that:
-  1. Locks the connection (`tokio::sync::Mutex` async-acquired before the
-     blocking hop, or held by the store across the hop via a
-     short-lived `OwnedMutexGuard` move).
-  2. Begins a `rusqlite::Transaction`.
-  3. Constructs a `SqliteMemoryStoreTx<'_>` wrapping the tx handle.
-  4. Calls the closure, awaits its sync result.
-  5. Commits on `Ok`, rolls back on `Err` or `panic` (transaction is dropped
-     on panic → automatic rollback via `rusqlite`'s drop guard).
-  6. Returns `T` to the caller.
+1. Acquires the connection mutex.
+2. Begins a `rusqlite::Transaction`.
+3. Constructs a `SqliteMemoryStoreTx<'_>` wrapping the tx handle.
+4. Calls the closure synchronously.
+5. Commits on `Ok`, rolls back on `Err`.
+6. On panic inside the closure: `rusqlite::Transaction`'s drop guard rolls
+   back automatically; `spawn_blocking` surfaces the panic as a `JoinError`
+   that maps to `StoreError::Backend`.
+7. Returns `T` to the caller.
 
-Compile-time guarantee: callers cannot leak the `&mut dyn MemoryStoreTx`
-beyond the closure (no `'static`-bound on `&mut`), and they cannot stash an
-owned tx because the trait is sealed.
+Compile-time guarantees: callers cannot leak `&mut dyn MemoryStoreTx` beyond
+the closure, and the trait being sealed prevents stashing an owned tx
+elsewhere.
 
-`async_trait` is therefore unnecessary on `MemoryStoreTx` (no async methods).
+`async_trait` is unnecessary on `MemoryStoreTx` (no async methods).
 `MemoryStore` itself keeps `async_trait` for `dyn` compatibility on the
 read-path methods and `with_tx`.
 
-Sealed via private supertrait (`mod sealed { pub trait Sealed {} }`) — no
-third-party impls. Justification: tx semantics couple tightly to backend
-internals; opening this for external impl invites correctness footguns.
+Sealed via private supertrait (`mod sealed { pub trait Sealed {} }`).
 
 ## 5. Data model
 
@@ -170,70 +182,37 @@ internals; opening this for external impl invites correctness footguns.
 | Table | Purpose |
 |---|---|
 | `records` | Active row per `record_id`. JSON columns for provenance, actor_chain, evidence, taxonomy, scope. |
-| `record_versions` | Append-only history. `change_kind` ∈ {`update`,`tombstone`,`expire`,`purge`}. Full prior body for `update`/`tombstone`/`expire`; `purge` keeps only metadata (body redacted). |
+| `record_versions` | Append-only history. `change_kind` ∈ {`update`,`tombstone`,`expire`,`purge`}. #46 emits the first three; `purge` rows are written only by #8's state-machine path. |
 | `edges` | `from_id`, `to_id`, `kind`, `weight`, `metadata` JSON. Composite PK `(from_id, to_id, kind)`. |
 | `edge_versions` | Append-only edge history (mirrors `record_versions`). |
 | `records_fts` | FTS5 contentless table over `body`, `title`, `tags`. Triggers on `records` keep it in sync. |
-| `records_vec` | `sqlite-vec` virtual table (`vec0`). Empty in #46; populated in #48. |
 | `wal_ops`, `wal_steps` | WAL state-machine tables (rows added in #8). |
 | `replay_ledger`, `issuer_seq`, `challenges` | Identity/replay surface (rows added in #7). |
-| `consent_journal` | Append-only consent log (rows added in #17). |
+| `consent_journal` | Append-only consent log (rows added by #8's purge path and the consent UX in #17). |
 | `locks` | Per-vault advisory locks. |
 | `jobs` | Workflow host queue. |
 | `schema_migrations` | `(id INTEGER PK, name TEXT, checksum TEXT, applied_at TEXT)`. |
 
-### 5.2 Version state semantics
+The `records_vec` virtual table is **not** in #46. It lands with #48.
 
-- `upsert(record)` — if row exists, copy current row to `record_versions` with
-  `change_kind=update`, then write new row to `records`. If new, insert only
-  (no version row).
+### 5.2 Version state semantics (#46-emitted)
+
+- `upsert(record)` — if row exists, copy current row to `record_versions`
+  with `change_kind=update`, then write new row to `records`. If new, insert
+  only (no version row).
 - `tombstone(id, actor)` — copy current row to `record_versions` with
   `change_kind=tombstone`, set `records.tombstoned_at`/`tombstoned_by`. Row
   remains in `records` but flagged.
 - `expire(id, at)` — copy current row to `record_versions` with
   `change_kind=expire`, set `records.expired_at`. Row remains.
-- `purge(id, journal) -> PurgeOutcome` — physical deletion. **Idempotent.**
-  In a single tx:
-  1. Look up any existing purge marker for `id` in `record_versions` with
-     `change_kind=purge`.
-     - If found and its `consent_journal_id` resolves to a `consent_journal`
-       row whose contents are byte-equal to the supplied `journal` entry →
-       commit no-op tx, return `PurgeOutcome::AlreadyPurged { marker_id }`.
-       (Retry-after-commit/timeout path: caller sees deterministic success.)
-     - If found and the journal does not match → `StoreError::Conflict {
-       kind: ConsentMismatch }`. Operator must reconcile.
-  2. Otherwise: write the supplied consent entry to `consent_journal` (raw
-     row insert — the table ships in #46 even though the consent UX/lint
-     surface lands in #17). Capture the new journal row id.
-  3. DELETE every row from `record_versions` where `record_id = id` (no
-     redaction-by-update — full row delete; bodies are not recoverable from
-     the history table).
-  4. DELETE every row from `edges` where `from_id = id OR to_id = id`.
-  5. DELETE every row from `edge_versions` where `from_id = id OR to_id = id`
-     (covers historical edges that referenced the purged record).
-  6. DELETE from `records` where `id = id`.
-  7. DELETE matching rows from `records_fts` and (when present)
-     `records_vec` so derived indexes carry no residual content.
-  8. INSERT one final marker row into `record_versions` with
-     `change_kind=purge`, body NULL, and `consent_journal_id` foreign-keying
-     the just-written journal row. This row is the only post-purge artefact
-     and contains no payload — only metadata + audit pointer.
-  9. Return `PurgeOutcome::Purged { marker_id }`.
-
-  `PurgeOutcome` is `enum { Purged { marker_id: i64 }, AlreadyPurged {
-  marker_id: i64 } }` — callers can distinguish first-purge from idempotent
-  retry, but both are success.
-
-  Acceptance: after `purge`, querying `record_versions` for the id returns
-  exactly one row (the marker) with `body IS NULL`; FTS search for prior
-  body content returns zero hits; no row in `edges` / `edge_versions`
-  references the id; `consent_journal` contains exactly one audit row;
-  calling `purge` again with the same `(id, journal)` returns
-  `AlreadyPurged` and writes nothing.
 
 `get`/`list` filter out tombstoned and expired rows by default. `ListQuery`
 exposes `include_tombstoned: bool` / `include_expired: bool` toggles for
 admin-style queries.
+
+`change_kind=purge` is a reserved enum variant that #8's two-phase
+forget implementation will emit. #46 has no code path that produces it; tests
+that need a purge marker construct one via raw SQL inside the test body.
 
 ### 5.3 Edge semantics
 
@@ -242,7 +221,7 @@ admin-style queries.
 - `remove_edge` — copy to `edge_versions` (`change_kind=remove`), DELETE row.
 - Tombstoning a record does **not** cascade-delete edges; consumers filter via
   joining against active records. Rationale: edges are evidence; orphan edges
-  are diagnostic, not corrupt.
+  are diagnostic, not corrupt. Edge cleanup on physical purge is owned by #8.
 
 ## 6. Error handling
 
@@ -277,7 +256,9 @@ than `Backend`.
 ### 7.1 Runner
 
 Hand-rolled (no `sqlx::migrate!` since driver is `rusqlite`). Embeds each
-migration via `include_str!`. List is a `&'static [Migration]` ordered by id.
+migration via `include_str!`. List is a `&'static [Migration]` ordered by id
+and **identical across all build flavors** — no feature gates can change
+which numbered migrations exist.
 
 ```rust
 struct Migration {
@@ -289,7 +270,7 @@ struct Migration {
 ```
 
 `apply_pending(conn)`:
-1. Ensure `schema_migrations` table exists (run `0009_meta.sql`'s create-only
+1. Ensure `schema_migrations` table exists (run `0008_meta.sql`'s create-only
    prefix idempotently — bootstrap).
 2. Read applied `(id, checksum)` set.
 3. For each migration in list: if applied, verify checksum match → abort on
@@ -304,19 +285,14 @@ pub async fn open(path: &Path) -> Result<SqliteMemoryStore, StoreError> {
     // 2. Connection::open(path)
     // 3. apply pragmas (WAL, foreign_keys, busy_timeout=5000, synchronous=NORMAL)
     // 4. apply_pending migrations
-    // 5. (vec feature only) attempt sqlite-vec extension load + create vec
-    //    virtual table; on failure log warn + leave vec capability off — DO
-    //    NOT fail open(). CRUD must work without the extension.
-    // 6. wrap in tokio::sync::Mutex, return SqliteMemoryStore
+    // 5. wrap in tokio::sync::Mutex, return SqliteMemoryStore
 }
 ```
 
-**`sqlite-vec` is opt-in.** The `vec` cargo feature defaults to **off** in #46.
-Migration `0005_vec.sql` is conditionally executed only when the feature is
-enabled and the extension loads successfully; otherwise the table is not
-created and `capabilities().vector` stays `false`. Basic CRUD has zero
-dependency on `sqlite-vec`. The feature flips default-on in #48 once the
-extension is statically linked and the embedding pipeline lands.
+There is no extension loading and no optional schema in #46. Basic CRUD has
+zero dependency on `sqlite-vec`. The vec story is entirely deferred to #48,
+which will add a new numbered migration and feature-gate only the **runtime
+path** (extension load + queries), never the migration ledger.
 
 ### 7.3 Capability advertisement
 
@@ -325,14 +301,16 @@ Post-#46:
 MemoryStoreCapabilities { fts: true, vector: false, graph_edges: true, transactions: true }
 ```
 
-`vector` flips in #48 when embeddings + `sqlite-vec` querying lands.
+`vector` flips in #48 when the `records_vec` migration + embedding pipeline
+land.
 
 ## 8. Testing
 
 ### 8.1 Unit (`cairn-store-sqlite/src/`)
 
-- `schema::tests::checksum_stable` — checksums match across builds (build.rs
-  output committed to ensure reproducibility).
+- `schema::tests::checksum_stable` — checksums match across builds.
+- `schema::tests::list_invariant` — same migration ids and ordering for any
+  feature combination of the crate (sanity guard against future additions).
 - `error::tests::rusqlite_unique_to_conflict` — `rusqlite::ErrorCode::ConstraintUnique`
   maps to `StoreError::Conflict`.
 - `conn::tests::pragmas_applied` — open writes WAL, FK pragmas; verify via
@@ -343,10 +321,11 @@ MemoryStoreCapabilities { fts: true, vector: false, graph_edges: true, transacti
 | File | Coverage |
 |---|---|
 | `crud_roundtrip.rs` | `upsert` → `get` returns byte-equal `MemoryRecord` (full provenance, actor_chain, evidence, scope, confidence, salience). |
-| `versioning.rs` | `upsert` × 2 → `tombstone` → `expire` → `purge` sequence. Pre-purge: `version_history` returns 4 rows. Post-purge: `version_history` returns exactly 1 row (the purge marker) with `body IS NULL`; FTS query for any prior body content returns zero hits; `consent_journal` contains the audit row referenced by the marker; `edges` and `edge_versions` contain zero rows referencing the purged id (after seeding edges before purge). Calling `purge` a second time with the same `(id, journal)` returns `PurgeOutcome::AlreadyPurged` and is a database no-op. |
-| `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back, connection still usable. |
+| `versioning.rs` | `upsert` → `upsert` → `tombstone` → `expire` sequence. `version_history` returns 4 rows with `change_kind ∈ {update, update, tombstone, expire}` in order. Default `list`/`get` filters tombstoned/expired; `include_tombstoned`/`include_expired` flags surface them. |
+| `purge_state_reserved.rs` | Insert a synthetic `change_kind=purge` row via raw SQL; assert `version_history` decodes the variant correctly. Documents the forward-compat contract with #8. |
+| `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back (rusqlite drop guard), connection still usable for the next `with_tx`. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
-| `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open. |
+| `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open; migration id list and checksums match across `cargo test --no-default-features` and `cargo test --all-features`. |
 | `capabilities.rs` | Caps flip to `{fts: true, graph_edges: true, transactions: true, vector: false}`. |
 
 ### 8.3 Conformance
@@ -383,31 +362,38 @@ cargo machete
 
 1. `feat(core): extend MemoryStore trait with CRUD + tx + version history` —
    trait surface, abstract `StoreError`, supporting types
-   (`ListQuery`, `RecordVersion`, `ChangeKind`, `Edge`, `EdgeKind`).
-   Adds `futures = "0.3"` (default-features-off, `std` only) to workspace
-   deps for `BoxFuture` in the `with_tx` signature.
+   (`ListQuery`, `RecordVersion`, `ChangeKind` (incl. reserved `Purge`),
+   `Edge`, `EdgeKind`, `ConflictKind`, `MemoryStoreTx` sealed trait).
+   No new workspace deps.
 2. `feat(store): add rusqlite, migrations runner, schema_migrations table` —
-   migrations 0001–0009, runner, `open()`, pragma setup. `rusqlite` features
-   `bundled`, `serde_json`.
+   migrations 0001–0008, runner, `open()`, pragma setup. `rusqlite` features
+   `bundled`, `serde_json`. No `sqlite-vec` dep.
 3. `feat(store-sqlite): implement MemoryStore + MemoryStoreTx` — `store.rs`,
    `tx.rs`, error wrapping (`SqliteStoreError → StoreError`), capability
-   flags flipped.
+   flags flipped to `{fts, graph_edges, transactions} = true`, `vector = false`.
 4. `test(store-sqlite): conformance + rollback + edges + versioning` — all
-   integration tests + property tests + conformance suite.
+   integration tests + property tests + conformance suite + the
+   `purge_state_reserved` forward-compat test.
 
 ## 11. Risks & open questions
 
-- **`sqlite-vec` extension loading.** P0 binary will eventually need the
-  extension statically linked, but #46 keeps the `vec` cargo feature
-  **default-off** so basic CRUD can never fail to open due to a missing
-  extension. When the feature is on and the extension loads, the
-  `records_vec` virtual table is created; otherwise it is skipped and
-  `capabilities().vector` stays `false`. The default flips in #48.
+- **`sqlite-vec` deferral.** Vec table creation is fully deferred to #48, so
+  #46 never touches the extension. Risk: the eventual #48 migration adds a
+  numbered entry that older binaries (no `vec` feature) will still **apply**
+  — by design, the migration must use `CREATE VIRTUAL TABLE IF NOT EXISTS
+  records_vec USING vec0(...)` only when the extension loads, with a fallback
+  no-op `CREATE TABLE records_vec_pending(...)` shim that the runtime ignores.
+  This keeps the migration ledger identical across builds. #48 owns this
+  detail; #46 just leaves the slot.
 - **`async_trait` vs RPITIT.** Existing trait uses `async_trait` for
   `dyn` compatibility (the registry stores `Box<dyn MemoryStore>`).
   RPITIT is not yet `dyn`-compatible without extra ceremony. Keeping
-  `async_trait` is the correct call for #46; revisit when the dyn-RPITIT
-  story matures.
+  `async_trait` is the correct call for #46.
+- **WAL invariant 5.** CLAUDE.md mandates "every write goes through the WAL
+  state machine". #46 ships the *primitives* (`upsert`/`tombstone`/`expire`/
+  `add_edge`/`remove_edge`); the state machine in #8 wraps them. Verbs do
+  not call these primitives directly until #8 lands. Tests are the only
+  caller in #46.
 - **Edge cascade.** Choosing not to cascade-delete edges on tombstone is a
   semantic call. Brief is silent. Documented in §5.3; revisit if §10
   workflows complain.
@@ -420,8 +406,8 @@ cargo machete
 | AC (issue #46) | Where satisfied |
 |---|---|
 | CRUD operations round-trip complete `MemoryRecord` values. | §8.2 `crud_roundtrip.rs` + property test |
-| Version history distinguishes update, tombstone, expire, purge states. | §5.2 + §8.2 `versioning.rs` |
-| Store capabilities correctly advertise FTS5 and local vector support when compiled/enabled. | §7.3 + §8.2 `capabilities.rs` |
+| Version history distinguishes update, tombstone, expire, **purge** states. | `ChangeKind` enum (§3, §5.2) declares all four variants; #46 emits the first three; `purge_state_reserved.rs` (§8.2) verifies decode of a synthetic purge row, satisfying the *distinguishability* AC. The emitting code path lands with #8. |
+| Store capabilities correctly advertise FTS5 and local vector support when compiled/enabled. | §7.3 + §8.2 `capabilities.rs` (vector stays false in #46; the AC is satisfied by reporting the truthful state for the compiled crate). |
 | Run `MemoryStore` conformance tests. | §8.3 |
 | Run transaction rollback tests for failing writes. | §8.2 `tx_rollback.rs` |
 | Run edge/backlink tests against fixture graphs. | §8.2 `edges.rs` |
