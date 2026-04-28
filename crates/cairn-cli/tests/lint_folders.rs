@@ -59,6 +59,37 @@ async fn bad_policy_yaml_does_not_abort_run() {
 }
 
 #[tokio::test]
+async fn atomic_writes_overwrite_stale_and_leave_no_tmp() {
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+    std::fs::create_dir_all(vault.path().join(".cairn")).unwrap();
+
+    // Pre-place stale content; atomic rename must replace it.
+    std::fs::write(vault.path().join("raw/_index.md"), "stale content\n").unwrap();
+
+    let _ = fix_folders_handler(&store, vault.path()).await.unwrap();
+
+    let content = std::fs::read_to_string(vault.path().join("raw/_index.md")).unwrap();
+    assert!(
+        content.contains("kind: folder_index"),
+        "stale content not replaced: {content:?}"
+    );
+
+    // No leftover temp files in raw/. tempfile::Builder::suffix(".md.tmp")
+    // produces names like `<random>.md.tmp` — match anything containing ".tmp".
+    let leftovers: Vec<_> = std::fs::read_dir(vault.path().join("raw"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "tempfile leftovers: {leftovers:?}");
+}
+
+#[tokio::test]
 async fn fixture_index_matches_snapshot() {
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();
