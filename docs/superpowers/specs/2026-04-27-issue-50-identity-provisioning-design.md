@@ -40,9 +40,10 @@ trust scores, `IdentityProvider` plugin, shared-tier consent receipts).
    `SensorIdentity`. Store private keys in the platform keychain.
 2. Persist public identity metadata, the key ring, and revocation state in
    `.cairn/cairn.db`.
-3. Bind defaults at bootstrap: one local human identity (from the OS
-   username) and one Claude Code agent identity. Sensors are not bound at
-   bootstrap.
+3. Bind defaults on first identity initialization: one local human identity
+   (from the OS username) and one Claude Code agent identity. Identity
+   initialization is a distinct step from `cairn bootstrap` (see §3.7).
+   Sensors are not bound here.
 4. Provision sensor identities lazily on first enable, not at unrelated
    startup.
 5. Surface the `cairn identity` subcommand: `provision`, `list`, `show`,
@@ -147,14 +148,22 @@ Provisioning flow (single identity):
    `'active'`. Failure here leaves the keychain entry with a pending
    registry row — reconciliation handles it.
 
-Reconciliation runs at every `IdentityRegistry::open` (i.e., once per
+Reconciliation runs at every `IdentityService::open` (i.e., once per
 process start). For each `pending` row:
 
-- If the keychain entry exists → flip to `active`. (Crash between steps 3
-  and 4.)
-- If the keychain entry does not exist → delete the registry row, mark the
-  outcome `orphaned` in the audit log (`tracing` warn). (Crash before or
-  during step 3.)
+- **Keychain entry missing** → delete the registry row, mark the outcome
+  `orphaned` in the audit log (`tracing` warn). (Crash before or during
+  step 3.)
+- **Keychain entry present** → load the private key, derive its public key,
+  and compare it against the `identity_keys.public_key` reserved at step 1.
+  - **Match** → flip the row to `active`. (Crash between steps 3 and 4.)
+  - **Mismatch** → fail closed: leave the row `pending`, surface
+    `RegistryError::KeyMaterialMismatch { id }`, log at `error`, require
+    operator intervention via `cairn identity repair <id> --force` (which
+    deletes both the pending row and the conflicting keychain entry, then
+    re-runs provisioning). Mismatch is a strong signal of cross-vault
+    namespace collision (§3.7) or out-of-band tampering and **must not**
+    auto-recover.
 
 Idempotent re-provision of the same `(identity, key_version)` is a no-op
 once `active`. A re-provision attempt while a different `pending` row
@@ -195,6 +204,78 @@ P0 split:
 `identity_keys` schema gains a `superseded_at TEXT` column that records
 when a key version was rotated past — informational only; not used for
 deletion.
+
+### 3.7 Per-vault keystore namespacing + first-run gate
+
+Two Cairn vaults owned by the same OS user must not share keychain
+entries. Identity ids alone do not isolate them — `hmn:alice:v1` collides
+with itself if Alice has two vaults. The keystore namespace must be
+vault-scoped.
+
+**Vault id.** `cairn bootstrap` writes `.cairn/vault.id` containing a
+randomly minted ULID on first run. The file is committed to the
+filesystem-only bootstrap contract — no DB write, no keychain access.
+Subsequent bootstraps preserve the existing id (idempotent). The bootstrap
+spec (`2026-04-26-bootstrap-design.md`) is updated in the same PR to add
+this single artefact; the receipt grows a `vault_id` field. This is the
+sole change to the bootstrap contract.
+
+**Secret handle format.** `Keystore` uses:
+
+- service: `cairn:<vault_id>` (e.g., `cairn:01HXY…`)
+- account: `<identity-wire-form>#k<version>`
+
+Wrong-vault leakage is impossible: the service segment carries the vault
+id and is verified by the keystore on every load.
+
+**First-run gate.** `cairn bootstrap` exits 0 with a vault that has zero
+identities. Any verb that needs an issuer (`ingest`, `capture_trace`,
+`forget`, `cairn identity rotate`, etc.) opens `IdentityService`, which
+checks for at least one `active` identity of kind `Human` **and** kind
+`Agent`. If absent, the verb fails fast with a typed
+`IdentityServiceError::DefaultsNotInitialized` mapped to `EX_USAGE = 64`
+and a human-readable hint:
+
+```
+cairn ingest: no default identities found
+  run `cairn identity init-defaults` to provision the local human + agent identities
+```
+
+`cairn bootstrap` human-readable output gains a final line:
+
+```
+next:     cairn identity init-defaults
+```
+
+The split is now explicit at three layers (goals §2.1, design §3.7, CLI
+§4.5) and the failure mode for "bootstrapped but no identities" is loud,
+not silent.
+
+### 3.8 Idempotent provision verifies key material, not just registry presence
+
+`cairn identity provision` and `cairn identity init-defaults` treat an
+`active` row as a no-op only after a **liveness check** on the keychain
+entry:
+
+1. Read the registry's current `key_version` for the identity.
+2. `Keystore::load_signing_key` for the matching `SecretHandle`.
+3. Derive the public key, compare to `identity_keys.public_key`.
+4. **All three pass** → no-op (true idempotent path).
+5. **Keychain entry missing or mismatched** → fail closed with
+   `IdentityServiceError::KeyMaterialDesynchronized { id, reason }` mapped
+   to `EX_DATAERR = 65`. The CLI hint advises
+   `cairn identity repair <id>` (which atomically revokes the active row
+   and re-provisions a new key version, preserving prior public-key rows
+   for verification).
+
+This closes the "active row, missing keychain secret" hole: the system
+self-detects on the very next provision attempt rather than silently
+treating a stuck identity as healthy.
+
+`IdentityService::open` runs the same liveness check on every `active`
+identity at startup and emits a `tracing` warn for any desynchronized
+entry, so long-lived processes (MCP server, workflow host) surface the
+condition without waiting for a verb to trip on it.
 
 ## 4. Crate-by-crate changes
 
@@ -253,7 +334,16 @@ pub trait IdentityRegistry: Send + Sync {
 
 `RegistryError` (`#[non_exhaustive]`): `NotFound`, `IdentityExists { id }`,
 `ProvisioningInFlight { id }`, `AlreadyRevoked { id }`,
+`KeyMaterialMismatch { id }`,
 `KeyVersionConflict { existing, attempted }`, `Backend(#[source] …)`.
+
+`IdentityServiceError` (top-level error returned by `IdentityService`,
+wraps the two adapter errors plus the cross-cutting cases):
+`Keystore(#[source] KeystoreError)`,
+`Registry(#[source] RegistryError)`,
+`DefaultsNotInitialized`,
+`KeyMaterialDesynchronized { id, reason }`,
+`VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed).
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
 `zeroize`, `rand_core`. No new transitive surface beyond the cryptographic
@@ -271,9 +361,13 @@ crates/cairn-keychain/
     └── round_trip.rs     # store → load → delete; cfg-gated per OS
 ```
 
-`OsKeystore::new(service: &str)` defaults service to `cairn`. Account
-string is the wire form of `SecretHandle`. Uses `keyring::Entry::new` +
-`set_secret` / `get_secret` — bytes only, no string encoding.
+`OsKeystore::new(vault_id: &VaultId)` constructs the per-vault namespace.
+Service string is `cairn:<vault_id>`; account string is the
+`<identity-wire-form>#k<version>`. Uses `keyring::Entry::new` +
+`set_secret` / `get_secret` — bytes only, no string encoding. The
+keystore rejects loads whose `SecretHandle` carries a different
+`vault_id` than the one it was constructed with — defence in depth
+against caller mix-ups.
 
 Headless / unsupported environments (e.g., CI Linux without
 secret-service) return `KeystoreError::Backend`. The CLI maps this to
@@ -338,6 +432,7 @@ cairn identity show <id> [--json]
 cairn identity rotate <id> [--json]
 cairn identity revoke <id> [--json]
 cairn identity reconcile [--json]
+cairn identity repair <id> [--force] [--json]
 ```
 
 Shape mirrors brief §4.2 conventions; flags use `clap` derive + `ValueEnum`
@@ -354,12 +449,16 @@ the Claude Code agent identity:
 
 Idempotent: re-running `init-defaults` produces no registry diff.
 
-**`cairn bootstrap` is unchanged.** Per
+**`cairn bootstrap` adds exactly one artefact: `.cairn/vault.id`.** Per
 `docs/superpowers/specs/2026-04-26-bootstrap-design.md`, bootstrap is a
-filesystem-only command that does not create `.cairn/cairn.db` and must not
-depend on the OS keychain. Identity provisioning is therefore deliberately
-not wired into bootstrap; it requires a store-init pass that the bootstrap
-contract refuses to do.
+filesystem-only command that does not create `.cairn/cairn.db` and must
+not depend on the OS keychain. Both invariants are preserved: minting a
+ULID and writing it to a file is a pure filesystem operation. The
+existing bootstrap design doc is amended in this PR to add `vault_id` to
+`BootstrapReceipt` and the placeholder file table; the human-readable
+output gains a `next: cairn identity init-defaults` hint line. Identity
+provisioning itself remains out of bootstrap because it requires the DB +
+keychain.
 
 The recommended first-run path is two commands: `cairn bootstrap` (creates
 the directory tree, no DB, no keychain) followed by `cairn identity
@@ -389,7 +488,9 @@ enable yet (out of scope).
 | Condition | Error | CLI exit | Notes |
 |---|---|---|---|
 | Keychain unavailable / locked | `KeystoreError::Backend` / `Locked` | `EX_UNAVAILABLE = 69` | Maps to `CapabilityUnavailable` in capability advertisement. |
-| Re-provision same identity (idempotent path) | none | 0 | `upsert_identity` is a no-op when row is `active` and matches. |
+| Re-provision same identity (idempotent path) | none | 0 | No-op only after §3.8 liveness check passes (registry row + keychain entry + matching public key). |
+| Active row, keychain entry missing or pubkey mismatch | `IdentityServiceError::KeyMaterialDesynchronized { id, reason }` | 65 (`EX_DATAERR`) | CLI hint: run `cairn identity repair <id>`. |
+| `.cairn/vault.id` missing | `IdentityServiceError::VaultIdMissing` | 78 (`EX_CONFIG`) | Operator must re-run `cairn bootstrap` (idempotent; preserves existing vault id if any). |
 | Re-provision while another attempt is `pending` | `RegistryError::ProvisioningInFlight` | 75 (`EX_TEMPFAIL`) | Run `cairn identity reconcile` or restart. |
 | Re-provision conflicts (different `key_version`) | `RegistryError::KeyVersionConflict` | 1 | Operator must `rotate` or `revoke` first. |
 | Crash between keychain write and registry activate | recovered by §3.5 reconciliation on next `IdentityService::open` | n/a | Pending row flipped to active. Audit log entry at `info`. |
@@ -423,7 +524,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | identity CRUD; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency; rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash | integration via `MemoryKeystore` |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `cairn identity repair` round-trip; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
@@ -469,7 +570,7 @@ cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 |---|---|
 | Private keys are not stored in plaintext in the vault | §6, §7 “vault contains no plaintext key bytes” test |
 | Every write can resolve an issuer identity and current key version | `IdentityRegistry::get_identity` + `list_keys`; integration test asserts records returned with `current_key_version` |
-| Sensor identity provisioning happens when a sensor is first enabled | §4.6 — `provision_sensor_identity` helper; bootstrap does **not** mint sensor identities |
+| Sensor identity provisioning happens when a sensor is first enabled | §4.6 — `provision_sensor_identity` helper; neither `bootstrap` nor `init-defaults` mint sensor identities |
 | Run identity provisioning tests with a keychain mock | `MemoryKeystore` in `cairn-test-fixtures` (§4.3) |
 | Run key rotation and revocation fixture tests | §7 “rotation fixture; revocation fixture” |
 | Inspect vault files to confirm private keys are absent | §7 cross-crate test asserts no plaintext key bytes under `tempdir`/.cairn |
@@ -487,7 +588,9 @@ This is a teaser; the real implementation plan is written next via the
    on `open` + tests.
 5. `cairn-keychain` crate + per-OS round-trip tests.
 6. `cairn-cli identity` subcommand (`provision`, `init-defaults`, `list`,
-   `show`, `rotate`, `revoke`, `reconcile`) + snapshot tests. **No change to
-   `cairn bootstrap`.**
+   `show`, `rotate`, `revoke`, `reconcile`, `repair`) + snapshot tests.
+   Bootstrap delta: mint `.cairn/vault.id`, extend `BootstrapReceipt` with
+   `vault_id`, add `next: cairn identity init-defaults` hint line, update
+   bootstrap test snapshots.
 7. `cairn-sensors-local::provision_sensor_identity` helper + test.
 8. Verification checklist run; PR.
