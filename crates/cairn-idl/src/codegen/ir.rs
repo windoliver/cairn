@@ -130,6 +130,11 @@ pub struct CliPositional {
     /// `num_args(1..)`). Currently set from the optional `repeatable` field
     /// in `x-cairn-cli.positional`.
     pub repeatable: bool,
+    /// Schema field names this positional satisfies in a `oneOf` exclusivity
+    /// group. E.g., `cairn ingest`'s `source` positional aliases `body`,
+    /// `file`, and `url` — presence of the positional satisfies any of those
+    /// branches and conflicts with all of them.
+    pub aliases_one_of: Vec<String>,
 }
 
 /// Skill triggers extracted from `x-cairn-skill-triggers`.
@@ -727,6 +732,16 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
             .get("repeatable")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        aliases_one_of: p
+            .get("aliases_one_of")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     });
     Ok(CliCommand {
         command,

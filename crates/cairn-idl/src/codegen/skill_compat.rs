@@ -239,6 +239,13 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         .iter()
         .flat_map(|c| c.flags.iter().map(|f| (f.long.as_str(), f)))
         .collect();
+    // Property schemas (by IDL field name) for bound-checking flag values.
+    // For tagged-union verbs we union across all variants — a flag like
+    // `--limit` lives under each variant's `properties` so we just take the
+    // first definition we see.
+    let prop_schemas = verb_def
+        .map(collect_arg_property_schemas)
+        .unwrap_or_default();
     // Positional capacity: 0 if no variant declares one; usize::MAX if any
     // variant marks its positional repeatable (clap `num_args(1..)`); else 1.
     let positional_capacity = if cmds
@@ -253,7 +260,7 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
     let TokenScan {
         positional_count,
         used_field_names,
-    } = scan_tokens(verb, source_line, tokens, &allowed_flags)?;
+    } = scan_tokens(verb, source_line, tokens, &allowed_flags, &prop_schemas)?;
 
     if positional_count > positional_capacity {
         return Err(CompatError::Malformed {
@@ -310,10 +317,36 @@ fn validate_single_shape_required(
     source_line: usize,
 ) -> Result<(), CompatError> {
     let spec = single_required_spec(verb_def);
+    let positional_used = positional_count > 0;
     let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
+    let positional_aliases: BTreeSet<&str> = cmd
+        .positional
+        .as_ref()
+        .map(|p| p.aliases_one_of.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    // XOR: a positional with `aliases_one_of` (e.g., ingest's `source` →
+    // body|file|url) cannot coexist with any of the flags it aliases — the
+    // real CLI rejects that combination. Catch it here so SKILL.md can't
+    // ship an example like `cairn ingest foo --body bar`.
+    if positional_used
+        && let Some(conflict) = positional_aliases
+            .iter()
+            .find(|a| used_field_names.contains(**a))
+    {
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: format!(
+                "verb `{verb}` positional `{}` conflicts with aliased flag `--{conflict}`",
+                positional_name.unwrap_or("?")
+            ),
+            line: source_line,
+        });
+    }
+
     let satisfied = |field: &String| {
         used_field_names.contains(field)
-            || (positional_count > 0 && positional_name == Some(field.as_str()))
+            || (positional_used && positional_name == Some(field.as_str()))
     };
     for field in &spec.base {
         if !satisfied(field) {
@@ -337,11 +370,26 @@ fn validate_single_shape_required(
         });
     }
     if !spec.one_of.is_empty() {
-        let matched = spec
+        // Branches matched directly by used flags (and a same-named positional).
+        let mut matched = spec
             .one_of
             .iter()
             .filter(|branch| branch.iter().all(satisfied))
             .count();
+        // Positional aliasing: a single positional value collapses to exactly
+        // one runtime branch (CLI dispatches body/file/url at runtime), so add
+        // one to the count when the positional aliases any oneOf branch. The
+        // XOR guard above already ensures positional and aliased flags don't
+        // coexist, so this can't double-count.
+        let positional_aliases_branch = positional_used
+            && spec.one_of.iter().any(|branch| {
+                branch
+                    .iter()
+                    .any(|f| positional_aliases.contains(f.as_str()))
+            });
+        if positional_aliases_branch {
+            matched += 1;
+        }
         if matched != 1 {
             return Err(CompatError::Malformed {
                 kind: "cli",
@@ -379,24 +427,32 @@ struct TokenScan {
 }
 
 /// True when `value` is an `ALL_CAPS_PLACEHOLDER` token (the convention
-/// `emit_skill` uses for generated examples). We skip strict typing for these
-/// — the placeholder isn't meant to be a real value.
+/// `emit_skill` uses for generated examples). Requires at least one uppercase
+/// letter so a digit-only string (`"999"`) doesn't accidentally bypass
+/// integer-bounds validation.
 fn is_placeholder(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    let mut has_upper = false;
+    for c in value.chars() {
+        if c.is_ascii_uppercase() {
+            has_upper = true;
+        } else if !(c.is_ascii_digit() || c == '_') {
+            return false;
+        }
+    }
+    has_upper
 }
 
-/// Validate `value` against the IDL `value_source` declared on a flag. Only
-/// the closed forms (`enum(...)`, `u32`, `u64`, `bool`) are checked
-/// strictly; freeform sources (`string`, `path`, `json`, `list<...>`) accept
-/// anything. ALL-CAPS placeholders bypass the check because the generated
-/// skill examples use them and they aren't real values.
+/// Validate `value` against the IDL `value_source` declared on a flag, plus
+/// numeric bounds (`minimum` / `maximum`) lifted from the property schema
+/// when supplied. Closed forms (`enum(...)`, `u*`, `i*`, `integer`, `bool`)
+/// are checked strictly; freeform sources (`string`, `path`, `json`,
+/// `list<...>`) accept anything. ALL-CAPS placeholders bypass the check
+/// because the generated skill examples use them and they aren't real values.
 fn validate_flag_value(
     flag: &str,
     value: &str,
     source: &str,
+    prop_schema: Option<&serde_json::Value>,
     line: usize,
 ) -> Result<(), CompatError> {
     if is_placeholder(value) {
@@ -414,14 +470,79 @@ fn validate_flag_value(
         if !allowed.contains(value) {
             return Err(bad(format!("value `{value}` is not in {{{inner}}}")));
         }
-    } else if is_unsigned_int_source(source) && value.parse::<u64>().is_err() {
-        return Err(bad(format!(
-            "value `{value}` is not a non-negative integer"
-        )));
-    } else if is_signed_int_source(source) && value.parse::<i64>().is_err() {
-        return Err(bad(format!("value `{value}` is not an integer")));
+    } else if is_unsigned_int_source(source) {
+        let parsed = value
+            .parse::<u64>()
+            .map_err(|_| bad(format!("value `{value}` is not a non-negative integer")))?;
+        check_integer_bounds(flag, i128::from(parsed), prop_schema, line)?;
+    } else if is_signed_int_source(source) {
+        let parsed = value
+            .parse::<i64>()
+            .map_err(|_| bad(format!("value `{value}` is not an integer")))?;
+        check_integer_bounds(flag, i128::from(parsed), prop_schema, line)?;
     }
     Ok(())
+}
+
+/// Enforce JSON-Schema `minimum` / `maximum` for an integer-typed flag value.
+/// Bounds come from the verb's `properties.<field>` schema, so a stale skill
+/// example with `--depth 999` for a `0..=16` field fails compat.
+fn check_integer_bounds(
+    flag: &str,
+    value: i128,
+    prop_schema: Option<&serde_json::Value>,
+    line: usize,
+) -> Result<(), CompatError> {
+    let Some(prop) = prop_schema else {
+        return Ok(());
+    };
+    let bad = |detail: String| CompatError::Malformed {
+        kind: "cli",
+        detail: format!("flag `--{flag}`: {detail}"),
+        line,
+    };
+    if let Some(min) = prop.get("minimum").and_then(serde_json::Value::as_i64)
+        && value < i128::from(min)
+    {
+        return Err(bad(format!("value {value} below minimum {min}")));
+    }
+    if let Some(max) = prop.get("maximum").and_then(serde_json::Value::as_i64)
+        && value > i128::from(max)
+    {
+        return Err(bad(format!("value {value} above maximum {max}")));
+    }
+    Ok(())
+}
+
+/// Build a flat `flag-name → property-schema` map by unioning every
+/// `$defs/*/properties` block in the verb's args schema. For tagged-union
+/// verbs (e.g., `retrieve`) the same logical field can appear under several
+/// variants — first definition wins, since downstream we only need the type
+/// shape and bounds, which are identical across variants by convention.
+fn collect_arg_property_schemas(verb_def: &VerbDef) -> BTreeMap<String, serde_json::Value> {
+    let mut out = BTreeMap::new();
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
+    else {
+        return out;
+    };
+    let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) else {
+        return out;
+    };
+    for (name, def) in defs {
+        // Only walk arg-side defs (`Args` itself, and tagged-union variants
+        // named `Args*` like `ArgsFolder`). Response defs live alongside
+        // (`Data`, `Hit`, `FolderItem`…) and would shadow arg properties of
+        // the same name with response-side bounds.
+        if !(name == "Args" || name.starts_with("Args")) {
+            continue;
+        }
+        if let Some(props) = def.get("properties").and_then(serde_json::Value::as_object) {
+            for (k, v) in props {
+                out.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+    }
+    out
 }
 
 fn is_unsigned_int_source(s: &str) -> bool {
@@ -473,6 +594,7 @@ fn scan_tokens<'a>(
     source_line: usize,
     tokens: impl Iterator<Item = &'a str>,
     allowed_flags: &BTreeMap<&str, &CliFlag>,
+    prop_schemas: &BTreeMap<String, serde_json::Value>,
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
@@ -485,12 +607,16 @@ fn scan_tokens<'a>(
             if name.is_empty() {
                 continue;
             }
-            let (arity, value_source) = if UNIVERSAL_FLAGS.contains(&name) {
-                (0usize, None)
+            let (arity, value_source, field_name) = if UNIVERSAL_FLAGS.contains(&name) {
+                (0usize, None, None)
             } else if let Some(flag) = allowed_flags.get(name) {
                 used_field_names.insert(flag.name.clone());
                 let arity = usize::from(flag.value_source != "bool");
-                (arity, Some(flag.value_source.as_str()))
+                (
+                    arity,
+                    Some(flag.value_source.as_str()),
+                    Some(flag.name.as_str()),
+                )
             } else {
                 return Err(CompatError::UnknownFlag {
                     verb: verb.to_string(),
@@ -498,6 +624,7 @@ fn scan_tokens<'a>(
                     line: source_line,
                 });
             };
+            let prop = field_name.and_then(|f| prop_schemas.get(f));
             if arity == 1 && !has_inline_value {
                 // Non-boolean flags require a value — either inline (`--x=v`)
                 // or the next non-flag token. Without one clap would reject
@@ -518,13 +645,13 @@ fn scan_tokens<'a>(
                     });
                 };
                 if let Some(src) = value_source {
-                    validate_flag_value(name, value, src, source_line)?;
+                    validate_flag_value(name, value, src, prop, source_line)?;
                 }
             } else if arity == 1
                 && let Some(src) = value_source
                 && let Some((_, value)) = flag_body.split_once('=')
             {
-                validate_flag_value(name, value, src, source_line)?;
+                validate_flag_value(name, value, src, prop, source_line)?;
             }
         } else if !tok.starts_with('-') {
             positional_count += 1;

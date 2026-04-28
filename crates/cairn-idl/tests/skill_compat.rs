@@ -166,6 +166,52 @@ fn cli_validator_rejects_multiple_one_of_branches_satisfied() {
 }
 
 #[test]
+fn cli_validator_rejects_positional_alias_conflicting_with_flag() {
+    // `cairn ingest`'s positional `source` aliases body|file|url. Supplying
+    // both the positional and an aliased flag is the same XOR violation as
+    // two flags from the oneOf — the real CLI rejects it. Regression for
+    // round-10 finding 1.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest foo --kind KIND --body BAR".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("positional + aliased flag must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_positional_alias_alone() {
+    // Positional alone (no body/file/url flag) should satisfy the oneOf via
+    // its `aliases_one_of` declaration.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND foo".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("positional aliasing oneOf must satisfy exclusivity");
+}
+
+#[test]
+fn cli_validator_rejects_integer_flag_above_maximum() {
+    // `retrieve --depth` has `maximum: 16`. A stale example with --depth 999
+    // must fail compat — this is the round-10 finding-2 regression.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --folder PATH --depth 999".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("out-of-range integer flag must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
