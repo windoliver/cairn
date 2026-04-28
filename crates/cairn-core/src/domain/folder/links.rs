@@ -119,8 +119,9 @@ fn parse_wiki(source_path: &Path, raw: &str) -> Option<RawLink> {
     };
     // Wiki links are always resolved relative to the source file's parent
     // directory (bare names like `[[alice]]` resolve to the same folder).
+    // A `..` chain that escapes the vault root drops the link entirely.
     Some(RawLink {
-        target_path: resolve_source_relative(source_path, &with_ext),
+        target_path: resolve_source_relative(source_path, &with_ext)?,
         anchor,
     })
 }
@@ -142,9 +143,11 @@ fn parse_markdown(source_path: &Path, raw: &str) -> Option<RawLink> {
     //                                  against the document's own folder)
     //
     // Note: `resolve_source_relative` already strips the leading slash for
-    // absolute targets, so a single dispatch handles every case.
+    // absolute targets, so a single dispatch handles every case.  Returns
+    // `None` for over-root `..` chains; we drop the link rather than
+    // silently re-anchoring it inside the vault.
     let target = Path::new(target_str);
-    let target_path = resolve_source_relative(source_path, target);
+    let target_path = resolve_source_relative(source_path, target)?;
     Some(RawLink {
         target_path,
         anchor,
@@ -152,28 +155,34 @@ fn parse_markdown(source_path: &Path, raw: &str) -> Option<RawLink> {
 }
 
 /// Resolve `target` against the parent directory of `source_path`.
-fn resolve_source_relative(source_path: &Path, target: &Path) -> PathBuf {
+/// Returns `None` if the resolved path escapes the vault root via `..` —
+/// such a link is out-of-vault and must NOT be silently clamped to an
+/// in-vault path (which would corrupt unrelated folder backlink counts).
+fn resolve_source_relative(source_path: &Path, target: &Path) -> Option<PathBuf> {
     if target.is_absolute() {
-        return target.components().skip(1).collect();
+        return Some(target.components().skip(1).collect());
     }
     let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
     let joined = parent.join(target);
     normalize(&joined)
 }
 
-fn normalize(p: &Path) -> PathBuf {
+/// Normalize by collapsing `.` and resolving `..` against accumulated
+/// segments. Returns `None` if a `..` would pop past the root — that link
+/// escapes the vault and must be dropped, not silently re-anchored.
+fn normalize(p: &Path) -> Option<PathBuf> {
     let mut out: Vec<std::ffi::OsString> = Vec::new();
     for comp in p.components() {
         use std::path::Component;
         match comp {
             Component::ParentDir => {
-                out.pop();
+                out.pop()?;
             }
             Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
             Component::Normal(s) => out.push(s.to_os_string()),
         }
     }
-    out.iter().collect()
+    Some(out.iter().collect())
 }
 
 use std::collections::BTreeMap;
@@ -294,6 +303,42 @@ mod tests {
             links[0].target_path,
             PathBuf::from("wiki/entities/alice.md"),
         );
+    }
+
+    #[test]
+    fn over_root_relative_link_is_dropped() {
+        // `../../../wiki/foo.md` from `raw/r1.md` would historically clamp
+        // to `wiki/foo.md`, silently re-anchoring an out-of-vault target
+        // and corrupting an unrelated in-vault folder's backlink count.
+        let src = Path::new("raw/r1.md");
+        let links = extract_links(src, "[oops](../../../wiki/foo.md)");
+        assert!(
+            links.is_empty(),
+            "over-root link must be dropped, got {links:?}"
+        );
+    }
+
+    #[test]
+    fn over_root_wiki_link_is_dropped() {
+        let src = Path::new("raw/a/r.md");
+        let links = extract_links(src, "[[../../../escape]]");
+        assert!(
+            links.is_empty(),
+            "over-root wiki link must be dropped, got {links:?}"
+        );
+    }
+
+    #[test]
+    fn over_root_link_is_not_materialized_as_backlink() {
+        let r1 = record_with_body(1, "[escape](../../../wiki/private/alice.md)");
+        let mut paths = BTreeMap::new();
+        paths.insert(r1.record.id.clone(), PathBuf::from("raw/r1.md"));
+        let map = materialize_backlinks(&[r1], &paths);
+        assert!(
+            !map.contains_key(Path::new("wiki/private/alice.md")),
+            "over-root target leaked into backlink graph"
+        );
+        assert!(map.is_empty(), "no backlinks expected, got {map:?}");
     }
 
     #[test]
