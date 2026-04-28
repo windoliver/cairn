@@ -612,6 +612,32 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             self.range
         }
+        async fn get(
+            &self,
+            _: &str,
+        ) -> Result<
+            Option<crate::contract::memory_store::StoredRecord>,
+            crate::contract::memory_store::StoreError,
+        > {
+            Err(crate::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn upsert(
+            &self,
+            _: crate::domain::record::MemoryRecord,
+        ) -> Result<
+            crate::contract::memory_store::StoredRecord,
+            crate::contract::memory_store::StoreError,
+        > {
+            Err(crate::contract::memory_store::StoreError::Unimplemented)
+        }
+        async fn list_active(
+            &self,
+        ) -> Result<
+            Vec<crate::contract::memory_store::StoredRecord>,
+            crate::contract::memory_store::StoreError,
+        > {
+            Err(crate::contract::memory_store::StoreError::Unimplemented)
+        }
     }
 
     impl MemoryStorePlugin for StubStore {
@@ -621,11 +647,11 @@ mod tests {
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
     }
 
     fn incompatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0))
     }
 
     #[test]
@@ -722,12 +748,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 "#
     }

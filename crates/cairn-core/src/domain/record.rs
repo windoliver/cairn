@@ -697,11 +697,23 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+/// Test helpers for [`MemoryRecord`] and [`StoredRecord`] construction.
+pub mod tests {
     use super::*;
     use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
-    pub(crate) fn sample_record() -> MemoryRecord {
+    /// Returns a [`crate::contract::memory_store::StoredRecord`] wrapping [`sample_record`] at the given version.
+    #[must_use]
+    pub fn sample_stored_record(version: u32) -> crate::contract::memory_store::StoredRecord {
+        crate::contract::memory_store::StoredRecord {
+            record: sample_record(),
+            version,
+        }
+    }
+
+    /// Returns a deterministic `MemoryRecord` for use in tests.
+    #[must_use]
+    pub fn sample_record() -> MemoryRecord {
         // Single human author at P0: scope.user, originating_agent_id, and
         // chain author all bind to `usr:tafeng`. Delegation chains arrive
         // with P2 countersignatures.

@@ -26,3 +26,33 @@ pub fn with_json(cmd: clap::Command) -> clap::Command {
             .help("Emit machine-readable JSON response envelope to stdout"),
     )
 }
+
+/// Add `--fix-markdown` flag to the `lint` subcommand.
+///
+/// Augments the generated subcommand builder without touching generated files,
+/// using the same pattern as `with_json`.
+#[must_use]
+pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("fix-markdown")
+            .long("fix-markdown")
+            .action(clap::ArgAction::SetTrue)
+            .help("Regenerate missing or stale markdown projections for all active records"),
+    )
+}
+
+/// Augments the `ingest` subcommand with the `--resync <path>` flag.
+///
+/// Uses the same pattern as [`with_json`] and [`with_fix_markdown`]: the
+/// generated subcommand builder is wrapped rather than modified.
+#[must_use]
+pub fn with_resync(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("resync")
+            .long("resync")
+            .value_name("PATH")
+            .help("Re-ingest an out-of-band edited markdown projection (brief §3.0, #43)")
+            .action(clap::ArgAction::Set)
+            .value_parser(clap::value_parser!(std::path::PathBuf)),
+    )
+}
