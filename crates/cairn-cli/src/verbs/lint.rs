@@ -179,9 +179,12 @@ pub async fn fix_folders_handler(
         // lstat-based parent + target check up front, on every iteration.
         {
             let dest = abs.clone();
-            tokio::task::spawn_blocking(move || crate::vault::bootstrap::check_write_safe(&dest))
-                .await
-                .with_context(|| format!("spawn_blocking validate {}", abs.display()))??;
+            let vroot = vault_root.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                crate::vault::bootstrap::check_write_safe(&vroot, &dest)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking validate {}", abs.display()))??;
         }
         let needs_write = match tokio::fs::read_to_string(&abs).await {
             Ok(existing) => existing != projected.content,
@@ -199,16 +202,24 @@ pub async fn fix_folders_handler(
         }
         let content = projected.content.clone();
         let dest = abs.clone();
+        let vroot = vault_root.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            // `write_once` lstat-checks the parent + final target for symlinks,
-            // writes a randomly-named tempfile in the same directory, and
-            // atomically renames into place. The created/skipped vecs are
-            // populated for bootstrap's receipt; we discard them here because
-            // the surrounding read-and-compare loop already classifies writes
-            // as `written` or `unchanged`.
+            // `write_once` lstat-checks every ancestor + final target for
+            // symlinks, writes a randomly-named tempfile in the same
+            // directory, and atomically renames into place. The
+            // created/skipped vecs are populated for bootstrap's receipt;
+            // we discard them here because the surrounding read-and-compare
+            // loop already classifies writes as `written` or `unchanged`.
             let mut created = Vec::new();
             let mut skipped = Vec::new();
-            crate::vault::bootstrap::write_once(&dest, &content, true, &mut created, &mut skipped)
+            crate::vault::bootstrap::write_once(
+                &vroot,
+                &dest,
+                &content,
+                true,
+                &mut created,
+                &mut skipped,
+            )
         })
         .await
         .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
@@ -249,7 +260,13 @@ async fn collect_policies(
         .filter_entry(|e| e.depth() == 0 || !is_hidden_dir(e));
     for entry in walker {
         let entry = entry.with_context(|| format!("walking {}", vault_root.display()))?;
-        if !entry.file_type().is_file() || entry.file_name() != "_policy.yaml" {
+        // Match by name first.  `follow_links(false)` reports a symlinked
+        // `_policy.yaml` as a non-file; if we filtered on `is_file()` first
+        // we would silently skip it and fall back to inherited/default
+        // policy below — exactly the fail-open hole brief invariant 6
+        // forbids.  Treat any non-regular `_policy.yaml` (symlink, fifo,
+        // directory) as a policy error and taint its containing folder.
+        if entry.file_name() != "_policy.yaml" {
             continue;
         }
         let abs = entry.path().to_path_buf();
@@ -258,6 +275,21 @@ async fn collect_policies(
             .with_context(|| format!("strip_prefix {}", abs.display()))?
             .to_path_buf();
         let dir = rel.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        if !entry.file_type().is_file() {
+            let kind = if entry.file_type().is_symlink() {
+                "symlink"
+            } else if entry.file_type().is_dir() {
+                "directory"
+            } else {
+                "non-regular file"
+            };
+            policy_errors.push(PolicyError {
+                path: rel,
+                reason: format!("_policy.yaml is a {kind} — refusing to follow"),
+            });
+            tainted_dirs.push(dir);
+            continue;
+        }
         // Read raw bytes — `read_to_string` would return InvalidData on
         // non-UTF-8 and the `?` would abort the whole rebuild. Decode here
         // so a non-UTF-8 file taints only its own subtree (brief invariant 6,

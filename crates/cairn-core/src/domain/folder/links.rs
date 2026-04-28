@@ -134,14 +134,19 @@ fn parse_markdown(source_path: &Path, raw: &str) -> Option<RawLink> {
         Some((t, a)) => (t, Some(a.to_owned())),
         None => (raw, None),
     };
-    // Markdown links: paths starting with `./` or `../` are source-relative;
-    // all others are treated as vault-relative already.
+    // Markdown link target resolution:
+    //   - `./foo.md` / `../foo.md`     → source-relative (explicit nav)
+    //   - bare `foo.md` (no `/`)       → source-relative (same-folder common case)
+    //   - `dir/foo.md` (contains `/`)  → vault-relative (intentional, tested:
+    //     records routinely write fully-qualified paths like `raw/alice.md`,
+    //     and switching to source-relative there would double-prefix)
     let target = Path::new(target_str);
     let target_path = {
         use std::path::Component;
         let first = target.components().next();
         let is_nav = matches!(first, Some(Component::CurDir | Component::ParentDir));
-        if is_nav {
+        let has_separator = target_str.contains('/');
+        if is_nav || !has_separator {
             resolve_source_relative(source_path, target)
         } else {
             normalize(target)
@@ -239,6 +244,28 @@ mod tests {
         let links = extract_links(src, "see [[alice#bio]]");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].anchor.as_deref(), Some("bio"));
+    }
+
+    #[test]
+    fn bare_filename_resolves_against_source_folder() {
+        // A common-case Markdown link `[Alice](alice.md)` from `raw/bob.md`
+        // must point at `raw/alice.md`, NOT vault-root `alice.md`. Targets
+        // without a `/` are unambiguously same-folder.
+        let src = Path::new("raw/bob.md");
+        let links = extract_links(src, "[Alice](alice.md)");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target_path, PathBuf::from("raw/alice.md"));
+    }
+
+    #[test]
+    fn slash_path_remains_vault_relative() {
+        // Paths with `/` are vault-relative by intent — records routinely
+        // write fully-qualified paths like `raw/alice.md`. Source-relative
+        // here would double-prefix.
+        let src = Path::new("raw/r1.md");
+        let links = extract_links(src, "[Alice](raw/alice.md)");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target_path, PathBuf::from("raw/alice.md"));
     }
 
     #[test]

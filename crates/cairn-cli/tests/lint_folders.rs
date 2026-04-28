@@ -183,6 +183,77 @@ async fn write_through_symlinked_parent_is_rejected() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn write_through_symlinked_ancestor_is_rejected() {
+    // `lstat` only refuses to follow the FINAL path component; intermediate
+    // components are still resolved through symlinks. So a write at
+    // `vault/raw/a/_index.md` could traverse a symlinked `raw` and land
+    // outside the vault even with the immediate-parent guard. The fix walks
+    // every ancestor between vault_root and the target.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    let attacker = tempfile::tempdir().unwrap();
+    // `raw` is a symlink that resolves to a real directory.
+    std::os::unix::fs::symlink(attacker.path(), vault.path().join("raw")).unwrap();
+    // The symlink's target has a real `a/` subdirectory; `_index.md` would
+    // be created at `attacker/a/_index.md` if validation only checked the
+    // immediate parent (which lstats `vault/raw/a` and sees a real dir).
+    std::fs::create_dir_all(attacker.path().join("a")).unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await;
+
+    assert!(result.is_err(), "symlinked ancestor must be rejected");
+    assert!(
+        !attacker.path().join("a/_index.md").exists(),
+        "write reached attacker subdirectory through symlinked ancestor",
+    );
+    assert!(
+        !attacker.path().join("_index.md").exists(),
+        "write reached attacker root through symlinked ancestor",
+    );
+}
+
+#[tokio::test]
+async fn symlinked_policy_yaml_taints_subtree() {
+    // A `_policy.yaml` that is itself a symlink (or any non-regular file)
+    // must be reported as a policy error and taint its containing folder.
+    // `walkdir(follow_links=false)` returns symlinks as non-files, and the
+    // earlier code skipped non-files silently — fail-OPEN, not fail-closed.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+    let real_target = vault.path().join("decoy.yaml");
+    std::fs::write(&real_target, "anything\n").unwrap();
+    std::os::unix::fs::symlink(&real_target, vault.path().join("raw/_policy.yaml")).unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await.unwrap();
+
+    assert_eq!(
+        result.policy_errors.len(),
+        1,
+        "symlinked _policy.yaml must produce a PolicyError"
+    );
+    assert!(
+        result.policy_errors[0].path.ends_with("raw/_policy.yaml"),
+        "unexpected policy error path: {:?}",
+        result.policy_errors[0].path
+    );
+    assert!(
+        result.written.is_empty(),
+        "expected no _index.md when raw/ is tainted, got {:?}",
+        result.written,
+    );
+    assert!(
+        !vault.path().join("raw/_index.md").exists(),
+        "raw/_index.md must not be written under a symlinked policy",
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn non_utf8_policy_yaml_taints_subtree_not_run() {
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();
