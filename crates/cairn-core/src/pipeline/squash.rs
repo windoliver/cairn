@@ -521,6 +521,87 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-7 (newer loop) regression: `stats.truncated` must reflect
+    /// any lossy transform, not just stage 5/6 budget loss. ANSI-only
+    /// stripping or dedup-only collapse produces a non-verbatim
+    /// `compacted_bytes` and must flip the bit.
+    #[test]
+    fn truncated_set_for_ansi_only_loss() {
+        // Tiny payload: two lines, both with SGR escapes that get
+        // stripped. No stage 5 or stage 6 loss.
+        let raw = b"\x1b[31mred\x1b[0m\nplain\n";
+        let evt = terminal_event(raw);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(out.stats.ansi_stripped, "ansi was stripped");
+        assert!(
+            out.stats.truncated,
+            "truncated must be true when any lossy stage acted"
+        );
+    }
+
+    /// Round-7 (newer loop) regression: dedup-only collapse must also
+    /// flip `stats.truncated`.
+    #[test]
+    fn truncated_set_for_dedup_only_loss() {
+        // Repeated line, no ANSI. Default dedup_min_run = 2.
+        let raw = b"same\nsame\nsame\n";
+        let evt = terminal_event(raw);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(out.stats.dedup_runs_collapsed > 0, "dedup acted");
+        assert!(
+            out.stats.truncated,
+            "truncated must be true when any lossy stage acted"
+        );
+    }
+
+    /// Round-7 (newer loop) regression: oversize bypass must populate
+    /// `cr_bearing_lines` for retained head/tail content. Bare `\r` in
+    /// preserved text is a renderer-safety hazard that consumers gate
+    /// on; the bypass must not silently zero this signal.
+    #[test]
+    fn oversize_bypass_populates_cr_bearing_lines() {
+        let mut raw: Vec<u8> = Vec::new();
+        // Head with progress-bar style bare CR.
+        raw.extend_from_slice(b"download 10%\rdownload 50%\rdownload 100%\n");
+        // Filler so head/tail windows are exercised.
+        raw.extend(std::iter::repeat_n(b'F', 50_000));
+        raw.push(b'\n');
+        raw.extend_from_slice(b"tail-1\n");
+        // Tail with a bare CR too.
+        raw.extend_from_slice(b"prog 25%\rprog 100%\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert!(
+            out.stats.cr_bearing_lines > 0,
+            "bypass must populate cr_bearing_lines, got {}",
+            out.stats.cr_bearing_lines,
+        );
+    }
+
     /// Round-1 (newer loop) regression: bypass `lines_dropped_truncate`
     /// must reflect raw lines actually omitted from the middle, and
     /// `bytes_dropped_truncate` must exclude ANSI bytes stripped during
@@ -1084,7 +1165,13 @@ pub struct SquashStats {
     pub bytes_dropped_truncate: usize,
     /// Number of lines that exceeded `max_line_bytes` and were truncated in stage 5.
     pub long_lines_truncated: usize,
-    /// True iff any stage 5 or stage 6 truncation occurred.
+    /// True iff `compacted_bytes` is NOT a verbatim sanitization-free
+    /// copy of the input — i.e., any lossy transform acted: stage 2
+    /// ANSI/OSC strip, stage 2 OSC recovery drop, stage 4 dedup
+    /// collapse, stage 5 per-line cap, stage 6 head/tail truncation,
+    /// or the oversize bypass. Downstream code that gates fallback /
+    /// raw-retention / warning banners on a single coarse bit should
+    /// use this; per-stage counters give the breakdown.
     pub truncated: bool,
     /// Bytes discarded by stage-2 OSC recovery on unterminated escape
     /// sequences (introducer + body up to the next `\n`, or to EOF if
@@ -2167,9 +2254,15 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         })
         .collect();
     stats.long_lines_truncated = long_lines_count;
-    // Stage 5 truncation already makes the output lossy; reflect that in
-    // the contract bit so callers don't read a false negative.
-    if long_lines_count > 0 {
+    // `truncated` means "compacted_bytes is not a verbatim sanitize-free
+    // copy of the input." Set it for any lossy stage that fired during
+    // the staged path: ANSI strip, OSC recovery drop, dedup collapse,
+    // per-line cap. Stage 6's drop loop sets it again on tail/head trim.
+    if stats.ansi_stripped
+        || stats.osc_recovery_bytes_dropped > 0
+        || stats.dedup_runs_collapsed > 0
+        || long_lines_count > 0
+    {
         stats.truncated = true;
     }
 
@@ -2274,6 +2367,14 @@ fn oversize_bypass(
         &mut stats.osc_recovery_bytes_dropped,
     );
     stats.ansi_stripped |= head_stripped;
+    // CR-bearing detection on the sanitized head: bare `\r` in the
+    // retained content is a renderer-safety hazard the module
+    // documents, and the bypass path must surface that signal to
+    // callers just like the staged path does.
+    stats.cr_bearing_lines += head_sanitized
+        .split('\n')
+        .filter(|l| l.contains('\r'))
+        .count();
     let head_trimmed = trim_to_byte_budget_at_boundary(&head_sanitized, half);
     // Drop any trailing partial line from head. If `head_trimmed`
     // contains NO `\n` at all, the entire window is a prefix of one
@@ -2308,6 +2409,10 @@ fn oversize_bypass(
             &mut tail_stripped,
             &mut stats.osc_recovery_bytes_dropped,
         );
+        stats.cr_bearing_lines += tail_sanitized
+            .split('\n')
+            .filter(|l| l.contains('\r'))
+            .count();
         stats.ansi_stripped |= tail_stripped;
         let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
         // The raw slice was line-aligned (begins after a `\n`), so an
