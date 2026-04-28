@@ -256,54 +256,83 @@ spec (`2026-04-26-bootstrap-design.md`) is updated in the same PR to add
 this single artefact; the receipt grows a `vault_id` field. This is the
 sole change to the bootstrap contract.
 
-**`vault.id` is non-regenerable once any keychain-backed key material
-exists.** Because every keychain entry is namespaced under
-`cairn:<vault_id>`, regenerating `vault.id` would point the process at a
-fresh keychain namespace and desynchronize every keychain entry in one
-stroke — including those for revoked, pending, or otherwise non-active
-identities. To prevent that, the bootstrap delta defined in this PR runs
-an explicit guard before minting a new id:
+**`vault.id` is non-regenerable once a keychain binding exists.** Because
+every keychain entry is namespaced under `cairn:<vault_id>`, regenerating
+`vault.id` would point the process at a fresh keychain namespace and
+desynchronize every keychain entry in one stroke. The binding is proved
+through a single dedicated artifact, **not** by probing per-identity
+keys (whose private halves can age out of the keystore under §3.6's
+ring-depth policy).
+
+**Vault witness.** The first time identity provisioning runs against a
+vault, it mints a 32-byte random `vault_witness` and stores it in two
+places, atomically:
+
+| Where | What | Lifetime |
+|---|---|---|
+| Keychain | service `cairn:<vault_id>`, account `__vault_witness__`, secret = the 32-byte witness | Never rotated, never deleted (separate from the per-identity ring). |
+| Filesystem | `.cairn/vault.binding` containing `sha256(witness)` | Written together with the keychain entry. Bootstrap reads this file as a sentinel. |
+| SQLite | `vault_meta(witness_sha256 BLOB NOT NULL)` row, set by migration `0002_identity.sql` during the same transaction that reserves the first identity | Authoritative copy used by recovery. |
+
+`vault.binding` is a filesystem sentinel — bootstrap (which is
+filesystem-only) checks it without touching the DB or keychain. The
+SQLite row is the authoritative copy for recovery. The keychain entry is
+the prover.
+
+**Bootstrap guard.** The bootstrap delta runs the following sequence
+before deciding whether to mint a new `vault.id`:
 
 1. If `.cairn/vault.id` exists → use it (idempotent path).
-2. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` does not
-   exist (or contains zero `identity_keys` rows) → mint a fresh ULID and
-   write the file.
-3. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` contains
-   one or more `identity_keys` rows (any state — active, pending, or
-   superseded) → bootstrap fails with `BootstrapError::VaultIdLost`
-   mapped to `EX_DATAERR = 65`. The guard reads `identity_keys`, not
-   `identities`, because each row corresponds to a real keychain entry
-   that needs the original namespace.
+2. If `.cairn/vault.id` is missing **and** `.cairn/vault.binding` is
+   missing → mint a fresh ULID and write the file. (No keychain binding
+   has ever been committed for this vault.)
+3. If `.cairn/vault.id` is missing **and** `.cairn/vault.binding`
+   exists → bootstrap fails with `BootstrapError::VaultIdLost` mapped to
+   `EX_DATAERR = 65`. The CLI hint:
 
    ```
-   cairn bootstrap: .cairn/vault.id is missing but the registry holds N keychain-backed keys.
+   cairn bootstrap: .cairn/vault.id is missing but .cairn/vault.binding exists.
+     A keychain witness is committed to this vault under an unknown vault id.
      Restore the original .cairn/vault.id from backup, or run:
        cairn identity vault-id-recover --probe-keychain
-     Bootstrap will not mint a new vault id while keys exist; doing so
+     Bootstrap will not mint a new vault id while a binding exists; doing so
      would desynchronize every keychain entry from the registry.
    ```
 
-`cairn identity vault-id-recover --probe-keychain` (new, in `cairn-cli`)
-walks every row in `identity_keys` regardless of its parent identity's
-`provisioning_state` (so revoked-only and pending-only vaults can still
-recover). For each candidate `vault_id` discovered in the keychain
-(`keyring` lets us enumerate by service prefix `cairn:`), it derives the
-candidate `SecretHandle` for **every** `identity_keys` row, loads the
-private key, derives the public key, and compares against the row's
-stored `public_key`. The recovery succeeds only when there is exactly
-one `vault_id` for which **every** `identity_keys` row matches:
+The guard is purely filesystem; it does not open `.cairn/cairn.db`, so
+schema/migration state cannot create an upgrade-window false negative.
+If `.cairn/vault.binding` exists but `.cairn/cairn.db` does not (the
+binding sentinel was restored from backup but the DB was lost), bootstrap
+still refuses to mint — the operator's keychain is still bound and must
+remain so until they explicitly purge it.
 
-- Multiple matching candidates → ambiguous; fail closed.
-- Zero matching candidates → fail closed; operator must restore from
-  backup.
-- One matching candidate, but a subset of rows fail to match → fail
-  closed; the registry and keychain disagree on at least one key, which
-  is a tampering or partial-restore signal.
+**Recovery.** `cairn identity vault-id-recover --probe-keychain`:
 
-Bootstrap guard, recovery proof model, and reconciliation are all keyed
-off `identity_keys` (not `identities`), so they agree on what counts as
-"key material exists" in every state combination. Test matrix covers the
-four state mixes: only-active, only-revoked, only-pending, and mixed.
+1. Read `vault_meta.witness_sha256` from `.cairn/cairn.db` (the
+   authoritative hash). If the table is missing or the row is absent →
+   refuse: there is no binding to recover against; the operator must
+   restore from backup.
+2. Enumerate keychain entries with service prefix `cairn:` to gather
+   candidate vault ids.
+3. For each candidate, load the secret at account `__vault_witness__`
+   and compute its SHA-256.
+4. Accept exactly the unique candidate whose hash equals
+   `vault_meta.witness_sha256`. Multiple matches (impossible under
+   honest use) or zero matches → fail closed.
+
+Recovery does **not** depend on any per-identity key surviving in the
+keystore, so routine rotation under §3.6 cannot brick recovery. The
+witness is its own atomic binding artifact and is never aged out.
+
+`vault_meta` is added by migration `0002_identity.sql` so it is always
+co-resident with the `identities` and `identity_keys` tables.
+
+Test matrix covers: vault with zero identities (no binding yet,
+bootstrap allowed), vault with `vault.binding` but missing DB (bootstrap
+refused), vault with binding + DB but `vault.id` lost (recovery succeeds
+on the unique candidate; fails closed on injected duplicate witness in a
+second namespace), vault after multiple rotations (recovery still works
+because the witness is untouched).
 
 **Secret handle format.** `Keystore` uses:
 
@@ -373,10 +402,12 @@ entry:
 4. **All three pass** → no-op (true idempotent path).
 5. **Keychain entry missing or mismatched** → fail closed with
    `IdentityServiceError::KeyMaterialDesynchronized { id, reason }` mapped
-   to `EX_DATAERR = 65`. The CLI hint advises
-   `cairn identity repair <id>` (which atomically revokes the active row
-   and re-provisions a new key version, preserving prior public-key rows
-   for verification).
+   to `EX_DATAERR = 65`. The CLI hint follows the §3.10 contract exactly:
+   `repair` cannot fix this (it is reconciliation-only and would never
+   mutate trust state); the operator chooses between restoring a keychain
+   backup, running `cairn identity rotate <id>` (signed, attributable —
+   requires the default-issuer gate), or `cairn identity purge <id>`
+   (audited operator-of-last-resort).
 
 This closes the "active row, missing keychain secret" hole: the system
 self-detects on the very next provision attempt rather than silently
@@ -658,7 +689,25 @@ CREATE TABLE identity_keys (
 );
 
 CREATE INDEX idx_identity_keys_identity ON identity_keys(identity_id);
+
+CREATE TABLE vault_meta (
+    -- Single-row table; CHECK enforces exactly one row.
+    rowid INTEGER PRIMARY KEY CHECK (rowid = 1),
+    witness_sha256 BLOB NOT NULL,
+    witness_created_at TEXT NOT NULL
+);
 ```
+
+The `vault_meta` row is inserted exactly once: the first time
+`reserve_identity` runs against an empty registry. Insertion is part of
+the same SQLite transaction that reserves the first pending identity, so
+the witness hash and the first identity row commit together. The
+matching keychain entry (`__vault_witness__`) is written immediately
+before that transaction commits; failure between the two is recovered by
+§3.5 reconciliation (orphan path: pending identity rolled back if the
+witness keychain entry never landed). `.cairn/vault.binding` is written
+immediately after the SQLite commit succeeds — bootstrap reads the
+sentinel, but the DB is the authoritative copy.
 
 `identity_keys` is append-only: rotation inserts a new row and stamps the
 prior row’s `superseded_at`; revocation flips `identities.provisioning_state`
@@ -779,7 +828,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected; `normalize_human_slug` covers ASCII / spaces / apostrophe / accented / non-Latin / 100-byte / empty-fallback (§3.9) | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | reserve/activate/delete-pending state-machine transitions; `list_pending` correctness; `count_keys` covers all states; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade; `purge_identity` requires valid `PurgeAcknowledgement` and emits the audit-gap log | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `repair` reconciles pending rows and **never** mutates active trust state (§3.10); `purge` requires the ack file and emits the audit-gap log line; `purge` is unreachable from the MCP surface; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `purge`, `vault-id-recover`) succeed with zero defaults; `rotate` / `revoke` fail with `DefaultsNotInitialized` when defaults missing; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when DB has any `identity_keys` row (active, pending, or revoked); `vault-id-recover --probe-keychain` round-trip success + ambiguous-match fail-closed | integration via `MemoryKeystore` |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact, **witness untouched**); revocation fixture; vault contains no plaintext key bytes (incl. no plaintext witness); reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `repair` reconciles pending rows and **never** mutates active trust state (§3.10); `purge` requires the ack file and emits the audit-gap log line; `purge` is unreachable from the MCP surface; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `purge`, `vault-id-recover`) succeed with zero defaults; `rotate` / `revoke` fail with `DefaultsNotInitialized` when defaults missing; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when `.cairn/vault.binding` exists (independent of DB / migration state); `vault-id-recover --probe-keychain` succeeds after multiple rotations (witness-based proof model survives ring eviction); ambiguous-match fail-closed; **schema-skew safety** test (DB exists, identity migration not yet applied, but `vault.binding` exists → bootstrap refuses) | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
@@ -847,10 +896,13 @@ This is a teaser; the real implementation plan is written next via the
 5. `cairn-keychain` crate + per-OS round-trip tests.
 6. `cairn-cli identity` subcommand (`provision`, `init-defaults`, `list`,
    `show`, `rotate`, `revoke`, `reconcile`, `repair`, `purge`,
-   `vault-id-recover`) + snapshot tests. Bootstrap delta: mint
-   `.cairn/vault.id` only when safe (§3.7 guard, keyed off `identity_keys`
-   count), extend `BootstrapReceipt` with `vault_id`, add `next: cairn
-   identity init-defaults` hint line, update bootstrap test snapshots,
-   and add a regression test for the `VaultIdLost`-with-any-keys refusal.
+   `vault-id-recover`) + snapshot tests. First identity provision writes
+   the witness keychain entry, the `vault_meta` row, and
+   `.cairn/vault.binding` together (§3.7). Bootstrap delta: mint
+   `.cairn/vault.id` only when `.cairn/vault.binding` is absent, extend
+   `BootstrapReceipt` with `vault_id`, add `next: cairn identity
+   init-defaults` hint line, update bootstrap test snapshots, and add
+   regression tests for the `VaultIdLost`-with-binding refusal and the
+   schema-skew safety case.
 7. `cairn-sensors-local::provision_sensor_identity` helper + test.
 8. Verification checklist run; PR.
