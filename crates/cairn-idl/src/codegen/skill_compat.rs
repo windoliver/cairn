@@ -301,36 +301,68 @@ fn command_segments(tokens: &[Token]) -> Vec<&[Token]> {
 }
 
 /// Position of the literal `cairn` command word in a simple-command token
-/// stream, walking past env-var assignments and known wrappers (and any
-/// wrapper-specific options/operands). Returns `None` if the segment never
-/// reaches a `cairn` token. Round-3 finding: `sudo -u alice cairn …` was
-/// mistreated as the wrapper pointing at `alice`; `echo cairn …` was
-/// treated as a real invocation. Both must resolve correctly.
+/// stream. Walks past env-var assignments and parses each known wrapper's
+/// option syntax (consuming option-values where the wrapper takes them) so
+/// the *actual* wrapped command is identified — round-5 finding: prior
+/// scanning consumed every later token until it found a `cairn` literal,
+/// which falsely classified `env printenv cairn` and `sudo grep cairn file`
+/// as Cairn invocations.
 fn locate_cairn_command(segment: &[Token]) -> Option<usize> {
-    const WRAPPERS: &[&str] = &["env", "time", "nohup", "sudo", "exec"];
-    let mut in_wrapper = false;
-    for (i, tok) in segment.iter().enumerate() {
+    let mut i = 0;
+    while i < segment.len() {
+        let tok = &segment[i];
         let val = tok.value.as_str();
         if !tok.quoted && is_env_var_assignment(val) {
+            i += 1;
             continue;
         }
-        if !tok.quoted && WRAPPERS.contains(&val) {
-            in_wrapper = true;
+        if !tok.quoted
+            && let Some(opts_with_value) = wrapper_options_with_value(val)
+        {
+            i += 1;
+            // Consume this wrapper's options. Stop at the first non-option
+            // non-assignment token; that's the wrapped command word.
+            while i < segment.len() {
+                let opt = &segment[i];
+                if opt.quoted || !opt.value.starts_with('-') {
+                    break;
+                }
+                if opt.value == "--" {
+                    i += 1;
+                    break;
+                }
+                let consumes_value = opts_with_value.contains(&opt.value.as_str());
+                i += 1;
+                if consumes_value && i < segment.len() {
+                    i += 1;
+                }
+            }
             continue;
         }
-        if !tok.quoted && val == "cairn" {
-            return Some(i);
-        }
-        if in_wrapper {
-            // After a wrapper, keep scanning past wrapper options /
-            // operands until we find `cairn` (or run out — caller skips).
-            continue;
-        }
-        // First non-wrapper, non-env command word isn't `cairn` — this
-        // segment is some other command (`echo …`, `cat …`, `ls …`).
-        return None;
+        // Non-wrapper, non-env token — this is the (possibly wrapped)
+        // command word. Validate iff it's literally `cairn`.
+        return if !tok.quoted && val == "cairn" {
+            Some(i)
+        } else {
+            None
+        };
     }
     None
+}
+
+/// Per-wrapper allowlist of options that consume the *next* token as a
+/// value. Returns `Some(&[])` for known wrappers without value-bearing
+/// options (`nohup`, `exec`), or `None` for non-wrappers.
+fn wrapper_options_with_value(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "env" => Some(&["-u", "-S", "-C"]),
+        "sudo" => Some(&[
+            "-u", "-U", "-g", "-D", "-p", "-h", "-r", "-t", "-T", "-C", "-c",
+        ]),
+        "time" => Some(&["-o", "-f"]),
+        "nohup" | "exec" => Some(&[]),
+        _ => None,
+    }
 }
 
 fn is_env_var_assignment(tok: &str) -> bool {

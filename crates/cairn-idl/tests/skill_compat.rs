@@ -638,6 +638,30 @@ fn cli_validator_inspects_wrapper_with_options() {
     }
 }
 
+#[test]
+fn cli_validator_skips_wrapper_with_non_cairn_command() {
+    // Round-5 finding: prior wrapper handling kept scanning past the
+    // wrapper's command word (`printenv`, `grep`) until it found a
+    // literal `cairn` token, misclassifying `env printenv cairn` and
+    // `sudo grep cairn file` as Cairn invocations. After parsing the
+    // wrapper's option syntax precisely, the first non-option token is
+    // the wrapped command word; if it isn't `cairn`, the segment is
+    // skipped.
+    for body in [
+        "env printenv cairn",
+        "sudo grep cairn file",
+        "time -p ls cairn",
+    ] {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.to_string(),
+            line: 1,
+        };
+        validate_cli_block(&block, &doc())
+            .unwrap_or_else(|e| panic!("wrapper segment `{body}` must be skipped, got: {e:?}"));
+    }
+}
+
 trait UnwrapErrPretty<T, E> {
     fn unwrap_err_or_else_pretty(self, ctx: &str) -> E;
 }
