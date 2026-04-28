@@ -853,3 +853,80 @@ mod stage4_tests {
         assert_eq!(collapsed, 0);
     }
 }
+
+/// Stage 5: per-line cap. `max_line_bytes` is the emitted budget inclusive of
+/// any inline truncation marker. Truncates at the nearest UTF-8 codepoint
+/// boundary.
+#[allow(dead_code)] // Used by squash() entrypoint in Task 13
+fn stage5_per_line_cap(
+    line: &str,
+    max_line_bytes: usize,
+    truncated_flag: &mut bool,
+) -> String {
+    if line.len() <= max_line_bytes {
+        return line.to_string();
+    }
+    *truncated_flag = true;
+    let dropped = line.len();
+    let mut keep_len = max_line_bytes;
+    loop {
+        while keep_len > 0 && !line.is_char_boundary(keep_len) {
+            keep_len -= 1;
+        }
+        let kept = &line[..keep_len];
+        let dropped_now = dropped - kept.len();
+        let marker = format!("[…{dropped_now} bytes truncated]");
+        debug_assert!(marker.len() <= MARKER_MAX_LEN);
+        if kept.len() + marker.len() <= max_line_bytes {
+            return format!("{kept}{marker}");
+        }
+        if keep_len == 0 {
+            return marker;
+        }
+        keep_len -= 1;
+    }
+}
+
+#[cfg(test)]
+mod stage5_tests {
+    use super::*;
+
+    fn cap(line: &str, max: usize) -> (String, bool) {
+        let mut truncated = false;
+        let out = stage5_per_line_cap(line, max, &mut truncated);
+        (out, truncated)
+    }
+
+    #[test]
+    fn line_under_cap_unchanged() {
+        let (out, t) = cap("hello", 100);
+        assert_eq!(out, "hello");
+        assert!(!t);
+    }
+
+    #[test]
+    fn line_at_cap_unchanged() {
+        let s = "x".repeat(MIN_MAX_LINE_BYTES);
+        let (out, t) = cap(&s, MIN_MAX_LINE_BYTES);
+        assert_eq!(out, s);
+        assert!(!t);
+    }
+
+    #[test]
+    fn ascii_line_over_cap_truncated_with_marker() {
+        let s = "x".repeat(200);
+        let (out, t) = cap(&s, MIN_MAX_LINE_BYTES);
+        assert!(t);
+        assert!(out.len() <= MIN_MAX_LINE_BYTES);
+        assert!(out.ends_with("bytes truncated]"));
+    }
+
+    #[test]
+    fn multibyte_line_truncates_on_codepoint_boundary() {
+        let s = "é".repeat(200);
+        let (out, t) = cap(&s, MIN_MAX_LINE_BYTES);
+        assert!(t);
+        assert!(out.is_char_boundary(out.len()));
+        assert!(out.len() <= MIN_MAX_LINE_BYTES);
+    }
+}
