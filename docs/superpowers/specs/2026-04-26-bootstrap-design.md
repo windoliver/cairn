@@ -215,29 +215,32 @@ Bootstrap's only job here is to refuse to mint a fresh id when binding
 already exists. Decision tree, in order:
 
 1. **`.cairn/vault.id` present.** Parse it, then cross-check against
-   **every** available binding-evidence source before trusting it:
-   - If `.cairn/cairn.db` exists and `vault_meta` has a row,
-     compare against `vault_meta.vault_id`.
-   - If `.cairn/vault.binding` exists, the file's hash must match
-     `sha256(witness)` for the keychain witness stored at
-     `cairn:<vault.id>` / `__vault_witness__` (verified via
-     `Keystore::load_secret`). If the keychain has no witness for
-     `cairn:<vault.id>` but the keystore backend supports
-     enumeration, run `Keystore::list_vault_namespaces("cairn:")`;
-     if any returned `VaultId` differs from the file value, treat
-     as evidence of a different binding.
+   **vault-local** evidence only (no keystore reads — bootstrap stays
+   filesystem + read-only-SQLite):
    - If `.cairn/vault.binding.pending` exists, fail closed
-     immediately — first-bind is in progress and bootstrap must not
-     race it (route to `cairn identity finalise-binding`).
-   On any disagreement (DB id ≠ file id, sentinel hash ≠ keychain
-   witness for the file's id, enumeration shows a different bound
-   namespace), fail closed with `BootstrapError::VaultIdConflict {
-   file_id, evidence }` (mapped to `EX_DATAERR = 65`); recovery
-   routes through `cairn identity vault-id-recover`. The
-   filesystem copy of `vault.id` is a hint, never an override; any
-   binding evidence that disagrees with it wins. Only when
-   **every** source either agrees with the file or is absent does
-   bootstrap continue with the file value.
+     immediately with `BootstrapError::FirstBindInProgress` (mapped
+     to `EX_TEMPFAIL = 75`). First-bind is mid-sequence; bootstrap
+     must not race `finalise-binding`.
+   - If `.cairn/cairn.db` exists and `vault_meta` has a row,
+     compare the file's id against `vault_meta.vault_id`. On
+     mismatch, fail closed with `BootstrapError::VaultIdConflict {
+     file_id, db_id }` (mapped to `EX_DATAERR = 65`); recovery
+     routes through `cairn identity vault-id-recover`.
+   The DB row is the durable authority once first-bind has
+   committed; the filesystem copy is a hint that the DB can
+   override. Bootstrap intentionally does **not** read the OS
+   keychain, does **not** enumerate namespaces, and does **not**
+   compare hashes against the keychain witness — those checks live
+   in `IdentityService::open()` (which all issuer-dependent verbs
+   pass through) and in the explicit `vault-id-recover` /
+   `finalise-binding` recovery commands. This keeps bootstrap a
+   filesystem-only path that runs on locked / unavailable / headless
+   keychain environments without availability regression.
+   `IdentityService::open()` performs the keychain witness
+   cross-check the next time an identity-using verb runs, so a
+   silently-forked binding is still caught — just at the issuer
+   boundary, not at bootstrap. If `vault_meta` is absent or the DB
+   is absent, the file is taken as-is. Continue.
 2. **`.cairn/vault.id` missing AND `.cairn/vault.binding` (or
    `.cairn/vault.binding.pending`) present.** Fail closed with
    `BootstrapError::VaultIdLost` (mapped to `EX_DATAERR = 65`). The
