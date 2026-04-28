@@ -329,6 +329,46 @@ fn empty_scope_filter() -> ScopeFilter {
 }
 
 #[test]
+fn summarize_rejects_empty_record_ids_with_invalid_args() {
+    let args = SummarizeArgs {
+        citations: None,
+        kind: None,
+        persist: None,
+        record_ids: vec![],
+    };
+    match sdk().summarize(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("record_ids"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn assemble_hot_rejects_oversized_budget_with_invalid_args() {
+    let args = AssembleHotArgs {
+        budget: Some(4_194_305),
+        session_id: None,
+    };
+    match sdk().assemble_hot(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("budget"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn capture_trace_rejects_empty_from_with_invalid_args() {
+    let args = CaptureTraceArgs {
+        from: String::new(),
+        session_id: None,
+    };
+    match sdk().capture_trace(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("from"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
 fn forget_session_rejects_empty_session_id_with_invalid_args() {
     let args = ForgetArgs::Session {
         session_id: String::new(),

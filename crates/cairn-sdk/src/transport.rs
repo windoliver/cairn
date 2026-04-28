@@ -172,40 +172,33 @@ impl<T: Transport> Sdk<T> {
     }
 
     /// `summarize` — rolling/periodic summary build (brief §8.4).
-    ///
-    /// No additional pre-dispatch validation: `SummarizeArgs` carries no
-    /// wire-form constraints beyond schema (`#[serde(deny_unknown_fields)]`),
-    /// which compile-time typing already enforces for SDK callers.
-    pub fn summarize(
-        &self,
-        _args: &SummarizeArgs,
-    ) -> Result<VerbResponse<SummarizeData>, SdkError> {
+    pub fn summarize(&self, args: &SummarizeArgs) -> Result<VerbResponse<SummarizeData>, SdkError> {
+        validate_summarize(args)?;
         Err(unimplemented("summarize"))
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
-    ///
-    /// No pre-dispatch validation: see `summarize` for rationale.
     pub fn assemble_hot(
         &self,
-        _args: &AssembleHotArgs,
+        args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
+        validate_assemble_hot(args)?;
         Err(unimplemented("assemble_hot"))
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).
-    ///
-    /// No pre-dispatch validation: see `summarize` for rationale.
     pub fn capture_trace(
         &self,
-        _args: &CaptureTraceArgs,
+        args: &CaptureTraceArgs,
     ) -> Result<VerbResponse<CaptureTraceData>, SdkError> {
+        validate_capture_trace(args)?;
         Err(unimplemented("capture_trace"))
     }
 
     /// `lint` — privacy / provenance / schema / policy drift checks (brief §8.7).
     ///
-    /// No pre-dispatch validation: see `summarize` for rationale.
+    /// No pre-dispatch validation: `LintArgs` has no schema constraints
+    /// beyond optional `write_report: bool`.
     pub fn lint(&self, _args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
         Err(unimplemented("lint"))
     }
@@ -482,6 +475,55 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
         // future variants rather than silently accept them.
         _ => Err(invalid("unsupported retrieve target variant")),
     }
+}
+
+/// Mirrors the JSON-schema constraints for `summarize` (the generated
+/// Rust `SummarizeArgs` only enforces `deny_unknown_fields`, but the wire
+/// schema requires non-empty `record_ids` and non-empty `kind` if
+/// present). Each `record_id` is also validated as a real ULID.
+fn validate_summarize(args: &SummarizeArgs) -> Result<(), SdkError> {
+    if args.record_ids.is_empty() {
+        return Err(invalid("record_ids: must contain at least one item"));
+    }
+    for id in &args.record_ids {
+        validate_ulid(id)?;
+    }
+    if let Some(kind) = &args.kind
+        && kind.is_empty()
+    {
+        return Err(invalid("kind: must not be empty when present"));
+    }
+    Ok(())
+}
+
+/// Mirrors the JSON-schema constraints for `assemble_hot`: `budget`
+/// in `[0, 4 MiB]`, `session_id` non-empty when present.
+fn validate_assemble_hot(args: &AssembleHotArgs) -> Result<(), SdkError> {
+    if let Some(budget) = args.budget
+        && budget > 4_194_304
+    {
+        return Err(invalid("budget: must be <= 4194304 (4 MiB)"));
+    }
+    if let Some(session_id) = &args.session_id
+        && session_id.is_empty()
+    {
+        return Err(invalid("session_id: must not be empty when present"));
+    }
+    Ok(())
+}
+
+/// Mirrors the JSON-schema constraints for `capture_trace`: `from`
+/// non-empty (required), `session_id` non-empty when present.
+fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
+    if args.from.is_empty() {
+        return Err(invalid("from: must not be empty"));
+    }
+    if let Some(session_id) = &args.session_id
+        && session_id.is_empty()
+    {
+        return Err(invalid("session_id: must not be empty when present"));
+    }
+    Ok(())
 }
 
 /// Mirrors every wire constraint in `ForgetArgs`'s generated
