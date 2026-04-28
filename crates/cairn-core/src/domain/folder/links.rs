@@ -178,6 +178,40 @@ fn normalize(p: &Path) -> PathBuf {
     out.iter().collect()
 }
 
+use std::collections::BTreeMap;
+
+use crate::contract::memory_store::StoredRecord;
+use crate::domain::record::RecordId;
+
+/// Build the reverse map: `target_path` → backlinks pointing at it. Sorted by
+/// `source_path` for deterministic output.
+#[must_use]
+pub fn materialize_backlinks(
+    records: &[StoredRecord],
+    record_paths: &BTreeMap<RecordId, PathBuf>,
+) -> BTreeMap<PathBuf, Vec<Backlink>> {
+    let mut by_target: BTreeMap<PathBuf, Vec<Backlink>> = BTreeMap::new();
+    for stored in records {
+        let Some(source_path) = record_paths.get(&stored.record.id) else {
+            continue;
+        };
+        for raw in extract_links(source_path, &stored.record.body) {
+            by_target
+                .entry(raw.target_path.clone())
+                .or_default()
+                .push(Backlink {
+                    source_path: source_path.clone(),
+                    target_path: raw.target_path,
+                    anchor: raw.anchor,
+                });
+        }
+    }
+    for entries in by_target.values_mut() {
+        entries.sort_by(|a, b| a.source_path.cmp(&b.source_path));
+    }
+    by_target
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +275,61 @@ mod tests {
         let body = r"\[not a link\](nope)";
         let links = extract_links(src, body);
         assert!(links.is_empty());
+    }
+
+    use crate::contract::memory_store::StoredRecord;
+    use crate::domain::record::tests::sample_stored_record;
+    use crate::domain::record::RecordId;
+    use std::collections::BTreeMap;
+
+    fn record_with_body(version: u32, body: &str) -> StoredRecord {
+        let mut s = sample_stored_record(version);
+        s.record.body = body.to_owned();
+        s
+    }
+
+    #[test]
+    fn materialize_empty_records_returns_empty_map() {
+        let records: Vec<StoredRecord> = Vec::new();
+        let paths: BTreeMap<RecordId, PathBuf> = BTreeMap::new();
+        let map = materialize_backlinks(&records, &paths);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn materialize_emits_backlink_for_existing_target() {
+        let r1 = record_with_body(1, "see [Alice](raw/alice.md)");
+        let mut paths = BTreeMap::new();
+        paths.insert(r1.record.id.clone(), PathBuf::from("raw/r1.md"));
+        let map = materialize_backlinks(&[r1], &paths);
+        let entries = map.get(Path::new("raw/alice.md")).expect("entry");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source_path, PathBuf::from("raw/r1.md"));
+    }
+
+    #[test]
+    fn materialize_includes_dangling_links() {
+        let r1 = record_with_body(1, "[ghost](raw/missing.md)");
+        let mut paths = BTreeMap::new();
+        paths.insert(r1.record.id.clone(), PathBuf::from("raw/r1.md"));
+        let map = materialize_backlinks(&[r1], &paths);
+        assert!(map.contains_key(Path::new("raw/missing.md")));
+    }
+
+    #[test]
+    fn materialize_two_sources_to_same_target_sorted() {
+        let r1 = record_with_body(1, "[a](raw/alice.md)");
+        let mut r2 = record_with_body(1, "[a](raw/alice.md)");
+        // Mutate id so paths differ.
+        r2.record.id =
+            RecordId::parse("01HQZX9F5N0000000000000ZZZ".to_owned()).expect("valid");
+        let mut paths = BTreeMap::new();
+        paths.insert(r1.record.id.clone(), PathBuf::from("raw/zzz.md"));
+        paths.insert(r2.record.id.clone(), PathBuf::from("raw/aaa.md"));
+        let map = materialize_backlinks(&[r1, r2], &paths);
+        let entries = map.get(Path::new("raw/alice.md")).expect("entry");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].source_path, PathBuf::from("raw/aaa.md"));
+        assert_eq!(entries[1].source_path, PathBuf::from("raw/zzz.md"));
     }
 }
