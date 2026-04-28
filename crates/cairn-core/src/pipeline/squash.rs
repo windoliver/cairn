@@ -661,21 +661,55 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
             if i + 1 < bytes.len() {
                 match bytes[i + 1] {
                     // CSI: ESC [ params intermediates final
+                    //
+                    // The CSI grammar admits any 0x40-0x7E byte as the
+                    // final, but in degraded captures (e.g.,
+                    // `ESC[31ERROR\n` truncated mid-SGR) the next
+                    // printable letter is *not* the intended final — it
+                    // is the first byte of the next real word. Restrict
+                    // commit to a curated set of finals seen in real
+                    // tool output (SGR/erase/cursor-move/DSR/save/restore
+                    // /modes); for anything else, drop only the lone
+                    // ESC and re-enter the outer loop so `[`, params,
+                    // and the surviving payload bytes survive.
                     0x5B => {
-                        i += 2; // skip ESC [
-                        // skip parameter bytes 0x30-0x3F
-                        while i < bytes.len() && (0x30..=0x3F).contains(&bytes[i]) {
+                        // Scan ahead without committing: peek params,
+                        // intermediates, then check the candidate final.
+                        let mut j = i + 2;
+                        while j < bytes.len() && (0x30..=0x3F).contains(&bytes[j]) {
+                            j += 1;
+                        }
+                        while j < bytes.len() && (0x20..=0x2F).contains(&bytes[j]) {
+                            j += 1;
+                        }
+                        // SGR / erase / cursor / position / save-restore
+                        // / mode set+reset / DSR.
+                        let curated_final = matches!(
+                            bytes.get(j).copied(),
+                            Some(
+                                b'm' | b'K'
+                                    | b'J'
+                                    | b'H'
+                                    | b'f'
+                                    | b'A'
+                                    | b'B'
+                                    | b'C'
+                                    | b'D'
+                                    | b's'
+                                    | b'u'
+                                    | b'h'
+                                    | b'l'
+                                    | b'n'
+                            )
+                        );
+                        if curated_final {
+                            i = j + 1;
+                        } else {
+                            // Malformed/uncommon CSI: drop ESC only.
+                            // Outer loop will then process `[`, params,
+                            // and surviving payload bytes normally.
                             i += 1;
                         }
-                        // skip intermediate bytes 0x20-0x2F
-                        while i < bytes.len() && (0x20..=0x2F).contains(&bytes[i]) {
-                            i += 1;
-                        }
-                        // skip final byte 0x40-0x7E (if present)
-                        if i < bytes.len() && (0x40..=0x7E).contains(&bytes[i]) {
-                            i += 1;
-                        }
-                        // malformed CSI (no final byte): already consumed params/intermediates
                     }
                     // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (0x1B 0x5C)
                     0x5D => {
@@ -816,6 +850,29 @@ mod stage2_tests {
         let (out, stripped) = s2("download 1%\rdownload 2%\n");
         assert_eq!(out, "download 1%\rdownload 2%\n");
         assert!(!stripped);
+    }
+
+    /// Round-9 regression: a truncated CSI (e.g., capture cut after the
+    /// numeric param but before the SGR `m`) must not eat the first
+    /// byte of the next printable word. Conservative final-byte
+    /// curation drops the lone ESC instead.
+    #[test]
+    fn truncated_csi_preserves_next_word() {
+        // \x1b[31ERROR\n — capture cut after `31` but before `m`.
+        // Strict CSI grammar would treat 'E' as a valid final (Cursor
+        // Down N) and eat it; we curate finals so 'E' is not consumed.
+        let (out, stripped) = s2("\x1b[31ERROR\n");
+        assert!(stripped);
+        assert!(out.ends_with("ERROR\n"), "got: {out:?}");
+    }
+
+    /// Round-9 regression: a well-formed SGR sequence must still be
+    /// stripped (no false-negative regressions from CSI curation).
+    #[test]
+    fn well_formed_sgr_still_stripped() {
+        let (out, stripped) = s2("\x1b[31mred\x1b[0mtail\n");
+        assert_eq!(out, "redtail\n");
+        assert!(stripped);
     }
 
     /// Round-7 regression: a truncated/unterminated OSC must NOT consume
@@ -1272,7 +1329,9 @@ fn stage6_layout(
             let drop_line = &lines[current_tail_end - 1];
             remaining_tail = remaining_tail.saturating_sub(drop_line.len() + 1);
             dropped_lines += 1;
-            dropped_bytes += drop_line.len();
+            // Each dropped line also removes its trailing LF separator
+            // from the joined body — match the `+ 1` used for `remaining_tail`.
+            dropped_bytes += drop_line.len() + 1;
             current_tail_end -= 1;
         }
 
@@ -1288,7 +1347,9 @@ fn stage6_layout(
             let drop_line = &lines[current_tail_start];
             remaining_tail = remaining_tail.saturating_sub(drop_line.len() + 1);
             dropped_lines += 1;
-            dropped_bytes += drop_line.len();
+            // Each dropped line also removes its trailing LF separator
+            // from the joined body — match the `+ 1` used for `remaining_tail`.
+            dropped_bytes += drop_line.len() + 1;
             current_tail_start += 1;
         }
 
@@ -1384,6 +1445,32 @@ mod stage6_tests {
         );
         // And matches the obvious lower bound (content + 1 each):
         assert!(stats.bytes_dropped_truncate >= expected.min(stats.bytes_dropped_truncate));
+    }
+
+    /// Round-9 regression: when the tail alone exceeds `max_bytes`
+    /// (`signed_head_budget == None`), the front-trim loop must count
+    /// each dropped line's LF separator in `bytes_dropped_truncate`,
+    /// matching the `+ 1` it subtracts from `remaining_tail`.
+    #[test]
+    fn mode_b_drop_accounting_counts_separators() {
+        // tail_lines forces head=0 so we land in the tail-overflow
+        // branch. Many short lines so phase-B drop loop runs.
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 0, 64, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let lines: Vec<String> = (0..200).map(|i| format!("L{i:03}")).collect();
+        let mut stats = SquashStats::default();
+        let _ = stage6_layout(&lines, None, false, &cfg, &mut stats);
+        // Each dropped line removes its content + 1 LF, so total
+        // bytes dropped >= 2 * dropped_lines for any line with
+        // 1-byte content. With "L%03d" content is 4 bytes → expect
+        // exactly 5 * dropped_lines.
+        assert_eq!(
+            stats.bytes_dropped_truncate,
+            stats.lines_dropped_truncate * 5,
+            "expected {}*5={}, got {}",
+            stats.lines_dropped_truncate,
+            stats.lines_dropped_truncate * 5,
+            stats.bytes_dropped_truncate,
+        );
     }
 
     #[test]
