@@ -517,3 +517,172 @@ mod stage1_tests {
         assert_eq!(stage1_lossy_utf8(b"").as_ref(), "");
     }
 }
+
+/// Stage 2: Strip ANSI/CSI/OSC escape sequences and bare control characters
+/// (except `\n`, `\t`, `\r`), then normalize CRLF → LF (preserving lone CR).
+///
+/// Sets `*stripped = true` whenever any byte is removed or normalized.
+#[allow(dead_code)] // Used by squash() entrypoint in Task 13
+#[allow(clippy::expect_used)] // invariant: only ASCII control bytes/ESC sequences removed; UTF-8 preserved
+fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
+    let bytes = input.as_bytes();
+    let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        if b == 0x1B {
+            // ESC: look ahead for CSI or OSC
+            *stripped = true;
+            if i + 1 < bytes.len() {
+                match bytes[i + 1] {
+                    // CSI: ESC [ params intermediates final
+                    0x5B => {
+                        i += 2; // skip ESC [
+                        // skip parameter bytes 0x30-0x3F
+                        while i < bytes.len() && (0x30..=0x3F).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        // skip intermediate bytes 0x20-0x2F
+                        while i < bytes.len() && (0x20..=0x2F).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        // skip final byte 0x40-0x7E (if present)
+                        if i < bytes.len() && (0x40..=0x7E).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        // malformed CSI (no final byte): already consumed params/intermediates
+                    }
+                    // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (0x1B 0x5C)
+                    0x5D => {
+                        i += 2; // skip ESC ]
+                        loop {
+                            if i >= bytes.len() {
+                                // unterminated OSC: drop to EOF
+                                break;
+                            }
+                            if bytes[i] == 0x07 {
+                                // BEL terminator
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == 0x5C {
+                                // ST (String Terminator): ESC \
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // Lone ESC or unrecognised: drop ESC byte only
+                    _ => {
+                        i += 1;
+                    }
+                }
+            } else {
+                // ESC at EOF
+                i += 1;
+            }
+        } else if b < 0x20 || b == 0x7F {
+            // Control character: preserve \n (0x0A), \t (0x09), \r (0x0D)
+            if b == b'\n' || b == b'\t' || b == b'\r' {
+                normalized.push(b);
+            } else {
+                *stripped = true;
+            }
+            i += 1;
+        } else {
+            normalized.push(b);
+            i += 1;
+        }
+    }
+
+    // Second pass: CRLF → LF (bare CR is preserved)
+    let mut result: Vec<u8> = Vec::with_capacity(normalized.len());
+    let mut j = 0;
+    while j < normalized.len() {
+        if normalized[j] == b'\r' && j + 1 < normalized.len() && normalized[j + 1] == b'\n' {
+            // CRLF → LF
+            result.push(b'\n');
+            *stripped = true;
+            j += 2;
+        } else {
+            result.push(normalized[j]);
+            j += 1;
+        }
+    }
+
+    String::from_utf8(result).expect("invariant: stage-2 preserves UTF-8")
+}
+
+#[cfg(test)]
+mod stage2_tests {
+    use super::*;
+
+    fn s2(input: &str) -> (String, bool) {
+        let mut stripped = false;
+        let out = stage2_ansi_strip(input, &mut stripped);
+        (out, stripped)
+    }
+
+    #[test]
+    fn pure_text_unchanged() {
+        let (out, stripped) = s2("hello world\n");
+        assert_eq!(out, "hello world\n");
+        assert!(!stripped);
+    }
+
+    #[test]
+    fn csi_color_sgr_dropped() {
+        let (out, stripped) = s2("\x1b[31mred\x1b[0m\n");
+        assert_eq!(out, "red\n");
+        assert!(stripped);
+    }
+
+    #[test]
+    fn osc_terminated_by_bel_dropped() {
+        let (out, stripped) = s2("\x1b]0;title\x07hello\n");
+        assert_eq!(out, "hello\n");
+        assert!(stripped);
+    }
+
+    #[test]
+    fn osc_terminated_by_string_terminator_dropped() {
+        // OSC terminated by ESC \ (ST)
+        let (out, stripped) = s2("\x1b]0;t\x1b\\hi\n");
+        assert_eq!(out, "hi\n");
+        assert!(stripped);
+    }
+
+    #[test]
+    fn newline_and_tab_preserved() {
+        let (out, stripped) = s2("a\tb\nc\n");
+        assert_eq!(out, "a\tb\nc\n");
+        assert!(!stripped);
+    }
+
+    #[test]
+    fn other_controls_stripped() {
+        // BEL (0x07) and BS (0x08) stripped
+        let (out, stripped) = s2("hi\x07\x08world\n");
+        assert_eq!(out, "hiworld\n");
+        assert!(stripped);
+    }
+
+    #[test]
+    fn crlf_normalized_after_ansi_strip() {
+        // \x1b[K is an erase-to-end-of-line CSI sequence; \r\n is CRLF
+        let (out, stripped) = s2("line1\r\x1b[K\nline2\r\n");
+        assert_eq!(out, "line1\nline2\n");
+        assert!(stripped);
+    }
+
+    #[test]
+    fn bare_cr_preserved() {
+        // Bare CR (not followed by LF) must be preserved for progress-bar output
+        let (out, stripped) = s2("download 1%\rdownload 2%\n");
+        assert_eq!(out, "download 1%\rdownload 2%\n");
+        assert!(!stripped);
+    }
+}
