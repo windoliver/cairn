@@ -329,15 +329,22 @@ fn tombstone_target_impl(
     actor: &ActorRef,
 ) -> Result<(), StoreError> {
     let now = Rfc3339Timestamp::now();
-    conn.execute(
-        "UPDATE records \
-         SET tombstoned = 1, \
-             tombstoned_at = COALESCE(tombstoned_at, ?2), \
-             tombstoned_by = COALESCE(tombstoned_by, ?3) \
-         WHERE target_id = ?1",
-        params![target_id.as_str(), now.as_str(), actor.as_str()],
-    )
-    .map_err(store_err)?;
+    let rows = conn
+        .execute(
+            "UPDATE records \
+             SET tombstoned = 1, \
+                 tombstoned_at = COALESCE(tombstoned_at, ?2), \
+                 tombstoned_by = COALESCE(tombstoned_by, ?3) \
+             WHERE target_id = ?1",
+            params![target_id.as_str(), now.as_str(), actor.as_str()],
+        )
+        .map_err(store_err)?;
+    // Bad target_id (or already-purged) → no rows touched. Fail loud
+    // so consent-journal entries cannot record a mutation that never
+    // landed in the records table.
+    if rows == 0 {
+        return Err(StoreError::NotFound(target_id.clone()));
+    }
     Ok(())
 }
 
@@ -346,13 +353,19 @@ fn expire_active_impl(
     target_id: &TargetId,
     at: &Rfc3339Timestamp,
 ) -> Result<(), StoreError> {
-    conn.execute(
-        "UPDATE records \
-         SET expired_at = COALESCE(expired_at, ?2) \
-         WHERE target_id = ?1 AND active = 1",
-        params![target_id.as_str(), at.as_str()],
-    )
-    .map_err(store_err)?;
+    let rows = conn
+        .execute(
+            "UPDATE records \
+             SET expired_at = COALESCE(expired_at, ?2) \
+             WHERE target_id = ?1 AND active = 1",
+            params![target_id.as_str(), at.as_str()],
+        )
+        .map_err(store_err)?;
+    // Bad target_id or no active row → fail loud (same reasoning as
+    // tombstone above).
+    if rows == 0 {
+        return Err(StoreError::NotFound(target_id.clone()));
+    }
     Ok(())
 }
 

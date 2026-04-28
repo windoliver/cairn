@@ -32,8 +32,11 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
 /// Contract version range this crate accepts.
+///
+/// `0.2.0` covers the issue-46 surface (`Principal`-bearing reads + sealed
+/// apply). Bump together with `cairn_core::contract::memory_store::CONTRACT_VERSION`.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
 // Compile-time assertion: our declared range must contain the host's
 // CONTRACT_VERSION so the registry version check passes on every build.

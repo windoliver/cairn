@@ -624,11 +624,11 @@ mod tests {
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
     }
 
     fn incompatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0))
     }
 
     #[test]
@@ -725,12 +725,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 "#
     }

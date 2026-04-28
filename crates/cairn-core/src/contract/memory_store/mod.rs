@@ -15,7 +15,12 @@ pub use types::*;
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+///
+/// `0.2.0` covers the Principal-bearing read surface (`get`, `list`,
+/// `version_history`) plus the sealed `MemoryStoreApply` write surface
+/// added by issue #46. Implementations advertising `0.1.0` are not
+/// surface-compatible and must republish.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
 /// Static capability declaration for a `MemoryStore` impl.
 ///
@@ -123,7 +128,7 @@ mod tests {
         }
 
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
         }
 
         async fn get(

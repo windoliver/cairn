@@ -243,11 +243,11 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
     );
 }
 
-/// A non-system principal who *was* able to read the target observes
-/// the `Purge` marker (rebac evaluated against the snapshot taken at
-/// purge time, brief `version_history` contract).
+/// Purge markers fail closed: only the system principal sees them.
+/// Per-version visibility persistence is a follow-up; until then,
+/// non-system callers cannot probe purge metadata.
 #[tokio::test]
-async fn purge_marker_visible_to_owner_principal() {
+async fn purge_marker_only_visible_to_system_principal() {
     let dir = tempdir().expect("tempdir");
     let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
         .await
@@ -279,29 +279,25 @@ async fn purge_marker_visible_to_owner_principal() {
         .await
         .expect("purge");
 
-    // Owner sees the purge marker.
+    // System sees the purge marker.
+    let system = Principal::system(&test_apply_token());
+    let sys_history = store
+        .version_history(&system, &target)
+        .await
+        .expect("version_history (system)");
+    assert_eq!(sys_history.len(), 1, "system must observe the purge marker");
+    assert!(matches!(sys_history[0], HistoryEntry::Purge(_)));
+
+    // The owner of the purged record must NOT see the marker until
+    // per-version visibility is persisted (failing closed).
     let owner = Principal::from_identity(Identity::parse("usr:purgetest").expect("valid"));
-    let history = store
+    let owner_history = store
         .version_history(&owner, &target)
         .await
         .expect("version_history (owner)");
-    assert_eq!(history.len(), 1, "owner must observe the purge marker");
     assert!(
-        matches!(history[0], HistoryEntry::Purge(_)),
-        "expected a Purge entry; got: {:?}",
-        history[0]
-    );
-
-    // A different (unauthorized) principal must NOT learn purge metadata
-    // for a private record they could never read.
-    let stranger = Principal::from_identity(Identity::parse("usr:stranger").expect("valid"));
-    let stranger_history = store
-        .version_history(&stranger, &target)
-        .await
-        .expect("version_history (stranger)");
-    assert!(
-        stranger_history.is_empty(),
-        "unauthorized principal must not observe purge metadata; got: {stranger_history:?}"
+        owner_history.is_empty(),
+        "non-system callers must not observe purge metadata yet; got: {owner_history:?}"
     );
 }
 

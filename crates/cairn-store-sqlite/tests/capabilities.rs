@@ -25,13 +25,14 @@ async fn caps_advertise_p0_feature_matrix() {
 }
 
 #[tokio::test]
-async fn supported_contract_versions_accepts_v0_1() {
+async fn supported_contract_versions_accepts_v0_2() {
     let dir = tempdir().expect("tempdir");
     let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
         .await
         .expect("open");
 
     let range = store.supported_contract_versions();
-    assert!(range.accepts(ContractVersion::new(0, 1, 0)));
-    assert!(!range.accepts(ContractVersion::new(0, 2, 0)));
+    assert!(range.accepts(ContractVersion::new(0, 2, 0)));
+    assert!(!range.accepts(ContractVersion::new(0, 1, 0)));
+    assert!(!range.accepts(ContractVersion::new(0, 3, 0)));
 }
