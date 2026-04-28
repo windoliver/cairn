@@ -214,7 +214,16 @@ dedicated `cairn identity vault-id-recover` command (identity spec
 Bootstrap's only job here is to refuse to mint a fresh id when binding
 already exists. Decision tree, in order:
 
-1. **`.cairn/vault.id` present.** Parse and trust it. Continue.
+1. **`.cairn/vault.id` present.** Parse it. If `.cairn/cairn.db`
+   exists with a `vault_meta` row, cross-check the file's id against
+   `vault_meta.vault_id`. On mismatch, fail closed with
+   `BootstrapError::VaultIdConflict { file_id, db_id }` (mapped to
+   `EX_DATAERR = 65`); recovery routes through
+   `cairn identity vault-id-recover`. The DB row is the durable
+   authority once first-bind has committed; the filesystem copy
+   exists for the pre-DB phase and as a hint, never as a write
+   that overrides the DB. If `vault_meta` is absent or the DB is
+   absent, the file is taken as-is. Continue.
 2. **`.cairn/vault.id` missing AND `.cairn/vault.binding` (or
    `.cairn/vault.binding.pending`) present.** Fail closed with
    `BootstrapError::VaultIdLost` (mapped to `EX_DATAERR = 65`). The

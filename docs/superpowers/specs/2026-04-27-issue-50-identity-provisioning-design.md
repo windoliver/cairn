@@ -208,13 +208,32 @@ Reconciliation has two open paths so that startup hygiene cannot
 block the very commands designed to fix problems:
 
 - **`IdentityService::open()`** — used by issuer-dependent verbs
-  (`ingest`, `capture_trace`, `forget`, `rotate`, `revoke`, etc.). Runs
-  the full reconciliation sweep below; any per-identity
+  (`ingest`, `capture_trace`, `forget`, `rotate`, `revoke`, etc.).
+  Before any other work, cross-checks `.cairn/vault.id` against
+  `vault_meta.vault_id` (when both exist). On mismatch returns
+  `IdentityServiceError::VaultIdConflict { file_id, db_id }` (mapped
+  to `EX_DATAERR = 65`); the verb hint routes the operator to
+  `cairn identity vault-id-recover`. This guarantees that no
+  issuer-dependent verb can ever derive its keystore namespace from
+  a stale or hand-edited `.cairn/vault.id`. After the consistency
+  check passes, runs the full reconciliation sweep below; any
+  per-identity
   `KeyMaterialMismatch` is reported as `tracing::error!` plus accumulated
-  into a `ReconciliationReport` returned to the caller. The verbs gate
-  via `require_default_issuer()` (§3.7) which surfaces the report.
-  Per-identity mismatches are **never** propagated as fatal errors out
-  of `open` itself — that would lock the operator out of recovery.
+  into a `ReconciliationReport` returned to the caller. Per-identity
+  mismatches are **never** propagated as fatal errors out of `open`
+  itself — that would lock the operator out of recovery. **Scoped
+  signer eligibility, not global gating.** Issuer-dependent verbs do
+  **not** fail open across the whole vault when `ReconciliationReport`
+  is non-empty. Each verb's signer-eligibility check
+  (`IdentityService::require_attributable_signer(candidate_id)`) only
+  fails when the **specific** identity it would sign with is in the
+  report (or its provisioning_state forbids signing). A mismatched
+  non-default sensor identity therefore does not block `ingest` or
+  `forget` writes signed by the default human/agent; the only verbs
+  it blocks are those that would have signed under that exact
+  identity. The `ReconciliationReport` is also surfaced as a
+  warning in `cairn identity status` so the operator sees the global
+  picture without each verb refusing to run.
 - **`IdentityService::open_for_maintenance()`** — used by the recovery
   and inspection commands (`list`, `show`, `reconcile`, `repair`,
   `purge`, `finalise-binding`, `vault-id-recover`, `init-defaults`,
@@ -1590,6 +1609,10 @@ across an injected mid-step-2 crash and is still consumable by
 a registry whose `vault_meta` row has not yet been written by
 `reserve_first_identity` — prevents any code path other than first-bind
 from establishing a vault binding),
+`FirstBindAlreadyCommitted` (returned when `reserve_first_identity` is
+called against a registry that already has at least one `identities`
+row; defence-in-depth so the second-INSERT case fails with a typed
+error before reaching schema-level rejection),
 `Backend(#[source] …)`.
 
 `FirstBindState` (closed enum, exported from `cairn-core`):
@@ -1625,6 +1648,7 @@ wraps the two adapter errors plus the cross-cutting cases):
 `KeyMaterialDesynchronized { id, reason }`,
 `NoLiveAttributableSigner` (rotate/revoke target was the only live default; see §3.10),
 `VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed),
+`VaultIdConflict { file_id: VaultId, db_id: VaultId }` (filesystem and DB disagree on vault binding; mapped to `EX_DATAERR = 65`),
 `IdentityLockBusy { id }` (per-identity advisory lock held by another mutation; mapped to `EX_TEMPFAIL = 75`).
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
@@ -1764,16 +1788,40 @@ CREATE INDEX idx_identity_receipts_pending_key_disable ON identity_receipts(pend
 
 The `vault_meta` row is inserted exactly once, and **only** by
 `IdentityRegistry::reserve_first_identity` (the first-bind transaction
-defined in §3.7). The ordinary `reserve_identity` path — used for
-every non-first identity — is forbidden from touching `vault_meta` at
-the trait, adapter, and SQL-trigger layers. A SQLite trigger
-(`vault_meta_insert_guard`) rejects any `INSERT` into `vault_meta`
-that arrives outside the same transaction as the first
-`identities`-row insertion (detected by an empty `identities` table at
-trigger fire time); conformance tests assert that calling
-`reserve_identity` against a fresh registry returns
-`RegistryError::VaultMetaMissing` rather than implicitly creating the
-row. This makes the first-bind sentinel-and-witness sequencing
+defined in §3.7). Sole-writer enforcement layers three defences:
+
+1. **Schema-level immutability.** `vault_meta` is a single-row table
+   (`CHECK (rowid = 1)`); a second `INSERT` is rejected by SQLite's
+   PK-uniqueness machinery, full stop. There is no path to "add
+   another `vault_meta`" once the first row commits.
+2. **Schema-level read-only-after-commit.** A SQLite trigger
+   (`vault_meta_no_update`) raises on `BEFORE UPDATE OF vault_id,
+   witness_sha256 ON vault_meta` and on `BEFORE DELETE ON
+   vault_meta`. The only mutation that ever lands is the initial
+   single-row `INSERT`. (`binding_path` updates are also forbidden;
+   the path is fixed at first-bind.)
+3. **Adapter-level pre-insert assertion.** `reserve_first_identity`
+   begins its transaction with `SELECT EXISTS(SELECT 1 FROM
+   identities)`. If a row already exists, the call returns
+   `RegistryError::FirstBindAlreadyCommitted` rather than attempting
+   the `INSERT` (which would fail at layer 1 anyway, but this gives
+   a typed error). Conversely, every `reserve_identity` call begins
+   its transaction with `SELECT vault_id, witness_sha256 FROM
+   vault_meta`; an empty result returns
+   `RegistryError::VaultMetaMissing`. Both checks run before any
+   state mutation, so an ordinary `provision` cannot silently
+   create the binding.
+
+Together: the first INSERT can only land in the first-bind
+transaction (because all other paths fail closed before mutating);
+subsequent attempts fail at the schema layer; the row is immutable
+once committed. The three defences are independent — disabling any
+one still leaves the other two enforcing the invariant. Conformance
+tests assert: (a) calling `reserve_identity` against a fresh registry
+returns `VaultMetaMissing`; (b) attempting a second
+`reserve_first_identity` on an already-bound registry returns
+`FirstBindAlreadyCommitted`; (c) raw-SQL `UPDATE`/`DELETE` against
+`vault_meta` raises the trigger. This makes the first-bind sentinel-and-witness sequencing
 (§3.7's advisory lock + two-phase `.binding.pending`) the **only**
 code path that can establish a vault binding; an adapter or caller
 mistake cannot accidentally promote an ordinary `provision` call into
