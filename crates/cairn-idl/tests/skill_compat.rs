@@ -360,6 +360,29 @@ fn cli_validator_rejects_invalid_u8_value() {
 }
 
 #[test]
+fn cli_validator_pairs_variants_by_content() {
+    // Pairs each CliCommand to its schema variant by content. If pairing
+    // fell back to array-position, a session-only invocation could trip the
+    // validator when the schema/CLI orders ever diverged. The current happy
+    // path proves the *content-based* pairing actually validates the right
+    // variant — both `--session SESSION_ID` (Session) and `--session
+    // SESSION_ID --turn TURN_ID` (Turn) must succeed.
+    let d = doc();
+    for line in [
+        "cairn retrieve --session SESSION_ID",
+        "cairn retrieve --session SESSION_ID --turn TURN_ID",
+    ] {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: line.into(),
+            line: 1,
+        };
+        validate_cli_block(&block, &d)
+            .unwrap_or_else(|e| panic!("expected `{line}` to validate, got: {e}"));
+    }
+}
+
+#[test]
 fn live_skill_md_passes_compat_checks() {
     let md = live_skill_md();
     let d = doc();

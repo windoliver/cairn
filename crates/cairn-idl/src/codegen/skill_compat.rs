@@ -606,32 +606,75 @@ pub(crate) fn variant_required_specs(verb_def: &VerbDef, cmds: &[&CliCommand]) -
         return empty_specs();
     };
 
-    let mut out = Vec::with_capacity(cmds.len());
-    for (idx, entry) in one_of.iter().enumerate() {
-        let Some(variant_schema) = entry
-            .get("$ref")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|p| p.strip_prefix("#/$defs/"))
-            .and_then(|name| defs.get(name))
-        else {
-            out.push(VariantSpec::default());
+    // Pair each CliCommand to its schema variant by *content* (matching the
+    // CLI flag/positional name set against each variant's non-const property
+    // names) rather than by array position — without this, a schema reorder
+    // of `oneOf` would silently mispair specs to commands and let drift slip
+    // through the gate.
+    let variant_schemas: Vec<&serde_json::Value> = one_of
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|p| p.strip_prefix("#/$defs/"))
+                .and_then(|name| defs.get(name))
+        })
+        .collect();
+
+    cmds.iter()
+        .map(|cmd| {
+            let Some(variant_schema) = pair_cmd_to_variant(cmd, &variant_schemas) else {
+                return VariantSpec::default();
+            };
+            let mut base = required_excluding_const(variant_schema);
+            if let Some(disc) = discriminator_const(variant_schema)
+                && let Some(flag) = cmd.flags.iter().find(|f| f.long == disc || f.name == disc)
+            {
+                base.insert(flag.name.clone());
+            }
+            let any_of = any_of_required_branches(variant_schema);
+            VariantSpec { base, any_of }
+        })
+        .collect()
+}
+
+/// Pick the schema variant whose non-const property names equal the
+/// `CliCommand`'s flag/positional name set. Falls back to the variant with
+/// the largest overlap (so a single drift between schema and CLI still pairs
+/// to the most-likely match instead of silently picking by index).
+fn pair_cmd_to_variant<'a>(
+    cmd: &CliCommand,
+    variants: &[&'a serde_json::Value],
+) -> Option<&'a serde_json::Value> {
+    let cmd_fields: BTreeSet<String> = cmd
+        .flags
+        .iter()
+        .map(|f| f.name.clone())
+        .chain(cmd.positional.as_ref().map(|p| p.name.clone()))
+        .collect();
+    if cmd_fields.is_empty() {
+        return variants.first().copied();
+    }
+    let mut best: Option<(&'a serde_json::Value, usize)> = None;
+    for &v in variants {
+        let Some(props) = v.get("properties").and_then(serde_json::Value::as_object) else {
             continue;
         };
-        let mut base = required_excluding_const(variant_schema);
-        // Lift the discriminator into base when its const value matches a CLI
-        // flag on this variant — that's how shapes like ArgsProfile select
-        // themselves on the command line (`--profile ...`).
-        if let Some(disc) = discriminator_const(variant_schema)
-            && let Some(cmd) = cmds.get(idx)
-            && let Some(flag) = cmd.flags.iter().find(|f| f.long == disc || f.name == disc)
-        {
-            base.insert(flag.name.clone());
+        let variant_fields: BTreeSet<String> = props
+            .iter()
+            .filter(|(_, ps)| ps.get("const").is_none())
+            .map(|(k, _)| k.clone())
+            .collect();
+        if variant_fields == cmd_fields {
+            return Some(v);
         }
-        let any_of = any_of_required_branches(variant_schema);
-        out.push(VariantSpec { base, any_of });
+        let overlap = cmd_fields.intersection(&variant_fields).count();
+        if best.is_none_or(|(_, score)| overlap > score) {
+            best = Some((v, overlap));
+        }
     }
-    out.resize_with(cmds.len(), VariantSpec::default);
-    out
+    best.map(|(v, _)| v)
 }
 
 /// Walk `markdown`, returning each code block paired with the verb id from the
