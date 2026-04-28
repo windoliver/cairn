@@ -1,0 +1,8 @@
+---
+source: crates/cairn-core/tests/squash_fixtures.rs
+assertion_line: 94
+expression: "run_squash(\"short_ls.txt\", &SquashConfig::default())"
+---
+file1.txt
+file2.txt
+file3.txt

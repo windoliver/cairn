@@ -1,0 +1,97 @@
+---
+source: crates/cairn-core/tests/squash_fixtures.rs
+assertion_line: 104
+expression: "run_squash(\"npm_test.txt\", &SquashConfig::default())"
+---
+> @scope/pkg@1.0.0 test
+> jest
+
+PASS  src/foo.test.ts
+PASS  src/bar.test.ts
+FAIL  src/baz.test.ts
+  baz
+    × test 1 (5 ms)
+    × test 2 (3 ms)
+    × test 3 (2 ms)
+
+  ● baz › test 1
+
+    expect(received).toBe(expected)
+
+    Expected: 1
+    Received: 0
+
+      at Object.<anonymous> (src/baz.test.ts:10:25)
+      at Object.asyncJestTest (node_modules/jest-jasmine2/build/jasmineAsyncInstall.js:100:37)
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+      at node_modules/jest-jasmine2/build/queueRunner.js:84:21
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+
+  ● baz › test 2
+
+    expect(received).toBe(expected)
+
+    Expected: 2
+    Received: 1
+
+      at Object.<anonymous> (src/baz.test.ts:20:25)
+      at Object.asyncJestTest (node_modules/jest-jasmine2/build/jasmineAsyncInstall.js:100:37)
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+      at node_modules/jest-jasmine2/build/queueRunner.js:84:21
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+
+  ● baz › test 3
+
+    expect(received).toBe(expected)
+
+    Expected: true
+    Received: false
+
+      at Object.<anonymous> (src/baz.test.ts:30:25)
+      at Object.asyncJestTest (node_modules/jest-jasmine2/build/jasmineAsyncInstall.js:100:37)
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+      at node_modules/jest-jasmine2/build/queueRunner.js:84:21
+      at node_modules/jest-jasmine2/build/queueRunner.js:47:12
+      at new Promise (<anonymous>)
+      at mapper (node_modules/jest-jasmine2/build/queueRunner.js:30:19)
+
+  console.log
+    debug output line 1
+
+      at src/baz.test.ts:8:13
+
+  console.log
+    debug output line 2
+
+      at src/baz.test.ts:9:13
+
+  console.log
+    debug output line 3
+
+      at src/baz.test.ts:10:13
+
+  console.log
+    debug output line 1
+
+      at src/baz.test.ts:18:13
+
+  console.log
+    debug output line 2
+
+      at src/baz.test.ts:19:13
+
+Test Suites: 1 failed, 2 passed, 3 total
+Tests:       3 failed, 17 passed, 20 total
+Snapshots:   0 total
+Time:        2.345 s
+Ran all test suites.
