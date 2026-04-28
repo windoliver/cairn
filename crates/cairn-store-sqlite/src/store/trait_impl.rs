@@ -74,25 +74,25 @@ impl MemoryStore for SqliteMemoryStore {
         self.do_versions(target).await.map_err(Into::into)
     }
 
-    async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+    async fn put_edge(&self, edge: &Edge) -> Result<(), StoreError> {
         if self.conn.is_none() {
             return not_initialized("put_edge");
         }
-        not_implemented("put_edge", 46)
+        self.do_put_edge(edge).await.map_err(Into::into)
     }
 
-    async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+    async fn remove_edge(&self, key: &EdgeKey) -> Result<bool, StoreError> {
         if self.conn.is_none() {
             return not_initialized("remove_edge");
         }
-        not_implemented("remove_edge", 46)
+        self.do_remove_edge(key).await.map_err(Into::into)
     }
 
-    async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+    async fn neighbours(&self, id: &RecordId, dir: EdgeDir) -> Result<Vec<Edge>, StoreError> {
         if self.conn.is_none() {
             return not_initialized("neighbours");
         }
-        not_implemented("neighbours", 46)
+        self.do_neighbours(id, dir).await.map_err(Into::into)
     }
 
     async fn search_keyword(

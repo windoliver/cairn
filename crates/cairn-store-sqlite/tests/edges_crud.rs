@@ -98,5 +98,8 @@ async fn updates_edge_immutable_via_remove_returns_error() {
         })
         .await
         .expect("remove");
-    assert!(removed, "updates-edge DELETE is allowed at schema 0001 today");
+    assert!(
+        removed,
+        "updates-edge DELETE is allowed at schema 0001 today"
+    );
 }
