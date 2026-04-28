@@ -30,6 +30,7 @@ pub mod intent;
 pub mod provenance;
 pub mod record;
 pub mod scope;
+pub mod target_id;
 pub mod taxonomy;
 pub mod timestamp;
 
@@ -48,5 +49,6 @@ pub use intent::VerifiedSignedIntent;
 pub use provenance::Provenance;
 pub use record::MemoryRecord;
 pub use scope::ScopeTuple;
+pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use timestamp::Rfc3339Timestamp;
