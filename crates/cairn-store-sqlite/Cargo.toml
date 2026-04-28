@@ -36,4 +36,4 @@ rusqlite = { workspace = true }
 workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["sha2"]
+ignored = ["sha2", "blake3", "tracing"]
