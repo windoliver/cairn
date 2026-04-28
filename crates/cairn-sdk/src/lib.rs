@@ -40,7 +40,9 @@ pub use error::SdkError;
 pub use transport::{Sdk, Transport};
 
 use cairn_core::generated::common::Ulid;
-use cairn_core::generated::envelope::{ResponsePolicyTrace, ResponseStatus, ResponseVerb};
+use cairn_core::generated::envelope::{
+    ResponsePolicyTrace, ResponseStatus, ResponseTarget, ResponseVerb,
+};
 
 /// Successful verb response.
 ///
@@ -58,6 +60,12 @@ pub struct VerbResponse<D> {
     pub policy_trace: Vec<ResponsePolicyTrace>,
     /// Verb the response is for. Always matches the SDK fn called.
     pub verb: ResponseVerb,
+    /// Retrieve-only discriminator echoing the requested target (record,
+    /// session, turn, folder, scope, profile). The wire envelope requires
+    /// this field on every committed `verb=retrieve` response and forbids
+    /// it elsewhere; SDK retrieve responses populate it from the
+    /// [`generated::verbs::retrieve::RetrieveArgs`] variant.
+    pub target: Option<ResponseTarget>,
     /// Typed verb-specific data payload.
     pub data: D,
 }
@@ -65,16 +73,16 @@ pub struct VerbResponse<D> {
 impl<D: serde::Serialize> serde::Serialize for VerbResponse<D> {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct as _;
-        // Field count matches the canonical envelope's success arm
-        // (`contract`, `status`, `verb`, `operation_id`, `policy_trace`,
-        // `data`). Errors and the retrieve-only `target` discriminator are
-        // intentionally omitted on the success path.
-        let mut s = ser.serialize_struct("Response", 6)?;
+        let len = 6 + usize::from(self.target.is_some());
+        let mut s = ser.serialize_struct("Response", len)?;
         s.serialize_field("contract", CONTRACT)?;
         s.serialize_field("status", &ResponseStatus::Committed)?;
         s.serialize_field("verb", &self.verb)?;
         s.serialize_field("operation_id", &self.operation_id)?;
         s.serialize_field("policy_trace", &self.policy_trace)?;
+        if let Some(target) = &self.target {
+            s.serialize_field("target", target)?;
+        }
         s.serialize_field("data", &self.data)?;
         s.end()
     }

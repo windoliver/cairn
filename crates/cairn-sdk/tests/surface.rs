@@ -70,6 +70,7 @@ fn verb_response_serializes_as_canonical_envelope() {
         operation_id: ulid(),
         policy_trace: vec![],
         verb: ResponseVerb::Ingest,
+        target: None,
         data: IngestData {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
@@ -84,6 +85,26 @@ fn verb_response_serializes_as_canonical_envelope() {
         assert!(obj.contains_key(k), "envelope missing {k}");
     }
     assert!(obj["data"].is_object());
+    // Non-retrieve verbs must NOT emit `target` (schema rejects it elsewhere).
+    assert!(!obj.contains_key("target"));
+}
+
+#[test]
+fn verb_response_emits_target_for_retrieve_envelope() {
+    // Wire envelope requires `target` on every committed verb=retrieve
+    // response and forbids it elsewhere — see Response.target in
+    // cairn_core::generated::envelope.
+    use cairn_sdk::generated::envelope::ResponseTarget;
+    let resp: VerbResponse<serde_json::Value> = VerbResponse {
+        operation_id: ulid(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Retrieve,
+        target: Some(ResponseTarget::Record),
+        data: serde_json::json!({}),
+    };
+    let value = serde_json::to_value(&resp).expect("serializes");
+    assert_eq!(value["verb"].as_str(), Some("retrieve"));
+    assert_eq!(value["target"].as_str(), Some("record"));
 }
 
 #[test]

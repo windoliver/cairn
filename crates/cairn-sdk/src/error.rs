@@ -69,12 +69,22 @@ pub enum SdkError {
     /// `ReplayDetected`, `NotFound`, `ConflictVersion`, etc. without
     /// parsing the human-readable message. New codes are additive — both
     /// `SdkError` and `ErrorCode` are `#[non_exhaustive]`.
+    ///
+    /// `data` carries the wire envelope's `error.data` payload verbatim
+    /// (e.g. `Unauthorized.required`, `NotFound.target`,
+    /// `ConflictVersion.expected/actual`, `ReplayDetected.operation_id`).
+    /// The schema is per-code; callers branch on `code` first, then read
+    /// the recovery-critical fields out of `data`.
     #[error("{code:?}: {message}")]
     Protocol {
         /// Typed wire error code.
         code: ErrorCode,
         /// Human-readable message; intended for logs, not dispatch.
         message: String,
+        /// Per-code structured payload from the wire envelope's
+        /// `error.data` field. `None` when the verb handler did not emit
+        /// one; a JSON object (per the schema) when it did.
+        data: Option<serde_json::Value>,
         /// Operation correlation ID for log lookup.
         operation_id: Ulid,
     },
