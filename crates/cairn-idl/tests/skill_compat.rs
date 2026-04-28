@@ -473,6 +473,39 @@ fn cli_validator_rejects_invalid_scope_via_relative_ref() {
 }
 
 #[test]
+fn cli_validator_rejects_empty_search_query_positional() {
+    // Round-4 finding 1: positional validation must enforce the full
+    // property schema, not just `pattern`. `search.query` declares
+    // `minLength: 1`, so an empty positional must fail compat.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: r#"cairn search --mode keyword """#.into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("empty search query positional must fail minLength");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_search_filters_with_internal_ref() {
+    // Round-4 finding 2: JSON-flag validator must preserve the owning
+    // verb's `$defs` so internal `#/$defs/<Name>` refs (e.g.,
+    // `search.filters` → `#/$defs/filter`) compile. A schema-valid
+    // payload must pass.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: r#"cairn search --mode keyword query --filters '{"field":"kind","op":"eq","value":"note"}'"#.into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("valid --filters payload must validate against internal $defs/filter");
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.

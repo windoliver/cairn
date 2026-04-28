@@ -196,6 +196,48 @@ fn verb_base_id(verb_def: &VerbDef) -> Option<String> {
         })
 }
 
+/// Pull the verb args schema's top-level `$defs` (if any) so JSON examples
+/// referencing internal `#/$defs/<Name>` refs can compile against a wrapper
+/// schema. Without this, validating `--filters '{...}'` for a property whose
+/// schema is `$ref: "#/$defs/filter"` would fail compilation even though the
+/// example is valid.
+fn verb_owner_defs(verb_def: &VerbDef) -> Option<serde_json::Value> {
+    let schema: serde_json::Value = serde_json::from_slice(&verb_def.args_schema_bytes).ok()?;
+    schema.get("$defs").cloned()
+}
+
+/// Build a self-contained validator schema by wrapping `prop_schema` with the
+/// owning verb file's `$id` and `$defs`. This lets a property whose body uses
+/// either internal (`#/$defs/...`) or relative (`../common/...`) `$ref`s
+/// compile and validate against the cross-file retriever.
+fn wrap_property_schema(
+    prop_schema: &serde_json::Value,
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut wrapper = serde_json::Map::new();
+    wrapper.insert(
+        "$schema".into(),
+        serde_json::Value::String("https://json-schema.org/draft/2020-12/schema".into()),
+    );
+    if let Some(id) = base_id {
+        wrapper.insert("$id".into(), serde_json::Value::String(id.to_string()));
+    }
+    if let Some(defs) = owner_defs {
+        wrapper.insert("$defs".into(), defs.clone());
+    }
+    if let Some(prop_obj) = prop_schema.as_object() {
+        for (k, v) in prop_obj {
+            // Don't let the property override the wrapper's `$defs` / `$id`.
+            if k == "$defs" || k == "$id" || k == "$schema" {
+                continue;
+            }
+            wrapper.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::Value::Object(wrapper)
+}
+
 /// Validate one CLI block against the IDL.
 ///
 /// Accepts any `cairn <verb> [flags]` line where `<verb>` is either a
@@ -295,6 +337,7 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
     };
 
     let base_id = verb_def.and_then(verb_base_id);
+    let owner_defs = verb_def.and_then(verb_owner_defs);
     let TokenScan {
         positional_count,
         used_field_names,
@@ -306,6 +349,7 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         &allowed_flags,
         &prop_schemas,
         base_id.as_deref(),
+        owner_defs.as_ref(),
     )?;
 
     if positional_count > positional_capacity {
@@ -318,21 +362,15 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         });
     }
 
-    // Validate each positional value against its property schema's `pattern`
-    // (if any) so a hand-written example like `cairn retrieve not-a-ulid`
-    // fails the gate the same way the runtime would. ALL_CAPS placeholders
-    // bypass — the user is meant to substitute their own value.
-    if !positional_values.is_empty()
-        // Pick the first command that declares a positional — for tagged-union
-        // verbs every variant with a positional shares its schema field name
-        // (e.g., `id` for retrieve.record), so any one is sufficient.
-        && let Some(pos_field) = cmds.iter().find_map(|c| c.positional.as_ref())
-        && let Some(prop) = prop_schemas.get(&pos_field.name)
-    {
-        for value in &positional_values {
-            validate_positional_value(verb, &pos_field.name, value, prop, source_line)?;
-        }
-    }
+    validate_positional_values(
+        verb,
+        &cmds,
+        &prop_schemas,
+        &positional_values,
+        base_id.as_deref(),
+        owner_defs.as_ref(),
+        source_line,
+    )?;
 
     // Tagged-union verbs (`retrieve`, `forget`) carry multiple variants; clap
     // models the discriminator as an `ArgGroup` requiring exactly one.
@@ -482,17 +520,59 @@ fn single_required_spec(verb_def: &VerbDef) -> VariantSpec {
     }
 }
 
-/// Validate a positional argument value against its property schema. Skips
-/// `ALL_CAPS` placeholders. For array-typed positionals (e.g., `summarize`'s
-/// `record_ids`) the per-item schema (`items`) is consulted. For now we only
-/// enforce `pattern` since cross-file `$ref` resolution would require a
-/// schema retriever — the gate will gain richer checks once such examples
-/// exist in SKILL.md.
+/// Validate every positional value collected from one CLI line against the
+/// owning command's positional schema. ALL-CAPS placeholders bypass — the
+/// user is meant to substitute their own value. Pick the first command that
+/// declares a positional: tagged-union verbs share the field name across
+/// variants (e.g., `id` for `retrieve.record`), so any one is sufficient.
+fn validate_positional_values(
+    verb: &str,
+    cmds: &[&CliCommand],
+    prop_schemas: &BTreeMap<String, serde_json::Value>,
+    positional_values: &[String],
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
+    source_line: usize,
+) -> Result<(), CompatError> {
+    if positional_values.is_empty() {
+        return Ok(());
+    }
+    let Some(pos_field) = cmds.iter().find_map(|c| c.positional.as_ref()) else {
+        return Ok(());
+    };
+    let Some(prop) = prop_schemas.get(&pos_field.name) else {
+        return Ok(());
+    };
+    for value in positional_values {
+        validate_positional_value(
+            verb,
+            &pos_field.name,
+            value,
+            prop,
+            base_id,
+            owner_defs,
+            source_line,
+        )?;
+    }
+    Ok(())
+}
+
+/// Validate a positional argument value against its (per-item) property
+/// schema. Skips `ALL_CAPS` placeholders. For array-typed positionals (e.g.,
+/// `summarize`'s `record_ids`) the per-item schema (`items`) is consulted.
+///
+/// Goes through the full JSON Schema validator with the owning verb's `$id`
+/// and `$defs` wrapped in so that constraints like `minLength`, `enum`,
+/// numeric bounds, structural requirements, and any `$ref` (cross-file or
+/// internal) are all enforced — not just `pattern`. Without this, a
+/// schema-invalid example like `cairn search ""` would slip past the gate.
 fn validate_positional_value(
     verb: &str,
     field: &str,
     value: &str,
     prop_schema: &serde_json::Value,
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
     line: usize,
 ) -> Result<(), CompatError> {
     if is_placeholder(value) {
@@ -504,27 +584,22 @@ fn validate_positional_value(
         } else {
             prop_schema
         };
-    let resolved_pattern = item_schema
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            // Resolve cross-file primitive `$ref`s (`Ulid`, `Identity`, …)
-            // by reading patterns from the embedded `common/primitives.json`.
-            // See `primitive_ref_pattern` for the lookup mechanism.
-            let r = item_schema
-                .get("$ref")
-                .and_then(serde_json::Value::as_str)?;
-            primitive_ref_pattern(r)
-        });
-    if let Some(pattern) = resolved_pattern
-        && let Ok(re) = regex::Regex::new(&pattern)
-        && !re.is_match(value)
-    {
+    let wrapper = wrap_property_schema(item_schema, base_id, owner_defs);
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(SchemaDirRetriever)
+        .build(&wrapper)
+        .map_err(|e| CompatError::Malformed {
+            kind: "cli",
+            detail: format!("verb `{verb}` positional `{field}` schema compile: {e}"),
+            line,
+        })?;
+    // CLI positional values arrive as strings; validate them as JSON strings.
+    let json_value = serde_json::Value::String(value.to_string());
+    if let Err(err) = validator.validate(&json_value) {
         return Err(CompatError::Malformed {
             kind: "cli",
             detail: format!(
-                "verb `{verb}` positional `{field}` value `{value}` does not match pattern /{pattern}/"
+                "verb `{verb}` positional `{field}` value `{value}` violates schema: {err}"
             ),
             line,
         });
@@ -628,6 +703,7 @@ fn validate_flag_value(
     source: &str,
     prop_schema: Option<&serde_json::Value>,
     base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
     line: usize,
 ) -> Result<(), CompatError> {
     if is_placeholder(value) {
@@ -673,7 +749,7 @@ fn validate_flag_value(
         // cross-file retriever wired in. A non-JSON value or one that
         // misses required narrowing fails compat the way the runtime
         // would.
-        check_json_flag_value(value, prop, base_id, &bad)?;
+        check_json_flag_value(value, prop, base_id, owner_defs, &bad)?;
     }
     Ok(())
 }
@@ -722,30 +798,17 @@ fn check_json_flag_value(
     value: &str,
     prop_schema: &serde_json::Value,
     base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
     bad: &dyn Fn(String) -> CompatError,
 ) -> Result<(), CompatError> {
     let parsed: serde_json::Value =
         serde_json::from_str(value).map_err(|e| bad(format!("not valid JSON: {e}")))?;
-    // Wrap the property schema with the owning verb's `$id` so any relative
-    // `$ref` (e.g., scope's `../common/scope_filter.json`) resolves through
-    // the retriever. Without the base URI those refs have no anchor and
-    // schema compilation fails on real `--scope '{...}'` examples.
-    let schema = if let Some(id) = base_id {
-        let mut wrapper = serde_json::json!({
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "$id": id,
-        });
-        if let Some(obj) = wrapper.as_object_mut()
-            && let Some(prop_obj) = prop_schema.as_object()
-        {
-            for (k, v) in prop_obj {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
-        wrapper
-    } else {
-        prop_schema.clone()
-    };
+    // Wrap the property schema with the owning verb's `$id` and `$defs` so
+    // both relative cross-file refs (`../common/...`) and internal refs
+    // (`#/$defs/<Name>`) resolve. Dropping `$defs` here previously broke
+    // valid examples like `cairn search --filters '{...}'` whose property
+    // is `$ref: "#/$defs/filter"`.
+    let schema = wrap_property_schema(prop_schema, base_id, owner_defs);
     let validator = jsonschema::draft202012::options()
         .with_retriever(SchemaDirRetriever)
         .build(&schema)
@@ -936,6 +999,7 @@ fn scan_tokens<'a>(
     allowed_flags: &BTreeMap<&str, &CliFlag>,
     prop_schemas: &BTreeMap<String, serde_json::Value>,
     base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
@@ -1016,7 +1080,7 @@ fn scan_tokens<'a>(
                         .push(value);
                 } else {
                     let prop = field_name.and_then(|f| prop_schemas.get(f));
-                    validate_flag_value(name, &value, src, prop, base_id, source_line)?;
+                    validate_flag_value(name, &value, src, prop, base_id, owner_defs, source_line)?;
                 }
             }
         } else if !tok.starts_with('-') || tok == "-" {
@@ -1040,6 +1104,7 @@ fn scan_tokens<'a>(
             &flag.value_source,
             prop,
             base_id,
+            owner_defs,
             source_line,
         )?;
     }
