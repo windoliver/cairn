@@ -207,6 +207,13 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
                 build(r"\bAIza[0-9A-Za-z_-]{35}\b"),
             ),
             (
+                // HashiCorp Vault tokens. Service tokens prefix
+                // `hvs.`, batch tokens `hvb.`, root tokens `hvr.`.
+                // Stable namespace, opaque base62 body.
+                RedactionTag::OpaqueApiKey,
+                build(r"\bhv[srb]\.[A-Za-z0-9_-]{20,255}\b"),
+            ),
+            (
                 RedactionTag::Email,
                 build(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}\b"),
             ),
@@ -766,6 +773,31 @@ mod tests {
             "SAS leaked: {}",
             r.text
         );
+    }
+
+    #[test]
+    fn redacts_hashicorp_vault_service_token() {
+        // Round 9 codex: bare `hvs.<opaque>` Vault tokens in logs or
+        // pasted output had no matching detector unless a `token=`
+        // prefix happened to be there too.
+        let token = "hvs.CAESILe6BsXg-fakeVaultBodyABCDEFGHIJklmnopqrstuvwxYZ0123";
+        let r = redact(&format!("logged in with {token} successfully"));
+        assert!(!r.spans.is_empty(), "no span for hvs. Vault token");
+        assert!(!r.text.contains(token), "Vault token leaked: {}", r.text);
+    }
+
+    #[test]
+    fn redacts_hashicorp_vault_batch_and_root_tokens() {
+        for prefix in ["hvb", "hvr"] {
+            let token = format!("{prefix}.CAESILe6BsXg-fakeVaultBodyABCDEFGHIJklmnopqrstuvwxYZ");
+            let r = redact(&format!("token: {token}"));
+            assert!(!r.spans.is_empty(), "no span for {prefix}. token");
+            assert!(
+                !r.text.contains(&token),
+                "{prefix}. token leaked: {}",
+                r.text
+            );
+        }
     }
 
     #[test]
