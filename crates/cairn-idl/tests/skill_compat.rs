@@ -361,6 +361,26 @@ fn cli_validator_accepts_valid_ulid_positional() {
 }
 
 #[test]
+fn json_validator_resolves_cross_file_primitive_refs() {
+    // `summarize.Args` references the Ulid primitive in
+    // `common/primitives.json`. The cross-file `$ref` must resolve via the
+    // schema retriever (round-15 follow-up), and a non-Ulid value must fail
+    // pattern validation. A bare `{}` would also fail required, but using a
+    // real Ulid-shaped key isolates the retriever path.
+    let block = CodeBlock {
+        lang: "json".into(),
+        body: r#"{"record_ids": ["not-a-ulid"]}"#.into(),
+        line: 5,
+    };
+    let err = validate_json_block(&block, &doc(), "summarize")
+        .expect_err("invalid Ulid in summarize payload must fail via cross-file $ref");
+    assert!(
+        matches!(err, CompatError::SchemaMismatch { line: 5, ref verb, .. } if verb == "summarize"),
+        "expected SchemaMismatch for summarize at line 5, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.

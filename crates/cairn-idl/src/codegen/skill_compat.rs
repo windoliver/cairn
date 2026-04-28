@@ -489,14 +489,13 @@ fn validate_positional_value(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            // Inline-resolve well-known cross-file `$ref`s for primitive types
-            // so positional Ulids (`retrieve.id`, `summarize.record_ids`) get
-            // pattern-checked without standing up a full schema retriever.
-            // Extend this table as new primitive refs appear in positionals.
+            // Resolve cross-file primitive `$ref`s (`Ulid`, `Identity`, …)
+            // by reading patterns from the embedded `common/primitives.json`.
+            // See `primitive_ref_pattern` for the lookup mechanism.
             let r = item_schema
                 .get("$ref")
                 .and_then(serde_json::Value::as_str)?;
-            primitive_ref_pattern(r).map(str::to_string)
+            primitive_ref_pattern(r)
         });
     if let Some(pattern) = resolved_pattern
         && let Ok(re) = regex::Regex::new(&pattern)
@@ -513,14 +512,64 @@ fn validate_positional_value(
     Ok(())
 }
 
-/// Map a well-known cross-file `$ref` (`../common/primitives.json#/$defs/X`)
-/// to its inline regex pattern. Returns `None` for refs we don't recognise so
-/// the caller can fall through to the no-pattern path.
-fn primitive_ref_pattern(reference: &str) -> Option<&'static str> {
+/// Resolve a cross-file `$ref` (`../common/primitives.json#/$defs/<Name>`)
+/// to the `pattern` declared on that def, by reading the embedded
+/// `common/primitives.json` and any future common-defs file at compile time.
+/// Returns `None` for refs we can't resolve so the caller can fall through
+/// to the no-pattern path.
+///
+/// Generalising past the `Ulid`-only Round-15 hack: all primitive patterns
+/// flow from the IDL JSON, not from a hand-maintained Rust table, so adding
+/// a new primitive in `common/primitives.json` is automatically picked up
+/// by the compat gate without a code change.
+fn primitive_ref_pattern(reference: &str) -> Option<String> {
+    static PRIMITIVES_JSON: &str = include_str!("../../schema/common/primitives.json");
+    static PATTERNS: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    let map = PATTERNS.get_or_init(|| {
+        let mut out = BTreeMap::new();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(PRIMITIVES_JSON)
+            && let Some(defs) = v.get("$defs").and_then(serde_json::Value::as_object)
+        {
+            for (name, def) in defs {
+                if let Some(pat) = def.get("pattern").and_then(serde_json::Value::as_str) {
+                    out.insert(name.clone(), pat.to_string());
+                }
+            }
+        }
+        out
+    });
     let suffix = reference.rsplit('/').next()?;
-    match suffix {
-        "Ulid" => Some(r"^[0-9A-HJKMNP-TV-Z]{26}$"),
-        _ => None,
+    map.get(suffix).cloned()
+}
+
+/// `referencing::Retrieve` impl that resolves cross-file `$ref`s by mapping
+/// the `cairn.dev/schema/cairn.mcp.v1/...` URI back to a path under the
+/// crate's compile-time `SCHEMA_DIR`. Without this any SKILL.md JSON example
+/// that touches a primitive (`Ulid`, `Identity`, …) would fail to compile.
+#[derive(Debug)]
+struct SchemaDirRetriever;
+
+impl referencing::Retrieve for SchemaDirRetriever {
+    fn retrieve(
+        &self,
+        uri: &referencing::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        // Verb files declare `$id: https://cairn.dev/schema/cairn.mcp.v1/<rel>`.
+        // Strip the well-known prefix and read the matching file from the
+        // crate's schema bundle.
+        const PREFIX: &str = "https://cairn.dev/schema/cairn.mcp.v1/";
+        let raw = uri.as_str();
+        let rel = raw.strip_prefix(PREFIX).ok_or_else(|| {
+            format!(
+                "skill-compat retriever: unexpected URI `{raw}` (only `{PREFIX}*` is supported)"
+            )
+        })?;
+        let path = std::path::Path::new(crate::SCHEMA_DIR).join(rel);
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("skill-compat retriever: read `{}`: {e}", path.display()))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("skill-compat retriever: parse `{}`: {e}", path.display()))?;
+        Ok(value)
     }
 }
 
@@ -1282,8 +1331,10 @@ pub fn validate_json_block(
     {
         obj.insert("$id".to_string(), id);
     }
-    let validator =
-        jsonschema::draft202012::new(&schema).map_err(|e| CompatError::SchemaMismatch {
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(SchemaDirRetriever)
+        .build(&schema)
+        .map_err(|e| CompatError::SchemaMismatch {
             verb: verb.to_string(),
             detail: format!("schema compile: {e}"),
             line: block.line,

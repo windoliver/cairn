@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 clap = { workspace = true }
 tempfile = { workspace = true }
 jsonschema = { workspace = true }
+referencing = { workspace = true }
 regex = { workspace = true }
 
 [dev-dependencies]
