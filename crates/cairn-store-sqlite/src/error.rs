@@ -10,11 +10,6 @@ pub enum StoreError {
     #[error("sqlite error")]
     Sqlite(#[from] rusqlite::Error),
 
-    /// Background `tokio_rusqlite` worker error (channel closed, panic in
-    /// the worker thread, etc.).
-    #[error("tokio_rusqlite worker error")]
-    Worker(#[from] tokio_rusqlite::Error),
-
     /// Migration runner failure.
     #[error("migration error")]
     Migration(#[from] rusqlite_migration::Error),
@@ -23,8 +18,60 @@ pub enum StoreError {
     #[error("vault path error: {0}")]
     VaultPath(String),
 
-    /// On-disk schema diverged from the binary's expected manifest
-    /// (missing trigger, mutated migration row, extra object, etc.).
+    /// On-disk schema diverged from the binary's expected manifest.
     #[error("schema drift: {0}")]
     SchemaDrift(String),
+
+    /// Record id was looked up but not present (or only present as a
+    /// tombstoned row that callers must not see via `get`).
+    #[error("record not found: {id}")]
+    NotFound {
+        /// The record id that was not found.
+        id: String,
+    },
+
+    /// Method requires a capability the store does not advertise.
+    /// `what` is the cap flag name (`"fts"`, `"vector"`, `"graph_edges"`,
+    /// `"transactions"`).
+    #[error("capability unavailable: {what}")]
+    CapabilityUnavailable {
+        /// The capability flag name (e.g. `"fts"`, `"vector"`,
+        /// `"graph_edges"`, `"transactions"`).
+        what: &'static str,
+    },
+
+    /// FTS5 query parse error. Surfaced as a separate variant so the
+    /// verb layer can return user-actionable errors instead of generic
+    /// SQL failures.
+    #[error("FTS5 query parse error: {message}")]
+    FtsQuery {
+        /// Human-readable parse error message from the FTS5 engine.
+        message: String,
+    },
+
+    /// Background `tokio_rusqlite` worker error (channel closed, panic
+    /// in the worker thread, etc.).
+    #[error("tokio_rusqlite worker error")]
+    Worker(#[from] tokio_rusqlite::Error),
+
+    /// Record JSON ↔ struct codec error.
+    #[error("record codec error")]
+    Codec(#[from] serde_json::Error),
+
+    /// Invariant violation. Indicates a bug in the store, not a user
+    /// error. Logged and surfaced.
+    #[error("invariant violated: {what}")]
+    Invariant {
+        /// Description of the violated invariant.
+        what: String,
+    },
 }
+
+// Note: the plan specifies an explicit
+// `impl From<StoreError> for Box<dyn std::error::Error + Send + Sync + 'static>`,
+// but the standard library already provides a blanket
+// `impl<E: Error + Send + Sync + 'a> From<E> for Box<dyn Error + Send + Sync + 'a>`
+// which would conflict (E0119). Since `StoreError: Error + Send + Sync + 'static`
+// via `thiserror`, `?`-propagation into the trait alias
+// `Box<dyn Error + Send + Sync + 'static>` works automatically through the
+// blanket impl, satisfying the plan's intent.
