@@ -319,6 +319,47 @@ fn cli_validator_accepts_uppercase_placeholder_for_enum() {
 }
 
 #[test]
+fn cli_validator_accepts_quoted_positional_value() {
+    // `search` takes an optional positional `query`; a quoted multi-word
+    // string must remain one positional, not split into two.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search \"project status\"".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("quoted positional must not be split into multiple tokens");
+}
+
+#[test]
+fn cli_validator_accepts_retrieve_profile_agent_branch() {
+    // ArgsProfile's anyOf permits either user OR agent — both branches
+    // should validate, not just the first.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --profile --agent AGENT".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("retrieve --profile --agent must validate via second anyOf branch");
+}
+
+#[test]
+fn cli_validator_rejects_invalid_u8_value() {
+    // retrieve --depth is u8; non-integer value must fail.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --folder PATH --depth nope".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("non-integer u8 must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn live_skill_md_passes_compat_checks() {
     let md = live_skill_md();
     let d = doc();

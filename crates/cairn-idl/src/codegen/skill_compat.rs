@@ -206,7 +206,8 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
 
 /// Validate one whitespace-tokenised `cairn …` line.
 fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(), CompatError> {
-    let mut tokens = line.split_whitespace();
+    let owned = shell_split(line);
+    let mut tokens = owned.iter().map(String::as_str);
     let _ = tokens.next(); // "cairn"
     let Some(verb) = tokens.next() else {
         return Err(CompatError::Malformed {
@@ -327,12 +328,55 @@ fn validate_flag_value(
         if !allowed.contains(value) {
             return Err(bad(format!("value `{value}` is not in {{{inner}}}")));
         }
-    } else if (source == "u32" || source == "u64") && value.parse::<u64>().is_err() {
+    } else if is_unsigned_int_source(source) && value.parse::<u64>().is_err() {
         return Err(bad(format!(
             "value `{value}` is not a non-negative integer"
         )));
+    } else if is_signed_int_source(source) && value.parse::<i64>().is_err() {
+        return Err(bad(format!("value `{value}` is not an integer")));
     }
     Ok(())
+}
+
+fn is_unsigned_int_source(s: &str) -> bool {
+    matches!(s, "u8" | "u16" | "u32" | "u64" | "usize")
+}
+
+fn is_signed_int_source(s: &str) -> bool {
+    matches!(s, "i8" | "i16" | "i32" | "i64" | "isize" | "integer")
+}
+
+/// Shell-aware tokenizer for one CLI example line. Handles single- and
+/// double-quoted strings and backslash-escaped characters; otherwise behaves
+/// like `split_whitespace`. Without this `cairn search "project status"`
+/// would parse as two positionals instead of one.
+fn shell_split(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    buf.push(next);
+                }
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ws if !in_single && !in_double && ws.is_whitespace() => {
+                if !buf.is_empty() {
+                    out.push(std::mem::take(&mut buf));
+                }
+            }
+            _ => buf.push(c),
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
 }
 
 /// Walk the post-verb tokens, returning the positional count and the set of
@@ -409,8 +453,10 @@ fn scan_tokens<'a>(
 /// Count how many variants of a tagged-union verb the example "selects".
 ///
 /// A variant is selected when:
-/// - every one of its schema-required fields is satisfied (long-flag or
-///   positional), AND
+/// - every base required field (post const-strip + discriminator-flag) is
+///   satisfied (long-flag or positional), AND
+/// - if `anyOf` branches exist, *at least one* branch is fully satisfied
+///   (disjunctive: `ArgsProfile` accepts either `--user` or `--agent`), AND
 /// - every flag the example used belongs to this variant's own flag set
 ///   (so a strict superset like `--session --turn` selects only `ArgsTurn`,
 ///   not also `ArgsSession`), AND
@@ -421,34 +467,44 @@ fn count_matching_variants(
     used_field_names: &BTreeSet<String>,
     positional_count: usize,
 ) -> usize {
-    let required_per_variant = variant_required_fields(verb_def, cmds);
+    let specs = variant_required_specs(verb_def, cmds);
     cmds.iter()
         .enumerate()
         .filter(|(idx, cmd)| {
-            let required = &required_per_variant[*idx];
-            if required.is_empty() {
+            let spec = &specs[*idx];
+            if spec.base.is_empty() && spec.any_of.is_empty() {
                 return false;
             }
             let variant_flag_names: BTreeSet<&str> =
                 cmd.flags.iter().map(|f| f.name.as_str()).collect();
             let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
 
-            // 1. All required fields satisfied.
-            let required_ok = required.iter().all(|field| {
+            let satisfied = |field: &String| {
                 used_field_names.contains(field)
                     || (positional_count > 0 && positional_name == Some(field.as_str()))
-            });
-            if !required_ok {
+            };
+
+            // 1. Base required fields all satisfied.
+            if !spec.base.iter().all(satisfied) {
                 return false;
             }
-            // 2. No foreign flags — every used flag belongs to this variant.
-            let no_foreign_flags = used_field_names
+            // 2. If anyOf branches exist, at least one must be fully satisfied.
+            if !spec.any_of.is_empty()
+                && !spec
+                    .any_of
+                    .iter()
+                    .any(|branch| branch.iter().all(satisfied))
+            {
+                return false;
+            }
+            // 3. No foreign flags — every used flag belongs to this variant.
+            if !used_field_names
                 .iter()
-                .all(|f| variant_flag_names.contains(f.as_str()));
-            if !no_foreign_flags {
+                .all(|f| variant_flag_names.contains(f.as_str()))
+            {
                 return false;
             }
-            // 3. Positional count must fit this variant.
+            // 4. Positional count must fit this variant.
             let positional_capacity = match &cmd.positional {
                 Some(p) if p.repeatable => usize::MAX,
                 Some(_) => 1,
@@ -457,6 +513,15 @@ fn count_matching_variants(
             positional_count <= positional_capacity
         })
         .count()
+}
+
+/// Per-variant required-field decomposition: `base` is the schema-required
+/// set after stripping const discriminators (and lifting the discriminator
+/// flag); `any_of` is the optional set of disjunctive branches.
+#[derive(Debug, Default)]
+pub(crate) struct VariantSpec {
+    pub base: BTreeSet<String>,
+    pub any_of: Vec<BTreeSet<String>>,
 }
 
 /// Pull `required: [...]` from a JSON-Schema object, dropping any field whose
@@ -519,66 +584,53 @@ pub(crate) fn discriminator_const(schema: &serde_json::Value) -> Option<String> 
     None
 }
 
-/// For a tagged-union verb, return the schema-required field set per
-/// `CliCommand` variant in `cmds` order. Discriminator fields (whose schema
-/// is a `const`) are stripped, then augmented with:
-/// - the variant's discriminator flag, when its `const` value matches a flag
-///   on this `CliCommand` (e.g., `target: "profile"` → `--profile`); and
-/// - the first `anyOf` branch's required fields, so variants like
-///   `ArgsProfile` (`anyOf: [{required:["user"]},{required:["agent"]}]`) are
-///   matched on at least one valid combination.
-fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTreeSet<String>> {
-    // Best-effort schema parse; if anything is off, return empty sets so the
-    // matcher falls back to "no variant selected" (and therefore rejects).
+/// For a tagged-union verb, return per-variant `VariantSpec` (base + anyOf
+/// branches) in `cmds` order. Discriminator fields (whose schema is a
+/// `const`) are stripped from `base`, and the variant's discriminator flag
+/// is lifted in when its `const` value matches a flag on this `CliCommand`
+/// (e.g., `target: "profile"` → `--profile`).
+pub(crate) fn variant_required_specs(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<VariantSpec> {
+    let empty_specs = || (0..cmds.len()).map(|_| VariantSpec::default()).collect();
     let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
     else {
-        return vec![BTreeSet::new(); cmds.len()];
+        return empty_specs();
     };
     let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) else {
-        return vec![BTreeSet::new(); cmds.len()];
+        return empty_specs();
     };
     let Some(one_of) = defs
         .get("Args")
         .and_then(|a| a.get("oneOf"))
         .and_then(serde_json::Value::as_array)
     else {
-        return vec![BTreeSet::new(); cmds.len()];
+        return empty_specs();
     };
 
     let mut out = Vec::with_capacity(cmds.len());
     for (idx, entry) in one_of.iter().enumerate() {
-        let Some(ref_path) = entry.get("$ref").and_then(serde_json::Value::as_str) else {
-            out.push(BTreeSet::new());
+        let Some(variant_schema) = entry
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|p| p.strip_prefix("#/$defs/"))
+            .and_then(|name| defs.get(name))
+        else {
+            out.push(VariantSpec::default());
             continue;
         };
-        let Some(name) = ref_path.strip_prefix("#/$defs/") else {
-            out.push(BTreeSet::new());
-            continue;
-        };
-        let Some(variant_schema) = defs.get(name) else {
-            out.push(BTreeSet::new());
-            continue;
-        };
-        let mut required = required_excluding_const(variant_schema);
-        // Lift the discriminator into required when its const value matches a
-        // CLI flag on this variant — that's how shapes like ArgsProfile select
+        let mut base = required_excluding_const(variant_schema);
+        // Lift the discriminator into base when its const value matches a CLI
+        // flag on this variant — that's how shapes like ArgsProfile select
         // themselves on the command line (`--profile ...`).
         if let Some(disc) = discriminator_const(variant_schema)
             && let Some(cmd) = cmds.get(idx)
             && let Some(flag) = cmd.flags.iter().find(|f| f.long == disc || f.name == disc)
         {
-            required.insert(flag.name.clone());
+            base.insert(flag.name.clone());
         }
-        // For `anyOf: [{required:[…]}, …]` constraints (ArgsProfile), pull in
-        // the first branch so the matcher and the example emitter agree on a
-        // canonical satisfying combination.
-        if let Some(first) = any_of_required_branches(variant_schema).into_iter().next() {
-            required.extend(first);
-        }
-        out.push(required);
+        let any_of = any_of_required_branches(variant_schema);
+        out.push(VariantSpec { base, any_of });
     }
-    // Pad / truncate to match cmds length so the index map is stable.
-    out.resize(cmds.len(), BTreeSet::new());
+    out.resize_with(cmds.len(), VariantSpec::default);
     out
 }
 
