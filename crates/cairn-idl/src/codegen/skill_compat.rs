@@ -285,6 +285,7 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
     let TokenScan {
         positional_count,
         used_field_names,
+        positional_values,
     } = scan_tokens(verb, source_line, tokens, &allowed_flags, &prop_schemas)?;
 
     if positional_count > positional_capacity {
@@ -295,6 +296,22 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
             ),
             line: source_line,
         });
+    }
+
+    // Validate each positional value against its property schema's `pattern`
+    // (if any) so a hand-written example like `cairn retrieve not-a-ulid`
+    // fails the gate the same way the runtime would. ALL_CAPS placeholders
+    // bypass — the user is meant to substitute their own value.
+    if !positional_values.is_empty()
+        // Pick the first command that declares a positional — for tagged-union
+        // verbs every variant with a positional shares its schema field name
+        // (e.g., `id` for retrieve.record), so any one is sufficient.
+        && let Some(pos_field) = cmds.iter().find_map(|c| c.positional.as_ref())
+        && let Some(prop) = prop_schemas.get(&pos_field.name)
+    {
+        for value in &positional_values {
+            validate_positional_value(verb, &pos_field.name, value, prop, source_line)?;
+        }
     }
 
     // Tagged-union verbs (`retrieve`, `forget`) carry multiple variants; clap
@@ -445,10 +462,73 @@ fn single_required_spec(verb_def: &VerbDef) -> VariantSpec {
     }
 }
 
+/// Validate a positional argument value against its property schema. Skips
+/// `ALL_CAPS` placeholders. For array-typed positionals (e.g., `summarize`'s
+/// `record_ids`) the per-item schema (`items`) is consulted. For now we only
+/// enforce `pattern` since cross-file `$ref` resolution would require a
+/// schema retriever — the gate will gain richer checks once such examples
+/// exist in SKILL.md.
+fn validate_positional_value(
+    verb: &str,
+    field: &str,
+    value: &str,
+    prop_schema: &serde_json::Value,
+    line: usize,
+) -> Result<(), CompatError> {
+    if is_placeholder(value) {
+        return Ok(());
+    }
+    let item_schema =
+        if prop_schema.get("type").and_then(serde_json::Value::as_str) == Some("array") {
+            prop_schema.get("items").unwrap_or(prop_schema)
+        } else {
+            prop_schema
+        };
+    let resolved_pattern = item_schema
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            // Inline-resolve well-known cross-file `$ref`s for primitive types
+            // so positional Ulids (`retrieve.id`, `summarize.record_ids`) get
+            // pattern-checked without standing up a full schema retriever.
+            // Extend this table as new primitive refs appear in positionals.
+            let r = item_schema
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)?;
+            primitive_ref_pattern(r).map(str::to_string)
+        });
+    if let Some(pattern) = resolved_pattern
+        && let Ok(re) = regex::Regex::new(&pattern)
+        && !re.is_match(value)
+    {
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: format!(
+                "verb `{verb}` positional `{field}` value `{value}` does not match pattern /{pattern}/"
+            ),
+            line,
+        });
+    }
+    Ok(())
+}
+
+/// Map a well-known cross-file `$ref` (`../common/primitives.json#/$defs/X`)
+/// to its inline regex pattern. Returns `None` for refs we don't recognise so
+/// the caller can fall through to the no-pattern path.
+fn primitive_ref_pattern(reference: &str) -> Option<&'static str> {
+    let suffix = reference.rsplit('/').next()?;
+    match suffix {
+        "Ulid" => Some(r"^[0-9A-HJKMNP-TV-Z]{26}$"),
+        _ => None,
+    }
+}
+
 /// Token-scan result for one CLI line.
 struct TokenScan {
     positional_count: usize,
     used_field_names: BTreeSet<String>,
+    positional_values: Vec<String>,
 }
 
 /// True when `value` is an `ALL_CAPS_PLACEHOLDER` token (the convention
@@ -693,6 +773,7 @@ fn scan_tokens<'a>(
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
+    let mut positional_values: Vec<String> = Vec::new();
     // Aggregate values for `list<...>` flags across repeated occurrences so a
     // user-written `--include a --include b` (clap's `ArgAction::Append`
     // form) is validated as the same logical list as the comma-delimited
@@ -769,6 +850,7 @@ fn scan_tokens<'a>(
             }
         } else if !tok.starts_with('-') {
             positional_count += 1;
+            positional_values.push(tok.to_string());
         }
     }
     // Validate aggregated `list<...>` flag values once each. `--include a
@@ -784,6 +866,7 @@ fn scan_tokens<'a>(
     Ok(TokenScan {
         positional_count,
         used_field_names,
+        positional_values,
     })
 }
 
@@ -1182,15 +1265,23 @@ pub fn validate_json_block(
     // Wrap `$defs/Args` (the actual input shape) with the original `$defs`
     // bundle so intra-file `$ref`s still resolve. Validating against the raw
     // file root would let `{}` through because the top-level has no `required`.
+    // Preserve the original `$id` so any cross-file `$ref` (e.g.,
+    // `../common/primitives.json#/$defs/Ulid`) can be resolved by a retriever
+    // relative to the verb file's URL.
     let defs = full_schema
         .get("$defs")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    let schema = serde_json::json!({
+    let mut schema = serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": defs,
         "$ref": "#/$defs/Args",
     });
+    if let Some(id) = full_schema.get("$id").cloned()
+        && let Some(obj) = schema.as_object_mut()
+    {
+        obj.insert("$id".to_string(), id);
+    }
     let validator =
         jsonschema::draft202012::new(&schema).map_err(|e| CompatError::SchemaMismatch {
             verb: verb.to_string(),

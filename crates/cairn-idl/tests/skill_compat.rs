@@ -334,6 +334,33 @@ fn cli_validator_preserves_freeform_list_string_with_commas() {
 }
 
 #[test]
+fn cli_validator_rejects_invalid_ulid_positional() {
+    // `cairn retrieve <id>` expects a Crockford-base32 ULID. A bogus
+    // hand-written value must fail the gate. Round-15 finding 2.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve not-a-ulid".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("invalid ULID positional must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_valid_ulid_positional() {
+    // 26-char Crockford base32 ULID — must validate.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve 01H8XGJWBWBAQ4N1NQK1A8X9YZ".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("valid ULID positional must pass");
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
@@ -400,7 +427,7 @@ fn cli_validator_rejects_retrieve_with_two_discriminators() {
     // variants; clap's ArgGroup rejects this and so should the compat gate.
     let block = CodeBlock {
         lang: "bash".into(),
-        body: "cairn retrieve abc --session s1".into(),
+        body: "cairn retrieve 01H8XGJWBWBAQ4N1NQK1A8X9YZ --session s1".into(),
         line: 17,
     };
     let err = validate_cli_block(&block, &doc())
