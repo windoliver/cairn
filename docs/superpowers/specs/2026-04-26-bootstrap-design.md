@@ -201,47 +201,64 @@ The human-readable output gains one line under the `config` block:
   vault id  01HV6N5K7Q9R3F8E2W7B4M5Z9X
 ```
 
-### Re-bootstrap guard (DB-aware)
+### Re-bootstrap guard (DB-aware, fail-closed)
 
 `vault.id` is non-regenerable once the vault has bound itself to the OS
 keychain (every keychain entry is namespaced under `cairn:<vault_id>`,
 so reminting a new id would orphan every key). Bootstrap therefore
-performs a **read-only** SQLite probe before considering reminting:
+performs a **read-only** SQLite probe before considering reminting and
+**never repairs `.cairn/vault.id` itself** — repair is the job of the
+dedicated `cairn identity vault-id-recover` command (identity spec
+§3.7), which is the single authoritative recovery surface.
 
-1. If `.cairn/vault.id` exists, parse it; the file is the authoritative
-   source. Skip step 2.
-2. If `.cairn/vault.id` is missing, open `.cairn/cairn.db` **read-only**
-   (`?mode=ro&immutable=0`) and `SELECT vault_id FROM vault_meta LIMIT
-   1`. The `vault_meta` table is created by identity migration
-   `0002_identity.sql`; `IdentityRegistry::reserve_first_identity` is
-   the only writer.
-   - **Row present:** the keychain is already bound. Bootstrap restores
-     `.cairn/vault.id` from the row and proceeds idempotently. The
-     receipt notes `vault_id_recovered = true`.
+Bootstrap's only job here is to refuse to mint a fresh id when binding
+already exists. Decision tree, in order:
+
+1. **`.cairn/vault.id` present.** Parse and trust it. Continue.
+2. **`.cairn/vault.id` missing AND `.cairn/vault.binding` (or
+   `.cairn/vault.binding.pending`) present.** Fail closed with
+   `BootstrapError::VaultIdLost` (mapped to `EX_DATAERR = 65`). The
+   error hint instructs the operator to run
+   `cairn identity vault-id-recover` (which can also re-write the
+   binding sentinel from `vault_meta.witness_sha256` — see identity
+   spec §3.10). Bootstrap does **not** silently restore either file.
+3. **`.cairn/vault.id` missing AND no binding sentinel.** Open
+   `.cairn/cairn.db` **read-only** (`?mode=ro&immutable=0`) and
+   `SELECT vault_id FROM vault_meta LIMIT 1`. `vault_meta` is created
+   by identity migration `0002_identity.sql`;
+   `IdentityRegistry::reserve_first_identity` is the only writer.
+   - **Row present:** the SQLite half of first-bind committed but the
+     filesystem artefacts are gone. Fail closed with
+     `BootstrapError::VaultIdLost`; recovery again routes through
+     `cairn identity vault-id-recover`. Bootstrap does **not** write
+     `.cairn/vault.id`.
    - **Row absent (table exists, no rows):** no first-bind has run yet;
      mint a fresh ULID and write `.cairn/vault.id`.
-   - **Table missing or DB file missing:** identity migrations have not
-     run yet; mint a fresh ULID and write `.cairn/vault.id`.
+   - **Table missing or DB file missing:** identity migrations have
+     not run yet; mint a fresh ULID and write `.cairn/vault.id`.
    - **Any other error** (DB present, schema readable, but the SELECT
      fails — corruption, locked, permission denied, etc.): fail closed
      with `BootstrapError::VaultStateUnreadable` mapped to
      `EX_DATAERR = 65`. Do **not** mint a new id under ambiguity.
 
-This guard closes the silent-desynchronization path where a deleted
-`.cairn/vault.id` would let bootstrap mint a fresh namespace while the
-SQLite registry and OS keychain still reference the original — every
-identity would appear orphaned.
+This split keeps bootstrap minimal (mint-or-refuse) and concentrates
+all keychain-binding repair behind `vault-id-recover`, which is
+audited, ack-gated, and aware of the full keychain/DB/sentinel
+trifecta. Bootstrap can never silently mutate trust state.
 
 ### `--force` semantics
 
 `--force` continues to overwrite `purpose.md`, `index.md`, and `log.md`.
 It does **not** overwrite `.cairn/vault.id` or `.cairn/config.yaml`
-once the keychain is bound (i.e., `vault_meta` row present). To
-intentionally rebind a vault to a fresh namespace, the operator runs
-`cairn identity vault-id-recover --abandon` (defined in the identity
-spec §3.10), which is loud, audited, and requires
-`.cairn/maintenance/vault-rebind-ack`. `bootstrap --force` alone never
-crosses that boundary.
+under any circumstance once `.cairn/vault.id` exists or any binding
+artefact (`.cairn/vault.binding`, `vault_meta` row) exists. There is
+no bootstrap path that rebinds a vault to a fresh keychain namespace.
+To abandon a half-completed first-bind (the only legitimate path that
+detaches a vault from a partially established namespace), the operator
+runs `cairn identity finalise-binding --abandon --vault-id <id>` per
+identity spec §3.7. That flow has its own audit gating and is the
+single authoritative abandon surface — bootstrap delegates rather than
+duplicating.
 
 ### New tests
 
@@ -251,6 +268,8 @@ Added to `crates/cairn-cli/tests/bootstrap.rs`:
 |---|---|
 | `bootstrap_mints_vault_id_first_run` | `.cairn/vault.id` exists, valid ULID, receipt populates `vault_id` |
 | `bootstrap_preserves_vault_id` | Second run leaves `.cairn/vault.id` byte-identical |
-| `bootstrap_recovers_vault_id_from_db` | Delete `.cairn/vault.id`, run bootstrap; file restored from `vault_meta`; receipt has `vault_id_recovered = true` |
+| `bootstrap_fails_closed_when_vault_id_lost_with_db_row` | Delete `.cairn/vault.id` while `vault_meta` row + `.cairn/vault.binding` exist; bootstrap exits `65` with `VaultIdLost`; no files written |
+| `bootstrap_fails_closed_when_vault_id_lost_with_sentinel_only` | Delete `.cairn/vault.id` while `.cairn/vault.binding` exists (no DB yet); bootstrap exits `65`; no files written |
+| `bootstrap_mints_when_no_binding_artefacts` | Delete `.cairn/vault.id`, no `vault_meta` row, no binding sentinel; bootstrap mints a fresh ULID |
 | `bootstrap_fails_closed_on_unreadable_db` | Corrupt `.cairn/cairn.db` (truncate header), run bootstrap; exits `65`; `.cairn/vault.id` not touched |
-| `bootstrap_force_does_not_rewrite_vault_id` | `--force` after first-bind leaves vault id intact |
+| `bootstrap_force_does_not_rewrite_vault_id` | `--force` after first-bind leaves `vault.id` intact |

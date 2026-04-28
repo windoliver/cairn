@@ -1350,6 +1350,10 @@ across an injected mid-step-2 crash and is still consumable by
 `InvalidPurgeStartState { id, state }`,
 `PurgeIncomplete { id, remaining_versions }`,
 `FirstBindMismatch { stored: VaultId, attempted: VaultId }`,
+`VaultMetaMissing` (returned when `reserve_identity` is called against
+a registry whose `vault_meta` row has not yet been written by
+`reserve_first_identity` — prevents any code path other than first-bind
+from establishing a vault binding),
 `Backend(#[source] …)`.
 
 `FirstBindState` (closed enum, exported from `cairn-core`):
@@ -1519,10 +1523,24 @@ CREATE INDEX idx_identity_receipts_pending_eviction ON identity_receipts(pending
 CREATE INDEX idx_identity_receipts_pending_key_disable ON identity_receipts(pending_key_disable) WHERE pending_key_disable = 1;
 ```
 
-The `vault_meta` row is inserted exactly once: the first time
-`reserve_identity` runs against an empty registry. Ordering follows
-§3.7's canonical sentinel-first sequence — restated here so the storage
-contract and the binding contract can never drift apart:
+The `vault_meta` row is inserted exactly once, and **only** by
+`IdentityRegistry::reserve_first_identity` (the first-bind transaction
+defined in §3.7). The ordinary `reserve_identity` path — used for
+every non-first identity — is forbidden from touching `vault_meta` at
+the trait, adapter, and SQL-trigger layers. A SQLite trigger
+(`vault_meta_insert_guard`) rejects any `INSERT` into `vault_meta`
+that arrives outside the same transaction as the first
+`identities`-row insertion (detected by an empty `identities` table at
+trigger fire time); conformance tests assert that calling
+`reserve_identity` against a fresh registry returns
+`RegistryError::VaultMetaMissing` rather than implicitly creating the
+row. This makes the first-bind sentinel-and-witness sequencing
+(§3.7's advisory lock + two-phase `.binding.pending`) the **only**
+code path that can establish a vault binding; an adapter or caller
+mistake cannot accidentally promote an ordinary `provision` call into
+a first-bind. Ordering follows §3.7's canonical sentinel-first
+sequence — restated here so the storage contract and the binding
+contract can never drift apart:
 
 1. `.cairn/vault.binding` is written and `fsync`-ed (the operator's
    filesystem now records that this vault may be bound).
