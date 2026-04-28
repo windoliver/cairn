@@ -471,6 +471,31 @@ identities is still durably bound via `vault_meta`, and bootstrap
 detects that. Recovery via `vault-id-recover` is then trivial because
 the vault id is sitting in the DB.
 
+**Bootstrap contract amendment.** The original bootstrap design
+(`docs/superpowers/specs/2026-04-26-bootstrap-design.md`) framed the
+command as "filesystem-only" and explicitly declined to open
+`.cairn/cairn.db`. This PR amends that contract narrowly: bootstrap
+now performs a single **read-only probe** of the DB to detect
+`vault_meta`. Concretely:
+
+- The probe opens the SQLite file with `OpenFlags::SQLITE_OPEN_READ_ONLY`.
+- It runs at most one query: `SELECT 1 FROM vault_meta LIMIT 1`.
+- If the file does not exist, the table does not exist, or the query
+  fails for any reason → bootstrap treats the signal as "no binding
+  durable in DB" and falls through to the filesystem signals.
+- Bootstrap never creates the DB, never runs migrations, never opens a
+  write transaction, never holds a lock that blocks subsequent
+  store-init.
+
+The amendment is documented in the bootstrap design doc in the same
+PR: §1 problem statement gains a note, §3 directory tree section
+notes the read-only probe, the bootstrap-tests table gains a
+regression test for the probe being read-only. With this amendment
+the two contracts (filesystem-only mutations vs DB-aware durability)
+are no longer mutually exclusive: bootstrap mutates the filesystem
+only, but it may *observe* DB state to refuse minting a fresh
+`vault.id` against an already-bound keychain namespace.
+
 The same hint shape applies to all positive signals:
 
    ```
@@ -482,12 +507,15 @@ The same hint shape applies to all positive signals:
      would desynchronize every keychain entry from the registry.
    ```
 
-The guard is purely filesystem; it does not open `.cairn/cairn.db`, so
-schema/migration state cannot create an upgrade-window false negative.
-If `.cairn/vault.binding` exists but `.cairn/cairn.db` does not (the
-binding sentinel was restored from backup but the DB was lost), bootstrap
-still refuses to mint — the operator's keychain is still bound and must
-remain so until they explicitly purge it.
+The guard combines filesystem signals (`.cairn/vault.binding{,
+.pending}`) with the read-only DB probe described above. Schema /
+migration state cannot create an upgrade-window false negative:
+either the table exists with a row (positive signal) or it does not
+(no signal — fall through to filesystem). If `.cairn/vault.binding`
+exists but `.cairn/cairn.db` does not (the binding sentinel was
+restored from backup but the DB was lost), bootstrap still refuses
+to mint on the filesystem signal alone — the operator's keychain is
+still bound and must remain so until they explicitly purge it.
 
 **Recovery.** `cairn identity vault-id-recover [--probe-keychain | --vault-id <id>]`:
 
@@ -548,7 +576,15 @@ single-signer (every record carries one `signer_identity` /
 verb: at least one live attributable signer must exist.
 
 `require_attributable_signer(target: Option<&Identity>)` returns the
-chosen signer (or an error). Selection rules:
+chosen signer (or an error). **Eligibility comes first**: a candidate
+signer must have `provisioning_state == 'active'`. `revoked`,
+`purge_pending`, and `purged` identities are rejected before any
+keychain liveness probe runs — revocation must remove the identity
+from every signing path. The conformance test asserts that a revoked
+default cannot sign ordinary writes or attribute trust-state mutations
+even when its keychain entry is still present.
+
+After eligibility, selection rules:
 
 - For **ordinary writes** (`ingest`, `capture_trace`, `forget`,
   no `target`) — pick whichever default is live, prefer the default
@@ -844,8 +880,11 @@ P0 split, all gate-aware:
       (`RegistryError::PurgeIncomplete`) if the caller has not yet
       verified all keys — but enforcement in the registry is advisory
       only because it cannot itself observe keystore state. The CLI
-      then consumes `.cairn/maintenance/purge-ack` and writes the
-      audit-log entry.
+      then deletes `.cairn/maintenance/purge-ack` (this is the only
+      code path that removes it) and writes the audit-log entry.
+      `purge --resume <id>` after a mid-step-2 crash finds the ack
+      still on disk and re-runs the same flow with re-checked operator
+      intent.
 
    **Resume is explicit, not implicit.** Neither
    `IdentityService::open_for_maintenance` nor inspection commands like
@@ -1088,13 +1127,21 @@ caller-supplied file path that must live on local disk at
 `.cairn/maintenance/purge-ack`. The file must be **operator-authored
 out-of-band before** invoking `cairn identity purge`; the CLI does **not**
 create it, does **not** prompt to create it, and does **not** offer a
-flag that creates it. The CLI only verifies the file is present, that
-its contents match the identity wire form being purged, then consumes
-(deletes) it after the registry call succeeds. MCP / SDK callers cannot
-construct a `PurgeAcknowledgement` because they do not have local
-filesystem access of the right shape; this is the same pattern the
-brief uses for human-only operations (§14). Tests assert that no CLI
-code path under any flag combination writes the ack file.
+flag that creates it. The CLI only verifies the file is present and
+that its contents match the identity wire form being purged. **The ack
+file is retained until `finalise_purge` succeeds**: the CLI does not
+delete it after `mark_purge_pending` or after individual key-deletion
+steps. If the process crashes during step 2, the ack is still on disk,
+which is what `cairn identity purge --resume <id>` needs to re-verify
+operator intent before re-driving the loop. The CLI deletes the ack
+file only on the same code path that calls `finalise_purge` and only
+after that call returns success. MCP / SDK callers cannot construct a
+`PurgeAcknowledgement` because they do not have local filesystem
+access of the right shape; this is the same pattern the brief uses for
+human-only operations (§14). Tests assert that no CLI code path under
+any flag combination writes the ack file, and that the file persists
+across an injected mid-step-2 crash and is still consumable by
+`--resume`.
 
 `RegistryError` (`#[non_exhaustive]`): `NotFound`, `IdentityExists { id }`,
 `ProvisioningInFlight { id }`, `AlreadyRevoked { id }`,
@@ -1370,7 +1417,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected; `normalize_human_slug` covers ASCII / spaces / apostrophe / accented / non-Latin / 100-byte / empty-fallback (§3.9) | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | reserve/activate/delete-pending state-machine transitions; `list_pending` correctness; `count_keys` covers all states; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade; `purge_identity` two-phase state machine (active → `purge_pending` → `purged` only after every key version is verified-deleted from the keystore; injected `delete_keypair` failure parks the row at `purge_pending`; `cairn identity purge --resume <id>` (and only that path, after re-checking `.cairn/maintenance/purge-ack`) re-runs the loop and reaches `purged`; `open_for_maintenance` and inspection commands do **not** advance `purge_pending`); `identity_keys` rows preserved across purge so post-purge signature verification still resolves the public key; rejects writes if `PurgeAcknowledgement` is missing or wrong; `vault_meta` insert rejected if `.cairn/vault.binding` is not present on disk (sentinel-first storage contract); `reserve_first_identity` is exactly-once; `record_rotation` / `record_revocation` persist the `RotationReceipt` / `RevocationReceipt` verbatim and the conformance test re-verifies the stored signature against the persisted signer + key versions | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact, **witness untouched**); revocation fixture; vault contains no plaintext key bytes (incl. no plaintext witness); reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `repair` reconciles pending rows and **never** mutates active trust state (§3.10); `purge` two-phase tombstone (state → `purge_pending` → `purged`, with private-key deletion + verification between transitions; `purge_pending` rejects all signing; `identity_keys` rows preserved; historical signature verification still resolves the public key after `purged`); **purge crash recovery is opt-in** (kill the process during step 2 of `purge` with one key version deleted and one still present → `cairn identity list` and `show` are no-ops on the `purge_pending` row; only `cairn identity purge --resume <id>` (which re-checks the ack file) completes the deletion and advances to `purged`); **purge does not auto-resume on inspection** (running `cairn identity list` after a crashed purge does not delete the remaining keys); `purge` requires the ack file and emits the audit-gap log line; `purge` is unreachable from the MCP surface; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); **liveness-gate test** (`cairn ingest` after default keychain entry deleted out-of-band returns `EX_DATAERR = 65` *before* the ingest pipeline runs); **purge ack barrier** (no CLI flag combination, including `--yes`/`--force`/`--no-confirm`, causes the CLI to write the ack file); **single-default-broken ordinary write** (default human keychain entry deleted out-of-band → `cairn ingest` succeeds attributed under the live default agent; `signer_identity` and `signer_key_version` reflect the agent on the resulting record); **single-default-broken rotation** (broken default rotated under the live other default; §3.10 priority 1); **rotation atomicity** (kill mid-`apply_rotation` → either both the new key row + advanced `current_key_version` *and* the receipt land, or neither lands; conformance test asserts no orphan receipt or orphan key row); **rotation receipt records signer_key_version** (after default agent rotation, an earlier rotation receipt that was signed by agent v1 still verifies against agent's archived v1 public key, even after agent has rotated to v2); **receipt FK enforcement** (attempt to insert an `identity_receipts` row with a `signer_key_version` not present in `identity_keys` is rejected by SQLite, even if adapter code regresses); **purged_at not stamped early** (kill mid-`purge` step 2 → `purge_requested_at` is set, `purged_at` is NULL, audit reads correctly distinguish "purge requested" from "purge complete"); **non-default self-rotation** (both defaults broken, target's own key still live, target is non-default → rotation succeeds with `signer = <id>` and `attributable_via = "self"` in the receipt); **all-broken degrades to purge** (defaults broken **and** target key broken → `rotate` returns `NoLiveAttributableSigner` mapped to `EX_UNAVAILABLE = 69`); **maintenance-open isolation** (inject pending mismatch; `cairn identity list`, `repair`, `purge`, `finalise-binding` all open + run successfully via `open_for_maintenance`; only issuer-dependent verbs surface the mismatch through `require_default_issuer`); **finalise-binding abandon** (sentinel-only state with no keychain or DB binding → `--abandon` deletes sentinel and is recorded as `binding_abandoned` audit-gap); **concurrent first-bind** (two `init-defaults` processes against the same vault; advisory lock on `.cairn/vault.binding.lock` serializes them; exactly one binding lands; the loser observes the committed state and returns 0 as a no-op); **first-bind --no-wait** (loser returns `EX_TEMPFAIL = 75` when lock is held); **finalise-binding finalise from `.binding.pending`** (crash between sentinel write and keychain write → next run reads pending file, idempotently completes steps 2-4, no external backup needed); **finalise-binding finalise from `.binding`** (sentinel + keychain witness exist, DB never wrote → `--vault-id <id>` finalises and writes `vault_meta`); **DPAPI vault-id-recover with intact DB** (Windows simulated `DiscoveryUnsupported`, `.cairn/vault.id` deleted, DB intact → recovery reads `vault_meta.vault_id`, verifies witness, restores `vault.id` without operator-supplied flag); **vault-scoped abandon** (`--abandon --vault-id <id>` probes only that namespace; vault B's keychain entries do not block vault A's abandon); **abandon refused without `--vault-id`** on every backend; **DPAPI abandon** with `--vault-id` and confirmed `NotFound` probe records `evidence = "vault_id_negative_probe"`; **rotation receipt persisted** (after `cairn identity rotate`, the `identity_receipts` table contains a row whose signature still verifies against the stored signer's public key); recovery commands (`list`, `reconcile`, `repair`, `purge`, `vault-id-recover`, `finalise-binding`) succeed with zero defaults; `rotate` / `revoke` fail with `DefaultsNotInitialized` when defaults missing; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when *any* durable evidence exists: `.cairn/vault.binding`, `.cairn/vault.binding.pending`, **or** `vault_meta` row in `.cairn/cairn.db`. **DB-only durable binding test**: delete both filesystem sentinels, leave DB intact → bootstrap still refuses; `vault-id-recover` reads `vault_meta.vault_id` and restores both files. Unrelated keystore namespaces from other vaults on the machine do **not** trip the refusal (vault-local check only). **sentinel-first crash test** (kill between sentinel write and keychain witness write → bootstrap still refuses, `finalise-binding` resolves); **multi-vault coexistence test** (vault A bound, fresh checkout in different directory bootstraps cleanly); `vault-id-recover` survives multiple rotations; ambiguous-match fail-closed; `--vault-id <id>` fallback works when `Keystore::list_vault_namespaces` returns `DiscoveryUnsupported`; **schema-skew safety** test (DB exists, identity migration not yet applied, but `vault.binding` exists → bootstrap refuses) | integration via `MemoryKeystore` |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact, **witness untouched**); revocation fixture; vault contains no plaintext key bytes (incl. no plaintext witness); reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `repair` reconciles pending rows and **never** mutates active trust state (§3.10); `purge` two-phase tombstone (state → `purge_pending` → `purged`, with private-key deletion + verification between transitions; `purge_pending` rejects all signing; `identity_keys` rows preserved; historical signature verification still resolves the public key after `purged`); **purge crash recovery is opt-in** (kill the process during step 2 of `purge` with one key version deleted and one still present → `cairn identity list` and `show` are no-ops on the `purge_pending` row; **the ack file is still on disk after the crash**; only `cairn identity purge --resume <id>` (which re-checks the ack) completes the deletion and advances to `purged`, then deletes the ack); **purge does not auto-resume on inspection** (running `cairn identity list` after a crashed purge does not delete the remaining keys); **revoked default cannot sign** (revoke the default agent → ordinary `cairn ingest` and `cairn identity rotate <human>` reject the revoked agent as a candidate signer regardless of its keychain liveness; selection falls through to the live default human or `NoLiveAttributableSigner`); `purge` requires the ack file and emits the audit-gap log line; `purge` is unreachable from the MCP surface; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); **liveness-gate test** (`cairn ingest` after default keychain entry deleted out-of-band returns `EX_DATAERR = 65` *before* the ingest pipeline runs); **purge ack barrier** (no CLI flag combination, including `--yes`/`--force`/`--no-confirm`, causes the CLI to write the ack file); **single-default-broken ordinary write** (default human keychain entry deleted out-of-band → `cairn ingest` succeeds attributed under the live default agent; `signer_identity` and `signer_key_version` reflect the agent on the resulting record); **single-default-broken rotation** (broken default rotated under the live other default; §3.10 priority 1); **rotation atomicity** (kill mid-`apply_rotation` → either both the new key row + advanced `current_key_version` *and* the receipt land, or neither lands; conformance test asserts no orphan receipt or orphan key row); **rotation receipt records signer_key_version** (after default agent rotation, an earlier rotation receipt that was signed by agent v1 still verifies against agent's archived v1 public key, even after agent has rotated to v2); **receipt FK enforcement** (attempt to insert an `identity_receipts` row with a `signer_key_version` not present in `identity_keys` is rejected by SQLite, even if adapter code regresses); **purged_at not stamped early** (kill mid-`purge` step 2 → `purge_requested_at` is set, `purged_at` is NULL, audit reads correctly distinguish "purge requested" from "purge complete"); **non-default self-rotation** (both defaults broken, target's own key still live, target is non-default → rotation succeeds with `signer = <id>` and `attributable_via = "self"` in the receipt); **all-broken degrades to purge** (defaults broken **and** target key broken → `rotate` returns `NoLiveAttributableSigner` mapped to `EX_UNAVAILABLE = 69`); **maintenance-open isolation** (inject pending mismatch; `cairn identity list`, `repair`, `purge`, `finalise-binding` all open + run successfully via `open_for_maintenance`; only issuer-dependent verbs surface the mismatch through `require_default_issuer`); **finalise-binding abandon** (sentinel-only state with no keychain or DB binding → `--abandon` deletes sentinel and is recorded as `binding_abandoned` audit-gap); **concurrent first-bind** (two `init-defaults` processes against the same vault; advisory lock on `.cairn/vault.binding.lock` serializes them; exactly one binding lands; the loser observes the committed state and returns 0 as a no-op); **first-bind --no-wait** (loser returns `EX_TEMPFAIL = 75` when lock is held); **finalise-binding finalise from `.binding.pending`** (crash between sentinel write and keychain write → next run reads pending file, idempotently completes steps 2-4, no external backup needed); **finalise-binding finalise from `.binding`** (sentinel + keychain witness exist, DB never wrote → `--vault-id <id>` finalises and writes `vault_meta`); **DPAPI vault-id-recover with intact DB** (Windows simulated `DiscoveryUnsupported`, `.cairn/vault.id` deleted, DB intact → recovery reads `vault_meta.vault_id`, verifies witness, restores `vault.id` without operator-supplied flag); **vault-scoped abandon** (`--abandon --vault-id <id>` probes only that namespace; vault B's keychain entries do not block vault A's abandon); **abandon refused without `--vault-id`** on every backend; **DPAPI abandon** with `--vault-id` and confirmed `NotFound` probe records `evidence = "vault_id_negative_probe"`; **rotation receipt persisted** (after `cairn identity rotate`, the `identity_receipts` table contains a row whose signature still verifies against the stored signer's public key); recovery commands (`list`, `reconcile`, `repair`, `purge`, `vault-id-recover`, `finalise-binding`) succeed with zero defaults; `rotate` / `revoke` fail with `DefaultsNotInitialized` when defaults missing; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when *any* durable evidence exists: `.cairn/vault.binding`, `.cairn/vault.binding.pending`, **or** `vault_meta` row in `.cairn/cairn.db`. **DB-only durable binding test**: delete both filesystem sentinels, leave DB intact → bootstrap still refuses (uses the read-only `SELECT 1 FROM vault_meta LIMIT 1` probe); `vault-id-recover` reads `vault_meta.vault_id` and restores both files. **Bootstrap probe is read-only**: regression test asserts bootstrap holds no write lock on the DB and never creates the file. Unrelated keystore namespaces from other vaults on the machine do **not** trip the refusal (vault-local check only). **sentinel-first crash test** (kill between sentinel write and keychain witness write → bootstrap still refuses, `finalise-binding` resolves); **multi-vault coexistence test** (vault A bound, fresh checkout in different directory bootstraps cleanly); `vault-id-recover` survives multiple rotations; ambiguous-match fail-closed; `--vault-id <id>` fallback works when `Keystore::list_vault_namespaces` returns `DiscoveryUnsupported`; **schema-skew safety** test (DB exists, identity migration not yet applied, but `vault.binding` exists → bootstrap refuses) | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
