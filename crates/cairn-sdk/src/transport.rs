@@ -147,7 +147,6 @@ impl<T: Transport> Sdk<T> {
     /// `ingest` — accept new memory (brief §8.1).
     pub fn ingest(&self, args: &IngestArgs) -> Result<VerbResponse<IngestData>, SdkError> {
         validate_ingest(args)?;
-        revalidate::<IngestArgs>(args)?;
         Err(unimplemented("ingest"))
     }
 
@@ -157,7 +156,7 @@ impl<T: Transport> Sdk<T> {
     /// be advertised by [`Self::status`], otherwise the call is rejected
     /// with [`SdkError::CapabilityUnavailable`] before any dispatch.
     pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
-        revalidate::<SearchArgs>(args)?;
+        validate_search(args)?;
         self.require_capability(args.mode.capability())?;
         Err(unimplemented("search"))
     }
@@ -167,38 +166,47 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
     /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
     pub fn retrieve(&self, args: &RetrieveArgs) -> Result<VerbResponse<RetrieveData>, SdkError> {
-        revalidate::<RetrieveArgs>(args)?;
+        validate_retrieve(args)?;
         self.require_capability(args.capability())?;
         Err(unimplemented("retrieve"))
     }
 
     /// `summarize` — rolling/periodic summary build (brief §8.4).
-    pub fn summarize(&self, args: &SummarizeArgs) -> Result<VerbResponse<SummarizeData>, SdkError> {
-        revalidate::<SummarizeArgs>(args)?;
+    ///
+    /// No additional pre-dispatch validation: `SummarizeArgs` carries no
+    /// wire-form constraints beyond schema (`#[serde(deny_unknown_fields)]`),
+    /// which compile-time typing already enforces for SDK callers.
+    pub fn summarize(
+        &self,
+        _args: &SummarizeArgs,
+    ) -> Result<VerbResponse<SummarizeData>, SdkError> {
         Err(unimplemented("summarize"))
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
+    ///
+    /// No pre-dispatch validation: see `summarize` for rationale.
     pub fn assemble_hot(
         &self,
-        args: &AssembleHotArgs,
+        _args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
-        revalidate::<AssembleHotArgs>(args)?;
         Err(unimplemented("assemble_hot"))
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).
+    ///
+    /// No pre-dispatch validation: see `summarize` for rationale.
     pub fn capture_trace(
         &self,
-        args: &CaptureTraceArgs,
+        _args: &CaptureTraceArgs,
     ) -> Result<VerbResponse<CaptureTraceData>, SdkError> {
-        revalidate::<CaptureTraceArgs>(args)?;
         Err(unimplemented("capture_trace"))
     }
 
     /// `lint` — privacy / provenance / schema / policy drift checks (brief §8.7).
-    pub fn lint(&self, args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
-        revalidate::<LintArgs>(args)?;
+    ///
+    /// No pre-dispatch validation: see `summarize` for rationale.
+    pub fn lint(&self, _args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
         Err(unimplemented("lint"))
     }
 
@@ -207,7 +215,7 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
     /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
     pub fn forget(&self, args: &ForgetArgs) -> Result<VerbResponse<ForgetData>, SdkError> {
-        revalidate::<ForgetArgs>(args)?;
+        validate_forget(args)?;
         self.require_capability(args.capability())?;
         Err(unimplemented("forget"))
     }
@@ -239,32 +247,97 @@ impl<T: Transport> Sdk<T> {
     }
 }
 
-/// `IngestArgs` has an explicit IDL `validate()` for its exactly-one-of group.
-fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
-    args.validate().map_err(|reason| SdkError::InvalidArgs {
+/// Wrap a `&'static str` from a hand-rolled validator into [`SdkError::InvalidArgs`].
+fn invalid(reason: &'static str) -> SdkError {
+    SdkError::InvalidArgs {
         reason: reason.to_owned(),
-    })
+    }
 }
 
-/// Run the same constraint checks the wire format runs (non-empty strings,
-/// numeric ranges, oneOf groups, etc.) by serializing the typed arg and
-/// re-deserializing it through the generated `TryFrom<Raw...>` path.
-///
-/// Direct construction in Rust skips those checks; this brings SDK callers
-/// back onto the same validation as the CLI/MCP surfaces, surfaced as
-/// [`SdkError::InvalidArgs`].
-fn revalidate<T>(args: &T) -> Result<(), SdkError>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    let json = serde_json::to_value(args).map_err(|err| SdkError::InvalidArgs {
-        reason: format!("non-serializable args: {err}"),
-    })?;
-    serde_json::from_value::<T>(json)
-        .map(|_| ())
-        .map_err(|err| SdkError::InvalidArgs {
-            reason: err.to_string(),
-        })
+/// `IngestArgs` has an explicit IDL `validate()` for its exactly-one-of group.
+fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
+    args.validate().map_err(invalid)
+}
+
+/// Mirrors the wire constraints from `SearchArgs`'s generated
+/// `TryFrom<RawSearchArgs>` without a serde round-trip — direct
+/// construction in Rust skips the deserializer, but the SDK still has to
+/// enforce the same invariants the CLI/MCP surfaces enforce.
+fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
+    if args.query.is_empty() {
+        return Err(invalid("query: must not be empty"));
+    }
+    if let Some(lim) = args.limit
+        && !(1..=1000).contains(&lim)
+    {
+        return Err(invalid("limit: must be in [1, 1000]"));
+    }
+    Ok(())
+}
+
+/// Mirrors the wire constraints from `RetrieveArgs`'s generated `TryFrom<RawRetrieveArgs>`.
+fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
+    use cairn_core::generated::verbs::retrieve::RetrieveArgs as A;
+    let (session_id, limit, include) = match args {
+        A::Session {
+            session_id,
+            limit,
+            include,
+            ..
+        } => (
+            session_id,
+            *limit,
+            include
+                .as_deref()
+                .map(|s| s.iter().map(|i| *i as u8).collect::<Vec<_>>()),
+        ),
+        A::Turn {
+            session_id,
+            include,
+            ..
+        } => (
+            session_id,
+            None,
+            include
+                .as_deref()
+                .map(|s| s.iter().map(|i| *i as u8).collect::<Vec<_>>()),
+        ),
+        // Record/Folder/Scope/Profile have no top-level Args constraints
+        // — their structural checks live in the response-side subtype
+        // deserializers, not in `RawRetrieveArgs::TryFrom`.
+        _ => return Ok(()),
+    };
+    if session_id.is_empty() {
+        return Err(invalid("session_id: must not be empty"));
+    }
+    if let Some(lim) = limit
+        && !(1..=10000).contains(&lim)
+    {
+        return Err(invalid("limit: must be in [1, 10000]"));
+    }
+    if let Some(inc) = include {
+        if inc.is_empty() {
+            return Err(invalid("include: must contain at least one item"));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for item in &inc {
+            if !seen.insert(*item) {
+                return Err(invalid("include: items must be unique"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mirrors the wire constraint from `ForgetArgs`'s generated `TryFrom<RawForgetArgs>`.
+fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
+    use cairn_core::generated::verbs::forget::ForgetArgs as F;
+    if let F::Session { session_id } = args
+        && session_id.is_empty()
+    {
+        return Err(invalid("session_id: must not be empty"));
+    }
+    Ok(())
 }
 
 /// Canonical P0 stub: every verb returns [`SdkError::Unimplemented`] until
