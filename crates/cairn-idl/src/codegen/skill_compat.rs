@@ -254,7 +254,13 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
     // continuation.
     for logical in join_continuations(&block.body) {
         let line = logical.trim();
-        if line.is_empty() || !line.starts_with("cairn") {
+        // Match on the *first whitespace-delimited token* equalling
+        // `cairn`. A bare `starts_with("cairn")` here would let
+        // `cairn-cli ...` or `cairn2 ...` lines slip through compat
+        // (round-7 finding) — and any real Cairn command must have
+        // whitespace after the executable name.
+        let first_tok = line.split_whitespace().next();
+        if first_tok != Some("cairn") {
             continue;
         }
         validate_cli_line(line, block.line, doc)?;
@@ -287,14 +293,7 @@ fn join_continuations(body: &str) -> Vec<String> {
 fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(), CompatError> {
     let owned = shell_split(line, source_line)?;
     let mut tokens = owned.iter().map(String::as_str);
-    let _ = tokens.next(); // "cairn"
-    let Some(verb) = tokens.next() else {
-        return Err(CompatError::Malformed {
-            kind: "cli",
-            detail: "missing verb after `cairn`".to_string(),
-            line: source_line,
-        });
-    };
+    let verb = consume_executable_and_verb(&mut tokens, source_line)?;
 
     // Resolve the token to its CliCommand variants. Match on the configured
     // `CliCommand::command` (so a future IDL rename that diverges from
@@ -318,13 +317,6 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         .iter()
         .flat_map(|c| c.flags.iter().map(|f| (f.long.as_str(), f)))
         .collect();
-    // Property schemas (by IDL field name) for bound-checking flag values.
-    // For tagged-union verbs we union across all variants — a flag like
-    // `--limit` lives under each variant's `properties` so we just take the
-    // first definition we see.
-    let prop_schemas = verb_def
-        .map(collect_arg_property_schemas)
-        .unwrap_or_default();
     // Positional capacity: 0 if no variant declares one; usize::MAX if any
     // variant marks its positional repeatable (clap `num_args(1..)`); else 1.
     let positional_capacity = if cmds
@@ -336,21 +328,13 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         usize::from(cmds.iter().any(|c| c.positional.is_some()))
     };
 
-    let base_id = verb_def.and_then(verb_base_id);
-    let owner_defs = verb_def.and_then(verb_owner_defs);
     let TokenScan {
         positional_count,
         used_field_names,
         positional_values,
-    } = scan_tokens(
-        verb,
-        source_line,
-        tokens,
-        &allowed_flags,
-        &prop_schemas,
-        base_id.as_deref(),
-        owner_defs.as_ref(),
-    )?;
+        flag_occurrences,
+        list_flag_values,
+    } = scan_tokens(verb, source_line, tokens, &allowed_flags)?;
 
     if positional_count > positional_capacity {
         return Err(CompatError::Malformed {
@@ -362,22 +346,45 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         });
     }
 
-    validate_positional_values(
+    // Resolve which variant (if any) the example targets so value validation
+    // uses the matched variant's schema. For tagged-union verbs with two
+    // variants reusing the same field name (e.g., `retrieve --cursor` under
+    // both `ArgsSession` and `ArgsScope` with different schemas), the prior
+    // verb-wide property union could validate against the wrong one and let
+    // drift through the gate (round-7 finding).
+    let matched_idx = if cmds.len() == 1 {
+        Some(0usize)
+    } else if let Some(def) = verb_def {
+        find_matching_variant_index(def, &cmds, &used_field_names, positional_count)
+    } else {
+        None
+    };
+    let per_cmd_schemas = verb_def
+        .map(|def| variant_property_schemas(def, &cmds))
+        .unwrap_or_default();
+    let cmd_props = matched_idx
+        .and_then(|idx| per_cmd_schemas.get(idx))
+        .cloned()
+        .unwrap_or_default();
+
+    let base_id = verb_def.and_then(verb_base_id);
+    let owner_defs = verb_def.and_then(verb_owner_defs);
+
+    apply_value_validation(
         verb,
+        source_line,
         &cmds,
-        &prop_schemas,
+        &allowed_flags,
+        &cmd_props,
         &positional_values,
+        &flag_occurrences,
+        &list_flag_values,
         base_id.as_deref(),
         owner_defs.as_ref(),
-        source_line,
     )?;
 
     // Tagged-union verbs (`retrieve`, `forget`) carry multiple variants; clap
     // models the discriminator as an `ArgGroup` requiring exactly one.
-    // Approximate that here by requiring exactly one variant whose
-    // schema-required fields (other than `target`) are all satisfied by the
-    // example. Catches both missing-discriminator (`cairn retrieve --limit 5`)
-    // and multi-discriminator (`cairn retrieve abc --session s1`).
     if cmds.len() > 1
         && let Some(verb_def) = verb_def
     {
@@ -403,6 +410,112 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         )?;
     }
     Ok(())
+}
+
+/// Consume the leading two tokens of a `cairn …` line, enforcing the
+/// executable name is exactly `cairn` and a verb token follows. Defense in
+/// depth alongside the block-level filter in `validate_cli_block`.
+fn consume_executable_and_verb<'a, I: Iterator<Item = &'a str>>(
+    tokens: &mut I,
+    source_line: usize,
+) -> Result<&'a str, CompatError> {
+    match tokens.next() {
+        Some("cairn") => {}
+        Some(other) => {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: format!("first token must be `cairn`, got `{other}`"),
+                line: source_line,
+            });
+        }
+        None => {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: "empty CLI invocation".to_string(),
+                line: source_line,
+            });
+        }
+    }
+    tokens.next().ok_or(CompatError::Malformed {
+        kind: "cli",
+        detail: "missing verb after `cairn`".to_string(),
+        line: source_line,
+    })
+}
+
+/// Validate every positional + flag value collected from one CLI line
+/// against the matched variant's property schemas. Splits out the
+/// per-occurrence loop so `validate_cli_line` stays under the workspace's
+/// 100-line lint cap.
+#[allow(clippy::too_many_arguments)]
+fn apply_value_validation(
+    verb: &str,
+    source_line: usize,
+    cmds: &[&CliCommand],
+    allowed_flags: &BTreeMap<&str, &CliFlag>,
+    cmd_props: &BTreeMap<String, serde_json::Value>,
+    positional_values: &[String],
+    flag_occurrences: &[FlagOccurrence],
+    list_flag_values: &BTreeMap<String, Vec<String>>,
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
+) -> Result<(), CompatError> {
+    validate_positional_values(
+        verb,
+        cmds,
+        cmd_props,
+        positional_values,
+        base_id,
+        owner_defs,
+        source_line,
+    )?;
+    for occ in flag_occurrences {
+        let prop = cmd_props.get(&occ.field_name);
+        validate_flag_value(
+            &occ.long_name,
+            &occ.value,
+            &occ.value_source,
+            prop,
+            base_id,
+            owner_defs,
+            source_line,
+        )?;
+    }
+    for (long_name, values) in list_flag_values {
+        let Some(flag) = allowed_flags.get(long_name.as_str()) else {
+            continue;
+        };
+        let prop = cmd_props.get(flag.name.as_str());
+        let combined = values.join(",");
+        validate_flag_value(
+            long_name,
+            &combined,
+            &flag.value_source,
+            prop,
+            base_id,
+            owner_defs,
+            source_line,
+        )?;
+    }
+    Ok(())
+}
+
+/// Single matched variant index for tagged-union verbs, or `None` when zero
+/// or multiple variants match. Mirrors `count_matching_variants` so both
+/// agree on which examples are unambiguous.
+fn find_matching_variant_index(
+    verb_def: &VerbDef,
+    cmds: &[&CliCommand],
+    used_field_names: &BTreeSet<String>,
+    positional_count: usize,
+) -> Option<usize> {
+    let matched: Vec<usize> =
+        matching_variant_indices(verb_def, cmds, used_field_names, positional_count);
+    if matched.len() == 1 {
+        Some(matched[0])
+    } else {
+        None
+    }
 }
 
 /// Single-shape verb: enforce schema-required fields, anyOf (≥1), and
@@ -638,11 +751,26 @@ impl referencing::Retrieve for SchemaDirRetriever {
     }
 }
 
-/// Token-scan result for one CLI line.
+/// Token-scan result for one CLI line. Value validation is deferred to
+/// the caller so the matched-variant property schemas can be applied.
 struct TokenScan {
     positional_count: usize,
     used_field_names: BTreeSet<String>,
     positional_values: Vec<String>,
+    flag_occurrences: Vec<FlagOccurrence>,
+    /// Per-flag aggregated values for `list<enum(...)>` flags (clap's
+    /// `ArgAction::Append`). Other `list<...>` sources keep per-occurrence
+    /// semantics and live in `flag_occurrences`.
+    list_flag_values: BTreeMap<String, Vec<String>>,
+}
+
+/// One `--long [value]` occurrence picked up by `scan_tokens`. Stored
+/// pre-validation so the variant matcher can pick the right schema first.
+struct FlagOccurrence {
+    long_name: String,
+    field_name: String,
+    value_source: String,
+    value: String,
 }
 
 /// True when `value` is an `ALL_CAPS_PLACEHOLDER` token (the convention
@@ -857,6 +985,65 @@ fn check_integer_bounds(
     Ok(())
 }
 
+/// Per-`CliCommand` property-schema maps. For single-shape verbs returns one
+/// map (from `$defs/Args/properties`). For tagged-union verbs pairs each
+/// `CliCommand` to its matched schema variant via `pair_cmd_to_variant` and
+/// returns that variant's `properties` map. This lets value validation use
+/// the *correct* schema per variant — the prior verb-wide flatten could
+/// validate, e.g., a session `--cursor` value against the scope variant's
+/// schema, which was a real false-negative path (round-7 finding).
+pub(crate) fn variant_property_schemas(
+    verb_def: &VerbDef,
+    cmds: &[&CliCommand],
+) -> Vec<BTreeMap<String, serde_json::Value>> {
+    let empty = || (0..cmds.len()).map(|_| BTreeMap::new()).collect();
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
+    else {
+        return empty();
+    };
+    let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) else {
+        return empty();
+    };
+    let Some(args) = defs.get("Args") else {
+        return empty();
+    };
+    if cmds.len() == 1 {
+        return vec![extract_properties(args)];
+    }
+    let Some(one_of) = args.get("oneOf").and_then(serde_json::Value::as_array) else {
+        return empty();
+    };
+    let variant_schemas: Vec<&serde_json::Value> = one_of
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|p| p.strip_prefix("#/$defs/"))
+                .and_then(|name| defs.get(name))
+        })
+        .collect();
+    cmds.iter()
+        .map(|cmd| {
+            pair_cmd_to_variant(cmd, &variant_schemas)
+                .map(extract_properties)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn extract_properties(schema: &serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+    schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default()
+}
+
 /// Build a flat `flag-name → property-schema` map by unioning every
 /// `$defs/*/properties` block in the verb's args schema. For tagged-union
 /// verbs (e.g., `retrieve`) the same logical field can appear under several
@@ -947,26 +1134,25 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatErro
     Ok(out)
 }
 
-/// Walk the post-verb tokens, returning the positional count and the set of
-/// IDL field names the example referenced via long-flags. Rejects unknown
-/// `--flag` tokens up-front.
+/// Walk the post-verb tokens, returning a [`TokenScan`] with the positional
+/// count, the set of IDL field names the example referenced via long-flags,
+/// and per-flag occurrences (deferred so the caller can validate against the
+/// matched variant's schema). Rejects unknown `--flag` tokens up-front.
 fn scan_tokens<'a>(
     verb: &str,
     source_line: usize,
     tokens: impl Iterator<Item = &'a str>,
     allowed_flags: &BTreeMap<&str, &CliFlag>,
-    prop_schemas: &BTreeMap<String, serde_json::Value>,
-    base_id: Option<&str>,
-    owner_defs: Option<&serde_json::Value>,
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
     let mut positional_values: Vec<String> = Vec::new();
-    // Aggregate values for `list<...>` flags across repeated occurrences so a
-    // user-written `--include a --include b` (clap's `ArgAction::Append`
-    // form) is validated as the same logical list as the comma-delimited
-    // `--include a,b` form. Without this, `uniqueItems` and `minItems`
-    // would only see one occurrence at a time.
+    let mut flag_occurrences: Vec<FlagOccurrence> = Vec::new();
+    // Aggregate values for `list<enum(...)>` flags across repeated
+    // occurrences so a user-written `--include a --include b` (clap's
+    // `ArgAction::Append` form) is validated as the same logical list as
+    // the comma-delimited `--include a,b` form. Other `list<...>` keep
+    // per-occurrence semantics and flow through `flag_occurrences`.
     let mut list_flag_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut iter = tokens.peekable();
     while let Some(tok) = iter.next() {
@@ -996,13 +1182,9 @@ fn scan_tokens<'a>(
             };
             let value: Option<String> = if arity == 1 && !has_inline_value {
                 // Non-boolean flags require a value — either inline (`--x=v`)
-                // or the next non-flag token. Without one clap would reject
-                // the example at runtime, so fail compat too.
-                // Bare `-` (stdin sentinel) and `--` are valid values for
-                // many real flags (e.g., `cairn ingest --body -`), so accept
-                // them as the value rather than treating them as the next
-                // option. Anything else starting with `-` is still treated
-                // as the next flag, matching clap's default behavior.
+                // or the next non-flag token. Bare `-` (stdin sentinel) and
+                // `--` are valid values for many real flags (e.g.,
+                // `cairn ingest --body -`).
                 let v = match iter.peek() {
                     Some(n) if !n.starts_with('-') || *n == "-" || *n == "--" => {
                         let v = (*n).to_string();
@@ -1024,21 +1206,19 @@ fn scan_tokens<'a>(
             } else {
                 None
             };
-            if let (Some(value), Some(src)) = (value, value_source) {
+            if let (Some(value), Some(src), Some(field)) = (value, value_source, field_name) {
                 if list_enum_options(src).is_some() {
-                    // Closed `list<enum(...)>` — defer validation until all
-                    // occurrences are collected so uniqueItems / minItems
-                    // see the full input (see post-loop block below).
-                    // Other `list<...>` (e.g., `list<string>`) keep
-                    // per-occurrence semantics — commas are valid payload
-                    // data there and the generator does not delimit them.
                     list_flag_values
                         .entry(name.to_string())
                         .or_default()
                         .push(value);
                 } else {
-                    let prop = field_name.and_then(|f| prop_schemas.get(f));
-                    validate_flag_value(name, &value, src, prop, base_id, owner_defs, source_line)?;
+                    flag_occurrences.push(FlagOccurrence {
+                        long_name: name.to_string(),
+                        field_name: field.to_string(),
+                        value_source: src.to_string(),
+                        value,
+                    });
                 }
             }
         } else if !tok.starts_with('-') || tok == "-" {
@@ -1048,28 +1228,12 @@ fn scan_tokens<'a>(
             positional_values.push(tok.to_string());
         }
     }
-    // Validate aggregated `list<...>` flag values once each. `--include a
-    // --include b` and `--include a,b` collapse to the same input here.
-    for (long_name, values) in &list_flag_values {
-        let Some(flag) = allowed_flags.get(long_name.as_str()) else {
-            continue;
-        };
-        let prop = prop_schemas.get(flag.name.as_str());
-        let combined = values.join(",");
-        validate_flag_value(
-            long_name,
-            &combined,
-            &flag.value_source,
-            prop,
-            base_id,
-            owner_defs,
-            source_line,
-        )?;
-    }
     Ok(TokenScan {
         positional_count,
         used_field_names,
         positional_values,
+        flag_occurrences,
+        list_flag_values,
     })
 }
 
@@ -1090,6 +1254,15 @@ fn count_matching_variants(
     used_field_names: &BTreeSet<String>,
     positional_count: usize,
 ) -> usize {
+    matching_variant_indices(verb_def, cmds, used_field_names, positional_count).len()
+}
+
+fn matching_variant_indices(
+    verb_def: &VerbDef,
+    cmds: &[&CliCommand],
+    used_field_names: &BTreeSet<String>,
+    positional_count: usize,
+) -> Vec<usize> {
     let specs = variant_required_specs(verb_def, cmds);
     cmds.iter()
         .enumerate()
@@ -1146,7 +1319,8 @@ fn count_matching_variants(
             };
             positional_count <= positional_capacity
         })
-        .count()
+        .map(|(idx, _)| idx)
+        .collect()
 }
 
 /// Per-variant required-field decomposition: `base` is the schema-required
