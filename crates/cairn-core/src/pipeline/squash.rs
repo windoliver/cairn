@@ -1057,7 +1057,10 @@ mod stage6_tests {
 /// Pure function: same `(raw, cfg)` always produces byte-identical
 /// `compacted_bytes`. See module docs and design spec for invariants.
 #[must_use]
-pub fn squash(raw: &UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutput {
+// Wrapper is a validated witness; by-value enforces single-use semantics
+// at the type level (the spec pins this as the public surface).
+#[allow(clippy::needless_pass_by_value)]
+pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutput {
     let raw_bytes = raw.as_bytes();
     let raw_hash = raw.raw_hash().clone();
     let raw_byte_len = raw_bytes.len();
@@ -1190,7 +1193,7 @@ mod squash_integration_tests {
             TerminalContext::InteractiveTty,
         )
         .expect("valid wrapper");
-        squash(&wrapper, cfg)
+        squash(wrapper, cfg)
     }
 
     #[test]
