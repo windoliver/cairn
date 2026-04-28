@@ -5,6 +5,10 @@
 //! acceptable at 64 cases but would dominate runtime if the case count
 //! grew significantly.
 
+// Bit-exact comparison of `f32` is intentional: the projection round-trip
+// must preserve the original payload byte-for-byte, so any drift is a bug.
+#![allow(clippy::float_cmp)]
+
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 use cairn_store_sqlite::open_in_memory;

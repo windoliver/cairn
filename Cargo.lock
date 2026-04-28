@@ -351,9 +351,12 @@ name = "cairn-test-fixtures"
 version = "0.0.1"
 dependencies = [
  "cairn-core",
+ "cairn-store-sqlite",
  "insta",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "toml",
 ]
 
