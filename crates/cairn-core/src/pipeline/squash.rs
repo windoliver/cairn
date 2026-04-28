@@ -686,3 +686,57 @@ mod stage2_tests {
         assert!(!stripped);
     }
 }
+
+/// Stage 3: split on `\n`. Returns `(lines, trailing_newline_flag)`.
+/// Interior empty segments are preserved as empty lines; a trailing
+/// `\n` produces an empty final segment that is NOT a line.
+#[allow(dead_code)] // Used by squash() entrypoint in Task 13
+fn stage3_split_lines(s: &str) -> (Vec<&str>, bool) {
+    if s.is_empty() {
+        return (Vec::new(), false);
+    }
+    let trailing = s.ends_with('\n');
+    let body = if trailing { &s[..s.len() - 1] } else { s };
+    let lines: Vec<&str> = body.split('\n').collect();
+    (lines, trailing)
+}
+
+#[cfg(test)]
+mod stage3_tests {
+    use super::*;
+
+    #[test]
+    fn empty_input_no_lines_no_trailing() {
+        let (lines, trailing) = stage3_split_lines("");
+        assert!(lines.is_empty());
+        assert!(!trailing);
+    }
+
+    #[test]
+    fn single_line_no_newline() {
+        let (lines, trailing) = stage3_split_lines("hello");
+        assert_eq!(lines, vec!["hello"]);
+        assert!(!trailing);
+    }
+
+    #[test]
+    fn single_line_with_trailing_newline() {
+        let (lines, trailing) = stage3_split_lines("hello\n");
+        assert_eq!(lines, vec!["hello"]);
+        assert!(trailing);
+    }
+
+    #[test]
+    fn multiple_lines_with_trailing_newline() {
+        let (lines, trailing) = stage3_split_lines("a\nb\nc\n");
+        assert_eq!(lines, vec!["a", "b", "c"]);
+        assert!(trailing);
+    }
+
+    #[test]
+    fn interior_blank_lines_preserved() {
+        let (lines, trailing) = stage3_split_lines("a\n\nb\n");
+        assert_eq!(lines, vec!["a", "", "b"]);
+        assert!(trailing);
+    }
+}
