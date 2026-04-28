@@ -1243,3 +1243,61 @@ mod squash_integration_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptest_squash {
+    use super::*;
+    use super::wrapper_tests::terminal_event;
+    use proptest::prelude::*;
+
+    fn run_squash_for_proptest(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
+        let evt = terminal_event(raw);
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt, raw, TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        squash(wrapper, cfg)
+    }
+
+    fn arb_cfg() -> impl Strategy<Value = SquashConfig> {
+        (
+            MIN_MAX_BYTES..32_768usize,
+            0..50usize,
+            MIN_TAIL_LINES..50usize,
+            0..5usize,
+            MIN_MAX_LINE_BYTES..2_048usize,
+        )
+            .prop_filter_map("normalize", |(mb, h, t, dr, ml)| {
+                SquashConfig::new(mb, h, t, dr, ml).ok()
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn deterministic(raw in proptest::collection::vec(any::<u8>(), 0..4096), cfg in arb_cfg()) {
+            let a = run_squash_for_proptest(&raw, &cfg);
+            let b = run_squash_for_proptest(&raw, &cfg);
+            prop_assert_eq!(a.compacted_bytes, b.compacted_bytes);
+            prop_assert_eq!(a.stats, b.stats);
+        }
+
+        #[test]
+        fn byte_ceiling(raw in proptest::collection::vec(any::<u8>(), 0..16_384), cfg in arb_cfg()) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            if out.stats.truncated {
+                prop_assert!(out.compacted_byte_len <= cfg.max_bytes());
+            }
+        }
+
+        #[test]
+        fn hash_agreement(raw in proptest::collection::vec(any::<u8>(), 0..4096), cfg in arb_cfg()) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            let recomputed = {
+                use sha2::{Digest, Sha256};
+                let d = Sha256::digest(&out.compacted_bytes);
+                PayloadHash::parse(format!("sha256:{d:x}")).unwrap()
+            };
+            prop_assert_eq!(recomputed, out.compacted_hash);
+        }
+    }
+}
