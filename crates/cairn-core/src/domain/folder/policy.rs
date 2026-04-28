@@ -114,6 +114,93 @@ pub fn parse_policy(yaml: &str) -> Result<FolderPolicy, FolderError> {
     serde_yaml::from_str(yaml).map_err(|source| FolderError::PolicyParse { source })
 }
 
+/// Result of walking up `_policy.yaml` files and merging deepest-wins per key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectivePolicy {
+    /// Purpose echoed from the deepest policy that set one.
+    pub purpose: Option<String>,
+    /// Allowed kinds from the deepest policy that set them.
+    pub allowed_kinds: Option<Vec<crate::domain::MemoryKind>>,
+    /// Visibility default; falls back to `Private`.
+    pub visibility_default: crate::domain::MemoryVisibility,
+    /// Consolidation cadence; falls back to `Daily`.
+    pub consolidation_cadence: ConsolidationCadence,
+    /// Owning agent; `None` if unset anywhere in the chain.
+    pub owner_agent: Option<String>,
+    /// Retention; falls back to `Unlimited`.
+    pub retention: RetentionPolicy,
+    /// Summary token cap; falls back to 200.
+    pub summary_max_tokens: u32,
+    /// Folder paths that contributed, shallowest first, deepest last.
+    pub source_chain: Vec<std::path::PathBuf>,
+}
+
+impl Default for EffectivePolicy {
+    fn default() -> Self {
+        Self {
+            purpose: None,
+            allowed_kinds: None,
+            visibility_default: crate::domain::MemoryVisibility::Private,
+            consolidation_cadence: ConsolidationCadence::Daily,
+            owner_agent: None,
+            retention: RetentionPolicy::Unlimited,
+            summary_max_tokens: 200,
+            source_chain: Vec::new(),
+        }
+    }
+}
+
+/// Walk from `target`'s parent up to the vault root, merging `_policy.yaml`
+/// entries deepest-wins per key. Defaults from [`EffectivePolicy::default`]
+/// fill in fields that no policy set.
+#[must_use]
+pub fn resolve_policy(
+    target: &std::path::Path,
+    policies_by_dir: &std::collections::BTreeMap<std::path::PathBuf, FolderPolicy>,
+) -> EffectivePolicy {
+    // Build the chain shallowest → deepest.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut cur = target.parent();
+    while let Some(d) = cur {
+        if d.as_os_str().is_empty() {
+            break;
+        }
+        dirs.push(d.to_path_buf());
+        cur = d.parent();
+    }
+    dirs.reverse();
+
+    let mut effective = EffectivePolicy::default();
+    for dir in dirs {
+        let Some(p) = policies_by_dir.get(&dir) else {
+            continue;
+        };
+        effective.source_chain.push(dir);
+        if let Some(v) = &p.purpose {
+            effective.purpose = Some(v.clone());
+        }
+        if let Some(v) = &p.allowed_kinds {
+            effective.allowed_kinds = Some(v.clone());
+        }
+        if let Some(v) = p.visibility_default {
+            effective.visibility_default = v;
+        }
+        if let Some(v) = p.consolidation_cadence {
+            effective.consolidation_cadence = v;
+        }
+        if let Some(v) = &p.owner_agent {
+            effective.owner_agent = Some(v.clone());
+        }
+        if let Some(v) = p.retention {
+            effective.retention = v;
+        }
+        if let Some(v) = p.summary_max_tokens {
+            effective.summary_max_tokens = v;
+        }
+    }
+    effective
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +256,134 @@ summary_max_tokens: 300
         let yaml = "retention: unlimited\n";
         let policy = parse_policy(yaml).expect("parse");
         assert_eq!(policy.retention, Some(RetentionPolicy::Unlimited));
+    }
+
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    fn empty_chain() -> BTreeMap<PathBuf, FolderPolicy> {
+        BTreeMap::new()
+    }
+
+    #[test]
+    fn resolve_with_no_policies_returns_defaults() {
+        let target = Path::new("raw/projects/koi/rfc.md");
+        let resolved = resolve_policy(target, &empty_chain());
+        assert_eq!(resolved.visibility_default, MemoryVisibility::Private);
+        assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Daily);
+        assert_eq!(resolved.retention, RetentionPolicy::Unlimited);
+        assert_eq!(resolved.summary_max_tokens, 200);
+        assert!(resolved.purpose.is_none());
+        assert!(resolved.allowed_kinds.is_none());
+        assert!(resolved.owner_agent.is_none());
+        assert!(resolved.source_chain.is_empty());
+    }
+
+    #[test]
+    fn resolve_single_root_policy_is_echoed() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from("raw"),
+            FolderPolicy {
+                purpose: Some("root".into()),
+                consolidation_cadence: Some(ConsolidationCadence::Weekly),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/x.md");
+        let resolved = resolve_policy(target, &chain);
+        assert_eq!(resolved.purpose.as_deref(), Some("root"));
+        assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Weekly);
+        assert_eq!(resolved.source_chain, vec![PathBuf::from("raw")]);
+    }
+
+    #[test]
+    fn resolve_child_overrides_parent_per_key() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from("raw"),
+            FolderPolicy {
+                purpose: Some("root".into()),
+                consolidation_cadence: Some(ConsolidationCadence::Daily),
+                summary_max_tokens: Some(100),
+                ..FolderPolicy::default()
+            },
+        );
+        chain.insert(
+            PathBuf::from("raw/projects"),
+            FolderPolicy {
+                consolidation_cadence: Some(ConsolidationCadence::Weekly),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/projects/koi.md");
+        let resolved = resolve_policy(target, &chain);
+        // Inherited from root:
+        assert_eq!(resolved.purpose.as_deref(), Some("root"));
+        assert_eq!(resolved.summary_max_tokens, 100);
+        // Overridden by child:
+        assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Weekly);
+    }
+
+    #[test]
+    fn resolve_three_deep_chain_deepest_wins() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from("raw"),
+            FolderPolicy {
+                purpose: Some("root".into()),
+                ..FolderPolicy::default()
+            },
+        );
+        chain.insert(
+            PathBuf::from("raw/projects"),
+            FolderPolicy {
+                purpose: Some("projects".into()),
+                ..FolderPolicy::default()
+            },
+        );
+        chain.insert(
+            PathBuf::from("raw/projects/koi"),
+            FolderPolicy {
+                purpose: Some("koi".into()),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/projects/koi/rfc.md");
+        let resolved = resolve_policy(target, &chain);
+        assert_eq!(resolved.purpose.as_deref(), Some("koi"));
+        assert_eq!(
+            resolved.source_chain,
+            vec![
+                PathBuf::from("raw"),
+                PathBuf::from("raw/projects"),
+                PathBuf::from("raw/projects/koi"),
+            ],
+        );
+    }
+
+    #[test]
+    fn resolve_source_chain_skips_dirs_without_policy() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from("raw"),
+            FolderPolicy {
+                purpose: Some("r".into()),
+                ..FolderPolicy::default()
+            },
+        );
+        chain.insert(
+            PathBuf::from("raw/a/b/c"),
+            FolderPolicy {
+                purpose: Some("c".into()),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/a/b/c/d/e.md");
+        let resolved = resolve_policy(target, &chain);
+        assert_eq!(
+            resolved.source_chain,
+            vec![PathBuf::from("raw"), PathBuf::from("raw/a/b/c")],
+        );
     }
 }
