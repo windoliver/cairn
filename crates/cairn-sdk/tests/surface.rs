@@ -38,6 +38,21 @@ fn version_matches_status_server_info() {
 }
 
 #[test]
+fn started_at_is_bound_to_sdk_construction_not_first_status_call() {
+    // Sdk::new() must prime the incarnation snapshot so `started_at`
+    // reflects when the SDK service started in this process, not whenever
+    // something happens to call status() first.
+    let s = Sdk::new();
+    let constructed_at = s.status().server_info.started_at.clone();
+
+    // Doing other work, then calling status again, must not advance
+    // started_at — same process, same incarnation.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    let later = s.status().server_info.started_at;
+    assert_eq!(constructed_at, later);
+}
+
+#[test]
 fn status_incarnation_is_stable_process_wide() {
     // Brief §8.0.a wire-compat: status is byte-identical across an
     // incarnation. The SDK's incarnation unit is the *process*, not the

@@ -59,18 +59,33 @@ impl Transport for InProcess {}
 /// `incarnation` for cache invalidation or restart detection see real
 /// process restarts only — never spurious churn from re-instantiating
 /// the SDK.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Sdk<T: Transport = InProcess> {
     _transport: T,
 }
 
 impl Sdk<InProcess> {
     /// Construct an in-process SDK client.
+    ///
+    /// The first `Sdk::new()` call in a process primes the
+    /// process-wide incarnation snapshot, so `started_at` reflects when
+    /// the SDK service started in this process rather than when something
+    /// happened to call [`Sdk::status`] for the first time.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        // Prime the snapshot so `started_at` is bound to client construction,
+        // not to the first `status()` call. Subsequent constructions see the
+        // already-initialized OnceLock and are no-ops.
+        let _ = process_incarnation();
         Self {
             _transport: InProcess,
         }
+    }
+}
+
+impl Default for Sdk<InProcess> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
