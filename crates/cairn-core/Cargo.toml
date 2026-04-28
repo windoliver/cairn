@@ -20,9 +20,14 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+criterion = { workspace = true }
 proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "squash"
+harness = false
