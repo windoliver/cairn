@@ -356,9 +356,12 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
     // RFC 3986 forbids ASCII whitespace and control characters anywhere in
     // the URI; reject them upfront so values like "http: " or
     // "http:\npath" cannot slip through the structural floor.
-    if s.chars()
-        .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
-    {
+    if !s.is_ascii() {
+        // RFC 3986 §2.1: non-ASCII bytes must be percent-encoded. Reject raw
+        // non-ASCII so values like "http:💥/x" cannot reach storage.
+        return Err(invalid("url: must be ASCII (percent-encode non-ASCII)"));
+    }
+    if s.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
         return Err(invalid("url: must not contain whitespace or control chars"));
     }
     let Some(colon) = s.find(':') else {
