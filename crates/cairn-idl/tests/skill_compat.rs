@@ -639,6 +639,31 @@ fn cli_validator_inspects_wrapper_with_options() {
 }
 
 #[test]
+fn extract_captures_wrapped_inline_cairn_spans() {
+    // Round-7 finding 1: inline spans like `sudo -u alice cairn …` or
+    // `env DEBUG=1 cairn …` were silently dropped because the extractor
+    // only matched `cairn …` literal prefixes. Wrappers must round-trip
+    // through the inline-span extractor so the CLI validator gets a
+    // chance to inspect them.
+    let md =
+        "Use `sudo -u alice cairn ingest --bogus` then `env DEBUG=1 cairn search --bogus QUERY`.";
+    let blocks = extract_code_blocks(md).expect("inline markdown must parse");
+    let inline: Vec<_> = blocks.iter().filter(|b| b.lang == "inline").collect();
+    assert_eq!(
+        inline.len(),
+        2,
+        "wrapped inline cairn spans must be extracted, got: {blocks:?}"
+    );
+    // And the validator must reject the bogus flag inside the wrapped span.
+    let err = validate_cli_block(inline[0], &doc())
+        .expect_err("wrapped inline span with bogus flag must fail compat");
+    assert!(
+        matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "bogus"),
+        "expected UnknownFlag, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_rejects_inline_value_on_boolean_flag() {
     // Round-6 finding 1: clap's `ArgAction::SetTrue` rejects `--flag=value`
     // at runtime; the compat gate must do the same so a stale example like

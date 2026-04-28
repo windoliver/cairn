@@ -221,7 +221,21 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
                 skill_compat::validate_json_block(&block, doc, &verb)
                     .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
             }
-            _ => {}
+            other => {
+                // Round-7 finding: any non-bash, non-json fence (e.g. `zsh`,
+                // `console`, `text`, or unlabeled) containing a `cairn`
+                // invocation would otherwise silently bypass the gate. Fail
+                // closed so the only escape hatch is to drop the example
+                // entirely, not to relabel its fence.
+                if block.body.split_whitespace().any(|t| t == "cairn") {
+                    let line = block.line;
+                    return Err(CodegenError::Emit(format!(
+                        "skill compat: fenced block at line {line} uses unsupported language \
+                         `{other}` but contains a `cairn` token — relabel as `bash`/`shell`/`sh` \
+                         so the compat gate can validate it"
+                    )));
+                }
+            }
         }
     }
     Ok(())
@@ -278,4 +292,46 @@ fn walk_files(
         // and following them risks straying outside the workspace.
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc() -> ir::Document {
+        let raw = loader::load(std::path::Path::new(crate::SCHEMA_DIR))
+            .expect("invariant: SCHEMA_DIR loads");
+        ir::build(&raw).expect("invariant: IR builds")
+    }
+
+    fn skill_md(body: &str) -> Vec<GeneratedFile> {
+        vec![GeneratedFile {
+            path: PathBuf::from("skills/cairn/SKILL.md"),
+            bytes: body.as_bytes().to_vec(),
+        }]
+    }
+
+    #[test]
+    fn check_skill_compat_rejects_unsupported_fence_with_cairn_token() {
+        // Round-7 finding 2: any fence language other than bash/shell/sh/json
+        // (`zsh`, `console`, `text`, unlabeled) used to silently bypass the
+        // gate. Fail closed when the body mentions `cairn`, so the only
+        // escape is to drop the example, not relabel its fence.
+        let body = "## Ingest\n\n```zsh\ncairn ingest --bogus\n```\n";
+        let err = check_skill_compat(&doc(), &skill_md(body))
+            .expect_err("unsupported fence with cairn token must fail");
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("unsupported language `zsh`")),
+            "expected emit error citing zsh, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_skill_compat_ignores_unsupported_fence_without_cairn_token() {
+        // The gate must only fail closed for blocks that actually contain a
+        // `cairn` invocation — generic prose snippets in `text` fences are
+        // fine.
+        let body = "## Ingest\n\n```text\nlorem ipsum dolor\n```\n";
+        check_skill_compat(&doc(), &skill_md(body)).expect("unrelated fence must not fail compat");
+    }
 }

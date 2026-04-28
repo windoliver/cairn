@@ -151,21 +151,24 @@ fn is_heading(trimmed_line: &str) -> bool {
     after_hashes.len() < trimmed_line.len() && after_hashes.starts_with(' ')
 }
 
-/// Scan one line for `` `cairn …` `` inline spans.
+/// Scan one line for `` `cairn …` `` inline spans (including wrapped forms
+/// like `` `sudo -u alice cairn …` `` or `` `env DEBUG=1 cairn …` ``).
+/// Round-7 finding: gating only on the literal `cairn ` prefix let an inline
+/// example bypass the compat gate just by prepending a wrapper command —
+/// `validate_cli_block` already understands wrappers, so let it decide.
 fn extract_inline_cairn_spans(line: &str, line_no: usize) -> Vec<CodeBlock> {
     let mut out = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'`' {
-            // Find matching closing backtick.
             let start = i + 1;
             let Some(rel_end) = line[start..].find('`') else {
                 break;
             };
             let end = start + rel_end;
             let span = &line[start..end];
-            if span.trim_start().starts_with("cairn ") {
+            if span_looks_like_cairn_invocation(span) {
                 out.push(CodeBlock {
                     lang: "inline".to_string(),
                     body: span.to_string(),
@@ -178,6 +181,43 @@ fn extract_inline_cairn_spans(line: &str, line_no: usize) -> Vec<CodeBlock> {
         }
     }
     out
+}
+
+/// True when an inline span's first command word (after env-var assignments
+/// and recognized wrappers) is literally `cairn`. Mirrors what
+/// [`locate_cairn_command`] decides, but without forcing a full parse on every
+/// inline backtick on the page.
+fn span_looks_like_cairn_invocation(span: &str) -> bool {
+    let mut iter = span.split_whitespace();
+    while let Some(tok) = iter.next() {
+        if is_env_var_assignment(tok) {
+            continue;
+        }
+        if let Some(opts_with_value) = wrapper_options_with_value(tok) {
+            // Cheap wrapper-option skip: drop following `-…` tokens, plus the
+            // value of an option known to consume one. Matches the precise
+            // parser closely enough for inline-span gating.
+            while let Some(opt) = iter.clone().next() {
+                if !opt.starts_with('-') {
+                    break;
+                }
+                iter.next();
+                if opt == "--" {
+                    break;
+                }
+                let consumes = !opt.contains('=') && opts_with_value.contains(&opt);
+                if consumes {
+                    iter.next();
+                }
+            }
+            continue;
+        }
+        // Bare `cairn` with no following token is just a binary-name
+        // mention (`` `cairn` `` in prose), not an invocation. Match the
+        // original `cairn ` (trailing space) gate.
+        return tok == "cairn" && iter.clone().next().is_some();
+    }
+    false
 }
 
 /// Extract the verb file's top-level `$id` so JSON-typed flag values can
