@@ -123,6 +123,15 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
             render_example(&mut buf, cmd, required, &prop_schemas, None);
             emitted_any = true;
         }
+        // Round-10 finding: verbs whose schema is fully optional
+        // (`assemble_hot`, `lint`) had no example covering the bare
+        // invocation — the default user path. Emit one explicit
+        // empty-args example so a future drift on the zero-arg form
+        // (e.g., a newly required flag) blocks codegen.
+        if no_required_at_all {
+            render_example(&mut buf, cmd, &BTreeSet::new(), &prop_schemas, None);
+            emitted_any = true;
+        }
         // Once per branch we exercise required-field-only. Now layer in
         // every optional flag one at a time so the compat gate sees the
         // whole declared CLI surface — a rename or removal would block

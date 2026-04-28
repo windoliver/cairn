@@ -195,6 +195,10 @@ cairn summarize --citations on 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8
 **Example:**
 
 ```bash
+cairn assemble_hot
+```
+
+```bash
 cairn assemble_hot --session SESSION_ID
 ```
 
@@ -233,6 +237,10 @@ cairn capture_trace --from FROM --session SESSION_ID
 **Exclusivity:** this is the canonical vault-health surface
 
 **Example:**
+
+```bash
+cairn lint
+```
 
 ```bash
 cairn lint --write-report

@@ -711,6 +711,23 @@ fn cli_validator_inspects_wrapper_with_long_options() {
 }
 
 #[test]
+fn live_skill_md_exercises_bare_invocations_for_all_optional_verbs() {
+    // Round-10 finding: verbs with no required fields (`assemble_hot`,
+    // `lint`) need an explicit zero-argument example so the default user
+    // path is also gated by compat. Without this a future drift on the
+    // bare form (e.g., adding a newly required flag) wouldn't block
+    // codegen.
+    let body = live_skill_md();
+    for cmd in ["cairn assemble_hot\n", "cairn lint\n"] {
+        assert!(
+            body.contains(cmd),
+            "live SKILL.md must contain bare invocation `{}`",
+            cmd.trim()
+        );
+    }
+}
+
+#[test]
 fn extract_inline_span_catches_wrapped_cairn_punctuation() {
     // Round-9 finding 2: inline spans with shell punctuation around the
     // cairn token (`(cairn …)`, `{ cairn …; }`) used to be skipped by the
