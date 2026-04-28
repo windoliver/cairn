@@ -677,6 +677,35 @@ Concretely, `IdentityService::commit_first_identity` writes a
 **two-phase sentinel** under that lock so that a crash before the
 keychain step is always recoverable from local disk alone:
 
+0. **Namespace-ownership probe.** Before writing **any** state for
+   `vault_id`, probe `Keystore::load_secret(SecretHandle::for_witness
+   (vault_id))`. Three outcomes:
+   - `KeystoreError::NotFound`: the namespace is unclaimed; proceed.
+   - `Ok(existing_witness)`: an existing witness occupies
+     `cairn:<vault_id>` / `__vault_witness__`. This vault either
+     belongs to a different Cairn install that copied/aged out its
+     local files, or the operator has transplanted a `vault.id`
+     from another vault. Fail closed with
+     `IdentityServiceError::VaultNamespaceClaimed { vault_id }`
+     (mapped to `EX_DATAERR = 65`); the CLI hint routes the
+     operator to `cairn identity vault-id-recover --probe-keychain`
+     (which can adopt the existing namespace if `vault_meta` /
+     `vault.binding` evidence agrees) or to choosing a different
+     `vault.id` (delete the file, re-run bootstrap to mint a
+     fresh ULID).
+   - `KeystoreError::Locked` or `PermissionDenied`: the operator
+     has not authorised keychain access. Fail with
+     `IdentityServiceError::Keystore(Locked|PermissionDenied)`
+     mapped to `EX_TEMPFAIL = 75`; the operator unlocks and
+     retries. Do **not** proceed under ambiguity — without
+     namespace-ownership proof, first-bind would be unsafe.
+   - `KeystoreError::DiscoveryUnsupported` does not apply here —
+     this is a per-handle `load_secret`, not enumeration; every
+     backend including DPAPI supports it.
+
+   This probe closes the cross-vault corruption path where a stale
+   or transplanted `.cairn/vault.id` would let `commit_first_identity`
+   overwrite another vault's witness.
 1. `fs::write(".cairn/vault.binding.pending", VAULT_BINDING_PENDING_V1
    { vault_id, witness_bytes (32B) })` (mode 0600) and `fsync`. The
    pending file holds the actual witness bytes — recovery can re-drive
@@ -1817,6 +1846,7 @@ wraps the two adapter errors plus the cross-cutting cases):
 `VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed),
 `VaultIdConflict { file_id: VaultId, db_id: VaultId }` (filesystem and DB disagree on vault binding; mapped to `EX_DATAERR = 65`),
 `VaultDegraded { mismatched_ids: Vec<Identity> }` (one or more reconciliation `KeyMaterialMismatch` errors detected — vault-wide block on signed writes; mapped to `EX_TEMPFAIL = 75`),
+`VaultNamespaceClaimed { vault_id: VaultId }` (first-bind probe found an existing `__vault_witness__` for the candidate vault id; mapped to `EX_DATAERR = 65`),
 `IdentityLockBusy { id }` (per-identity advisory lock held by another mutation; mapped to `EX_TEMPFAIL = 75`).
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
@@ -2100,11 +2130,22 @@ Procedure:
    or `delete_*` calls reachable through the handle's API surface).
    The keystore is essential because mismatch detection requires
    loading the private key and re-deriving the public key.
-3. Run the §3.5 reconciliation sweep in dry-run mode: iterate every
-   `pending` row, compute the same per-row outcome (`active`,
-   `orphaned`, `KeyMaterialMismatch`), but **do not** call
-   `activate_identity` or `delete_pending`. Accumulate the report
-   and return it.
+3. Run the §3.5 reconciliation sweep in dry-run mode against
+   **both** `pending` and `active` rows:
+   - For `pending` rows: compute the per-row outcome (`active`,
+     `orphaned`, `KeyMaterialMismatch`) but do not mutate.
+   - For `active` rows: run the §3.8 liveness check —
+     `Keystore::load_signing_key(handle)` for the row's
+     `current_key_version`, derive the public key, and compare it
+     against the `identity_keys` archive. Three outcomes per row:
+     `live` (match), `desynchronized` (keystore returns `NotFound`
+     — private key missing), `mismatch` (key loaded but public
+     does not match). Both `desynchronized` and `mismatch` go
+     into the report (under separate `desynchronized_active_ids`
+     and `mismatched_active_ids` collections so remediation hints
+     can differ — desync is recoverable via `rotate`, mismatch
+     escalates to vault-degraded under §3.5).
+   Accumulate the full report and return it.
 4. The vault-binding consistency check (`vault.id` ↔ `vault_meta.
    vault_id`) runs first; on conflict, `status` reports
    `vault_id_conflict` and skips the mismatch sweep (since the
@@ -2121,10 +2162,16 @@ Output:
 - `vault_id` and binding state (`bound` / `pending` / `unbound`).
 - `defaults` — the active default human + agent identities (or
   "not initialised" with the `init-defaults` hint).
-- `mismatched_ids: Vec<Identity>` — the `KeyMaterialMismatch` rows
-  computed by the dry-run sweep above. When non-empty,
-  `vault_degraded = true` and the human-readable output prints a
-  remediation block pointing at `repair`/`purge`/`vault-id-recover`.
+- `mismatched_ids: Vec<Identity>` — `KeyMaterialMismatch` from
+  pending-row reconciliation **plus** active-row mismatches.
+  When non-empty, `vault_degraded = true` and the human-readable
+  output prints a remediation block pointing at
+  `repair`/`purge`/`vault-id-recover`.
+- `desynchronized_active_ids: Vec<Identity>` — active rows whose
+  keystore private key is missing (`NotFound`). Not vault-degraded
+  (recovery is `rotate <id>`); the human-readable output prints
+  a separate remediation block recommending rotation under a
+  live default signer.
 - `pending_evictions` and `pending_key_disables` — receipt-flag
   snapshots for cross-store reconciliation status.
 - `purge_pending_ids` — identities awaiting `purge --resume`.
