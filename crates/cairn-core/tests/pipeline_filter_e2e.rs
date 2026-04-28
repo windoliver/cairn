@@ -201,13 +201,25 @@ fn pipeline_is_idempotent_on_already_processed_text() {
     let r2 = redact(&f1.text);
     let f2 = fence(&r2.text);
 
-    // Second pass over already-processed text adds nothing.
+    // Second pass leaves the text byte-equal to the first pass.
+    assert_eq!(r2.text, f1.text);
+    assert_eq!(f2.text, f1.text);
+    // Redact stays no-op on its own masked output (bracketed REDACTED
+    // tokens don't match any detector).
     assert!(
         r2.spans.is_empty(),
         "redact found new spans: {:?}",
         r2.spans
     );
-    assert!(f2.marks.is_empty(), "fence found new marks: {:?}", f2.marks);
-    assert_eq!(r2.text, f1.text);
-    assert_eq!(f2.text, f1.text);
+    // Fence is byte-idempotent and count-stable: re-detecting inside
+    // pre-existing wraps yields the same mark count, not zero. The
+    // attacker-supplied-sentinel hardening means marks remain visible
+    // to the audit on every pass.
+    assert_eq!(
+        f2.marks.len(),
+        f1.marks.len(),
+        "fence mark count drifted: {:?} vs {:?}",
+        f1.marks,
+        f2.marks
+    );
 }

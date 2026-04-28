@@ -161,6 +161,12 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
                 build(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b"),
             ),
             (
+                // Fine-grained PATs: `github_pat_<22 base62>_<59 base62>`
+                // — bound the underscore-separated tail conservatively.
+                RedactionTag::GithubToken,
+                build(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b"),
+            ),
+            (
                 RedactionTag::SlackToken,
                 build(r"\bxox[abprs]-[A-Za-z0-9-]{10,200}\b"),
             ),
@@ -241,6 +247,16 @@ mod tests {
         // 36-char body satisfies the new GitHub token shape.
         let s = format!("token ghp_{} done", "a".repeat(36));
         assert_eq!(one_tag(&s), RedactionTag::GithubToken);
+    }
+
+    #[test]
+    fn detects_github_fine_grained_pat() {
+        // Fine-grained PAT: `github_pat_<22 base62>_<59 base62>`.
+        let pat = format!("github_pat_{}_{}", "A".repeat(22), "B".repeat(59));
+        let r = redact(&format!("creds {pat} done"));
+        assert_eq!(r.spans.len(), 1, "expected one span, got {:?}", r.spans);
+        assert_eq!(r.spans[0].tag, RedactionTag::GithubToken);
+        assert!(!r.text.contains(&pat), "raw token leaked: {}", r.text);
     }
 
     #[test]
