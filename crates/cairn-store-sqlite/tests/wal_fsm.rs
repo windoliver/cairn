@@ -4,7 +4,7 @@
 //! the §5.6 FSM exactly: ISSUED -> {PREPARED, REJECTED};
 //! PREPARED -> {COMMITTED, ABORTED}; everything else aborts.
 
-use cairn_store_sqlite::open_in_memory;
+use cairn_store_sqlite::open_in_memory_sync as open_in_memory;
 use proptest::prelude::*;
 use rusqlite::Connection;
 

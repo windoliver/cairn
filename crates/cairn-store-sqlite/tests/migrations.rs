@@ -1,6 +1,8 @@
 //! Integration tests for the migration set.
 
-use cairn_store_sqlite::{migrations::migrations, open, open_in_memory};
+use cairn_store_sqlite::{
+    migrations::migrations, open_in_memory_sync as open_in_memory, open_sync as open,
+};
 use rusqlite::params;
 use tempfile::tempdir;
 

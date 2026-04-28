@@ -10,6 +10,10 @@ pub enum StoreError {
     #[error("sqlite error")]
     Sqlite(#[from] rusqlite::Error),
 
+    /// Async `SQLite` runner failure (`tokio_rusqlite`).
+    #[error("async sqlite error")]
+    AsyncSqlite(#[from] tokio_rusqlite::Error),
+
     /// Migration runner failure.
     #[error("migration error")]
     Migration(#[from] rusqlite_migration::Error),

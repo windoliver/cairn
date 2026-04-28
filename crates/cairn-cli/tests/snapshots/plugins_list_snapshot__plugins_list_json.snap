@@ -36,8 +36,8 @@ expression: json
     {
       "capabilities": {
         "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "graph_edges": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",
