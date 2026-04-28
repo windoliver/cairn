@@ -56,10 +56,12 @@ pub struct VisibilityPolicy {
 ///
 /// 1. Look up the matrix entry for `(identity_kind, mode, source)`.
 /// 2. If `policy.override_for_source` has an entry for `source` and it
-///    is **stricter** (more private) than the matrix value, use it.
-///    Otherwise keep the matrix value — overrides cannot broaden.
-/// 3. If `policy.ceiling` is set and it is **stricter** than the
-///    current value, clamp down to it. The ceiling cannot broaden.
+///    is **a safe narrowing** of the matrix value, use it. Otherwise
+///    keep the matrix value — overrides cannot broaden, and Session →
+///    Private is *not* a safe narrowing (see [`is_safe_narrowing`]).
+/// 3. If `policy.ceiling` is set and it is a safe narrowing of the
+///    current value, clamp down to it. The same Session-vs-Private
+///    asymmetry applies.
 ///
 /// The whole resolution is monotonically non-broadening: the output
 /// is always less-or-equal-to the matrix default, never above it.
@@ -82,13 +84,55 @@ pub fn default_visibility(
 ) -> MemoryVisibility {
     let matrix = matrix_lookup(identity_kind, mode, source);
     let after_override = match policy.override_for_source.get(&source).copied() {
-        Some(o) if o < matrix => o,
+        Some(o) if is_safe_narrowing(matrix, o) => o,
         _ => matrix,
     };
     match policy.ceiling {
-        Some(c) if c < after_override => c,
+        Some(c) if is_safe_narrowing(after_override, c) => c,
         _ => after_override,
     }
+}
+
+/// Predicate: is moving from `from` to `to` a safe narrowing the
+/// Filter stage may apply without a consent.log entry?
+///
+/// `MemoryVisibility` derives `PartialOrd` over the variant order
+/// `Private < Session < Project < Team < Org < Public`, which is
+/// almost-but-not-quite an audience ordering: at the `Private`
+/// boundary the ordering inverts in *time*. A `Session` capture is
+/// turn-local — it disappears when the session ends. A `Private`
+/// capture persists in the vault and is queryable by every future
+/// turn the same owner runs (§6.3, "never leaves the vault without
+/// explicit promotion"). The visibility module's matrix comment
+/// states this directly: promoting a sensor observation from
+/// `Session` to `Private` "would silently widen scope from this turn
+/// to vault-wide". A vault `_policy.yaml` must therefore not be able
+/// to perform that transition either — codex round 7 caught this as
+/// a real bypass: a benign-looking `ceiling: Private` could quietly
+/// promote every sensor observation to vault-wide persistence.
+///
+/// Concretely: any narrowing within `[Project, Team, Org, Public]` is
+/// safe, and so is narrowing those to `Private` or `Session`. But the
+/// `Session ↔ Private` step is treated as **incomparable** — the
+/// Filter stage refuses to apply it in either direction without
+/// consent.
+fn is_safe_narrowing(from: MemoryVisibility, to: MemoryVisibility) -> bool {
+    if matches!(
+        (from, to),
+        (MemoryVisibility::Session, MemoryVisibility::Private)
+            | (MemoryVisibility::Private, MemoryVisibility::Session)
+    ) {
+        // Session ↔ Private is the incomparable pair — refuse.
+        return false;
+    }
+    if from == to {
+        // Same-tier clamp is a no-op; safe.
+        return true;
+    }
+    // Outside the Session/Private boundary the derived ordering
+    // (`Private < Session < Project < Team < Org < Public`) faithfully
+    // tracks audience-narrowing direction.
+    to < from
 }
 
 /// Hard-coded matrix used by [`default_visibility`] before policy
@@ -290,8 +334,13 @@ mod tests {
 
     #[test]
     fn ceiling_clamps_downward_only() {
-        // ceiling=Private: an Auto+Hook (default Session) gets clamped
-        // down to Private. An Explicit+Cli (already Private) stays put.
+        // ceiling=Private on Auto+Hook (default Session) is *not* a
+        // safe narrowing — the codex round-7 finding: Session is
+        // turn-local, Private is vault-wide-persistent, so this swap
+        // would silently broaden the lifetime even though it narrows
+        // the audience. The clamp is rejected and Auto+Hook stays
+        // Session. ceiling=Private on Explicit+Cli (already Private)
+        // is a same-tier no-op.
         let policy = VisibilityPolicy {
             ceiling: Some(MemoryVisibility::Private),
             ..Default::default()
@@ -303,7 +352,8 @@ mod tests {
                 SourceFamily::Hook,
                 &policy
             ),
-            MemoryVisibility::Private,
+            MemoryVisibility::Session,
+            "Session→Private clamp must be rejected (lifetime broadens)"
         );
         assert_eq!(
             default_visibility(
@@ -313,6 +363,54 @@ mod tests {
                 &policy
             ),
             MemoryVisibility::Private,
+        );
+    }
+
+    #[test]
+    fn ceiling_private_on_session_capture_is_rejected() {
+        // §14: a vault `_policy.yaml` cannot promote a session-scoped
+        // sensor observation into vault-wide persistence by setting
+        // `ceiling: Private`. The Filter stage refuses the clamp.
+        let policy = VisibilityPolicy {
+            ceiling: Some(MemoryVisibility::Private),
+            ..Default::default()
+        };
+        for source in [
+            SourceFamily::Hook,
+            SourceFamily::Ide,
+            SourceFamily::Terminal,
+            SourceFamily::Clipboard,
+            SourceFamily::Voice,
+            SourceFamily::Screen,
+            SourceFamily::RecordingBatch,
+        ] {
+            assert_eq!(
+                default_visibility(IdentityKind::Sensor, CaptureMode::Auto, source, &policy),
+                MemoryVisibility::Session,
+                "ceiling=Private illegally clamped Auto+{source:?} to Private"
+            );
+        }
+    }
+
+    #[test]
+    fn override_session_to_private_is_rejected() {
+        // The Session ↔ Private incomparability also applies to the
+        // per-source override path.
+        let mut overrides = HashMap::new();
+        overrides.insert(SourceFamily::Hook, MemoryVisibility::Private);
+        let policy = VisibilityPolicy {
+            override_for_source: overrides,
+            ..Default::default()
+        };
+        assert_eq!(
+            default_visibility(
+                IdentityKind::Sensor,
+                CaptureMode::Auto,
+                SourceFamily::Hook,
+                &policy
+            ),
+            MemoryVisibility::Session,
+            "override Session→Private must be rejected"
         );
     }
 
@@ -356,12 +454,15 @@ mod tests {
     #[test]
     fn source_override_only_narrows() {
         // Auto+Clipboard defaults to Session. An override to Private is
-        // narrower → applies. An override to Project would be broader
-        // → silently ignored, default preserved.
-        let mut narrow = HashMap::new();
-        narrow.insert(SourceFamily::Clipboard, MemoryVisibility::Private);
+        // *not* a safe narrowing per the Session/Private incomparability
+        // (codex round 7) — Private would broaden lifetime from
+        // turn-local to vault-wide. The override is rejected. An
+        // override to Project would broaden audience and is also
+        // rejected.
+        let mut overrides_to_private = HashMap::new();
+        overrides_to_private.insert(SourceFamily::Clipboard, MemoryVisibility::Private);
         let policy = VisibilityPolicy {
-            override_for_source: narrow,
+            override_for_source: overrides_to_private,
             ..Default::default()
         };
         assert_eq!(
@@ -371,7 +472,8 @@ mod tests {
                 SourceFamily::Clipboard,
                 &policy
             ),
-            MemoryVisibility::Private,
+            MemoryVisibility::Session,
+            "override Session→Private must be rejected (lifetime broadens)"
         );
 
         let mut broaden = HashMap::new();
@@ -393,11 +495,36 @@ mod tests {
     }
 
     #[test]
+    fn source_override_actually_narrows_for_project_capture() {
+        // A capture that lands above Private/Session in the matrix
+        // (e.g. promoted Project tier) can be narrowed by an override
+        // to Project / Team / Org / Public going downward, and the
+        // narrowing is honored.
+        let mut overrides = HashMap::new();
+        overrides.insert(SourceFamily::Cli, MemoryVisibility::Private);
+        let policy = VisibilityPolicy {
+            override_for_source: overrides,
+            ..Default::default()
+        };
+        // Explicit+Cli defaults to Private; the override Private→Private
+        // is a same-tier no-op.
+        assert_eq!(
+            default_visibility(
+                IdentityKind::Human,
+                CaptureMode::Explicit,
+                SourceFamily::Cli,
+                &policy
+            ),
+            MemoryVisibility::Private,
+        );
+    }
+
+    #[test]
     fn override_and_ceiling_both_narrow_compose() {
-        // Override Hook (Session) down to Project — but Project is
-        // broader than Session, so override is ignored. Then ceiling
-        // Private clamps the matrix value (Session) down to Private.
-        // Net effect: Private.
+        // Override Hook (matrix=Session) down to Project — Project is
+        // broader, override is ignored. Then ceiling Private would
+        // also be rejected because Session→Private is incomparable.
+        // Net effect: Session is preserved.
         let mut overrides = HashMap::new();
         overrides.insert(SourceFamily::Hook, MemoryVisibility::Project);
         let policy = VisibilityPolicy {
@@ -411,7 +538,8 @@ mod tests {
                 SourceFamily::Hook,
                 &policy
             ),
-            MemoryVisibility::Private,
+            MemoryVisibility::Session,
+            "Session→Private clamp must be rejected via either override or ceiling"
         );
     }
 

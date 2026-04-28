@@ -245,11 +245,35 @@ fn find_context_keyed_spans(input: &str) -> Vec<RedactionSpan> {
         // separator + optional whitespace. The optional `['"]?` runs
         // both before and after `[:=]?` so JSON / YAML structured-key
         // shapes (`"password":`, `'api_key' = `) align the post-key
-        // cursor on the value's first byte. `bearer` and the standalone
-        // `Bearer` after `Authorization:` both fall through to the
-        // value-consume step below.
+        // cursor on the value's first byte.
+        //
+        // Compound prefixes (`client_secret`, `access_token`,
+        // `db_password`, `oauth_refresh_token`, etc.) are covered by
+        // an optional `[a-z][a-z0-9]*[_-]` head before the keyword.
+        // Without it the `\b`-bounded keyword would not match inside
+        // `client_secret` because the leading `client_` is contiguous
+        // word characters. `bearer` and the standalone `Bearer` after
+        // `Authorization:` both fall through to the value-consume
+        // step below.
         build(
-            r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|authorization|bearer)\b['"]?\s*[:=]?\s*"#,
+            r#"(?ix)
+            \b
+            [a-z0-9_-]{0,40}?                # optional prefix chars (lazy, bounded)
+            (?: api[_-]?key
+              | secret
+              | token
+              | password
+              | passwd
+              | pwd
+              | auth
+              | authorization
+              | bearer
+              | credential[s]?
+            )
+            [a-z0-9_-]{0,40}                 # optional suffix chars
+            \b
+            ['"]? \s* [:=]? \s*
+            "#,
         )
     });
 
@@ -639,6 +663,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn redacts_compound_keyed_secrets() {
+        // Round 7 codex flagged that `client_secret`, `access_token`,
+        // `refresh_token`, `db_password`, etc. all shipped through
+        // unredacted. The compound-prefix support in KEY_RE makes the
+        // keyword match anywhere inside the structured key word.
+        for input in [
+            r#"{"client_secret":"abcd1234efgh5678"}"#,
+            r#"{"access_token":"opaque-bearer-12345"}"#,
+            r#"{"refresh_token":"opaque-refresh-12345"}"#,
+            "db_password=verysecretdbpassword",
+            "client_id=foo client_secret=hunter2horsestaple",
+            "oauth_refresh_token=longopaquetokenstring",
+            "clientSecret=camelCasedSecretValue",
+        ] {
+            let r = redact(input);
+            assert!(!r.spans.is_empty(), "no span fired for {input}");
+            for needle in [
+                "abcd1234efgh5678",
+                "opaque-bearer-12345",
+                "opaque-refresh-12345",
+                "verysecretdbpassword",
+                "hunter2horsestaple",
+                "longopaquetokenstring",
+                "camelCasedSecretValue",
+            ] {
+                assert!(
+                    !r.text.contains(needle),
+                    "compound-keyed secret `{needle}` leaked for {input}: {}",
+                    r.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redacts_credentials_keyword() {
+        // The `credentials` (and `credential`) keyword is a common
+        // cloud-config field name.
+        let r = redact("aws_credentials: my-secret-creds-string-here");
+        assert!(!r.spans.is_empty(), "no span for aws_credentials");
+        assert!(
+            !r.text.contains("my-secret-creds-string-here"),
+            "credentials value leaked: {}",
+            r.text
+        );
     }
 
     #[test]

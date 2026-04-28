@@ -178,10 +178,14 @@ fn proactive_agent_capture_with_injection_blocks_by_default_and_can_opt_in() {
 // ── Vault policy clamps Auto+Hook down from Session to Private ───────
 
 #[test]
-fn policy_ceiling_clamps_default_toward_private() {
-    // §14: the Filter stage must never broaden visibility — promotion
-    // requires an audited consent.log entry. Vault policy can only
-    // narrow toward Private; the ceiling enforces that direction.
+fn policy_ceiling_session_to_private_is_rejected() {
+    // §14 / codex round 7: the Filter stage must never broaden
+    // visibility — promotion requires an audited consent.log entry.
+    // Session and Private are incomparable: Session is turn-local,
+    // Private persists vault-wide. A `ceiling: Private` on an
+    // Auto+Sensor capture would silently promote the observation
+    // from "this turn" to "every future turn this owner runs". The
+    // Filter stage refuses the clamp; visibility stays at Session.
     let raw = "PostToolUse: tests passed";
     let redacted = redact(raw);
     let fenced = fence(&redacted.text);
@@ -200,9 +204,11 @@ fn policy_ceiling_clamps_default_toward_private() {
     );
 
     assert_eq!(decision, Decision::Proceed);
-    // Auto+Hook would default to Session, but the policy ceiling
-    // collapses it down to Private without any consent path.
-    assert_eq!(visibility, MemoryVisibility::Private);
+    assert_eq!(
+        visibility,
+        MemoryVisibility::Session,
+        "ceiling=Private must not collapse session-scoped sensor data into vault-wide persistence"
+    );
 }
 
 #[test]
