@@ -232,16 +232,21 @@ pub struct SquashConfig {
 
 /// Maximum byte length of any truncation marker emitted by `squash`.
 ///
-/// Markers have one of two forms:
-///   - skip-line:    `[…skipped K lines, X bytes…]`
-///   - tail/inline:  `[…N bytes truncated]`
+/// Markers have one of three forms:
+///   - skip-line:                `[…skipped K lines, X bytes…]`
+///   - per-line truncate:        `[…N bytes truncated]`
+///   - per-line truncate after dedup collapse:
+///                               `[…N source bytes truncated, ×K]`
 ///
-/// The fixed text is at most ~40 ASCII bytes (the multibyte ellipsis
-/// `…` is 3 bytes UTF-8 each, ×2 per marker). The numeric fields `K`,
-/// `X`, `N` are `usize` decimal renderings; `usize` is at most 64-bit
-/// on every supported target, so each renders to at most 20 ASCII
-/// digits. Worst case: 40 (text) + 3 × 20 (digits) = 100 bytes. We
-/// round up for slack:
+/// The fixed text is at most ~48 ASCII bytes for the longest form
+/// (the multibyte ellipsis `…` is 3 bytes UTF-8 each, ×2 per
+/// marker; phrases like "source bytes truncated" + comma + space +
+/// `×` add another ~20). The numeric fields `K`, `X`, `N` are
+/// `usize` decimal renderings; `usize` is at most 64-bit on every
+/// supported target, so each renders to at most 20 ASCII digits.
+/// Worst case (per-line-after-dedup form): 48 (text) + 2 × 20
+/// (digits) = 88 bytes. The skip-line form: 30 (text) + 2 × 20 = 70
+/// bytes. Both fit well under:
 pub const MARKER_MAX_LEN: usize = 128;
 
 /// Worst-case stage-6 layout overhead beyond `max_line_bytes` and
@@ -251,7 +256,7 @@ pub const LAYOUT_OVERHEAD: usize = 4;
 
 pub const MIN_MAX_BYTES: usize = 4 * MARKER_MAX_LEN;   // 512
 pub const MIN_MAX_LINE_BYTES: usize = MARKER_MAX_LEN;  // 128
-pub const MIN_TAIL_LINES: usize = 1;                    // tail-preservation invariant
+pub const MIN_TAIL_LINES: usize = 2;                    // accommodates tail-locked pair
 // head_lines may be 0; dedup_min_run < 2 disables dedup.
 
 // Implementation requirement (load-bearing): the impl `assert!`s
@@ -269,13 +274,13 @@ impl SquashConfig {
     /// Validates and constructs a `SquashConfig`. Returns
     /// `SquashConfigError` for any field below its minimum, or for
     /// the cross-field check
-    /// `max_line_bytes + MARKER_MAX_LEN + LAYOUT_OVERHEAD ≤
-    /// max_bytes`. The cross-field check accounts for a single
-    /// per-line-capped tail line plus the skip-marker line plus
-    /// separator newlines; without it the stage-6 layout could not
-    /// fit a marker + final preserved line within `max_bytes` and
-    /// would have to either violate the strict ceiling or drop the
-    /// supposedly-preserved last line.
+    /// `2 × max_line_bytes + MARKER_MAX_LEN + LAYOUT_OVERHEAD ≤
+    /// max_bytes`. The `2 ×` factor accounts for the tail-locked
+    /// pair (count-marker line + final exact line) emitted when the
+    /// input ends in a repeat run; without it, the tight-budget
+    /// fallback in stage 4 would relax the byte-for-byte final-line
+    /// invariant. With it, the fallback is unreachable for valid
+    /// configs and the strict invariant holds.
     pub fn new(
         max_bytes: usize,
         head_lines: usize,
@@ -307,10 +312,10 @@ pub enum SquashConfigError {
     #[error("tail_lines must be ≥ {min}, got {value}")]
     TailLinesTooSmall { value: usize, min: usize },
     #[error(
-        "max_line_bytes ({line}) + MARKER_MAX_LEN ({marker}) + \
+        "2 × max_line_bytes ({line}) + MARKER_MAX_LEN ({marker}) + \
          LAYOUT_OVERHEAD ({overhead}) must be ≤ max_bytes ({total}); \
-         the stage-6 layout could not fit a marker + final preserved \
-         line within the budget"
+         the stage-6 layout could not fit the tail-locked pair \
+         (count-marker + final preserved line) within the budget"
     )]
     LineCapExceedsLayoutBudget {
         line: usize,
@@ -355,7 +360,7 @@ The pipeline carries **one load-bearing invariant — last-content-line
 preservation:** for every normalized `SquashConfig` and every input
 with at least one non-empty content line, the **last content line**
 of the input (per stage 3's content-line definition, capped to
-`max_line_bytes` per stage 4) appears as a suffix of
+`max_line_bytes` per stage 5) appears as a suffix of
 `compacted_bytes` — preceding the optional trailing newline. This is
 the single guarantee callers can rely on universally. Stack traces,
 final error messages, and command-final state always sit on a
@@ -385,9 +390,26 @@ both are gone does the tail block lose entire leading lines.
    - OSC sequences: `ESC ]` … terminated by `BEL` (`0x07`) or `ESC \`
      (`0x1b 0x5c`).
    - Bare control characters in `0x00-0x1f` and `0x7f` **except** `\n`
-     (`0x0a`) and `\t` (`0x09`).
+     (`0x0a`) and `\t` (`0x09`). `\r` is included in the stripped
+     set — see "Known limitations" below.
 
    Set `stats.ansi_stripped = true` if any byte was removed.
+
+   **Known limitation: progress-bar output is concatenated.**
+   Stage 2 strips `\r` as a bare control byte; it does NOT emulate
+   terminal cursor-rewind or `CSI K` erase-line semantics. So an
+   input like `b"download 1%\rdownload 2%\rdownload 100%"` emits
+   `b"download 1%download 2%download 100%"` rather than the visible
+   final state `b"download 100%"`. Stage 4 (consecutive-run dedup
+   on full lines) does not help here because the rewrites land on
+   the same logical line. P0 accepts this: dedup still collapses
+   repeated full-line statuses (the more common pattern in CI/build
+   logs); progress-bar concatenation is documented as a known
+   lossiness, not silently wrong terminal-state fabrication. Proper
+   terminal-state emulation (CR cursor rewind + `CSI K` erase-line)
+   is filed as a follow-up issue. UTF-8 validity established by
+   stage 1 is preserved through stage 2 because stripping is
+   byte-removal only, never partial-codepoint truncation.
 3. **Line split on `\n`.** Define **lines** as the byte slices
    between consecutive `\n`s, including any empty segments produced by
    adjacent newlines (interior blank lines are full lines, byte-for-
@@ -398,26 +420,93 @@ both are gone does the tail block lose entire leading lines.
    set. Dedup, layout, and the last-line invariant operate on the
    line list. The "last content line" invariant uses **last non-empty
    line in the line list**.
-4. **Per-line cap.** `max_line_bytes` is the **emitted** line budget
-   inclusive of any inline truncation marker. For each line whose
-   byte length exceeds `max_line_bytes`, truncate at the nearest
-   preceding UTF-8 codepoint boundary so that the prefix plus a
-   `[…N bytes truncated]` marker (N = dropped source bytes) is **≤
+4. **Consecutive-run dedup (on full lines).** Walk the line list from
+   stage 3 (full source bytes, BEFORE per-line truncation). Whenever
+   an identical line repeats `dedup_min_run` or more times in a row,
+   collapse the run to a single line `<line> [×N]`. Increment
+   `stats.dedup_runs_collapsed` per collapsed run.
+
+   **Last-line exemption (split form, with tail-lock).** A run whose
+   last element is also the last non-empty content line of the input
+   is split in two during stage 4:
+   - The earlier `N − 1` duplicates collapse to one marker line
+     `<line> [×N−1]` (omitted when `N − 1 < dedup_min_run`).
+   - The final occurrence is preserved verbatim, with no `[×…]`
+     suffix.
+
+   Both lines are then **tail-locked together** in stage 6:
+   atomic. Either both lines are admitted to the tail block or
+   both are dropped — never one without the other. The pair counts
+   as 2 toward `tail_lines` (line-count semantics; see stage 6). Examples:
+   - `["a","x","x","x","x"]` → tail-locked pair `["x [×3]","x"]`
+     prepended by head `["a"]`. Under stage-6 tight budget, head
+     drops first; the tail pair is preserved as one unit.
+   - `["x","x"]` → no collapse (`N − 1 = 1 < dedup_min_run`). Tail
+     pair degenerates to one line `["x"]`.
+   - `["x","x","x"]` → tail-locked pair `["x [×2]","x"]`.
+
+   **No fallback path.** The cross-field check in `SquashConfig::new`
+   (`2 × max_line_bytes + MARKER_MAX_LEN + LAYOUT_OVERHEAD ≤
+   max_bytes`) plus `MIN_TAIL_LINES = 2` means every valid
+   `SquashConfig` accommodates the split-form pair. There is no
+   single-line `<line> [×N]` degraded mode; the algorithm always
+   emits the split form when applicable, and the byte-for-byte
+   final-line invariant is universal across the type's surface.
+
+   **Order matters.** Dedup runs on full source line bytes, not on
+   per-line-capped lines, because two distinct long lines that share
+   their first `max_line_bytes` bytes would otherwise be merged into
+   one fabricated repeat-run after stage-5 truncation. Comparing on
+   full bytes guarantees collapsed runs only describe genuinely
+   identical source lines.
+
+5. **Per-line cap.** `max_line_bytes` is the **emitted** line budget
+   inclusive of any inline truncation marker. For each line (after
+   dedup) whose byte length exceeds `max_line_bytes`, truncate at the
+   nearest preceding UTF-8 codepoint boundary so that the prefix plus
+   a `[…N bytes truncated]` marker (N = dropped source bytes) is **≤
    `max_line_bytes`**. The emitted line is therefore always
    ≤ `max_line_bytes`, regardless of whether truncation occurred.
    Increment `stats.long_lines_truncated`. Applies uniformly to every
    line (head, middle, tail) before the size-enforcement stages run.
-5. **Consecutive-run dedup.** Walk lines; whenever an identical line
-   repeats `dedup_min_run` or more times in a row, collapse the run to a
-   single line `<line> [×N]`. Increment `stats.dedup_runs_collapsed`
-   per collapsed run.
+
+   The collapsed dedup line `<original line> [×N]` may itself be
+   over `max_line_bytes` if the original was; the per-line cap then
+   applies and the dedup-suffix `[×N]` is preserved at the end of the
+   truncation marker (concretely: truncate then append
+   `[…N source bytes truncated, ×K]`). The combined marker is bounded
+   by `MARKER_MAX_LEN`.
 6. **Plan size-enforced layout (head / marker / tail).** Compute the
    joined byte length. If it fits in `max_bytes`, emit the lines as-is
    (no marker). Otherwise:
 
+   `tail_lines` is a **line count** end-to-end. Stage 6 reserves the
+   last `min(tail_lines, total_lines)` lines from the post-stage-5
+   line list. The split-form last-line exemption (stage 4) produces
+   a `[count-marker, final-line]` pair that consumes **2** of those
+   lines; `MIN_TAIL_LINES = 2` is enforced by `SquashConfig::new`
+   precisely so this never displaces the byte-for-byte final-line
+   invariant. There is no `tail_lines = 1` fallback path: callers
+   asking for fewer than 2 tail lines get a config-validation
+   error, not a degraded compaction mode.
+
+   Trade-off note: the count-marker line consumes a tail-slot. With
+   `tail_lines = 2` and a final repeat run, the output emits
+   `[count-marker, final-line]` and a preceding ordinary line is
+   not preserved. Callers who want both multiplicity AND a window
+   of preceding context should set `tail_lines ≥ 3`.
+
    a. Reserve the **tail block** first: take the last
-      `min(tail_lines, total)` lines verbatim. Compute its byte length
-      `T`.
+      `min(tail_lines, total_lines)` lines from the post-stage-5
+      line list. The tail-locked pair, if present, occupies exactly
+      the last two lines of the post-stage-5 list. With
+      `MIN_TAIL_LINES = 2` enforced by `SquashConfig::new`, any
+      `tail_lines ≥ 2` selects either both pair lines (when the
+      window reaches them) or neither. The pair is therefore never
+      split by the tail window — the atomicity rule is satisfied by
+      the line-count math, not by a special selection rule. Compute
+      the block's byte length `T` (sum of selected line lengths plus
+      separator newlines).
    b. Reserve a skip-marker line slot of size `MARKER_MAX_LEN`. The
       *actual* marker rendered in step 6d may be shorter (smaller `K`,
       `X`); reserving the upper bound up front means the rendered
@@ -427,15 +516,29 @@ both are gone does the tail block lose entire leading lines.
    c. Compute the **head budget** =
       `max_bytes − T − MARKER_MAX_LEN − newline_overhead`.
       - If the head budget is **negative** (the tail alone exceeds
-        `max_bytes`), drop entire leading lines from the front of the
-        tail block (never mid-line bytes) until the remaining lines
-        fit. Set head to empty. The single marker line is still emitted
-        to record what was dropped. The tail-preservation invariant
-        narrows from "all `tail_lines`" to "as many trailing lines as
-        fit"; the LAST line is always preserved by construction
-        (per-line cap from stage 4 guarantees a single line ≤
-        `max_line_bytes ≤ max_bytes`, and `MIN_MAX_BYTES` is large
-        enough to hold it plus the marker).
+        `max_bytes`), drop entire leading lines from the front of
+        the tail block (never mid-line bytes) until the remaining
+        lines fit. **Atomicity rule for the tail-locked pair:** the
+        count-marker half (the second-to-last line of the tail
+        block when a pair is present) must NOT be dropped while
+        the final-line half is kept. If the drop loop would remove
+        the count-marker but the final-line is still present, also
+        drop the final-line — the pair drops together. The skip-
+        marker line then records both lines as dropped. This is
+        safe by construction (`MIN_MAX_BYTES` is large enough to
+        always hold at least the pair + skip-marker), so the loop
+        terminates with at least the pair preserved or both pair
+        lines explicitly dropped together (the latter being
+        unreachable with valid configs). Set head to empty. The single skip-marker
+        line is still emitted to record what was dropped. The
+        tail-preservation invariant narrows from "all `tail_lines`
+        lines" to "as many trailing lines as fit"; the LAST line of
+        the input (or the LAST line of the tail-locked pair if one
+        survived) is always preserved by construction (the
+        cross-field check
+        `2 × max_line_bytes + MARKER_MAX_LEN + LAYOUT_OVERHEAD ≤
+        max_bytes` guarantees the tail-locked pair fits, and a
+        single ordinary final line certainly does).
       - If the head budget is **non-negative**, take the first
         `head_lines` lines, then drop trailing head lines (closest to
         the marker) one at a time until the head fits in the budget.
@@ -514,15 +617,23 @@ land alongside as later issues ship.
 
 - **`SquashConfig::new` validation:** below-min `max_bytes`,
   `max_line_bytes`, `tail_lines` each return their distinct error
-  variant; cross-field violation (`max_line_bytes + MARKER_MAX_LEN >
-  max_bytes`) returns `LineCapExceedsLayoutBudget`; valid inputs
-  round-trip; `Default` is always valid; `MIN_MAX_BYTES` and
-  `MIN_MAX_LINE_BYTES` are derived from `MARKER_MAX_LEN` (compile-time
-  `const _: () = assert!(...)`).
-- **Marker length bound:** `assert!` (release-mode) runtime checks (and
-  one explicit unit test that drives stage 6 with the largest possible
-  `K`/`X` values for `usize::MAX` to confirm the rendered marker fits
-  in `MARKER_MAX_LEN`).
+  variant (note `MIN_TAIL_LINES = 2`, so `tail_lines = 1` rejects);
+  cross-field violation (`2 × max_line_bytes + MARKER_MAX_LEN +
+  LAYOUT_OVERHEAD > max_bytes`) returns
+  `LineCapExceedsLayoutBudget`; an explicit regression case must
+  cover a config that **passes** the old single-line rule
+  (`max_line_bytes + MARKER_MAX_LEN ≤ max_bytes`) but **fails** the
+  new tail-locked-pair rule, to lock in the tightened invariant;
+  valid inputs round-trip; `Default` is always valid; `MIN_MAX_BYTES`
+  and `MIN_MAX_LINE_BYTES` are derived from `MARKER_MAX_LEN`
+  (compile-time `const _: () = assert!(...)`).
+- **Marker length bound:** `assert!` (release-mode) runtime checks
+  cover all three marker forms. Three explicit unit tests drive the
+  three forms with `usize::MAX`-sized `K`/`X`/`N` values and confirm
+  the rendered marker length is `≤ MARKER_MAX_LEN`:
+  1. Skip-line form (`[…skipped K lines, X bytes…]`).
+  2. Per-line truncate form (`[…N bytes truncated]`).
+  3. Per-line-after-dedup form (`[…N source bytes truncated, ×K]`).
 - **`UnstructuredTextBytes::try_from_terminal_event` gating:**
   - non-`Terminal` `CapturePayload` variants → `NotTerminalPayload`.
   - `Terminal` variant + bytes whose sha256 does not match
@@ -536,6 +647,16 @@ land alongside as later issues ship.
     `event.payload_hash` and `PayloadHash::sha256(raw)`.
 - **ANSI strip:** CSI SGR colors, OSC titles, mixed sequences, lone
   ESC, preserved `\n`/`\t`.
+- **CR pass-through limitation:** `b"download 1%\rdownload 2%\n"`
+  emits `b"download 1%download 2%\n"` — `\r` is stripped, no
+  terminal-state emulation. Test asserts the documented behavior so
+  the limitation is visible in the suite, not silent.
+- **Dedup vs per-line cap order:** two distinct long lines that
+  share their first `max_line_bytes` bytes but differ in the tail
+  must NOT be collapsed by stage 4. Test:
+  `b"verylongprefix...A\nverylongprefix...B\n"` (each over
+  `max_line_bytes`, differing only past the cap) emits two distinct
+  truncated lines, not a single `[×2]` collapse.
 - **Per-line cap:** ASCII line under cap, ASCII line at cap, ASCII line
   over cap, multi-byte UTF-8 line truncated mid-codepoint (must not
   split a codepoint).
@@ -556,10 +677,16 @@ land alongside as later issues ship.
     is present.
 - **Last-content-line invariant test:** synthetic inputs whose last
   content line carries a sentinel — both with and without a trailing
-  `\n` — return `compacted_bytes` whose last content line begins with
-  that sentinel under every config in the normalized parameter grid.
-  An input of pure trailing whitespace (`b"\n\n\n"`) returns empty
-  `compacted_bytes` plus the trailing-newline flag.
+  `\n` — return `compacted_bytes` whose last content line is **byte-
+  for-byte equal** to the input's last content line (capped per
+  stage 5 if longer than `max_line_bytes`) under every config in the
+  normalized parameter grid. Specifically: an input ending in
+  repeated identical lines (e.g., `b"x\nx\nx\n"`) emits earlier
+  duplicates as `b"x [×2]\n"` followed by the final preserved
+  `b"x\n"` line *without* a `[×N]` suffix — the split-form last-line
+  exemption applies. An input of pure trailing whitespace
+  (`b"\n\n\n"`) returns empty `compacted_bytes` plus the
+  trailing-newline flag.
 - **Best-effort tail-block test (Tier-A-equivalent):** with the
   default config and inputs of various sizes, all `tail_lines`
   trailing lines of input appear verbatim (post-per-line-cap) in
@@ -590,13 +717,13 @@ bytes:
   When not truncated, `compacted_byte_len ≤ cfg.max_bytes` still holds.
 - **Last-content-line preservation:** for every input with at least
   one non-empty content line, the last content line (per stage 3,
-  capped per stage 4) appears in `compacted_bytes` immediately before
+  capped per stage 5) appears in `compacted_bytes` immediately before
   the optional trailing newline. Newline-terminated logs do not
   satisfy this invariant by emitting only an empty trailing segment.
 - **No-truncation passthrough:** if (post-stage-1 lossy-decode +
   stage-2 ANSI-strip) output already fits in `max_bytes` and contains
-  no over-cap lines (stage 4 no-op) and has no consecutive runs of
-  duplicate lines (stage 5 no-op), `compacted_bytes` equals the
+  no consecutive runs of duplicate lines (stage 4 no-op) and no
+  over-cap lines (stage 5 no-op), `compacted_bytes` equals the
   ANSI-stripped, lossy-decoded input byte-for-byte. Interior blank
   lines are preserved verbatim. Trailing newline preserved iff
   present.
