@@ -751,9 +751,13 @@ fn scan_tokens<'a>(
                 None
             };
             if let (Some(value), Some(src)) = (value, value_source) {
-                if src.starts_with("list<") {
-                    // Defer list validation until all occurrences are
-                    // collected (see post-loop block below).
+                if list_enum_options(src).is_some() {
+                    // Closed `list<enum(...)>` — defer validation until all
+                    // occurrences are collected so uniqueItems / minItems
+                    // see the full input (see post-loop block below).
+                    // Other `list<...>` (e.g., `list<string>`) keep
+                    // per-occurrence semantics — commas are valid payload
+                    // data there and the generator does not delimit them.
                     list_flag_values
                         .entry(name.to_string())
                         .or_default()

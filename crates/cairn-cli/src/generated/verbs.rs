@@ -13,7 +13,7 @@ pub fn ingest_subcommand() -> clap::Command {
         .arg(clap::Arg::new("file").long("file").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("url").long("url").value_name("STRING"))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
-        .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append).value_delimiter(','))
+        .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
         .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.").required(false))
 }
 

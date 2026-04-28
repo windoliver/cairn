@@ -202,9 +202,10 @@ fn write_variant_command(
             && seen.insert(pos.name.clone())
         {
             w.line(&format!(
-                ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false))",
+                ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false){})",
                 pos.name,
-                escape_rust_str(&pos.description)
+                escape_rust_str(&pos.description),
+                if pos.repeatable { ".num_args(1..)" } else { "" }
             ));
         }
     }
@@ -279,12 +280,17 @@ fn render_flag_arg(flag: &CliFlag) -> String {
     if let Some(action) = action {
         let _ = write!(out, ".action({action})");
     }
-    // For `list<...>` flags, expose comma-delimited single-token form in
-    // addition to repeated occurrences — `--include a,b` and
-    // `--include a --include b` are both accepted. The skill-compat gate
-    // validates the comma-delimited form, so this keeps the generator and
-    // the gate in lockstep.
-    if flag.value_source.starts_with("list<") {
+    // For closed `list<enum(...)>` flags, expose comma-delimited single-
+    // token form in addition to repeated occurrences. We deliberately do
+    // NOT delimit `list<string>` / `list<path>` because commas are valid
+    // payload data there (e.g., `ingest --tags "foo,bar"` must preserve
+    // `foo,bar` as a single tag, not split into two).
+    if flag
+        .value_source
+        .strip_prefix("list<enum(")
+        .and_then(|s| s.strip_suffix(")>"))
+        .is_some()
+    {
         let _ = write!(out, ".value_delimiter(',')");
     }
     out

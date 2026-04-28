@@ -320,6 +320,20 @@ fn cli_validator_aggregates_repeated_list_flag_occurrences() {
 }
 
 #[test]
+fn cli_validator_preserves_freeform_list_string_with_commas() {
+    // Round-14 finding 1: `ingest --tags` is `list<string>`. A literal
+    // comma in user data must not be treated as a list delimiter — the
+    // gate should accept the value as a single tag.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND --body BODY --tags \"foo,bar\"".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("freeform list<string> values must accept embedded commas");
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
