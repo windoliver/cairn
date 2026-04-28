@@ -480,9 +480,24 @@ now performs a single **read-only probe** of the DB to detect
 
 - The probe opens the SQLite file with `OpenFlags::SQLITE_OPEN_READ_ONLY`.
 - It runs at most one query: `SELECT 1 FROM vault_meta LIMIT 1`.
-- If the file does not exist, the table does not exist, or the query
-  fails for any reason → bootstrap treats the signal as "no binding
-  durable in DB" and falls through to the filesystem signals.
+- Outcomes are interpreted strictly. Only two outcomes are negative
+  evidence (treated as "no DB binding"); every other outcome is
+  fail-closed:
+  - **File missing** (open returns `SQLITE_CANTOPEN` for an absent
+    path) → no signal; fall through to filesystem.
+  - **Table missing** (`SQLITE_ERROR: no such table: vault_meta`,
+    e.g. pre-`0002_identity.sql` migration state) → no signal; fall
+    through to filesystem.
+  - **Row exists** (query returns 1) → positive signal; refuse to
+    mint.
+  - **Any other error** — corrupted database (`SQLITE_CORRUPT`),
+    permission denied, busy/locked, I/O error, schema-mismatch,
+    unexpected `SQLITE_*` codes — bootstrap fails closed with
+    `BootstrapError::VaultStateUnreadable` mapped to
+    `EX_DATAERR = 65`. The CLI hint instructs the operator to
+    investigate the DB before any further bootstrap attempt; minting
+    a fresh `vault.id` against possibly-bound state is never
+    permitted just because the probe could not read it.
 - Bootstrap never creates the DB, never runs migrations, never opens a
   write transaction, never holds a lock that blocks subsequent
   store-init.
@@ -527,6 +542,11 @@ still bound and must remain so until they explicitly purge it.
    - Load the secret at `SecretHandle::for_witness(vault_meta.vault_id)`
      and confirm its SHA-256 matches `vault_meta.witness_sha256`.
    - Write `.cairn/vault.id` with the recovered ULID.
+   - **Rewrite `.cairn/vault.binding`** with `vault_meta.witness_sha256`
+     so the local binding sentinel is restored alongside `vault.id`.
+     Recovery is not complete until both files exist again — otherwise
+     a future DB loss would leave bootstrap with no fallback signal
+     and could remint silently.
    - Done. This path works on every backend, including DPAPI, because
      it never enumerates.
 2. If `vault_meta` is unreachable (DB missing, table absent, single row
@@ -781,12 +801,26 @@ P0 split, all gate-aware:
       as before — a still-live default agent rotates a broken default
       human, etc.).
    2. If `<id>` is **not a default** and `<id>`'s own current key is
-      still live (it can sign) → `<id>` may self-attribute the
-      rotation/revocation. The persisted `RotationReceipt` records
-      `signer = <id>` and the audit log emits
-      `attributable_via = "self"` so the audit trail is explicit. This
-      preserves attribution for non-default identities even when both
-      defaults are unrecoverable.
+      still live → self-attribution is allowed **only** when the
+      operator has authored
+      `.cairn/maintenance/self-rotate-ack` on local disk (containing
+      the identity wire form being rotated/revoked) before the
+      command runs. The CLI verifies the file is present and matches
+      `<id>`, runs the rotation/revocation under `<id>`'s own
+      signature, and deletes the ack file only after
+      `apply_rotation` / `apply_revocation` succeeds. The persisted
+      receipt records `signer = <id>`; the audit log emits
+      `attributable_via = "self"` and `audit_gap = "self_rotation_ack"`.
+
+      The ack barrier closes the degraded-mode authorization shortcut:
+      if `<id>` is the compromised key, an attacker holding it can
+      still rotate it, but only by also having local filesystem write
+      access of the right shape — the same human-only gate `purge`
+      uses (§14). Pure-keychain compromise is no longer enough to
+      rotate or revoke without an out-of-band operator step. MCP /
+      SDK callers cannot construct the ack and therefore cannot
+      reach this path. If the ack file is missing the command falls
+      through to the next priority rule.
    3. If neither is available — `<id>` is itself a default **and** the
       other default is also unavailable, **or** `<id>` is non-default
       but its own key is also broken — the operation returns
