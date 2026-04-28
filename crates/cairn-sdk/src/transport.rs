@@ -194,11 +194,18 @@ impl<T: Transport> Sdk<T> {
     /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
     /// not advertised by `status()`. Verbs whose IDL declares no
     /// capability (`None`) are unconditionally allowed.
+    #[allow(clippy::unused_self)] // method form for future per-instance capability state
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
-        let advertised = self.status().capabilities;
+        // Read capabilities directly instead of routing through `status()`,
+        // which would mint a fresh `incarnation`/`started_at` per call.
+        // Capabilities are the only field needed for the gating decision,
+        // and they are stable for the lifetime of the process — no
+        // TOCTOU window between an inspection `status()` and the verb
+        // call that follows it.
+        let advertised = p0_capabilities();
         let is_advertised = advertised.iter().any(|c| {
             serde_json::to_value(c)
                 .ok()
