@@ -740,3 +740,116 @@ mod stage3_tests {
         assert!(trailing);
     }
 }
+
+/// Stage 4: consecutive-run dedup on full source lines. Split-form last-line
+/// exemption: when the final repeat run reaches the input's last line, the
+/// final line is preserved verbatim and earlier duplicates collapse to
+/// `<line> [×N-1]`. CR-bearing lines never collapse.
+#[allow(dead_code)] // Used by squash() entrypoint in Task 13
+fn stage4_dedup(
+    lines: &[String],
+    min_run: usize,
+    collapsed_runs: &mut usize,
+) -> Vec<String> {
+    if lines.is_empty() || min_run < 2 {
+        return lines.to_vec();
+    }
+    let last_idx = lines.len() - 1;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = &lines[i];
+        let mut j = i + 1;
+        while j < lines.len() && &lines[j] == line {
+            j += 1;
+        }
+        let run_len = j - i;
+        let run_contains_last = j - 1 == last_idx;
+        let cr_bearing = line.contains('\r');
+
+        if run_len >= min_run && !cr_bearing {
+            if run_contains_last {
+                let count = run_len - 1;
+                if count >= min_run {
+                    out.push(format!("{line} [×{count}]"));
+                    *collapsed_runs += 1;
+                } else {
+                    for _ in 0..count {
+                        out.push(line.clone());
+                    }
+                }
+                out.push(line.clone());
+            } else {
+                out.push(format!("{line} [×{run_len}]"));
+                *collapsed_runs += 1;
+            }
+        } else {
+            for _ in 0..run_len {
+                out.push(line.clone());
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+#[cfg(test)]
+mod stage4_tests {
+    use super::*;
+
+    fn dedup(lines: &[&str], min_run: usize) -> (Vec<String>, usize) {
+        let owned: Vec<String> = lines.iter().map(|s| (*s).to_string()).collect();
+        let mut collapsed = 0;
+        let out = stage4_dedup(&owned, min_run, &mut collapsed);
+        (out, collapsed)
+    }
+
+    #[test]
+    fn no_duplicates_passes_through() {
+        let (out, collapsed) = dedup(&["a", "b", "c"], 2);
+        assert_eq!(out, vec!["a", "b", "c"]);
+        assert_eq!(collapsed, 0);
+    }
+
+    #[test]
+    fn run_below_min_not_collapsed() {
+        let (out, collapsed) = dedup(&["a", "a", "b"], 3);
+        assert_eq!(out, vec!["a", "a", "b"]);
+        assert_eq!(collapsed, 0);
+    }
+
+    #[test]
+    fn run_at_min_collapsed() {
+        let (out, collapsed) = dedup(&["a", "a", "b"], 2);
+        assert_eq!(out, vec!["a [×2]", "b"]);
+        assert_eq!(collapsed, 1);
+    }
+
+    #[test]
+    fn final_repeat_run_split_form() {
+        let (out, collapsed) = dedup(&["a", "x", "x", "x", "x"], 2);
+        assert_eq!(out, vec!["a", "x [×3]", "x"]);
+        assert_eq!(collapsed, 1);
+    }
+
+    #[test]
+    fn final_repeat_run_too_short_for_split() {
+        let (out, collapsed) = dedup(&["x", "x"], 2);
+        assert_eq!(out, vec!["x", "x"]);
+        assert_eq!(collapsed, 0);
+    }
+
+    #[test]
+    fn cr_bearing_line_not_collapsed() {
+        let (out, collapsed) = dedup(&["a\rb", "a\rb", "y"], 2);
+        assert_eq!(out, vec!["a\rb", "a\rb", "y"]);
+        assert_eq!(collapsed, 0);
+    }
+
+    #[test]
+    fn dedup_min_run_zero_or_one_disables() {
+        let (out, collapsed) = dedup(&["x", "x", "x"], 1);
+        assert_eq!(out, vec!["x", "x", "x"]);
+        assert_eq!(collapsed, 0);
+    }
+}
