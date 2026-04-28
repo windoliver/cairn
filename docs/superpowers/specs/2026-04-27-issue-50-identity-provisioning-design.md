@@ -255,12 +255,34 @@ block the very commands designed to fix problems:
   surfaced in `cairn identity status` so the operator can see the
   global picture before running any maintenance command.
 - **`IdentityService::open_for_maintenance()`** — used by the recovery
-  and inspection commands (`list`, `show`, `reconcile`, `repair`,
-  `purge`, `finalise-binding`, `vault-id-recover`, `init-defaults`,
-  `provision`). Skips reconciliation entirely; opens the registry +
-  keystore handles and returns. The maintenance commands run the
-  reconciliation steps they need against the specific identities they
-  target, never as a global blocking sweep.
+  and inspection commands. Skips reconciliation entirely; opens the
+  registry + keystore handles and returns. The maintenance commands
+  run the reconciliation steps they need against the specific
+  identities they target, never as a global blocking sweep.
+
+  **Vault-binding consistency check still applies.** Before opening
+  any keystore handle for a mutating maintenance command (`provision`,
+  `init-defaults`, `repair`, `purge`, `rotate`, `revoke`, the apply
+  paths of `finalise-binding`/`vault-id-recover`),
+  `open_for_maintenance()` runs the same `.cairn/vault.id` ↔
+  `vault_meta.vault_id` cross-check `IdentityService::open()` does
+  and refuses with `IdentityServiceError::VaultIdConflict { file_id,
+  db_id }` on disagreement. This prevents a stale or hand-edited
+  `vault.id` from driving keystore writes or deletes against the
+  wrong `cairn:<vault_id>` namespace via a maintenance path. The
+  exception is `vault-id-recover` itself, whose entire purpose is
+  to repair the file/DB disagreement — it deliberately bypasses the
+  check (and, per §3.7, refuses to run when
+  `.cairn/vault.binding.pending` exists). Read-only inspection
+  (`list`, `show`) opens the registry without a keystore handle and
+  is not subject to the vault-binding check, since it cannot mutate
+  cross-vault state.
+
+  Two open paths inside `open_for_maintenance`:
+  - `open_for_maintenance(MaintenanceMode::ReadOnly)` — registry
+    only, no keystore handle, no vault-binding check.
+  - `open_for_maintenance(MaintenanceMode::Mutating)` — registry +
+    keystore handle, vault-binding check enforced.
 
 The reconciliation sweep itself, when it does run, processes each
 `pending` row:
@@ -686,7 +708,9 @@ keychain step is always recoverable from local disk alone:
 | State on disk | What recovery does |
 |---|---|
 | `.binding.pending` exists, `.binding` absent | `cairn identity finalise-binding` reads the persisted vault id + witness bytes from the pending file, idempotently writes the keychain witness (no-op if already present), idempotently drives the DB transaction, then performs the rename to `.binding`. No external backup required. |
-| `.binding` exists, `.binding.pending` absent | Witness bytes are gone from disk by design (only the hash remains). If keychain + DB are healthy → vault is bound, nothing to do. If keychain witness is missing → `finalise-binding` requires the operator to supply `--vault-id` (or matches it via enumeration where supported) so it can re-discover and verify; if no recovery candidate is found, the path is `--abandon` (with `--vault-id`). |
+| `.binding` exists, `.binding.pending` absent, **DB healthy (`vault_meta` row present)** | Vault is fully bound. Nothing to do. |
+| `.binding` exists, `.binding.pending` absent, **DB never wrote** (`vault_meta` row absent), **keychain witness present** | `finalise-binding --vault-id <id>` reconstructs the pending sentinel and finishes first-bind. Procedure: (1) require `--vault-id` (the file's hash cannot derive the ULID by itself). (2) Load the witness bytes from `Keystore::load_secret(SecretHandle::for_witness(<id>))`; verify `sha256(witness_bytes) == contents of .cairn/vault.binding`. (3) Re-write the witness-bearing pending sentinel: `fs::write(".cairn/vault.binding.pending", VAULT_BINDING_PENDING_V1 { vault_id, witness_bytes })`. Both `.binding` and `.binding.pending` now exist; this is the "both files exist" case below, which the same flow then resolves. (4) Call `IdentityRegistry::reserve_first_identity(...)` with `binding_path = .cairn/vault.binding.pending`; the adapter `stat`s it and re-hashes — same contract as the happy path. (5) Atomically remove `.cairn/vault.binding.pending` (the rename to `.binding` is a no-op since `.binding` already carries the correct hash). The reconstruction step recreates the exact pre-DB witness-bearing artefact `reserve_first_identity` requires; the trait contract is satisfied without weakening it. |
+| `.binding` exists, `.binding.pending` absent, DB absent, **keychain witness absent** | Recovery genuinely impossible — the witness bytes exist nowhere reachable. `finalise-binding --abandon --vault-id <id>` deletes the sentinel and is recorded as an audit-gap event. |
 | Both files exist | Inconsistent crash (rename interrupted). `finalise-binding` retries the rename. |
 | Neither file exists | No binding committed; bootstrap mints fresh. |
 
@@ -2028,7 +2052,33 @@ cairn identity repair <id> [--json]
 cairn identity purge <id> [--resume] [--json]
 cairn identity vault-id-recover [--probe-keychain | --vault-id <id>] [--json]
 cairn identity finalise-binding [--abandon [--vault-id <id>]] [--json]
+cairn identity status [--json]
 ```
+
+`cairn identity status` is the **operator-visible inspection surface
+for vault-degraded mode**. It runs through `open_for_maintenance`, so
+it is callable even when issuer-dependent verbs are blocked by
+`VaultDegraded`. Output:
+
+- `vault_id` and binding state (`bound` / `pending` / `unbound`).
+- `defaults` — the active default human + agent identities (or
+  "not initialised" with the `init-defaults` hint).
+- `mismatched_ids: Vec<Identity>` — the `KeyMaterialMismatch` rows
+  surfaced by reconciliation. When non-empty, `vault_degraded =
+  true` and the human-readable output prints a remediation block
+  pointing at `repair`/`purge`/`vault-id-recover`.
+- `pending_evictions` and `pending_key_disables` — receipt-flag
+  snapshots for cross-store reconciliation status.
+- `purge_pending_ids` — identities awaiting `purge --resume`.
+
+`--json` emits the full structured `IdentityStatusReport` (defined
+in `cairn-core::domain::identity::status`); the human form is a
+short health summary plus the remediation block when degraded. The
+verb is read-only and never opens a keystore handle for mutation
+(it uses `MaintenanceMode::ReadOnly`), so it satisfies the
+"inspection surface that works under degraded mode" requirement
+without re-introducing the cross-vault writes that
+`open_for_maintenance` mutating mode guards against.
 
 Shape mirrors brief §4.2 conventions; flags use `clap` derive + `ValueEnum`
 for the kind enum. Snapshot tests cover human and `--json` output.
