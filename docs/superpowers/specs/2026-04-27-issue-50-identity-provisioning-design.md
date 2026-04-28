@@ -285,6 +285,62 @@ P0 split:
 when a key version was rotated past — informational only; not used for
 deletion.
 
+**Rotation as a cross-store two-phase workflow.** Like provisioning and
+purge, rotation cannot be made atomic across SQLite + the keystore, so
+it has an explicit ordered protocol with reconciliation rules per crash
+point. Steps (run by `IdentityService::rotate_identity`):
+
+1. **Reserve next version.** Mint `key_version = current + 1` (a
+   `KeyVersion` is `NonZeroU32`; `current_key_version` is monotone, so
+   reservation is collision-free without a registry round trip).
+   Construct `SecretHandle::for_identity(vault_id, id, next_version)`.
+2. **Persist new private key.** `Keystore::store_keypair(handle,
+   secret)`. If this fails the call returns; no DB mutation has
+   occurred, so retry is safe and there is no orphan to clean up.
+3. **Read-back verify.** `Keystore::load_signing_key(handle)` and
+   confirm the public key matches the planned `IdentityKeyEntry`.
+   Failure aborts: the just-written entry is deleted via
+   `Keystore::delete_keypair(handle)` (best-effort; logged on
+   failure) and the operation returns `KeyMaterialMismatch`. No
+   registry write yet.
+4. **Atomic registry transition.**
+   `IdentityRegistry::apply_rotation(receipt)` runs a single SQLite
+   transaction that (a) appends the new `identity_keys` row, (b)
+   stamps the predecessor row's `superseded_at`, (c) advances
+   `identities.current_key_version` to the new version, and (d)
+   persists the `RotationReceipt` to `identity_receipts`. After this
+   commit the new key is the canonical signer.
+5. **Evict eldest predecessor private key.** Determine the version to
+   evict (`new_current - 3`, if any). Call
+   `Keystore::delete_keypair(for_identity(vault_id, id, evict_v))`.
+   Treat `KeystoreError::NotFound` as already-clean. Failure here
+   does **not** roll back the rotation — the new key is already
+   active and the leftover private key is recoverable through
+   reconciliation. The loop emits a tracing warning and stamps
+   `pending_eviction = true` on the rotation receipt.
+
+**Crash-point recovery.** `cairn identity reconcile` extends to cover
+rotation drift; the rules are derivable from registry + keystore reads
+alone:
+
+| Crash point | Observable state | Action by `reconcile` |
+|---|---|---|
+| After step 2, before step 4 | Keystore has version `N+1`; registry `current_key_version = N`; no row at `N+1` in `identity_keys` | Delete the orphan keystore entry at `N+1` (`delete_keypair`). Operator re-runs `rotate` if still desired. |
+| After step 4, before step 5 | Registry `current_key_version = N+1`; keystore has both `N+1` (current) and `N-2` (should be evicted) | Re-attempt `delete_keypair` for the eldest predecessor. Idempotent: `NotFound` is clean. |
+| After step 5 partial | Registry `current_key_version = N+1`; eldest evicted; intermediate predecessor still present | No-op (this is the steady state — current + 2 predecessors). |
+
+`reconcile` never writes to `identity_keys` and never advances
+`current_key_version`; it only repairs keystore state to match what
+the committed registry says, or deletes orphan keystore material that
+no committed registry row references. The receipt produced by
+`apply_rotation` carries `pending_eviction: bool`; reconciliation
+clears it once the eviction succeeds (via a separate
+`IdentityRegistry::clear_pending_eviction(receipt_id)` call run in
+its own SQLite transaction, no keystore coupling). This is the same
+"registry first, keystore second, reconcile re-drives" pattern §3.5
+uses for provisioning, applied to the rotation lifecycle so no crash
+point can leave the system stranded.
+
 ### 3.7 Per-vault keystore namespacing + first-run gate
 
 Two Cairn vaults owned by the same OS user must not share keychain
@@ -771,7 +827,10 @@ P0 split, all gate-aware:
    - `pending` row, keychain entry present, public-key match →
      `activate_identity`.
    - `pending` row, keychain entry present, public-key mismatch → fail
-     closed (`KeyMaterialMismatch`); the operator must `purge` first.
+     closed (`KeyMaterialMismatch`); the operator must `purge` first
+     (the purge state machine in §3.10 accepts `pending` as a legal
+     start state via the same two-phase tombstone path used for
+     `active|revoked`, so the row is recoverable rather than stuck).
    - `active` row, keychain entry healthy → no-op (already healthy).
    - `active` row, keychain entry missing or mismatched → fail closed
      with `KeyMaterialDesynchronized`; `repair` does **not** auto-revoke.
@@ -841,6 +900,49 @@ P0 split, all gate-aware:
    carry no such load-bearing role and self-rotation costs nothing
    beyond the explicit audit-log marker.
 
+   **Revocation also disables signing material.** Flipping
+   `provisioning_state = revoked` in SQLite is necessary but not
+   sufficient: any local code path with keystore access could still
+   call `Keystore::load_signing_key` for a revoked identity and sign
+   payloads, so the registry-only flip is a porous trust boundary.
+   `IdentityService::revoke_identity` therefore runs a two-phase
+   cross-store flow analogous to rotation:
+
+   1. **Atomic registry transition.**
+      `IdentityRegistry::apply_revocation(receipt)` flips
+      `provisioning_state = revoked`, stamps `revoked_at`, and
+      persists the `RevocationReceipt`. After this commit signer
+      eligibility checks reject the identity in every gate
+      (`require_attributable_signer` and the `Operational`
+      visibility filter both treat `revoked` as non-signing).
+   2. **Delete + verify each retained private key.** Iterate the
+      retained private-key ring (current + ≤ 2 predecessors per §3.6)
+      and apply the same delete-then-verify loop §3.10 step 2 uses
+      for `purge`: `Keystore::delete_keypair(handle)`, then
+      `Keystore::load_signing_key(handle)` and confirm
+      `KeystoreError::NotFound`. `NotFound` for an aged-out version is
+      treated as already-clean (same rule as purge). Any other
+      outcome leaves a `pending_key_disable = true` flag on the
+      revocation receipt; `cairn identity reconcile` re-drives this
+      loop until clean. The `identity_keys` archive (public keys,
+      append-only) is **not** touched — historical signature
+      verification continues to resolve the issuer, satisfying the
+      brief's "earlier operations remain valid" promise. The keychain
+      witness is also untouched (vault binding is independent of any
+      single identity's lifecycle).
+
+   The result: a `revoked` identity has no recoverable private signing
+   material once reconciliation completes, while every record signed
+   under that identity prior to revocation remains verifiable. This
+   closes the gap where revocation enforced trust state only at the
+   registry layer and left the keystore as a side channel for
+   continued signing by compromised callers. `Keystore::load_signing_key`
+   is **not** required to refuse revoked identities at the adapter
+   layer (the keystore is intentionally unaware of provisioning state);
+   trust enforcement lives in `IdentityService`, and the mechanical
+   guarantee is that after revoke + reconcile the keystore returns
+   `NotFound` for every retained version.
+
 3. **`cairn identity purge <id>`** (new, in `cairn-cli`) — operator-of-
    last-resort. **Does not hard-delete.** It moves the identity to a
    `purged` provisioning state, deletes the corresponding **private**
@@ -865,12 +967,21 @@ P0 split, all gate-aware:
    **Two-phase state machine across registry + keystore.** SQLite and
    the keystore cannot transact together, so `purge` is explicit about
    ordering, verification, and recovery. The state machine adds one
-   transitional state, `purge_pending`, between `active`/`revoked` and
-   `purged`:
+   transitional state, `purge_pending`, between
+   `pending`/`active`/`revoked` and `purged`:
 
    ```
-   active|revoked → purge_pending → purged
+   pending|active|revoked → purge_pending → purged
    ```
+
+   `pending` is admitted because §3.10.1 redirects key-material
+   mismatched `pending` rows here as their only recovery path; without
+   this transition such rows would be permanently stuck and would
+   block re-provision via `ProvisioningInFlight`. When the start state
+   is `pending`, the receipt records `prior_state = "pending"` and
+   `audit_gap = "no_signed_revocation"` (same gap label as `active|
+   revoked` → `purged`, since no signed envelope is produced); the
+   rest of the flow is identical.
 
    Steps:
 
@@ -1092,7 +1203,12 @@ pub trait IdentityRegistry: Send + Sync {
     //     `identity_receipts`.
     //   * `apply_revocation`: flip `identities.provisioning_state` to
     //     `revoked`, stamp `revoked_at`, and persist the
-    //     `RevocationReceipt` to `identity_receipts`.
+    //     `RevocationReceipt` to `identity_receipts`. The
+    //     keystore-side disable of retained private keys is run by
+    //     `IdentityService::revoke_identity` immediately after this
+    //     transaction commits (§3.10 step 2 of the revocation flow);
+    //     the registry trait does not own that step because keystore
+    //     and SQLite cannot transact together.
     // Splitting receipt-write from state-mutation as separate trait
     // methods would let an adapter persist authorization without
     // applying the change (or vice versa); the trait does not allow
@@ -1120,7 +1236,10 @@ pub trait IdentityRegistry: Send + Sync {
     // exposes the state machine explicitly: there is no shortcut
     // method that flips straight to `purged`. Implementations must
     // expose both transitions so reconciliation can re-drive a stuck
-    // `purge_pending` row. `identity_keys` rows are never deleted —
+    // `purge_pending` row. `mark_purge_pending` accepts a row in
+    // `pending`, `active`, or `revoked` (per §3.10's start-state
+    // matrix) and rejects all other states with
+    // `RegistryError::InvalidPurgeStartState { id, state }`. `identity_keys` rows are never deleted —
     // historical signature verification continues to resolve the
     // issuer even after `purged`. The caller must hold a per-vault
     // on-disk acknowledgement (`PurgeAcknowledgement`) so this cannot
@@ -1180,7 +1299,10 @@ across an injected mid-step-2 crash and is still consumable by
 `RegistryError` (`#[non_exhaustive]`): `NotFound`, `IdentityExists { id }`,
 `ProvisioningInFlight { id }`, `AlreadyRevoked { id }`,
 `KeyMaterialMismatch { id }`,
-`KeyVersionConflict { existing, attempted }`, `Backend(#[source] …)`.
+`KeyVersionConflict { existing, attempted }`,
+`InvalidPurgeStartState { id, state }`,
+`PurgeIncomplete { id, remaining_versions }`,
+`Backend(#[source] …)`.
 
 `IdentityServiceError` (top-level error returned by `IdentityService`,
 wraps the two adapter errors plus the cross-cutting cases):
