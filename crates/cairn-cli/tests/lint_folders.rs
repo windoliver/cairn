@@ -128,6 +128,29 @@ async fn atomic_writes_overwrite_stale_and_leave_no_tmp() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn write_through_symlinked_parent_is_rejected() {
+    // The atomic-write path delegates to `vault::bootstrap::write_once`,
+    // which lstat-checks the immediate parent. A symlinked `raw/` (the
+    // parent of `raw/_index.md`) must be rejected, not silently written
+    // through to the symlink target.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    let attacker = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(attacker.path(), vault.path().join("raw")).unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await;
+
+    assert!(result.is_err(), "symlink-parent write should be rejected");
+    assert!(
+        !attacker.path().join("_index.md").exists(),
+        "symlink target was written through",
+    );
+}
+
+#[tokio::test]
 async fn fixture_index_matches_snapshot() {
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();

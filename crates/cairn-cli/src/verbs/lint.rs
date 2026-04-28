@@ -165,7 +165,12 @@ pub async fn fix_folders_handler(
         &backlinks_by_target,
     );
 
-    // 5. Write each `_index.md` atomically.
+    // 5. Write each `_index.md` atomically. We delegate the symlink-rejection
+    //    + atomic-persist sequence to `vault::bootstrap::write_once` (force=true)
+    //    so the same lstat-then-rename guarantees protect both bootstrap and
+    //    `lint --fix-folders`. The "unchanged" semantic (skip when content
+    //    already matches) lives here, because `write_once` does not compare
+    //    bytes — under `force=true` it always overwrites.
     let mut written = Vec::new();
     let mut unchanged = 0usize;
     for state in states {
@@ -187,18 +192,16 @@ pub async fn fix_folders_handler(
         }
         let content = projected.content.clone();
         let dest = abs.clone();
-        let parent_buf = abs.parent().unwrap_or(Path::new(".")).to_path_buf();
         tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
-            let mut tmp = tempfile::Builder::new()
-                .suffix(".md.tmp")
-                .tempfile_in(&parent_buf)
-                .with_context(|| format!("tempfile in {}", parent_buf.display()))?;
-            tmp.write_all(content.as_bytes())
-                .with_context(|| format!("write temp {}", tmp.path().display()))?;
-            tmp.persist(&dest)
-                .map_err(|e| anyhow::anyhow!("persist -> {}: {}", dest.display(), e.error))?;
-            Ok::<_, anyhow::Error>(())
+            // `write_once` lstat-checks the parent + final target for symlinks,
+            // writes a randomly-named tempfile in the same directory, and
+            // atomically renames into place. The created/skipped vecs are
+            // populated for bootstrap's receipt; we discard them here because
+            // the surrounding read-and-compare loop already classifies writes
+            // as `written` or `unchanged`.
+            let mut created = Vec::new();
+            let mut skipped = Vec::new();
+            crate::vault::bootstrap::write_once(&dest, &content, true, &mut created, &mut skipped)
         })
         .await
         .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
