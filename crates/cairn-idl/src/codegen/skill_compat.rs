@@ -194,8 +194,12 @@ fn extract_inline_cairn_spans(line: &str, line_no: usize) -> Vec<CodeBlock> {
 /// Returns [`CompatError`] when the verb is unknown, a flag is unknown, or the
 /// block is malformed.
 pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), CompatError> {
-    for raw_line in block.body.lines() {
-        let line = raw_line.trim();
+    // Join shell line-continuations (`\` at EOL) into single logical commands
+    // first — without this, `cairn retrieve --session S \\n  --include bogus`
+    // would only validate the leading line and silently accept the stale
+    // continuation.
+    for logical in join_continuations(&block.body) {
+        let line = logical.trim();
         if line.is_empty() || !line.starts_with("cairn") {
             continue;
         }
@@ -204,9 +208,30 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
     Ok(())
 }
 
+/// Collapse shell line-continuations: a line ending in an unescaped trailing
+/// backslash is concatenated with the next line (the backslash + newline are
+/// replaced by a single space).
+fn join_continuations(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for raw in body.lines() {
+        if let Some(stripped) = raw.strip_suffix('\\') {
+            current.push_str(stripped);
+            current.push(' ');
+        } else {
+            current.push_str(raw);
+            out.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// Validate one whitespace-tokenised `cairn …` line.
 fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(), CompatError> {
-    let owned = shell_split(line);
+    let owned = shell_split(line, source_line)?;
     let mut tokens = owned.iter().map(String::as_str);
     let _ = tokens.next(); // "cairn"
     let Some(verb) = tokens.next() else {
@@ -481,20 +506,48 @@ fn validate_flag_value(
             .map_err(|_| bad(format!("value `{value}` is not an integer")))?;
         check_integer_bounds(flag, i128::from(parsed), prop_schema, line)?;
     } else if let Some(allowed) = list_enum_options(source) {
-        // `list<enum(a,b,c)>` is the closed list-of-enum form (e.g.,
-        // retrieve's `--include`). Split the CLI value on `,` and reject any
-        // item not in the allow-set so a stale `--include nonsense` slips
-        // exactly the way the real clap parser would.
-        let allowed_set: BTreeSet<&str> = allowed.split(',').map(str::trim).collect();
-        for item in value.split(',') {
-            let item = item.trim();
-            if item.is_empty() {
-                continue;
-            }
-            if !allowed_set.contains(item) {
-                return Err(bad(format!("list item `{item}` is not in {{{allowed}}}")));
-            }
+        validate_list_enum_value(value, allowed, prop_schema, &bad)?;
+    }
+    Ok(())
+}
+
+/// Validate a `list<enum(a,b,c)>` CLI value: reject empty items, enforce
+/// membership, and honour `uniqueItems` / `minItems` from the property schema.
+fn validate_list_enum_value(
+    value: &str,
+    allowed: &str,
+    prop_schema: Option<&serde_json::Value>,
+    bad: &dyn Fn(String) -> CompatError,
+) -> Result<(), CompatError> {
+    let allowed_set: BTreeSet<&str> = allowed.split(',').map(str::trim).collect();
+    let unique_required = prop_schema
+        .and_then(|p| p.get("uniqueItems"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut count = 0usize;
+    for item in value.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(bad("empty list item".to_string()));
         }
+        if !allowed_set.contains(item) {
+            return Err(bad(format!("list item `{item}` is not in {{{allowed}}}")));
+        }
+        if unique_required && !seen.insert(item) {
+            return Err(bad(format!("duplicate list item `{item}`")));
+        }
+        count += 1;
+    }
+    let min_items = prop_schema
+        .and_then(|p| p.get("minItems"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let min_items = usize::try_from(min_items).unwrap_or(usize::MAX);
+    if count < min_items {
+        return Err(bad(format!(
+            "list has {count} item(s), schema requires at least {min_items}"
+        )));
     }
     Ok(())
 }
@@ -581,9 +634,10 @@ pub(crate) fn is_signed_int_source(s: &str) -> bool {
 
 /// Shell-aware tokenizer for one CLI example line. Handles single- and
 /// double-quoted strings and backslash-escaped characters; otherwise behaves
-/// like `split_whitespace`. Without this `cairn search "project status"`
-/// would parse as two positionals instead of one.
-fn shell_split(line: &str) -> Vec<String> {
+/// like `split_whitespace`. Returns an error on an unmatched quote or a
+/// dangling backslash so a syntactically broken example like
+/// `cairn search "unterminated` can't slip past the gate.
+fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatError> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut in_single = false;
@@ -592,9 +646,14 @@ fn shell_split(line: &str) -> Vec<String> {
     while let Some(c) = chars.next() {
         match c {
             '\\' if !in_single => {
-                if let Some(next) = chars.next() {
-                    buf.push(next);
-                }
+                let Some(next) = chars.next() else {
+                    return Err(CompatError::Malformed {
+                        kind: "cli",
+                        detail: "trailing backslash with nothing to escape".to_string(),
+                        line: source_line,
+                    });
+                };
+                buf.push(next);
             }
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
@@ -606,10 +665,20 @@ fn shell_split(line: &str) -> Vec<String> {
             _ => buf.push(c),
         }
     }
+    if in_single || in_double {
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: format!(
+                "unterminated {} quote",
+                if in_single { "single" } else { "double" }
+            ),
+            line: source_line,
+        });
+    }
     if !buf.is_empty() {
         out.push(buf);
     }
-    out
+    Ok(out)
 }
 
 /// Walk the post-verb tokens, returning the positional count and the set of

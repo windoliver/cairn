@@ -239,6 +239,67 @@ fn cli_validator_accepts_valid_list_enum_items() {
 }
 
 #[test]
+fn cli_validator_rejects_duplicate_list_enum_items() {
+    // `--include` declares `uniqueItems: true`. Round-12 finding 1.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID --turn 0 --include tool_calls,tool_calls".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("duplicate list<enum> items must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_rejects_empty_list_enum_item() {
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID --turn 0 --include tool_calls,".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("empty list item must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_inspects_line_continuations() {
+    // Multiline bash with backslash-newline. Round-12 finding 2: the gate
+    // must validate the joined logical command, not just the first line.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID --turn 0 \\\n  --include nonsense".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("continuation line must be validated");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_rejects_unterminated_quote() {
+    // Round-12 finding 3: a syntactically broken example must not slip past
+    // the gate just because the tokenizer was lenient.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode keyword \"unterminated".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("unterminated quote must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
