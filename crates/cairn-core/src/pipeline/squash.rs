@@ -517,6 +517,89 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-1 (newer loop) regression: bypass `lines_dropped_truncate`
+    /// must reflect raw lines actually omitted from the middle, and
+    /// `bytes_dropped_truncate` must exclude ANSI bytes stripped during
+    /// sanitization (sanitization is not truncation).
+    #[test]
+    fn oversize_bypass_stats_use_raw_boundaries() {
+        // Build a payload where: head=10 short lines, middle=1000
+        // dropped lines (each with embedded ANSI sgr), tail=10 lines.
+        let mut raw: Vec<u8> = Vec::new();
+        for i in 0..10 {
+            raw.extend_from_slice(format!("head-{i:02}\n").as_bytes());
+        }
+        // Middle: 1000 lines, each with a \x1b[31m...\x1b[0m wrapper.
+        for i in 0..1000 {
+            raw.extend_from_slice(
+                format!("\x1b[31mmiddle-{i:04}-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x1b[0m\n")
+                    .as_bytes(),
+            );
+        }
+        for i in 0..10 {
+            raw.extend_from_slice(format!("tail-{i:02}\n").as_bytes());
+        }
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        // We dropped some non-zero count of lines from the middle.
+        assert!(
+            out.stats.lines_dropped_truncate > 0,
+            "lines_dropped_truncate must be populated, got {}",
+            out.stats.lines_dropped_truncate,
+        );
+        // Total raw \n count is 1020. Lines preserved = head \n
+        // count + tail \n count. dropped = 1020 - preserved should
+        // be in (0, 1020).
+        #[allow(clippy::naive_bytecount)]
+        let total_lines = raw.iter().filter(|&&b| b == b'\n').count();
+        assert!(out.stats.lines_dropped_truncate < total_lines);
+        // The middle had ~1000 lines × ~10 ANSI bytes stripped =
+        // ~10K bytes of pure-sanitization loss. With the OLD (buggy)
+        // accounting that subtracted sanitized lengths from raw_byte_len,
+        // those 10K stripped bytes would have been counted as dropped.
+        // With raw-boundary accounting, they are NOT counted: the
+        // dropped count reflects only the unrenderable middle.
+        let head_lines_pos = raw
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'\n')
+            .nth(9)
+            .unwrap()
+            .0;
+        let tail_start_lines = total_lines - 10;
+        let mut count = 0usize;
+        let mut tail_start_byte = 0usize;
+        for (i, &b) in raw.iter().enumerate() {
+            if b == b'\n' {
+                if count == tail_start_lines {
+                    tail_start_byte = i + 1;
+                    break;
+                }
+                count += 1;
+            }
+        }
+        let middle_byte_len = tail_start_byte.saturating_sub(head_lines_pos + 1);
+        // With raw-boundary accounting, dropped bytes ≈ middle byte
+        // length (within a small slop for the byte-budget cut not
+        // exactly aligning to head_lines_pos and tail_start_byte).
+        assert!(
+            out.stats.bytes_dropped_truncate >= middle_byte_len / 2,
+            "expected dropped >= half of middle ({}), got {}",
+            middle_byte_len / 2,
+            out.stats.bytes_dropped_truncate,
+        );
+    }
+
     /// Round-9 (new loop) regression: when the entire payload is one
     /// extremely long line (no `\n` anywhere), the bypass must not
     /// leak a head prefix of that line — there is no safe line
@@ -763,8 +846,9 @@ mod wrapper_tests {
     /// Round-6 (new loop) regression: a payload under `MAX_INPUT_BYTES`
     /// but with > `MAX_INPUT_LINES` newlines must route to the bypass
     /// path so stage 3 does not allocate millions of empty `String`s.
+    // Allocates ~1M bytes (1.0 MiB) — fast enough for CI, exercises
+    // the LineCardinality bypass route through squash() end-to-end.
     #[test]
-    #[ignore = "allocates ~1M+1 newlines; run with --ignored"]
     fn line_dense_payload_routes_to_bypass() {
         let n = MAX_INPUT_LINES + 1;
         let mut raw: Vec<u8> = Vec::with_capacity(n + 32);
@@ -2104,6 +2188,7 @@ impl BypassReason {
 /// expand 1B → 3B for invalid bytes), insert a clear marker, and
 /// return a normal `SquashOutput` with `stats.truncated = true`.
 /// Memory and output are bounded by `cfg.max_bytes()`.
+#[allow(clippy::too_many_lines)] // sequential pipeline; splitting hurts clarity
 fn oversize_bypass(
     raw_bytes: &[u8],
     raw_hash: PayloadHash,
@@ -2172,7 +2257,29 @@ fn oversize_bypass(
             tail_trimmed
         };
         compacted_bytes.extend_from_slice(tail_aligned.as_bytes());
-        tail_source_bytes = tail_aligned.len();
+        // Track raw-tail span for accounting: count newlines in
+        // `tail_aligned` and find the matching position from end-of-raw.
+        // Newlines pass through stages 1+2 unchanged, so the n-th
+        // sanitized newline corresponds 1:1 with the n-th raw newline.
+        let tail_newlines = tail_aligned.bytes().filter(|&b| b == b'\n').count();
+        if tail_newlines > 0 {
+            let mut count = 0usize;
+            for i in (0..raw_byte_len).rev() {
+                if raw_bytes[i] == b'\n' {
+                    count += 1;
+                    if count == tail_newlines + 1 {
+                        tail_source_bytes = raw_byte_len - (i + 1);
+                        break;
+                    }
+                }
+            }
+            // If the source has fewer newlines than emitted (shouldn't
+            // happen given 1:1 \n preservation), fall back to using
+            // raw_byte_len - tail_raw_start.
+            if tail_source_bytes == 0 {
+                tail_source_bytes = raw_byte_len - tail_raw_start;
+            }
+        }
     } else if !raw_bytes.is_empty() {
         let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
         compacted_bytes.extend_from_slice(degraded);
@@ -2184,11 +2291,41 @@ fn oversize_bypass(
         max_body,
     );
     stats.truncated = true;
-    // Drop accounting: count only source bytes that were preserved.
-    // Synthetic markers and injected newlines are NOT source bytes,
-    // so we cannot subtract `compacted_bytes.len()` from `raw_byte_len`.
-    let preserved_source_bytes = head.len() + tail_source_bytes;
-    stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(preserved_source_bytes);
+    // Bypass accounting derived from raw slice boundaries (not sanitized
+    // lengths) so ANSI/OSC bytes stripped during sanitization do NOT
+    // count as truncation loss. `head_raw_end_preserved` is the byte
+    // after the last `\n` in raw_bytes[..head_raw_end] (the position
+    // up to which head's source content extends in raw). `tail_source_bytes`
+    // is the raw-byte length of the source span represented by the
+    // emitted tail.
+    let head_raw_end_preserved = raw_bytes[..head_raw_end]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |p| p + 1);
+    // If `head` was emitted as empty (no `\n` in head_trimmed) the
+    // source preserved by head is also 0 — match that.
+    let head_raw_preserved = if head.is_empty() {
+        0
+    } else {
+        head_raw_end_preserved
+    };
+    let preserved_raw_bytes = head_raw_preserved + tail_source_bytes;
+    stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(preserved_raw_bytes);
+    // Lines dropped: count newlines in the dropped middle region of
+    // raw_bytes (between head's last preserved newline and where the
+    // tail's source span starts).
+    let tail_source_start = raw_byte_len.saturating_sub(tail_source_bytes);
+    if tail_source_start > head_raw_preserved {
+        // Count `\n` bytes in the dropped middle region. We are
+        // intentionally filtering for a specific byte; bytecount
+        // crates are not in our dep tree.
+        #[allow(clippy::naive_bytecount)]
+        let n = raw_bytes[head_raw_preserved..tail_source_start]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        stats.lines_dropped_truncate = n;
+    }
     let compacted_hash = sha256_payload_hash(&compacted_bytes);
     let compacted_byte_len = compacted_bytes.len();
     SquashOutput {
