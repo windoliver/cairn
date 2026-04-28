@@ -170,9 +170,25 @@ async-closures stabilize.
   remains in `records` but flagged.
 - `expire(id, at)` — copy current row to `record_versions` with
   `change_kind=expire`, set `records.expired_at`. Row remains.
-- `purge(id, journal)` — copy minimal metadata to `record_versions` with
-  `change_kind=purge` (body redacted), DELETE row from `records`. Requires
-  non-null `consent_journal_ref` for audit.
+- `purge(id, journal)` — physical deletion. In a single tx:
+  1. Write the supplied consent entry to `consent_journal` (raw row insert —
+     the table ships in #46 even though the consent UX/lint surface lands in
+     #17). Open `consent_journal_ref` is the row's PK; supplying a stale or
+     non-matching ref → `StoreError::Invariant`.
+  2. DELETE every row from `record_versions` where `record_id = id` (no
+     redaction-by-update — full row delete; bodies are not recoverable from
+     the history table).
+  3. DELETE from `records` where `id = id`.
+  4. INSERT one final marker row into `record_versions` with
+     `change_kind=purge`, body NULL, and `consent_journal_id` foreign-keying
+     the just-written journal row. This row is the only post-purge artefact
+     and contains no payload — only metadata + audit pointer.
+  5. DELETE matching rows from `records_fts` and (when present) `records_vec`
+     so derived indexes carry no residual content.
+
+  Acceptance: after `purge`, querying `record_versions` for the id returns
+  exactly one row (the marker) with `body IS NULL`; full-text search over the
+  body returns zero hits; `consent_journal` contains a permanent audit row.
 
 `get`/`list` filter out tombstoned and expired rows by default. `ListQuery`
 exposes `include_tombstoned: bool` / `include_expired: bool` toggles for
@@ -246,11 +262,20 @@ pub async fn open(path: &Path) -> Result<SqliteMemoryStore, StoreError> {
     // 1. tokio::task::spawn_blocking
     // 2. Connection::open(path)
     // 3. apply pragmas (WAL, foreign_keys, busy_timeout=5000, synchronous=NORMAL)
-    // 4. load sqlite-vec extension (feature-gated; #46 declares feature, no-op load)
-    // 5. apply_pending migrations
+    // 4. apply_pending migrations
+    // 5. (vec feature only) attempt sqlite-vec extension load + create vec
+    //    virtual table; on failure log warn + leave vec capability off — DO
+    //    NOT fail open(). CRUD must work without the extension.
     // 6. wrap in tokio::sync::Mutex, return SqliteMemoryStore
 }
 ```
+
+**`sqlite-vec` is opt-in.** The `vec` cargo feature defaults to **off** in #46.
+Migration `0005_vec.sql` is conditionally executed only when the feature is
+enabled and the extension loads successfully; otherwise the table is not
+created and `capabilities().vector` stays `false`. Basic CRUD has zero
+dependency on `sqlite-vec`. The feature flips default-on in #48 once the
+extension is statically linked and the embedding pipeline lands.
 
 ### 7.3 Capability advertisement
 
@@ -277,7 +302,7 @@ MemoryStoreCapabilities { fts: true, vector: false, graph_edges: true, transacti
 | File | Coverage |
 |---|---|
 | `crud_roundtrip.rs` | `upsert` → `get` returns byte-equal `MemoryRecord` (full provenance, actor_chain, evidence, scope, confidence, salience). |
-| `versioning.rs` | `upsert` × 2 → `tombstone` → `expire` → `purge` sequence. Assert `version_history` returns 5 rows with `change_kind ∈ {update, tombstone, expire, purge}` and that purge body is redacted. |
+| `versioning.rs` | `upsert` × 2 → `tombstone` → `expire` → `purge` sequence. Pre-purge: `version_history` returns 4 rows. Post-purge: `version_history` returns exactly 1 row (the purge marker) with `body IS NULL`; FTS query for any prior body content returns zero hits; `consent_journal` contains the audit row referenced by the marker. |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back, connection still usable. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open. |
@@ -331,12 +356,12 @@ cargo machete
 
 ## 11. Risks & open questions
 
-- **`sqlite-vec` extension loading.** P0 binary needs the extension
-  statically linked. `sqlite-vec` exposes a C entry point loadable at runtime;
-  static link requires a `cc` build step. #46 creates the table behind a
-  cargo feature `vec` (default-on) but does not exercise it. If static link
-  proves brittle on macOS-arm64 in CI, fall back to runtime
-  `Connection::load_extension` and feature-gate the table.
+- **`sqlite-vec` extension loading.** P0 binary will eventually need the
+  extension statically linked, but #46 keeps the `vec` cargo feature
+  **default-off** so basic CRUD can never fail to open due to a missing
+  extension. When the feature is on and the extension loads, the
+  `records_vec` virtual table is created; otherwise it is skipped and
+  `capabilities().vector` stays `false`. The default flips in #48.
 - **`async_trait` vs RPITIT.** Existing trait uses `async_trait` for
   `dyn` compatibility (the registry stores `Box<dyn MemoryStore>`).
   RPITIT is not yet `dyn`-compatible without extra ceremony. Keeping
