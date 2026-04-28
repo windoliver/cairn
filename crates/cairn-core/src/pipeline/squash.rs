@@ -268,27 +268,6 @@ impl<'a> UnstructuredTextBytes<'a> {
     }
 }
 
-/// Unstable shim that forwards to the crate-private constructor.
-/// Compiled only with `--features internal-unstable`. Exists so the
-/// criterion bench (and any in-tree dev tool) can build the wrapper
-/// while #218 is open. Will be removed once `TerminalContext` is
-/// persisted on `CapturePayload::Terminal`.
-#[cfg(feature = "internal-unstable")]
-impl<'a> UnstructuredTextBytes<'a> {
-    /// See [`UnstructuredTextBytes::try_from_terminal_event`].
-    ///
-    /// # Errors
-    /// Same as the crate-private constructor.
-    #[doc(hidden)]
-    pub fn try_from_terminal_event_unstable(
-        event: &CaptureEvent,
-        raw: &'a [u8],
-        context: TerminalContext,
-    ) -> Result<Self, UnstructuredBindError> {
-        Self::try_from_terminal_event(event, raw, context)
-    }
-}
-
 /// Sensor-supplied execution context for a Terminal payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -815,7 +794,15 @@ fn stage4_dedup_structured(
     if lines.is_empty() || min_run < 2 {
         return lines.iter().map(|l| (l.clone(), None)).collect();
     }
+    // Anchor split-form exemption on the last non-empty content line, not
+    // the literal last index. Otherwise `FINAL\nFINAL\n\n` collapses to
+    // `FINAL [×2]` and the byte-exact final content line is lost under
+    // truncation, even though that is what callers need preserved.
     let last_idx = lines.len() - 1;
+    let last_content_idx = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .unwrap_or(last_idx);
     let mut out: Vec<DedupLine> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
@@ -825,7 +812,7 @@ fn stage4_dedup_structured(
             j += 1;
         }
         let run_len = j - i;
-        let run_contains_last = j - 1 == last_idx;
+        let run_contains_last = j - 1 == last_content_idx;
         let cr_bearing = line.contains('\r');
         // Empty-line runs pass through verbatim — collapsing them to
         // `[×N]` would synthesize a non-empty summary line that fools
@@ -1083,14 +1070,15 @@ mod stage5_tests {
 
 /// Stage 6: head/marker/tail layout. Returns the joined output (no trailing
 /// newline; the squash entrypoint re-adds one if the input had one).
-/// `pair_at_end` indicates the last two lines form an atomic split-form
-/// dedup pair (`<line> [×N-1]` followed by `<line>` verbatim) — they must
-/// be kept together or dropped together. `reserve_trailing` reduces the
-/// effective budget by 1 byte so the entrypoint can re-append `\n` without
-/// breaching `cfg.max_bytes()`.
+/// `pair_companion_idx`, when `Some(i)`, marks the index of the
+/// `(content, Some(K))` count-companion of a split-form dedup pair; the
+/// pair entries at `[i, i+1]` must be kept in the same region (both in
+/// head or both in tail). `reserve_trailing` reduces the effective budget
+/// by 1 byte so the entrypoint can re-append `\n` without breaching
+/// `cfg.max_bytes()`.
 fn stage6_layout(
     lines: &[String],
-    pair_at_end: bool,
+    pair_companion_idx: Option<usize>,
     reserve_trailing: bool,
     cfg: &SquashConfig,
     stats: &mut SquashStats,
@@ -1117,6 +1105,15 @@ fn stage6_layout(
     let mut tail_start = lines.len() - cfg.tail_lines().min(lines.len());
     if tail_start > last_content_idx {
         tail_start = last_content_idx;
+    }
+    // If a split-form dedup pair would straddle the head/tail boundary
+    // (count-companion just before tail_start, verbatim partner inside
+    // tail), extend tail_start to include the companion so the pair stays
+    // atomic. Symmetric with the pair-floor lock in mode B.
+    if let Some(idx) = pair_companion_idx
+        && idx + 1 == tail_start
+    {
+        tail_start = idx;
     }
     let tail_take = lines.len() - tail_start;
     let tail_slice = &lines[tail_start..];
@@ -1167,8 +1164,11 @@ fn stage6_layout(
 
         // Phase B: drop from the front of the preserved tail, stopping
         // before the atomic region around last_content_idx (and its
-        // split-form pair partner when pair_at_end).
-        let pair_floor = if pair_at_end { 2 } else { 1 };
+        // split-form pair partner if `pair_companion_idx` points just
+        // before last_content_idx).
+        let pair_locked_below_anchor =
+            pair_companion_idx.is_some_and(|idx| idx + 1 == last_content_idx);
+        let pair_floor = if pair_locked_below_anchor { 2 } else { 1 };
         let min_tail_start = (last_content_idx + 1).saturating_sub(pair_floor);
         while remaining_tail > target && current_tail_start < min_tail_start {
             let drop_line = &lines[current_tail_start];
@@ -1211,7 +1211,7 @@ mod stage6_tests {
         let cfg = SquashConfig::default();
         let lines: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
         assert_eq!(out, "a\nb\nc");
         assert!(!stats.truncated);
     }
@@ -1221,7 +1221,7 @@ mod stage6_tests {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
         let lines: Vec<String> = (0..200).map(|i| format!("line-{i:04}")).collect();
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
         assert!(stats.truncated);
         assert!(out.len() <= cfg.max_bytes());
         assert!(out.contains("skipped"));
@@ -1233,7 +1233,7 @@ mod stage6_tests {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
         let lines: Vec<String> = (0..10_000).map(|i| format!("L{i}")).collect();
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
         assert!(out.ends_with("L9999"));
         assert!(out.len() <= cfg.max_bytes());
     }
@@ -1273,7 +1273,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
 
     stats.cr_bearing_lines = raw_lines.iter().filter(|l| l.contains('\r')).count();
 
-    let (post_dedup, pair_at_end) = stage4_dedup_structured_with_pair_flag(
+    let (post_dedup, pair_companion_idx) = stage4_dedup_structured_with_pair_flag(
         &raw_lines,
         cfg.dedup_min_run(),
         &mut stats.dedup_runs_collapsed,
@@ -1302,7 +1302,13 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     // final compacted bytes never exceed cfg.max_bytes().
     let reserve_trailing = trailing_newline;
     let had_lines = !post_cap.is_empty();
-    let mut compacted = stage6_layout(&post_cap, pair_at_end, reserve_trailing, cfg, &mut stats);
+    let mut compacted = stage6_layout(
+        &post_cap,
+        pair_companion_idx,
+        reserve_trailing,
+        cfg,
+        &mut stats,
+    );
     // Re-append the trailing newline whenever the input had one and there
     // was at least one logical line — otherwise a sole `"\n"` collapses to
     // empty output even though it fits every byte budget.
@@ -1341,28 +1347,21 @@ fn stage4_dedup_structured_with_pair_flag(
     lines: &[String],
     min_run: usize,
     collapsed_runs: &mut usize,
-) -> (Vec<DedupLine>, bool) {
-    if lines.is_empty() || min_run < 2 {
-        return (lines.iter().map(|l| (l.clone(), None)).collect(), false);
-    }
-    // pair_at_end mirrors stage 4's split-form emission rule: the run that
-    // ends at the *literal* last index is the only one promoted to
-    // `(content, Some(N-1))` + `(content, None)`. Detecting against the
-    // last content index would over-set the flag for runs that don't
-    // actually emit a split-form pair (e.g., a repeated content run
-    // followed by trailing blanks — there stage 4 emits a single
-    // `(content, Some(N))` instead, and there is no companion to lock).
-    let last_idx = lines.len() - 1;
-    let last_line = &lines[last_idx];
-    let mut run_start = last_idx;
-    while run_start > 0 && &lines[run_start - 1] == last_line {
-        run_start -= 1;
-    }
-    let trailing_run = last_idx - run_start + 1;
-    let cr_bearing = last_line.contains('\r');
-    let pair_at_end = trailing_run > min_run && !cr_bearing;
+) -> (Vec<DedupLine>, Option<usize>) {
     let out = stage4_dedup_structured(lines, min_run, collapsed_runs);
-    (out, pair_at_end)
+    // Locate the split-form pair in the output (count-companion `Some(K)`
+    // immediately followed by `None` with identical content). Returns the
+    // index of the count-companion so stage 6 can keep both entries in
+    // the same region — the pair may not be at the end if trailing blank
+    // lines follow the repeated content run.
+    let pair_idx = out.iter().enumerate().find_map(|(i, entry)| {
+        let next = out.get(i + 1)?;
+        match (entry, next) {
+            ((content_a, Some(_)), (content_b, None)) if content_a == content_b => Some(i),
+            _ => None,
+        }
+    });
+    (out, pair_idx)
 }
 
 #[cfg(test)]
@@ -1376,7 +1375,8 @@ mod tail_lock_tests {
         lines.push("x [×3]".into());
         lines.push("x".into());
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, true, false, &cfg, &mut stats);
+        // Pair count-companion ("x [×3]") is at index 100, partner at 101.
+        let out = stage6_layout(&lines, Some(100), false, &cfg, &mut stats);
         let has_marker = out.contains("x [×3]");
         let has_final = out.contains("\nx") || out.starts_with('x');
         assert!(has_final, "final line must survive");
@@ -1490,19 +1490,19 @@ mod squash_integration_tests {
         assert!(out.compacted_byte_len <= cfg.max_bytes());
     }
 
-    /// Regression: a repeated content run followed by trailing blanks
-    /// stays a single `(content, Some(N))` entry in stage 4 (not split-form,
-    /// because the run does not contain the literal last index), and stage 6
-    /// must preserve that combined `<content> [×N]` line under truncation.
+    /// Regression: a repeated content run followed by trailing blanks must
+    /// emit the split-form pair `<content> [×N-1]` + verbatim `<content>`
+    /// (anchored on the last *non-empty* content line) so the byte-exact
+    /// final line survives — not be collapsed to a single `[×N]` entry.
     #[test]
-    fn repeated_run_with_trailing_blanks_keeps_count_marker() {
+    fn repeated_run_with_trailing_blanks_keeps_verbatim_final() {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
         let mut raw = Vec::new();
         for i in 0..50 {
             raw.extend_from_slice(format!("noise-{i:04}\n").as_bytes());
         }
-        // 4 repeats of FINAL: stage 4 emits a single ("FINAL", Some(4))
-        // because the run does not reach the literal last index.
+        // 4 repeats of FINAL → split-form ("FINAL", Some(3)) + ("FINAL", None)
+        // because the run reaches last_content_idx (trailing blanks ignored).
         for _ in 0..4 {
             raw.extend_from_slice(b"FINAL\n");
         }
@@ -1511,9 +1511,29 @@ mod squash_integration_tests {
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         assert!(out.stats.truncated);
         assert!(
-            body.contains("FINAL [×4]"),
-            "single combined dedup line must survive: {body:?}"
+            body.contains("FINAL [×3]"),
+            "split-form ×3 marker must survive: {body:?}"
         );
+        // The verbatim FINAL must appear after the count marker.
+        let split_idx = body.find("FINAL [×3]").unwrap();
+        assert!(
+            body[split_idx + "FINAL [×3]".len()..].contains("FINAL"),
+            "verbatim final FINAL line must follow the count marker: {body:?}"
+        );
+    }
+
+    /// Reviewer's specific case: `FINAL\nFINAL\n\n` should preserve both
+    /// `FINAL` lines verbatim (run len 2 with `min_run=2` → split-form,
+    /// `count=1` is below `min_run` so emit duplicates verbatim instead of
+    /// `[×1]`).
+    #[test]
+    fn double_final_with_trailing_blank_preserves_both_verbatim() {
+        let cfg = SquashConfig::default();
+        let out = run_squash(b"FINAL\nFINAL\n\n", &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Two FINAL lines should appear (no dedup collapse).
+        assert_eq!(body.matches("FINAL").count(), 2, "got: {body:?}");
+        assert!(!body.contains("[×"), "no count marker expected: {body:?}");
     }
 
     /// Regression: when an input ends with multiple blank lines, the tail
@@ -1633,6 +1653,54 @@ mod squash_fixtures_tests {
     #[test]
     fn snapshot_binary_junk() {
         insta::assert_snapshot!(run_fixture("binary_junk.bin", &SquashConfig::default()));
+    }
+}
+
+// Internal perf smoke test, replacing the (deleted) criterion bench so we
+// don't have to expose `try_from_terminal_event` outside the crate. Run
+// manually with: `cargo test -p cairn-core squash_perf -- --ignored --nocapture`.
+#[cfg(test)]
+mod squash_perf {
+    use super::wrapper_tests::terminal_event;
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "perf smoke; run manually"]
+    fn squash_50kb_under_50ms() {
+        let raw: Vec<u8> = (0..50_000_u32)
+            .map(|i| b'a' + u8::try_from(i % 26).expect("i % 26 fits in u8"))
+            .collect();
+        let cfg = SquashConfig::default();
+        let evt = terminal_event(&raw);
+
+        // Warm-up.
+        for _ in 0..3 {
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                TerminalContext::InteractiveTty,
+            )
+            .expect("valid wrapper");
+            let _ = squash(w, &cfg);
+        }
+
+        let iters: u32 = 50;
+        let start = Instant::now();
+        for _ in 0..iters {
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                TerminalContext::InteractiveTty,
+            )
+            .expect("valid wrapper");
+            let _ = squash(w, &cfg);
+        }
+        let avg = start.elapsed() / iters;
+        eprintln!("squash 50KB avg: {avg:?}");
+        // Loose ceiling — production is unoptimized debug + cold caches in
+        // CI; primarily this catches catastrophic regressions.
+        assert!(avg.as_millis() < 50, "avg {avg:?} exceeded 50ms ceiling");
     }
 }
 
