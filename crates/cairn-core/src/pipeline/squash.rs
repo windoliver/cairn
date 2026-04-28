@@ -2247,9 +2247,20 @@ fn oversize_bypass(
     reason: BypassReason,
 ) -> SquashOutput {
     let max_body = cfg.max_bytes();
-    // Line count needed only for the LineCardinality marker; cheap to
-    // compute and capped via short-circuit in `bytecount_newlines`.
-    let line_count = bytecount_newlines(raw_bytes);
+    // For the LineCardinality marker we want an EXACT count, not the
+    // capped short-circuit value used by the gate. Audit consumers
+    // looking at the marker need the real scale of the discarded
+    // input, not just confirmation that it exceeded the threshold.
+    // The caller only takes this branch on the destructive path, so
+    // the extra O(N) scan is acceptable.
+    let line_count = match reason {
+        BypassReason::LineCardinality => {
+            #[allow(clippy::naive_bytecount)] // counting a specific byte; no bytecount dep
+            let n = raw_bytes.iter().filter(|&&b| b == b'\n').count();
+            n
+        }
+        BypassReason::ByteCeiling => 0, // not rendered for this branch
+    };
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
