@@ -41,7 +41,7 @@ fn build_command() -> clap::Command {
             generated::verbs::capture_trace_subcommand(),
         ))
         .subcommand(verbs::with_json(verbs::with_fix_markdown(
-            generated::verbs::lint_subcommand(),
+            verbs::with_fix_folders(generated::verbs::lint_subcommand()),
         )))
         .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
         // Protocol preludes.
