@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use cairn_core::config::CairnConfig;
+use cairn_idl::codegen;
 
 use crate::{command, plugins};
 
@@ -124,6 +125,33 @@ pub fn run(opts: &RunOpts) -> Result<Report, DocgenError> {
     Ok(report)
 }
 
+/// Build the `cairn-docgen` maintainer CLI command tree.
+#[must_use]
+pub fn docgen_command() -> clap::Command {
+    clap::Command::new("cairn-docgen")
+        .about("Generate Cairn docs reference Markdown")
+        .arg(
+            clap::Arg::new("check")
+                .long("check")
+                .conflicts_with("write")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run in check mode: compare emitted docs against on-disk files"),
+        )
+        .arg(
+            clap::Arg::new("write")
+                .long("write")
+                .action(clap::ArgAction::SetTrue)
+                .help("Write generated docs; default when neither --check nor --write is set"),
+        )
+        .arg(
+            clap::Arg::new("out")
+                .long("out")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Workspace root (defaults to the parent of CARGO_MANIFEST_DIR)"),
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedFile {
     path: PathBuf,
@@ -144,12 +172,36 @@ fn emit_all(
 ) -> Result<Vec<GeneratedFile>, DocgenError> {
     let mut files = Vec::new();
     emit_cli_docs(&mut files)?;
+    emit_codegen_docs(&mut files)?;
+    emit_docgen_docs(&mut files)?;
     emit_config_defaults(&mut files)?;
     emit_plugins(&mut files)?;
     emit_mcp_tools(&mut files);
     emit_packages(&mut files, package_names, coverage);
     emit_contract_verbs(&mut files, workspace_root)?;
     Ok(files)
+}
+
+fn emit_codegen_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
+    let cmd = codegen::codegen_command();
+    let mut out = generated_doc("cairn-codegen");
+    out.push_str("Generated from the maintainer `cairn-codegen` clap command tree.\n\n");
+    out.push_str("## Help\n\n```text\n");
+    out.push_str(&help_text(&cmd)?);
+    out.push_str("```\n");
+    files.push(generated_file("codegen.md", out));
+    Ok(())
+}
+
+fn emit_docgen_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
+    let cmd = docgen_command();
+    let mut out = generated_doc("cairn-docgen");
+    out.push_str("Generated from the maintainer `cairn-docgen` clap command tree.\n\n");
+    out.push_str("## Help\n\n```text\n");
+    out.push_str(&help_text(&cmd)?);
+    out.push_str("```\n");
+    files.push(generated_file("docgen.md", out));
+    Ok(())
 }
 
 fn emit_cli_docs(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {

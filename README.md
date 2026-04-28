@@ -104,7 +104,9 @@ Nothing should be thrown away when moving up a level. The same vault, record IDs
 
 ## Target P0
 
-The first shippable version is scoped to the smallest useful memory substrate:
+The first shippable version is scoped to the smallest useful memory substrate.
+The list below is target scope, not a claim that every item works in this
+pre-v0.1 scaffold:
 
 - Single Rust binary with no required runtime service.
 - One local `.cairn/cairn.db` SQLite file for records, WAL state, consent journal, locks, and replay metadata.
@@ -114,7 +116,7 @@ The first shippable version is scoped to the smallest useful memory substrate:
 - Five harness hooks plus opt-in local sensors for IDE, terminal, clipboard, voice, screen, and recording-to-text capture.
 - Record-level `forget` with index drains and physical purge.
 - Capability-gated search behavior: semantic and hybrid are advertised by default; if `search.local_embeddings: false` is set and no P1 provider is configured, those modes are removed from capabilities and rejected with `CapabilityUnavailable`.
-- **No bundled LLM runtime.** The `LLMProvider` is optional at P0 and operator-configured. With no provider set, `ingest`, `retrieve`, keyword/semantic/hybrid `search`, `forget`, `capture_trace`, and `lint` all keep working; `LLMExtractor`, `LLMDreamWorker`, `summarize`, and `assemble_hot` fail closed with `CapabilityUnavailable { code: "llm.not_configured" }` (CLI exit `78`). See [ADR 0001](docs/design/decisions/0001-llm-default.md).
+- **No bundled LLM runtime.** The `LLMProvider` is optional at P0 and operator-configured. Target P0 behavior is that non-LLM paths keep working without a provider while LLM-backed enrichment fails closed with `CapabilityUnavailable { code: "llm.not_configured" }` (CLI exit `78`). In the current scaffold, the memory verbs are exposed but still fail closed until storage and dispatch land. See [ADR 0001](docs/design/decisions/0001-llm-default.md).
 
 ## LLM provider (optional)
 

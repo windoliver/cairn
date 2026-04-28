@@ -73,6 +73,26 @@ pub enum RunMode {
     Check,
 }
 
+/// Build the `cairn-codegen` maintainer CLI command tree.
+#[must_use]
+pub fn codegen_command() -> clap::Command {
+    clap::Command::new("cairn-codegen")
+        .about("Cairn IDL → Rust + JSON codegen")
+        .arg(
+            clap::Arg::new("check")
+                .long("check")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run in check mode: compare emitted bytes against on-disk; exit 1 on drift"),
+        )
+        .arg(
+            clap::Arg::new("out")
+                .long("out")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Workspace root (defaults to the parent of CARGO_MANIFEST_DIR)"),
+        )
+}
+
 /// Summary returned to the caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {

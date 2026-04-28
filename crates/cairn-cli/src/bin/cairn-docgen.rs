@@ -3,43 +3,26 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cairn_cli::docgen::{RunMode, RunOpts, run};
-
-#[derive(clap::Parser, Debug)]
-#[command(
-    name = "cairn-docgen",
-    about = "Generate Cairn docs reference Markdown"
-)]
-struct Cli {
-    /// Run in check mode — compare emitted docs against on-disk files.
-    #[arg(long, conflicts_with = "write")]
-    check: bool,
-
-    /// Write generated docs. This is the default when neither flag is set.
-    #[arg(long)]
-    write: bool,
-
-    /// Workspace root (defaults to the parent of `CARGO_MANIFEST_DIR`).
-    #[arg(long)]
-    out: Option<PathBuf>,
-}
+use cairn_cli::docgen::{RunMode, RunOpts, docgen_command, run};
 
 fn main() -> ExitCode {
-    use clap::Parser as _;
-    let cli = Cli::parse();
+    let matches = docgen_command().get_matches();
 
-    let workspace_root = cli.out.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("cairn-cli crate must have a parent (the `crates/` dir)")
-            .parent()
-            .expect("`crates/` must have a parent (the workspace root)")
-            .to_path_buf()
-    });
+    let workspace_root = matches
+        .get_one::<PathBuf>("out")
+        .cloned()
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("cairn-cli crate must have a parent (the `crates/` dir)")
+                .parent()
+                .expect("`crates/` must have a parent (the workspace root)")
+                .to_path_buf()
+        });
 
     let opts = RunOpts {
         workspace_root,
-        mode: if cli.check {
+        mode: if matches.get_flag("check") {
             RunMode::Check
         } else {
             RunMode::Write
@@ -66,7 +49,7 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
         Ok(report) => {
-            if cli.check {
+            if matches.get_flag("check") {
                 eprintln!(
                     "cairn-docgen: clean - {} file(s) match.",
                     report.files_emitted

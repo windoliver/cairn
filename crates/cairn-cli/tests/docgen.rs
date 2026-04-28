@@ -96,6 +96,36 @@ fn docgen_command_tree_matches_runtime() {
 }
 
 #[test]
+fn docgen_binary_help_is_generated_from_command_tree() {
+    let command = cairn_cli::docgen::docgen_command();
+    let flags: Vec<_> = command
+        .get_arguments()
+        .filter_map(clap::Arg::get_long)
+        .collect();
+    for expected in ["check", "write", "out"] {
+        assert!(
+            flags.contains(&expected),
+            "docgen command missing --{expected}; got {flags:?}",
+        );
+    }
+}
+
+#[test]
+fn codegen_binary_help_is_generated_from_command_tree() {
+    let command = cairn_idl::codegen::codegen_command();
+    let flags: Vec<_> = command
+        .get_arguments()
+        .filter_map(clap::Arg::get_long)
+        .collect();
+    for expected in ["check", "out"] {
+        assert!(
+            flags.contains(&expected),
+            "codegen command missing --{expected}; got {flags:?}",
+        );
+    }
+}
+
+#[test]
 fn docgen_write_then_check_is_clean() {
     let root = tempfile::tempdir().expect("tempdir");
     write_coverage(root.path(), complete_coverage());

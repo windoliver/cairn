@@ -20,6 +20,7 @@ path = "src/bin/cairn-docgen.rs"
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-idl = { workspace = true }
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }

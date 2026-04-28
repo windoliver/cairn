@@ -35,6 +35,8 @@
   - [`cairn plugins list`](reference/generated/commands/plugins-list.md)
   - [`cairn plugins verify`](reference/generated/commands/plugins-verify.md)
   - [`cairn bootstrap`](reference/generated/commands/bootstrap.md)
+- [`cairn-codegen`](reference/generated/codegen.md)
+- [`cairn-docgen`](reference/generated/docgen.md)
 - [Config Defaults](reference/generated/config-defaults.md)
 - [Contract Verbs](reference/generated/contract-verbs.md)
 - [MCP Tools](reference/generated/mcp-tools.md)

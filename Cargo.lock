@@ -196,6 +196,7 @@ dependencies = [
  "async-trait",
  "base64",
  "cairn-core",
+ "cairn-idl",
  "cairn-mcp",
  "cairn-sensors-local",
  "cairn-store-sqlite",
