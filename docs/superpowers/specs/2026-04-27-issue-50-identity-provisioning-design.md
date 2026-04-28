@@ -459,12 +459,41 @@ The WAL row stays append-only; both mechanisms above mutate
 non-WAL rows.
 
 Effect: every identity mutation is observable as exactly one
-append-only `identity_wal` row, with no contradictory states; replay
-(re-deriving DB+keystore state from the WAL log) and audit
-(per-target history via `idx_identity_wal_target`) work as in §5.6;
-cross-store reconciliation has its own dedicated mechanism (the
-receipt flags) so the WAL never has to model "applied here but not
-there".
+append-only `identity_wal` row, with no contradictory states.
+
+**WAL replay scope (narrow, intentionally).** The WAL log replays
+**registry state** — every `identity_wal` row corresponds to a
+committed SQLite mutation, so the registry tables (`identities`,
+`identity_keys`, `identity_receipts`, `pending_rotations`) can be
+re-derived from the log. The WAL does **not** by itself encode
+keystore-side completion: an `apply_rotation` row, for example,
+proves the registry transitioned, not that the eldest predecessor
+private key was evicted. That keystore-side completion is recorded
+by separate WAL rows for the `clear_pending_eviction` and
+`clear_pending_key_disable` mutations — those rows land only after
+`reconcile` has verified the keystore state, so a reader scanning
+the WAL can determine "registry mutation committed" vs "keystore
+cleanup confirmed" by checking whether the matching `clear_*` row
+exists for the receipt. Until that follow-up row appears,
+incident-recovery tooling must assume residual keystore material is
+possible (which is why `pending_eviction` / `pending_key_disable`
+flags exist on the receipt and why `cairn identity status` surfaces
+them). The WAL therefore gives:
+
+- **Audit** — per-target history of every mutation that landed
+  (`idx_identity_wal_target`).
+- **Registry replay** — re-derive `identities` / `identity_keys` /
+  `identity_receipts` from the log.
+- **Keystore-cleanup-witnessed flag** — derivable by joining the
+  primary mutation row against later `clear_pending_eviction` /
+  `clear_pending_key_disable` rows for the same receipt.
+
+It does **not** give live keystore inspection; that requires
+opening the keystore directly (which `cairn identity status` does
+in read-only mode for exactly this reason). Replay tooling that
+assumes "WAL says cleanup landed" without consulting the keystore
+or the matching `clear_*` row would be unsafe; the contract makes
+that explicit.
 
 ### 3.6 Key retention model (private keys ring-bounded, public keys immortal)
 
@@ -2056,29 +2085,60 @@ cairn identity status [--json]
 ```
 
 `cairn identity status` is the **operator-visible inspection surface
-for vault-degraded mode**. It runs through `open_for_maintenance`, so
-it is callable even when issuer-dependent verbs are blocked by
-`VaultDegraded`. Output:
+for vault-degraded mode**. It must work on a cold start (e.g.,
+immediately after a fresh process invocation when no `open()` has
+run yet), so it computes `mismatched_ids` itself rather than relying
+on a cached report from a prior `IdentityService::open()` call.
+
+Procedure:
+
+1. Open the registry through `open_for_maintenance(MaintenanceMode::
+   ReadOnly)` (no vault-binding mutation, no advisory lock).
+2. **Open a read-only keystore handle** scoped to the current
+   `vault.id` — this is a new sub-mode of `MaintenanceMode::ReadOnly`
+   that opens the keystore for `load_signing_key` only (no `store_*`
+   or `delete_*` calls reachable through the handle's API surface).
+   The keystore is essential because mismatch detection requires
+   loading the private key and re-deriving the public key.
+3. Run the §3.5 reconciliation sweep in dry-run mode: iterate every
+   `pending` row, compute the same per-row outcome (`active`,
+   `orphaned`, `KeyMaterialMismatch`), but **do not** call
+   `activate_identity` or `delete_pending`. Accumulate the report
+   and return it.
+4. The vault-binding consistency check (`vault.id` ↔ `vault_meta.
+   vault_id`) runs first; on conflict, `status` reports
+   `vault_id_conflict` and skips the mismatch sweep (since the
+   namespace itself is uncertain).
+
+`status` therefore has its own source of truth for mismatch
+evidence and works under `VaultDegraded` even on cold start. It
+never mutates registry state and never writes to the keystore, so
+it remains safe under the maintenance-path cross-vault concerns the
+mutating mode guards against.
+
+Output:
 
 - `vault_id` and binding state (`bound` / `pending` / `unbound`).
 - `defaults` — the active default human + agent identities (or
   "not initialised" with the `init-defaults` hint).
 - `mismatched_ids: Vec<Identity>` — the `KeyMaterialMismatch` rows
-  surfaced by reconciliation. When non-empty, `vault_degraded =
-  true` and the human-readable output prints a remediation block
-  pointing at `repair`/`purge`/`vault-id-recover`.
+  computed by the dry-run sweep above. When non-empty,
+  `vault_degraded = true` and the human-readable output prints a
+  remediation block pointing at `repair`/`purge`/`vault-id-recover`.
 - `pending_evictions` and `pending_key_disables` — receipt-flag
   snapshots for cross-store reconciliation status.
 - `purge_pending_ids` — identities awaiting `purge --resume`.
 
 `--json` emits the full structured `IdentityStatusReport` (defined
 in `cairn-core::domain::identity::status`); the human form is a
-short health summary plus the remediation block when degraded. The
-verb is read-only and never opens a keystore handle for mutation
-(it uses `MaintenanceMode::ReadOnly`), so it satisfies the
-"inspection surface that works under degraded mode" requirement
-without re-introducing the cross-vault writes that
-`open_for_maintenance` mutating mode guards against.
+short health summary plus the remediation block when degraded.
+
+A backend that returns `KeystoreError::Locked` for the read-only
+keystore probe (e.g., macOS Keychain access denied) means `status`
+cannot compute mismatches itself. In that case the report includes
+`mismatch_check = "keystore_locked"` and the remediation block
+instructs the operator to unlock and re-run; this is preferable to
+silently reporting "no mismatches" or refusing to run at all.
 
 Shape mirrors brief §4.2 conventions; flags use `clap` derive + `ValueEnum`
 for the kind enum. Snapshot tests cover human and `--json` output.
