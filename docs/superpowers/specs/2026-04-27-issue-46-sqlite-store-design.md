@@ -252,10 +252,11 @@ construction.
 
 | Table | Purpose |
 |---|---|
-| `records` | **Versioned copy-on-write** table per brief lines 337-369. PK is per-version `record_id`. `target_id` + `version` indexed; partial unique index `WHERE active = 1` enforces one active version per target. Tombstone is set per-row, on every version of a target. JSON columns for provenance, actor_chain, evidence, taxonomy, scope. |
+| `records` | **Versioned copy-on-write** table per brief lines 337-369. PK is per-version `record_id`. `target_id` + `version` indexed; partial unique index `WHERE active = 1` enforces one active version per target. Mutable lifecycle columns: `active`, `tombstoned`, `tombstoned_at`, `tombstoned_by`, `expired_at`. JSON columns for provenance, actor_chain, evidence, taxonomy, scope. |
+| `record_purges` | **Append-only purge audit log.** One row per `purge_target` invocation. Persists a metadata-only marker (`target_id`, `op_id`, `purged_at`, `purged_by`, `body_hash_salt`) so `version_history(target_id)` can surface a purge after every `records` row is gone. Survives the physical delete; consumed by audit/forensic verbs. |
 | `edges` | `from_id`, `to_id`, `kind`, `weight`, `metadata` JSON. Composite PK `(from_id, to_id, kind)`. `from_id`/`to_id` reference per-version `record_id` (so edges carry version semantics like vector/FTS rows do per §5.6). |
 | `edge_versions` | Append-only edge history (insert/update/remove markers). |
-| `records_fts` | FTS5 contentless table indexing every version (active or not); read-time filter on `records.active = 1 AND tombstoned = 0` keeps superseded versions out of results (per brief line 2038 read-fence model). |
+| `records_fts` | FTS5 contentless table indexing every version (active or not). The read predicate matches `get`/`list` exactly: `active = 1 AND tombstoned = 0 AND (expired_at IS NULL OR expired_at > now)`. Superseded **and expired** rows are filtered identically. |
 | `wal_ops`, `wal_steps` | WAL state-machine tables (rows added in #8). |
 | `replay_ledger`, `issuer_seq`, `challenges` | Identity/replay surface (rows added in #7). |
 | `consent_journal` | Append-only consent log (rows added by the WAL executor in #8 and the consent UX in #17). |
@@ -304,47 +305,90 @@ CREATE INDEX records_target_idx ON records(target_id);
   return `StoreError::Conflict { kind: VersionAlreadyStaged }`.
 - `activate_version(target_id, version)` — single SQL transaction:
   ```sql
+  -- Step 1: confirm the target/version row exists.
+  SELECT 1 FROM records WHERE target_id = ?1 AND version = ?2;
+  --   missing → return StoreError::NotFound (no UPDATE issued).
+  -- Step 2: flip flags atomically.
   UPDATE records SET active = (version = ?2) WHERE target_id = ?1;
+  -- Step 3: assert exactly one row is now active for the target.
+  SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1;
+  --   != 1 → rollback + return StoreError::Invariant("activate_version: no row activated")
   ```
-  Partial unique index ensures exactly one active version. The brief
-  pairs this with a `consent_journal` insert in the same transaction —
-  but that insert is the **WAL executor's** job, not the store's. The
-  store provides the activate primitive only.
+  The check-then-update guards against a stale `version` parameter
+  silently clearing every active row — the partial unique index only
+  enforces *at most one* active, never *exactly one*. Total-or-error.
+  The brief pairs this with a `consent_journal` insert in the same
+  transaction — but that insert is the **WAL executor's** job, not
+  the store's. The store provides the activate primitive only.
 - `tombstone_target(target_id, actor)` — sets `tombstoned=1` on every
   version of the target. Idempotent: re-tombstoning is a no-op. The
   `actor` is recorded into `tombstoned_by`/`tombstoned_at` columns
   (added to schema; default NULL pre-tombstone).
 - `expire_active(target_id, at)` — sets `expired_at` on the active
   version only. Reads filter on `expired_at IS NULL OR expired_at > now()`.
-- `purge_target(target_id)` — DELETE every row with `target_id`, plus
-  every `edges` and `edge_versions` row whose `from_id` or `to_id` is the
-  `record_id` of any of those versions, plus matching `records_fts`
-  rows. The brief's audit invariant (line 2030) requires no body, edge,
-  or index entry survives. Pre-image zeroing in `wal_ops`/`wal_steps`
-  is the executor's job (the store doesn't know op IDs); `purge_target`
-  in the store covers everything keyed off `record_id`.
+- `purge_target(target_id, op_id, actor)` — single tx:
+  1. INSERT a metadata-only marker into `record_purges` with
+     `(target_id, op_id, purged_at=now(), purged_by=actor,
+      body_hash_salt=random())`. This row survives the physical
+     deletion and is the only post-purge audit artefact in the store.
+  2. DELETE every row from `records` with `target_id`.
+  3. DELETE every `edges` / `edge_versions` row whose `from_id` or
+     `to_id` references any per-version `record_id` of the target.
+  4. DELETE matching rows from `records_fts`.
+  Idempotent: re-invoking with the same `op_id` is a no-op (the marker
+  is the idempotency key — `(target_id, op_id)` UNIQUE). The brief's
+  audit invariant (line 2030) requires no body, edge, or index entry
+  survives; `record_purges` carries no body, only audit metadata, so
+  the invariant holds. Pre-image zeroing in `wal_ops`/`wal_steps` is
+  the executor's job; the store does not know op-step linkage.
 
 ### 5.4 `version_history` semantics
 
-Returns every row from `records` for the given `target_id`, ordered by
-`version` ASC. Each `RecordVersion` carries: `record_id`, `version`,
-`active` flag, `tombstoned` flag, `expired_at`, `created_at`, `actor`,
-and a `change_kind` derived as:
+Returns a `Vec<RecordVersion>` reconstructed from BOTH `records` and
+`record_purges` rows for the given `target_id`, ordered by `version` ASC
+(records first, then a synthesized purge marker if `record_purges` has
+an entry).
 
-```
-change_kind = match (active, tombstoned, expired_at) {
-    (1, 0, None)    => Update,        // current visible version
-    (0, 0, _)       => Update,        // a superseded version (history)
-    (_, 1, _)       => Tombstone,     // tombstoned (Phase A)
-    (_, _, Some(_)) => Expire,        // expired
+Each `RecordVersion` carries the **full lifecycle event log** for that
+version, not a single derived `change_kind`:
+
+```rust
+pub struct RecordVersion {
+    pub record_id: RecordId,        // per-version
+    pub target_id: TargetId,
+    pub version: u64,
+    pub active: bool,
+    pub events: Vec<RecordEvent>,   // ordered by event timestamp ASC
+}
+
+pub struct RecordEvent {
+    pub kind: ChangeKind,           // Update | Tombstone | Expire | Purge
+    pub at: Timestamp,
+    pub actor: Option<ActorRef>,
 }
 ```
 
-`Purge` is a reserved variant for `change_kind` that #46 cannot emit
-because purge deletes the row entirely. It exists in the enum for
-forward-compat with future audit-only modes that might choose to retain a
-metadata-only purge marker. Tests verify the variant decodes from a
-synthetic value.
+Lifecycle events are sourced from row columns:
+
+- `events[0]` always exists with `kind=Update, at=created_at, actor=
+  created_by` — the version's birth.
+- If `tombstoned_at` is non-NULL: append `kind=Tombstone, at=
+  tombstoned_at, actor=tombstoned_by`. Because `tombstoned_at` is
+  immutable (set once on Phase A and never overwritten), tombstoning a
+  target with multiple versions does **not** rewrite earlier `Update`
+  events — every version still reports its `Update` at birth and a
+  later `Tombstone` event at the tombstone time. Forensic queries see
+  the full sequence.
+- If `expired_at` is non-NULL on the active version: append
+  `kind=Expire, at=expired_at, actor=None`.
+
+For purged targets, `version_history` synthesizes one trailing
+`RecordVersion` with `version = u64::MAX`, no `record_id`, and a single
+`events` entry of `kind=Purge, at=record_purges.purged_at, actor=
+record_purges.purged_by`. The body is gone but the audit fact survives.
+
+`ChangeKind::Purge` is therefore an emitted variant in #46 (sourced
+from `record_purges`), not a reserved-only variant.
 
 ### 5.5 Edge semantics
 
@@ -467,15 +511,16 @@ mint an `ApplyToken` and exercise `MemoryStoreApply`.
 |---|---|
 | `crud_roundtrip.rs` | `stage_version` → `activate_version` → `get` returns byte-equal `MemoryRecord` (full provenance, actor_chain, evidence, scope, confidence, salience). |
 | `cow_versioning.rs` | Stage v1 → activate v1 → stage v2 → activate v2 → assert: (a) `version_history(target)` returns 2 rows; (b) `get(target)` returns v2's body; (c) partial unique index rejects a second active row; (d) FTS5 returns only v2 because read filter joins on `active=1`. |
-| `tombstone_all_versions.rs` | Stage three versions, tombstone target → assert all three rows have `tombstoned=1`; `get` returns `None`; `version_history` still shows them with `change_kind=Tombstone`. |
-| `expire_active.rs` | Expire active version → `get` returns `None` after the expiry; `include_expired=true` surfaces it. |
-| `purge_target.rs` | Stage 3 versions + edges + FTS rows, then `purge_target` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts` for any of the per-version `record_id`s; `version_history` returns empty. |
+| `tombstone_preserves_history.rs` | Stage v1 → activate → stage v2 → activate → tombstone target. Assert `version_history` returns 2 `RecordVersion` entries; v1's events are `[Update(at=v1.created_at), Tombstone(at=ts)]`; v2's events are `[Update(at=v2.created_at), Tombstone(at=ts)]`. **The earlier Update events are not rewritten.** `get` returns `None`. |
+| `expire_active.rs` | Expire active version → `get` returns `None` after the expiry; `include_expired=true` surfaces it; FTS5 search for the body returns zero hits **without** `include_expired` (covers expiry fence in §5.1 records_fts row). |
+| `activate_validates_existence.rs` | `activate_version(target, version=999)` for a non-existent version → returns `StoreError::NotFound`, no row's `active` flag changes (assert by reading post-error). Re-issue with the correct version → succeeds; exactly one active row. |
+| `purge_audit_marker.rs` | Stage 3 versions + edges + FTS rows, then `purge_target(target, op_id, actor)` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts`; **assert one row in `record_purges`**; `version_history(target)` returns one synthesized `RecordVersion` with `events=[Purge(at, by=actor)]`. Re-invoking with the same `op_id` is a no-op (idempotency key UNIQUE on `(target_id, op_id)`). |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back (rusqlite drop guard), connection still usable for the next `with_apply_tx`. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open; migration ids/checksums match across `cargo test --no-default-features` and `cargo test --all-features`. |
 | `capabilities.rs` | Caps: `{fts: true, graph_edges: true, transactions: true, vector: false}`. |
 | `apply_token_gate.rs` | Compile-fail test (via `trybuild`): a function that imports `MemoryStoreApply` and tries to call `with_apply_tx` without a token from `cairn_core::wal` fails to build. Establishes the token-gate as type-enforced. |
-| `change_kind_purge_decode.rs` | Construct a synthetic `change_kind=purge` value and verify `RecordVersion` decoding handles the variant. Forward-compat with #8. |
+| `fts_visibility_predicate.rs` | Index three records: one active+visible, one tombstoned, one expired. FTS search with the same query against all three bodies returns only the active+visible record. Confirms FTS read joins the full `active=1 AND tombstoned=0 AND (expired_at IS NULL OR expired_at > now)` predicate. |
 
 ### 8.3 Conformance
 
@@ -561,7 +606,7 @@ cargo machete
 | AC (issue #46) | Where satisfied |
 |---|---|
 | CRUD operations round-trip complete `MemoryRecord` values. | §8.2 `crud_roundtrip.rs` + property test |
-| Version history distinguishes update, tombstone, expire, **purge** states. | `ChangeKind` enum (§3) declares all four variants; #46 emits `Update`/`Tombstone`/`Expire` (§5.4); `Purge` decode tested via `change_kind_purge_decode.rs` (§8.2). The emitting code path lands with #8 (forget_record). The brief's distinguishability requirement is satisfied at the schema and decoder level. |
+| Version history distinguishes update, tombstone, expire, **purge** states. | `ChangeKind` enum declares all four variants; #46 emits all four — `Update` from `created_at`, `Tombstone` from `tombstoned_at`, `Expire` from `expired_at`, `Purge` from the `record_purges` audit row. Each `RecordVersion` carries an immutable per-version event sequence (§5.4) so a later tombstone never rewrites earlier update history. Tested by `tombstone_preserves_history.rs` and `purge_audit_marker.rs` (§8.2). |
 | Store capabilities correctly advertise FTS5 and local vector support when compiled/enabled. | §7.3 + §8.2 `capabilities.rs` |
 | Run `MemoryStore` conformance tests. | §8.3 |
 | Run transaction rollback tests for failing writes. | §8.2 `tx_rollback.rs` |
