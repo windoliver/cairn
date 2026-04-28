@@ -194,7 +194,9 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
     };
     let body = std::str::from_utf8(&skill.bytes)
         .map_err(|e| CodegenError::Emit(format!("SKILL.md not utf-8: {e}")))?;
-    for (verb_ctx, block) in skill_compat::extract_verb_scoped_blocks(body) {
+    let blocks = skill_compat::extract_verb_scoped_blocks(body)
+        .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+    for (verb_ctx, block) in blocks {
         match block.lang.as_str() {
             "bash" | "shell" | "sh" | "inline" if block.body.trim_start().starts_with("cairn ") => {
                 skill_compat::validate_cli_block(&block, doc)

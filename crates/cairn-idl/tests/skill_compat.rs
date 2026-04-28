@@ -29,7 +29,7 @@ fn live_skill_md() -> String {
 #[test]
 fn extract_finds_fenced_blocks_with_lang_tags() {
     let md = "intro\n\n```bash\ncairn search foo\n```\n\nmore\n\n```json\n{\"a\":1}\n```\n";
-    let blocks = extract_code_blocks(md);
+    let blocks = extract_code_blocks(md).expect("well-formed fences must parse");
     assert!(
         blocks
             .iter()
@@ -47,7 +47,7 @@ fn extract_finds_fenced_blocks_with_lang_tags() {
 #[test]
 fn extract_finds_inline_cairn_spans() {
     let md = "Use `cairn handshake --json` then `cairn status --json`.";
-    let blocks = extract_code_blocks(md);
+    let blocks = extract_code_blocks(md).expect("inline-only markdown must parse");
     let inline: Vec<_> = blocks.iter().filter(|b| b.lang == "inline").collect();
     assert_eq!(
         inline.len(),
@@ -160,7 +160,7 @@ fn cli_validator_consumes_value_token_after_value_flag() {
 #[test]
 fn extract_verb_scoped_blocks_attaches_heading_verb() {
     let md = "# Skill\n\n## `cairn ingest`\n\n```json\n{\"kind\":\"fact\"}\n```\n\n## `cairn search`\n\n```bash\ncairn search foo\n```\n";
-    let scoped = extract_verb_scoped_blocks(md);
+    let scoped = extract_verb_scoped_blocks(md).expect("well-formed markdown must parse");
     let json = scoped
         .iter()
         .find(|(_, b)| b.lang == "json")
@@ -174,10 +174,71 @@ fn extract_verb_scoped_blocks_attaches_heading_verb() {
 }
 
 #[test]
+fn extract_rejects_unterminated_fenced_block() {
+    let md = "intro\n\n```bash\ncairn search foo\n";
+    let err = extract_code_blocks(md).expect_err("unterminated fence must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "fence", .. }),
+        "expected Malformed fence error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_rejects_retrieve_without_discriminator() {
+    // `--limit` exists on the session variant but ArgsRecord/ArgsTurn/etc.
+    // don't share it; without `--session` (or any other discriminator) the
+    // example matches no variant cleanly.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --limit 5".into(),
+        line: 13,
+    };
+    // Either AmbiguousVariant (no/multi match) or Malformed surface a real
+    // failure for this drift case; we just need it to not silently pass.
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("retrieve without a unique discriminator must fail");
+    assert!(
+        matches!(
+            err,
+            CompatError::AmbiguousVariant { .. } | CompatError::Malformed { .. }
+        ),
+        "expected AmbiguousVariant or Malformed, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_rejects_retrieve_with_two_discriminators() {
+    // Positional id (ArgsRecord) plus --session (ArgsSession) selects two
+    // variants; clap's ArgGroup rejects this and so should the compat gate.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve abc --session s1".into(),
+        line: 17,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("retrieve with multiple discriminators must fail");
+    assert!(
+        matches!(err, CompatError::AmbiguousVariant { matched_variants, .. } if matched_variants > 1),
+        "expected AmbiguousVariant with >1 match, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_retrieve_with_single_discriminator() {
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session s1 --limit 5".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("retrieve with exactly one discriminator must validate");
+}
+
+#[test]
 fn live_skill_md_passes_compat_checks() {
     let md = live_skill_md();
     let d = doc();
-    for block in extract_code_blocks(&md) {
+    for block in extract_code_blocks(&md).expect("live SKILL.md must parse") {
         match block.lang.as_str() {
             "bash" | "shell" | "sh" | "inline" if block.body.trim_start().starts_with("cairn ") => {
                 validate_cli_block(&block, &d).unwrap_or_else(|e| {
