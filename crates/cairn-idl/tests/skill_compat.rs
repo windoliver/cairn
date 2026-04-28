@@ -280,8 +280,42 @@ fn cli_validator_accepts_summarize_repeatable_positional() {
         body: "cairn summarize ID1 ID2 ID3".into(),
         line: 1,
     };
-    validate_cli_block(&block, &doc())
-        .expect("repeatable positional must accept multiple tokens");
+    validate_cli_block(&block, &doc()).expect("repeatable positional must accept multiple tokens");
+}
+
+#[test]
+fn cli_validator_rejects_invalid_enum_value() {
+    // search --mode is enum(keyword,semantic,hybrid); `bogus` must fail.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode bogus".into(),
+        line: 23,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("invalid enum must fail");
+    assert!(
+        matches!(
+            err,
+            CompatError::Malformed {
+                kind: "cli",
+                line: 23,
+                ..
+            }
+        ),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_uppercase_placeholder_for_enum() {
+    // The generated skill renders enum-typed flags with placeholder values
+    // (e.g. `--mode MODE`). Those must pass to keep the generator's own
+    // examples valid.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode MODE".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("placeholder enum values must validate");
 }
 
 #[test]

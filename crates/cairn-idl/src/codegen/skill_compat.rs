@@ -216,13 +216,18 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         });
     };
 
-    // Resolve the verb to its CliCommand variants. Preludes carry no flags
-    // or positionals.
-    let verb_def: Option<&VerbDef> = doc.verbs.iter().find(|v| v.id == verb);
+    // Resolve the token to its CliCommand variants. Match on the configured
+    // `CliCommand::command` (so a future IDL rename that diverges from
+    // `verb.id` flows through), with a fallback to `verb.id`. Preludes carry
+    // no flags or positionals.
+    let verb_def: Option<&VerbDef> = verb_for_command(doc, verb);
     let cmds: Vec<&CliCommand> = if PRELUDES.contains(&verb) {
         Vec::new()
-    } else if let Some(cmds) = cli_commands_for(doc, verb) {
-        cmds
+    } else if let Some(def) = verb_def {
+        match &def.cli {
+            CliShape::Single(c) => vec![c],
+            CliShape::Variants(vs) => vs.iter().collect(),
+        }
     } else {
         return Err(CompatError::UnknownVerb {
             verb: verb.to_string(),
@@ -286,6 +291,50 @@ struct TokenScan {
     used_field_names: BTreeSet<String>,
 }
 
+/// True when `value` is an `ALL_CAPS_PLACEHOLDER` token (the convention
+/// `emit_skill` uses for generated examples). We skip strict typing for these
+/// — the placeholder isn't meant to be a real value.
+fn is_placeholder(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Validate `value` against the IDL `value_source` declared on a flag. Only
+/// the closed forms (`enum(...)`, `u32`, `u64`, `bool`) are checked
+/// strictly; freeform sources (`string`, `path`, `json`, `list<...>`) accept
+/// anything. ALL-CAPS placeholders bypass the check because the generated
+/// skill examples use them and they aren't real values.
+fn validate_flag_value(
+    flag: &str,
+    value: &str,
+    source: &str,
+    line: usize,
+) -> Result<(), CompatError> {
+    if is_placeholder(value) {
+        return Ok(());
+    }
+    let bad = |detail: String| CompatError::Malformed {
+        kind: "cli",
+        detail: format!("flag `--{flag}`: {detail}"),
+        line,
+    };
+    if let Some(rest) = source.strip_prefix("enum(")
+        && let Some(inner) = rest.strip_suffix(')')
+    {
+        let allowed: BTreeSet<&str> = inner.split(',').map(str::trim).collect();
+        if !allowed.contains(value) {
+            return Err(bad(format!("value `{value}` is not in {{{inner}}}")));
+        }
+    } else if (source == "u32" || source == "u64") && value.parse::<u64>().is_err() {
+        return Err(bad(format!(
+            "value `{value}` is not a non-negative integer"
+        )));
+    }
+    Ok(())
+}
+
 /// Walk the post-verb tokens, returning the positional count and the set of
 /// IDL field names the example referenced via long-flags. Rejects unknown
 /// `--flag` tokens up-front.
@@ -306,11 +355,12 @@ fn scan_tokens<'a>(
             if name.is_empty() {
                 continue;
             }
-            let arity = if UNIVERSAL_FLAGS.contains(&name) {
-                0
+            let (arity, value_source) = if UNIVERSAL_FLAGS.contains(&name) {
+                (0usize, None)
             } else if let Some(flag) = allowed_flags.get(name) {
                 used_field_names.insert(flag.name.clone());
-                usize::from(flag.value_source != "bool")
+                let arity = usize::from(flag.value_source != "bool");
+                (arity, Some(flag.value_source.as_str()))
             } else {
                 return Err(CompatError::UnknownFlag {
                     verb: verb.to_string(),
@@ -322,18 +372,29 @@ fn scan_tokens<'a>(
                 // Non-boolean flags require a value — either inline (`--x=v`)
                 // or the next non-flag token. Without one clap would reject
                 // the example at runtime, so fail compat too.
-                match iter.peek() {
+                let value = match iter.peek() {
                     Some(n) if !n.starts_with('-') => {
+                        let v = *n;
                         let _ = iter.next();
+                        Some(v)
                     }
-                    _ => {
-                        return Err(CompatError::Malformed {
-                            kind: "cli",
-                            detail: format!("flag `--{name}` requires a value"),
-                            line: source_line,
-                        });
-                    }
+                    _ => None,
+                };
+                let Some(value) = value else {
+                    return Err(CompatError::Malformed {
+                        kind: "cli",
+                        detail: format!("flag `--{name}` requires a value"),
+                        line: source_line,
+                    });
+                };
+                if let Some(src) = value_source {
+                    validate_flag_value(name, value, src, source_line)?;
                 }
+            } else if arity == 1
+                && let Some(src) = value_source
+                && let Some((_, value)) = flag_body.split_once('=')
+            {
+                validate_flag_value(name, value, src, source_line)?;
             }
         } else if !tok.starts_with('-') {
             positional_count += 1;
@@ -658,6 +719,19 @@ pub fn validate_json_block(
         });
     }
     Ok(())
+}
+
+/// Look up the verb whose `CliCommand::command` matches `cmd_token`. Falls
+/// back to `verb.id` for back-compat. Returns `None` when neither matches.
+#[must_use]
+pub fn verb_for_command<'a>(doc: &'a Document, cmd_token: &str) -> Option<&'a VerbDef> {
+    doc.verbs
+        .iter()
+        .find(|v| match &v.cli {
+            CliShape::Single(c) => c.command == cmd_token,
+            CliShape::Variants(vs) => vs.iter().any(|c| c.command == cmd_token),
+        })
+        .or_else(|| doc.verbs.iter().find(|v| v.id == cmd_token))
 }
 
 /// Look up the `CliCommand` set for a given verb id, returning `None` for

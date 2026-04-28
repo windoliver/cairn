@@ -107,7 +107,10 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) {
             continue;
         }
         buf.push_str("```bash\n");
-        let _ = write!(buf, "cairn {}", verb.id);
+        // Use the variant's `command` rather than `verb.id` so a future IDL
+        // change that diverges them (e.g., a CLI rename) flows through into
+        // the example without manual edits.
+        let _ = write!(buf, "cairn {}", cmd.command);
         for flag in &cmd.flags {
             if required.contains(&flag.name) {
                 if flag.value_source == "bool" {
