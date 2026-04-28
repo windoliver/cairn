@@ -51,7 +51,9 @@ fn build_audit(
     }
 }
 
-fn count_by_tag(spans: &[cairn_core::pipeline::filter::RedactionSpan]) -> HashMap<RedactionTag, u32> {
+fn count_by_tag(
+    spans: &[cairn_core::pipeline::filter::RedactionSpan],
+) -> HashMap<RedactionTag, u32> {
     let mut out: HashMap<RedactionTag, u32> = HashMap::new();
     for s in spans {
         *out.entry(s.tag).or_insert(0) += 1;
@@ -101,10 +103,7 @@ fn hook_auto_capture_with_pii_and_injection_blocks_and_audits_clean() {
     let json = serde_json::to_string(&entry).expect("serialize audit");
     assert!(!json.contains("alice@example.com"), "{json}");
     assert!(!json.contains("AKIAIOSFODNN7EXAMPLE"), "{json}");
-    assert!(
-        !json.contains("ignore previous instructions"),
-        "{json}"
-    );
+    assert!(!json.contains("ignore previous instructions"), "{json}");
     // Round-trip the audit row to prove deny_unknown_fields is intact.
     let back: BlockedAuditEntry = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, entry);
@@ -203,7 +202,11 @@ fn pipeline_is_idempotent_on_already_processed_text() {
     let f2 = fence(&r2.text);
 
     // Second pass over already-processed text adds nothing.
-    assert!(r2.spans.is_empty(), "redact found new spans: {:?}", r2.spans);
+    assert!(
+        r2.spans.is_empty(),
+        "redact found new spans: {:?}",
+        r2.spans
+    );
     assert!(f2.marks.is_empty(), "fence found new marks: {:?}", f2.marks);
     assert_eq!(r2.text, f1.text);
     assert_eq!(f2.text, f1.text);
