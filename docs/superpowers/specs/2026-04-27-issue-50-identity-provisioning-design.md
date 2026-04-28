@@ -243,21 +243,17 @@ block the very commands designed to fix problems:
   rules below, because a missing private key is recoverable through
   rotation and is not evidence of namespace contamination.
   `KeyMaterialMismatch` is reported as `tracing::error!` plus accumulated
-  into a `ReconciliationReport` returned to the caller. Per-identity
-  mismatches are **never** propagated as fatal errors out of `open`
-  itself — that would lock the operator out of recovery. **Scoped
-  signer eligibility, not global gating.** Issuer-dependent verbs do
-  **not** fail open across the whole vault when `ReconciliationReport`
-  is non-empty. Each verb's signer-eligibility check
-  (`IdentityService::require_attributable_signer(candidate_id)`) only
-  fails when the **specific** identity it would sign with is in the
-  report (or its provisioning_state forbids signing). A mismatched
-  non-default sensor identity therefore does not block `ingest` or
-  `forget` writes signed by the default human/agent; the only verbs
-  it blocks are those that would have signed under that exact
-  identity. The `ReconciliationReport` is also surfaced as a
-  warning in `cairn identity status` so the operator sees the global
-  picture without each verb refusing to run.
+  into a `ReconciliationReport` returned to the caller.
+  `KeyMaterialMismatch` is **not** propagated as a fatal error out of
+  `open` itself — that would lock the operator out of recovery — but
+  every issuer-dependent verb checks the report's `vault_degraded`
+  flag (set whenever the report contains ≥1 mismatch) and refuses
+  with `IdentityServiceError::VaultDegraded`. Single deterministic
+  contract: there is no "scoped per-identity skip" path; mismatch
+  evidence on any identity blocks every signed write in the vault
+  until reconciliation succeeds. The `ReconciliationReport` is also
+  surfaced in `cairn identity status` so the operator can see the
+  global picture before running any maintenance command.
 - **`IdentityService::open_for_maintenance()`** — used by the recovery
   and inspection commands (`list`, `show`, `reconcile`, `repair`,
   `purge`, `finalise-binding`, `vault-id-recover`, `init-defaults`,
@@ -475,6 +471,23 @@ point. Steps (run by `IdentityService::rotate_identity`):
    after rollback). This prevents two concurrent `rotate <id>` calls
    from racing to claim `current + 1`. The lock is per-identity, so
    unrelated rotates can still run in parallel.
+0a. **Persist rotation intent (pre-keystore).** Before any keystore
+   write, run a single SQLite transaction that inserts a row into
+   `pending_rotations(identity, planned_version, planned_handle,
+   intended_at)`. This row is the durable, **DB-visible** record of
+   every keystore handle the rotation plans to write — its purpose
+   is to give revoke/purge/reconcile a SQLite-discoverable view of
+   handles even on backends like DPAPI where keystore enumeration is
+   unsupported. Without this row, a crash between the keystore write
+   (step 2) and the registry transaction (step 4) would leave a
+   handle the keystore knows about but no SQL query can surface;
+   revoke/purge would then have no way to find or delete it. The
+   row is removed only by the same SQLite transaction that runs
+   `apply_rotation` (step 4) on success, or by `reconcile` after it
+   verifies the planned handle is absent from the keystore (or has
+   been deleted). Crash-recovery rules in the table below derive
+   directly from `pending_rotations ⋈ identity_keys`.
+
 1. **Read current version.** Snapshot
    `(observed_current, observed_revision) =
    IdentityRegistry::get_identity(id, IncludingPending)`. The
@@ -520,13 +533,15 @@ point. Steps (run by `IdentityService::rotate_identity`):
    `pending_eviction = true` on the rotation receipt.
 
 **Crash-point recovery.** `cairn identity reconcile` extends to cover
-rotation drift; the rules are derivable from registry + keystore reads
-alone:
+rotation drift; the rules are derivable from registry reads alone
+because `pending_rotations` makes every in-flight keystore handle
+SQLite-discoverable:
 
 | Crash point | Observable state | Action by `reconcile` |
 |---|---|---|
-| After step 2, before step 4 | Keystore has version `N+1`; registry `current_key_version = N`; no row at `N+1` in `identity_keys` | Delete the orphan keystore entry at `N+1` (`delete_keypair`). Operator re-runs `rotate` if still desired. |
-| After step 4, before step 5 | Registry `current_key_version = N+1`; keystore has both `N+1` (current) and `N-2` (should be evicted) | Re-attempt `delete_keypair` for the eldest predecessor. Idempotent: `NotFound` is clean. |
+| After step 0a, before step 2 | `pending_rotations` row exists; keystore has no `N+1`; no `identity_keys` row at `N+1` | Best-effort `delete_keypair` (`NotFound` is clean), then delete the `pending_rotations` row. Operator re-runs `rotate`. |
+| After step 2, before step 4 | `pending_rotations` row exists; keystore has `N+1`; no `identity_keys` row at `N+1` | `delete_keypair` for the planned handle (verified absent), then delete the `pending_rotations` row. Even on DPAPI the handle is recoverable because the row carries `planned_handle`. |
+| After step 4, before step 5 | `pending_rotations` row gone; registry `current_key_version = N+1`; keystore has both `N+1` (current) and `N-2` (should be evicted) | Re-attempt `delete_keypair` for the eldest predecessor. Idempotent: `NotFound` is clean. |
 | After step 5 partial | Registry `current_key_version = N+1`; eldest evicted; intermediate predecessor still present | No-op (this is the steady state — current + 2 predecessors). |
 
 `reconcile` never writes to `identity_keys` and never advances
@@ -1190,7 +1205,10 @@ P0 split, all gate-aware:
       even if a stale keystore handle survives indefinitely.
    2. **Delete + verify every key version that has ever existed.**
       Iterate **all** `identity_keys` rows for the target identity
-      (not just the retained ring). For each version: call
+      **plus every `pending_rotations` row scoped to it** (not just
+      the retained ring; this catches both committed-but-unevicted
+      versions and crashed-rotation orphan handles that have no
+      `identity_keys` row). For each version: call
       `Keystore::delete_keypair(handle)`, then
       `Keystore::load_signing_key(handle)` and confirm
       `KeystoreError::NotFound`. Aged-out versions whose private key
@@ -1300,9 +1318,12 @@ P0 split, all gate-aware:
       (`require_attributable_signer` rejects `purge_pending` and
       `purged` alike).
    2. **Delete + verify each key.** Iterate every `identity_keys` row
-      for the identity (the authoritative version list — not just the
-      retained ring; this catches orphan private keys left by prior
-      rotation evictions that failed). The retained private-key ring
+      for the identity **plus every `pending_rotations` row scoped
+      to it** (the authoritative + in-flight version list — not just
+      the retained ring; this catches orphan private keys left by
+      prior rotation evictions that failed AND crashed-rotation
+      handles that have no `identity_keys` row yet). The retained
+      private-key ring
       is current + 2 predecessors (§3.6); older versions are usually
       already evicted from the keystore as part of normal rotation.
       The loop treats that case as already-clean and continues. After
@@ -1861,6 +1882,23 @@ CREATE TABLE identity_receipts (
 
 CREATE INDEX idx_identity_receipts_target ON identity_receipts(target_identity);
 CREATE INDEX idx_identity_receipts_signer ON identity_receipts(signer_identity);
+CREATE TABLE pending_rotations (
+    -- DB-visible record of every keystore handle a rotation has
+    -- planned to write but not yet committed via apply_rotation.
+    -- Lets revoke/purge/reconcile discover orphan keystore handles
+    -- on backends that cannot enumerate (DPAPI). Rows are inserted
+    -- in step 0a of the rotation flow (§3.6) and deleted by the
+    -- same SQLite transaction that runs apply_rotation, or by
+    -- reconcile after the planned handle is verified absent.
+    rowid INTEGER PRIMARY KEY,
+    identity_id TEXT NOT NULL,
+    planned_version INTEGER NOT NULL,
+    planned_handle TEXT NOT NULL,           -- canonical wire form: <identity>#k<version>
+    intended_at TEXT NOT NULL,
+    UNIQUE (identity_id, planned_version)
+);
+CREATE INDEX idx_pending_rotations_identity ON pending_rotations(identity_id);
+
 CREATE INDEX idx_identity_receipts_pending_eviction ON identity_receipts(pending_eviction) WHERE pending_eviction = 1;
 CREATE INDEX idx_identity_receipts_pending_key_disable ON identity_receipts(pending_key_disable) WHERE pending_key_disable = 1;
 ```
