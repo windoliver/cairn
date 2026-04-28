@@ -23,9 +23,13 @@ callers.
 **Out of scope.** WAL state-machine logic (§5.6 — #8). Phase A drain →
 Phase B physical purge orchestration (#8). Ranking, semantic embedding
 generation, hybrid search orchestration. The `sqlite-vec` virtual table is
-not created in #46 — it lands with embeddings in #48. Visibility/scope
-filtering and tenant authorization (those happen above the store, in the
-verb-layer Scope Resolve + Rank & Filter stages — brief line 1624).
+not created in #46 — it lands with embeddings in #48. The full ReBAC rule
+set + `Principal` resolution lives in `cairn-core::rebac` (separate
+issue); #46 ships only the read-trait surface that *takes* a `&Principal`
+and the SQL-level filter helpers — the rebac decision function is wired
+in by its owning issue. For #46, "rebac evaluation" means: filter rows
+by `scope.visibility` ∈ allowed-tiers and `scope.user`/`scope.agent`
+match against the principal. Anything richer is a follow-up.
 
 ## 2. Context
 
@@ -43,11 +47,17 @@ verb-layer Scope Resolve + Rank & Filter stages — brief line 1624).
   at the type level, write methods take an `ApplyToken` whose constructor
   is `pub(in cairn_core::wal)` and unreachable from outside `cairn-core`'s
   WAL module (which lands in #8).
-- **Brief line 1624** — "The harness never reaches the store directly — it
-  always goes through Scope Resolve and Rank & Filter." Visibility/scope/
-  tenant filtering is **above** the store. The `MemoryStore` read API
-  intentionally takes no actor or principal; it is an internal storage
-  primitive, not a policy-enforcement boundary.
+- **Visibility / rebac is enforced at the `MemoryStore` layer.** Brief
+  lines 2557 (`retrieve --scope` "rebac applied per-row at MemoryStore
+  layer"), 3287 ("Filter lives at the store layer; caller never sees
+  leaked rows"), and 4136 ("results the caller can't read are dropped
+  at the MemoryStore layer, never surfaced") fix this. Brief line 1624
+  ("the harness never reaches the store directly") describes the
+  *invocation flow* through Scope Resolve and Rank & Filter — Scope
+  Resolve produces a typed query carrying the principal, the store
+  evaluates rebac per row, and Rank & Filter further trims. Store-layer
+  enforcement is the dominant signal; read methods therefore take a
+  `&Principal` and the store drops non-readable rows pre-return.
 - Existing `cairn-store-sqlite` is a stub. No `rusqlite` dep yet
   (intentionally deferred per `Cargo.toml` comment).
 - `MemoryRecord`, `RecordId`, `Provenance`, `ActorChain`, `Evidence`,
@@ -109,36 +119,59 @@ pub trait MemoryStore: Send + Sync {
     fn capabilities(&self) -> &MemoryStoreCapabilities;
     fn supported_contract_versions(&self) -> VersionRange;
 
-    /// Read the active version of a logical record by stable `target_id`.
-    /// Returns `None` if no active version exists or the active row is
-    /// tombstoned/expired (caller controls via `ListQuery` toggles for
-    /// admin paths; the default `get` returns only visible content).
-    async fn get(&self, target_id: &TargetId) -> Result<Option<MemoryRecord>, StoreError>;
+    /// Read the active version of a logical record by stable `target_id`,
+    /// gated by rebac against `principal`. Returns `None` if no active
+    /// version exists, the active row is tombstoned/expired, OR the
+    /// principal cannot read it (the three are indistinguishable to the
+    /// caller — brief line 4136 mandates hidden rows never surface).
+    async fn get(
+        &self,
+        principal: &Principal,
+        target_id: &TargetId,
+    ) -> Result<Option<MemoryRecord>, StoreError>;
 
-    /// Range/list query over active records. The query carries pre-resolved
-    /// scope filters (target_id prefix, kind, tier, time bounds) — the
-    /// store does NOT do scope authorization (that belongs above per brief
-    /// line 1624). The query lets the verb layer push filters down to SQL.
-    async fn list(&self, query: &ListQuery) -> Result<Vec<MemoryRecord>, StoreError>;
+    /// Range/list query, gated by rebac against `query.principal`. The
+    /// query carries pre-resolved scope filters (target_id prefix, kind,
+    /// tier, time bounds); the store evaluates each candidate row's
+    /// `scope` + `actor_chain` against the principal and drops
+    /// non-readable rows before returning (brief line 3287). Returns the
+    /// (visible) rows; the count of dropped rows is surfaced via
+    /// `ListResult::hidden` per brief line 4136 (`results_hidden: N`).
+    async fn list(&self, query: &ListQuery) -> Result<ListResult, StoreError>;
 
-    /// Full lifecycle history for a logical `target_id`. Returns concrete
-    /// `Version` entries first (ordered by `version` ASC, including
-    /// superseded/tombstoned/expired rows), then any `Purge` markers from
+    /// Full lifecycle history for a logical `target_id`, gated by rebac
+    /// against `principal`. Returns concrete `Version` entries first
+    /// (ordered by `version` ASC, including superseded/tombstoned/expired
+    /// rows the principal can read), then any `Purge` markers from
     /// `record_purges`. Used by audit/forensic paths and by the WAL
-    /// executor when computing pre-images. See §5.4 for `HistoryEntry`.
-    async fn version_history(&self, target_id: &TargetId)
-        -> Result<Vec<HistoryEntry>, StoreError>;
+    /// executor when computing pre-images. The WAL executor passes a
+    /// system principal that bypasses scope filtering. See §5.4.
+    async fn version_history(
+        &self,
+        principal: &Principal,
+        target_id: &TargetId,
+    ) -> Result<Vec<HistoryEntry>, StoreError>;
 }
 ```
 
 `MemoryStore` is the trait that `register_plugin!` stores as
 `Box<dyn MemoryStore>`. **It exposes no write methods.** Any in-process
-caller holding `dyn MemoryStore` can only read.
+caller holding `dyn MemoryStore` can only read, and only what the
+supplied `Principal` is permitted to see.
 
 `get`/`list` return only rows where `active = 1 AND tombstoned = 0 AND
-(expired_at IS NULL OR expired_at > now)` by default. `ListQuery` admin
-toggles expose superseded/tombstoned/expired rows for forensic and WAL
-recovery paths.
+(expired_at IS NULL OR expired_at > now)` AND the principal passes the
+rebac predicate. `ListQuery` admin toggles expose
+superseded/tombstoned/expired rows for forensic and WAL recovery paths
+— but only ever rows the principal can read.
+
+`Principal` (defined in `cairn-core::domain::identity`, already
+present) carries the actor identity and resolved scope tuple. A
+`Principal::system()` constructor returns a privileged principal that
+bypasses rebac — used by the WAL executor and tests. Brief line 1361
+flags this kind of unverified read with a `trust: "unverified"` marker
+in the response; the store passes the principal mode through unchanged
+and lets the verb layer surface the trust marker.
 
 ### 4.2 Apply (write) surface — sealed, token-gated
 
@@ -638,6 +671,7 @@ mint an `ApplyToken` and exercise `MemoryStoreApply`.
 | `purge_audit_marker.rs` | Stage 3 versions + edges + FTS rows, then `purge_target(target, op_id, actor)` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts`; **assert one row in `record_purges`** with `purged_by=actor`; `version_history(target)` returns one `HistoryEntry::Purge` with `event.kind=Purge`, `event.at=purged_at`, `event.actor=Some(actor)`. Re-invoking with the same `op_id` returns `PurgeOutcome::AlreadyPurged` and writes nothing (PK on `(target_id, op_id)` enforces idempotency). |
 | `activate_monotonicity.rs` | Stage v1+v2+v3, activate v3, then attempt `activate_version(target, version=2, expected_prior=Some(3))` → `StoreError::Conflict { kind: ActivationRaced }`. Same with `expected_prior=None`. v3 stays active; reads see v3. |
 | `consent_journal_atomicity.rs` | Inside one `with_apply_tx`, call `activate_version` then `append_consent_journal`, then return `Err`. Assert post-rollback: no records change AND no consent_journal row. Same closure but returning `Ok` → both writes visible. Proves the brief's atomicity invariant. |
+| `rebac_visibility.rs` | Stage three records: one `private` for principal `alice`, one `private` for principal `bob`, one `team` shared. Call `list` with alice's principal → only alice's private + the team record; `bob`'s private is dropped pre-return; `ListResult.hidden` = 1. Same for `get` against bob's record with alice's principal: returns `None`. `Principal::system()` sees all three. Proves brief lines 2557/3287/4136 — non-readable rows never surface, hidden count is reported. |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back (rusqlite drop guard), connection still usable for the next `with_apply_tx`. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open; migration ids/checksums match across `cargo test --no-default-features` and `cargo test --all-features`. |
@@ -697,25 +731,14 @@ cargo machete
 
 ## 11. Risks & open questions
 
-- **OPEN — brief contradicts itself on the auth boundary.** Brief line
-  1624 (§5.1) says "the harness never reaches the store directly — it
-  always goes through Scope Resolve and Rank & Filter." That implies
-  `MemoryStore` is an internal storage primitive; visibility/scope
-  filtering happens above it. But brief line 2557 (§8 retrieve --scope),
-  line 3287 (rebac revocation), and line 4136 (§14 privacy) all say
-  ReBAC and visibility filters are enforced **at the `MemoryStore`
-  layer**, with hidden rows never surfaced to the caller. These two
-  positions cannot both be implemented as written: enforcing rebac
-  per-row at the store requires the read API to take a principal/scope
-  context, which the read-as-internal-primitive position rules out.
-
-  This spec currently follows §5.1 (no principal in read API). If
-  maintainer review prefers §6.3/§13/§14, the read trait gains a
-  `Principal` parameter (or wraps every read in a typed query carrying
-  one) and the store gains rebac evaluation against the row's `scope`
-  + `actor_chain` columns. **Flag for maintainer decision before
-  implementation begins.** Either resolution is workable in the
-  proposed schema; the trait surface is the only thing that flips.
+- **Brief reading: rebac at MemoryStore layer.** Brief line 1624 ("the
+  harness never reaches the store directly") describes invocation
+  flow, while lines 2557, 3287, 4136 specify enforcement *location*:
+  rebac is per-row at the store. This spec follows the latter — read
+  methods take a `&Principal`, the store drops non-readable rows
+  pre-return. The full ReBAC rule set lives in `cairn-core::rebac`
+  (separate issue); #46 ships only the principal-bearing trait surface
+  + the SQL filter helpers (visibility tier check + actor scope match).
 
 - **`ApplyToken` is a discipline mechanism, not a security boundary.**
   Anyone with mutable repo access can mint a constructor. The token
