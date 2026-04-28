@@ -600,6 +600,25 @@ fn live_skill_md_exercises_positional_source_for_ingest() {
 }
 
 #[test]
+fn cli_validator_does_not_bypass_placeholder_for_constrained_field() {
+    // Round-4 finding: ALL-CAPS placeholders bypassed validation even
+    // for constrained string fields. `forget --record` carries a
+    // primitive `$ref: Ulid` — a placeholder must NOT be silently
+    // accepted; the schema's pattern check must fire.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn forget --record FOO_BAR".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("placeholder for $ref-constrained field must fail schema validation");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_inspects_wrapper_with_options() {
     // Round-3 finding 1: `sudo -u alice cairn …`, `env -i cairn …`,
     // `time -p cairn …` should still be validated. Prior code stopped
@@ -913,7 +932,7 @@ fn cli_validator_accepts_summarize_repeatable_positional() {
     // tokens must validate, not trip the positional-cap check.
     let block = CodeBlock {
         lang: "bash".into(),
-        body: "cairn summarize ID1 ID2 ID3".into(),
+        body: "cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8XAB1 01H8XGJWBWBAQ4N1NQK1A8XAB2".into(),
         line: 1,
     };
     validate_cli_block(&block, &doc()).expect("repeatable positional must accept multiple tokens");

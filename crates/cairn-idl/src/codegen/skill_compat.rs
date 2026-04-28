@@ -826,7 +826,7 @@ fn validate_positional_value(
     owner_defs: Option<&serde_json::Value>,
     line: usize,
 ) -> Result<(), CompatError> {
-    if is_placeholder(value) {
+    if is_placeholder_for_schema(value, Some(prop_schema)) {
         return Ok(());
     }
     let item_schema =
@@ -970,6 +970,42 @@ fn is_placeholder(value: &str) -> bool {
     has_upper
 }
 
+/// True when `value` looks like an `ALL_CAPS_PLACEHOLDER` *and* the field
+/// schema would actually accept it. Round-4 finding: the prior bypass let
+/// constrained string/path fields like `format: "uri"` (`ingest.url`) and
+/// `$ref: Cursor` ship with ALL-CAPS placeholders that wouldn't satisfy the
+/// schema at runtime. By gating the bypass on "unconstrained string", any
+/// constrained field forces `emit_skill` to provide a concrete `cli_exemplar`.
+fn is_placeholder_for_schema(value: &str, prop_schema: Option<&serde_json::Value>) -> bool {
+    if !is_placeholder(value) {
+        return false;
+    }
+    let Some(prop) = prop_schema else {
+        return true;
+    };
+    // For array-typed fields, dispatch on the items schema.
+    let target = if prop.get("type").and_then(serde_json::Value::as_str) == Some("array") {
+        prop.get("items").unwrap_or(prop)
+    } else {
+        prop
+    };
+    // Any of these makes the placeholder unsafe to bypass:
+    if target.get("format").is_some()
+        || target.get("pattern").is_some()
+        || target.get("enum").is_some()
+        || target.get("$ref").is_some()
+        || target.get("const").is_some()
+    {
+        return false;
+    }
+    if let Some(max_len) = target.get("maxLength").and_then(serde_json::Value::as_u64)
+        && (value.chars().count() as u64) > max_len
+    {
+        return false;
+    }
+    true
+}
+
 /// Validate `value` against the IDL `value_source` declared on a flag, plus
 /// numeric bounds (`minimum` / `maximum`) lifted from the property schema
 /// when supplied. Closed forms (`enum(...)`, `u*`, `i*`, `integer`, `bool`)
@@ -985,7 +1021,7 @@ fn validate_flag_value(
     owner_defs: Option<&serde_json::Value>,
     line: usize,
 ) -> Result<(), CompatError> {
-    if is_placeholder(value) {
+    if is_placeholder_for_schema(value, prop_schema) {
         return Ok(());
     }
     let bad = |detail: String| CompatError::Malformed {
