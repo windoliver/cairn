@@ -247,10 +247,25 @@ async fn collect_policies(
             .with_context(|| format!("strip_prefix {}", abs.display()))?
             .to_path_buf();
         let dir = rel.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-        let bytes = tokio::fs::read_to_string(&abs)
+        // Read raw bytes — `read_to_string` would return InvalidData on
+        // non-UTF-8 and the `?` would abort the whole rebuild. Decode here
+        // so a non-UTF-8 file taints only its own subtree (brief invariant 6,
+        // fail-closed), exactly like a YAML parse failure.
+        let bytes = tokio::fs::read(&abs)
             .await
             .with_context(|| format!("read {}", abs.display()))?;
-        match parse_policy(&bytes) {
+        let text = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                policy_errors.push(PolicyError {
+                    path: rel,
+                    reason: format!("_policy.yaml is not valid UTF-8: {e}"),
+                });
+                tainted_dirs.push(dir);
+                continue;
+            }
+        };
+        match parse_policy(&text) {
             Ok(p) => {
                 policies_by_dir.insert(dir, p);
             }

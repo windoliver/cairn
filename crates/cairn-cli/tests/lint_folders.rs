@@ -151,6 +151,36 @@ async fn write_through_symlinked_parent_is_rejected() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn non_utf8_policy_yaml_taints_subtree_not_run() {
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+    std::fs::create_dir_all(vault.path().join("raw/broken")).unwrap();
+
+    // Write non-UTF-8 bytes — 0xFF, 0xFE are invalid as UTF-8 in this position.
+    std::fs::write(
+        vault.path().join("raw/broken/_policy.yaml"),
+        [0xFF, 0xFE, 0xFD, 0xFC].as_slice(),
+    )
+    .unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await.unwrap();
+
+    // Run did NOT abort. raw/_index.md still emitted (sibling subtree).
+    assert!(vault.path().join("raw/_index.md").exists());
+    // The broken policy is recorded as a policy error.
+    assert_eq!(result.policy_errors.len(), 1);
+    assert!(
+        result.policy_errors[0]
+            .path
+            .ends_with("raw/broken/_policy.yaml")
+    );
+}
+
+#[tokio::test]
 async fn fixture_index_matches_snapshot() {
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();
