@@ -96,32 +96,40 @@ pub fn default_visibility(
 ///
 /// Mode-driven rules (brief §5.0.a / §6.3):
 /// - **Auto** + a real sensor family (`hook`, `ide`, `terminal`,
-///   `clipboard`, `voice`, `screen`, `recording_batch`) → `Session`.
-///   Sensor observations are turn-local; promoting them to `Private`
-///   would silently widen scope from "this turn" to "vault-wide".
+///   `clipboard`, `voice`, `screen`, `recording_batch`) **emitted by
+///   a sensor identity** → `Session`. Sensor observations are turn-
+///   local; promoting them to `Private` would silently widen scope
+///   from "this turn" to "vault-wide".
 /// - **Auto** without a sensor family (`cli`, `mcp`, `proactive`) →
 ///   `Private`. Auto from these channels means the harness fired ingest
 ///   without explicit user action; treat as agent state.
-/// - **Explicit** (Mode B) → always `Private`. The user said "remember
-///   this"; the user must also say "share this" later.
-/// - **Proactive** (Mode C) → always `Private`. Agent-generated facts
-///   must clear consent before they leave the vault.
+/// - **Explicit** (Mode B) emitted by a human identity → `Private`.
+///   The user said "remember this"; the user must also say "share
+///   this" later.
+/// - **Proactive** (Mode C) emitted by an agent identity → `Private`.
+///   Agent-generated facts must clear consent before they leave the
+///   vault.
 ///
-/// Identity kind is currently informational — the §4.2 attribution
-/// rules already reject mismatches (Auto without `snr:`, Explicit
-/// without `usr:`, Proactive without `agt:`) before the Filter stage,
-/// so the matrix only differentiates on `mode × source`. The
-/// `identity_kind` parameter is kept in the signature to make a future
-/// "promote agt-authored Explicit captures to Project" policy a
-/// one-line matrix change without a callsite migration.
-#[allow(clippy::needless_pass_by_value)]
+/// **Fail-closed on impossible triples (§14).** Identity kind is not
+/// just informational — the matrix enforces the §5.0.a attribution
+/// pairing here too, so a malformed call (e.g. `(Human, Auto, Hook)`
+/// or `(Agent, Auto, Screen)`) cannot accidentally land at `Session`
+/// because some upstream caller forgot to validate. Anything that
+/// doesn't match one of the three legal pairings collapses to
+/// `Private` rather than trusting the source-family lookup alone.
+//
+// The explicit `(Human, Explicit) | (Agent, Proactive)` arm is kept
+// alongside the `_` wildcard for documentation: it shows the legal
+// §5.0.a pairings inline next to the impossible-triple fallback.
+// Both bodies returning `Private` is intentional, not a bug.
+#[allow(clippy::match_same_arms)]
 fn matrix_lookup(
-    _identity_kind: IdentityKind,
+    identity_kind: IdentityKind,
     mode: CaptureMode,
     source: SourceFamily,
 ) -> MemoryVisibility {
-    match mode {
-        CaptureMode::Auto => match source {
+    match (identity_kind, mode) {
+        (IdentityKind::Sensor, CaptureMode::Auto) => match source {
             SourceFamily::Hook
             | SourceFamily::Ide
             | SourceFamily::Terminal
@@ -129,11 +137,22 @@ fn matrix_lookup(
             | SourceFamily::Voice
             | SourceFamily::Screen
             | SourceFamily::RecordingBatch => MemoryVisibility::Session,
+            // Auto from a sensor identity but a non-sensor source
+            // family is malformed — fail closed.
             SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::Proactive => {
                 MemoryVisibility::Private
             }
         },
-        CaptureMode::Explicit | CaptureMode::Proactive => MemoryVisibility::Private,
+        // Legal §5.0.a pairings: Explicit must come from a human
+        // identity; Proactive from an agent identity. Both default
+        // to Private — the user (B) or agent (C) must clear consent
+        // to promote.
+        (IdentityKind::Human, CaptureMode::Explicit)
+        | (IdentityKind::Agent, CaptureMode::Proactive) => MemoryVisibility::Private,
+        // Impossible identity/mode triples (e.g. Human+Auto+Hook,
+        // Agent+Auto+Screen) collapse to Private rather than trust
+        // the source family alone.
+        _ => MemoryVisibility::Private,
     }
 }
 
@@ -394,6 +413,45 @@ mod tests {
             ),
             MemoryVisibility::Private,
         );
+    }
+
+    // ── Fail-closed on impossible identity/mode triples ─────────────
+
+    #[test]
+    fn malformed_identity_mode_pairs_collapse_to_private() {
+        // The §5.0.a attribution rules pair Auto with Sensor,
+        // Explicit with Human, Proactive with Agent. Any other pair
+        // is malformed — the matrix must fail closed at Private even
+        // when the source family looks sensor-like, so a missing
+        // upstream validation cannot accidentally promote.
+        let policy = VisibilityPolicy::default();
+        for (k, m) in [
+            (IdentityKind::Human, CaptureMode::Auto),
+            (IdentityKind::Agent, CaptureMode::Auto),
+            (IdentityKind::Sensor, CaptureMode::Explicit),
+            (IdentityKind::Agent, CaptureMode::Explicit),
+            (IdentityKind::Sensor, CaptureMode::Proactive),
+            (IdentityKind::Human, CaptureMode::Proactive),
+        ] {
+            for s in [
+                SourceFamily::Hook,
+                SourceFamily::Ide,
+                SourceFamily::Terminal,
+                SourceFamily::Clipboard,
+                SourceFamily::Voice,
+                SourceFamily::Screen,
+                SourceFamily::RecordingBatch,
+                SourceFamily::Cli,
+                SourceFamily::Mcp,
+                SourceFamily::Proactive,
+            ] {
+                assert_eq!(
+                    default_visibility(k, m, s, &policy),
+                    MemoryVisibility::Private,
+                    "malformed triple {k:?},{m:?},{s:?} broadened above Private"
+                );
+            }
+        }
     }
 
     #[test]

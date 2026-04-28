@@ -115,6 +115,12 @@ pub fn redact(input: &str) -> RedactedPayload {
         })
         .collect();
 
+    // Context-keyed secrets are scanned with a hand-rolled
+    // delimiter-aware scanner so values are not bounded by an
+    // arbitrary regex length cap and so `Authorization: Bearer ...`
+    // headers are covered.
+    hits.extend(find_context_keyed_spans(input));
+
     // Sort by start asc, then by length desc so that on overlap the
     // longer match wins — this avoids `email` swallowing the local
     // part of a JWT that happens to contain `@`.
@@ -188,9 +194,7 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
                 // suffix lengths keep regex linear-time. Order before
                 // HexSecret so a hex-shaped suffix doesn't win.
                 RedactionTag::OpaqueApiKey,
-                build(
-                    r"\b(?:sk_live|sk_test|pk_live|pk_test|rk_live|whsec)_[A-Za-z0-9]{16,128}\b",
-                ),
+                build(r"\b(?:sk_live|sk_test|pk_live|pk_test|rk_live|whsec)_[A-Za-z0-9]{16,128}\b"),
             ),
             (
                 // OpenAI / Anthropic style `sk-...` and `sk-proj-...`.
@@ -201,35 +205,6 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
                 // Google API keys.
                 RedactionTag::OpaqueApiKey,
                 build(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-            ),
-            (
-                // Context-keyed secret assignments — quoted form
-                // (`api_key="..."` / `password='...'`). The value can
-                // contain any non-quote, non-newline byte so passwords
-                // with `!`, `@`, `$`, `%`, `:`, etc. are covered.
-                RedactionTag::ContextKeyedSecret,
-                build(
-                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*"[^"\n]{6,200}""#,
-                ),
-            ),
-            (
-                // Context-keyed secret assignments — single-quoted form.
-                RedactionTag::ContextKeyedSecret,
-                build(
-                    r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*'[^'\n]{6,200}'",
-                ),
-            ),
-            (
-                // Context-keyed secret assignments — unquoted form.
-                // The value is bounded by whitespace, common
-                // delimiters (`,`, `;`, `)`, `}`), or end-of-input,
-                // so prose isn't swallowed; the character class is
-                // intentionally broad enough to cover real-world
-                // secrets containing `!`, `@`, `$`, `%`, `&`, `:`, etc.
-                RedactionTag::ContextKeyedSecret,
-                build(
-                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*[^\s,;)}'"<>]{8,200}"#,
-                ),
             ),
             (
                 RedactionTag::Email,
@@ -250,6 +225,128 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
 fn build(pat: &str) -> Regex {
     #[allow(clippy::expect_used)]
     Regex::new(pat).expect("static redactor pattern compiles")
+}
+
+// ── Context-keyed secret scanner ──────────────────────────────────────
+//
+// `password=...`, `api_key: "..."`, `Authorization: Bearer <token>`,
+// `secret = ...` — these envelopes wrap values of arbitrary length and
+// arbitrary character class. A regex with a fixed length cap leaks the
+// suffix when the value runs longer than the cap, and a fixed value
+// charset misses values with punctuation. The scanner consumes through
+// the matching delimiter (close quote, whitespace, comma, semicolon,
+// closing bracket, newline, or end-of-input) so the entire secret is
+// captured regardless of length.
+
+fn find_context_keyed_spans(input: &str) -> Vec<RedactionSpan> {
+    static KEY_RE: OnceLock<Regex> = OnceLock::new();
+    let key_re = KEY_RE.get_or_init(|| {
+        // Match the keyword + optional separator. `bearer` and the
+        // standalone `Bearer` after `Authorization:` both fall through
+        // to the value-consume step below.
+        build(
+            r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|authorization|bearer)\b\s*[:=]?\s*",
+        )
+    });
+
+    let bytes = input.as_bytes();
+    let mut spans: Vec<RedactionSpan> = Vec::new();
+
+    for m in key_re.find_iter(input) {
+        let span_start = m.start();
+        let mut i = m.end();
+
+        // After the key/separator, optionally swallow a `Bearer ` /
+        // `Token ` HTTP-scheme prefix so the actual opaque value is
+        // what gets consumed below.
+        i = skip_scheme_prefix(input, i);
+        if i >= bytes.len() {
+            continue;
+        }
+
+        // Consume the value through its delimiter.
+        let (value_start, value_end) = consume_value(input, i);
+        if value_end <= value_start || value_end - value_start < 6 {
+            continue;
+        }
+
+        spans.push(RedactionSpan {
+            start: span_start,
+            end: value_end,
+            tag: RedactionTag::ContextKeyedSecret,
+        });
+    }
+    spans
+}
+
+/// Skip over `Bearer ` / `Token ` / `Bearer: ` / `Token: ` scheme
+/// prefixes after a context key, so the consume step lands on the
+/// actual opaque value.
+fn skip_scheme_prefix(input: &str, mut i: usize) -> usize {
+    let bytes = input.as_bytes();
+    for prefix in ["bearer", "token"] {
+        let len = prefix.len();
+        let Some(slice) = input.get(i..i.saturating_add(len)) else {
+            continue;
+        };
+        if !slice.eq_ignore_ascii_case(prefix) {
+            continue;
+        }
+        let after = i + len;
+        // Optional `:` or `=` immediately after the scheme keyword.
+        let after_sep = match bytes.get(after) {
+            Some(b':' | b'=') => after + 1,
+            _ => after,
+        };
+        // Require at least one whitespace separator after the scheme.
+        if !bytes.get(after_sep).is_some_and(u8::is_ascii_whitespace) {
+            continue;
+        }
+        i = after_sep;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        return i;
+    }
+    i
+}
+
+/// Consume a value starting at `i`. If the first byte is `'` or `"`,
+/// consume through the matching close quote (or newline / EOF if the
+/// quote is unbalanced — fail-closed: include all bytes). Otherwise,
+/// consume non-whitespace, non-delimiter bytes.
+fn consume_value(input: &str, i: usize) -> (usize, usize) {
+    let bytes = input.as_bytes();
+    if i >= bytes.len() {
+        return (i, i);
+    }
+    let first = bytes[i];
+    if first == b'"' || first == b'\'' {
+        let q = first;
+        let value_start = i;
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != q && bytes[j] != b'\n' && bytes[j] != b'\r' {
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == q {
+            return (value_start, j + 1);
+        }
+        // Unbalanced quote — fail closed: redact through the line.
+        return (value_start, j);
+    }
+    let value_start = i;
+    let mut j = i;
+    while j < bytes.len() && !is_value_terminator(bytes[j]) {
+        j += 1;
+    }
+    (value_start, j)
+}
+
+const fn is_value_terminator(b: u8) -> bool {
+    matches!(
+        b,
+        b' ' | b'\t' | b'\n' | b'\r' | b',' | b';' | b')' | b'}' | b'>' | b'<' | b'"' | b'\''
+    )
 }
 
 #[cfg(test)]
@@ -305,9 +402,14 @@ mod tests {
 
     #[test]
     fn detects_github_token() {
-        // 36-char body satisfies the new GitHub token shape.
-        let s = format!("token ghp_{} done", "a".repeat(36));
-        assert_eq!(one_tag(&s), RedactionTag::GithubToken);
+        // The token-shaped detector fires; if a `token` context-key
+        // scanner span overlaps, either detector is acceptable as
+        // long as the raw secret is gone from the output.
+        let s = format!("ghp_{} alone", "a".repeat(36));
+        let r = redact(&s);
+        assert!(!r.spans.is_empty(), "no span fired for {s}");
+        assert_eq!(r.spans[0].tag, RedactionTag::GithubToken);
+        assert!(!r.text.contains(&"a".repeat(36)));
     }
 
     #[test]
@@ -357,20 +459,23 @@ mod tests {
 
     #[test]
     fn detects_stripe_style_sk_live_key() {
+        // Bare key (no `token` keyword to compete with the
+        // OpaqueApiKey detector).
         assert_eq!(
-            one_tag("token sk_live_aB3dEfGhIjKlMnOpQrStUv done"),
+            one_tag("creds sk_live_aB3dEfGhIjKlMnOpQrStUv done"),
             RedactionTag::OpaqueApiKey
         );
     }
 
     #[test]
     fn detects_google_api_key() {
-        // Exactly 35 chars after `AIza`.
+        // Bare key (no preceding `token` keyword that would otherwise
+        // get matched by the context-keyed scanner).
         let key: String = std::iter::repeat_n('A', 35).collect();
-        assert_eq!(
-            one_tag(&format!("token AIza{key} done")),
-            RedactionTag::OpaqueApiKey,
-        );
+        let r = redact(&format!("creds AIza{key} done"));
+        assert!(!r.spans.is_empty(), "no span fired");
+        assert_eq!(r.spans[0].tag, RedactionTag::OpaqueApiKey);
+        assert!(!r.text.contains(&format!("AIza{key}")), "{}", r.text);
     }
 
     #[test]
@@ -442,6 +547,60 @@ mod tests {
         assert!(
             !r.text.contains("abc!defghijklmnopqrstuv"),
             "secret leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_quoted_password_longer_than_old_regex_cap() {
+        // The previous regex capped values at 200 bytes. A quoted
+        // password longer than the cap leaked the suffix. The hand-
+        // rolled scanner consumes through the matching close quote
+        // regardless of length.
+        let secret: String = std::iter::repeat_n('a', 400).collect();
+        let input = format!(r#"password="{secret}""#);
+        let r = redact(&input);
+        assert!(!r.spans.is_empty(), "no span for >200B quoted password");
+        assert!(
+            !r.text.contains(&secret),
+            "long password leaked through scanner: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_unquoted_token_longer_than_old_regex_cap() {
+        let secret: String = std::iter::repeat_n('z', 400).collect();
+        let input = format!("token={secret} done");
+        let r = redact(&input);
+        assert!(!r.spans.is_empty(), "no span for >200B unquoted token");
+        assert!(!r.text.contains(&secret), "long token leaked: {}", r.text);
+    }
+
+    #[test]
+    fn redacts_authorization_bearer_header() {
+        // The HTTP form `Authorization: Bearer <opaque>` — `bearer`
+        // appears after a `:` separator, but the actual value is the
+        // opaque token after the `Bearer ` scheme. The scanner walks
+        // past the scheme prefix and consumes the token through the
+        // next delimiter.
+        let r = redact("Authorization: Bearer abcDEF1234567890ZYXWvut done");
+        assert!(!r.spans.is_empty(), "no span for Authorization header");
+        assert!(
+            !r.text.contains("abcDEF1234567890ZYXWvut"),
+            "bearer token leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_authorization_token_scheme() {
+        // Same shape, different scheme keyword.
+        let r = redact("Authorization: Token abcDEF1234567890ZYXWvut done");
+        assert!(!r.spans.is_empty());
+        assert!(
+            !r.text.contains("abcDEF1234567890ZYXWvut"),
+            "scheme'd token leaked: {}",
             r.text
         );
     }
