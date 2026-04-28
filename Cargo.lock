@@ -262,6 +262,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-sdk"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "cairn-core",
+ "insta",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
 name = "cairn-sensors-local"
 version = "0.0.1"
 dependencies = [
