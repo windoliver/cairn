@@ -94,18 +94,12 @@ pub trait MemoryStore: Send + Sync {
 mod tests {
     use super::*;
     use crate::contract::memory_store::apply::{
-        ApplyToken, MemoryStoreApply, MemoryStoreApplyTx, Sealed,
+        ApplyToken, MemoryStoreApply, MemoryStoreApplyTx, private::Sealed,
     };
     use crate::contract::memory_store::error::StoreError;
-    use crate::contract::memory_store::types::{
-        ConsentJournalEntry, ConsentJournalRowId, Edge, EdgeKind, HistoryEntry, ListQuery,
-        ListResult, OpId, PurgeOutcome, RecordId, TargetId,
-    };
+    use crate::contract::memory_store::types::{HistoryEntry, ListQuery, ListResult, TargetId};
     use crate::contract::version::{ContractVersion, VersionRange};
-    use crate::domain::{
-        actor_ref::ActorRef, principal::Principal, record::MemoryRecord,
-        timestamp::Rfc3339Timestamp,
-    };
+    use crate::domain::{principal::Principal, record::MemoryRecord};
 
     struct StubStore;
 
@@ -152,73 +146,6 @@ mod tests {
             _target_id: &TargetId,
         ) -> Result<Vec<HistoryEntry>, StoreError> {
             Ok(vec![])
-        }
-    }
-
-    // StubApplyTx exercises the MemoryStoreApplyTx impl surface. It is
-    // constructed indirectly through trait-object dispatch in apply tests.
-    #[allow(dead_code)]
-    struct StubApplyTx;
-
-    impl Sealed for StubApplyTx {}
-
-    impl MemoryStoreApplyTx for StubApplyTx {
-        fn stage_version(&mut self, _record: &MemoryRecord) -> Result<RecordId, StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn activate_version(
-            &mut self,
-            _target_id: &TargetId,
-            _version: u64,
-            _expected_prior: Option<u64>,
-        ) -> Result<(), StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn tombstone_target(
-            &mut self,
-            _target_id: &TargetId,
-            _actor: &ActorRef,
-        ) -> Result<(), StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn expire_active(
-            &mut self,
-            _target_id: &TargetId,
-            _at: Rfc3339Timestamp,
-        ) -> Result<(), StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn purge_target(
-            &mut self,
-            _target_id: &TargetId,
-            _op_id: &OpId,
-            _actor: &ActorRef,
-        ) -> Result<PurgeOutcome, StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn add_edge(&mut self, _edge: &Edge) -> Result<(), StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn remove_edge(
-            &mut self,
-            _from: &RecordId,
-            _to: &RecordId,
-            _kind: EdgeKind,
-        ) -> Result<(), StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
-        }
-
-        fn append_consent_journal(
-            &mut self,
-            _entry: &ConsentJournalEntry,
-        ) -> Result<ConsentJournalRowId, StoreError> {
-            Err(StoreError::Invariant("stub: not implemented"))
         }
     }
 

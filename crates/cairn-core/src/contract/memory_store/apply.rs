@@ -7,7 +7,10 @@
 //! `with_apply_tx`.
 //!
 //! The sealing supertrait prevents third-party implementations of the write
-//! traits outside this crate.
+//! traits outside this crate. Adapter crates implement the seal via
+//! `impl cairn_core::contract::memory_store::apply::private::Sealed for
+//! MyStore {}` — the `private` module name plus `#[doc(hidden)]` make
+//! third-party impls explicitly transgressive rather than accidental.
 
 pub use crate::wal::ApplyToken;
 
@@ -20,25 +23,29 @@ use crate::domain::{actor_ref::ActorRef, record::MemoryRecord, timestamp::Rfc333
 
 /// Sealing module — prevents third-party `MemoryStoreApply` /
 /// `MemoryStoreApplyTx` impls from outside `cairn-core`.
-mod sealed_impl {
+///
+/// Adapter crates may implement `private::Sealed` to opt in; the
+/// `#[doc(hidden)]` and `private` name signal that doing so without
+/// `cairn-core`'s knowledge is explicitly transgressive.
+#[doc(hidden)]
+pub mod private {
     /// Seal supertrait. Implement this for a type to mark it as an
     /// approved implementor of the apply traits.
     pub trait Sealed {}
 }
 
-/// Re-export so adapter crates can implement the seal on their own types.
-pub use sealed_impl::Sealed;
-
 /// Apply entrypoint trait. Sealed — only `cairn-core`-blessed types can
 /// implement it.
+///
+/// To implement this trait on an adapter type, also implement
+/// `cairn_core::contract::memory_store::apply::private::Sealed` for it.
 ///
 /// `with_apply_tx` is `async` so adapters can dispatch the synchronous
 /// closure to `tokio::task::spawn_blocking` and await the join handle.
 /// The closure itself is synchronous to match `rusqlite::Transaction`'s
 /// thread-affinity requirement.
-#[allow(clippy::module_name_repetitions)]
 #[async_trait::async_trait]
-pub trait MemoryStoreApply: sealed_impl::Sealed + Send + Sync {
+pub trait MemoryStoreApply: private::Sealed + Send + Sync {
     /// Run a synchronous closure inside one database transaction.
     ///
     /// - **Commit** on `Ok(t)`.
@@ -57,8 +64,10 @@ pub trait MemoryStoreApply: sealed_impl::Sealed + Send + Sync {
 ///
 /// Implementations run on a blocking thread (e.g. `spawn_blocking`) while
 /// holding a live database transaction handle. All methods are synchronous.
-#[allow(clippy::module_name_repetitions)]
-pub trait MemoryStoreApplyTx: sealed_impl::Sealed + Send {
+///
+/// To implement this trait on an adapter type, also implement
+/// `cairn_core::contract::memory_store::apply::private::Sealed` for it.
+pub trait MemoryStoreApplyTx: private::Sealed + Send {
     /// Stage a new version of a record with `active = 0`.
     ///
     /// The caller computes `version = max(existing) + 1`. The deterministic

@@ -34,11 +34,19 @@ impl Rfc3339Timestamp {
         Ok(Self(raw))
     }
 
-    /// Current wall-clock time as a validated RFC3339 timestamp (`Z` suffix).
+    /// Returns the current UTC time as an `Rfc3339Timestamp`.
     ///
     /// Uses [`std::time::SystemTime`] — no external date/time crate required.
     /// Falls back to `1970-01-01T00:00:00Z` if the system clock returns a
     /// duration before the Unix epoch (impossible on supported platforms).
+    ///
+    /// **Note on `cairn-core` purity:** this method reads the system wall
+    /// clock via `std::time::SystemTime::now()`, which makes callers
+    /// non-deterministic. The brief mandates "no I/O" in `cairn-core` (§3),
+    /// and this is the one principled exception until a `Clock` trait is
+    /// threaded through. Tests that depend on timestamp values should
+    /// construct fixed `Rfc3339Timestamp::parse(...)` values rather than
+    /// calling `now()`. See follow-up issue (TODO: link once filed).
     #[must_use]
     pub fn now() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,9 +62,12 @@ impl Rfc3339Timestamp {
         // Days since epoch (1970-01-01)
         let days = secs / 86_400;
         let (year, month, day) = days_since_epoch_to_ymd(days);
-        Self(format!(
-            "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z"
-        ))
+        let s = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z");
+        debug_assert!(
+            Self::parse(&s).is_ok(),
+            "Rfc3339Timestamp::now() produced an invalid timestamp: {s}"
+        );
+        Self(s)
     }
 
     /// Underlying RFC3339 string.
@@ -84,6 +95,12 @@ impl<'de> Deserialize<'de> for Rfc3339Timestamp {
 
 /// Convert days since the Unix epoch (1970-01-01) into a `(year, month, day)`
 /// tuple using the proleptic Gregorian calendar.
+///
+/// TODO(I3): all values use `u64` throughout but the intermediate `mp`/`doy`
+/// variables are logically bounded to small ranges where `u8`/`u32` would be
+/// more self-documenting and prevent accidental wrap-around. Revisit when a
+/// real datetime parser (`jiff`, `time`, or `chrono`) is wired in at the
+/// store boundary and this hand-rolled arithmetic can be retired.
 fn days_since_epoch_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm from https://howardhinnant.github.io/date_algorithms.html
     // "civil_from_days", adjusted for u64 epoch offset.
@@ -319,5 +336,15 @@ mod tests {
     fn rejects_leap_second_60() {
         let err = Rfc3339Timestamp::parse("2026-04-22T14:02:60Z").unwrap_err();
         assert!(matches!(err, DomainError::InvalidTimestamp { .. }));
+    }
+
+    #[test]
+    fn now_round_trips() {
+        let now = Rfc3339Timestamp::now();
+        assert!(
+            Rfc3339Timestamp::parse(now.as_str()).is_ok(),
+            "now() output must satisfy parse(): {}",
+            now.as_str()
+        );
     }
 }
