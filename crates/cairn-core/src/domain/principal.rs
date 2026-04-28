@@ -44,10 +44,13 @@ impl Principal {
 
     /// Privileged system principal. Bypasses rebac scope filtering.
     ///
-    /// Used by the WAL executor and tests. **Never minted by user-facing
-    /// code paths.**
+    /// Construction requires an [`ApplyToken`](crate::wal::ApplyToken),
+    /// which only `cairn_core::wal` can mint (and `test_apply_token`
+    /// behind `cfg(test)`/`feature = "test-util"`). User-facing code
+    /// paths cannot fabricate one, preventing in-process callers from
+    /// bypassing rebac.
     #[must_use]
-    pub fn system() -> Self {
+    pub fn system(_token: &crate::wal::ApplyToken) -> Self {
         Self {
             identity: None,
             is_system: true,
@@ -73,7 +76,7 @@ mod tests {
 
     #[test]
     fn system_is_privileged() {
-        let p = Principal::system();
+        let p = Principal::system(&crate::wal::test_apply_token());
         assert!(p.is_system());
         assert!(p.identity().is_none());
     }

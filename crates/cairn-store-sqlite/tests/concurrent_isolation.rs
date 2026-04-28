@@ -133,7 +133,7 @@ async fn reader_does_not_see_uncommitted_staged_row() {
 
         // This call will block on `blocking_lock()` inside `spawn_blocking`
         // until the writer releases the guard (after COMMIT).
-        let principal = Principal::system();
+        let principal = Principal::system(&test_apply_token());
         store_r
             .list(&ListQuery::new(principal))
             .await

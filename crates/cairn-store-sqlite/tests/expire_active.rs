@@ -86,7 +86,7 @@ async fn get_returns_none_after_past_expiry() {
         .expect("stage+activate");
 
     // Confirm it's visible before expiry.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     assert!(
         store
             .get(&principal, &target)

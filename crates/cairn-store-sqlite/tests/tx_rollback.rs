@@ -102,7 +102,7 @@ async fn err_in_closure_rolls_back_record_and_consent_journal_atomically() {
     assert!(matches!(result, Err(StoreError::Invariant(_))));
 
     // No record visible.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let list = store
         .list(&ListQuery::new(principal.clone()))
         .await
@@ -160,7 +160,7 @@ async fn connection_survives_err_rollback() {
         .await
         .expect("post-rollback tx must succeed");
 
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let got = store
         .get(&principal, &target)
         .await

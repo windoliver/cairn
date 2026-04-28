@@ -109,7 +109,7 @@ async fn ok_commits_record_and_all_consent_entries() {
         .expect("commit-both tx must succeed");
 
     // Record is visible.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let got = store
         .get(&principal, &target)
         .await

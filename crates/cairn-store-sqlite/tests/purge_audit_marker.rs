@@ -197,7 +197,7 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
     assert_eq!(purge_count, 1, "exactly one purge audit marker must exist");
 
     // version_history(system) must return one Purge entry.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let history = store
         .version_history(&principal, &target)
         .await

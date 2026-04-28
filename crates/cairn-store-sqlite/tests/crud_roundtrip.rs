@@ -26,7 +26,7 @@ use tempfile::tempdir;
 /// Build a minimal valid `MemoryRecord` for testing.
 ///
 /// - `id` = "01HQZX9F5N0000000000000000" (ULID)
-/// - `visibility = Public` so `Principal::system()` always sees it without
+/// - `visibility = Public` so `Principal::system(&test_apply_token())` always sees it without
 ///   extra rebac setup.
 fn make_record(body: &str) -> MemoryRecord {
     let user_id = Identity::parse("usr:tafeng").expect("valid");
@@ -88,7 +88,7 @@ async fn stage_activate_get_roundtrip() {
         .expect("apply_tx");
 
     // Read back via system principal (bypasses rebac).
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let got = store
         .get(&principal, &target)
         .await
@@ -121,7 +121,7 @@ async fn get_missing_target_returns_none() {
     let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
         .await
         .expect("open");
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let target = TargetId::new("does-not-exist");
     let result = store.get(&principal, &target).await.expect("no error");
     assert!(result.is_none(), "missing target_id must return None");
@@ -196,7 +196,7 @@ async fn multi_version_cow_same_target() {
         .expect("stage v1");
 
     // Read back v1.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let got_v1 = store
         .get(&principal, &target)
         .await

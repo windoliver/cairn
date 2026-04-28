@@ -137,7 +137,7 @@ async fn downgrade_activation_returns_activation_raced() {
     );
 
     // v3 must still be the active version after the conflict.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let active = store
         .get(&principal, &target)
         .await

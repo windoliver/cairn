@@ -81,8 +81,9 @@ pub trait MemoryStore: Send + Sync {
     ///
     /// Returns all `Version` entries the principal can read (ascending by
     /// `version`), then any `Purge` markers from `record_purges` (ascending
-    /// by `purged_at`). The WAL executor passes a `Principal::system()`
-    /// that bypasses scope filtering.
+    /// by `purged_at`). The WAL executor passes a system principal
+    /// (constructed via [`Principal::system`](crate::domain::principal::Principal::system)
+    /// with an `ApplyToken`) that bypasses scope filtering.
     async fn version_history(
         &self,
         principal: &crate::domain::principal::Principal,

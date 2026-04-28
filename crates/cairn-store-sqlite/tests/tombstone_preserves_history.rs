@@ -122,7 +122,7 @@ async fn tombstone_appends_to_both_versions_without_rewriting_update() {
         .expect("tombstone");
 
     // get must return None for a tombstoned target.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let got = store
         .get(&principal, &target)
         .await
@@ -240,7 +240,7 @@ async fn tombstone_is_idempotent() {
         .await
         .expect("second tombstone (idempotent)");
 
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     assert!(
         store.get(&principal, &target).await.expect("get").is_none(),
         "get after double-tombstone must still return None"

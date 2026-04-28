@@ -109,7 +109,7 @@ proptest! {
                 .await
                 .expect("stage+activate");
 
-            let principal = Principal::system();
+            let principal = Principal::system(&test_apply_token());
             let got = store
                 .get(&principal, &target)
                 .await

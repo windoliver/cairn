@@ -4,8 +4,9 @@
 //! Per-row rebac filtering at the store layer (brief lines 2557/3287/4136).
 //!
 //! - `private` records are visible only to their owner.
-//! - `team` / `public` records are visible to any identified principal.
-//! - `Principal::system()` bypasses all checks.
+//! - `team` / `org` collapse to owner-match until membership context
+//!   lands; `public` is visible to any identified principal.
+//! - `Principal::system(&test_apply_token())` bypasses all checks.
 //! - `ListResult::hidden` reports the count of rows the rebac filter
 //!   dropped.
 
@@ -103,8 +104,8 @@ async fn list_drops_private_rows_owned_by_other_principals_and_reports_hidden() 
             &target_team,
             "01HQZX9F5N0000000000000092",
             "usr:carol",
-            MemoryVisibility::Team,
-            "carol's team body",
+            MemoryVisibility::Public,
+            "carol's public body",
         ),
     ] {
         let rec = make_record(ulid, body, owner, vis);
@@ -119,13 +120,13 @@ async fn list_drops_private_rows_owned_by_other_principals_and_reports_hidden() 
             .expect("stage+activate");
     }
 
-    // Alice sees: own private + team. Bob's private is hidden.
+    // Alice sees: own private + carol's public. Bob's private is hidden.
     let alice = principal_for("usr:alice");
     let alice_list = store
         .list(&ListQuery::new(alice.clone()))
         .await
         .expect("alice list");
-    assert_eq!(alice_list.rows.len(), 2, "alice sees own private + team");
+    assert_eq!(alice_list.rows.len(), 2, "alice sees own private + public");
     assert_eq!(alice_list.hidden, 1, "bob's private is hidden");
 
     // Alice cannot get bob's record by target id.
@@ -139,7 +140,7 @@ async fn list_drops_private_rows_owned_by_other_principals_and_reports_hidden() 
     );
 
     // System sees all three.
-    let system = Principal::system();
+    let system = Principal::system(&test_apply_token());
     let sys_list = store.list(&ListQuery::new(system)).await.expect("sys list");
     assert_eq!(sys_list.rows.len(), 3);
     assert_eq!(sys_list.hidden, 0);

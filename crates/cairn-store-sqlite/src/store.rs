@@ -100,7 +100,9 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 sql.push_str(" AND tombstoned = 0");
             }
             if !q.include_expired {
-                sql.push_str(" AND (expired_at IS NULL OR unixepoch(expired_at) > unixepoch('now'))");
+                sql.push_str(
+                    " AND (expired_at IS NULL OR unixepoch(expired_at) > unixepoch('now'))",
+                );
             }
             // Always restrict to active versions for normal reads.
             sql.push_str(" AND active = 1");
@@ -113,10 +115,10 @@ impl MemoryStore for crate::SqliteMemoryStore {
             }
 
             sql.push_str(" ORDER BY target_id, version");
-            if let Some(limit) = q.max_results {
-                use std::fmt::Write as _;
-                let _: Result<(), _> = write!(sql, " LIMIT {limit}");
-            }
+            // `max_results` documents a *visible*-row cap, so it must be
+            // enforced after rebac filtering. Pushing LIMIT into SQL
+            // would let hidden rows displace readable ones from the
+            // result page.
 
             let mut stmt = conn.prepare(&sql).map_err(store_err)?;
 
@@ -158,6 +160,14 @@ impl MemoryStore for crate::SqliteMemoryStore {
             for (scope_json, taxonomy_json, record_json_opt) in rows_iter {
                 if !principal_can_read(&q.principal, &scope_json, &taxonomy_json) {
                     hidden += 1;
+                    continue;
+                }
+                // Cap visible-row count, but keep iterating so the
+                // `hidden` count remains accurate over the full
+                // candidate set.
+                if let Some(limit) = q.max_results
+                    && out.len() >= limit
+                {
                     continue;
                 }
                 let json = record_json_opt.ok_or(StoreError::Invariant(

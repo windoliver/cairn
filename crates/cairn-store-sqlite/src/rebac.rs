@@ -19,7 +19,10 @@ use serde_json::Value;
 /// - `"session"` visibility  → owner match (collapses to `private`
 ///   semantics until `Principal` carries a session id; granting access
 ///   by row-tag alone would leak across users).
-/// - `"team"`, `"org"`, `"public"` → any identified principal may read.
+/// - `"team"`, `"org"` → owner match (fail closed until `Principal`
+///   carries verifiable membership context — granting access by row
+///   tag alone would expose data across tenants).
+/// - `"public"` → any identified principal may read (public-by-design).
 /// - Unknown / missing visibility → deny (fail closed).
 #[must_use]
 pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json: &str) -> bool {
@@ -65,7 +68,13 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
             let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
             id_str == scope_user || id_str == scope_agent
         }
-        "team" | "org" | "public" => true,
+        "team" | "org" => {
+            // Until `Principal` carries membership context, treat as owner-match.
+            let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
+            let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
+            id_str == scope_user || id_str == scope_agent
+        }
+        "public" => true,
         _ => false,
     }
 }
@@ -81,8 +90,24 @@ mod tests {
 
     #[test]
     fn system_bypasses_all() {
-        let p = Principal::system();
+        let p = Principal::system(&cairn_core::wal::test_apply_token());
         assert!(principal_can_read(&p, "{}", r#"{"visibility":"private"}"#));
+    }
+
+    #[test]
+    fn team_non_owner_denied() {
+        let p = principal_for("usr:bob");
+        let scope = r#"{"user":"usr:alice"}"#;
+        let tax = r#"{"visibility":"team"}"#;
+        assert!(!principal_can_read(&p, scope, tax));
+    }
+
+    #[test]
+    fn team_owner_match() {
+        let p = principal_for("usr:alice");
+        let scope = r#"{"user":"usr:alice"}"#;
+        let tax = r#"{"visibility":"team"}"#;
+        assert!(principal_can_read(&p, scope, tax));
     }
 
     #[test]

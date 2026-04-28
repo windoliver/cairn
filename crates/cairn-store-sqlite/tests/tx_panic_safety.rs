@@ -96,7 +96,7 @@ async fn panic_in_closure_rolls_back_and_connection_survives() {
     );
 
     // Partial write must NOT be visible.
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let list = store
         .list(&ListQuery::new(principal.clone()))
         .await

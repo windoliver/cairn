@@ -103,7 +103,7 @@ async fn version_history_returns_two_entries_after_two_activations() {
         .expect("stage+activate v2");
 
     // version_history (system principal sees all).
-    let principal = Principal::system();
+    let principal = Principal::system(&test_apply_token());
     let history = store
         .version_history(&principal, &target)
         .await
