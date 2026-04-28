@@ -527,7 +527,11 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+    use crate::contract::memory_store::{
+        CONTRACT_VERSION, HistoryEntry, ListQuery, ListResult, MemoryStore,
+        MemoryStoreCapabilities, StoreError, TargetId,
+    };
+    use crate::domain::{Principal, record::MemoryRecord};
 
     // -- PluginName tests -------------------------------------------------
 
@@ -593,6 +597,29 @@ mod tests {
         }
         fn supported_contract_versions(&self) -> VersionRange {
             self.range
+        }
+
+        async fn get(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+
+        async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
+            Ok(ListResult {
+                rows: vec![],
+                hidden: 0,
+            })
+        }
+
+        async fn version_history(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Vec<HistoryEntry>, StoreError> {
+            Ok(vec![])
         }
     }
 

@@ -9,13 +9,16 @@ use std::sync::Arc;
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
-use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{
+    HistoryEntry, ListQuery, ListResult, MemoryStore, MemoryStoreCapabilities, StoreError, TargetId,
+};
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
+use cairn_core::domain::{Principal, record::MemoryRecord};
 
 const STORE_MANIFEST: &str = r#"
 name = "stub-store"
@@ -58,6 +61,29 @@ impl MemoryStore for StubStore {
     }
     fn supported_contract_versions(&self) -> VersionRange {
         VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    async fn get(
+        &self,
+        _principal: &Principal,
+        _target_id: &TargetId,
+    ) -> Result<Option<MemoryRecord>, StoreError> {
+        Ok(None)
+    }
+
+    async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
+        Ok(ListResult {
+            rows: vec![],
+            hidden: 0,
+        })
+    }
+
+    async fn version_history(
+        &self,
+        _principal: &Principal,
+        _target_id: &TargetId,
+    ) -> Result<Vec<HistoryEntry>, StoreError> {
+        Ok(vec![])
     }
 }
 

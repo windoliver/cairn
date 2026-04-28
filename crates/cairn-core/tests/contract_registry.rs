@@ -3,9 +3,13 @@
 
 use std::sync::Arc;
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{
+    CONTRACT_VERSION, HistoryEntry, ListQuery, ListResult, MemoryStore, MemoryStoreCapabilities,
+    StoreError, TargetId,
+};
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::{Principal, record::MemoryRecord};
 use cairn_core::register_plugin;
 
 mod compatible_plugin {
@@ -30,6 +34,29 @@ mod compatible_plugin {
         }
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn get(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+
+        async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
+            Ok(ListResult {
+                rows: vec![],
+                hidden: 0,
+            })
+        }
+
+        async fn version_history(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Vec<HistoryEntry>, StoreError> {
+            Ok(vec![])
         }
     }
 
@@ -62,6 +89,29 @@ mod future_plugin {
                 ContractVersion::new(9, 9, 0),
                 ContractVersion::new(10, 0, 0),
             )
+        }
+
+        async fn get(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+
+        async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
+            Ok(ListResult {
+                rows: vec![],
+                hidden: 0,
+            })
+        }
+
+        async fn version_history(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Vec<HistoryEntry>, StoreError> {
+            Ok(vec![])
         }
     }
 
@@ -145,6 +195,29 @@ patch = 0
         }
         fn supported_contract_versions(&self) -> VersionRange {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn get(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+
+        async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
+            Ok(ListResult {
+                rows: vec![],
+                hidden: 0,
+            })
+        }
+
+        async fn version_history(
+            &self,
+            _principal: &Principal,
+            _target_id: &TargetId,
+        ) -> Result<Vec<HistoryEntry>, StoreError> {
+            Ok(vec![])
         }
     }
 

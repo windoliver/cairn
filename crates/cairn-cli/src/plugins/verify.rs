@@ -308,6 +308,41 @@ mod tests {
             fn supported_contract_versions(&self) -> VersionRange {
                 VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
             }
+
+            async fn get(
+                &self,
+                _principal: &cairn_core::domain::Principal,
+                _target_id: &cairn_core::contract::memory_store::TargetId,
+            ) -> Result<
+                Option<cairn_core::domain::record::MemoryRecord>,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(None)
+            }
+
+            async fn list(
+                &self,
+                _query: &cairn_core::contract::memory_store::ListQuery,
+            ) -> Result<
+                cairn_core::contract::memory_store::ListResult,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(cairn_core::contract::memory_store::ListResult {
+                    rows: vec![],
+                    hidden: 0,
+                })
+            }
+
+            async fn version_history(
+                &self,
+                _principal: &cairn_core::domain::Principal,
+                _target_id: &cairn_core::contract::memory_store::TargetId,
+            ) -> Result<
+                Vec<cairn_core::contract::memory_store::HistoryEntry>,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(vec![])
+            }
         }
 
         let mut reg = PluginRegistry::new();
@@ -356,6 +391,41 @@ mod tests {
             }
             fn supported_contract_versions(&self) -> VersionRange {
                 VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            }
+
+            async fn get(
+                &self,
+                _principal: &cairn_core::domain::Principal,
+                _target_id: &cairn_core::contract::memory_store::TargetId,
+            ) -> Result<
+                Option<cairn_core::domain::record::MemoryRecord>,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(None)
+            }
+
+            async fn list(
+                &self,
+                _query: &cairn_core::contract::memory_store::ListQuery,
+            ) -> Result<
+                cairn_core::contract::memory_store::ListResult,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(cairn_core::contract::memory_store::ListResult {
+                    rows: vec![],
+                    hidden: 0,
+                })
+            }
+
+            async fn version_history(
+                &self,
+                _principal: &cairn_core::domain::Principal,
+                _target_id: &cairn_core::contract::memory_store::TargetId,
+            ) -> Result<
+                Vec<cairn_core::contract::memory_store::HistoryEntry>,
+                cairn_core::contract::memory_store::StoreError,
+            > {
+                Ok(vec![])
             }
         }
 

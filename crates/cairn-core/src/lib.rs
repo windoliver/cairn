@@ -13,3 +13,4 @@ pub mod contract;
 pub mod domain;
 pub mod generated;
 pub mod verifier;
+pub mod wal;
