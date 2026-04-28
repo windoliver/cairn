@@ -163,6 +163,106 @@ pub fn aggregate_folders(
     states
 }
 
+use crate::domain::projection::ProjectedFile;
+
+/// Project a [`FolderState`] to a `_index.md` file. Caller is responsible
+/// for ensuring deterministic sort order on `state.records`,
+/// `state.subfolders`, and `state.backlinks`.
+#[must_use]
+pub fn project_index(state: &FolderState) -> ProjectedFile {
+    use std::fmt::Write as _;
+
+    let folder_str = state.path.to_string_lossy();
+    let updated_at = state
+        .records
+        .iter()
+        .map(|r| r.record.updated_at.as_str())
+        .chain(
+            state
+                .subfolders
+                .iter()
+                .filter_map(|s| s.last_updated.as_ref().map(Rfc3339Timestamp::as_str)),
+        )
+        .max()
+        .unwrap_or("1970-01-01T00:00:00Z")
+        .to_owned();
+
+    let mut frontmatter = String::new();
+    frontmatter.push_str("---\n");
+    // Writing to a String is infallible; discard the Ok(()) result.
+    let _ = writeln!(frontmatter, "folder: {folder_str}");
+    frontmatter.push_str("kind: folder_index\n");
+    let _ = writeln!(frontmatter, "updated_at: {updated_at}");
+    let _ = writeln!(frontmatter, "record_count: {}", state.records.len());
+    let _ = writeln!(frontmatter, "subfolder_count: {}", state.subfolders.len());
+    if let Some(purpose) = &state.effective_policy.purpose {
+        // Quote with serde_yaml to avoid breaking on `:` / leading whitespace.
+        let yaml_val = serde_yaml::Value::String(purpose.clone());
+        let s = serde_yaml::to_string(&yaml_val)
+            .ok()
+            .and_then(|s| s.strip_prefix("---\n").map(str::to_owned).or(Some(s)))
+            .unwrap_or_else(|| purpose.clone());
+        let s = s.trim_end_matches('\n');
+        let _ = writeln!(frontmatter, "purpose: {s}");
+    }
+    frontmatter.push_str("---\n\n");
+
+    let mut body = String::new();
+    let _ = writeln!(body, "# {folder_str}");
+
+    if !state.records.is_empty() {
+        let _ = write!(body, "\n## Records ({})\n", state.records.len());
+        for s in &state.records {
+            // path = folder / "<kind>_<id>.md" — same as MarkdownProjector.
+            let leaf = format!(
+                "{}_{}.md",
+                s.record.kind.as_str(),
+                s.record.id.as_str(),
+            );
+            let _ = writeln!(
+                body,
+                "- [{leaf}]({leaf}) — {kind} · updated {upd}",
+                kind = s.record.kind.as_str(),
+                upd = s.record.updated_at.as_str(),
+            );
+        }
+    }
+
+    if !state.subfolders.is_empty() {
+        let _ = write!(body, "\n## Subfolders ({})\n", state.subfolders.len());
+        for sf in &state.subfolders {
+            let upd = sf
+                .last_updated
+                .as_ref()
+                .map(|t| format!(" · last updated {}", t.as_str()))
+                .unwrap_or_default();
+            let _ = writeln!(
+                body,
+                "- [{name}/]({name}/) — {n} records{upd}",
+                name = sf.name,
+                n = sf.record_count,
+            );
+        }
+    }
+
+    if !state.backlinks.is_empty() {
+        let _ = write!(
+            body,
+            "\n## Backlinks into this folder ({})\n",
+            state.backlinks.len(),
+        );
+        for bl in &state.backlinks {
+            let p = bl.source_path.to_string_lossy();
+            let _ = writeln!(body, "- [{p}]({p})");
+        }
+    }
+
+    ProjectedFile {
+        path: state.path.join("_index.md"),
+        content: format!("{frontmatter}{body}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +358,95 @@ mod tests {
             .find(|s| s.path == Path::new("raw"))
             .expect("raw state");
         assert_eq!(raw.backlinks.len(), 1);
+    }
+
+    use crate::domain::projection::ProjectedFile;
+
+    #[test]
+    fn project_emits_required_frontmatter_fields() {
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf: ProjectedFile = project_index(&state);
+        assert_eq!(pf.path, PathBuf::from("raw/_index.md"));
+        assert!(pf.content.contains("folder: raw"));
+        assert!(pf.content.contains("kind: folder_index"));
+        assert!(pf.content.contains("record_count: 0"));
+        assert!(pf.content.contains("subfolder_count: 0"));
+    }
+
+    #[test]
+    fn project_omits_purpose_when_unset() {
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(!pf.content.contains("purpose:"));
+    }
+
+    #[test]
+    fn project_includes_purpose_when_set() {
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy {
+                purpose: Some("things".into()),
+                ..EffectivePolicy::default()
+            },
+        };
+        let pf = project_index(&state);
+        assert!(pf.content.contains("purpose: things"));
+    }
+
+    #[test]
+    fn project_is_deterministic() {
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: vec![
+                SubfolderEntry {
+                    name: "b".into(),
+                    record_count: 1,
+                    last_updated: None,
+                },
+                SubfolderEntry {
+                    name: "a".into(),
+                    record_count: 1,
+                    last_updated: None,
+                },
+            ],
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy::default(),
+        };
+        let mut state = state;
+        state.subfolders.sort_by(|a, b| a.name.cmp(&b.name));
+        let a = project_index(&state);
+        let b = project_index(&state);
+        assert_eq!(a.content, b.content);
+    }
+
+    #[test]
+    fn project_omits_empty_sections() {
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(!pf.content.contains("## Records"));
+        assert!(!pf.content.contains("## Subfolders"));
+        assert!(!pf.content.contains("## Backlinks"));
     }
 }
