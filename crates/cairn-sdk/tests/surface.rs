@@ -153,6 +153,63 @@ fn ingest_valid_args_returns_internal_stub() {
 }
 
 #[test]
+fn ingest_rejects_schema_minlength_violations() {
+    // The IDL `validate()` only enforces the body/file/url XOR, but the
+    // schema additionally requires non-empty body, file, url, kind,
+    // session_id, and tags[*]. Direct Rust construction must hit the same
+    // floor.
+    let bases = || IngestArgs {
+        body: Some("note".to_owned()),
+        file: None,
+        frontmatter: None,
+        kind: "note".to_owned(),
+        session_id: None,
+        tags: None,
+        url: None,
+    };
+    let cases: [(&str, IngestArgs); 7] = [
+        ("body", IngestArgs { body: Some(String::new()), ..bases() }),
+        ("file", IngestArgs { body: None, file: Some(String::new()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some(String::new()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some("not-a-uri".to_owned()), ..bases() }),
+        ("kind", IngestArgs { kind: String::new(), ..bases() }),
+        ("session_id", IngestArgs { session_id: Some(String::new()), ..bases() }),
+        ("tags", IngestArgs { tags: Some(vec![String::new()]), ..bases() }),
+    ];
+    for (needle, args) in cases {
+        match sdk().ingest(&args).expect_err("must reject") {
+            SdkError::InvalidArgs { reason } => {
+                assert!(reason.contains(needle), "reason {reason:?} missing {needle:?}");
+            }
+            other => panic!("expected InvalidArgs for {needle}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn ingest_accepts_well_formed_uri_schemes() {
+    // Sanity-check that the URI floor admits real schemes — `http`, `https`,
+    // `file`, `cairn+vault` — so we don't accidentally regress to body-only.
+    for url in [
+        "http://example.com/x",
+        "https://example.com/x",
+        "file:/tmp/x",
+        "cairn+vault://memo",
+    ] {
+        let args = IngestArgs {
+            body: None,
+            file: None,
+            frontmatter: None,
+            kind: "note".to_owned(),
+            session_id: None,
+            tags: None,
+            url: Some(url.to_owned()),
+        };
+        assert_unimplemented("ingest", sdk().ingest(&args));
+    }
+}
+
+#[test]
 fn search_rejects_empty_query_with_invalid_args() {
     // Wire format requires non-empty query; SDK must surface it as
     // InvalidArgs instead of capability-checking an unvalidated request.

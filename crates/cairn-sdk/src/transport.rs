@@ -344,9 +344,62 @@ fn validate_scope_filter(
     Ok(())
 }
 
-/// `IngestArgs` has an explicit IDL `validate()` for its exactly-one-of group.
+/// Mirrors the full `ingest` JSON Schema: the IDL `validate()` covers the
+/// exactly-one-of XOR; the schema additionally pins `minLength: 1` on `body`,
+/// `file`, `url`, `kind`, `session_id`, and every `tags[*]`, and `format: uri`
+/// on `url`. The generated `TryFrom<RawIngestArgs>` only enforces the XOR,
+/// so direct Rust construction would otherwise sail past these constraints.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
-    args.validate().map_err(invalid)
+    args.validate().map_err(invalid)?;
+    if let Some(body) = &args.body
+        && body.is_empty()
+    {
+        return Err(invalid("body: must not be empty"));
+    }
+    if let Some(file) = &args.file
+        && file.is_empty()
+    {
+        return Err(invalid("file: must not be empty"));
+    }
+    if let Some(url) = &args.url {
+        if url.is_empty() {
+            return Err(invalid("url: must not be empty"));
+        }
+        // Schema declares `format: uri` (RFC 3986). Full RFC parsing lives in
+        // the verb handler; the SDK enforces the cheap structural floor —
+        // a non-empty scheme followed by `:` — to reject obviously malformed
+        // inputs at the boundary without pulling a URL crate into core.
+        match url.find(':') {
+            Some(0) | None => return Err(invalid("url: must be a valid URI")),
+            Some(i) => {
+                let scheme = &url[..i];
+                let mut chars = scheme.chars();
+                let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+                let rest_ok = chars.all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
+                });
+                if !(first_ok && rest_ok) {
+                    return Err(invalid("url: must be a valid URI"));
+                }
+            }
+        }
+    }
+    if args.kind.is_empty() {
+        return Err(invalid("kind: must not be empty"));
+    }
+    if let Some(sid) = &args.session_id
+        && sid.is_empty()
+    {
+        return Err(invalid("session_id: must not be empty"));
+    }
+    if let Some(tags) = &args.tags {
+        for tag in tags {
+            if tag.is_empty() {
+                return Err(invalid("tags[*]: must not be empty"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Mirrors the wire constraints from `SearchArgs`'s generated
