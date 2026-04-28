@@ -52,6 +52,15 @@ pub const MIN_TAIL_LINES: usize = 2;
 /// non-lossy path. Tracked for streaming refactor in #221-followup.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Hard ceiling on raw line cardinality before squash routes to the
+/// oversize bypass. Stage 3 collects lines into a `Vec<String>`, so a
+/// payload that fits under [`MAX_INPUT_BYTES`] but is overwhelmingly
+/// `\n` (e.g., 60 MiB of bare newlines → ~60M empty `String`s) can
+/// still exhaust memory before stage 6 enforces the byte budget. Cap
+/// at 1M newlines; above that, the bypass path's byte-slice strategy
+/// avoids the per-line `String` allocations entirely.
+pub const MAX_INPUT_LINES: usize = 1_000_000;
+
 // Compile-time invariant: MIN_MAX_BYTES must hold the tail-locked pair
 // + skip-marker + layout newlines.
 const _: () = assert!(MIN_MAX_BYTES >= 2 * MIN_MAX_LINE_BYTES + MARKER_MAX_LEN + LAYOUT_OVERHEAD);
@@ -558,13 +567,11 @@ mod wrapper_tests {
         assert!(out.compacted_byte_len <= cfg.max_bytes());
     }
 
-    /// Round-5 (new loop) regression: oversized newline-free payloads
-    /// (minified JSON, base64) must NOT collapse the tail to empty.
-    /// Preserve a bounded suffix with an explicit degraded-tail marker
-    /// so consumers know the suffix may not start on a line boundary.
+    /// Round-6 (new loop) regression: oversized newline-free payloads
+    /// must emit ONLY the degraded marker — never a suffix that may
+    /// carry residual mid-sequence control bytes (URLs, titles).
     #[test]
-    fn oversize_bypass_newline_free_payload_preserves_suffix() {
-        // 100 KB of newline-free payload ending in a recognizable tag.
+    fn oversize_bypass_newline_free_payload_drops_suffix() {
         let mut raw: Vec<u8> = Vec::new();
         raw.extend(std::iter::repeat_n(b'B', 100_000));
         raw.extend_from_slice(b"END-OF-STREAM-TAG");
@@ -574,16 +581,43 @@ mod wrapper_tests {
         let stats = SquashStats::default();
         let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Suffix is NOT preserved — would risk leaking mid-sequence bytes.
         assert!(
-            body.contains("END-OF-STREAM-TAG"),
-            "suffix preserved: ...{}",
-            &body[body.len().saturating_sub(200)..]
+            !body.contains("END-OF-STREAM-TAG"),
+            "suffix must be dropped: {body:?}"
         );
         assert!(
-            body.contains("tail mid-line"),
+            body.contains("tail dropped"),
             "degraded marker present: {body:?}"
         );
         assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    /// Round-6 (new loop) regression: a payload under `MAX_INPUT_BYTES`
+    /// but with > `MAX_INPUT_LINES` newlines must route to the bypass
+    /// path so stage 3 does not allocate millions of empty `String`s.
+    #[test]
+    #[ignore = "allocates ~1M+1 newlines; run with --ignored"]
+    fn line_dense_payload_routes_to_bypass() {
+        let n = MAX_INPUT_LINES + 1;
+        let mut raw: Vec<u8> = Vec::with_capacity(n + 32);
+        raw.extend(std::iter::repeat_n(b'\n', n));
+        raw.extend_from_slice(b"FINAL\n");
+        let evt = terminal_event(&raw);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("under byte ceiling");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(out.stats.truncated, "must take bypass path");
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("oversize bypass"),
+            "bypass marker present: {body:?}"
+        );
     }
 
     /// Round-3 (new loop) regression: the oversize bypass must run
@@ -791,6 +825,22 @@ use std::borrow::Cow;
 /// U+FFFD; valid input passes through borrowed.
 fn stage1_lossy_utf8(raw: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(raw)
+}
+
+/// Count `\n` bytes; short-circuits as soon as the count exceeds the
+/// `MAX_INPUT_LINES` ceiling so pathological inputs are not fully
+/// scanned before triggering the bypass.
+fn bytecount_newlines(raw: &[u8]) -> usize {
+    let mut count = 0usize;
+    for &b in raw {
+        if b == b'\n' {
+            count += 1;
+            if count > MAX_INPUT_LINES {
+                return count;
+            }
+        }
+    }
+    count
 }
 
 /// Trim the *end* of `s` so its byte length is at most `budget`,
@@ -1752,7 +1802,11 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         };
     }
 
-    if raw_bytes.len() > MAX_INPUT_BYTES {
+    // Byte-count gate AND line-cardinality gate: either above its
+    // ceiling routes to the bypass path, which uses byte slicing and
+    // avoids the per-line `Vec<String>` allocations of the staged
+    // pipeline. Counting `\n` is O(N) but cheap relative to staging.
+    if raw_bytes.len() > MAX_INPUT_BYTES || bytecount_newlines(raw_bytes) > MAX_INPUT_LINES {
         return oversize_bypass(raw_bytes, raw_hash, raw_byte_len, cfg, stats);
     }
 
@@ -1892,29 +1946,16 @@ fn oversize_bypass(
     } else if !raw_bytes.is_empty() {
         // No `\n` exists in the entire retained window — the source
         // is one extremely long line (minified JSON, base64, etc.).
-        // Per Round-5 reviewer: preserve a bounded suffix rather than
-        // dropping the tail entirely. Emit a degraded marker followed
-        // by up to `max_line_bytes` bytes of suffix, sanitized. The
-        // suffix may still contain mid-sequence bytes if a CSI/OSC
-        // introducer fell outside the suffix window; the degraded
-        // marker explicitly flags the tail as mid-line so consumers
-        // do not assume line-boundary safety.
-        let degraded = b"[\xe2\x80\xa6tail mid-line: oversized single-line payload, suffix may contain residual control bytes\xe2\x80\xa6]";
+        // Any suffix we could emit may begin mid-CSI/OSC payload, and
+        // a backward-looking sanitizer cannot recover sequence state
+        // from outside the window. To prevent leaking residual
+        // control-plane bytes, emit only the degraded marker — no
+        // suffix bytes. The byte-bounded loss is signaled to
+        // consumers by the marker itself; the head + this marker
+        // together still indicate that an oversized single-line
+        // payload was bypassed.
+        let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
         compacted_bytes.extend_from_slice(degraded);
-        compacted_bytes.push(b'\n');
-        let line_cap = cfg.max_line_bytes();
-        let suffix_window = line_cap.min(raw_bytes.len());
-        let suffix_start = raw_bytes.len() - suffix_window;
-        let suffix_decoded = stage1_lossy_utf8(&raw_bytes[suffix_start..]);
-        let mut suf_stripped = false;
-        let suffix_sanitized = stage2_ansi_strip(&suffix_decoded, &mut suf_stripped);
-        stats.ansi_stripped |= suf_stripped;
-        // Recompute remaining budget after head/marker/degraded marker
-        // so total stays under max_body.
-        let used = compacted_bytes.len();
-        let remaining = max_body.saturating_sub(used);
-        let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_sanitized, remaining);
-        compacted_bytes.extend_from_slice(suffix.as_bytes());
     }
     assert!(
         compacted_bytes.len() <= max_body,
