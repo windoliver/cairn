@@ -255,12 +255,10 @@ impl<'a> UnstructuredTextBytes<'a> {
         event
             .validate()
             .map_err(UnstructuredBindError::EventValidationFailed)?;
-        if raw.len() > MAX_INPUT_BYTES {
-            return Err(UnstructuredBindError::PayloadTooLarge {
-                actual: raw.len(),
-                limit: MAX_INPUT_BYTES,
-            });
-        }
+        // NOTE: oversize payloads (> MAX_INPUT_BYTES) are NOT rejected
+        // here. `squash()` detects them and applies an in-band bypass
+        // that does head+tail byte slicing without per-stage clones, so
+        // the raw bytes are preserved (head + tail) rather than dropped.
         if !matches!(event.payload, CapturePayload::Terminal { .. }) {
             return Err(UnstructuredBindError::NotTerminalPayload);
         }
@@ -325,17 +323,6 @@ pub enum UnstructuredBindError {
     /// malformed events to avoid lossy compaction of unintended bytes.
     #[error("CaptureEvent failed envelope validation: {0}")]
     EventValidationFailed(#[source] crate::domain::error::DomainError),
-    /// The raw payload exceeds [`MAX_INPUT_BYTES`]. The current squash
-    /// pipeline materializes intermediate copies per stage, so a hard
-    /// cap at the gate prevents a runaway terminal capture from
-    /// exhausting host memory before compaction can finish.
-    #[error("payload exceeds MAX_INPUT_BYTES ({limit}): got {actual}")]
-    PayloadTooLarge {
-        /// Actual byte length of the supplied payload.
-        actual: usize,
-        /// The configured ceiling ([`MAX_INPUT_BYTES`]).
-        limit: usize,
-    },
 }
 
 #[cfg(test)]
@@ -521,29 +508,38 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
-    /// Round-8 regression: payloads above the gate ceiling are rejected
-    /// before any squash work runs, so a runaway terminal capture cannot
-    /// drive the per-stage cloning into OOM.
+    /// Round-1 (new loop) regression: oversize payloads are NOT rejected;
+    /// `squash()` falls back to a head+tail byte-slice bypass that
+    /// preserves both ends of the raw stream and emits a clear marker.
+    /// Heavy (64 MiB allocation) — gated behind `--ignored` so default
+    /// runs stay fast.
     #[test]
-    fn rejects_payload_over_max_input_bytes() {
-        // Build an event whose payload_hash matches `MAX_INPUT_BYTES + 1`
-        // bytes of zeros, then ensure the constructor rejects on size
-        // before computing the hash.
-        let oversized = vec![0u8; MAX_INPUT_BYTES + 1];
+    #[ignore = "allocates MAX_INPUT_BYTES + 1 bytes; run with --ignored"]
+    fn oversize_payload_bypass_preserves_head_and_tail() {
+        let mut oversized = vec![b'A'; MAX_INPUT_BYTES + 1];
+        // Distinct head and tail markers so we can confirm preservation.
+        oversized[..5].copy_from_slice(b"HEADX");
+        let n = oversized.len();
+        oversized[n - 5..].copy_from_slice(b"YTAIL");
         let evt = terminal_event(&oversized);
-        let err = UnstructuredTextBytes::try_from_terminal_event(
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
             &evt,
             &oversized,
             TerminalContext::InteractiveTty,
         )
-        .unwrap_err();
-        match err {
-            UnstructuredBindError::PayloadTooLarge { actual, limit } => {
-                assert_eq!(actual, MAX_INPUT_BYTES + 1);
-                assert_eq!(limit, MAX_INPUT_BYTES);
-            }
-            other => panic!("expected PayloadTooLarge, got: {other:?}"),
-        }
+        .expect("oversize is no longer rejected");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(out.stats.truncated);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(body.contains("HEADX"), "head preserved: {body:.200}");
+        assert!(
+            body.contains("YTAIL"),
+            "tail preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(body.contains("oversize bypass"), "marker present");
+        assert!(out.compacted_bytes.len() <= cfg.max_bytes() + LAYOUT_OVERHEAD);
     }
 
     /// Round-6 regression: malformed envelopes (e.g., `source_family` /
@@ -712,13 +708,17 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
                         }
                     }
                     // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (0x1B 0x5C)
+                    //
+                    // Scan ahead for a proper terminator without committing.
+                    // If found, consume the entire OSC. If not (degraded
+                    // capture truncated mid-escape), the OSC body may carry
+                    // hidden control-plane content (titles, OSC-8 hyperlink
+                    // URLs) that must not be promoted to extractable text.
+                    // Recovery boundary: drop everything up to and including
+                    // the next LF, so subsequent lines (e.g., the trailing
+                    // error/status line) survive while the OSC payload does
+                    // not contaminate `compacted_bytes`.
                     0x5D => {
-                        // Scan ahead for a terminator without committing to
-                        // consume. If the OSC is unterminated (e.g., capture
-                        // truncated mid-escape), preserve the trailing bytes
-                        // by dropping only the lone ESC and re-processing
-                        // `]` and remainder through the outer loop. This
-                        // guarantees no tail-data loss on degraded captures.
                         let mut j = i + 2;
                         let term = loop {
                             if j >= bytes.len() {
@@ -735,10 +735,18 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
                         if let Some(end) = term {
                             i = end;
                         } else {
-                            // Unterminated: drop only the ESC byte; the
-                            // outer loop will then process `]` (printable)
-                            // and the rest of the stream normally.
-                            i += 1;
+                            // Unterminated: drop the OSC introducer + body
+                            // up to the next LF (recovery boundary). If no
+                            // LF exists in the remainder, drop the whole
+                            // tail — the OSC body would otherwise leak
+                            // hidden bytes through extraction.
+                            let mut k = i + 2;
+                            while k < bytes.len() && bytes[k] != b'\n' {
+                                k += 1;
+                            }
+                            // Stop before the LF so it gets preserved by
+                            // the outer loop as a normal line separator.
+                            i = k;
                         }
                     }
                     // Lone ESC or unrecognised: drop ESC byte only
@@ -875,20 +883,49 @@ mod stage2_tests {
         assert!(stripped);
     }
 
-    /// Round-7 regression: a truncated/unterminated OSC must NOT consume
-    /// the rest of the capture. Truncated terminal captures are common
-    /// (timeouts, buffering); dropping to EOF would erase trailing
-    /// error lines and violate the last-line preservation goal.
+    /// Round-1 (new loop) regression: a truncated/unterminated OSC may
+    /// carry hidden control-plane content (terminal titles, OSC-8
+    /// hyperlink URLs) that must not be promoted to extractable text.
+    /// Recovery boundary: drop the OSC introducer and body up to the
+    /// next LF; the LF itself and subsequent lines survive so that
+    /// trailing error/status lines are not erased.
     #[test]
-    fn unterminated_osc_does_not_drop_trailing_bytes() {
-        // ESC ] starts an OSC but no BEL or ESC \ ever arrives.
-        // Expect: ESC stripped, `]0;title` and the trailing "FINAL\n"
-        // preserved as printable content (the lone introducer is dropped
-        // but the would-be OSC body and the rest of the stream survive).
-        let (out, stripped) = s2("\x1b]0;titleFINAL\n");
+    fn unterminated_osc_drops_body_up_to_next_newline() {
+        // OSC body on line 1 (no terminator), then a real line on line 2.
+        let (out, stripped) = s2("\x1b]0;titleHIDDEN\nFINAL\n");
         assert!(stripped);
+        // Hidden OSC body must NOT appear in compacted output.
+        assert!(!out.contains("HIDDEN"), "OSC body must be dropped: {out:?}");
+        assert!(!out.contains("title"), "OSC body must be dropped: {out:?}");
+        // Trailing lines after the recovery boundary survive.
         assert!(out.ends_with("FINAL\n"), "got: {out:?}");
-        assert!(out.contains(']'), "got: {out:?}");
+    }
+
+    /// Round-1 (new loop) regression: OSC-8 hyperlink truncation. The
+    /// URL payload between `ESC ]8;;` and the (missing) terminator must
+    /// not leak into compacted output as plain text.
+    #[test]
+    fn unterminated_osc8_hyperlink_url_not_leaked() {
+        // OSC-8 hyperlink with URL but no ST terminator before \n.
+        let (out, stripped) = s2("\x1b]8;;https://attacker.example/secret?token=abc\nVISIBLE\n");
+        assert!(stripped);
+        assert!(
+            !out.contains("attacker.example"),
+            "URL must be dropped: {out:?}"
+        );
+        assert!(!out.contains("token=abc"), "URL must be dropped: {out:?}");
+        assert!(out.ends_with("VISIBLE\n"), "got: {out:?}");
+    }
+
+    /// Round-1 (new loop) regression: truncated OSC with no LF in the
+    /// remainder drops to EOF (no recovery boundary). Trailing bytes
+    /// would otherwise be hidden control content.
+    #[test]
+    fn unterminated_osc_with_no_following_newline_drops_to_eof() {
+        let (out, stripped) = s2("prefix\n\x1b]0;dangling-title-no-newline");
+        assert!(stripped);
+        assert!(out.starts_with("prefix\n"), "got: {out:?}");
+        assert!(!out.contains("dangling"), "got: {out:?}");
     }
 }
 
@@ -1507,6 +1544,46 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
             raw_byte_len,
             compacted_hash,
             compacted_byte_len: 0,
+            stats,
+        };
+    }
+
+    // Oversize-bypass: when raw exceeds MAX_INPUT_BYTES the per-stage
+    // pipeline would clone several full copies before stage 6 enforces
+    // max_bytes, risking OOM on legitimate long-running build/test logs.
+    // Take a head + tail byte slice with a marker, decode lossily, and
+    // skip the staged pipeline entirely. Memory is bounded by max_bytes;
+    // raw bytes are preserved (head + tail) rather than rejected.
+    if raw_bytes.len() > MAX_INPUT_BYTES {
+        let max_body = cfg.max_bytes();
+        let marker = format!(
+            "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
+        );
+        let marker_bytes = marker.as_bytes();
+        let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
+        let half = budget / 2;
+        // Codepoint-safe: lossy_utf8 decodes byte slices and replaces
+        // invalid sequences with U+FFFD.
+        let head = stage1_lossy_utf8(&raw_bytes[..half.min(raw_bytes.len())]);
+        let tail_start = raw_bytes.len().saturating_sub(half);
+        let tail = stage1_lossy_utf8(&raw_bytes[tail_start..]);
+        let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
+        compacted_bytes.extend_from_slice(head.as_bytes());
+        compacted_bytes.push(b'\n');
+        compacted_bytes.extend_from_slice(marker_bytes);
+        compacted_bytes.push(b'\n');
+        compacted_bytes.extend_from_slice(tail.as_bytes());
+        debug_assert!(compacted_bytes.len() <= max_body + LAYOUT_OVERHEAD);
+        stats.truncated = true;
+        stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(compacted_bytes.len());
+        let compacted_hash = sha256_payload_hash(&compacted_bytes);
+        let compacted_byte_len = compacted_bytes.len();
+        return SquashOutput {
+            compacted_bytes,
+            raw_hash,
+            raw_byte_len,
+            compacted_hash,
+            compacted_byte_len,
             stats,
         };
     }
