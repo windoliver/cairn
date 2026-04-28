@@ -12,6 +12,29 @@ without I/O. The function is a pure pipeline stage in `cairn-core`. Storage
 of compacted bytes and audit metadata is a separate concern handled by the
 pipeline driver in a later issue.
 
+## What `compacted_bytes` is — and what it isn't
+
+`SquashOutput::compacted_bytes` is an **audit artifact**, not a
+render-ready string for human display. Specifically:
+
+- **Audit consumers** (Extract, byte-level diffing, replay-engine
+  golden-file fixtures, store-level dedup hash inputs) operate on
+  the byte stream directly and see all transformation markers
+  (`[×N]`, `[…N bytes truncated]`, `[…skipped K lines, X bytes…]`)
+  unconditionally.
+- **Human-facing renderers** (any tooling that prints
+  `compacted_bytes` verbatim to a TTY or terminal-honoring viewer)
+  MUST escape or neutralize bare `\r` bytes before rendering, since
+  a CR-bearing line in a terminal can visually shadow trailing
+  squash markers. This is a renderer-side responsibility, not a
+  squash-side guarantee.
+
+Calling code that needs a TTY-safe representation should run a
+post-pass over `compacted_bytes` that replaces bare `\r` with `\\r`
+(literal backslash-r) before printing. That post-pass is a
+renderer concern outside #72; squash itself never injects
+fabricated bytes into the audit stream.
+
 ## Caller contract — what `squash` is for, and what it isn't
 
 `squash` is for **`Terminal` `CapturePayload` bytes only** in P0 — the
@@ -209,7 +232,9 @@ pub enum UnstructuredBindError {
 
 /// Pure transformation: unstructured text bytes → compacted bytes +
 /// metadata. Infallible. Same `(raw, cfg)` always produces
-/// byte-identical output.
+/// byte-identical output. CR bytes (`\r`) are preserved through
+/// stage 2 unchanged — squash never interprets them and never
+/// fabricates bytes that didn't appear in the input.
 ///
 /// `cfg` must be a normalized `SquashConfig` (constructed via
 /// `SquashConfig::new` or `SquashConfig::default()`); the function
@@ -341,6 +366,7 @@ pub struct SquashOutput {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SquashStats {
     pub ansi_stripped: bool,
+    pub cr_bearing_lines: usize,
     pub dedup_runs_collapsed: usize,
     pub lines_dropped_truncate: usize,
     pub bytes_dropped_truncate: usize,
@@ -382,34 +408,60 @@ both are gone does the tail block lose entire leading lines.
 
 1. **Lossy UTF-8 decode.** Invalid byte sequences become U+FFFD. Tool
    stdout is effectively always UTF-8; lossy decode means the function
-   is infallible and downstream stages always see valid UTF-8.
-2. **ANSI strip.** Drop:
+   absorbs UTF-8 invalidity and downstream stages always see valid UTF-8.
+2. **ANSI strip then CRLF normalize (CR-preserving for bare CR).**
+   First, drop:
    - CSI sequences: `ESC [` followed by parameter bytes `0x30-0x3f`,
      intermediate bytes `0x20-0x2f`, terminated by a final byte
      `0x40-0x7e`.
    - OSC sequences: `ESC ]` … terminated by `BEL` (`0x07`) or `ESC \`
      (`0x1b 0x5c`).
-   - Bare control characters in `0x00-0x1f` and `0x7f` **except** `\n`
-     (`0x0a`) and `\t` (`0x09`). `\r` is included in the stripped
-     set — see "Known limitations" below.
+   - Bare control characters in `0x00-0x1f` and `0x7f` **except**
+     `\n`, `\t`, and `\r`. CR bytes pass through this stripping
+     step unchanged.
 
    Set `stats.ansi_stripped = true` if any byte was removed.
 
-   **Known limitation: progress-bar output is concatenated.**
-   Stage 2 strips `\r` as a bare control byte; it does NOT emulate
-   terminal cursor-rewind or `CSI K` erase-line semantics. So an
-   input like `b"download 1%\rdownload 2%\rdownload 100%"` emits
-   `b"download 1%download 2%download 100%"` rather than the visible
-   final state `b"download 100%"`. Stage 4 (consecutive-run dedup
-   on full lines) does not help here because the rewrites land on
-   the same logical line. P0 accepts this: dedup still collapses
-   repeated full-line statuses (the more common pattern in CI/build
-   logs); progress-bar concatenation is documented as a known
-   lossiness, not silently wrong terminal-state fabrication. Proper
-   terminal-state emulation (CR cursor rewind + `CSI K` erase-line)
-   is filed as a follow-up issue. UTF-8 validity established by
-   stage 1 is preserved through stage 2 because stripping is
-   byte-removal only, never partial-codepoint truncation.
+   **Then** normalize line endings: every `\r\n` byte pair (after
+   ANSI/CSI/OSC stripping) collapses to a single `\n`. Running this
+   after ANSI strip catches `\r<ANSI>\n` rewrite patterns: the ANSI
+   sequence is removed first, leaving the `\r\n` adjacent for
+   normalization. Bare `\r` (a `\r` not followed by `\n` after
+   normalization) survives.
+
+   UTF-8 validity established by stage 1 is preserved because
+   stripping and CRLF normalization are byte-level removals, never
+   partial-codepoint truncation.
+
+   Stage-3 line split runs on `\n`; bare-CR bytes within a line
+   are just bytes. Lines containing bare `\r` are flagged
+   (`stats.cr_bearing_lines += 1`) and opted out of **dedup
+   collapse only** in stage 4: a CR-bearing line never collapses
+   into a `<line> [×N]` marker (the `[×N]` annotation could be
+   visually shadowed on replay by the line's own `\r` cursor
+   rewind). Adjacent CR-bearing duplicates pass through
+   individually.
+
+   CR-bearing lines participate in stage 5 per-line cap and stage 6
+   layout truncation normally. Bare `\r` bytes are preserved through
+   all stages — there is no escape transformation, so the
+   no-fabrication guarantee holds: every byte in `compacted_bytes`
+   either appeared in the input (after stage 1 lossy decode and
+   stage 2 stripping) or is part of an explicitly documented marker
+   (`[×N]`, `[…N bytes truncated]`, `[…skipped K lines, X bytes…]`).
+
+   **Documented replayer-rendering limitation.** When a CR-bearing
+   line is truncated, the trailing marker `[…N bytes truncated]` is
+   present at the byte level but may be visually shadowed by the
+   line's own `\r` cursor rewinds when the consumer renders the
+   bytes through a terminal that honors CR semantics. Audit-level
+   consumers (Extract, byte-level tooling, replay diffing) see the
+   marker. Replay tooling that wants strict marker visibility must
+   render `\r` as a literal escape (e.g., `\\r`) or strip CR before
+   rendering — that is a replayer policy, not a squash policy. This
+   limitation is the documented cost of CR preservation; the
+   alternative (dropping CR-bearing oversize lines) was rejected
+   because it violates the universal last-line invariant.
 3. **Line split on `\n`.** Define **lines** as the byte slices
    between consecutive `\n`s, including any empty segments produced by
    adjacent newlines (interior blank lines are full lines, byte-for-
@@ -578,9 +630,9 @@ breaks.
 
 ## Errors
 
-`squash` itself is infallible — every input byte sequence maps to some
-`SquashOutput`. UTF-8 invalidity is absorbed by the lossy decode in
-stage 1.
+`squash` itself is infallible — every input byte sequence maps to
+some `SquashOutput`. UTF-8 invalidity is absorbed by the lossy decode
+in stage 1.
 
 `SquashConfig::new` returns `SquashConfigError` if any field is below
 its `MIN_*` constant. Invalid `SquashConfig` instances cannot exist: the
@@ -647,10 +699,18 @@ land alongside as later issues ship.
     `event.payload_hash` and `PayloadHash::sha256(raw)`.
 - **ANSI strip:** CSI SGR colors, OSC titles, mixed sequences, lone
   ESC, preserved `\n`/`\t`.
-- **CR pass-through limitation:** `b"download 1%\rdownload 2%\n"`
-  emits `b"download 1%download 2%\n"` — `\r` is stripped, no
-  terminal-state emulation. Test asserts the documented behavior so
-  the limitation is visible in the suite, not silent.
+- **CRLF normalization:** `b"line1\r\nline2\n"` → stage-2 output
+  `b"line1\nline2\n"`. CRLF and `\n`-only forms of the same content
+  dedup against each other.
+- **Bare CR preservation + dedup opt-out:**
+  `b"download 1%\rdownload 2%\n"` → bare CR survives stage 2; the
+  CR-bearing line is exempt from stage-4 dedup collapse but goes
+  through stage-5 per-line cap normally. Tests cover: CR within
+  `max_line_bytes` (passes through), CR over `max_line_bytes`
+  (truncated with marker; marker may be replay-shadowed but is
+  byte-present), adjacent identical CR-lines (NOT collapsed; pass
+  through individually), CR-line as final content line (preserved
+  per universal last-line invariant).
 - **Dedup vs per-line cap order:** two distinct long lines that
   share their first `max_line_bytes` bytes but differ in the tail
   must NOT be collapsed by stage 4. Test:
