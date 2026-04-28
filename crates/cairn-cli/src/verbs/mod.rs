@@ -41,6 +41,23 @@ pub fn with_fix_markdown(cmd: clap::Command) -> clap::Command {
     )
 }
 
+/// Add `--fix-folders` flag to the `lint` subcommand.
+///
+/// Augments the generated subcommand builder without touching generated
+/// files, using the same pattern as [`with_fix_markdown`].
+#[must_use]
+pub fn with_fix_folders(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("fix-folders")
+            .long("fix-folders")
+            .action(clap::ArgAction::SetTrue)
+            .help(
+                "Regenerate folder _index.md sidecars and backlinks for every \
+                 non-empty folder (brief §3.4, #44)",
+            ),
+    )
+}
+
 /// Augments the `ingest` subcommand with the `--resync <path>` flag.
 ///
 /// Uses the same pattern as [`with_json`] and [`with_fix_markdown`]: the

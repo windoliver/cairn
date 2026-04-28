@@ -30,7 +30,7 @@ pub struct MemoryStoreCapabilities {
 /// `version` is the monotonic per-`target_id` counter from the DB COW model
 /// (brief §3.0). Projection and resync use it for optimistic concurrency
 /// checks without touching the DB row directly.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoredRecord {
     /// The stored memory record.
     pub record: MemoryRecord,
