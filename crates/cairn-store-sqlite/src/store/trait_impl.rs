@@ -46,18 +46,18 @@ impl MemoryStore for SqliteMemoryStore {
         self.do_upsert(record).await.map_err(Into::into)
     }
 
-    async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+    async fn get(&self, id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
         if self.conn.is_none() {
             return not_initialized("get");
         }
-        not_implemented("get", 46)
+        self.do_get(id).await.map_err(Into::into)
     }
 
-    async fn list(&self, _a: &ListArgs) -> Result<ListPage, StoreError> {
+    async fn list(&self, args: &ListArgs) -> Result<ListPage, StoreError> {
         if self.conn.is_none() {
             return not_initialized("list");
         }
-        not_implemented("list", 46)
+        self.do_list(args).await.map_err(Into::into)
     }
 
     async fn tombstone(&self, _id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
@@ -67,11 +67,11 @@ impl MemoryStore for SqliteMemoryStore {
         not_implemented("tombstone", 46)
     }
 
-    async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+    async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
         if self.conn.is_none() {
             return not_initialized("versions");
         }
-        not_implemented("versions", 46)
+        self.do_versions(target).await.map_err(Into::into)
     }
 
     async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
