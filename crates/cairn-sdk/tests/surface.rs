@@ -9,6 +9,7 @@
 
 use cairn_sdk::error::ErrorCode;
 use cairn_sdk::generated::common::{Cursor, ScopeFilter, Ulid};
+use cairn_sdk::generated::verbs::search::SearchArgsFilters;
 use cairn_sdk::generated::verbs::{
     assemble_hot::AssembleHotArgs,
     capture_trace::CaptureTraceArgs,
@@ -257,6 +258,76 @@ fn retrieve_profile_requires_user_or_agent() {
     match sdk().retrieve(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("user, agent"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_empty_and_filter_with_invalid_args() {
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: Some(SearchArgsFilters::And { and: vec![] }),
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hi".to_owned(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("filter.and"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_excessive_filter_depth_with_invalid_args() {
+    // Build a 9-level Not chain — exceeds max depth of 8.
+    let mut node = SearchArgsFilters::Leaf(serde_json::json!({
+        "field": "kind", "op": "eq", "value": "note"
+    }));
+    for _ in 0..9 {
+        node = SearchArgsFilters::Not {
+            not: Box::new(node),
+        };
+    }
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: Some(node),
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hi".to_owned(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("max boolean depth"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_malformed_filter_leaf_with_invalid_args() {
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: Some(SearchArgsFilters::Leaf(serde_json::json!({
+            "field": "",
+            "op": "eq",
+            "value": "x"
+        }))),
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hi".to_owned(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("field"), "reason: {reason}");
         }
         other => panic!("expected InvalidArgs, got {other:?}"),
     }

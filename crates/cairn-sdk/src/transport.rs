@@ -351,8 +351,9 @@ fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
 
 /// Mirrors the wire constraints from `SearchArgs`'s generated
 /// `TryFrom<RawSearchArgs>` plus nested type validators (`Cursor`,
-/// `ScopeFilter`) — direct Rust construction bypasses the deserializer for
-/// these inner types too.
+/// `ScopeFilter`, recursive `SearchArgsFilters`) — direct Rust
+/// construction bypasses the generated deserializer for these inner types
+/// too.
 fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
     if args.query.is_empty() {
         return Err(invalid("query: must not be empty"));
@@ -367,6 +368,164 @@ fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
     }
     if let Some(scope) = &args.scope {
         validate_scope_filter(scope)?;
+    }
+    if let Some(filters) = &args.filters {
+        validate_filter_node(filters, 8)?;
+    }
+    Ok(())
+}
+
+/// Recursive validator mirroring the generated
+/// `parse_search_args_filters_node` rules: max depth 8, max fanout 32,
+/// non-empty `and`/`or` arrays, leaf shape per `validate_filter_leaf_shape`.
+fn validate_filter_node(
+    node: &cairn_core::generated::verbs::search::SearchArgsFilters,
+    remaining_depth: u32,
+) -> Result<(), SdkError> {
+    use cairn_core::generated::verbs::search::SearchArgsFilters as F;
+    const MAX_FANOUT: usize = 32;
+    match node {
+        F::And { and } => {
+            if remaining_depth == 0 {
+                return Err(invalid("filter: exceeds max boolean depth"));
+            }
+            if and.is_empty() {
+                return Err(invalid("filter.and: must contain at least one item"));
+            }
+            if and.len() > MAX_FANOUT {
+                return Err(invalid("filter.and: exceeds max fanout"));
+            }
+            for child in and {
+                validate_filter_node(child, remaining_depth - 1)?;
+            }
+            Ok(())
+        }
+        F::Or { or } => {
+            if remaining_depth == 0 {
+                return Err(invalid("filter: exceeds max boolean depth"));
+            }
+            if or.is_empty() {
+                return Err(invalid("filter.or: must contain at least one item"));
+            }
+            if or.len() > MAX_FANOUT {
+                return Err(invalid("filter.or: exceeds max fanout"));
+            }
+            for child in or {
+                validate_filter_node(child, remaining_depth - 1)?;
+            }
+            Ok(())
+        }
+        F::Not { not } => {
+            if remaining_depth == 0 {
+                return Err(invalid("filter: exceeds max boolean depth"));
+            }
+            validate_filter_node(not, remaining_depth - 1)
+        }
+        F::Leaf(value) => validate_filter_leaf(value),
+        // Forward-compat for #[non_exhaustive].
+        _ => Err(invalid("unsupported filter variant")),
+    }
+}
+
+/// Mirrors the generated `validate_filter_leaf_shape` for `SearchArgsFilters::Leaf`.
+fn validate_filter_leaf(v: &serde_json::Value) -> Result<(), SdkError> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| invalid("filter leaf: must be a JSON object"))?;
+    for k in obj.keys() {
+        if !matches!(k.as_str(), "field" | "op" | "value") {
+            return Err(invalid("filter leaf: unknown key"));
+        }
+    }
+    let field = obj
+        .get("field")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid("filter leaf: field must be a string"))?;
+    if field.is_empty() {
+        return Err(invalid("filter leaf: field must not be empty"));
+    }
+    let op = obj
+        .get("op")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| invalid("filter leaf: op must be a string"))?;
+    let value = obj
+        .get("value")
+        .ok_or_else(|| invalid("filter leaf: value missing"))?;
+    match op {
+        "string_contains" | "string_starts_with" | "string_ends_with" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| invalid("filter leaf: value must be a non-empty string"))?;
+            if s.is_empty() {
+                return Err(invalid("filter leaf: value must be a non-empty string"));
+            }
+        }
+        "eq" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() {
+                    return Err(invalid("filter leaf: value must be a non-empty string"));
+                }
+            } else if !(value.is_number() || value.is_boolean()) {
+                return Err(invalid(
+                    "filter leaf: eq value must be string, number, or boolean",
+                ));
+            }
+        }
+        "neq" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() {
+                    return Err(invalid("filter leaf: value must be a non-empty string"));
+                }
+            } else if !value.is_number() {
+                return Err(invalid(
+                    "filter leaf: neq value must be string or number — booleans only support eq",
+                ));
+            }
+        }
+        "lt" | "lte" | "gt" | "gte" => {
+            if !value.is_number() {
+                return Err(invalid("filter leaf: value must be a number"));
+            }
+        }
+        "in" | "nin" => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| invalid("filter leaf: value must be a non-empty array"))?;
+            if arr.is_empty() {
+                return Err(invalid("filter leaf: value must be a non-empty array"));
+            }
+            let first = &arr[0];
+            if first.is_string() {
+                for item in arr {
+                    let s = item.as_str().ok_or_else(|| {
+                        invalid("filter leaf: in/nin array must be all strings or all numbers")
+                    })?;
+                    if s.is_empty() {
+                        return Err(invalid(
+                            "filter leaf: array items must be non-empty strings",
+                        ));
+                    }
+                }
+            } else if first.is_number() {
+                for item in arr {
+                    if !item.is_number() {
+                        return Err(invalid(
+                            "filter leaf: in/nin array must be all strings or all numbers",
+                        ));
+                    }
+                }
+            } else {
+                return Err(invalid(
+                    "filter leaf: in/nin array must be all strings or all numbers",
+                ));
+            }
+        }
+        "exists" => {
+            if !value.is_boolean() {
+                return Err(invalid("filter leaf: exists value must be a boolean"));
+            }
+        }
+        _ => return Err(invalid("filter leaf: unknown op")),
     }
     Ok(())
 }
