@@ -8,7 +8,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cairn_core::generated::common::{Nonce16Base64, Ulid};
-use cairn_core::generated::errors::ErrorCode;
 
 use crate::SdkError;
 
@@ -99,12 +98,13 @@ fn is_leap(y: u64) -> bool {
 
 /// Build the canonical "store not wired in this P0 build" stub error.
 ///
-/// Mirrors `cairn-cli::verbs::envelope::unimplemented_response` so SDK and
-/// CLI emit identical error payloads. The verb handler is tracked under #9.
-pub(crate) fn store_not_wired() -> SdkError {
-    SdkError::Protocol {
-        code: ErrorCode::Internal,
-        message: "store not wired in this P0 build — verb dispatch lands in #9".to_owned(),
+/// Returns the dedicated [`SdkError::Unimplemented`] variant rather than a
+/// generic `Internal`, so callers can fail-fast against verbs whose happy
+/// path has not yet shipped. The verb handler is tracked under epic #9.
+pub(crate) fn store_not_wired(verb: &'static str) -> SdkError {
+    SdkError::Unimplemented {
+        verb,
+        tracking: "verb dispatch lands in epic #9 (store wiring)",
         operation_id: new_operation_id(),
     }
 }
@@ -147,13 +147,16 @@ mod tests {
     }
 
     #[test]
-    fn store_not_wired_carries_operation_id() {
-        let err = store_not_wired();
+    fn store_not_wired_carries_unimplemented_variant() {
+        let err = store_not_wired("ingest");
         match &err {
-            SdkError::Protocol {
-                code, operation_id, ..
+            SdkError::Unimplemented {
+                verb,
+                tracking,
+                operation_id,
             } => {
-                assert_eq!(*code, ErrorCode::Internal);
+                assert_eq!(*verb, "ingest");
+                assert!(tracking.contains("#9"));
                 assert_eq!(operation_id.0.len(), 26);
             }
             other => panic!("unexpected variant: {other:?}"),

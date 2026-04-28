@@ -44,6 +44,24 @@ pub enum SdkError {
         operation_id: Ulid,
     },
 
+    /// The verb is permanently unimplemented in this SDK build (P0 stub).
+    ///
+    /// Distinct from [`SdkError::Protocol`] with `code = ErrorCode::Internal`
+    /// so callers can fail fast and skip retries — a transient internal
+    /// error and "the store is not wired in this build" are operationally
+    /// very different. When the verb handler lands (epic #9), this variant
+    /// disappears from the happy path and only [`SdkError::Protocol`]
+    /// surfaces real wire failures.
+    #[error("unimplemented in this build: {verb}")]
+    Unimplemented {
+        /// The verb the caller invoked, as a stable string identifier.
+        verb: &'static str,
+        /// Tracking issue / context for when the verb will be implemented.
+        tracking: &'static str,
+        /// Operation correlation ID for log lookup.
+        operation_id: Ulid,
+    },
+
     /// Wire-level protocol error from the verb handler.
     ///
     /// The `code` is the closed [`ErrorCode`] enum lowered from the IDL,
@@ -70,16 +88,18 @@ impl SdkError {
         match self {
             Self::InvalidArgs { .. } => None,
             Self::CapabilityUnavailable { operation_id, .. }
+            | Self::Unimplemented { operation_id, .. }
             | Self::Protocol { operation_id, .. } => Some(operation_id),
         }
     }
 
     /// Typed wire code, when this error originated from a protocol response.
-    /// `InvalidArgs` is pre-envelope and returns `None`.
+    /// `InvalidArgs` and `Unimplemented` are SDK-side rejections without a
+    /// wire round-trip and return `None`.
     #[must_use]
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
-            Self::InvalidArgs { .. } => None,
+            Self::InvalidArgs { .. } | Self::Unimplemented { .. } => None,
             Self::CapabilityUnavailable { .. } => Some(ErrorCode::CapabilityUnavailable),
             Self::Protocol { code, .. } => Some(*code),
         }

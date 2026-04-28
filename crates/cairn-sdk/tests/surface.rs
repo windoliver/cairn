@@ -133,7 +133,7 @@ fn ingest_valid_args_returns_internal_stub() {
         tags: None,
         url: None,
     };
-    assert_internal_stub(sdk().ingest(&args));
+    assert_unimplemented("ingest", sdk().ingest(&args));
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn summarize_returns_internal_stub() {
         persist: None,
         record_ids: vec![ulid()],
     };
-    assert_internal_stub(sdk().summarize(&args));
+    assert_unimplemented("summarize", sdk().summarize(&args));
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn assemble_hot_returns_internal_stub() {
         budget: None,
         session_id: None,
     };
-    assert_internal_stub(sdk().assemble_hot(&args));
+    assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
 }
 
 #[test]
@@ -248,20 +248,27 @@ fn capture_trace_returns_internal_stub() {
         from: "/tmp/trace.log".to_owned(),
         session_id: None,
     };
-    assert_internal_stub(sdk().capture_trace(&args));
+    assert_unimplemented("capture_trace", sdk().capture_trace(&args));
 }
 
 #[test]
 fn lint_returns_internal_stub() {
     let args = LintArgs { write_report: None };
-    assert_internal_stub(sdk().lint(&args));
+    assert_unimplemented("lint", sdk().lint(&args));
 }
 
 #[test]
 fn sdk_error_code_helper_returns_typed_code() {
-    // SdkError::code() lets callers branch on ErrorCode without parsing
-    // strings, satisfying the closed-typed-error contract.
-    let p0_stub = sdk()
+    // CapabilityUnavailable carries a typed wire code so callers can branch
+    // without parsing strings.
+    let cap_err = sdk()
+        .retrieve(&RetrieveArgs::Record { id: ulid() })
+        .expect_err("cap");
+    assert_eq!(cap_err.code(), Some(ErrorCode::CapabilityUnavailable));
+
+    // Unimplemented and InvalidArgs are SDK-side rejections without a wire
+    // round-trip — they have no wire code.
+    let unimpl = sdk()
         .ingest(&IngestArgs {
             body: Some("note".to_owned()),
             file: None,
@@ -272,7 +279,8 @@ fn sdk_error_code_helper_returns_typed_code() {
             url: None,
         })
         .expect_err("stub");
-    assert_eq!(p0_stub.code(), Some(ErrorCode::Internal));
+    assert!(matches!(unimpl, SdkError::Unimplemented { .. }));
+    assert_eq!(unimpl.code(), None);
 
     let invalid = sdk()
         .ingest(&IngestArgs {
@@ -285,7 +293,6 @@ fn sdk_error_code_helper_returns_typed_code() {
             url: None,
         })
         .expect_err("invalid");
-    // Pre-envelope rejections have no wire code.
     assert!(matches!(invalid, SdkError::InvalidArgs { .. }));
     assert_eq!(invalid.code(), None);
 }
@@ -304,21 +311,18 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
 }
 
 #[track_caller]
-fn assert_internal_stub<T: std::fmt::Debug>(result: Result<T, SdkError>) {
+fn assert_unimplemented<T: std::fmt::Debug>(verb: &'static str, result: Result<T, SdkError>) {
     let err = result.expect_err("P0 stubs must error until #9 wires the store");
     match err {
-        SdkError::Protocol {
-            code,
-            message,
+        SdkError::Unimplemented {
+            verb: actual,
+            tracking,
             operation_id,
         } => {
-            assert_eq!(code, ErrorCode::Internal);
-            assert!(
-                message.contains("store not wired"),
-                "message must mention store: {message}"
-            );
+            assert_eq!(actual, verb);
+            assert!(tracking.contains("#9"), "tracking: {tracking}");
             assert_eq!(operation_id.0.len(), 26, "operation_id is a ULID");
         }
-        other => panic!("expected Protocol Internal stub, got {other:?}"),
+        other => panic!("expected Unimplemented, got {other:?}"),
     }
 }

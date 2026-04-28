@@ -25,7 +25,6 @@ use cairn_core::generated::verbs::{
 
 use crate::stub::{new_nonce, now_ms, now_rfc3339_seconds, store_not_wired};
 use crate::{CONTRACT, SdkError, VerbResponse};
-use cairn_core::generated::envelope::ResponseVerb;
 
 /// Marker trait for transport implementations.
 ///
@@ -134,7 +133,7 @@ impl<T: Transport> Sdk<T> {
     pub fn ingest(&self, args: &IngestArgs) -> Result<VerbResponse<IngestData>, SdkError> {
         validate_ingest(args)?;
         revalidate::<IngestArgs>(args)?;
-        Err(stub(ResponseVerb::Ingest))
+        Err(unimplemented("ingest"))
     }
 
     /// `search` — hybrid keyword/semantic retrieval (brief §8.2).
@@ -145,7 +144,7 @@ impl<T: Transport> Sdk<T> {
     pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
         revalidate::<SearchArgs>(args)?;
         self.require_capability(args.mode.capability())?;
-        Err(stub(ResponseVerb::Search))
+        Err(unimplemented("search"))
     }
 
     /// `retrieve` — by-target fetch (record/session/turn/folder/scope/profile).
@@ -155,13 +154,13 @@ impl<T: Transport> Sdk<T> {
     pub fn retrieve(&self, args: &RetrieveArgs) -> Result<VerbResponse<RetrieveData>, SdkError> {
         revalidate::<RetrieveArgs>(args)?;
         self.require_capability(args.capability())?;
-        Err(stub(ResponseVerb::Retrieve))
+        Err(unimplemented("retrieve"))
     }
 
     /// `summarize` — rolling/periodic summary build (brief §8.4).
     pub fn summarize(&self, args: &SummarizeArgs) -> Result<VerbResponse<SummarizeData>, SdkError> {
         revalidate::<SummarizeArgs>(args)?;
-        Err(stub(ResponseVerb::Summarize))
+        Err(unimplemented("summarize"))
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
@@ -170,7 +169,7 @@ impl<T: Transport> Sdk<T> {
         args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
         revalidate::<AssembleHotArgs>(args)?;
-        Err(stub(ResponseVerb::AssembleHot))
+        Err(unimplemented("assemble_hot"))
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).
@@ -179,13 +178,13 @@ impl<T: Transport> Sdk<T> {
         args: &CaptureTraceArgs,
     ) -> Result<VerbResponse<CaptureTraceData>, SdkError> {
         revalidate::<CaptureTraceArgs>(args)?;
-        Err(stub(ResponseVerb::CaptureTrace))
+        Err(unimplemented("capture_trace"))
     }
 
     /// `lint` — privacy / provenance / schema / policy drift checks (brief §8.7).
     pub fn lint(&self, args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
         revalidate::<LintArgs>(args)?;
-        Err(stub(ResponseVerb::Lint))
+        Err(unimplemented("lint"))
     }
 
     /// `forget` — record/session/scope tombstone + purge (brief §8.8, §5.6).
@@ -195,7 +194,7 @@ impl<T: Transport> Sdk<T> {
     pub fn forget(&self, args: &ForgetArgs) -> Result<VerbResponse<ForgetData>, SdkError> {
         revalidate::<ForgetArgs>(args)?;
         self.require_capability(args.capability())?;
-        Err(stub(ResponseVerb::Forget))
+        Err(unimplemented("forget"))
     }
 
     /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
@@ -253,10 +252,11 @@ where
         })
 }
 
-/// Canonical P0 stub: every verb returns `Internal — store not wired`.
-/// Replace each call site with real dispatch when verb handlers land (#9).
-fn stub(_verb: ResponseVerb) -> SdkError {
-    store_not_wired()
+/// Canonical P0 stub: every verb returns [`SdkError::Unimplemented`] until
+/// verb dispatch lands (#9). Distinct from a generic `Internal` so callers
+/// can fail fast instead of retrying.
+fn unimplemented(verb: &'static str) -> SdkError {
+    store_not_wired(verb)
 }
 
 fn p0_capabilities() -> Vec<Capabilities> {
