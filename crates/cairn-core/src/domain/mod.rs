@@ -34,7 +34,6 @@ pub mod record;
 pub mod scope;
 pub mod taxonomy;
 pub mod timestamp;
-pub mod timestamp_store;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use actor_ref::ActorRef;
@@ -55,4 +54,3 @@ pub use record::MemoryRecord;
 pub use scope::ScopeTuple;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use timestamp::Rfc3339Timestamp;
-pub use timestamp_store::Timestamp;

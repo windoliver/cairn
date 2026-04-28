@@ -34,6 +34,31 @@ impl Rfc3339Timestamp {
         Ok(Self(raw))
     }
 
+    /// Current wall-clock time as a validated RFC3339 timestamp (`Z` suffix).
+    ///
+    /// Uses [`std::time::SystemTime`] — no external date/time crate required.
+    /// Falls back to `1970-01-01T00:00:00Z` if the system clock returns a
+    /// duration before the Unix epoch (impossible on supported platforms).
+    #[must_use]
+    pub fn now() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        // Saturate to 0 on the pathological pre-epoch case rather than panic.
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        // Format as YYYY-MM-DDTHH:MM:SSZ using only integer arithmetic.
+        let sec = secs % 60;
+        let min = (secs / 60) % 60;
+        let hour = (secs / 3_600) % 24;
+        // Days since epoch (1970-01-01)
+        let days = secs / 86_400;
+        let (year, month, day) = days_since_epoch_to_ymd(days);
+        Self(format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z"
+        ))
+    }
+
     /// Underlying RFC3339 string.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -55,6 +80,24 @@ impl<'de> Deserialize<'de> for Rfc3339Timestamp {
         let raw = String::deserialize(deserializer)?;
         Self::parse(raw).map_err(serde::de::Error::custom)
     }
+}
+
+/// Convert days since the Unix epoch (1970-01-01) into a `(year, month, day)`
+/// tuple using the proleptic Gregorian calendar.
+fn days_since_epoch_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
+    // "civil_from_days", adjusted for u64 epoch offset.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn validate(s: &str) -> Result<(), &'static str> {

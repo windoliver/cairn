@@ -11,12 +11,12 @@
 
 /// Witness that the caller is the WAL state-machine executor.
 ///
-/// Constructable only from within `cairn_core::wal` (via
-/// `pub(super) fn __new()`). The visibility modifier blocks external
-/// construction at compile time, turning non-WAL writes into a compile
-/// error rather than a runtime failure.
+/// Constructable only from within `cairn_core::wal` (via `__new()`).
+/// The private `_private` field blocks external struct-literal construction
+/// at compile time, turning non-WAL writes into a compile error rather than
+/// a runtime failure.
 pub struct ApplyToken {
-    pub(super) _private: (),
+    _private: (),
 }
 
 impl ApplyToken {

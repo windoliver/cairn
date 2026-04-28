@@ -103,7 +103,8 @@ mod tests {
     };
     use crate::contract::version::{ContractVersion, VersionRange};
     use crate::domain::{
-        actor_ref::ActorRef, principal::Principal, record::MemoryRecord, timestamp_store::Timestamp,
+        actor_ref::ActorRef, principal::Principal, record::MemoryRecord,
+        timestamp::Rfc3339Timestamp,
     };
 
     struct StubStore;
@@ -186,7 +187,7 @@ mod tests {
         fn expire_active(
             &mut self,
             _target_id: &TargetId,
-            _at: Timestamp,
+            _at: Rfc3339Timestamp,
         ) -> Result<(), StoreError> {
             Err(StoreError::Invariant("stub: not implemented"))
         }

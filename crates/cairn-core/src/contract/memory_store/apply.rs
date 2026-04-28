@@ -16,7 +16,7 @@ use super::types::{
     ConsentJournalEntry, ConsentJournalRowId, Edge, EdgeKind, OpId, PurgeOutcome, RecordId,
     TargetId,
 };
-use crate::domain::{actor_ref::ActorRef, record::MemoryRecord, timestamp_store::Timestamp};
+use crate::domain::{actor_ref::ActorRef, record::MemoryRecord, timestamp::Rfc3339Timestamp};
 
 /// Sealing module — prevents third-party `MemoryStoreApply` /
 /// `MemoryStoreApplyTx` impls from outside `cairn-core`.
@@ -98,7 +98,11 @@ pub trait MemoryStoreApplyTx: sealed_impl::Sealed + Send {
     /// Subsequent reads filter rows where
     /// `expired_at IS NULL OR expired_at > now()`, unless
     /// `ListQuery::include_expired` is set.
-    fn expire_active(&mut self, target_id: &TargetId, at: Timestamp) -> Result<(), StoreError>;
+    fn expire_active(
+        &mut self,
+        target_id: &TargetId,
+        at: Rfc3339Timestamp,
+    ) -> Result<(), StoreError>;
 
     /// Phase B purge primitive.
     ///

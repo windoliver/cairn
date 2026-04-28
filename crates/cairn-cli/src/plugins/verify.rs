@@ -361,6 +361,10 @@ mod tests {
         assert_eq!(exit_code(&report, false), 69);
     }
 
+    // The inline stub impls for MemoryStore and MCPServer push this test
+    // over 100 lines. Extracting helper structs to a submodule would obscure
+    // the causal chain this regression test is meant to document.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn cross_contract_same_name_orphan_is_failed() {
         // Regression for the round-3 review finding: a single PluginName

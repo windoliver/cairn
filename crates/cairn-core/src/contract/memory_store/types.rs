@@ -2,11 +2,11 @@
 //!
 //! These types compose the read-API parameters and return shapes plus
 //! the apply-API method arguments. Domain types (`MemoryRecord`,
-//! `Principal`, `ActorRef`, `Timestamp`, `Scope`) live in
+//! `Principal`, `ActorRef`, `Rfc3339Timestamp`, `Scope`) live in
 //! `cairn_core::domain`.
 
 use crate::domain::{
-    actor_ref::ActorRef, principal::Principal, record::MemoryRecord, timestamp_store::Timestamp,
+    actor_ref::ActorRef, principal::Principal, record::MemoryRecord, timestamp::Rfc3339Timestamp,
 };
 use serde::{Deserialize, Serialize};
 
@@ -134,8 +134,9 @@ pub enum ChangeKind {
 pub struct RecordEvent {
     /// Type of lifecycle change.
     pub kind: ChangeKind,
-    /// When the change occurred.
-    pub at: Timestamp,
+    /// When the change occurred. `None` when the store row's audit column is
+    /// `NULL` (e.g. a row that was staged but never activated).
+    pub at: Option<Rfc3339Timestamp>,
     /// Who performed the change (none for system-driven expiry).
     pub actor: Option<ActorRef>,
 }
@@ -251,7 +252,7 @@ pub struct ConsentJournalEntry {
     /// Arbitrary payload (hashes, references — no raw body).
     pub payload: serde_json::Value,
     /// Wall-clock time of the event.
-    pub at: Timestamp,
+    pub at: Rfc3339Timestamp,
 }
 
 /// Primary key of a freshly-written `consent_journal` row.

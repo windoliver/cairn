@@ -33,8 +33,12 @@
 /// # Examples
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+/// # use cairn_core::contract::memory_store::{
+/// #     HistoryEntry, ListQuery, ListResult, MemoryStore,
+/// #     MemoryStoreCapabilities, StoreError, TargetId,
+/// # };
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// # use cairn_core::domain::{Principal, record::MemoryRecord};
 /// use cairn_core::register_plugin;
 ///
 /// #[derive(Default)]
@@ -58,6 +62,14 @@
 ///             ContractVersion::new(0, 2, 0),
 ///         )
 ///     }
+///     async fn get(&self, _: &Principal, _: &TargetId)
+///         -> Result<Option<MemoryRecord>, StoreError> { Ok(None) }
+///     async fn list(&self, _: &ListQuery)
+///         -> Result<ListResult, StoreError> {
+///         Ok(ListResult { rows: vec![], hidden: 0 })
+///     }
+///     async fn version_history(&self, _: &Principal, _: &TargetId)
+///         -> Result<Vec<HistoryEntry>, StoreError> { Ok(vec![]) }
 /// }
 ///
 /// register_plugin!(MemoryStore, MyStore, "acme-store");
@@ -71,8 +83,12 @@
 /// # Manifest-aware form (preferred for bundled plugins)
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+/// # use cairn_core::contract::memory_store::{
+/// #     HistoryEntry, ListQuery, ListResult, MemoryStore,
+/// #     MemoryStoreCapabilities, StoreError, TargetId,
+/// # };
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// # use cairn_core::domain::{Principal, record::MemoryRecord};
 /// use cairn_core::register_plugin;
 ///
 /// const MANIFEST_TOML: &str = r#"
@@ -111,6 +127,14 @@
 ///             ContractVersion::new(0, 2, 0),
 ///         )
 ///     }
+///     async fn get(&self, _: &Principal, _: &TargetId)
+///         -> Result<Option<MemoryRecord>, StoreError> { Ok(None) }
+///     async fn list(&self, _: &ListQuery)
+///         -> Result<ListResult, StoreError> {
+///         Ok(ListResult { rows: vec![], hidden: 0 })
+///     }
+///     async fn version_history(&self, _: &Principal, _: &TargetId)
+///         -> Result<Vec<HistoryEntry>, StoreError> { Ok(vec![]) }
 /// }
 ///
 /// register_plugin!(MemoryStore, MyStore, "acme-store", MANIFEST_TOML);
