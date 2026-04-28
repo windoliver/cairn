@@ -79,6 +79,13 @@ impl<D: serde::Serialize> serde::Serialize for VerbResponse<D> {
         // malformed permutations here so SDK consumers cannot emit
         // envelope-invalid traffic, even when constructing
         // `VerbResponse` by hand.
+        // `unknown` is reserved for the rejected/UnknownVerb arm; a
+        // committed success envelope must name a real verb.
+        if matches!(self.verb, ResponseVerb::Unknown) {
+            return Err(S::Error::custom(
+                "verb=unknown is only valid on rejected responses",
+            ));
+        }
         let is_retrieve = matches!(self.verb, ResponseVerb::Retrieve);
         match (is_retrieve, self.target.is_some()) {
             (true, false) => {

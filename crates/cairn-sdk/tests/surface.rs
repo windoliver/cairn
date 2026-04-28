@@ -119,6 +119,22 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
 }
 
 #[test]
+fn verb_response_rejects_unknown_verb_on_committed_envelope() {
+    // The `unknown` sentinel is only valid on rejected responses with
+    // error.code=UnknownVerb. A committed VerbResponse must name a real
+    // verb — surface mistakes as Serialize errors before they reach the
+    // wire.
+    let resp: VerbResponse<serde_json::Value> = VerbResponse {
+        operation_id: ulid(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Unknown,
+        target: None,
+        data: serde_json::json!({}),
+    };
+    assert!(serde_json::to_value(&resp).is_err());
+}
+
+#[test]
 fn verb_response_emits_target_for_retrieve_envelope() {
     // Wire envelope requires `target` on every committed verb=retrieve
     // response and forbids it elsewhere — see Response.target in
