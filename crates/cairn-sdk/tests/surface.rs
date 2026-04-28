@@ -90,6 +90,35 @@ fn verb_response_serializes_as_canonical_envelope() {
 }
 
 #[test]
+fn verb_response_rejects_envelope_invalid_target_combinations() {
+    use cairn_sdk::generated::envelope::ResponseTarget;
+    // verb=retrieve without target is rejected by the wire envelope —
+    // the SDK's Serialize impl must surface that as an error rather than
+    // emit malformed JSON.
+    let missing: VerbResponse<serde_json::Value> = VerbResponse {
+        operation_id: ulid(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Retrieve,
+        target: None,
+        data: serde_json::json!({}),
+    };
+    assert!(serde_json::to_value(&missing).is_err());
+
+    // target set on a non-retrieve verb is also rejected.
+    let stray: VerbResponse<IngestData> = VerbResponse {
+        operation_id: ulid(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Ingest,
+        target: Some(ResponseTarget::Record),
+        data: IngestData {
+            record_id: ulid(),
+            session_id: "s".to_owned(),
+        },
+    };
+    assert!(serde_json::to_value(&stray).is_err());
+}
+
+#[test]
 fn verb_response_emits_target_for_retrieve_envelope() {
     // Wire envelope requires `target` on every committed verb=retrieve
     // response and forbids it elsewhere — see Response.target in

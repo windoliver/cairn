@@ -72,7 +72,27 @@ pub struct VerbResponse<D> {
 
 impl<D: serde::Serialize> serde::Serialize for VerbResponse<D> {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct as _;
+        use serde::ser::{Error as _, SerializeStruct as _};
+        // Wire envelope invariant (cairn_core::generated::envelope::Response
+        // RawResponse::TryFrom): `target` is required when verb=retrieve
+        // with status=committed, and forbidden otherwise. Reject the
+        // malformed permutations here so SDK consumers cannot emit
+        // envelope-invalid traffic, even when constructing
+        // `VerbResponse` by hand.
+        let is_retrieve = matches!(self.verb, ResponseVerb::Retrieve);
+        match (is_retrieve, self.target.is_some()) {
+            (true, false) => {
+                return Err(S::Error::custom(
+                    "verb=retrieve requires `target` on committed responses",
+                ));
+            }
+            (false, true) => {
+                return Err(S::Error::custom(
+                    "`target` is forbidden when verb is not retrieve",
+                ));
+            }
+            _ => {}
+        }
         let len = 6 + usize::from(self.target.is_some());
         let mut s = ser.serialize_struct("Response", len)?;
         s.serialize_field("contract", CONTRACT)?;
