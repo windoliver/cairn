@@ -443,3 +443,26 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 }
+
+/// Result of a successful squash: compacted bytes plus audit metadata.
+#[derive(Debug, Clone)]
+pub struct SquashOutput {
+    pub compacted_bytes: Vec<u8>,
+    pub raw_hash: PayloadHash,
+    pub raw_byte_len: usize,
+    pub compacted_hash: PayloadHash,
+    pub compacted_byte_len: usize,
+    pub stats: SquashStats,
+}
+
+/// Per-call statistics. Drives audit, observability, and tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SquashStats {
+    pub ansi_stripped: bool,
+    pub cr_bearing_lines: usize,
+    pub dedup_runs_collapsed: usize,
+    pub lines_dropped_truncate: usize,
+    pub bytes_dropped_truncate: usize,
+    pub long_lines_truncated: usize,
+    pub truncated: bool,
+}
