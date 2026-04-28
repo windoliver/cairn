@@ -263,7 +263,11 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+<<<<<<< HEAD
  "unicode-normalization",
+=======
+ "ulid",
+>>>>>>> 8461ada (feat(core): add KeyVersion, IdentityRevision, VaultId, WitnessHash newtypes (#50))
 ]
 
 [[package]]
