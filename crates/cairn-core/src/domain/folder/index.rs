@@ -239,14 +239,59 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
             state.backlinks.len(),
         );
         for bl in &state.backlinks {
-            let p = bl.source_path.to_string_lossy();
-            let _ = writeln!(body, "- [{p}]({p})");
+            let label = bl.source_path.to_string_lossy();
+            // Render the href relative to the folder containing this _index.md
+            // so a Markdown viewer resolves it correctly. Vault-relative paths
+            // would double-prefix (e.g. `raw/_index.md` → `raw/raw/foo.md`).
+            let href_rel = relativize(&state.path, &bl.source_path);
+            let href = href_rel.to_string_lossy();
+            let _ = writeln!(body, "- [{label}]({href})");
         }
     }
 
     ProjectedFile {
         path: state.path.join("_index.md"),
         content: format!("{frontmatter}{body}"),
+    }
+}
+
+/// Render `target` relative to `base`. Walks the common-prefix split,
+/// emitting `..` for each base segment past the common ancestor and the
+/// remaining target segments. Both inputs are expected to be vault-relative
+/// (no leading `/`). If `target` is fully inside `base`, the result is the
+/// suffix; otherwise we emit `..` segments.
+fn relativize(base: &Path, target: &Path) -> PathBuf {
+    use std::path::Component;
+    let base_segs: Vec<_> = base
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    let target_segs: Vec<_> = target
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    let common = base_segs
+        .iter()
+        .zip(target_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for _ in common..base_segs.len() {
+        out.push(std::ffi::OsString::from(".."));
+    }
+    for s in &target_segs[common..] {
+        out.push(s.clone());
+    }
+    if out.is_empty() {
+        PathBuf::from(".")
+    } else {
+        out.iter().collect()
     }
 }
 
@@ -468,6 +513,104 @@ mod tests {
         assert!(
             pf.content.contains("· 1 backlinks"),
             "expected backlink count, got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_renders_backlink_href_relative_to_folder() {
+        // `raw/_index.md` listing a backlink whose source is `raw/other.md`
+        // must render the href as `other.md` — NOT `raw/other.md`, which
+        // would resolve to `raw/raw/other.md` in a Markdown viewer.
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/other.md"),
+                target_path: PathBuf::from("raw/x.md"),
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("- [raw/other.md](other.md)"),
+            "expected folder-relative href, got:\n{}",
+            pf.content
+        );
+        assert!(
+            !pf.content.contains("(raw/other.md)"),
+            "vault-relative href should not appear, got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_renders_backlink_href_for_sibling_subfolder() {
+        // `raw/a/_index.md` listing a backlink from `raw/b/foo.md` must
+        // render `../b/foo.md`.
+        let state = FolderState {
+            path: PathBuf::from("raw/a"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/b/foo.md"),
+                target_path: PathBuf::from("raw/a/x.md"),
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("(../b/foo.md)"),
+            "expected sibling-relative href '../b/foo.md', got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_renders_backlink_href_for_nested_descendant() {
+        // `raw/_index.md` listing a backlink from `raw/sub/foo.md` must
+        // render `sub/foo.md`.
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/sub/foo.md"),
+                target_path: PathBuf::from("raw/x.md"),
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("(sub/foo.md)"),
+            "expected descendant-relative href 'sub/foo.md', got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_renders_backlink_href_for_parent_source() {
+        // `raw/sub/_index.md` listing a backlink from `raw/parent.md` must
+        // render `../parent.md`.
+        let state = FolderState {
+            path: PathBuf::from("raw/sub"),
+            records: Vec::new(),
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/parent.md"),
+                target_path: PathBuf::from("raw/sub/x.md"),
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("(../parent.md)"),
+            "expected parent-relative href '../parent.md', got:\n{}",
             pf.content
         );
     }
