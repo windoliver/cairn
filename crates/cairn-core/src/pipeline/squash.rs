@@ -517,6 +517,126 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-7 (new loop) regression: when sanitized tail exceeds the
+    /// byte budget, `trim_to_byte_budget_at_boundary_from_end` shaves
+    /// bytes off the front, which may sit mid-line; the bypass must
+    /// re-align to the next `\n` so the emitted tail begins on a
+    /// whole-line boundary.
+    #[test]
+    fn oversize_bypass_post_trim_realigns_tail() {
+        // Build a tail that is line-aligned but oversized after sanitize:
+        // many short lines whose total exceeds half the byte budget.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        raw.extend(std::iter::repeat_n(b'F', 50_000));
+        raw.push(b'\n');
+        // Add 200 lines of 80 chars each = 16K bytes — exceeds default
+        // half-budget (~8K), forcing front-trim mid-line.
+        for i in 0..200 {
+            raw.extend_from_slice(format!("line-{i:03}-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\n").as_bytes());
+        }
+        raw.extend_from_slice(b"FINAL-LINE\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Find the marker, then verify the byte AFTER the marker's
+        // trailing `\n` starts a complete `line-` line, not mid-line.
+        if let Some((_, after_marker)) = body.rsplit_once("squash skipped…]\n") {
+            let first_tail_line = after_marker.lines().next().unwrap_or("");
+            assert!(
+                first_tail_line.starts_with("line-") || first_tail_line == "FINAL-LINE",
+                "tail must begin on a line boundary, got: {first_tail_line:?}"
+            );
+        }
+        // Final line still preserved.
+        assert!(
+            body.contains("FINAL-LINE"),
+            "final line preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+    }
+
+    /// Round-7 (new loop) regression: bypass marker must distinguish
+    /// the byte-ceiling guard from the line-cardinality guard.
+    #[test]
+    fn oversize_bypass_line_cardinality_marker_distinct() {
+        let raw: Vec<u8> = b"head\n"
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(b'\n', 100))
+            .collect();
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::LineCardinality,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("MAX_INPUT_LINES"),
+            "line-cardinality marker present: {body:?}"
+        );
+        assert!(
+            !body.contains("> MAX_INPUT_BYTES"),
+            "byte-ceiling marker must not appear for line-cardinality bypass: {body:?}"
+        );
+    }
+
+    /// Round-7 (new loop) regression: `bytes_dropped_truncate` must
+    /// reflect dropped *source* bytes, not `raw_byte_len -
+    /// compacted_bytes.len()`. Synthetic markers/newlines are not
+    /// source bytes; subtracting them under-reports loss.
+    #[test]
+    fn oversize_bypass_drop_accounting_excludes_synthetic_marker() {
+        // Construct a payload whose head + tail preserved bytes are
+        // small relative to total raw_byte_len; expected drop ~=
+        // raw_byte_len - (head_preserved + tail_preserved).
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"head-line\n");
+        raw.extend(std::iter::repeat_n(b'M', 80_000));
+        raw.push(b'\n');
+        raw.extend_from_slice(b"tail-line\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        // Sum of marker + newlines ~= 100 bytes. dropped should be
+        // strictly greater than (raw_byte_len - compacted_byte_len),
+        // because compacted includes synthetic marker bytes that
+        // aren't source.
+        let naive = raw_byte_len.saturating_sub(out.compacted_byte_len);
+        assert!(
+            out.stats.bytes_dropped_truncate > naive,
+            "source-byte accounting > naive raw-minus-compacted: got {} vs naive {}",
+            out.stats.bytes_dropped_truncate,
+            naive,
+        );
+    }
+
     /// Round-5 (new loop) regression: the oversize bypass tail slice
     /// can begin mid-OSC/CSI sequence; the sanitizer anchors on ESC
     /// and would treat the dangling bytes as plain text. Advance the
@@ -548,7 +668,14 @@ mod wrapper_tests {
         let raw_hash = super::sha256_payload_hash(&raw);
         let cfg = SquashConfig::default();
         let stats = SquashStats::default();
-        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         assert!(
             !body.contains("attacker.example"),
@@ -579,7 +706,14 @@ mod wrapper_tests {
         let raw_hash = super::sha256_payload_hash(&raw);
         let cfg = SquashConfig::default();
         let stats = SquashStats::default();
-        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         // Suffix is NOT preserved — would risk leaking mid-sequence bytes.
         assert!(
@@ -640,7 +774,14 @@ mod wrapper_tests {
         let raw_hash = super::sha256_payload_hash(&raw);
         let cfg = SquashConfig::default();
         let stats = SquashStats::default();
-        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         // Sanitization happened.
         assert!(out.stats.ansi_stripped, "ansi_stripped flag must be set");
@@ -677,7 +818,14 @@ mod wrapper_tests {
         let raw_hash = super::sha256_payload_hash(&raw);
         let cfg = SquashConfig::default();
         let stats = SquashStats::default();
-        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         // Final diagnostic line preserved whole.
         assert!(
@@ -1806,8 +1954,25 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     // ceiling routes to the bypass path, which uses byte slicing and
     // avoids the per-line `Vec<String>` allocations of the staged
     // pipeline. Counting `\n` is O(N) but cheap relative to staging.
-    if raw_bytes.len() > MAX_INPUT_BYTES || bytecount_newlines(raw_bytes) > MAX_INPUT_LINES {
-        return oversize_bypass(raw_bytes, raw_hash, raw_byte_len, cfg, stats);
+    if raw_bytes.len() > MAX_INPUT_BYTES {
+        return oversize_bypass(
+            raw_bytes,
+            raw_hash,
+            raw_byte_len,
+            cfg,
+            stats,
+            BypassReason::ByteCeiling,
+        );
+    }
+    if bytecount_newlines(raw_bytes) > MAX_INPUT_LINES {
+        return oversize_bypass(
+            raw_bytes,
+            raw_hash,
+            raw_byte_len,
+            cfg,
+            stats,
+            BypassReason::LineCardinality,
+        );
     }
 
     let decoded = stage1_lossy_utf8(raw_bytes);
@@ -1874,10 +2039,34 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     }
 }
 
-/// Oversize-bypass: when raw exceeds `MAX_INPUT_BYTES` the per-stage
-/// pipeline would clone several full copies before stage 6 enforces
-/// `max_bytes`, risking OOM on legitimate long-running build/test logs.
-/// Take a head + tail byte slice, decode lossily, trim the decoded
+/// Reason `squash()` routed to the oversize bypass. Surfaced in the
+/// emitted marker so audit/observability can distinguish the failing
+/// guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BypassReason {
+    /// `raw_bytes.len() > MAX_INPUT_BYTES`.
+    ByteCeiling,
+    /// `\n` count exceeded `MAX_INPUT_LINES` (line-density OOM guard).
+    LineCardinality,
+}
+
+impl BypassReason {
+    fn marker(self, raw_byte_len: usize, line_count: usize) -> String {
+        match self {
+            Self::ByteCeiling => format!(
+                "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
+            ),
+            Self::LineCardinality => format!(
+                "[…oversize bypass: {line_count} lines > MAX_INPUT_LINES ({MAX_INPUT_LINES}), squash skipped…]"
+            ),
+        }
+    }
+}
+
+/// Oversize-bypass: when raw exceeds `MAX_INPUT_BYTES` or `MAX_INPUT_LINES`
+/// the per-stage pipeline would clone several full copies before stage 6
+/// enforces `max_bytes`, risking OOM on legitimate long-running build/test
+/// logs. Take a head + tail byte slice, decode lossily, trim the decoded
 /// strings to byte budgets at codepoint boundaries (lossy decode can
 /// expand 1B → 3B for invalid bytes), insert a clear marker, and
 /// return a normal `SquashOutput` with `stats.truncated = true`.
@@ -1888,22 +2077,18 @@ fn oversize_bypass(
     raw_byte_len: usize,
     cfg: &SquashConfig,
     mut stats: SquashStats,
+    reason: BypassReason,
 ) -> SquashOutput {
     let max_body = cfg.max_bytes();
-    let marker = format!(
-        "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
-    );
+    // Line count needed only for the LineCardinality marker; cheap to
+    // compute and capped via short-circuit in `bytecount_newlines`.
+    let line_count = bytecount_newlines(raw_bytes);
+    let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
     let half = budget / 2;
-    // Head/tail windows are sized at 2x the byte budget so lossy
-    // decoding (1B → 3B for invalid bytes) and stage-2 sanitization
-    // both have headroom before the final byte trim.
     let head_raw_end = (half * 2).min(raw_bytes.len());
     let head_decoded = stage1_lossy_utf8(&raw_bytes[..head_raw_end]);
-    // Stage-2 ANSI/OSC sanitization: oversized captures must NOT leak
-    // control-plane bytes (titles, OSC-8 URLs, raw escapes) just because
-    // they took the bypass path.
     let mut head_stripped = false;
     let head_sanitized = stage2_ansi_strip(&head_decoded, &mut head_stripped);
     stats.ansi_stripped |= head_stripped;
@@ -1915,12 +2100,6 @@ fn oversize_bypass(
         None => head_trimmed,
     };
 
-    // Tail: the slice may begin mid-CSI/OSC, so the sanitizer (which
-    // anchors on ESC) cannot recognize a sequence whose introducer fell
-    // outside the window. Advance `tail_raw_start` to the byte AFTER
-    // the next `\n` in raw_bytes — that guarantees the slice begins on
-    // a source-line boundary, so any escape that crossed the boundary
-    // is fully outside the retained window.
     let tail_window = (half * 2).min(raw_bytes.len());
     let mut tail_raw_start = raw_bytes.len() - tail_window;
     let mut tail_aligned_to_line = false;
@@ -1934,26 +2113,30 @@ fn oversize_bypass(
     compacted_bytes.extend_from_slice(marker_bytes);
     compacted_bytes.push(b'\n');
 
+    let mut tail_source_bytes: usize = 0;
     if tail_aligned_to_line {
-        // Standard path: slice begins on a line boundary, sanitizer
-        // sees every introducer in-window, no mid-sequence leak risk.
         let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
         let mut tail_stripped = false;
         let tail_sanitized = stage2_ansi_strip(&tail_decoded, &mut tail_stripped);
         stats.ansi_stripped |= tail_stripped;
         let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
-        compacted_bytes.extend_from_slice(tail_trimmed.as_bytes());
+        // The raw slice was line-aligned (begins after a `\n`), so an
+        // UN-trimmed tail starts on a line boundary. Only realign if
+        // `trim_to_byte_budget_at_boundary_from_end` actually shaved
+        // bytes off the front — that's when the first byte can sit
+        // mid-line again (Round-7 finding).
+        let was_trimmed = tail_trimmed.len() < tail_sanitized.len();
+        let tail_aligned: &str = if was_trimmed {
+            match tail_trimmed.find('\n') {
+                Some(idx) => &tail_trimmed[idx + 1..],
+                None => "",
+            }
+        } else {
+            tail_trimmed
+        };
+        compacted_bytes.extend_from_slice(tail_aligned.as_bytes());
+        tail_source_bytes = tail_aligned.len();
     } else if !raw_bytes.is_empty() {
-        // No `\n` exists in the entire retained window — the source
-        // is one extremely long line (minified JSON, base64, etc.).
-        // Any suffix we could emit may begin mid-CSI/OSC payload, and
-        // a backward-looking sanitizer cannot recover sequence state
-        // from outside the window. To prevent leaking residual
-        // control-plane bytes, emit only the degraded marker — no
-        // suffix bytes. The byte-bounded loss is signaled to
-        // consumers by the marker itself; the head + this marker
-        // together still indicate that an oversized single-line
-        // payload was bypassed.
         let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
         compacted_bytes.extend_from_slice(degraded);
     }
@@ -1964,7 +2147,11 @@ fn oversize_bypass(
         max_body,
     );
     stats.truncated = true;
-    stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(compacted_bytes.len());
+    // Drop accounting: count only source bytes that were preserved.
+    // Synthetic markers and injected newlines are NOT source bytes,
+    // so we cannot subtract `compacted_bytes.len()` from `raw_byte_len`.
+    let preserved_source_bytes = head.len() + tail_source_bytes;
+    stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(preserved_source_bytes);
     let compacted_hash = sha256_payload_hash(&compacted_bytes);
     let compacted_byte_len = compacted_bytes.len();
     SquashOutput {
