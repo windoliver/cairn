@@ -27,6 +27,18 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 cairn ingest --kind KIND --body BODY
 ```
 
+```bash
+cairn ingest --kind KIND --file FILE
+```
+
+```bash
+cairn ingest --kind KIND --url URL
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --tags TAGS
+```
+
 ## `cairn search`
 
 **Use when:**
@@ -43,6 +55,18 @@ cairn ingest --kind KIND --body BODY
 
 ```bash
 cairn search --mode keyword QUERY
+```
+
+```bash
+cairn search --mode keyword --limit 1 QUERY
+```
+
+```bash
+cairn search --mode keyword --filters '{"field":"kind","op":"eq","value":"note"}' QUERY
+```
+
+```bash
+cairn search --mode keyword --cursor CURSOR QUERY
 ```
 
 ## `cairn retrieve`
@@ -67,11 +91,27 @@ cairn retrieve --session SESSION_ID
 ```
 
 ```bash
+cairn retrieve --session SESSION_ID --limit 1
+```
+
+```bash
+cairn retrieve --session SESSION_ID --include tool_calls
+```
+
+```bash
 cairn retrieve --session SESSION_ID --turn 0
 ```
 
 ```bash
+cairn retrieve --session SESSION_ID --turn 0 --include tool_calls
+```
+
+```bash
 cairn retrieve --folder PATH
+```
+
+```bash
+cairn retrieve --folder PATH --depth 0
 ```
 
 ```bash
@@ -80,6 +120,10 @@ cairn retrieve --scope '{"user":"u"}'
 
 ```bash
 cairn retrieve --profile --user USER
+```
+
+```bash
+cairn retrieve --profile --agent AGENT
 ```
 
 ## `cairn summarize`
@@ -107,6 +151,12 @@ cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 - do NOT call in a tight inner loop — one call per turn
 
 **Exclusivity:** this is the canonical hot-prefix surface
+
+**Example:**
+
+```bash
+cairn assemble_hot --budget 0
+```
 
 ## `cairn capture_trace`
 

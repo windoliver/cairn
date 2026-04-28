@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::ir::{CliCommand, CliShape, Document, VerbDef};
+use super::ir::{CliCommand, CliFlag, CliShape, Document, VerbDef};
 use super::skill_compat::{
     any_of_required_branches, collect_arg_property_schemas, is_signed_int_source,
-    is_unsigned_int_source, one_of_required_branches, required_excluding_const,
+    is_unsigned_int_source, list_enum_options, one_of_required_branches, required_excluding_const,
     variant_required_specs,
 };
 use super::{CodegenError, GeneratedFile};
@@ -82,104 +82,247 @@ fn push_verb_section(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError>
     Ok(())
 }
 
-/// Emit a canonical CLI example block per `CliCommand` (one per variant for
-/// tagged-union verbs). Each example uses every schema-required field with an
-/// uppercase placeholder value — this is what the skill-compat gate actually
-/// validates against the IDL, so a flag rename or required-field change here
-/// blocks both the emitter and `cairn-codegen --check`.
+/// Emit canonical CLI example blocks per `CliCommand`. Coverage:
+/// - one example per `anyOf` × `oneOf` branch combination so every
+///   disjunctive/exclusive arm is exercised (e.g., `ingest --body` /
+///   `--file` / `--url`, `retrieve --profile --user` / `--agent`); and
+/// - one extra example per "interesting" optional flag (`json`,
+///   `list<...>`, bounded ints, primitive `$ref` strings) so optional
+///   user-visible paths participate in the compat gate too.
 fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError> {
     let cmds: Vec<&CliCommand> = match &verb.cli {
         CliShape::Single(c) => vec![c],
         CliShape::Variants(v) => v.iter().collect(),
     };
     let is_tagged_union = cmds.len() > 1;
-    let required_per_cmd = required_args_per_command(verb, &cmds);
+    let specs = variant_specs_per_command(verb, &cmds);
     let prop_schemas = collect_arg_property_schemas(verb);
     let mut emitted_any = false;
     let mut buf = String::new();
     for (idx, cmd) in cmds.iter().enumerate() {
-        let required = required_per_cmd.get(idx).cloned().unwrap_or_default();
-        let positional_in_required = cmd
-            .positional
-            .as_ref()
-            .is_some_and(|p| required.contains(&p.name));
-        let any_required_flag_known = cmd.flags.iter().any(|f| required.contains(&f.name));
-        // For tagged-union verbs, each variant must produce exactly one
-        // example. An empty required-set here means `variant_required_specs`
-        // couldn't pair this CliCommand to any schema branch — likely a CLI/
-        // schema drift. Fail closed so the gate doesn't silently lose
-        // coverage for that variant.
-        if is_tagged_union && !positional_in_required && !any_required_flag_known {
+        let spec = specs.get(idx).cloned().unwrap_or_default();
+        let branch_sets = expand_branches(&spec);
+        // Variant must yield at least one renderable branch. Empty here
+        // means the spec couldn't be paired to any schema branch — likely
+        // CLI/schema drift. Fail closed for tagged-union verbs.
+        let any_renderable = branch_sets.iter().any(|req| set_is_renderable(cmd, req));
+        if is_tagged_union && !any_renderable {
             return Err(CodegenError::Emit(format!(
                 "verb `{}` variant `{}` (idx {idx}): no required field could be paired to a schema variant — CLI/schema drift likely",
                 verb.id, cmd.command
             )));
         }
-        // Single-shape verbs may legitimately have no required fields
-        // (rare, but allowed) — silently skip the example block in that case.
-        if !positional_in_required && !any_required_flag_known {
-            continue;
+        for required in &branch_sets {
+            if !set_is_renderable(cmd, required) {
+                continue;
+            }
+            render_example(&mut buf, cmd, required, &prop_schemas, None);
+            emitted_any = true;
         }
-        buf.push_str("```bash\n");
-        // Use the variant's `command` rather than `verb.id` so a future IDL
-        // change that diverges them (e.g., a CLI rename) flows through into
-        // the example without manual edits.
-        let _ = write!(buf, "cairn {}", cmd.command);
+        // Once per branch we exercise required-field-only. Now layer in
+        // optional "interesting" flags one at a time so the compat gate
+        // sees them too. We use the first renderable branch's required
+        // set as the carrier so the line stays minimal.
+        let carrier = branch_sets
+            .iter()
+            .find(|r| set_is_renderable(cmd, r))
+            .cloned()
+            .unwrap_or_default();
         for flag in &cmd.flags {
-            if required.contains(&flag.name) {
-                if flag.value_source == "bool" {
-                    let _ = write!(buf, " --{}", flag.long);
-                } else {
-                    let exemplar = exemplar_for_flag(
-                        &flag.name,
-                        &flag.value_source,
-                        flag.cli_exemplar.as_deref(),
-                        prop_schemas.get(&flag.name),
-                    );
-                    let _ = write!(buf, " --{} {}", flag.long, shell_quote(&exemplar));
-                }
+            if carrier.contains(&flag.name) {
+                continue;
             }
-        }
-        if positional_in_required && let Some(p) = &cmd.positional {
-            // Resolve a primitive-ref exemplar (e.g., Ulid) when the
-            // positional's property schema points at one — without this
-            // `cairn retrieve ID` would bypass the Ulid pattern check via
-            // the placeholder rule. Falls back to ALL_CAPS placeholder
-            // for unconstrained positionals.
-            let item_schema = prop_schemas.get(&p.name).and_then(|s| {
-                if s.get("type").and_then(serde_json::Value::as_str) == Some("array") {
-                    s.get("items")
-                } else {
-                    Some(s)
-                }
-            });
-            let primitive_sample = item_schema
-                .and_then(|s| s.get("$ref").and_then(serde_json::Value::as_str))
-                .and_then(primitive_ref_exemplar);
-            if p.repeatable {
-                if let Some(sample) = primitive_sample {
-                    // Two concrete schema-valid items so the gate exercises
-                    // the pattern check on every one.
-                    let _ = write!(buf, " {sample} {sample}");
-                } else {
-                    let stem = placeholder_for(&p.name);
-                    let stem = stem.trim_end_matches('S');
-                    let _ = write!(buf, " {stem}_1 {stem}_2");
-                }
-            } else if let Some(sample) = primitive_sample {
-                let _ = write!(buf, " {sample}");
-            } else {
-                let _ = write!(buf, " {}", placeholder_for(&p.name));
+            if !is_interesting_optional(flag, prop_schemas.get(&flag.name)) {
+                continue;
             }
+            render_example(
+                &mut buf,
+                cmd,
+                &carrier,
+                &prop_schemas,
+                Some(flag.name.as_str()),
+            );
+            emitted_any = true;
         }
-        buf.push_str("\n```\n\n");
-        emitted_any = true;
     }
     if emitted_any {
         s.push_str("**Example:**\n\n");
         s.push_str(&buf);
     }
     Ok(())
+}
+
+/// True when the example for `cmd` constrained to `required` would render
+/// at least one token after the verb (a known flag or its positional). An
+/// unrenderable required set means an empty `cairn <verb>` line, which the
+/// gate rejects as ambiguous.
+fn set_is_renderable(cmd: &CliCommand, required: &BTreeSet<String>) -> bool {
+    let positional_in_required = cmd
+        .positional
+        .as_ref()
+        .is_some_and(|p| required.contains(&p.name));
+    let any_required_flag = cmd.flags.iter().any(|f| required.contains(&f.name));
+    positional_in_required || any_required_flag
+}
+
+/// Per-command [`VariantSpec`] — for tagged-union verbs this defers to
+/// `variant_required_specs`; for single-shape verbs it lifts `required` plus
+/// every `anyOf`/`oneOf` branch off `$defs/Args`. Unlike the prior
+/// `required_args_per_command`, this preserves the full branch list so the
+/// emitter can render one example per disjunct.
+fn variant_specs_per_command(
+    verb: &VerbDef,
+    cmds: &[&CliCommand],
+) -> Vec<super::skill_compat::VariantSpec> {
+    use super::skill_compat::VariantSpec;
+    let cmd_count = cmds.len();
+    if cmd_count > 1 {
+        return variant_required_specs(verb, cmds);
+    }
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb.args_schema_bytes) else {
+        return vec![VariantSpec::default(); cmd_count];
+    };
+    let Some(args) = schema.get("$defs").and_then(|d| d.get("Args")) else {
+        return vec![VariantSpec::default(); cmd_count];
+    };
+    let spec = VariantSpec {
+        base: required_excluding_const(args),
+        any_of: any_of_required_branches(args),
+        one_of: one_of_required_branches(args),
+    };
+    let mut out = Vec::with_capacity(cmd_count);
+    out.push(spec);
+    out.resize(cmd_count, VariantSpec::default());
+    out
+}
+
+/// Produce one required-field set per branch combination so each disjunctive
+/// (`anyOf`) and exclusive (`oneOf`) arm gets its own example. With no
+/// branches this collapses to a single set equal to `base`.
+fn expand_branches(spec: &super::skill_compat::VariantSpec) -> Vec<BTreeSet<String>> {
+    let any_of: Vec<BTreeSet<String>> = if spec.any_of.is_empty() {
+        vec![BTreeSet::new()]
+    } else {
+        spec.any_of.clone()
+    };
+    let one_of: Vec<BTreeSet<String>> = if spec.one_of.is_empty() {
+        vec![BTreeSet::new()]
+    } else {
+        spec.one_of.clone()
+    };
+    let mut out = Vec::new();
+    for a in &any_of {
+        for o in &one_of {
+            let mut combined = spec.base.clone();
+            combined.extend(a.iter().cloned());
+            combined.extend(o.iter().cloned());
+            if !out.contains(&combined) {
+                out.push(combined);
+            }
+        }
+    }
+    out
+}
+
+/// True for optional flag value sources where a rename or schema drift would
+/// be invisible to a required-only example: JSON, list, bounded ints, and
+/// primitive-`$ref` strings. Bool / freeform string flags don't add coverage
+/// the gate would otherwise miss.
+fn is_interesting_optional(flag: &CliFlag, prop_schema: Option<&serde_json::Value>) -> bool {
+    let src = flag.value_source.as_str();
+    if src == "json" || list_enum_options(src).is_some() || src.starts_with("list<") {
+        return true;
+    }
+    if (is_unsigned_int_source(src) || is_signed_int_source(src))
+        && let Some(p) = prop_schema
+        && (p.get("minimum").is_some() || p.get("maximum").is_some())
+    {
+        return true;
+    }
+    if let Some(p) = prop_schema
+        && p.get("$ref").is_some()
+    {
+        return true;
+    }
+    false
+}
+
+/// Render one `cairn <verb> ...` example into `buf`. `required` selects which
+/// flags / positional to emit; `extra_optional` (when set) appends one more
+/// flag after the required block — used to exercise an optional flag.
+fn render_example(
+    buf: &mut String,
+    cmd: &CliCommand,
+    required: &BTreeSet<String>,
+    prop_schemas: &std::collections::BTreeMap<String, serde_json::Value>,
+    extra_optional: Option<&str>,
+) {
+    buf.push_str("```bash\n");
+    let _ = write!(buf, "cairn {}", cmd.command);
+    for flag in &cmd.flags {
+        if required.contains(&flag.name) {
+            push_flag(buf, flag, prop_schemas);
+        }
+    }
+    if let Some(extra) = extra_optional
+        && let Some(flag) = cmd.flags.iter().find(|f| f.name == extra)
+    {
+        push_flag(buf, flag, prop_schemas);
+    }
+    if let Some(p) = &cmd.positional
+        && required.contains(&p.name)
+    {
+        push_positional(buf, p, prop_schemas);
+    }
+    buf.push_str("\n```\n\n");
+}
+
+fn push_flag(
+    buf: &mut String,
+    flag: &CliFlag,
+    prop_schemas: &std::collections::BTreeMap<String, serde_json::Value>,
+) {
+    if flag.value_source == "bool" {
+        let _ = write!(buf, " --{}", flag.long);
+    } else {
+        let exemplar = exemplar_for_flag(
+            &flag.name,
+            &flag.value_source,
+            flag.cli_exemplar.as_deref(),
+            prop_schemas.get(&flag.name),
+        );
+        let _ = write!(buf, " --{} {}", flag.long, shell_quote(&exemplar));
+    }
+}
+
+fn push_positional(
+    buf: &mut String,
+    p: &super::ir::CliPositional,
+    prop_schemas: &std::collections::BTreeMap<String, serde_json::Value>,
+) {
+    let item_schema = prop_schemas.get(&p.name).and_then(|s| {
+        if s.get("type").and_then(serde_json::Value::as_str) == Some("array") {
+            s.get("items")
+        } else {
+            Some(s)
+        }
+    });
+    let primitive_sample = item_schema
+        .and_then(|s| s.get("$ref").and_then(serde_json::Value::as_str))
+        .and_then(primitive_ref_exemplar);
+    if p.repeatable {
+        if let Some(sample) = primitive_sample {
+            let _ = write!(buf, " {sample} {sample}");
+        } else {
+            let stem = placeholder_for(&p.name);
+            let stem = stem.trim_end_matches('S');
+            let _ = write!(buf, " {stem}_1 {stem}_2");
+        }
+    } else if let Some(sample) = primitive_sample {
+        let _ = write!(buf, " {sample}");
+    } else {
+        let _ = write!(buf, " {}", placeholder_for(&p.name));
+    }
 }
 
 /// Render a schema field name as an uppercase shell placeholder (`session_id`
@@ -262,60 +405,6 @@ fn primitive_ref_exemplar(reference: &str) -> Option<&'static str> {
         "Identity" => Some("usr:alice"),
         _ => None,
     }
-}
-
-/// For each `CliCommand` index, return the set of schema-required field names
-/// (excluding any property whose schema is a `const` discriminator like
-/// `target` / `mode`). Falls back to empty sets if the schema can't be parsed.
-fn required_args_per_command(verb: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTreeSet<String>> {
-    let cmd_count = cmds.len();
-    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb.args_schema_bytes) else {
-        return vec![BTreeSet::new(); cmd_count];
-    };
-    let Some(defs) = schema.get("$defs").and_then(serde_json::Value::as_object) else {
-        return vec![BTreeSet::new(); cmd_count];
-    };
-    let Some(args) = defs.get("Args") else {
-        return vec![BTreeSet::new(); cmd_count];
-    };
-
-    // Tagged-union: defer to the shared variant-spec logic so emitter and
-    // matcher stay aligned. For example generation we collapse `base ∪
-    // first(anyOf)` — the canonical satisfying combination. Dispatch on
-    // `cmds.len()` rather than schema shape: ingest has a single CLI command
-    // but uses `oneOf` inline at `$defs/Args` for the body/file/url branches,
-    // which the single-shape path handles correctly via
-    // `any_of_required_branches`.
-    if cmd_count > 1 {
-        return variant_required_specs(verb, cmds)
-            .into_iter()
-            .map(|spec| {
-                let mut required = spec.base;
-                if let Some(first) = spec.any_of.into_iter().next() {
-                    required.extend(first);
-                }
-                if let Some(first) = spec.one_of.into_iter().next() {
-                    required.extend(first);
-                }
-                required
-            })
-            .collect();
-    }
-
-    // Single-shape: required lives on $defs/Args itself, and we lift the
-    // first `anyOf` and first `oneOf` branch in so the rendered example
-    // satisfies both the disjunctive (≥1) and exclusive (==1) checks.
-    let mut required = required_excluding_const(args);
-    if let Some(first) = any_of_required_branches(args).into_iter().next() {
-        required.extend(first);
-    }
-    if let Some(first) = one_of_required_branches(args).into_iter().next() {
-        required.extend(first);
-    }
-    let mut out = Vec::with_capacity(cmd_count);
-    out.push(required);
-    out.resize(cmd_count, BTreeSet::new());
-    out
 }
 
 fn emit_conventions(doc: &Document) -> GeneratedFile {

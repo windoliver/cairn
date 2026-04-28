@@ -473,6 +473,21 @@ fn cli_validator_rejects_invalid_scope_via_relative_ref() {
 }
 
 #[test]
+fn live_skill_md_covers_oneof_branches_and_optional_json_flag() {
+    // Round-5 finding 1 + 2: the generated SKILL.md must exercise every
+    // disjunctive branch (so a rename of `--file` or `--url` would block
+    // codegen) and every "interesting" optional flag (so a rename of
+    // `--filters` would too). Spot-check a representative trio.
+    let md = live_skill_md();
+    for needle in ["--body", "--file", "--url", "--filters"] {
+        assert!(
+            md.contains(needle),
+            "live SKILL.md must contain `{needle}` so the compat gate exercises that path"
+        );
+    }
+}
+
+#[test]
 fn cli_validator_rejects_empty_search_query_positional() {
     // Round-4 finding 1: positional validation must enforce the full
     // property schema, not just `pattern`. `search.query` declares

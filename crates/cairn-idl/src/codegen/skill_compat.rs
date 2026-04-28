@@ -863,7 +863,7 @@ fn validate_list_enum_value(
 /// Parse a `list<enum(a,b,c)>` value-source into the inner `a,b,c`. Returns
 /// `None` for any other shape so the caller can fall through to the
 /// freeform/unchecked path.
-fn list_enum_options(source: &str) -> Option<&str> {
+pub(crate) fn list_enum_options(source: &str) -> Option<&str> {
     source
         .strip_prefix("list<enum(")
         .and_then(|rest| rest.strip_suffix(")>"))
@@ -1196,7 +1196,7 @@ fn count_matching_variants(
 /// flag); `any_of` is the inclusive-or branches (≥1 satisfied); `one_of` is
 /// the exclusive-or branches (exactly 1 satisfied — JSON Schema `oneOf`
 /// semantics, e.g., `ingest`'s `body | file | url`).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct VariantSpec {
     pub base: BTreeSet<String>,
     pub any_of: Vec<BTreeSet<String>>,
