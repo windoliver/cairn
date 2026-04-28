@@ -72,6 +72,10 @@ cairn retrieve --folder PATH
 cairn retrieve --scope SCOPE
 ```
 
+```bash
+cairn retrieve --profile --user USER
+```
+
 ## `cairn summarize`
 
 **Use when:**
@@ -85,7 +89,7 @@ cairn retrieve --scope SCOPE
 **Example:**
 
 ```bash
-cairn summarize RECORD_IDS
+cairn summarize RECORD_ID_1 RECORD_ID_2
 ```
 
 ## `cairn assemble_hot`

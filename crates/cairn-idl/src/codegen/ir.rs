@@ -126,6 +126,10 @@ pub struct CliFlag {
 pub struct CliPositional {
     pub name: String,
     pub description: String,
+    /// True when the positional accepts more than one value (clap
+    /// `num_args(1..)`). Currently set from the optional `repeatable` field
+    /// in `x-cairn-cli.positional`.
+    pub repeatable: bool,
 }
 
 /// Skill triggers extracted from `x-cairn-skill-triggers`.
@@ -719,6 +723,10 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
+        repeatable: p
+            .get("repeatable")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     });
     Ok(CliCommand {
         command,

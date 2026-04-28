@@ -233,7 +233,16 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         .iter()
         .flat_map(|c| c.flags.iter().map(|f| (f.long.as_str(), f)))
         .collect();
-    let positional_capacity = usize::from(cmds.iter().any(|c| c.positional.is_some()));
+    // Positional capacity: 0 if no variant declares one; usize::MAX if any
+    // variant marks its positional repeatable (clap `num_args(1..)`); else 1.
+    let positional_capacity = if cmds
+        .iter()
+        .any(|c| c.positional.as_ref().is_some_and(|p| p.repeatable))
+    {
+        usize::MAX
+    } else {
+        usize::from(cmds.iter().any(|c| c.positional.is_some()))
+    };
 
     let TokenScan {
         positional_count,
@@ -379,7 +388,11 @@ fn count_matching_variants(
                 return false;
             }
             // 3. Positional count must fit this variant.
-            let positional_capacity = usize::from(cmd.positional.is_some());
+            let positional_capacity = match &cmd.positional {
+                Some(p) if p.repeatable => usize::MAX,
+                Some(_) => 1,
+                None => 0,
+            };
             positional_count <= positional_capacity
         })
         .count()
@@ -407,10 +420,52 @@ pub(crate) fn required_excluding_const(schema: &serde_json::Value) -> BTreeSet<S
         .collect()
 }
 
+/// Extract every `anyOf` branch's `required` field set from a variant schema.
+/// For shapes like `ArgsProfile` (`required: ["target"]` plus
+/// `anyOf: [{required: ["user"]}, {required: ["agent"]}]`), the branch
+/// requirements are what actually distinguishes the variant on the CLI.
+/// Returns an empty `Vec` when the schema has no `anyOf`.
+pub(crate) fn any_of_required_branches(schema: &serde_json::Value) -> Vec<BTreeSet<String>> {
+    let Some(arr) = schema.get("anyOf").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|branch| {
+            branch
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .map(|r| {
+                    r.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect::<BTreeSet<String>>()
+                })
+        })
+        .collect()
+}
+
+/// Look up the const-discriminator value (e.g., `target: { "const": "profile" }`)
+/// → `"profile"`. Returns `None` when no property carries a `const`.
+pub(crate) fn discriminator_const(schema: &serde_json::Value) -> Option<String> {
+    let props = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)?;
+    for value in props.values() {
+        if let Some(c) = value.get("const").and_then(serde_json::Value::as_str) {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
 /// For a tagged-union verb, return the schema-required field set per
 /// `CliCommand` variant in `cmds` order. Discriminator fields (whose schema
-/// is a `const`) are stripped — what's left is what a CLI invocation must
-/// actually supply to satisfy that variant.
+/// is a `const`) are stripped, then augmented with:
+/// - the variant's discriminator flag, when its `const` value matches a flag
+///   on this `CliCommand` (e.g., `target: "profile"` → `--profile`); and
+/// - the first `anyOf` branch's required fields, so variants like
+///   `ArgsProfile` (`anyOf: [{required:["user"]},{required:["agent"]}]`) are
+///   matched on at least one valid combination.
 fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTreeSet<String>> {
     // Best-effort schema parse; if anything is off, return empty sets so the
     // matcher falls back to "no variant selected" (and therefore rejects).
@@ -430,7 +485,7 @@ fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTre
     };
 
     let mut out = Vec::with_capacity(cmds.len());
-    for entry in one_of {
+    for (idx, entry) in one_of.iter().enumerate() {
         let Some(ref_path) = entry.get("$ref").and_then(serde_json::Value::as_str) else {
             out.push(BTreeSet::new());
             continue;
@@ -439,10 +494,26 @@ fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTre
             out.push(BTreeSet::new());
             continue;
         };
-        let required = defs
-            .get(name)
-            .map(required_excluding_const)
-            .unwrap_or_default();
+        let Some(variant_schema) = defs.get(name) else {
+            out.push(BTreeSet::new());
+            continue;
+        };
+        let mut required = required_excluding_const(variant_schema);
+        // Lift the discriminator into required when its const value matches a
+        // CLI flag on this variant — that's how shapes like ArgsProfile select
+        // themselves on the command line (`--profile ...`).
+        if let Some(disc) = discriminator_const(variant_schema)
+            && let Some(cmd) = cmds.get(idx)
+            && let Some(flag) = cmd.flags.iter().find(|f| f.long == disc || f.name == disc)
+        {
+            required.insert(flag.name.clone());
+        }
+        // For `anyOf: [{required:[…]}, …]` constraints (ArgsProfile), pull in
+        // the first branch so the matcher and the example emitter agree on a
+        // canonical satisfying combination.
+        if let Some(first) = any_of_required_branches(variant_schema).into_iter().next() {
+            required.extend(first);
+        }
         out.push(required);
     }
     // Pad / truncate to match cmds length so the index map is stable.

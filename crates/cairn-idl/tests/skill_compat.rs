@@ -237,6 +237,54 @@ fn cli_validator_accepts_retrieve_with_single_discriminator() {
 }
 
 #[test]
+fn cli_validator_rejects_value_flag_without_value() {
+    // `--mode` takes a value; trailing nothing must fail compat (clap would
+    // also reject this at runtime).
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode".into(),
+        line: 21,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("missing flag value must fail");
+    assert!(
+        matches!(
+            err,
+            CompatError::Malformed {
+                kind: "cli",
+                line: 21,
+                ..
+            }
+        ),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_retrieve_profile_anyof_branch() {
+    // ArgsProfile selects via `--profile` and requires one of {user,agent}.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --profile --user USER".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("retrieve --profile --user must validate via anyOf branch");
+}
+
+#[test]
+fn cli_validator_accepts_summarize_repeatable_positional() {
+    // summarize.record_ids is a repeatable positional; multiple positional
+    // tokens must validate, not trip the positional-cap check.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn summarize ID1 ID2 ID3".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("repeatable positional must accept multiple tokens");
+}
+
+#[test]
 fn live_skill_md_passes_compat_checks() {
     let md = live_skill_md();
     let d = doc();
