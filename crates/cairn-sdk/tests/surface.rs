@@ -523,6 +523,8 @@ fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
         // array_size_eq: negative / non-integer
         serde_json::json!({"field": "x", "op": "array_size_eq", "value": -1}),
         serde_json::json!({"field": "x", "op": "array_size_eq", "value": "10"}),
+        // `exists` is not part of the canonical filter grammar — must reject.
+        serde_json::json!({"field": "x", "op": "exists", "value": true}),
     ];
     for leaf in bad_leaves {
         let args = SearchArgs {

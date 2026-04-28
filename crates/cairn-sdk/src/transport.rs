@@ -581,11 +581,6 @@ fn validate_filter_leaf(v: &serde_json::Value) -> Result<(), SdkError> {
                 ));
             }
         }
-        "exists" => {
-            if !value.is_boolean() {
-                return Err(invalid("filter leaf: exists value must be a boolean"));
-            }
-        }
         "between" => {
             let arr = value.as_array().ok_or_else(|| {
                 invalid("filter leaf: between value must be a 2-element number array")
