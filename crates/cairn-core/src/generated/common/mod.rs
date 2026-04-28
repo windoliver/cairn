@@ -89,10 +89,10 @@ impl<'de> ::serde::Deserialize<'de> for Identity {
     where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         let tail = if let Some(t) = s.strip_prefix("agt:") { t }
-            else if let Some(t) = s.strip_prefix("usr:") { t }
+            else if let Some(t) = s.strip_prefix("hmn:") { t }
             else if let Some(t) = s.strip_prefix("snr:") { t }
             else {
-            return Err(::serde::de::Error::custom("Identity: must start with one of [agt:, usr:, snr:]"));
+            return Err(::serde::de::Error::custom("Identity: must start with one of [agt:, hmn:, snr:]"));
         };
         if tail.is_empty() {
             return Err(::serde::de::Error::custom("Identity: body after prefix must not be empty"));

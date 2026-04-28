@@ -125,7 +125,7 @@ fn seed_db() -> Connection {
     );
 
     // r2: kind=feedback, confidence=0.5, tags=["pref"]
-    //     actor_chain=[{role:author,identity:usr:tafeng}]
+    //     actor_chain=[{role:author,identity:hmn:tafeng}]
     //     extra_frontmatter: title, category=draft, priority=3, is_static=1,
     //                        tombstoned=0, active=1, backlinks=[], version=2
     insert(
@@ -143,7 +143,7 @@ fn seed_db() -> Connection {
             ("tags", r#"["pref"]"#),
             (
                 "actor_chain",
-                r#"[{"role":"author","identity":"usr:tafeng","at":"2026-04-02T11:00:00Z"}]"#,
+                r#"[{"role":"author","identity":"hmn:tafeng","at":"2026-04-02T11:00:00Z"}]"#,
             ),
             (
                 "extra_frontmatter",
@@ -434,7 +434,7 @@ fn exec_actor_chain_contains_user_identity() {
         serde_json::json!({
             "field": "actor_chain",
             "op": "array_contains",
-            "value": "usr:tafeng"
+            "value": "hmn:tafeng"
         }),
     );
     assert_eq!(ids, vec!["r2"]);
@@ -448,7 +448,7 @@ fn exec_actor_chain_contains_any_matches() {
         serde_json::json!({
             "field": "actor_chain",
             "op": "array_contains_any",
-            "value": ["usr:tafeng", "agt:other"]
+            "value": ["hmn:tafeng", "agt:other"]
         }),
     );
     ids.sort();

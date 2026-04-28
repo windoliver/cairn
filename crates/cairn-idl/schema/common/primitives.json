@@ -24,8 +24,8 @@
     "Identity": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(agt|usr|snr):[A-Za-z0-9._:-]+$",
-      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
+      "pattern": "^(agt|hmn|snr):[A-Za-z0-9._:-]+$",
+      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1."
     },
     "Cursor": {
       "type": "string",

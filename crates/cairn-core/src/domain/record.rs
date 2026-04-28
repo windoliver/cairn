@@ -449,7 +449,7 @@ impl MemoryRecord {
     /// confirmed its signature. The chain author's identity is
     /// **not** verified by [`Self::validate`] (which is shape-only),
     /// so binding scope.user to the author would let an attacker forge
-    /// `actor_chain.author = usr:victim` with a syntactically valid but
+    /// `actor_chain.author = hmn:victim` with a syntactically valid but
     /// uncountersigned signature and pollute cross-user memory under
     /// an authorized tenant/workspace/entity. Author-bound containment
     /// returns once a `VerifiedMemoryRecord` token (P1+) proves the
@@ -460,7 +460,7 @@ impl MemoryRecord {
     ) -> Result<(), DomainError> {
         let issuer = intent.issuer.0.as_str();
         if let Some(user) = self.scope.user.as_deref() {
-            let issuer_matches = issuer.starts_with("usr:") && user == issuer;
+            let issuer_matches = issuer.starts_with("hmn:") && user == issuer;
             if !issuer_matches {
                 return Err(DomainError::MalformedScope {
                     message: format!(
@@ -507,7 +507,7 @@ impl MemoryRecord {
     /// `provenance.originating_agent_id` ↔ author binding.
     ///
     /// `scope.user` / `scope.agent` must be canonical *full* identity
-    /// strings (`usr:tafeng`, `agt:claude-code:opus-4-7:main:v1`) so the
+    /// strings (`hmn:tafeng`, `agt:claude-code:opus-4-7:main:v1`) so the
     /// IDL filter sees the same string a query uses. This catches
     /// kind/format mistakes early.
     ///
@@ -538,12 +538,12 @@ impl MemoryRecord {
             let parsed =
                 Identity::parse(user.to_owned()).map_err(|_| DomainError::MalformedScope {
                     message: format!(
-                        "scope.user `{user}` is not a canonical identity (full `usr:` form required)"
+                        "scope.user `{user}` is not a canonical identity (full `hmn:` form required)"
                     ),
                 })?;
             if parsed.kind() != IdentityKind::Human {
                 return Err(DomainError::MalformedScope {
-                    message: format!("scope.user `{user}` must be a human (`usr:`) identity"),
+                    message: format!("scope.user `{user}` must be a human (`hmn:`) identity"),
                 });
             }
         }
@@ -703,16 +703,16 @@ mod tests {
 
     pub(crate) fn sample_record() -> MemoryRecord {
         // Single human author at P0: scope.user, originating_agent_id, and
-        // chain author all bind to `usr:tafeng`. Delegation chains arrive
+        // chain author all bind to `hmn:tafeng`. Delegation chains arrive
         // with P2 countersignatures.
-        let user_id = Identity::parse("usr:tafeng").expect("valid");
+        let user_id = Identity::parse("hmn:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
             scope: ScopeTuple {
-                user: Some("usr:tafeng".to_owned()),
+                user: Some("hmn:tafeng".to_owned()),
                 ..ScopeTuple::default()
             },
             body: "user prefers dark mode".to_owned(),
@@ -910,7 +910,7 @@ mod tests {
             chain_parents: vec![],
             expires_at: "2026-04-22T14:07:11Z".to_owned(),
             issued_at: "2026-04-22T14:02:11Z".to_owned(),
-            issuer: crate::generated::common::Identity("usr:tafeng".to_owned()),
+            issuer: crate::generated::common::Identity("hmn:tafeng".to_owned()),
             key_version: 1,
             nonce: crate::generated::common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
             operation_id: crate::generated::common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
@@ -1068,7 +1068,7 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        r.scope.user = Some("usr:tafeng".to_owned());
+        r.scope.user = Some("hmn:tafeng".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: agent.clone(),
@@ -1083,19 +1083,19 @@ mod tests {
     #[test]
     fn intent_containment_rejects_user_scope_via_forged_author() {
         // Adversarial path: an attacker constructs a record whose
-        // chain-author identity is `usr:victim` with a syntactically
+        // chain-author identity is `hmn:victim` with a syntactically
         // valid but uncountersigned signature, then sets
-        // `scope.user = usr:victim`. validate() is shape-only, so it
+        // `scope.user = hmn:victim`. validate() is shape-only, so it
         // accepts the well-formed identity and signature wire form.
         // Containment must reject because intent.issuer (the only
-        // cryptographically established identity here) is `usr:tafeng`,
-        // not `usr:victim` — the author claim is unverified.
+        // cryptographically established identity here) is `hmn:tafeng`,
+        // not `hmn:victim` — the author claim is unverified.
         let mut r = sample_record();
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        let victim = Identity::parse("usr:victim").expect("valid");
-        r.scope.user = Some("usr:victim".to_owned());
+        let victim = Identity::parse("hmn:victim").expect("valid");
+        r.scope.user = Some("hmn:victim".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: victim.clone(),
@@ -1103,7 +1103,7 @@ mod tests {
         }];
         r.provenance.originating_agent_id = victim;
         let intent = intent_for(&r, "acme", "ws", "ent", SignedIntentScopeTier::Project);
-        // intent.issuer = usr:tafeng (not usr:victim) — author claim
+        // intent.issuer = hmn:tafeng (not hmn:victim) — author claim
         // is uncountersigned, so containment must not accept it.
         let err = r.validate_against_intent(&intent).unwrap_err();
         assert!(matches!(err, DomainError::MalformedScope { .. }));
@@ -1116,7 +1116,7 @@ mod tests {
         r.scope.tenant = Some("acme".to_owned());
         r.scope.workspace = Some("ws".to_owned());
         r.scope.entity = Some("ent".to_owned());
-        r.scope.user = Some("usr:victim".to_owned());
+        r.scope.user = Some("hmn:victim".to_owned());
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
             identity: agent.clone(),
@@ -1153,7 +1153,7 @@ mod tests {
             0,
             ActorChainEntry {
                 role: ChainRole::Principal,
-                identity: Identity::parse("usr:tafeng").expect("valid"),
+                identity: Identity::parse("hmn:tafeng").expect("valid"),
                 at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             },
         );
@@ -1227,9 +1227,9 @@ mod tests {
     fn scope_agent_rejects_human_author() {
         // scope.agent requires an agent author.
         let mut r = sample_record();
-        // Sample author is `usr:tafeng`. Set scope.agent — must reject.
+        // Sample author is `hmn:tafeng`. Set scope.agent — must reject.
         r.scope = ScopeTuple {
-            agent: Some("usr:tafeng".to_owned()),
+            agent: Some("hmn:tafeng".to_owned()),
             ..ScopeTuple::default()
         };
         let err = r.validate().unwrap_err();
@@ -1274,14 +1274,14 @@ mod tests {
     #[test]
     fn agent_author_cannot_forge_user_scope_via_unsigned_principal() {
         // P0 attack: agent signs a record but adds an unsigned `principal:
-        // usr:victim` entry, claiming `scope.user = victim`. With the P0
+        // hmn:victim` entry, claiming `scope.user = victim`. With the P0
         // chain-shape rule the unsigned principal is rejected before the
         // scope cross-check even runs — both gates close the forgery.
         let mut r = sample_record();
         r.actor_chain = vec![
             ActorChainEntry {
                 role: ChainRole::Principal,
-                identity: Identity::parse("usr:victim").expect("valid"),
+                identity: Identity::parse("hmn:victim").expect("valid"),
                 at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
             },
             ActorChainEntry {
@@ -1332,7 +1332,7 @@ mod tests {
         let mut r = sample_record();
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
-            identity: Identity::parse("usr:tafeng").expect("valid"),
+            identity: Identity::parse("hmn:tafeng").expect("valid"),
             at: Rfc3339Timestamp::parse("2026-04-22T16:00:00Z").expect("valid"),
         }];
         r.updated_at = Rfc3339Timestamp::parse("2026-04-22T14:00:00Z").expect("valid");
@@ -1350,7 +1350,7 @@ mod tests {
         r.updated_at = Rfc3339Timestamp::parse("2026-04-22T13:00:00Z").expect("valid");
         r.actor_chain = vec![ActorChainEntry {
             role: ChainRole::Author,
-            identity: Identity::parse("usr:tafeng").expect("valid"),
+            identity: Identity::parse("hmn:tafeng").expect("valid"),
             at: Rfc3339Timestamp::parse("2026-04-22T14:00:00+02:00").expect("valid"),
         }];
         r.validate()
