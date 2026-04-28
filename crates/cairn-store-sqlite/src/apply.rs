@@ -576,20 +576,43 @@ fn append_consent_journal_impl(
     entry: &ConsentJournalEntry,
 ) -> Result<ConsentJournalRowId, StoreError> {
     let payload = serde_json::to_string(&entry.payload)?;
-    conn.execute(
-        "INSERT INTO consent_journal \
-         (op_id, kind, target_id, actor, payload, at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            entry.op_id.as_str(),
-            entry.kind,
-            entry.target_id.as_ref().map(TargetId::as_str),
-            entry.actor.as_str(),
-            payload,
-            entry.at.as_str(),
-        ],
-    )
-    .map_err(store_err)?;
+    let target_id_str = entry.target_id.as_ref().map(TargetId::as_str);
+
+    // ON CONFLICT DO NOTHING + the unique idempotency index on
+    // (op_id, kind, COALESCE(target_id, '__NULL__')) means a retried
+    // logical operation cannot accumulate duplicate audit rows.
+    let inserted = conn
+        .execute(
+            "INSERT INTO consent_journal \
+             (op_id, kind, target_id, actor, payload, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(op_id, kind, COALESCE(target_id, '__NULL__')) DO NOTHING",
+            params![
+                entry.op_id.as_str(),
+                entry.kind,
+                target_id_str,
+                entry.actor.as_str(),
+                payload,
+                entry.at.as_str(),
+            ],
+        )
+        .map_err(store_err)?;
+
+    if inserted == 0 {
+        // Idempotent retry: surface the existing row's id so callers
+        // observe the same identity across attempts.
+        let id: i64 = conn
+            .query_row(
+                "SELECT id FROM consent_journal \
+                 WHERE op_id = ?1 AND kind = ?2 \
+                   AND COALESCE(target_id, '__NULL__') = COALESCE(?3, '__NULL__')",
+                params![entry.op_id.as_str(), entry.kind, target_id_str],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        return Ok(ConsentJournalRowId(id));
+    }
+
     let id = conn.last_insert_rowid();
     Ok(ConsentJournalRowId(id))
 }

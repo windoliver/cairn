@@ -33,12 +33,18 @@ impl ApplyToken {
     }
 }
 
-/// **Tests only.** Constructs an [`ApplyToken`] without involving the WAL
-/// executor.
+/// **Tests only — never call from production code.**
 ///
-/// Gated behind `#[cfg(any(test, feature = "test-util"))]` so non-test
-/// production builds cannot mint one outside the WAL module.
-#[cfg(any(test, feature = "test-util"))]
+/// Constructs an [`ApplyToken`] without involving the WAL executor.
+/// Gated behind `#[cfg(any(test, feature = "_test_util_unsafe"))]`; the
+/// feature name is intentionally ugly to discourage opt-in by
+/// production crates. Enabling it bypasses both the WAL-only write
+/// gate and the rebac read gate (via [`Principal::system`]).
+///
+/// `#[doc(hidden)]` keeps the function out of generated docs to avoid
+/// signposting it as part of the public API.
+#[cfg(any(test, feature = "_test_util_unsafe"))]
+#[doc(hidden)]
 #[must_use]
 pub fn test_apply_token() -> ApplyToken {
     ApplyToken::new()

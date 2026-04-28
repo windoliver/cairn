@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 sha2 = { workspace = true }
 
 [dev-dependencies]
-cairn-core = { workspace = true, features = ["test-util"] }
+cairn-core = { workspace = true, features = ["_test_util_unsafe"] }
 cairn-test-fixtures = { workspace = true }
 tempfile = { workspace = true }
 rstest = { workspace = true }

@@ -12,7 +12,12 @@ description = "Cairn verb layer, domain types, and error enums. No I/O, no adapt
 
 [features]
 default = []
-test-util = []
+# Exposes `test_apply_token`, which mints a privileged `ApplyToken`
+# bypassing both the WAL write gate and (via `Principal::system`) the
+# rebac read gate. The intentionally-ugly name discourages opt-in by
+# production crates; the helper is `#[doc(hidden)]`. ENABLE ONLY in
+# `dev-dependencies`. Renamed from `test-util` per security review.
+_test_util_unsafe = []
 
 [dependencies]
 serde = { workspace = true }

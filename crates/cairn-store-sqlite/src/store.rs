@@ -75,8 +75,18 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 if !principal_can_read(&principal, &scope_json, &taxonomy_json) {
                     return Ok(None);
                 }
-                let rec = row_to_record(row).map_err(store_err)?;
-                Ok(Some(rec))
+                // Treat legacy rows whose `record_json` is NULL or
+                // unparseable as effectively missing rather than
+                // surfacing a hard error. The migration runner logs
+                // legacy rows; this keeps reads alive after upgrade.
+                if let Ok(rec) = row_to_record(row) {
+                    Ok(Some(rec))
+                } else {
+                    tracing::warn!(
+                        "get: legacy row with unreadable record_json; treating as missing"
+                    );
+                    Ok(None)
+                }
             } else {
                 Ok(None)
             }
@@ -183,10 +193,19 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 {
                     continue;
                 }
-                let json = record_json_opt.ok_or(StoreError::Invariant(
-                    "list: record_json IS NULL (row predates migration 0009)",
-                ))?;
-                let rec: MemoryRecord = serde_json::from_str(&json)?;
+                // Skip rows with missing or unparseable `record_json`
+                // (e.g. legacy rows that 0009's best-effort backfill
+                // could not reconstruct into a valid `MemoryRecord`).
+                // Treat them as not-yet-migrated rather than poisoning
+                // the entire result with `StoreError::Invariant`.
+                let Some(json) = record_json_opt else {
+                    tracing::warn!("list: skipping row with NULL record_json (legacy/pre-0009)");
+                    continue;
+                };
+                let Ok(rec) = serde_json::from_str::<MemoryRecord>(&json) else {
+                    tracing::warn!("list: skipping row with unparseable record_json");
+                    continue;
+                };
                 out.push(rec);
             }
 

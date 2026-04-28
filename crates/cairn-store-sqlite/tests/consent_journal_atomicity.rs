@@ -131,3 +131,61 @@ async fn ok_commits_record_and_all_consent_entries() {
         "both consent_journal rows must commit alongside the record"
     );
 }
+
+/// Retrying the same `(op_id, kind, target_id)` MUST be a no-op rather
+/// than accumulating duplicate audit rows. Returns the same row id.
+#[tokio::test]
+async fn append_consent_journal_idempotent_under_retry() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+    let store = SqliteMemoryStore::open(&db_path).await.expect("open");
+
+    let target = TargetId::new("cj-idem-target");
+    let actor = ActorRef::from_string("usr:cjtest");
+    let op_id = OpId::new("op-cj-retry");
+
+    let entry = ConsentJournalEntry {
+        op_id: op_id.clone(),
+        kind: "activate".to_owned(),
+        target_id: Some(target.clone()),
+        actor: actor.clone(),
+        payload: serde_json::json!({"phase": "first"}),
+        at: Rfc3339Timestamp::now(),
+    };
+
+    let id_first = store
+        .with_apply_tx(test_apply_token(), {
+            let e = entry.clone();
+            move |tx| tx.append_consent_journal(&e)
+        })
+        .await
+        .expect("first append");
+
+    // Retry with the same idempotency tuple — payload changed to prove
+    // the second insert was a no-op.
+    let mut retry = entry.clone();
+    retry.payload = serde_json::json!({"phase": "retry-should-be-ignored"});
+    let id_second = store
+        .with_apply_tx(test_apply_token(), {
+            let e = retry.clone();
+            move |tx| tx.append_consent_journal(&e)
+        })
+        .await
+        .expect("retry append");
+
+    assert_eq!(
+        id_first, id_second,
+        "retry must surface the same row id as the first call"
+    );
+
+    // Exactly one row in consent_journal under the shared op_id.
+    let conn = Connection::open(&db_path).expect("raw conn");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM consent_journal WHERE op_id = ?1",
+            rusqlite::params![op_id.as_str()],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(count, 1, "retry must not duplicate consent_journal rows");
+}

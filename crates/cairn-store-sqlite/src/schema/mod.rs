@@ -99,6 +99,12 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0010_purge_scope_snapshot.sql"),
             checksum: checksum_for("0010_purge_scope_snapshot.sql"),
         },
+        Migration {
+            id: 11,
+            name: "0011_consent_journal_idempotency.sql",
+            sql: include_str!("../../migrations/0011_consent_journal_idempotency.sql"),
+            checksum: checksum_for("0011_consent_journal_idempotency.sql"),
+        },
     ]
 });
 
