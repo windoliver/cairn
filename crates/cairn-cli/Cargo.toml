@@ -9,6 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 description = "Cairn terminal entry point. Wires adapters into the verb layer."
+default-run = "cairn"
 
 [[bin]]
 name = "cairn"
