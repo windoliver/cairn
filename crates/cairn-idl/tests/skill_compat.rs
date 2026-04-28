@@ -639,6 +639,53 @@ fn cli_validator_inspects_wrapper_with_options() {
 }
 
 #[test]
+fn cli_validator_rejects_inline_value_on_boolean_flag() {
+    // Round-6 finding 1: clap's `ArgAction::SetTrue` rejects `--flag=value`
+    // at runtime; the compat gate must do the same so a stale example like
+    // `cairn handshake --json=false` cannot ship as valid.
+    for body in ["cairn handshake --json=false", "cairn status --json=no"] {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.to_string(),
+            line: 1,
+        };
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(body);
+        assert!(
+            matches!(err, CompatError::Malformed { kind: "cli", .. }),
+            "expected Malformed cli error for `{body}`, got: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_validator_inspects_wrapper_with_long_options() {
+    // Round-6 finding 2: prior wrapper allowlist only modeled short options,
+    // so `sudo --user alice cairn …` and `env --chdir /tmp cairn …` stopped
+    // at the option-value (`alice`/`/tmp`) and skipped the embedded `cairn`
+    // entirely. After modeling long forms (and self-contained `--opt=value`
+    // syntax), these still get validated.
+    for prefix in [
+        "sudo --user alice",
+        "sudo --user=alice",
+        "env --chdir /tmp",
+        "env --chdir=/tmp",
+        "time --output run.log",
+    ] {
+        let body = format!("{prefix} cairn ingest --bogus");
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.clone(),
+            line: 1,
+        };
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(&body);
+        assert!(
+            matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "bogus"),
+            "expected UnknownFlag for --bogus inside `{body}`, got: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn cli_validator_skips_wrapper_with_non_cairn_command() {
     // Round-5 finding: prior wrapper handling kept scanning past the
     // wrapper's command word (`printenv`, `grep`) until it found a

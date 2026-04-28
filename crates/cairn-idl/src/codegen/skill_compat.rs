@@ -331,7 +331,18 @@ fn locate_cairn_command(segment: &[Token]) -> Option<usize> {
                     i += 1;
                     break;
                 }
-                let consumes_value = opts_with_value.contains(&opt.value.as_str());
+                // `--long=value` form is self-contained — never consume the
+                // next token. Only the bare `--long`/`-x` forms can take the
+                // following token as a value (round-6 finding 2).
+                let has_inline = opt.value.starts_with("--") && opt.value.contains('=');
+                let opt_name = if has_inline {
+                    opt.value
+                        .split_once('=')
+                        .map_or(opt.value.as_str(), |(n, _)| n)
+                } else {
+                    opt.value.as_str()
+                };
+                let consumes_value = !has_inline && opts_with_value.contains(&opt_name);
                 i += 1;
                 if consumes_value && i < segment.len() {
                     i += 1;
@@ -355,11 +366,42 @@ fn locate_cairn_command(segment: &[Token]) -> Option<usize> {
 /// options (`nohup`, `exec`), or `None` for non-wrappers.
 fn wrapper_options_with_value(name: &str) -> Option<&'static [&'static str]> {
     match name {
-        "env" => Some(&["-u", "-S", "-C"]),
-        "sudo" => Some(&[
-            "-u", "-U", "-g", "-D", "-p", "-h", "-r", "-t", "-T", "-C", "-c",
+        "env" => Some(&[
+            "-u",
+            "-S",
+            "-C",
+            "--unset",
+            "--chdir",
+            "--split-string",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
         ]),
-        "time" => Some(&["-o", "-f"]),
+        "sudo" => Some(&[
+            "-u",
+            "-U",
+            "-g",
+            "-D",
+            "-p",
+            "-h",
+            "-r",
+            "-t",
+            "-T",
+            "-C",
+            "-c",
+            "--user",
+            "--other-user",
+            "--group",
+            "--chdir",
+            "--prompt",
+            "--host",
+            "--role",
+            "--type",
+            "--command-timeout",
+            "--close-from",
+            "--login-class",
+        ]),
+        "time" => Some(&["-o", "-f", "--output", "--format"]),
         "nohup" | "exec" => Some(&[]),
         _ => None,
     }
@@ -1413,6 +1455,10 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<Token>, CompatError
 /// count, the set of IDL field names the example referenced via long-flags,
 /// and per-flag occurrences (deferred so the caller can validate against the
 /// matched variant's schema). Rejects unknown `--flag` tokens up-front.
+// Splitting the long-flag arm into a separate helper would force the caller
+// to thread `iter`, `used_field_names`, `flag_occurrences`, and
+// `list_flag_values` as out-params — net more code. Local allow.
+#[allow(clippy::too_many_lines)]
 fn scan_tokens<'a>(
     verb: &str,
     source_line: usize,
@@ -1459,6 +1505,17 @@ fn scan_tokens<'a>(
                     line: source_line,
                 });
             };
+            // Round-6 finding 1: boolean flags (`ArgAction::SetTrue`) reject
+            // inline `=value` syntax at runtime — clap surfaces it as an
+            // error. The compat gate must do the same so a stale example
+            // like `--rehydrate=false` or `--json=no` cannot ship.
+            if arity == 0 && has_inline_value {
+                return Err(CompatError::Malformed {
+                    kind: "cli",
+                    detail: format!("boolean flag `--{name}` does not accept an inline value"),
+                    line: source_line,
+                });
+            }
             let value: Option<String> = if arity == 1 && !has_inline_value {
                 // Non-boolean flags require a value — either inline (`--x=v`)
                 // or the next token. A quoted token is always a value
