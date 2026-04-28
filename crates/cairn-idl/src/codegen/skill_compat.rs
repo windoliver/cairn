@@ -253,19 +253,79 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
         if line.is_empty() {
             continue;
         }
-        // Shell-split, then locate the *first* `cairn` token. This both
-        // anchors the line at the executable (so `cairn-cli`, `cairn2` are
-        // ignored — round-7) AND validates wrapped invocations like
-        // `env DEBUG=1 cairn …`, `time cairn …`, `FOO=bar cairn …`
-        // (round-8). A line with no `cairn` token is non-Cairn shell and
-        // is skipped — no false positives, no silent bypass.
         let owned = shell_split(line, block.line)?;
-        let Some(cairn_pos) = owned.iter().position(|t| t == "cairn") else {
-            continue;
-        };
-        validate_cli_line_tokens(&owned[cairn_pos..], block.line, doc)?;
+        for segment in command_segments(&owned) {
+            // Skip env-var assignments (`FOO=bar …`) and time-style
+            // wrappers (`time cairn …`, `env DEBUG=1 cairn …`) until we
+            // hit the actual command word. Only validate when that
+            // command word is exactly `cairn` — quoted text, `echo
+            // cairn …`, or `cat cairn …` are not real invocations.
+            let Some(cmd_pos) = command_word_position(segment) else {
+                continue;
+            };
+            if segment[cmd_pos] != "cairn" {
+                continue;
+            }
+            validate_cli_line_tokens(&segment[cmd_pos..], block.line, doc)?;
+        }
     }
     Ok(())
+}
+
+/// Split a token stream on shell control operators (`;`, `&&`, `||`, `|`,
+/// `&`) and strip any trailing comment (`#…`). Each returned segment is a
+/// candidate simple command. Round-2 finding: without this `cairn search
+/// foo && jq …` would feed `&&` and `jq` into the CLI scanner.
+fn command_segments(tokens: &[String]) -> Vec<&[String]> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, tok) in tokens.iter().enumerate() {
+        if matches!(tok.as_str(), ";" | "&&" | "||" | "|" | "&" | "|&") {
+            if start < i {
+                out.push(&tokens[start..i]);
+            }
+            start = i + 1;
+        } else if tok.starts_with('#') {
+            // Trailing shell comment — drop it and everything after.
+            if start < i {
+                out.push(&tokens[start..i]);
+            }
+            return out;
+        }
+    }
+    if start < tokens.len() {
+        out.push(&tokens[start..]);
+    }
+    out
+}
+
+/// Position of the command word in a simple-command token stream — i.e.,
+/// the first token that is not an env-var assignment (`KEY=value`) and not
+/// a known plain wrapper (`time`, `env`, `nohup`, `sudo`). Returns `None`
+/// if no command word is found.
+fn command_word_position(segment: &[String]) -> Option<usize> {
+    const WRAPPERS: &[&str] = &["env", "time", "nohup", "sudo", "exec"];
+    for (i, tok) in segment.iter().enumerate() {
+        // Env-var assignment: `FOO=bar` (must start with letter/underscore).
+        if let Some(eq_pos) = tok.find('=')
+            && eq_pos > 0
+        {
+            let key = &tok[..eq_pos];
+            if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && key
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            {
+                continue;
+            }
+        }
+        if WRAPPERS.contains(&tok.as_str()) {
+            continue;
+        }
+        return Some(i);
+    }
+    None
 }
 
 /// Collapse shell line-continuations: a line ending in an unescaped trailing
@@ -1329,6 +1389,18 @@ fn scan_tokens<'a>(
             // not another flag.
             positional_count += 1;
             positional_values.push(tok.to_string());
+        } else {
+            // Single-dash token that isn't `-` or `--` (which is consumed
+            // above via the `flag_body` strip and the bare-`-` branch). We
+            // don't model short options yet, so flag any such token as
+            // unknown rather than silently dropping it (round-2 finding 2).
+            // `--` end-of-options marker is rare in our examples and not
+            // documented; treat it as unknown too.
+            return Err(CompatError::UnknownFlag {
+                verb: verb.to_string(),
+                flag: tok.trim_start_matches('-').to_string(),
+                line: source_line,
+            });
         }
     }
     Ok(TokenScan {

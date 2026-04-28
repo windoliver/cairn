@@ -600,6 +600,54 @@ fn live_skill_md_exercises_positional_source_for_ingest() {
 }
 
 #[test]
+fn cli_validator_skips_quoted_or_argument_cairn_text() {
+    // Round-2 finding 1: `cairn` appearing as an argument to `echo`
+    // (or any non-cairn command) must not be treated as a Cairn
+    // invocation. Without segment + command-word handling the validator
+    // would parse `echo cairn search foo` and try to interpret
+    // `--bogus` against the search verb.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "echo cairn search --bogus".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("`cairn` as an argument to another command must be skipped, not validated");
+}
+
+#[test]
+fn cli_validator_stops_at_shell_control_operators() {
+    // Round-2 finding 1: shell control operators (`&&`, `|`, `;`) must
+    // terminate the command segment so following tokens aren't fed into
+    // the CLI scanner as extra args.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode keyword QUERY && jq .".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("`&& jq .` must terminate the cairn segment, not be parsed as cairn args");
+}
+
+#[test]
+fn cli_validator_rejects_unknown_short_option() {
+    // Round-2 finding 2: a stale single-dash option (e.g. `-x`) was
+    // silently dropped by the scanner. Compat must surface it as an
+    // UnknownFlag so a typo or removed alias blocks the gate.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID -x".into(),
+        line: 1,
+    };
+    let err =
+        validate_cli_block(&block, &doc()).expect_err("unknown short option must fail compat");
+    assert!(
+        matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "x"),
+        "expected UnknownFlag for -x, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_rejects_empty_list_string_item() {
     // Round-10 finding 2: `ingest --tags` is `list<string>` and its
     // items declare `minLength: 1`. An empty `--tags ""` value must
