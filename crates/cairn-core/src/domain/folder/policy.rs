@@ -164,11 +164,15 @@ pub fn resolve_policy(
     target: &std::path::Path,
     policies_by_dir: &std::collections::BTreeMap<std::path::PathBuf, FolderPolicy>,
 ) -> EffectivePolicy {
-    // Build the chain shallowest → deepest.
+    // Build the chain shallowest → deepest. The empty path is the vault-root
+    // key — `collect_policies` in `cairn-cli` writes a root `_policy.yaml`
+    // under `PathBuf::from("")`, so we must probe that key too. Otherwise a
+    // valid root policy is silently dropped from the chain.
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut cur = target.parent();
     while let Some(d) = cur {
         if d.as_os_str().is_empty() {
+            dirs.push(std::path::PathBuf::from(""));
             break;
         }
         dirs.push(d.to_path_buf());
@@ -401,6 +405,55 @@ summary_max_tokens: 300
                 PathBuf::from("raw/projects"),
                 PathBuf::from("raw/projects/koi"),
             ],
+        );
+    }
+
+    #[test]
+    fn resolve_root_policy_applies_to_descendant() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from(""),
+            FolderPolicy {
+                purpose: Some("root applies".into()),
+                consolidation_cadence: Some(ConsolidationCadence::Hourly),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/projects/koi.md");
+        let resolved = resolve_policy(target, &chain);
+        assert_eq!(resolved.purpose.as_deref(), Some("root applies"));
+        assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Hourly);
+        assert_eq!(resolved.source_chain, vec![PathBuf::from("")]);
+    }
+
+    #[test]
+    fn resolve_root_policy_overridden_by_deeper_policy() {
+        let mut chain = BTreeMap::new();
+        chain.insert(
+            PathBuf::from(""),
+            FolderPolicy {
+                purpose: Some("root".into()),
+                consolidation_cadence: Some(ConsolidationCadence::Daily),
+                ..FolderPolicy::default()
+            },
+        );
+        chain.insert(
+            PathBuf::from("raw"),
+            FolderPolicy {
+                consolidation_cadence: Some(ConsolidationCadence::Weekly),
+                ..FolderPolicy::default()
+            },
+        );
+        let target = Path::new("raw/x.md");
+        let resolved = resolve_policy(target, &chain);
+        // Inherited from root:
+        assert_eq!(resolved.purpose.as_deref(), Some("root"));
+        // Overridden by raw/:
+        assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Weekly);
+        // Source chain is shallowest-first, deepest-last.
+        assert_eq!(
+            resolved.source_chain,
+            vec![PathBuf::from(""), PathBuf::from("raw")],
         );
     }
 
