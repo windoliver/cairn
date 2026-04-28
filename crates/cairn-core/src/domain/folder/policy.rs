@@ -386,4 +386,93 @@ summary_max_tokens: 300
             vec![PathBuf::from("raw"), PathBuf::from("raw/a/b/c")],
         );
     }
+
+    use proptest::prelude::*;
+
+    fn arb_cadence() -> impl Strategy<Value = ConsolidationCadence> {
+        prop_oneof![
+            Just(ConsolidationCadence::Hourly),
+            Just(ConsolidationCadence::Daily),
+            Just(ConsolidationCadence::Weekly),
+            Just(ConsolidationCadence::Monthly),
+            Just(ConsolidationCadence::Manual),
+        ]
+    }
+
+    fn arb_retention() -> impl Strategy<Value = RetentionPolicy> {
+        prop_oneof![
+            (1u32..=365).prop_map(RetentionPolicy::Days),
+            Just(RetentionPolicy::Unlimited),
+        ]
+    }
+
+    fn arb_policy() -> impl Strategy<Value = FolderPolicy> {
+        (
+            proptest::option::of("[a-z ]{1,40}".prop_map(String::from)),
+            proptest::option::of(arb_cadence()),
+            proptest::option::of(arb_retention()),
+            proptest::option::of(1u32..=1024),
+        )
+            .prop_map(|(purpose, cadence, retention, summary)| FolderPolicy {
+                purpose,
+                allowed_kinds: None,
+                visibility_default: None,
+                consolidation_cadence: cadence,
+                owner_agent: None,
+                retention,
+                summary_max_tokens: summary,
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn parse_serialize_round_trips(p in arb_policy()) {
+            let yaml = serde_yaml::to_string(&p).expect("infallible — FolderPolicy always serializes");
+            let parsed = parse_policy(&yaml).expect("infallible — round-trip of valid policy");
+            prop_assert_eq!(parsed, p);
+        }
+
+        #[test]
+        fn resolve_associative_under_chunked_merge(
+            seed in 0u32..1000
+        ) {
+            // Deterministic three-policy chain.
+            let mut chain = std::collections::BTreeMap::new();
+            chain.insert(
+                std::path::PathBuf::from("a"),
+                FolderPolicy {
+                    purpose: Some(format!("a-{seed}")),
+                    summary_max_tokens: Some(100),
+                    ..FolderPolicy::default()
+                },
+            );
+            chain.insert(
+                std::path::PathBuf::from("a/b"),
+                FolderPolicy {
+                    consolidation_cadence: Some(ConsolidationCadence::Weekly),
+                    ..FolderPolicy::default()
+                },
+            );
+            chain.insert(
+                std::path::PathBuf::from("a/b/c"),
+                FolderPolicy {
+                    summary_max_tokens: Some(seed.min(500) + 50),
+                    ..FolderPolicy::default()
+                },
+            );
+            let target = std::path::Path::new("a/b/c/x.md");
+            let full = resolve_policy(target, &chain);
+
+            // Subset (only middle) should differ on cadence inheritance.
+            let mut middle_only = std::collections::BTreeMap::new();
+            middle_only.insert(
+                std::path::PathBuf::from("a/b"),
+                chain.get(std::path::Path::new("a/b")).unwrap().clone(),
+            );
+            let middle = resolve_policy(target, &middle_only);
+
+            prop_assert_eq!(full.consolidation_cadence, ConsolidationCadence::Weekly);
+            prop_assert_eq!(middle.consolidation_cadence, ConsolidationCadence::Weekly);
+        }
+    }
 }
