@@ -269,6 +269,14 @@ fn find_context_keyed_spans(input: &str) -> Vec<RedactionSpan> {
               | authorization
               | bearer
               | credential[s]?
+              | private[_-]?key              # GCP service-account JSON, PEM PKCS#8
+              | private[_-]?key[_-]?id       # GCP private_key_id
+              | account[_-]?key              # Azure Storage AccountKey=
+              | accountkey                   # bare CamelCase form in Azure conn strings
+              | shared[_-]?access[_-]?signature
+              | signature                    # Azure SAS sig=, JWT sig fields
+              | sig                          # Azure SAS sig=
+              | client[_-]?secret            # OAuth client secret (also caught by suffix path)
             )
             [a-z0-9_-]{0,40}                 # optional suffix chars
             \b
@@ -698,6 +706,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn redacts_gcp_service_account_private_key_field() {
+        // Real-shaped GCP service-account JSON. Round 8 codex flagged
+        // that `private_key` and `private_key_id` were not in the
+        // keyword set, so the embedded PEM body shipped through.
+        let input = r#"{"type":"service_account","private_key_id":"abc1234deadbeef","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDsecretpembody\n-----END PRIVATE KEY-----\n"}"#;
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for GCP private_key field");
+        for needle in [
+            "abc1234deadbeef",
+            "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj",
+            "secretpembody",
+        ] {
+            assert!(
+                !r.text.contains(needle),
+                "GCP secret `{needle}` leaked: {}",
+                r.text
+            );
+        }
+    }
+
+    #[test]
+    fn redacts_azure_storage_connection_string_account_key() {
+        // Azure Storage connection strings expose `AccountKey=` —
+        // case-sensitive and bare (not `account_key`).
+        let input = "DefaultEndpointsProtocol=https;AccountName=foo;AccountKey=base64encodedazurekeyvaluehere==;EndpointSuffix=core.windows.net";
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for Azure AccountKey");
+        assert!(
+            !r.text.contains("base64encodedazurekeyvaluehere=="),
+            "Azure AccountKey leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_azure_sas_signature_field() {
+        // Azure Shared Access Signature URL: `?sig=<base64-encoded>`.
+        let input = "https://foo.blob.core.windows.net/container?sv=2021-08-06&sig=abcdef1234567890%2Fbase64sigvalue%3D&se=2024-01-01";
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for Azure SAS sig= field");
+        assert!(
+            !r.text.contains("abcdef1234567890%2Fbase64sigvalue%3D"),
+            "Azure SAS signature leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_shared_access_signature_field() {
+        let input = r#"{"shared_access_signature":"abcdef1234567890longsigvalue"}"#;
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for shared_access_signature");
+        assert!(
+            !r.text.contains("abcdef1234567890longsigvalue"),
+            "SAS leaked: {}",
+            r.text
+        );
     }
 
     #[test]

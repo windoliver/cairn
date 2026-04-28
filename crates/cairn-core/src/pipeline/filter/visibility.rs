@@ -157,15 +157,21 @@ fn is_safe_narrowing(from: MemoryVisibility, to: MemoryVisibility) -> bool {
 /// **Fail-closed on impossible triples (§14).** Identity kind is not
 /// just informational — the matrix enforces the §5.0.a attribution
 /// pairing here too, so a malformed call (e.g. `(Human, Auto, Hook)`
-/// or `(Agent, Auto, Screen)`) cannot accidentally land at `Session`
-/// because some upstream caller forgot to validate. Anything that
-/// doesn't match one of the three legal pairings collapses to
-/// `Private` rather than trusting the source-family lookup alone.
+/// or `(Agent, Auto, Screen)`) cannot accidentally land at the legal
+/// sensor-default tier because some upstream caller forgot to
+/// validate. Codex round 8 caught a related case: collapsing every
+/// malformed triple to `Private` actually broadens the lifetime of
+/// sensor-shaped data from "this turn" to "vault-wide" (Session and
+/// Private are incomparable, see [`is_safe_narrowing`]). For
+/// malformed triples we therefore preserve the *lifetime* property of
+/// the source family: sensor sources stay at `Session` (turn-local),
+/// non-sensor sources fail closed at `Private`.
 //
-// The explicit `(Human, Explicit) | (Agent, Proactive)` arm is kept
-// alongside the `_` wildcard for documentation: it shows the legal
-// §5.0.a pairings inline next to the impossible-triple fallback.
-// Both bodies returning `Private` is intentional, not a bug.
+// The legal `(Sensor, Auto)` arm and the malformed-triple wildcard
+// share the same `sensor_default(source)` body intentionally: legal
+// triples land at the matrix value, and malformed triples land at
+// the same lifetime-preserving fallback. Both arms are kept for
+// documentation rather than collapsing into the wildcard.
 #[allow(clippy::match_same_arms)]
 fn matrix_lookup(
     identity_kind: IdentityKind,
@@ -173,20 +179,7 @@ fn matrix_lookup(
     source: SourceFamily,
 ) -> MemoryVisibility {
     match (identity_kind, mode) {
-        (IdentityKind::Sensor, CaptureMode::Auto) => match source {
-            SourceFamily::Hook
-            | SourceFamily::Ide
-            | SourceFamily::Terminal
-            | SourceFamily::Clipboard
-            | SourceFamily::Voice
-            | SourceFamily::Screen
-            | SourceFamily::RecordingBatch => MemoryVisibility::Session,
-            // Auto from a sensor identity but a non-sensor source
-            // family is malformed — fail closed.
-            SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::Proactive => {
-                MemoryVisibility::Private
-            }
-        },
+        (IdentityKind::Sensor, CaptureMode::Auto) => sensor_default(source),
         // Legal §5.0.a pairings: Explicit must come from a human
         // identity; Proactive from an agent identity. Both default
         // to Private — the user (B) or agent (C) must clear consent
@@ -194,9 +187,33 @@ fn matrix_lookup(
         (IdentityKind::Human, CaptureMode::Explicit)
         | (IdentityKind::Agent, CaptureMode::Proactive) => MemoryVisibility::Private,
         // Impossible identity/mode triples (e.g. Human+Auto+Hook,
-        // Agent+Auto+Screen) collapse to Private rather than trust
-        // the source family alone.
-        _ => MemoryVisibility::Private,
+        // Sensor+Explicit+Hook). Preserve the lifetime bound for
+        // sensor-shaped sources: clamping a sensor-source capture to
+        // Private would silently turn turn-local data into vault-wide
+        // persistence. Non-sensor sources keep the Private fallback.
+        _ => sensor_default(source),
+    }
+}
+
+/// Default tier for a source family treated as a *sensor* shape:
+/// `Hook`, `Ide`, `Terminal`, `Clipboard`, `Voice`, `Screen`,
+/// `RecordingBatch` → `Session`. Non-sensor (`Cli`, `Mcp`,
+/// `Proactive`) → `Private`. Used by [`matrix_lookup`] for the legal
+/// `(Sensor, Auto, …)` arm and the malformed-triple fallback so
+/// sensor-shaped data preserves its turn-local lifetime even when
+/// upstream validation has failed.
+const fn sensor_default(source: SourceFamily) -> MemoryVisibility {
+    match source {
+        SourceFamily::Hook
+        | SourceFamily::Ide
+        | SourceFamily::Terminal
+        | SourceFamily::Clipboard
+        | SourceFamily::Voice
+        | SourceFamily::Screen
+        | SourceFamily::RecordingBatch => MemoryVisibility::Session,
+        SourceFamily::Cli | SourceFamily::Mcp | SourceFamily::Proactive => {
+            MemoryVisibility::Private
+        }
     }
 }
 
@@ -546,13 +563,29 @@ mod tests {
     // ── Fail-closed on impossible identity/mode triples ─────────────
 
     #[test]
-    fn malformed_identity_mode_pairs_collapse_to_private() {
+    fn malformed_identity_mode_pairs_preserve_lifetime_bound() {
         // The §5.0.a attribution rules pair Auto with Sensor,
         // Explicit with Human, Proactive with Agent. Any other pair
-        // is malformed — the matrix must fail closed at Private even
-        // when the source family looks sensor-like, so a missing
-        // upstream validation cannot accidentally promote.
+        // is malformed. Codex round 8: collapsing every malformed
+        // triple to Private silently broadens lifetime for
+        // sensor-shaped sources from turn-local to vault-wide.
+        // Sensor-shaped sources stay at Session; non-sensor sources
+        // fail closed at Private.
         let policy = VisibilityPolicy::default();
+        let sensor_sources = [
+            SourceFamily::Hook,
+            SourceFamily::Ide,
+            SourceFamily::Terminal,
+            SourceFamily::Clipboard,
+            SourceFamily::Voice,
+            SourceFamily::Screen,
+            SourceFamily::RecordingBatch,
+        ];
+        let non_sensor_sources = [
+            SourceFamily::Cli,
+            SourceFamily::Mcp,
+            SourceFamily::Proactive,
+        ];
         for (k, m) in [
             (IdentityKind::Human, CaptureMode::Auto),
             (IdentityKind::Agent, CaptureMode::Auto),
@@ -561,22 +594,20 @@ mod tests {
             (IdentityKind::Sensor, CaptureMode::Proactive),
             (IdentityKind::Human, CaptureMode::Proactive),
         ] {
-            for s in [
-                SourceFamily::Hook,
-                SourceFamily::Ide,
-                SourceFamily::Terminal,
-                SourceFamily::Clipboard,
-                SourceFamily::Voice,
-                SourceFamily::Screen,
-                SourceFamily::RecordingBatch,
-                SourceFamily::Cli,
-                SourceFamily::Mcp,
-                SourceFamily::Proactive,
-            ] {
+            for s in sensor_sources {
+                assert_eq!(
+                    default_visibility(k, m, s, &policy),
+                    MemoryVisibility::Session,
+                    "malformed triple {k:?},{m:?},{s:?} should stay session-scoped \
+                     for sensor-shaped sources, not promote to vault-wide Private"
+                );
+            }
+            for s in non_sensor_sources {
                 assert_eq!(
                     default_visibility(k, m, s, &policy),
                     MemoryVisibility::Private,
-                    "malformed triple {k:?},{m:?},{s:?} broadened above Private"
+                    "malformed triple {k:?},{m:?},{s:?} should fail closed at Private \
+                     for non-sensor sources"
                 );
             }
         }
