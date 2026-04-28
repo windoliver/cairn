@@ -8,7 +8,7 @@ pub mod index;
 pub mod links;
 pub mod policy;
 
-#[allow(unused_imports)] // links module is empty until Task 5
+pub use index::*;
 pub use links::*;
 pub use policy::*;
 

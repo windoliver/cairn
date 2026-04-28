@@ -6,9 +6,9 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use cairn_core::contract::memory_store::MemoryStore;
-use cairn_core::domain::folder::index::{aggregate_folders, project_index};
-use cairn_core::domain::folder::policy::FolderPolicy;
-use cairn_core::domain::folder::{materialize_backlinks, parse_policy};
+use cairn_core::domain::folder::{
+    FolderPolicy, aggregate_folders, materialize_backlinks, parse_policy, project_index,
+};
 use cairn_core::domain::projection::MarkdownProjector;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
@@ -259,8 +259,11 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     let fix_folders = sub.get_flag("fix-folders");
 
     if fix_markdown || fix_folders {
-        // TODO(#46): wire the SQLite store. For now, return the same
-        // unimplemented envelope used by --fix-markdown.
+        // TODO(#46): wire SQLite store. When live, dispatch should call:
+        //   - fix_markdown_handler(&store, &vault_root) when fix_markdown
+        //   - fix_folders_handler(&store, &vault_root) when fix_folders
+        // Both handlers are already implemented and exercised via FixtureStore in
+        // crates/cairn-cli/tests/{resync,lint_folders}.rs.
         let resp = unimplemented_response(ResponseVerb::Lint);
         if json {
             emit_json(&resp);
