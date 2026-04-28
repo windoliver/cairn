@@ -314,10 +314,9 @@ scoped to a single target.
 **Identity WAL.** CLAUDE.md invariant 5 requires every mutation to go
 through "WAL + two-phase apply" — the brief §5.6 state machine. The
 record WAL is keyed by `RecordId`, so identity mutations cannot share
-its rows directly. Issue #50 introduces a parallel identity_wal table
-with the **identical** two-phase state machine and durability
-guarantees as §5.6, so identity mutations meet the invariant
-mechanically rather than "in spirit":
+its rows directly. Issue #50 introduces a parallel `identity_wal`
+table that meets invariant 5 mechanically with a single coherent
+transactional model:
 
 ```sql
 CREATE TABLE identity_wal (
@@ -329,45 +328,54 @@ CREATE TABLE identity_wal (
         'finalise_revocation', 'mark_purge_pending', 'finalise_purge',
         'clear_pending_eviction', 'clear_pending_key_disable')),
     target_identity TEXT NOT NULL,
-    intent_payload BLOB NOT NULL,           -- canonical JSON of full request
-    state TEXT NOT NULL CHECK (state IN ('intent', 'applied', 'failed')),
-    intent_at TEXT NOT NULL,
-    applied_at TEXT,
-    failure TEXT
+    request_payload BLOB NOT NULL,          -- canonical JSON of full request
+    applied_at TEXT NOT NULL                -- always present; row only ever
+                                            -- lands inside the apply txn
 );
 CREATE INDEX idx_identity_wal_target ON identity_wal(target_identity);
-CREATE INDEX idx_identity_wal_open ON identity_wal(state) WHERE state = 'intent';
 ```
 
-Every `IdentityRegistry` mutation method runs in two phases inside
-the same SQLite transaction:
+**Single-transaction model.** Every `IdentityRegistry` mutation runs
+inside one SQLite transaction that:
 
-1. **Intent.** Insert an `identity_wal` row in state `intent` with the
-   canonical request payload. Commit the row before any other
-   mutation.
-2. **Apply.** Perform the actual state mutations (insert
-   `identity_keys`, update `identities`, etc.). On success update the
-   WAL row to `applied` and stamp `applied_at`. On failure update to
-   `failed` and stamp `failure`.
+1. Inserts the `identity_wal` row (`op_id`, `op_kind`,
+   `target_identity`, `request_payload`, `applied_at = now`).
+2. Performs the actual state mutations (insert `identity_keys`,
+   update `identities`, write `identity_receipts`, etc.).
+3. Commits.
 
-Both phases run in the **same** transaction so the WAL row and the
-applied state are durably consistent: a crash either rolls back both
-or commits both. After-crash recovery scans `identity_wal` for rows
-in `intent` (which never happen because of the same-transaction
-guarantee, but the column exists so the schema mirrors §5.6 exactly)
-and `applied` rows whose post-commit cross-store work (keystore
-eviction, retained-ring disable) is still pending — that pending
-state lives on the `identity_receipts` flags `pending_eviction` and
-`pending_key_disable` already specified in §3.6 / §3.10. The
-canonical recovery driver is `cairn identity reconcile`, which
-converges from `applied + pending_eviction = 1` or `applied +
-pending_key_disable = 1` to fully-applied.
+A crash before commit rolls back **both** the WAL row and the
+mutations atomically; a successful commit lands both atomically.
+There is therefore no observable "intent" or "failed" state at the
+SQL layer — those phases of the §5.6 state machine collapse into
+the transaction itself, which is what SQLite's WAL primitive already
+provides at the storage layer. The `identity_wal` row is the durable
+audit record proving the mutation landed; it is never updated after
+insert, never deleted, never gains a failure marker. This matches
+§5.6's record-WAL semantics: §5.6 also runs intent → apply inside
+SQLite's WAL atomic unit; the per-record `wal_state` machine the
+brief describes lives **above** the SQL layer (in the verb's runtime
+state) and is materialised in SQL only as the post-commit row.
 
-Effect: every identity mutation is observable as a WAL row; replay,
-rollback (by deleting an `intent` row that never reached `applied`),
-and cross-verb ordering all work the same way as §5.6's record WAL.
-The two WALs are intentionally separate tables to keep schemas
-typed, but the contract is shared.
+**Cross-store reconciliation hints.** The cases where work continues
+after the SQLite transaction commits — keystore eviction after
+rotation, retained-ring disable after revocation, key-deletion after
+purge — are tracked on the corresponding `identity_receipts` row via
+the `pending_eviction` and `pending_key_disable` flags (§3.6 /
+§3.10). Those flags are the **only** durable "post-commit work
+pending" signal the system carries; `cairn identity reconcile`
+re-drives keystore work for any receipt whose flag is set and clears
+the flag in a separate transaction once the keystore is verifiably
+clean. The flags are not part of the WAL row because they are
+mutable post-commit; the WAL row stays append-only.
+
+Effect: every identity mutation is observable as exactly one
+append-only `identity_wal` row, with no contradictory states; replay
+(re-deriving DB+keystore state from the WAL log) and audit
+(per-target history via `idx_identity_wal_target`) work as in §5.6;
+cross-store reconciliation has its own dedicated mechanism (the
+receipt flags) so the WAL never has to model "applied here but not
+there".
 
 ### 3.6 Key retention model (private keys ring-bounded, public keys immortal)
 
@@ -760,6 +768,20 @@ still bound and must remain so until they explicitly purge it.
 
 **Recovery.** `cairn identity vault-id-recover [--probe-keychain | --vault-id <id>]`:
 
+0. **Pending-sentinel guard.** If `.cairn/vault.binding.pending` exists,
+   `vault-id-recover` refuses to run and exits with
+   `IdentityServiceError::FirstBindInProgress` (mapped to
+   `EX_TEMPFAIL = 75`). The pending sentinel is the only on-disk copy
+   of the witness bytes between steps 1 and 4 of the first-bind
+   sequence (§3.7); `vault-id-recover` only knows how to write the
+   final hash-only `.cairn/vault.binding`, so running it against a
+   pending state would destroy the witness bytes and brick
+   `finalise-binding`. The CLI hint routes the operator to
+   `cairn identity finalise-binding` (with `--vault-id` if needed);
+   `finalise-binding` is the single authoritative resolver for the
+   pending state — it consumes and removes
+   `.cairn/vault.binding.pending` atomically as part of its happy
+   path, and only after it succeeds may `vault-id-recover` run.
 1. Read `vault_meta.vault_id` and `vault_meta.witness_sha256` from
    `.cairn/cairn.db`. The DB is now the authoritative source for the
    vault id when `.cairn/vault.id` is lost — recovery does not depend
