@@ -327,9 +327,29 @@ purge, rotation cannot be made atomic across SQLite + the keystore, so
 it has an explicit ordered protocol with reconciliation rules per crash
 point. Steps (run by `IdentityService::rotate_identity`):
 
-1. **Reserve next version.** Mint `key_version = current + 1` (a
-   `KeyVersion` is `NonZeroU32`; `current_key_version` is monotone, so
-   reservation is collision-free without a registry round trip).
+0. **Acquire per-identity serialization lock.** All trust-state
+   mutations against a given identity (`rotate`, `revoke`, `purge`,
+   `repair` writes) acquire the on-disk advisory lock
+   `.cairn/maintenance/identity-locks/<sha256(id-wire-form)>.lock`
+   via `fs2::FileExt::try_lock_exclusive` (created on demand, mode
+   0600). The lock blocks for up to 30 s by default; `--no-wait`
+   returns `IdentityServiceError::IdentityLockBusy` mapped to
+   `EX_TEMPFAIL = 75`. The lock is released only after step 5 (or
+   after rollback). This prevents two concurrent `rotate <id>` calls
+   from racing to claim `current + 1`. The lock is per-identity, so
+   unrelated rotates can still run in parallel.
+1. **Read current version.** Snapshot
+   `(observed_current, observed_revision) =
+   IdentityRegistry::get_identity(id, IncludingPending)`. The
+   candidate new version is `observed_current + 1`. The §0 lock keeps
+   this snapshot stable across steps 1-4; a failed
+   `try_lock_exclusive` already prevents another rotate from racing.
+   Step 4's `apply_rotation` performs an additional compare-and-swap
+   (`UPDATE … WHERE current_key_version = ?observed_current`) inside
+   the SQLite transaction so even a clock-skew or filesystem-lock
+   bypass cannot promote a stale rotation: a row-count of zero
+   returns `RegistryError::KeyVersionConflict { existing, attempted }`
+   and aborts the transaction without mutating either side.
    Construct `SecretHandle::for_identity(vault_id, id, next_version)`.
 2. **Persist new private key.** `Keystore::store_keypair(handle,
    secret)`. If this fails the call returns; no DB mutation has
@@ -340,13 +360,19 @@ point. Steps (run by `IdentityService::rotate_identity`):
    `Keystore::delete_keypair(handle)` (best-effort; logged on
    failure) and the operation returns `KeyMaterialMismatch`. No
    registry write yet.
-4. **Atomic registry transition.**
-   `IdentityRegistry::apply_rotation(receipt)` runs a single SQLite
-   transaction that (a) appends the new `identity_keys` row, (b)
-   stamps the predecessor row's `superseded_at`, (c) advances
-   `identities.current_key_version` to the new version, and (d)
-   persists the `RotationReceipt` to `identity_receipts`. After this
-   commit the new key is the canonical signer.
+4. **Atomic registry transition (with CAS).**
+   `IdentityRegistry::apply_rotation(receipt, expected_current)`
+   runs a single SQLite transaction that (a) executes
+   `UPDATE identities SET current_key_version = ? WHERE id = ? AND
+   current_key_version = ?expected_current` and aborts with
+   `KeyVersionConflict` if the row count is zero, (b) appends the new
+   `identity_keys` row, (c) stamps the predecessor row's
+   `superseded_at`, and (d) persists the `RotationReceipt` to
+   `identity_receipts`. The CAS guards the trust-state transition
+   even under a misbehaving §0 lock; combined with the keystore
+   handle's `#k<version>` namespacing (one keystore entry per
+   version) the design has two independent serialization layers.
+   After this commit the new key is the canonical signer.
 5. **Evict eldest predecessor private key.** Determine the version to
    evict (`new_current - 3`, if any). Call
    `Keystore::delete_keypair(for_identity(vault_id, id, evict_v))`.
@@ -985,16 +1011,35 @@ P0 split, all gate-aware:
       eligibility checks reject the identity in every gate
       (`require_attributable_signer` and the `Operational`
       visibility filter both treat `revoked` as non-signing).
-   2. **Delete + verify each retained private key.** Iterate the
-      retained private-key ring (current + ≤ 2 predecessors per §3.6)
-      and apply the same delete-then-verify loop §3.10 step 2 uses
-      for `purge`: `Keystore::delete_keypair(handle)`, then
+   2. **Delete + verify every key version that has ever existed.**
+      Iterate **all** `identity_keys` rows for the target identity
+      (not just the retained ring). For each version: call
+      `Keystore::delete_keypair(handle)`, then
       `Keystore::load_signing_key(handle)` and confirm
-      `KeystoreError::NotFound`. `NotFound` for an aged-out version is
-      treated as already-clean (same rule as purge). Any other
-      outcome leaves a `pending_key_disable = true` flag on the
-      revocation receipt; `cairn identity reconcile` re-drives this
-      loop until clean. The `identity_keys` archive (public keys,
+      `KeystoreError::NotFound`. Aged-out versions whose private key
+      was already evicted by routine rotation report `NotFound` from
+      both calls and are treated as already-clean. Earlier
+      `pending_eviction = true` rotation receipts that left orphan
+      private keys behind are caught here because the iterator drives
+      from `identity_keys` (the authoritative version list), not from
+      the retained-ring window — so a revoke followed by a successful
+      reconciliation is guaranteed to leave **no** recoverable
+      signing material for the target identity, regardless of prior
+      rotation eviction failures. After the registry-driven loop,
+      the service issues a defence-in-depth keystore namespace probe:
+      `Keystore::list_identity_versions(vault_id, id) ->
+      Result<Vec<KeyVersion>, KeystoreError>` (a backend-supplied
+      enumeration of `<identity-wire-form>#k*` accounts under the
+      vault's service prefix). If the probe returns a non-empty
+      vector, those versions are deleted-and-verified just like the
+      registry-driven set; if the backend cannot enumerate
+      (`DiscoveryUnsupported`, e.g., DPAPI), the receipt records
+      `keystore_enumeration = "unsupported"` and reconciliation
+      relies on the registry-driven loop alone (which is sufficient
+      for any version a receipt has ever touched). Any other outcome
+      leaves a `pending_key_disable = true` flag on the revocation
+      receipt; `cairn identity reconcile` re-drives this loop until
+      clean. The `identity_keys` archive (public keys,
       append-only) is **not** touched — historical signature
       verification continues to resolve the issuer, satisfying the
       brief's "earlier operations remain valid" promise. The keychain
@@ -1064,10 +1109,18 @@ P0 split, all gate-aware:
       (`require_attributable_signer` rejects `purge_pending` and
       `purged` alike).
    2. **Delete + verify each key.** Iterate every `identity_keys` row
-      for the identity. The retained private-key ring is current + 2
-      predecessors (§3.6); older versions have already been evicted
-      from the keystore as part of normal rotation. The loop treats
-      that case as already-clean and continues:
+      for the identity (the authoritative version list — not just the
+      retained ring; this catches orphan private keys left by prior
+      rotation evictions that failed). The retained private-key ring
+      is current + 2 predecessors (§3.6); older versions are usually
+      already evicted from the keystore as part of normal rotation.
+      The loop treats that case as already-clean and continues. After
+      the registry-driven loop, the service runs the same defence-in-
+      depth keystore namespace probe `Keystore::list_identity_versions
+      (vault_id, id)` documented for revocation; any extra versions
+      surfaced are deleted-and-verified before finalisation, and an
+      unsupported backend records `keystore_enumeration = "unsupported"`
+      on the purge receipt. Per-version steps:
       a. `Keystore::delete_keypair(handle)`. If the call returns
          `KeystoreError::NotFound` **and** `key_version` is outside
          the retained ring (i.e. older than `current_key_version - 2`),
@@ -1190,6 +1243,22 @@ pub trait Keystore: Send + Sync {
     // `Ok(empty)`, so callers can fail closed instead of silently
     // assuming "no binding".
     async fn list_vault_namespaces(&self, service_prefix: &str) -> Result<Vec<VaultId>, KeystoreError>;
+
+    // Defence-in-depth enumeration of every `#k<version>` keystore
+    // account that exists for an identity under this vault's service
+    // prefix. Used by revoke and purge to catch orphan private keys
+    // that the registry-driven loop would not see (e.g., a rotation
+    // whose eviction step failed and was never reconciled, leaving
+    // an aged-out version in the keystore but not in `identity_keys`
+    // beyond its already-superseded row). Backends that cannot
+    // enumerate (DPAPI) return `KeystoreError::DiscoveryUnsupported`;
+    // callers fall back to the registry-driven loop and stamp the
+    // receipt with `keystore_enumeration = "unsupported"`.
+    async fn list_identity_versions(
+        &self,
+        vault_id: &VaultId,
+        id: &Identity,
+    ) -> Result<Vec<KeyVersion>, KeystoreError>;
 }
 ```
 
@@ -1285,7 +1354,7 @@ pub trait IdentityRegistry: Send + Sync {
     // applying the change (or vice versa); the trait does not allow
     // that. Conformance tests assert post-call invariants on every
     // mutated row plus signature re-verification.
-    async fn apply_rotation(&self, receipt: &RotationReceipt) -> Result<(), RegistryError>;
+    async fn apply_rotation(&self, receipt: &RotationReceipt, expected_current: KeyVersion) -> Result<(), RegistryError>;
     async fn apply_revocation(&self, receipt: &RevocationReceipt) -> Result<(), RegistryError>;
 
     // First-bind transaction. Atomically inserts the `vault_meta` row
@@ -1445,7 +1514,8 @@ wraps the two adapter errors plus the cross-cutting cases):
 `DefaultsNotInitialized`,
 `KeyMaterialDesynchronized { id, reason }`,
 `NoLiveAttributableSigner` (rotate/revoke target was the only live default; see §3.10),
-`VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed).
+`VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed),
+`IdentityLockBusy { id }` (per-identity advisory lock held by another mutation; mapped to `EX_TEMPFAIL = 75`).
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
 `zeroize`, `rand_core`. No new transitive surface beyond the cryptographic
@@ -1601,16 +1671,23 @@ a first-bind. Ordering follows §3.7's canonical sentinel-first
 sequence — restated here so the storage contract and the binding
 contract can never drift apart:
 
-1. `.cairn/vault.binding` is written and `fsync`-ed (the operator's
-   filesystem now records that this vault may be bound).
+1. `.cairn/vault.binding.pending` (the **pending** sentinel,
+   witness-bearing, mode 0600) is written and `fsync`-ed.
 2. The `__vault_witness__` keychain entry is written.
 3. The single SQLite transaction reserves the first pending identity
-   **and** inserts `vault_meta(witness_sha256)` with the same hash that
-   landed in step 1. Both rows commit atomically.
+   **and** inserts `vault_meta(witness_sha256)` with the same hash
+   the pending sentinel carries. The adapter `stat`s the **pending**
+   path inside the transaction and re-hashes its bytes — see §4.1's
+   `reserve_first_identity` doc. Both rows commit atomically.
+4. After the transaction commits, the caller promotes the pending
+   sentinel to the final `.cairn/vault.binding` (hash-only) per §3.7
+   step 4. The final sentinel does **not** exist before step 4;
+   neither `vault_meta` writes nor the keychain witness are gated on
+   it.
 
 The store adapter rejects any caller that tries to write `vault_meta`
-without the sentinel already on disk (it `stat`s the path inside the
-transaction); store integration tests assert the rejection. There is no
+without the **pending** sentinel already on disk (it `stat`s the path
+inside the transaction); store integration tests assert the rejection. There is no
 sequence in which the witness lands in keychain or DB without the
 sentinel already being durable, and `cairn identity finalise-binding`
 (§3.7) is the only path that can resolve a sentinel-only state.
