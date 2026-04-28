@@ -172,6 +172,17 @@ pub async fn fix_folders_handler(
     for state in states {
         let projected = project_index(&state);
         let abs = vault_root.join(&projected.path);
+        // No-follow validation BEFORE the read.  `read_to_string` follows
+        // symlinks; if `_index.md` is a symlink to an external file with
+        // matching content, the unchanged branch would silently bypass the
+        // symlink rejection that lives inside `write_once`.  Run the same
+        // lstat-based parent + target check up front, on every iteration.
+        {
+            let dest = abs.clone();
+            tokio::task::spawn_blocking(move || crate::vault::bootstrap::check_write_safe(&dest))
+                .await
+                .with_context(|| format!("spawn_blocking validate {}", abs.display()))??;
+        }
         let needs_write = match tokio::fs::read_to_string(&abs).await {
             Ok(existing) => existing != projected.content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,

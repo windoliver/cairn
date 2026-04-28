@@ -20,13 +20,26 @@ pub struct SubfolderEntry {
     pub last_updated: Option<Rfc3339Timestamp>,
 }
 
+/// One direct record under a folder, paired with its caller-supplied
+/// vault-relative path.  Carrying the path explicitly avoids reconstructing
+/// `<kind>_<id>.md` inside [`project_index`], which would silently emit
+/// broken links if the projector adopts a different naming scheme (e.g.
+/// `raw/a/x.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordEntry {
+    /// Vault-relative path of the projected markdown file for this record.
+    pub path: PathBuf,
+    /// The full stored record.
+    pub record: StoredRecord,
+}
+
 /// Aggregated state for one folder, ready to project as `_index.md`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderState {
     /// Vault-relative folder path.
     pub path: PathBuf,
     /// Records living directly in this folder, sorted by kind then id.
-    pub records: Vec<StoredRecord>,
+    pub records: Vec<RecordEntry>,
     /// Subfolders, sorted by name.
     pub subfolders: Vec<SubfolderEntry>,
     /// Backlinks targeting any record in this folder, sorted by source path.
@@ -67,14 +80,17 @@ pub fn aggregate_folders(
     //    descendant with a record. Record per-subtree counts.
     let mut subtree_count: BTreeMap<PathBuf, u32> = BTreeMap::new();
     let mut subtree_last_update: BTreeMap<PathBuf, Rfc3339Timestamp> = BTreeMap::new();
-    let mut direct: BTreeMap<PathBuf, Vec<&StoredRecord>> = BTreeMap::new();
+    let mut direct: BTreeMap<PathBuf, Vec<(PathBuf, &StoredRecord)>> = BTreeMap::new();
 
     for (path, stored) in &paired {
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map_or_else(|| PathBuf::from(""), Path::to_path_buf);
-        direct.entry(parent.clone()).or_default().push(*stored);
+        direct
+            .entry(parent.clone())
+            .or_default()
+            .push((path.clone(), *stored));
 
         // Walk every ancestor (parent inclusive) and bump counts.
         let mut cur: Option<&Path> = Some(&parent);
@@ -99,9 +115,16 @@ pub fn aggregate_folders(
     // 3. For every folder in `subtree_count`, build a FolderState.
     let mut states: Vec<FolderState> = Vec::new();
     for folder in subtree_count.keys() {
-        let direct_records: Vec<StoredRecord> = direct
+        let direct_records: Vec<RecordEntry> = direct
             .get(folder)
-            .map(|v| v.iter().map(|r| (*r).clone()).collect())
+            .map(|v| {
+                v.iter()
+                    .map(|(p, r)| RecordEntry {
+                        path: p.clone(),
+                        record: (*r).clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Subfolders: any path in `subtree_count` whose parent equals `folder`.
@@ -161,7 +184,7 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
     let updated_at = state
         .records
         .iter()
-        .map(|r| r.record.updated_at.as_str())
+        .map(|r| r.record.record.updated_at.as_str())
         .chain(
             state
                 .subfolders
@@ -197,20 +220,23 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
 
     if !state.records.is_empty() {
         let _ = write!(body, "\n## Records ({})\n", state.records.len());
-        for s in &state.records {
-            // path = folder / "<kind>_<id>.md" — same as MarkdownProjector.
-            let leaf = format!("{}_{}.md", s.record.kind.as_str(), s.record.id.as_str());
-            let projected_path = state.path.join(&leaf);
+        for entry in &state.records {
+            // Render the leaf relative to the folder containing the index,
+            // and resolve backlink counts against the record's actual
+            // vault-relative path.  Any reconstruction would diverge if the
+            // projector chooses a different naming scheme.
+            let leaf = relativize(&state.path, &entry.path);
+            let leaf_str = leaf.to_string_lossy();
             let backlink_count = state
                 .backlinks
                 .iter()
-                .filter(|bl| bl.target_path == projected_path)
+                .filter(|bl| bl.target_path == entry.path)
                 .count();
             let _ = writeln!(
                 body,
-                "- [{leaf}]({leaf}) — {kind} · updated {upd} · {backlink_count} backlinks",
-                kind = s.record.kind.as_str(),
-                upd = s.record.updated_at.as_str(),
+                "- [{leaf_str}]({leaf_str}) — {kind} · updated {upd} · {backlink_count} backlinks",
+                kind = entry.record.record.kind.as_str(),
+                upd = entry.record.record.updated_at.as_str(),
             );
         }
     }
@@ -494,7 +520,10 @@ mod tests {
         let target_path = PathBuf::from(format!("raw/{leaf}"));
         let state = FolderState {
             path: PathBuf::from("raw"),
-            records: vec![stored.clone()],
+            records: vec![RecordEntry {
+                path: target_path.clone(),
+                record: stored.clone(),
+            }],
             subfolders: Vec::new(),
             backlinks: vec![Backlink {
                 source_path: PathBuf::from("raw/other.md"),
@@ -513,6 +542,41 @@ mod tests {
         assert!(
             pf.content.contains("· 1 backlinks"),
             "expected backlink count, got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_records_section_uses_actual_record_path_for_nested_leaf() {
+        // A record at `raw/a/x.md` (not the `<kind>_<id>.md` reconstructed
+        // shape) must render its leaf as `a/x.md` from `raw/_index.md`, and
+        // its backlink count must be matched against the actual path.
+        use crate::domain::record::tests::sample_stored_record;
+        let stored = sample_stored_record(1);
+        let actual_path = PathBuf::from("raw/a/x.md");
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: vec![RecordEntry {
+                path: actual_path.clone(),
+                record: stored,
+            }],
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/other.md"),
+                target_path: actual_path,
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("- [a/x.md](a/x.md)"),
+            "expected nested leaf 'a/x.md', got:\n{}",
+            pf.content
+        );
+        assert!(
+            pf.content.contains("· 1 backlinks"),
+            "expected backlink count to match actual record path, got:\n{}",
             pf.content
         );
     }
@@ -619,9 +683,17 @@ mod tests {
     fn project_records_section_renders_zero_backlinks_when_state_empty() {
         use crate::domain::record::tests::sample_stored_record;
         let stored = sample_stored_record(1);
+        let leaf = format!(
+            "{}_{}.md",
+            stored.record.kind.as_str(),
+            stored.record.id.as_str()
+        );
         let state = FolderState {
             path: PathBuf::from("raw"),
-            records: vec![stored],
+            records: vec![RecordEntry {
+                path: PathBuf::from(format!("raw/{leaf}")),
+                record: stored,
+            }],
             subfolders: Vec::new(),
             backlinks: Vec::new(),
             effective_policy: EffectivePolicy::default(),

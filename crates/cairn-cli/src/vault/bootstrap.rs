@@ -194,19 +194,13 @@ pub fn render_human(receipt: &BootstrapReceipt) -> String {
     )
 }
 
-pub(crate) fn write_once(
-    path: &std::path::Path,
-    content: &str,
-    force: bool,
-    created: &mut Vec<PathBuf>,
-    skipped: &mut Vec<PathBuf>,
-) -> Result<()> {
-    use std::io::Write as _;
-
-    // Validate the parent directory first, before any path — including the
-    // early-return skip path.  A symlink-swapped parent (e.g. `.cairn`)
-    // would redirect every subsequent operation, so we reject it on every
-    // code path, not just the write path.
+/// No-follow validation for a write target. Rejects symlinked parents and
+/// symlinked / non-regular destinations. Callers that want to read the file
+/// before deciding whether to write (e.g. `lint --fix-folders` skipping
+/// unchanged indexes) MUST run this first; otherwise a symlinked
+/// `_index.md` would be read through to its target before the no-follow
+/// guards in [`write_once`] get a chance to fire.
+pub(crate) fn check_write_safe(path: &std::path::Path) -> Result<()> {
     let dir = path.parent().unwrap_or(std::path::Path::new("."));
     if let Ok(meta) = std::fs::symlink_metadata(dir)
         && meta.file_type().is_symlink()
@@ -216,8 +210,6 @@ pub(crate) fn write_once(
             dir.display()
         );
     }
-
-    // Inspect the final target without following symlinks.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         let ft = meta.file_type();
         if ft.is_symlink() {
@@ -227,13 +219,33 @@ pub(crate) fn write_once(
             );
         }
         if !ft.is_file() {
-            // A directory or special file at a placeholder path means the
-            // vault is in an inconsistent state; cairn cannot repair it.
             anyhow::bail!(
                 "{} exists but is not a regular file — cairn cannot overwrite it",
                 path.display()
             );
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_once(
+    path: &std::path::Path,
+    content: &str,
+    force: bool,
+    created: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    // Validate parent + target with no-follow lstat.  This rejects a
+    // symlink-swapped parent (e.g. `.cairn`) and a symlinked destination
+    // before any read or write touches them.
+    check_write_safe(path)?;
+
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        // Path exists and `check_write_safe` confirmed it is a regular file.
+        let _ = meta;
         if !force {
             skipped.push(path.to_owned());
             return Ok(());

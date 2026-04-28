@@ -129,6 +129,37 @@ async fn atomic_writes_overwrite_stale_and_leave_no_tmp() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn symlinked_index_destination_is_rejected_even_when_unchanged() {
+    // `_index.md` itself as a symlink — even one whose target's content
+    // matches what we would write — must be rejected. Earlier the unchanged
+    // fast-path read through the symlink with `read_to_string` and skipped
+    // `write_once`, bypassing its symlink guard.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    let attacker = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+
+    // Pre-populate the attacker target with arbitrary bytes.
+    std::fs::write(attacker.path().join("decoy.md"), b"decoy\n").unwrap();
+    // Plant a symlink at raw/_index.md pointing into the attacker tempdir.
+    std::os::unix::fs::symlink(
+        attacker.path().join("decoy.md"),
+        vault.path().join("raw/_index.md"),
+    )
+    .unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await;
+
+    assert!(result.is_err(), "symlinked _index.md must be rejected");
+    // The attacker's file must remain untouched; we never wrote through.
+    let decoy = std::fs::read_to_string(attacker.path().join("decoy.md")).unwrap();
+    assert_eq!(decoy, "decoy\n", "attacker file was modified");
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn write_through_symlinked_parent_is_rejected() {
     // The atomic-write path delegates to `vault::bootstrap::write_once`,
     // which lstat-checks the immediate parent. A symlinked `raw/` (the
