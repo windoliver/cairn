@@ -517,6 +517,39 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-9 (new loop) regression: when the entire payload is one
+    /// extremely long line (no `\n` anywhere), the bypass must not
+    /// leak a head prefix of that line — there is no safe line
+    /// boundary, so head must be dropped just like tail. Output is
+    /// the marker + degraded sentinel only.
+    #[test]
+    fn oversize_bypass_newline_free_drops_head_prefix() {
+        let mut raw: Vec<u8> = Vec::new();
+        // Distinct head-marker that would be visible if the bug
+        // recurred (first ~half-budget bytes of source).
+        raw.extend_from_slice(b"SECRET-PREFIX-DO-NOT-LEAK");
+        raw.extend(std::iter::repeat_n(b'X', 100_000));
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            !body.contains("SECRET-PREFIX"),
+            "head prefix must be dropped: {body:.200}"
+        );
+        assert!(body.contains("oversize bypass"), "marker present");
+        assert!(body.contains("tail dropped"), "degraded sentinel present");
+    }
+
     /// Round-7 (new loop) regression: when sanitized tail exceeds the
     /// byte budget, `trim_to_byte_budget_at_boundary_from_end` shaves
     /// bytes off the front, which may sit mid-line; the bypass must
@@ -2093,11 +2126,15 @@ fn oversize_bypass(
     let head_sanitized = stage2_ansi_strip(&head_decoded, &mut head_stripped);
     stats.ansi_stripped |= head_stripped;
     let head_trimmed = trim_to_byte_budget_at_boundary(&head_sanitized, half);
-    // Drop any trailing partial line from head so we don't emit a
-    // half-line before the marker.
+    // Drop any trailing partial line from head. If `head_trimmed`
+    // contains NO `\n` at all, the entire window is a prefix of one
+    // giant source line — emit nothing rather than a mid-line prefix
+    // (Round-9 finding: head leak on newline-free oversized payloads
+    // exposed up to ~half the byte budget of raw source bytes even
+    // though no safe line boundary existed).
     let head: &str = match head_trimmed.rfind('\n') {
         Some(idx) => &head_trimmed[..idx],
-        None => head_trimmed,
+        None => "",
     };
 
     let tail_window = (half * 2).min(raw_bytes.len());
