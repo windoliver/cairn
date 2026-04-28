@@ -508,6 +508,34 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-2 (new loop) regression: the oversize bypass must enforce
+    /// `compacted_byte_len <= cfg.max_bytes()` in release builds even
+    /// for non-UTF8 payloads, because lossy decoding expands each
+    /// invalid byte to the 3-byte U+FFFD. Heavy: 64 MiB allocation.
+    #[test]
+    #[ignore = "allocates MAX_INPUT_BYTES + 1 bytes; run with --ignored"]
+    fn oversize_bypass_enforces_byte_ceiling_on_invalid_utf8() {
+        // 0xFF is never a valid UTF-8 leading byte; every byte in the
+        // payload becomes U+FFFD on lossy decode (1B → 3B expansion).
+        let oversized = vec![0xFFu8; MAX_INPUT_BYTES + 1];
+        let evt = terminal_event(&oversized);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("oversize is no longer rejected");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(out.stats.truncated);
+        assert!(
+            out.compacted_byte_len <= cfg.max_bytes(),
+            "compacted exceeds max_bytes: {} > {}",
+            out.compacted_byte_len,
+            cfg.max_bytes(),
+        );
+    }
+
     /// Round-1 (new loop) regression: oversize payloads are NOT rejected;
     /// `squash()` falls back to a head+tail byte-slice bypass that
     /// preserves both ends of the raw stream and emits a clear marker.
@@ -608,6 +636,34 @@ use std::borrow::Cow;
 /// U+FFFD; valid input passes through borrowed.
 fn stage1_lossy_utf8(raw: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(raw)
+}
+
+/// Trim the *end* of `s` so its byte length is at most `budget`,
+/// stopping at the largest codepoint boundary that fits. Used by
+/// the oversize-bypass head slice.
+fn trim_to_byte_budget_at_boundary(s: &str, budget: usize) -> &str {
+    if s.len() <= budget {
+        return s;
+    }
+    let mut keep = budget;
+    while keep > 0 && !s.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    &s[..keep]
+}
+
+/// Trim the *front* of `s` so its byte length is at most `budget`,
+/// starting at the smallest codepoint boundary that fits. Used by
+/// the oversize-bypass tail slice.
+fn trim_to_byte_budget_at_boundary_from_end(s: &str, budget: usize) -> &str {
+    if s.len() <= budget {
+        return s;
+    }
+    let mut start = s.len() - budget;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
 }
 
 #[cfg(test)]
@@ -1548,44 +1604,8 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         };
     }
 
-    // Oversize-bypass: when raw exceeds MAX_INPUT_BYTES the per-stage
-    // pipeline would clone several full copies before stage 6 enforces
-    // max_bytes, risking OOM on legitimate long-running build/test logs.
-    // Take a head + tail byte slice with a marker, decode lossily, and
-    // skip the staged pipeline entirely. Memory is bounded by max_bytes;
-    // raw bytes are preserved (head + tail) rather than rejected.
     if raw_bytes.len() > MAX_INPUT_BYTES {
-        let max_body = cfg.max_bytes();
-        let marker = format!(
-            "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
-        );
-        let marker_bytes = marker.as_bytes();
-        let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
-        let half = budget / 2;
-        // Codepoint-safe: lossy_utf8 decodes byte slices and replaces
-        // invalid sequences with U+FFFD.
-        let head = stage1_lossy_utf8(&raw_bytes[..half.min(raw_bytes.len())]);
-        let tail_start = raw_bytes.len().saturating_sub(half);
-        let tail = stage1_lossy_utf8(&raw_bytes[tail_start..]);
-        let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
-        compacted_bytes.extend_from_slice(head.as_bytes());
-        compacted_bytes.push(b'\n');
-        compacted_bytes.extend_from_slice(marker_bytes);
-        compacted_bytes.push(b'\n');
-        compacted_bytes.extend_from_slice(tail.as_bytes());
-        debug_assert!(compacted_bytes.len() <= max_body + LAYOUT_OVERHEAD);
-        stats.truncated = true;
-        stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(compacted_bytes.len());
-        let compacted_hash = sha256_payload_hash(&compacted_bytes);
-        let compacted_byte_len = compacted_bytes.len();
-        return SquashOutput {
-            compacted_bytes,
-            raw_hash,
-            raw_byte_len,
-            compacted_hash,
-            compacted_byte_len,
-            stats,
-        };
+        return oversize_bypass(raw_bytes, raw_hash, raw_byte_len, cfg, stats);
     }
 
     let decoded = stage1_lossy_utf8(raw_bytes);
@@ -1642,6 +1662,61 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     let compacted_byte_len = compacted_bytes.len();
     let compacted_hash = sha256_payload_hash(&compacted_bytes);
 
+    SquashOutput {
+        compacted_bytes,
+        raw_hash,
+        raw_byte_len,
+        compacted_hash,
+        compacted_byte_len,
+        stats,
+    }
+}
+
+/// Oversize-bypass: when raw exceeds `MAX_INPUT_BYTES` the per-stage
+/// pipeline would clone several full copies before stage 6 enforces
+/// `max_bytes`, risking OOM on legitimate long-running build/test logs.
+/// Take a head + tail byte slice, decode lossily, trim the decoded
+/// strings to byte budgets at codepoint boundaries (lossy decode can
+/// expand 1B → 3B for invalid bytes), insert a clear marker, and
+/// return a normal `SquashOutput` with `stats.truncated = true`.
+/// Memory and output are bounded by `cfg.max_bytes()`.
+fn oversize_bypass(
+    raw_bytes: &[u8],
+    raw_hash: PayloadHash,
+    raw_byte_len: usize,
+    cfg: &SquashConfig,
+    mut stats: SquashStats,
+) -> SquashOutput {
+    let max_body = cfg.max_bytes();
+    let marker = format!(
+        "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
+    );
+    let marker_bytes = marker.as_bytes();
+    let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
+    let half = budget / 2;
+    let head_raw_end = (half * 2).min(raw_bytes.len());
+    let head_decoded = stage1_lossy_utf8(&raw_bytes[..head_raw_end]);
+    let head = trim_to_byte_budget_at_boundary(&head_decoded, half);
+    let tail_window = (half * 2).min(raw_bytes.len());
+    let tail_raw_start = raw_bytes.len() - tail_window;
+    let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
+    let tail = trim_to_byte_budget_at_boundary_from_end(&tail_decoded, half);
+    let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
+    compacted_bytes.extend_from_slice(head.as_bytes());
+    compacted_bytes.push(b'\n');
+    compacted_bytes.extend_from_slice(marker_bytes);
+    compacted_bytes.push(b'\n');
+    compacted_bytes.extend_from_slice(tail.as_bytes());
+    assert!(
+        compacted_bytes.len() <= max_body,
+        "oversize bypass exceeded max_bytes: got {} > {}",
+        compacted_bytes.len(),
+        max_body,
+    );
+    stats.truncated = true;
+    stats.bytes_dropped_truncate = raw_byte_len.saturating_sub(compacted_bytes.len());
+    let compacted_hash = sha256_payload_hash(&compacted_bytes);
+    let compacted_byte_len = compacted_bytes.len();
     SquashOutput {
         compacted_bytes,
         raw_hash,
