@@ -33,7 +33,8 @@ figment = { version = "0.10", features = ["yaml", "env"] }
 regex = { version = "1", default-features = false, features = ["std"] }
 serde_yaml = "0.9"
 temp-env = "0.3"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "serde_json"] }
+trybuild = "1"
 blake3 = "1"
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 ulid = { version = "1.1", default-features = false, features = ["std"] }

@@ -10,6 +10,10 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod conn;
+pub mod error;
+pub mod schema;
+
 use cairn_core::contract::memory_store::{
     CONTRACT_VERSION, HistoryEntry, ListQuery, ListResult, MemoryStore, MemoryStoreCapabilities,
     StoreError, TargetId,
@@ -45,7 +49,7 @@ const _: () = assert!(
     "host CONTRACT_VERSION outside this crate's declared range",
 );
 
-/// `SQLite`-backed `MemoryStore`. Fields and full impl arrive in #46 Task 3.
+/// `SQLite`-backed `MemoryStore`. Full field set and impl arrive in #46 Task 3.
 #[derive(Default)]
 pub struct SqliteMemoryStore;
 

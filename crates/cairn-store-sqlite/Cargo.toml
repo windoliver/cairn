@@ -14,17 +14,26 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-# NOTE: rusqlite (with `bundled` feature) is intentionally held out of the P0
-# scaffold. Pulling libsqlite3-sys/cc into every workspace build widens the
-# native-compilation surface before any storage code uses it. The real dep
-# lands with the storage implementation in issue #46.
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+
+[build-dependencies]
+sha2 = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
+tempfile = { workspace = true }
+rstest = { workspace = true }
+proptest = { workspace = true }
+trybuild = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true
 
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
 [package.metadata.cargo-machete]
-ignored = ["thiserror"]
+ignored = ["sha2"]
