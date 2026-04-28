@@ -711,6 +711,50 @@ fn cli_validator_inspects_wrapper_with_long_options() {
 }
 
 #[test]
+fn extract_inline_span_catches_wrapped_cairn_punctuation() {
+    // Round-9 finding 2: inline spans with shell punctuation around the
+    // cairn token (`(cairn …)`, `{ cairn …; }`) used to be skipped by the
+    // first-token == "cairn" prefilter. They must now be extracted so
+    // validate_cli_block's fail-closed catch-all can reject them.
+    let md = "Try `(cairn ingest --bogus)` or `{ cairn search foo; }` here.";
+    let blocks = extract_code_blocks(md).expect("inline-only markdown must parse");
+    let inline: Vec<_> = blocks.iter().filter(|b| b.lang == "inline").collect();
+    assert_eq!(
+        inline.len(),
+        2,
+        "wrapped inline cairn spans must be extracted, got: {blocks:?}"
+    );
+    for b in inline {
+        let err = validate_cli_block(b, &doc()).unwrap_err_or_else_pretty(&b.body);
+        assert!(
+            matches!(err, CompatError::Malformed { kind: "cli", .. }),
+            "expected Malformed for wrapped inline span `{}`, got: {err:?}",
+            b.body
+        );
+    }
+}
+
+#[test]
+fn cli_validator_validates_alias_backed_positional_value() {
+    // Round-9 finding 3: `cairn ingest`'s `source` positional aliases
+    // body|file|url. A schema-invalid positional value (empty string,
+    // which violates body/file/url's minLength constraints) used to slip
+    // through because validate_positional_values returned early when the
+    // positional name wasn't a direct property.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND \"\"".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("empty alias-backed positional value must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed for invalid alias-backed positional, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_handles_recognized_shell_prefix_words() {
     // Round-8 finding: compound shell forms like `command cairn …`,
     // `! cairn …`, `if cairn …; then` are real invocations. The parser

@@ -183,41 +183,21 @@ fn extract_inline_cairn_spans(line: &str, line_no: usize) -> Vec<CodeBlock> {
     out
 }
 
-/// True when an inline span's first command word (after env-var assignments
-/// and recognized wrappers) is literally `cairn`. Mirrors what
-/// [`locate_cairn_command`] decides, but without forcing a full parse on every
-/// inline backtick on the page.
+/// True when an inline span looks like a Cairn CLI invocation worth handing
+/// to [`validate_cli_block`]. Round-9 update: any whitespace token that
+/// strips down to `cairn` (e.g., `cairn`, `(cairn`, `cairn;`, `{cairn`) is
+/// treated as a candidate; the downstream catch-all then fails closed if it
+/// can't extract a parseable invocation. A bare `` `cairn` `` mention with no
+/// following content is still treated as prose, not an invocation.
 fn span_looks_like_cairn_invocation(span: &str) -> bool {
-    let mut iter = span.split_whitespace();
-    while let Some(tok) = iter.next() {
-        if is_env_var_assignment(tok) {
-            continue;
-        }
-        if let Some(opts_with_value) = wrapper_options_with_value(tok) {
-            // Cheap wrapper-option skip: drop following `-…` tokens, plus the
-            // value of an option known to consume one. Matches the precise
-            // parser closely enough for inline-span gating.
-            while let Some(opt) = iter.clone().next() {
-                if !opt.starts_with('-') {
-                    break;
-                }
-                iter.next();
-                if opt == "--" {
-                    break;
-                }
-                let consumes = !opt.contains('=') && opts_with_value.contains(&opt);
-                if consumes {
-                    iter.next();
-                }
-            }
-            continue;
-        }
-        // Bare `cairn` with no following token is just a binary-name
-        // mention (`` `cairn` `` in prose), not an invocation. Match the
-        // original `cairn ` (trailing space) gate.
-        return tok == "cairn" && iter.clone().next().is_some();
+    fn strip(t: &str) -> &str {
+        t.trim_matches(|c: char| !c.is_alphanumeric() && c != '_')
     }
-    false
+    let toks: Vec<&str> = span.split_whitespace().collect();
+    let Some(idx) = toks.iter().position(|t| strip(t) == "cairn") else {
+        return false;
+    };
+    toks.len() > idx + 1
 }
 
 /// Extract the verb file's top-level `$id` so JSON-typed flag values can
@@ -949,19 +929,92 @@ fn validate_positional_values(
     let Some(pos_field) = cmds.iter().find_map(|c| c.positional.as_ref()) else {
         return Ok(());
     };
-    let Some(prop) = prop_schemas.get(&pos_field.name) else {
-        return Ok(());
+    // Round-9 finding: a positional like `cairn ingest`'s `source` exists
+    // only as an alias — its name isn't in the property map. In that case
+    // the value must satisfy *at least one* of the aliased branches'
+    // schemas (body/file/url for ingest); otherwise the new positional
+    // example slips past unvalidated.
+    let direct = prop_schemas.get(&pos_field.name);
+    let alias_targets: Vec<(&String, &serde_json::Value)> = if direct.is_some() {
+        Vec::new()
+    } else {
+        pos_field
+            .aliases_one_of
+            .iter()
+            .filter_map(|alias| prop_schemas.get(alias).map(|s| (alias, s)))
+            .collect()
     };
+    // Two distinct cases when no `direct` schema is available:
+    // 1. The positional has `aliases_one_of` (e.g., `cairn ingest`'s
+    //    `source` aliases body/file/url). Round-9 finding: previously
+    //    this returned Ok and never validated the positional value. Now
+    //    we require at least one aliased branch resolves, and below we
+    //    require the value to validate against one of them.
+    // 2. The positional has no aliases (e.g., `cairn retrieve`'s `id`)
+    //    and prop_schemas is empty because variant matching failed
+    //    upstream — leave that to the dedicated AmbiguousVariant path
+    //    instead of double-reporting here.
+    if direct.is_none() && alias_targets.is_empty() {
+        if pos_field.aliases_one_of.is_empty() {
+            return Ok(());
+        }
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: format!(
+                "verb `{verb}` positional `{}` aliases {:?} but none of those branches \
+                 expose a property schema",
+                pos_field.name, pos_field.aliases_one_of
+            ),
+            line: source_line,
+        });
+    }
     for value in positional_values {
-        validate_positional_value(
-            verb,
-            &pos_field.name,
-            value,
-            prop,
-            base_id,
-            owner_defs,
-            source_line,
-        )?;
+        if let Some(prop) = direct {
+            validate_positional_value(
+                verb,
+                &pos_field.name,
+                value,
+                prop,
+                base_id,
+                owner_defs,
+                source_line,
+            )?;
+            continue;
+        }
+        // Alias-backed: accept the value iff it validates against at least
+        // one aliased branch's schema. Collect every error for the failure
+        // detail so the gate's message stays actionable.
+        let mut branch_errors: Vec<String> = Vec::new();
+        let mut accepted = false;
+        for (alias, prop) in &alias_targets {
+            match validate_positional_value(
+                verb,
+                alias,
+                value,
+                prop,
+                base_id,
+                owner_defs,
+                source_line,
+            ) {
+                Ok(()) => {
+                    accepted = true;
+                    break;
+                }
+                Err(e) => branch_errors.push(format!("{alias}: {e}")),
+            }
+        }
+        if !accepted {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: format!(
+                    "verb `{verb}` positional `{}` value `{value}` matches no aliased \
+                     branch ({})",
+                    pos_field.name,
+                    branch_errors.join("; ")
+                ),
+                line: source_line,
+            });
+        }
     }
     Ok(())
 }

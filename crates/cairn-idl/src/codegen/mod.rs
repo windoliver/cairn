@@ -227,7 +227,16 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
                 // invocation would otherwise silently bypass the gate. Fail
                 // closed so the only escape hatch is to drop the example
                 // entirely, not to relabel its fence.
-                if block.body.split_whitespace().any(|t| t == "cairn") {
+                // Round-9 finding: a token like `(cairn` or `cairn;` shows
+                // up after split_whitespace as a single chunk and would
+                // bypass an exact-match check. Strip surrounding shell
+                // punctuation before comparing so wrapped invocations get
+                // caught too.
+                let mentions_cairn = block
+                    .body
+                    .split_whitespace()
+                    .any(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '_') == "cairn");
+                if mentions_cairn {
                     let line = block.line;
                     return Err(CodegenError::Emit(format!(
                         "skill compat: fenced block at line {line} uses unsupported language \
@@ -320,6 +329,21 @@ mod tests {
         let body = "## Ingest\n\n```zsh\ncairn ingest --bogus\n```\n";
         let err = check_skill_compat(&doc(), &skill_md(body))
             .expect_err("unsupported fence with cairn token must fail");
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("unsupported language `zsh`")),
+            "expected emit error citing zsh, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_skill_compat_rejects_unsupported_fence_with_wrapped_cairn() {
+        // Round-9 finding 1: a token like `(cairn` appears as a single
+        // whitespace chunk and used to slip past the exact-match check.
+        // Strip surrounding shell punctuation before comparing so wrapped
+        // invocations in unsupported fences also fail closed.
+        let body = "## Ingest\n\n```zsh\n(cairn ingest --bogus)\n```\n";
+        let err = check_skill_compat(&doc(), &skill_md(body))
+            .expect_err("wrapped cairn in unsupported fence must fail");
         assert!(
             matches!(err, CodegenError::Emit(ref m) if m.contains("unsupported language `zsh`")),
             "expected emit error citing zsh, got: {err:?}"
