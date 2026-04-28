@@ -255,17 +255,16 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
         }
         let owned = shell_split(line, block.line)?;
         for segment in command_segments(&owned) {
-            // Skip env-var assignments (`FOO=bar …`) and time-style
-            // wrappers (`time cairn …`, `env DEBUG=1 cairn …`) until we
-            // hit the actual command word. Only validate when that
-            // command word is exactly `cairn` — quoted text, `echo
-            // cairn …`, or `cat cairn …` are not real invocations.
-            let Some(cmd_pos) = command_word_position(segment) else {
+            // Skip env-var assignments (`FOO=bar …`) and known wrappers
+            // (`time cairn …`, `env -i cairn …`, `sudo -u alice cairn …`)
+            // until we hit `cairn`. If the wrapped invocation isn't
+            // actually `cairn` (e.g., `echo cairn …`, `sudo -u alice ls`)
+            // the segment is skipped — round-3 found the prior bare-token
+            // skip mistreated `sudo -u alice cairn …` as wrapper option
+            // pointing at `alice`.
+            let Some(cmd_pos) = locate_cairn_command(segment) else {
                 continue;
             };
-            if segment[cmd_pos] != "cairn" {
-                continue;
-            }
             validate_cli_line_tokens(&segment[cmd_pos..], block.line, doc)?;
         }
     }
@@ -276,16 +275,18 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
 /// `&`) and strip any trailing comment (`#…`). Each returned segment is a
 /// candidate simple command. Round-2 finding: without this `cairn search
 /// foo && jq …` would feed `&&` and `jq` into the CLI scanner.
-fn command_segments(tokens: &[String]) -> Vec<&[String]> {
+fn command_segments(tokens: &[Token]) -> Vec<&[Token]> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for (i, tok) in tokens.iter().enumerate() {
-        if matches!(tok.as_str(), ";" | "&&" | "||" | "|" | "&" | "|&") {
+        // Operator tokens are emitted unquoted by shell — a quoted `;` is
+        // literal data, not a separator.
+        if !tok.quoted && matches!(tok.value.as_str(), ";" | "&&" | "||" | "|" | "&" | "|&") {
             if start < i {
                 out.push(&tokens[start..i]);
             }
             start = i + 1;
-        } else if tok.starts_with('#') {
+        } else if !tok.quoted && tok.value.starts_with('#') {
             // Trailing shell comment — drop it and everything after.
             if start < i {
                 out.push(&tokens[start..i]);
@@ -299,33 +300,52 @@ fn command_segments(tokens: &[String]) -> Vec<&[String]> {
     out
 }
 
-/// Position of the command word in a simple-command token stream — i.e.,
-/// the first token that is not an env-var assignment (`KEY=value`) and not
-/// a known plain wrapper (`time`, `env`, `nohup`, `sudo`). Returns `None`
-/// if no command word is found.
-fn command_word_position(segment: &[String]) -> Option<usize> {
+/// Position of the literal `cairn` command word in a simple-command token
+/// stream, walking past env-var assignments and known wrappers (and any
+/// wrapper-specific options/operands). Returns `None` if the segment never
+/// reaches a `cairn` token. Round-3 finding: `sudo -u alice cairn …` was
+/// mistreated as the wrapper pointing at `alice`; `echo cairn …` was
+/// treated as a real invocation. Both must resolve correctly.
+fn locate_cairn_command(segment: &[Token]) -> Option<usize> {
     const WRAPPERS: &[&str] = &["env", "time", "nohup", "sudo", "exec"];
+    let mut in_wrapper = false;
     for (i, tok) in segment.iter().enumerate() {
-        // Env-var assignment: `FOO=bar` (must start with letter/underscore).
-        if let Some(eq_pos) = tok.find('=')
-            && eq_pos > 0
-        {
-            let key = &tok[..eq_pos];
-            if key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && key
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            {
-                continue;
-            }
-        }
-        if WRAPPERS.contains(&tok.as_str()) {
+        let val = tok.value.as_str();
+        if !tok.quoted && is_env_var_assignment(val) {
             continue;
         }
-        return Some(i);
+        if !tok.quoted && WRAPPERS.contains(&val) {
+            in_wrapper = true;
+            continue;
+        }
+        if !tok.quoted && val == "cairn" {
+            return Some(i);
+        }
+        if in_wrapper {
+            // After a wrapper, keep scanning past wrapper options /
+            // operands until we find `cairn` (or run out — caller skips).
+            continue;
+        }
+        // First non-wrapper, non-env command word isn't `cairn` — this
+        // segment is some other command (`echo …`, `cat …`, `ls …`).
+        return None;
     }
     None
+}
+
+fn is_env_var_assignment(tok: &str) -> bool {
+    let Some(eq_pos) = tok.find('=') else {
+        return false;
+    };
+    if eq_pos == 0 {
+        return false;
+    }
+    let key = &tok[..eq_pos];
+    key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Collapse shell line-continuations: a line ending in an unescaped trailing
@@ -351,11 +371,11 @@ fn join_continuations(body: &str) -> Vec<String> {
 
 /// Validate one whitespace-tokenised `cairn …` line.
 fn validate_cli_line_tokens(
-    owned: &[String],
+    owned: &[Token],
     source_line: usize,
     doc: &Document,
 ) -> Result<(), CompatError> {
-    let mut tokens = owned.iter().map(String::as_str);
+    let mut tokens = owned.iter();
     let verb = consume_executable_and_verb(&mut tokens, source_line)?;
 
     // Resolve the token to its CliCommand variants. Match on the configured
@@ -483,16 +503,16 @@ fn validate_cli_line_tokens(
 /// Consume the leading two tokens of a `cairn …` line, enforcing the
 /// executable name is exactly `cairn` and a verb token follows. Defense in
 /// depth alongside the block-level filter in `validate_cli_block`.
-fn consume_executable_and_verb<'a, I: Iterator<Item = &'a str>>(
+fn consume_executable_and_verb<'a, I: Iterator<Item = &'a Token>>(
     tokens: &mut I,
     source_line: usize,
 ) -> Result<&'a str, CompatError> {
     match tokens.next() {
-        Some("cairn") => {}
-        Some(other) => {
+        Some(t) if !t.quoted && t.value == "cairn" => {}
+        Some(t) => {
             return Err(CompatError::Malformed {
                 kind: "cli",
-                detail: format!("first token must be `cairn`, got `{other}`"),
+                detail: format!("first token must be `cairn`, got `{}`", t.value),
                 line: source_line,
             });
         }
@@ -504,11 +524,14 @@ fn consume_executable_and_verb<'a, I: Iterator<Item = &'a str>>(
             });
         }
     }
-    tokens.next().ok_or(CompatError::Malformed {
-        kind: "cli",
-        detail: "missing verb after `cairn`".to_string(),
-        line: source_line,
-    })
+    tokens
+        .next()
+        .map(|t| t.value.as_str())
+        .ok_or(CompatError::Malformed {
+            kind: "cli",
+            detail: "missing verb after `cairn`".to_string(),
+            line: source_line,
+        })
 }
 
 /// Validate every positional + flag value collected from one CLI line
@@ -1243,14 +1266,25 @@ pub(crate) fn is_signed_int_source(s: &str) -> bool {
     matches!(s, "i8" | "i16" | "i32" | "i64" | "isize" | "integer")
 }
 
+/// One shell-split token plus whether *any* portion of it appeared inside
+/// quotes. Knowing the quote origin lets the parser distinguish a real
+/// `--option` token from a quoted argument that *starts* with `-` (e.g.,
+/// `--body "--literal"` — round-3 finding).
+#[derive(Debug, Clone)]
+pub(crate) struct Token {
+    pub value: String,
+    pub quoted: bool,
+}
+
 /// Shell-aware tokenizer for one CLI example line. Handles single- and
 /// double-quoted strings and backslash-escaped characters; otherwise behaves
 /// like `split_whitespace`. Returns an error on an unmatched quote or a
 /// dangling backslash so a syntactically broken example like
 /// `cairn search "unterminated` can't slip past the gate.
-fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatError> {
+fn shell_split(line: &str, source_line: usize) -> Result<Vec<Token>, CompatError> {
     let mut out = Vec::new();
     let mut buf = String::new();
+    let mut buf_quoted = false;
     let mut in_single = false;
     let mut in_double = false;
     let mut chars = line.chars().peekable();
@@ -1266,11 +1300,23 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatErro
                 };
                 buf.push(next);
             }
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => {
+                in_single = !in_single;
+                buf_quoted = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                buf_quoted = true;
+            }
             ws if !in_single && !in_double && ws.is_whitespace() => {
-                if !buf.is_empty() {
-                    out.push(std::mem::take(&mut buf));
+                // Empty *quoted* tokens are real arguments (`''` is a
+                // zero-length value); empty *unquoted* runs of whitespace
+                // are not.
+                if !buf.is_empty() || buf_quoted {
+                    out.push(Token {
+                        value: std::mem::take(&mut buf),
+                        quoted: std::mem::take(&mut buf_quoted),
+                    });
                 }
             }
             _ => buf.push(c),
@@ -1286,8 +1332,11 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatErro
             line: source_line,
         });
     }
-    if !buf.is_empty() {
-        out.push(buf);
+    if !buf.is_empty() || buf_quoted {
+        out.push(Token {
+            value: buf,
+            quoted: buf_quoted,
+        });
     }
     Ok(out)
 }
@@ -1299,22 +1348,26 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<String>, CompatErro
 fn scan_tokens<'a>(
     verb: &str,
     source_line: usize,
-    tokens: impl Iterator<Item = &'a str>,
+    tokens: impl Iterator<Item = &'a Token>,
     allowed_flags: &BTreeMap<&str, &CliFlag>,
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
     let mut positional_values: Vec<String> = Vec::new();
     let mut flag_occurrences: Vec<FlagOccurrence> = Vec::new();
-    // Aggregate values for `list<enum(...)>` flags across repeated
-    // occurrences so a user-written `--include a --include b` (clap's
-    // `ArgAction::Append` form) is validated as the same logical list as
-    // the comma-delimited `--include a,b` form. Other `list<...>` keep
-    // per-occurrence semantics and flow through `flag_occurrences`.
     let mut list_flag_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut iter = tokens.peekable();
     while let Some(tok) = iter.next() {
-        if let Some(flag_body) = tok.strip_prefix("--") {
+        // A *quoted* token is always argument data — never treat it as a
+        // `--option`. Round-3 finding: `--body "--literal"` lost its
+        // quoting context and the literal value was reparsed as a flag.
+        let looks_like_long = !tok.quoted && tok.value.starts_with("--") && tok.value.len() > 2;
+        let looks_like_short = !tok.quoted
+            && tok.value.starts_with('-')
+            && tok.value != "-"
+            && !tok.value.starts_with("--");
+        if looks_like_long {
+            let flag_body = tok.value.strip_prefix("--").unwrap_or("");
             let (name, has_inline_value) = flag_body
                 .split_once('=')
                 .map_or((flag_body, false), |(n, _)| (n, true));
@@ -1340,12 +1393,17 @@ fn scan_tokens<'a>(
             };
             let value: Option<String> = if arity == 1 && !has_inline_value {
                 // Non-boolean flags require a value — either inline (`--x=v`)
-                // or the next non-flag token. Bare `-` (stdin sentinel) and
-                // `--` are valid values for many real flags (e.g.,
-                // `cairn ingest --body -`).
+                // or the next token. A quoted token is always a value
+                // (even if it starts with `-`); an unquoted token is a
+                // value only if it isn't another option.
                 let v = match iter.peek() {
-                    Some(n) if !n.starts_with('-') || *n == "-" || *n == "--" => {
-                        let v = (*n).to_string();
+                    Some(n)
+                        if n.quoted
+                            || !n.value.starts_with('-')
+                            || n.value == "-"
+                            || n.value == "--" =>
+                    {
+                        let v = n.value.clone();
                         let _ = iter.next();
                         Some(v)
                     }
@@ -1365,11 +1423,8 @@ fn scan_tokens<'a>(
                 None
             };
             if let (Some(value), Some(src), Some(field)) = (value, value_source, field_name) {
-                // Aggregate every `list<...>` source (enum and freeform
-                // alike) so the array-as-a-whole is validated against the
-                // property schema. Round-10 found that `list<string>`
-                // flags like `ingest --tags` previously fell through with
-                // no schema check at all.
+                // Aggregate every `list<...>` source so the array-as-a-
+                // whole is validated against the property schema.
                 if src.starts_with("list<") {
                     list_flag_values
                         .entry(name.to_string())
@@ -1384,23 +1439,19 @@ fn scan_tokens<'a>(
                     });
                 }
             }
-        } else if !tok.starts_with('-') || tok == "-" {
-            // Bare `-` is a positional (stdin sentinel for ingest etc.),
-            // not another flag.
-            positional_count += 1;
-            positional_values.push(tok.to_string());
-        } else {
-            // Single-dash token that isn't `-` or `--` (which is consumed
-            // above via the `flag_body` strip and the bare-`-` branch). We
-            // don't model short options yet, so flag any such token as
-            // unknown rather than silently dropping it (round-2 finding 2).
-            // `--` end-of-options marker is rare in our examples and not
-            // documented; treat it as unknown too.
+        } else if looks_like_short {
+            // Single-dash token (e.g., `-x`). We don't model short
+            // options; surface as unknown so a stale alias blocks compat.
             return Err(CompatError::UnknownFlag {
                 verb: verb.to_string(),
-                flag: tok.trim_start_matches('-').to_string(),
+                flag: tok.value.trim_start_matches('-').to_string(),
                 line: source_line,
             });
+        } else {
+            // Quoted token, bare `-`, or anything not starting with `-`
+            // — treat as positional.
+            positional_count += 1;
+            positional_values.push(tok.value.clone());
         }
     }
     Ok(TokenScan {

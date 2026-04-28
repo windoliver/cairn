@@ -600,6 +600,52 @@ fn live_skill_md_exercises_positional_source_for_ingest() {
 }
 
 #[test]
+fn cli_validator_inspects_wrapper_with_options() {
+    // Round-3 finding 1: `sudo -u alice cairn …`, `env -i cairn …`,
+    // `time -p cairn …` should still be validated. Prior code stopped
+    // at the wrapper option (`-u`) and skipped the segment.
+    for prefix in ["sudo -u alice", "env -i", "time -p"] {
+        let body = format!("{prefix} cairn ingest --bogus");
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.clone(),
+            line: 1,
+        };
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(&body);
+        assert!(
+            matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "bogus"),
+            "expected UnknownFlag for --bogus inside `{body}`, got: {err:?}"
+        );
+    }
+}
+
+trait UnwrapErrPretty<T, E> {
+    fn unwrap_err_or_else_pretty(self, ctx: &str) -> E;
+}
+impl<T: std::fmt::Debug, E> UnwrapErrPretty<T, E> for Result<T, E> {
+    fn unwrap_err_or_else_pretty(self, ctx: &str) -> E {
+        match self {
+            Ok(v) => panic!("expected error for `{ctx}`, got Ok: {v:?}"),
+            Err(e) => e,
+        }
+    }
+}
+
+#[test]
+fn cli_validator_accepts_quoted_hyphen_value() {
+    // Round-3 finding 2: a quoted value that *starts* with `-` (e.g.,
+    // `--body "--literal"`) must be treated as the flag's value, not
+    // misclassified as another option. The compat gate must accept it.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND --body \"--literal\"".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("quoted hyphen-prefixed value must be consumed as a value, not a flag");
+}
+
+#[test]
 fn cli_validator_skips_quoted_or_argument_cairn_text() {
     // Round-2 finding 1: `cairn` appearing as an argument to `echo`
     // (or any non-cairn command) must not be treated as a Cairn
