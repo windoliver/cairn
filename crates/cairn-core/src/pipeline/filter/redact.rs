@@ -312,9 +312,11 @@ fn skip_scheme_prefix(input: &str, mut i: usize) -> usize {
 }
 
 /// Consume a value starting at `i`. If the first byte is `'` or `"`,
-/// consume through the matching close quote (or newline / EOF if the
-/// quote is unbalanced — fail-closed: include all bytes). Otherwise,
-/// consume non-whitespace, non-delimiter bytes.
+/// consume through the matching close quote **across newlines** (a
+/// quoted secret can legally span multiple lines, e.g. a heredoc-shaped
+/// PEM body), and fail closed by redacting through EOF if the quote is
+/// never closed. Otherwise, consume non-whitespace, non-delimiter
+/// bytes — unquoted values still terminate at the first delimiter.
 fn consume_value(input: &str, i: usize) -> (usize, usize) {
     let bytes = input.as_bytes();
     if i >= bytes.len() {
@@ -325,14 +327,19 @@ fn consume_value(input: &str, i: usize) -> (usize, usize) {
         let q = first;
         let value_start = i;
         let mut j = i + 1;
-        while j < bytes.len() && bytes[j] != q && bytes[j] != b'\n' && bytes[j] != b'\r' {
+        // Consume through the matching close quote, regardless of
+        // newlines. A multiline quoted secret (e.g. an embedded PEM
+        // body or a backslash-escaped multi-line string) must be
+        // redacted in full — terminating at `\n` would leak everything
+        // after the first line.
+        while j < bytes.len() && bytes[j] != q {
             j += 1;
         }
         if j < bytes.len() && bytes[j] == q {
             return (value_start, j + 1);
         }
-        // Unbalanced quote — fail closed: redact through the line.
-        return (value_start, j);
+        // Quote never closed — fail closed: redact through EOF.
+        return (value_start, bytes.len());
     }
     let value_start = i;
     let mut j = i;
@@ -564,6 +571,53 @@ mod tests {
         assert!(
             !r.text.contains(&secret),
             "long password leaked through scanner: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_multiline_quoted_secret_through_close_quote() {
+        // A quoted context-keyed value can legitimately span multiple
+        // lines (e.g. an embedded PEM body or a backslash-escaped
+        // multi-line string). The scanner must consume through the
+        // matching close quote across newlines — terminating at `\n`
+        // would leak every line after the first.
+        let secret = "first-line-contents\nsecond-line-secret\nthird-line-tail";
+        let input = format!("password=\"{secret}\" trailing");
+        let r = redact(&input);
+        assert!(!r.spans.is_empty(), "no span for multiline quoted secret");
+        for line in [
+            "first-line-contents",
+            "second-line-secret",
+            "third-line-tail",
+        ] {
+            assert!(
+                !r.text.contains(line),
+                "line `{line}` leaked through multiline scanner: {}",
+                r.text
+            );
+        }
+        // Bytes outside the quoted value are preserved.
+        assert!(r.text.contains(" trailing"), "tail dropped: {}", r.text);
+    }
+
+    #[test]
+    fn redacts_unclosed_quoted_secret_through_eof() {
+        // If the close quote never appears the scanner fails closed by
+        // redacting through end-of-input — a partial leak is still a
+        // leak.
+        let input =
+            "config: api_key=\"never-closed-secret-spanning\nmany lines without a close quote";
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for unclosed quoted secret");
+        assert!(
+            !r.text.contains("never-closed-secret-spanning"),
+            "unclosed secret prefix leaked: {}",
+            r.text
+        );
+        assert!(
+            !r.text.contains("many lines without a close quote"),
+            "unclosed secret tail leaked: {}",
             r.text
         );
     }
