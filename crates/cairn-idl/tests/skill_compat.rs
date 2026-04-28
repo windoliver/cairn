@@ -488,6 +488,43 @@ fn live_skill_md_covers_oneof_branches_and_optional_json_flag() {
 }
 
 #[test]
+fn cli_validator_rejects_empty_string_flag_below_min_length() {
+    // Round-6 finding 2: string-flag validation now goes through full
+    // JSON Schema. `ingest.kind` declares `minLength: 1`; an empty value
+    // must fail the gate, where the prior pattern-only path missed
+    // length / format / enum constraints on string flags.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: r#"cairn ingest --kind '' --body BODY"#.into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("empty string flag below minLength must fail full schema validation");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_inspects_bash_block_with_leading_comment() {
+    // Round-6 finding 1: a fenced bash block whose first line is a comment
+    // (or any non-`cairn` shell prefix) was previously skipped entirely.
+    // The compat gate must still inspect the `cairn …` lines inside.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "# example\ncairn ingest --bogus".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("unknown flag in bash block with leading comment must fail");
+    assert!(
+        matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "bogus"),
+        "expected UnknownFlag for --bogus, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_rejects_empty_search_query_positional() {
     // Round-4 finding 1: positional validation must enforce the full
     // property schema, not just `pattern`. `search.query` declares

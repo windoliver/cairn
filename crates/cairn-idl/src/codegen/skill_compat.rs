@@ -607,36 +607,6 @@ fn validate_positional_value(
     Ok(())
 }
 
-/// Resolve a cross-file `$ref` (`../common/primitives.json#/$defs/<Name>`)
-/// to the `pattern` declared on that def, by reading the embedded
-/// `common/primitives.json` and any future common-defs file at compile time.
-/// Returns `None` for refs we can't resolve so the caller can fall through
-/// to the no-pattern path.
-///
-/// Generalising past the `Ulid`-only Round-15 hack: all primitive patterns
-/// flow from the IDL JSON, not from a hand-maintained Rust table, so adding
-/// a new primitive in `common/primitives.json` is automatically picked up
-/// by the compat gate without a code change.
-fn primitive_ref_pattern(reference: &str) -> Option<String> {
-    static PRIMITIVES_JSON: &str = include_str!("../../schema/common/primitives.json");
-    static PATTERNS: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
-    let map = PATTERNS.get_or_init(|| {
-        let mut out = BTreeMap::new();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(PRIMITIVES_JSON)
-            && let Some(defs) = v.get("$defs").and_then(serde_json::Value::as_object)
-        {
-            for (name, def) in defs {
-                if let Some(pat) = def.get("pattern").and_then(serde_json::Value::as_str) {
-                    out.insert(name.clone(), pat.to_string());
-                }
-            }
-        }
-        out
-    });
-    let suffix = reference.rsplit('/').next()?;
-    map.get(suffix).cloned()
-}
-
 /// `referencing::Retrieve` impl that resolves cross-file `$ref`s by mapping
 /// the `cairn.dev/schema/cairn.mcp.v1/...` URI back to a path under the
 /// crate's compile-time `SCHEMA_DIR`. Without this any SKILL.md JSON example
@@ -734,12 +704,13 @@ fn validate_flag_value(
     } else if let Some(allowed) = list_enum_options(source) {
         validate_list_enum_value(value, allowed, prop_schema, &bad)?;
     } else if source == "string" || source == "path" {
-        // Freeform string/path: still honour the property schema's
-        // `pattern` / `minLength` / cross-file `$ref` (e.g.,
-        // `forget.record_id` is a Ulid). Without this a stale example
-        // like `cairn forget --record not-a-ulid` would silently pass.
+        // Freeform string/path: validate against the full property schema
+        // (minLength, maxLength, pattern, format, enum, $ref, …) so an
+        // example like `cairn ingest --url not-a-uri` fails the gate the
+        // way the runtime would. Round-6 found the prior pattern-only
+        // path missed `format: "uri"` and `maxLength` constraints.
         if let Some(prop) = prop_schema {
-            check_string_constraints(value, prop, &bad)?;
+            check_string_flag_value(value, prop, base_id, owner_defs, &bad)?;
         }
     } else if source == "json"
         && let Some(prop) = prop_schema
@@ -754,39 +725,26 @@ fn validate_flag_value(
     Ok(())
 }
 
-/// Validate a string/path flag value against the property schema's
-/// `pattern` / `minLength` and any well-known primitive `$ref`.
-fn check_string_constraints(
+/// Validate a string/path flag value via full JSON Schema validation —
+/// wraps the property in the owning verb's `$id` + `$defs` so any
+/// constraint (`minLength`, `maxLength`, `pattern`, `format`, `enum`,
+/// `$ref`) is enforced. Mirrors the positional path so generated and
+/// hand-written CLI examples are checked the same way.
+fn check_string_flag_value(
     value: &str,
     prop_schema: &serde_json::Value,
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
     bad: &dyn Fn(String) -> CompatError,
 ) -> Result<(), CompatError> {
-    if let Some(min_len) = prop_schema
-        .get("minLength")
-        .and_then(serde_json::Value::as_u64)
-        && (value.chars().count() as u64) < min_len
-    {
-        return Err(bad(format!(
-            "value `{value}` shorter than minLength {min_len}"
-        )));
-    }
-    let pattern = prop_schema
-        .get("pattern")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            let r = prop_schema
-                .get("$ref")
-                .and_then(serde_json::Value::as_str)?;
-            primitive_ref_pattern(r)
-        });
-    if let Some(pattern) = pattern
-        && let Ok(re) = regex::Regex::new(&pattern)
-        && !re.is_match(value)
-    {
-        return Err(bad(format!(
-            "value `{value}` does not match pattern /{pattern}/"
-        )));
+    let wrapper = wrap_property_schema(prop_schema, base_id, owner_defs);
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(SchemaDirRetriever)
+        .build(&wrapper)
+        .map_err(|e| bad(format!("schema compile: {e}")))?;
+    let json_value = serde_json::Value::String(value.to_string());
+    if let Err(err) = validator.validate(&json_value) {
+        return Err(bad(format!("value `{value}` violates schema: {err}")));
     }
     Ok(())
 }

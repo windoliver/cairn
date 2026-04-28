@@ -198,7 +198,13 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
         .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
     for (verb_ctx, block) in blocks {
         match block.lang.as_str() {
-            "bash" | "shell" | "sh" | "inline" if block.body.trim_start().starts_with("cairn ") => {
+            "bash" | "shell" | "sh" | "inline" => {
+                // Validate every bash/inline block — `validate_cli_block`
+                // handles per-line filtering so a `cairn …` invocation
+                // sitting after a comment, `set -e`, or any other shell
+                // boilerplate still gets inspected. Gating on the first
+                // line starting with `cairn ` was a formatting-based
+                // bypass of the gate (round-6 finding).
                 skill_compat::validate_cli_block(&block, doc)
                     .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
             }
