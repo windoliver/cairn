@@ -73,11 +73,12 @@ async fn bootstrap(conn: &AsyncConn) -> Result<(), StoreError> {
 
 /// Sync open at `path`, returning a raw `rusqlite::Connection`. For tests
 /// that drive SQL directly (drift detection, migration validation). Not
-/// part of the production API.
+/// part of the production API — gated behind `test-helpers` feature.
 ///
 /// # Errors
 /// Returns [`StoreError`] if the directory cannot be created, the
 /// connection cannot be opened, pragmas fail, or migrations fail.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn open_sync(path: impl AsRef<Path>) -> Result<rusqlite::Connection, StoreError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent()
@@ -94,10 +95,12 @@ pub fn open_sync(path: impl AsRef<Path>) -> Result<rusqlite::Connection, StoreEr
 }
 
 /// Sync in-memory open returning a raw `rusqlite::Connection` for tests
-/// that drive SQL directly. Not part of the production API.
+/// that drive SQL directly. Not part of the production API — gated behind
+/// `test-helpers` feature.
 ///
 /// # Errors
 /// Returns [`StoreError`] if pragmas or migrations fail.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn open_in_memory_sync() -> Result<rusqlite::Connection, StoreError> {
     let mut conn = rusqlite::Connection::open_in_memory()?;
     conn.execute_batch(PRAGMAS)?;

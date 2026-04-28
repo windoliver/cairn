@@ -14,7 +14,9 @@ pub mod store;
 mod verify;
 
 pub use error::StoreError;
-pub use open::{open, open_in_memory, open_in_memory_sync, open_sync};
+pub use open::{open, open_in_memory};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;

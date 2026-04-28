@@ -331,6 +331,7 @@ dependencies = [
  "blake3",
  "bon",
  "cairn-core",
+ "cairn-store-sqlite",
  "cairn-test-fixtures",
  "proptest",
  "rusqlite",

@@ -24,7 +24,14 @@ tokio = { workspace = true }
 tokio_rusqlite = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+default = []
+# Exposes sync `rusqlite::Connection` open helpers for integration tests.
+# Not part of the production API — keeps the test surface explicit.
+test-helpers = []
+
 [dev-dependencies]
+cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
