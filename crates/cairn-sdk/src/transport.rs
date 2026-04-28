@@ -344,6 +344,32 @@ fn validate_scope_filter(
     Ok(())
 }
 
+/// Structural RFC-3986 floor for the `format: uri` constraint. A full URI
+/// parser lives in the verb handler once the store wires in; the SDK
+/// enforces the cheap shape — non-empty `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) ":"`
+/// scheme, plus a non-empty hier-part — so obvious garbage (`""`, `":"`,
+/// `"http"`, `"://x"`, `"1bad:rest"`) cannot reach storage.
+fn validate_uri(s: &str) -> Result<(), SdkError> {
+    if s.is_empty() {
+        return Err(invalid("url: must not be empty"));
+    }
+    let Some(colon) = s.find(':') else {
+        return Err(invalid("url: must be a valid URI"));
+    };
+    if colon == 0 || colon == s.len() - 1 {
+        return Err(invalid("url: must be a valid URI"));
+    }
+    let scheme = &s[..colon];
+    let mut chars = scheme.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    let rest_ok =
+        chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !(first_ok && rest_ok) {
+        return Err(invalid("url: must be a valid URI"));
+    }
+    Ok(())
+}
+
 /// Mirrors the full `ingest` JSON Schema: the IDL `validate()` covers the
 /// exactly-one-of XOR; the schema additionally pins `minLength: 1` on `body`,
 /// `file`, `url`, `kind`, `session_id`, and every `tags[*]`, and `format: uri`
@@ -362,27 +388,12 @@ fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
         return Err(invalid("file: must not be empty"));
     }
     if let Some(url) = &args.url {
-        if url.is_empty() {
-            return Err(invalid("url: must not be empty"));
-        }
-        // Schema declares `format: uri` (RFC 3986). Full RFC parsing lives in
-        // the verb handler; the SDK enforces the cheap structural floor —
-        // a non-empty scheme followed by `:` — to reject obviously malformed
-        // inputs at the boundary without pulling a URL crate into core.
-        match url.find(':') {
-            Some(0) | None => return Err(invalid("url: must be a valid URI")),
-            Some(i) => {
-                let scheme = &url[..i];
-                let mut chars = scheme.chars();
-                let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
-                let rest_ok = chars.all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')
-                });
-                if !(first_ok && rest_ok) {
-                    return Err(invalid("url: must be a valid URI"));
-                }
-            }
-        }
+        validate_uri(url)?;
+    }
+    if let Some(fm) = &args.frontmatter
+        && !fm.is_object()
+    {
+        return Err(invalid("frontmatter: must be a JSON object"));
     }
     if args.kind.is_empty() {
         return Err(invalid("kind: must not be empty"));

@@ -167,14 +167,19 @@ fn ingest_rejects_schema_minlength_violations() {
         tags: None,
         url: None,
     };
-    let cases: [(&str, IngestArgs); 7] = [
+    let cases: [(&str, IngestArgs); 11] = [
         ("body", IngestArgs { body: Some(String::new()), ..bases() }),
         ("file", IngestArgs { body: None, file: Some(String::new()), ..bases() }),
         ("url",  IngestArgs { body: None, url: Some(String::new()), ..bases() }),
         ("url",  IngestArgs { body: None, url: Some("not-a-uri".to_owned()), ..bases() }),
+        // Schemed-but-empty hier-part / colon-only / scheme-only / leading-digit:
+        ("url",  IngestArgs { body: None, url: Some("http:".to_owned()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some(":rest".to_owned()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some("1bad:rest".to_owned()), ..bases() }),
         ("kind", IngestArgs { kind: String::new(), ..bases() }),
         ("session_id", IngestArgs { session_id: Some(String::new()), ..bases() }),
         ("tags", IngestArgs { tags: Some(vec![String::new()]), ..bases() }),
+        ("frontmatter", IngestArgs { frontmatter: Some(serde_json::json!([1, 2])), ..bases() }),
     ];
     for (needle, args) in cases {
         match sdk().ingest(&args).expect_err("must reject") {
