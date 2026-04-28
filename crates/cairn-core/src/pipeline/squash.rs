@@ -741,16 +741,26 @@ mod stage3_tests {
     }
 }
 
-/// Stage 4: consecutive-run dedup on full source lines. Split-form last-line
-/// exemption: when the final repeat run reaches the input's last line, the
-/// final line is preserved verbatim and earlier duplicates collapse to
-/// `<line> [×N-1]`. CR-bearing lines never collapse.
-fn stage4_dedup(lines: &[String], min_run: usize, collapsed_runs: &mut usize) -> Vec<String> {
+/// Structured stage-4 output: each entry is `(content, Some(K))` for a
+/// dedup-collapsed line that should render as `<content> [×K]`, or
+/// `(content, None)` for a verbatim pass-through line. Carrying the count
+/// separately lets stage 5 preserve multiplicity in its truncation marker
+/// when a collapsed line exceeds `max_line_bytes`.
+type DedupLine = (String, Option<usize>);
+
+/// Stage 4 (structured): consecutive-run dedup on full source lines. Same
+/// semantics as `stage4_dedup`, but emits `(content, Option<count>)` so
+/// downstream stages can preserve multiplicity through truncation.
+fn stage4_dedup_structured(
+    lines: &[String],
+    min_run: usize,
+    collapsed_runs: &mut usize,
+) -> Vec<DedupLine> {
     if lines.is_empty() || min_run < 2 {
-        return lines.to_vec();
+        return lines.iter().map(|l| (l.clone(), None)).collect();
     }
     let last_idx = lines.len() - 1;
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut out: Vec<DedupLine> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
         let line = &lines[i];
@@ -766,26 +776,41 @@ fn stage4_dedup(lines: &[String], min_run: usize, collapsed_runs: &mut usize) ->
             if run_contains_last {
                 let count = run_len - 1;
                 if count >= min_run {
-                    out.push(format!("{line} [×{count}]"));
+                    out.push((line.clone(), Some(count)));
                     *collapsed_runs += 1;
                 } else {
                     for _ in 0..count {
-                        out.push(line.clone());
+                        out.push((line.clone(), None));
                     }
                 }
-                out.push(line.clone());
+                out.push((line.clone(), None));
             } else {
-                out.push(format!("{line} [×{run_len}]"));
+                out.push((line.clone(), Some(run_len)));
                 *collapsed_runs += 1;
             }
         } else {
             for _ in 0..run_len {
-                out.push(line.clone());
+                out.push((line.clone(), None));
             }
         }
         i = j;
     }
     out
+}
+
+/// Stage 4 (string form): thin wrapper that renders structured output as
+/// the legacy `<line> [×N]` strings. Used by `stage4_tests` to keep the
+/// table-driven assertions readable; production code uses
+/// `stage4_dedup_structured` so per-line multiplicity survives stage 5.
+#[cfg(test)]
+fn stage4_dedup(lines: &[String], min_run: usize, collapsed_runs: &mut usize) -> Vec<String> {
+    stage4_dedup_structured(lines, min_run, collapsed_runs)
+        .into_iter()
+        .map(|(content, count)| match count {
+            Some(k) => format!("{content} [×{k}]"),
+            None => content,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -849,9 +874,55 @@ mod stage4_tests {
     }
 }
 
-/// Stage 5: per-line cap. `max_line_bytes` is the emitted budget inclusive of
-/// any inline truncation marker. Truncates at the nearest UTF-8 codepoint
-/// boundary.
+/// Stage 5 (dedup-aware): per-line cap that preserves multiplicity for
+/// dedup-collapsed lines. When `multiplicity` is `Some(k)` the line is
+/// rendered as `<content> [×k]` if it fits, or truncated to
+/// `<kept>[…N source bytes truncated, ×k]` if not. When `multiplicity` is
+/// `None` the behaviour matches the plain stage 5: `<kept>[…N bytes truncated]`.
+/// `dropped_now` counts source-content bytes only; the `[×k]` annotation is
+/// not part of the "dropped" accounting.
+fn stage5_per_line_cap_aware(
+    content: &str,
+    multiplicity: Option<usize>,
+    max_line_bytes: usize,
+    truncated_flag: &mut bool,
+) -> String {
+    let suffix = match multiplicity {
+        Some(k) => format!(" [×{k}]"),
+        None => String::new(),
+    };
+    let full_len = content.len() + suffix.len();
+    if full_len <= max_line_bytes {
+        return format!("{content}{suffix}");
+    }
+    *truncated_flag = true;
+    let dropped = content.len();
+    let mut keep_len = max_line_bytes;
+    loop {
+        while keep_len > 0 && !content.is_char_boundary(keep_len) {
+            keep_len -= 1;
+        }
+        let kept = &content[..keep_len];
+        let dropped_now = dropped - kept.len();
+        let marker = match multiplicity {
+            Some(k) => format!("[…{dropped_now} source bytes truncated, ×{k}]"),
+            None => format!("[…{dropped_now} bytes truncated]"),
+        };
+        debug_assert!(marker.len() <= MARKER_MAX_LEN);
+        if kept.len() + marker.len() <= max_line_bytes {
+            return format!("{kept}{marker}");
+        }
+        if keep_len == 0 {
+            return marker;
+        }
+        keep_len -= 1;
+    }
+}
+
+/// Stage 5 (plain form): per-line cap without dedup awareness. Kept for
+/// `stage5_tests` to lock in the simple `<kept>[…N bytes truncated]` shape;
+/// production code uses `stage5_per_line_cap_aware`.
+#[cfg(test)]
 fn stage5_per_line_cap(line: &str, max_line_bytes: usize, truncated_flag: &mut bool) -> String {
     if line.len() <= max_line_bytes {
         return line.to_string();
@@ -912,6 +983,32 @@ mod stage5_tests {
     }
 
     #[test]
+    fn dedup_collapsed_long_line_preserves_multiplicity_in_marker() {
+        // The line is too long to fit `<content> [×K]` in max_line_bytes, so
+        // the cap must rewrite the marker to the dedup-aware form that keeps
+        // ×K visible.
+        let content = "x".repeat(200);
+        let mut t = false;
+        let out = stage5_per_line_cap_aware(&content, Some(42), MIN_MAX_LINE_BYTES, &mut t);
+        assert!(t);
+        assert!(out.len() <= MIN_MAX_LINE_BYTES);
+        assert!(
+            out.contains("×42"),
+            "dedup multiplicity must survive truncation, got: {out}"
+        );
+        assert!(out.contains("source bytes truncated"));
+    }
+
+    #[test]
+    fn dedup_collapsed_short_line_renders_with_count_suffix() {
+        // Short content + ` [×K]` fits the budget: emit verbatim suffix form.
+        let mut t = false;
+        let out = stage5_per_line_cap_aware("hello", Some(7), 100, &mut t);
+        assert_eq!(out, "hello [×7]");
+        assert!(!t);
+    }
+
+    #[test]
     fn multibyte_line_truncates_on_codepoint_boundary() {
         let s = "é".repeat(200);
         let (out, t) = cap(&s, MIN_MAX_LINE_BYTES);
@@ -925,19 +1022,25 @@ mod stage5_tests {
 /// newline; the squash entrypoint re-adds one if the input had one).
 /// `pair_at_end` indicates the last two lines form an atomic split-form
 /// dedup pair (`<line> [×N-1]` followed by `<line>` verbatim) — they must
-/// be kept together or dropped together.
+/// be kept together or dropped together. `reserve_trailing` reduces the
+/// effective budget by 1 byte so the entrypoint can re-append `\n` without
+/// breaching `cfg.max_bytes()`.
 fn stage6_layout(
     lines: &[String],
     pair_at_end: bool,
+    reserve_trailing: bool,
     cfg: &SquashConfig,
     stats: &mut SquashStats,
 ) -> String {
     if lines.is_empty() {
         return String::new();
     }
+    // Effective body budget: subtract one if the entrypoint will append a
+    // trailing newline, so the final compacted bytes still fit max_bytes.
+    let max_body = cfg.max_bytes() - usize::from(reserve_trailing);
     let total_bytes: usize =
         lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
-    if total_bytes <= cfg.max_bytes() {
+    if total_bytes <= max_body {
         return lines.join("\n");
     }
 
@@ -948,8 +1051,7 @@ fn stage6_layout(
         tail_slice.iter().map(String::len).sum::<usize>() + tail_slice.len().saturating_sub(1);
 
     let layout_overhead = if tail_take > 0 { 2 } else { 1 };
-    let signed_head_budget = cfg
-        .max_bytes()
+    let signed_head_budget = max_body
         .checked_sub(tail_byte_len)
         .and_then(|x| x.checked_sub(MARKER_MAX_LEN))
         .and_then(|x| x.checked_sub(layout_overhead));
@@ -976,9 +1078,7 @@ fn stage6_layout(
         // Tail alone exceeds max_bytes. Drop tail lines from the front,
         // respecting the pair lock at end if applicable.
         head_take = 0;
-        let target = cfg
-            .max_bytes()
-            .saturating_sub(MARKER_MAX_LEN + layout_overhead);
+        let target = max_body.saturating_sub(MARKER_MAX_LEN + layout_overhead);
         let mut remaining_tail = tail_byte_len;
         // The atomic-pair lock: when pair_at_end, the bottom 2 indices
         // (lines.len()-2 and lines.len()-1) must be kept together. So the
@@ -1011,7 +1111,7 @@ fn stage6_layout(
     parts.push(marker.as_str());
     parts.extend(tail_slice_final.iter().map(String::as_str));
     let joined = parts.join("\n");
-    debug_assert!(joined.len() <= cfg.max_bytes());
+    debug_assert!(joined.len() <= max_body);
     joined
 }
 
@@ -1024,7 +1124,7 @@ mod stage6_tests {
         let cfg = SquashConfig::default();
         let lines: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
         assert_eq!(out, "a\nb\nc");
         assert!(!stats.truncated);
     }
@@ -1034,7 +1134,7 @@ mod stage6_tests {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
         let lines: Vec<String> = (0..200).map(|i| format!("line-{i:04}")).collect();
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
         assert!(stats.truncated);
         assert!(out.len() <= cfg.max_bytes());
         assert!(out.contains("skipped"));
@@ -1046,7 +1146,7 @@ mod stage6_tests {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
         let lines: Vec<String> = (0..10_000).map(|i| format!("L{i}")).collect();
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        let out = stage6_layout(&lines, false, false, &cfg, &mut stats);
         assert!(out.ends_with("L9999"));
         assert!(out.len() <= cfg.max_bytes());
     }
@@ -1086,7 +1186,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
 
     stats.cr_bearing_lines = raw_lines.iter().filter(|l| l.contains('\r')).count();
 
-    let (post_dedup, pair_at_end) = stage4_dedup_with_pair_flag(
+    let (post_dedup, pair_at_end) = stage4_dedup_structured_with_pair_flag(
         &raw_lines,
         cfg.dedup_min_run(),
         &mut stats.dedup_runs_collapsed,
@@ -1095,9 +1195,9 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     let mut long_lines_count: usize = 0;
     let post_cap: Vec<String> = post_dedup
         .into_iter()
-        .map(|line| {
+        .map(|(content, multiplicity)| {
             let mut t = false;
-            let r = stage5_per_line_cap(&line, cfg.max_line_bytes(), &mut t);
+            let r = stage5_per_line_cap_aware(&content, multiplicity, cfg.max_line_bytes(), &mut t);
             if t {
                 long_lines_count += 1;
             }
@@ -1106,7 +1206,10 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         .collect();
     stats.long_lines_truncated = long_lines_count;
 
-    let mut compacted = stage6_layout(&post_cap, pair_at_end, cfg, &mut stats);
+    // Reserve 1 byte for the trailing `\n` we will re-append below, so the
+    // final compacted bytes never exceed cfg.max_bytes().
+    let reserve_trailing = trailing_newline;
+    let mut compacted = stage6_layout(&post_cap, pair_at_end, reserve_trailing, cfg, &mut stats);
     if trailing_newline && !compacted.is_empty() {
         compacted.push('\n');
     }
@@ -1134,17 +1237,17 @@ fn sha256_payload_hash(bytes: &[u8]) -> PayloadHash {
         .expect("sha256 hex digest is a well-formed PayloadHash")
 }
 
-/// Wraps `stage4_dedup` and additionally reports whether the input ends in a
-/// repeat run that triggered the split-form last-line exemption (the output
-/// will end with `<line> [×N-1]` followed by `<line>` and the pair must be
-/// kept atomic in stage 6).
-fn stage4_dedup_with_pair_flag(
+/// Wraps `stage4_dedup_structured` and additionally reports whether the input
+/// ends in a repeat run that triggered the split-form last-line exemption (the
+/// output will end with `(content, Some(N-1))` followed by `(content, None)`
+/// and the pair must be kept atomic in stage 6).
+fn stage4_dedup_structured_with_pair_flag(
     lines: &[String],
     min_run: usize,
     collapsed_runs: &mut usize,
-) -> (Vec<String>, bool) {
+) -> (Vec<DedupLine>, bool) {
     if lines.is_empty() || min_run < 2 {
-        return (lines.to_vec(), false);
+        return (lines.iter().map(|l| (l.clone(), None)).collect(), false);
     }
     let last_idx = lines.len() - 1;
     let last_line = &lines[last_idx];
@@ -1155,7 +1258,7 @@ fn stage4_dedup_with_pair_flag(
     let trailing_run = last_idx - run_start + 1;
     let cr_bearing = last_line.contains('\r');
     let pair_at_end = trailing_run > min_run && !cr_bearing;
-    let out = stage4_dedup(lines, min_run, collapsed_runs);
+    let out = stage4_dedup_structured(lines, min_run, collapsed_runs);
     (out, pair_at_end)
 }
 
@@ -1170,7 +1273,7 @@ mod tail_lock_tests {
         lines.push("x [×3]".into());
         lines.push("x".into());
         let mut stats = SquashStats::default();
-        let out = stage6_layout(&lines, true, &cfg, &mut stats);
+        let out = stage6_layout(&lines, true, false, &cfg, &mut stats);
         let has_marker = out.contains("x [×3]");
         let has_final = out.contains("\nx") || out.starts_with('x');
         assert!(has_final, "final line must survive");
@@ -1241,6 +1344,30 @@ mod squash_integration_tests {
             String::from_utf8_lossy(&out.compacted_bytes).contains("FINAL_SENTINEL"),
             "last content line must be preserved"
         );
+    }
+
+    /// Regression: a newline-terminated payload whose body lands exactly at
+    /// `max_bytes` must still respect `max_bytes` after the entrypoint
+    /// re-appends the trailing `\n`.
+    #[test]
+    fn trailing_newline_does_not_breach_max_bytes() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 100, 100, 2, MIN_MAX_LINE_BYTES).unwrap();
+        // Build an input whose unique-line, joined-without-trailing-newline
+        // length fits inside max_bytes only when we reserve the trailing byte.
+        // We sweep a range of input sizes near the budget so at least one
+        // exercises the boundary where the body lands at exactly max_body.
+        for n in (cfg.max_bytes() - 8)..=(cfg.max_bytes() + 8) {
+            let mut raw = vec![b'a'; n];
+            raw.push(b'\n');
+            let out = run_squash(&raw, &cfg);
+            assert!(
+                out.compacted_byte_len <= cfg.max_bytes(),
+                "compacted_byte_len {} exceeded max_bytes {} for input size {}",
+                out.compacted_byte_len,
+                cfg.max_bytes(),
+                n
+            );
+        }
     }
 }
 
