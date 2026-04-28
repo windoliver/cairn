@@ -23,12 +23,14 @@ pub(crate) fn new_nonce() -> Nonce16Base64 {
     Nonce16Base64(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
-/// Current epoch milliseconds.
+/// Current epoch milliseconds, saturating to `0` if the host clock is set
+/// before 1970. Returning a sentinel beats panicking the SDK at the
+/// `status`/`handshake` boundary on a misconfigured clock.
 pub(crate) fn now_ms() -> u64 {
     #[allow(clippy::cast_possible_truncation)]
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("invariant: system clock is after Unix epoch")
+        .unwrap_or_default()
         .as_millis() as u64;
     ms
 }
@@ -36,11 +38,12 @@ pub(crate) fn now_ms() -> u64 {
 /// Current UTC time as RFC-3339 with second precision (`YYYY-MM-DDTHH:MM:SSZ`).
 ///
 /// Implemented locally (no `chrono` dep) to match the CLI's `status` output
-/// format byte-for-byte.
+/// format byte-for-byte. Saturates to the Unix epoch if the host clock is
+/// pre-1970 — see [`now_ms`].
 pub(crate) fn now_rfc3339_seconds() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("invariant: system clock is after Unix epoch")
+        .unwrap_or_default()
         .as_secs();
     let (y, mo, d, h, mi, s) = secs_to_ymdhms(secs);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")

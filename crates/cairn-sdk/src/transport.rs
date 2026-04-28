@@ -115,7 +115,8 @@ impl<T: Transport> Sdk<T> {
 
     /// `ingest` — accept new memory (brief §8.1).
     pub fn ingest(&self, args: &IngestArgs) -> Result<VerbResponse<IngestData>, SdkError> {
-        validate(args.validate())?;
+        validate_ingest(args)?;
+        revalidate::<IngestArgs>(args)?;
         Err(stub(ResponseVerb::Ingest))
     }
 
@@ -125,6 +126,7 @@ impl<T: Transport> Sdk<T> {
     /// be advertised by [`Self::status`], otherwise the call is rejected
     /// with [`SdkError::CapabilityUnavailable`] before any dispatch.
     pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
+        revalidate::<SearchArgs>(args)?;
         self.require_capability(args.mode.capability())?;
         Err(stub(ResponseVerb::Search))
     }
@@ -134,36 +136,38 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
     /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
     pub fn retrieve(&self, args: &RetrieveArgs) -> Result<VerbResponse<RetrieveData>, SdkError> {
+        revalidate::<RetrieveArgs>(args)?;
         self.require_capability(args.capability())?;
         Err(stub(ResponseVerb::Retrieve))
     }
 
     /// `summarize` — rolling/periodic summary build (brief §8.4).
-    pub fn summarize(
-        &self,
-        _args: &SummarizeArgs,
-    ) -> Result<VerbResponse<SummarizeData>, SdkError> {
+    pub fn summarize(&self, args: &SummarizeArgs) -> Result<VerbResponse<SummarizeData>, SdkError> {
+        revalidate::<SummarizeArgs>(args)?;
         Err(stub(ResponseVerb::Summarize))
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
     pub fn assemble_hot(
         &self,
-        _args: &AssembleHotArgs,
+        args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
+        revalidate::<AssembleHotArgs>(args)?;
         Err(stub(ResponseVerb::AssembleHot))
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).
     pub fn capture_trace(
         &self,
-        _args: &CaptureTraceArgs,
+        args: &CaptureTraceArgs,
     ) -> Result<VerbResponse<CaptureTraceData>, SdkError> {
+        revalidate::<CaptureTraceArgs>(args)?;
         Err(stub(ResponseVerb::CaptureTrace))
     }
 
     /// `lint` — privacy / provenance / schema / policy drift checks (brief §8.7).
-    pub fn lint(&self, _args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
+    pub fn lint(&self, args: &LintArgs) -> Result<VerbResponse<LintData>, SdkError> {
+        revalidate::<LintArgs>(args)?;
         Err(stub(ResponseVerb::Lint))
     }
 
@@ -172,6 +176,7 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
     /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
     pub fn forget(&self, args: &ForgetArgs) -> Result<VerbResponse<ForgetData>, SdkError> {
+        revalidate::<ForgetArgs>(args)?;
         self.require_capability(args.capability())?;
         Err(stub(ResponseVerb::Forget))
     }
@@ -203,14 +208,32 @@ impl<T: Transport> Sdk<T> {
     }
 }
 
-/// Map the IDL `validate()` result into [`SdkError::InvalidArgs`].
-fn validate(result: Result<(), &'static str>) -> Result<(), SdkError> {
-    match result {
-        Ok(()) => Ok(()),
-        Err(reason) => Err(SdkError::InvalidArgs {
-            reason: reason.to_owned(),
-        }),
-    }
+/// `IngestArgs` has an explicit IDL `validate()` for its exactly-one-of group.
+fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
+    args.validate().map_err(|reason| SdkError::InvalidArgs {
+        reason: reason.to_owned(),
+    })
+}
+
+/// Run the same constraint checks the wire format runs (non-empty strings,
+/// numeric ranges, oneOf groups, etc.) by serializing the typed arg and
+/// re-deserializing it through the generated `TryFrom<Raw...>` path.
+///
+/// Direct construction in Rust skips those checks; this brings SDK callers
+/// back onto the same validation as the CLI/MCP surfaces, surfaced as
+/// [`SdkError::InvalidArgs`].
+fn revalidate<T>(args: &T) -> Result<(), SdkError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let json = serde_json::to_value(args).map_err(|err| SdkError::InvalidArgs {
+        reason: format!("non-serializable args: {err}"),
+    })?;
+    serde_json::from_value::<T>(json)
+        .map(|_| ())
+        .map_err(|err| SdkError::InvalidArgs {
+            reason: err.to_string(),
+        })
 }
 
 /// Canonical P0 stub: every verb returns `Internal — store not wired`.

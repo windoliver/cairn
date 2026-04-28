@@ -112,6 +112,46 @@ fn ingest_valid_args_returns_internal_stub() {
 }
 
 #[test]
+fn search_rejects_empty_query_with_invalid_args() {
+    // Wire format requires non-empty query; SDK must surface it as
+    // InvalidArgs instead of capability-checking an unvalidated request.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: String::new(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("query"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_out_of_range_limit_with_invalid_args() {
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: Some(0),
+        mode: SearchArgsMode::Keyword,
+        query: "hello".to_owned(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("limit"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
 fn search_rejects_unadvertised_modes_with_capability_unavailable() {
     // P0 advertises no capabilities, so every search mode must fail closed
     // with CapabilityUnavailable rather than the generic Internal stub.
