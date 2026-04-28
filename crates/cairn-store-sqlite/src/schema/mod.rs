@@ -93,6 +93,12 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0009_add_record_json.sql"),
             checksum: checksum_for("0009_add_record_json.sql"),
         },
+        Migration {
+            id: 10,
+            name: "0010_purge_scope_snapshot.sql",
+            sql: include_str!("../../migrations/0010_purge_scope_snapshot.sql"),
+            checksum: checksum_for("0010_purge_scope_snapshot.sql"),
+        },
     ]
 });
 

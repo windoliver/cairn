@@ -236,24 +236,37 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .map(|(rv, _, _)| rv)
                 .collect();
 
-            // Purge markers carry only target_id + op_id + timestamp +
-            // actor + salt — no record body or scope content. The
-            // `version_history` contract requires them in the result so
-            // a caller can distinguish "never existed" from "was purged".
-            // Return them to every principal; the trait-level rebac filter
-            // applies to `Version` rows only.
+            // Purge markers gate on the snapshot scope/taxonomy taken at
+            // purge time. Without this filter, an unprivileged caller
+            // could probe arbitrary `target_id`s to learn purge timing
+            // and actor for records they were never allowed to read.
             let mut p = conn
                 .prepare(
-                    "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt \
+                    "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt, \
+                            scope_snapshot, taxonomy_snapshot \
                      FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
                 )
                 .map_err(store_err)?;
-            let purges: Vec<PurgeMarker> = p
-                .query_map(params![target_id.as_str()], row_to_purge_marker)
+            let raw_purges: Vec<(PurgeMarker, Option<String>, Option<String>)> = p
+                .query_map(params![target_id.as_str()], |row| {
+                    let marker = row_to_purge_marker(row)?;
+                    let scope: Option<String> = row.get("scope_snapshot")?;
+                    let taxonomy: Option<String> = row.get("taxonomy_snapshot")?;
+                    Ok((marker, scope, taxonomy))
+                })
                 .map_err(store_err)?
                 .collect::<Result<_, _>>()
                 .map_err(store_err)?;
-            let _ = principal; // intentionally unused after rebac filter on `visible`
+            let purges: Vec<PurgeMarker> = raw_purges
+                .into_iter()
+                .filter(|(_, scope, taxonomy)| match (scope, taxonomy) {
+                    (Some(s), Some(t)) => principal_can_read(&principal, s, t),
+                    // Pre-0010 markers without a snapshot: visible only
+                    // to system to avoid leaking history of unknown rows.
+                    _ => principal.is_system(),
+                })
+                .map(|(m, _, _)| m)
+                .collect();
 
             Ok(into_history(visible, purges))
         })

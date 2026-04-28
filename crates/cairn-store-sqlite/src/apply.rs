@@ -373,29 +373,52 @@ fn purge_target_impl(
         return Ok(PurgeOutcome::AlreadyPurged);
     }
 
+    // Capture record_ids and a scope/taxonomy snapshot from one of the
+    // versions so `version_history` can rebac-filter the purge marker
+    // later. Use the active row when present; otherwise the highest
+    // version. If the target has no rows AND no prior purge exists,
+    // refuse to write a fake audit marker.
     let mut stmt = conn
-        .prepare("SELECT record_id FROM records WHERE target_id = ?1")
+        .prepare(
+            "SELECT record_id, scope, taxonomy, active, version \
+             FROM records WHERE target_id = ?1 ORDER BY active DESC, version DESC",
+        )
         .map_err(store_err)?;
-    let record_ids: Vec<String> = stmt
-        .query_map(params![target_id.as_str()], |r| r.get(0))
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map(params![target_id.as_str()], |r| {
+            let rid: String = r.get(0)?;
+            let scope: String = r.get(1)?;
+            let taxonomy: String = r.get(2)?;
+            Ok((rid, scope, taxonomy))
+        })
         .map_err(store_err)?
         .collect::<Result<_, _>>()
         .map_err(store_err)?;
     drop(stmt);
+
+    let record_ids: Vec<String> = rows.iter().map(|(rid, _, _)| rid.clone()).collect();
+    let (scope_snapshot, taxonomy_snapshot) = match rows.first() {
+        Some((_, scope, taxonomy)) => (Some(scope.clone()), Some(taxonomy.clone())),
+        None => return Err(StoreError::NotFound(target_id.clone())),
+    };
 
     let now = Rfc3339Timestamp::now();
     let salt_input = format!("{}{}{}", now.as_str(), target_id.as_str(), op_id.as_str());
     let salt = blake3::hash(salt_input.as_bytes()).to_hex().to_string();
 
     conn.execute(
-        "INSERT INTO record_purges (target_id, op_id, purged_at, purged_by, body_hash_salt) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO record_purges \
+         (target_id, op_id, purged_at, purged_by, body_hash_salt, \
+          scope_snapshot, taxonomy_snapshot) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             target_id.as_str(),
             op_id.as_str(),
             now.as_str(),
             actor.as_str(),
             salt,
+            scope_snapshot,
+            taxonomy_snapshot,
         ],
     )
     .map_err(store_err)?;

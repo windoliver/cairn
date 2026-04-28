@@ -243,11 +243,11 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
     );
 }
 
-/// Non-system principals must also see the `Purge` marker so they can
-/// distinguish "target never existed" from "target was purged"
-/// (`version_history` contract).
+/// A non-system principal who *was* able to read the target observes
+/// the `Purge` marker (rebac evaluated against the snapshot taken at
+/// purge time, brief `version_history` contract).
 #[tokio::test]
-async fn purge_marker_visible_to_non_system_principal() {
+async fn purge_marker_visible_to_owner_principal() {
     let dir = tempdir().expect("tempdir");
     let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
         .await
@@ -279,20 +279,57 @@ async fn purge_marker_visible_to_non_system_principal() {
         .await
         .expect("purge");
 
-    // A non-system principal queries history.
-    let alice = Principal::from_identity(Identity::parse("usr:alice").expect("valid"));
+    // Owner sees the purge marker.
+    let owner = Principal::from_identity(Identity::parse("usr:purgetest").expect("valid"));
     let history = store
-        .version_history(&alice, &target)
+        .version_history(&owner, &target)
         .await
-        .expect("version_history");
-    assert_eq!(
-        history.len(),
-        1,
-        "non-system principal must observe the purge marker"
-    );
+        .expect("version_history (owner)");
+    assert_eq!(history.len(), 1, "owner must observe the purge marker");
     assert!(
         matches!(history[0], HistoryEntry::Purge(_)),
         "expected a Purge entry; got: {:?}",
         history[0]
+    );
+
+    // A different (unauthorized) principal must NOT learn purge metadata
+    // for a private record they could never read.
+    let stranger = Principal::from_identity(Identity::parse("usr:stranger").expect("valid"));
+    let stranger_history = store
+        .version_history(&stranger, &target)
+        .await
+        .expect("version_history (stranger)");
+    assert!(
+        stranger_history.is_empty(),
+        "unauthorized principal must not observe purge metadata; got: {stranger_history:?}"
+    );
+}
+
+/// Purging a target that has no records and no prior marker must
+/// return `NotFound` rather than fabricate audit history.
+#[tokio::test]
+async fn purge_nonexistent_target_returns_not_found() {
+    use cairn_core::contract::memory_store::error::StoreError;
+
+    let dir = tempdir().expect("tempdir");
+    let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
+        .await
+        .expect("open");
+
+    let target = TargetId::new("never-existed");
+    let actor = ActorRef::from_string("usr:purgetest");
+    let op_id = OpId::new("op-purge-noop");
+
+    let result = store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            let op = op_id.clone();
+            let a = actor.clone();
+            move |tx| tx.purge_target(&t, &op, &a)
+        })
+        .await;
+    assert!(
+        matches!(result, Err(StoreError::NotFound(_))),
+        "purge of nonexistent target must return NotFound; got: {result:?}"
     );
 }
