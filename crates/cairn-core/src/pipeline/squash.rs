@@ -447,23 +447,37 @@ mod wrapper_tests {
 /// Result of a successful squash: compacted bytes plus audit metadata.
 #[derive(Debug, Clone)]
 pub struct SquashOutput {
+    /// Compacted output bytes. Audit artifact; renderer is responsible for
+    /// any TTY-safe escaping (see spec on CR semantics).
     pub compacted_bytes: Vec<u8>,
+    /// `sha256:<hex>` of the input bytes, copied from the source `CaptureEvent`.
     pub raw_hash: PayloadHash,
+    /// Length in bytes of the input passed to `squash`.
     pub raw_byte_len: usize,
+    /// `sha256:<hex>` of `compacted_bytes`.
     pub compacted_hash: PayloadHash,
+    /// Length in bytes of `compacted_bytes`.
     pub compacted_byte_len: usize,
+    /// Per-call statistics for audit and observability.
     pub stats: SquashStats,
 }
 
 /// Per-call statistics. Drives audit, observability, and tests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SquashStats {
+    /// Whether stage 2 stripped any ANSI escape sequence.
     pub ansi_stripped: bool,
+    /// Number of lines containing at least one bare `\r` after CRLF normalize.
     pub cr_bearing_lines: usize,
+    /// Number of dedup runs collapsed in stage 4.
     pub dedup_runs_collapsed: usize,
+    /// Number of lines dropped by stage 6 head/tail truncation.
     pub lines_dropped_truncate: usize,
+    /// Total bytes dropped by stage 6 head/tail truncation.
     pub bytes_dropped_truncate: usize,
+    /// Number of lines that exceeded `max_line_bytes` and were truncated in stage 5.
     pub long_lines_truncated: usize,
+    /// True iff any stage 5 or stage 6 truncation occurred.
     pub truncated: bool,
 }
 
