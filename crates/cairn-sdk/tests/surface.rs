@@ -7,6 +7,7 @@
 //!   not wired).
 //! - SDK responses serialize into the same envelope shape the CLI emits.
 
+use cairn_sdk::error::ErrorCode;
 use cairn_sdk::generated::common::Ulid;
 use cairn_sdk::generated::verbs::{
     assemble_hot::AssembleHotArgs,
@@ -37,20 +38,26 @@ fn version_matches_status_server_info() {
 }
 
 #[test]
-fn status_incarnation_is_stable_per_client_instance() {
-    // Brief §8.0.a wire-compat: status must be byte-identical across an
-    // incarnation. The SDK's natural incarnation unit is the client.
+fn status_incarnation_is_stable_process_wide() {
+    // Brief §8.0.a wire-compat: status is byte-identical across an
+    // incarnation. The SDK's incarnation unit is the *process*, not the
+    // client instance — re-instantiating Sdk must NOT look like a server
+    // restart to anything correlating against incarnation.
     let s = sdk();
     let a = s.status();
     let b = s.status();
     assert_eq!(a.server_info.incarnation, b.server_info.incarnation);
     assert_eq!(a.server_info.started_at, b.server_info.started_at);
 
-    // A new client mints a new incarnation.
     let other = Sdk::new();
-    assert_ne!(
+    assert_eq!(
         s.status().server_info.incarnation,
-        other.status().server_info.incarnation
+        other.status().server_info.incarnation,
+        "two Sdk instances in the same process must report the same incarnation"
+    );
+    assert_eq!(
+        s.status().server_info.started_at,
+        other.status().server_info.started_at
     );
 }
 
@@ -251,6 +258,39 @@ fn lint_returns_internal_stub() {
 }
 
 #[test]
+fn sdk_error_code_helper_returns_typed_code() {
+    // SdkError::code() lets callers branch on ErrorCode without parsing
+    // strings, satisfying the closed-typed-error contract.
+    let p0_stub = sdk()
+        .ingest(&IngestArgs {
+            body: Some("note".to_owned()),
+            file: None,
+            frontmatter: None,
+            kind: "note".to_owned(),
+            session_id: None,
+            tags: None,
+            url: None,
+        })
+        .expect_err("stub");
+    assert_eq!(p0_stub.code(), Some(ErrorCode::Internal));
+
+    let invalid = sdk()
+        .ingest(&IngestArgs {
+            body: Some("a".to_owned()),
+            file: Some("b".to_owned()),
+            frontmatter: None,
+            kind: "note".to_owned(),
+            session_id: None,
+            tags: None,
+            url: None,
+        })
+        .expect_err("invalid");
+    // Pre-envelope rejections have no wire code.
+    assert!(matches!(invalid, SdkError::InvalidArgs { .. }));
+    assert_eq!(invalid.code(), None);
+}
+
+#[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     let err = sdk()
         .forget(&ForgetArgs::Record { record_id: ulid() })
@@ -267,18 +307,18 @@ fn forget_rejects_unadvertised_target_with_capability_unavailable() {
 fn assert_internal_stub<T: std::fmt::Debug>(result: Result<T, SdkError>) {
     let err = result.expect_err("P0 stubs must error until #9 wires the store");
     match err {
-        SdkError::Internal {
+        SdkError::Protocol {
             code,
             message,
             operation_id,
         } => {
-            assert_eq!(code, "Internal");
+            assert_eq!(code, ErrorCode::Internal);
             assert!(
                 message.contains("store not wired"),
                 "message must mention store: {message}"
             );
             assert_eq!(operation_id.0.len(), 26, "operation_id is a ULID");
         }
-        other => panic!("expected Internal stub, got {other:?}"),
+        other => panic!("expected Protocol Internal stub, got {other:?}"),
     }
 }
