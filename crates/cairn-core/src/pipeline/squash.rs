@@ -53,13 +53,14 @@ pub const MIN_TAIL_LINES: usize = 2;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Hard ceiling on raw line cardinality before squash routes to the
-/// oversize bypass. Stage 3 collects lines into a `Vec<String>`, so a
-/// payload that fits under [`MAX_INPUT_BYTES`] but is overwhelmingly
-/// `\n` (e.g., 60 MiB of bare newlines → ~60M empty `String`s) can
-/// still exhaust memory before stage 6 enforces the byte budget. Cap
-/// at 1M newlines; above that, the bypass path's byte-slice strategy
-/// avoids the per-line `String` allocations entirely.
-pub const MAX_INPUT_LINES: usize = 1_000_000;
+/// oversize bypass. The staged path materializes ~3 `Vec<String>`
+/// layers (stage 3, stage 4 dedup-line, stage 5 cap), each ~24 B of
+/// header per line on 64-bit + content. At 200K lines that is ~14 MiB
+/// of headers alone — a comfortable working-set budget for legitimate
+/// terminal captures (a verbose `cargo build` is ~10K lines, large
+/// `npm test` runs are ~50K). Above 200K, route to the bypass path's
+/// byte-slice strategy and skip the staged allocations entirely.
+pub const MAX_INPUT_LINES: usize = 200_000;
 
 // Compile-time invariant: MIN_MAX_BYTES must hold the tail-locked pair
 // + skip-marker + layout newlines.
@@ -1082,6 +1083,13 @@ pub struct SquashStats {
     pub long_lines_truncated: usize,
     /// True iff any stage 5 or stage 6 truncation occurred.
     pub truncated: bool,
+    /// Bytes discarded by stage-2 OSC recovery on unterminated escape
+    /// sequences (introducer + body up to the next `\n`, or to EOF if
+    /// no `\n` exists). Distinct from `bytes_dropped_truncate` so audit
+    /// consumers can tell sanitization-driven loss apart from
+    /// budget-driven truncation. Hardening for truncated terminal
+    /// captures whose final diagnostic line followed a stray `ESC ]`.
+    pub osc_recovery_bytes_dropped: usize,
 }
 
 use std::borrow::Cow;
@@ -1168,8 +1176,12 @@ mod stage1_tests {
 /// (except `\n`, `\t`, `\r`), then normalize CRLF → LF (preserving lone CR).
 ///
 /// Sets `*stripped = true` whenever any byte is removed or normalized.
+/// Adds the byte count of any unterminated-OSC recovery drop
+/// (introducer plus body up to next LF / EOF) to
+/// `*osc_recovery_dropped`. Audit consumers can use that counter to
+/// detect silent tail loss on truncated captures.
 #[allow(clippy::expect_used)] // invariant: only ASCII control bytes/ESC sequences removed; UTF-8 preserved
-fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
+fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mut usize) -> String {
     let bytes = input.as_bytes();
     let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1246,11 +1258,14 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
                             // up to the next LF (recovery boundary). If no
                             // LF exists in the remainder, drop the whole
                             // tail — the OSC body would otherwise leak
-                            // hidden bytes through extraction.
+                            // hidden bytes through extraction. Surface the
+                            // dropped count via `osc_recovery_dropped` so
+                            // audit consumers see the loss explicitly.
                             let mut k = i + 2;
                             while k < bytes.len() && bytes[k] != b'\n' {
                                 k += 1;
                             }
+                            *osc_recovery_dropped = osc_recovery_dropped.saturating_add(k - i);
                             // Stop before the LF so it gets preserved by
                             // the outer loop as a normal line separator.
                             i = k;
@@ -1303,8 +1318,17 @@ mod stage2_tests {
 
     fn s2(input: &str) -> (String, bool) {
         let mut stripped = false;
-        let out = stage2_ansi_strip(input, &mut stripped);
+        let mut osc_dropped = 0usize;
+        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped);
         (out, stripped)
+    }
+
+    /// Helper that also returns the OSC-recovery-dropped byte count.
+    fn s2_with_osc(input: &str) -> (String, bool, usize) {
+        let mut stripped = false;
+        let mut osc_dropped = 0usize;
+        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped);
+        (out, stripped, osc_dropped)
     }
 
     #[test]
@@ -1400,6 +1424,24 @@ mod stage2_tests {
         assert!(stripped);
         // `[31` survives as printable content.
         assert_eq!(out, "[31");
+    }
+
+    /// Round-2 (newer loop) regression: the OSC recovery drop must
+    /// be surfaced via `osc_recovery_dropped` so audit consumers can
+    /// detect silent tail loss on truncated terminal captures.
+    #[test]
+    fn unterminated_osc_to_eof_reports_drop_count() {
+        // OSC introducer with no terminator AND no following \n.
+        let (out, stripped, dropped) =
+            s2_with_osc("prefix\n\x1b]0;dangling-title-no-newline-or-bel");
+        assert!(stripped);
+        assert!(out.starts_with("prefix\n"), "got: {out:?}");
+        // OSC recovery dropped: ESC + `]` + body up to EOF.
+        // Body length: "0;dangling-title-no-newline-or-bel" = 34 + 2 = 36.
+        assert!(
+            dropped >= 30,
+            "expected non-trivial drop count, got: {dropped}"
+        );
     }
 
     /// Round-1 (new loop) regression: a truncated/unterminated OSC may
@@ -2093,7 +2135,11 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     }
 
     let decoded = stage1_lossy_utf8(raw_bytes);
-    let stage2 = stage2_ansi_strip(&decoded, &mut stats.ansi_stripped);
+    let stage2 = stage2_ansi_strip(
+        &decoded,
+        &mut stats.ansi_stripped,
+        &mut stats.osc_recovery_bytes_dropped,
+    );
     let (raw_lines_borrow, trailing_newline) = stage3_split_lines(&stage2);
     let raw_lines: Vec<String> = raw_lines_borrow.iter().map(|s| (*s).to_string()).collect();
 
@@ -2208,7 +2254,11 @@ fn oversize_bypass(
     let head_raw_end = (half * 2).min(raw_bytes.len());
     let head_decoded = stage1_lossy_utf8(&raw_bytes[..head_raw_end]);
     let mut head_stripped = false;
-    let head_sanitized = stage2_ansi_strip(&head_decoded, &mut head_stripped);
+    let head_sanitized = stage2_ansi_strip(
+        &head_decoded,
+        &mut head_stripped,
+        &mut stats.osc_recovery_bytes_dropped,
+    );
     stats.ansi_stripped |= head_stripped;
     let head_trimmed = trim_to_byte_budget_at_boundary(&head_sanitized, half);
     // Drop any trailing partial line from head. If `head_trimmed`
@@ -2239,7 +2289,11 @@ fn oversize_bypass(
     if tail_aligned_to_line {
         let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
         let mut tail_stripped = false;
-        let tail_sanitized = stage2_ansi_strip(&tail_decoded, &mut tail_stripped);
+        let tail_sanitized = stage2_ansi_strip(
+            &tail_decoded,
+            &mut tail_stripped,
+            &mut stats.osc_recovery_bytes_dropped,
+        );
         stats.ansi_stripped |= tail_stripped;
         let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
         // The raw slice was line-aligned (begins after a `\n`), so an
