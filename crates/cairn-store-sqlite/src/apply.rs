@@ -1,16 +1,18 @@
 //! `MemoryStoreApply` + `MemoryStoreApplyTx` implementation.
 //!
 //! Every write runs inside one `tokio::task::spawn_blocking` that holds the
-//! connection mutex for the duration of the closure. An explicit `BEGIN
-//! IMMEDIATE` / `COMMIT` / `ROLLBACK` SQL sequence manages the transaction
-//! so we never need to hold a `rusqlite::Transaction` (which is `!Send`)
-//! across the `spawn_blocking` boundary.
+//! connection mutex for the **entire duration** of the closure — from `BEGIN
+//! IMMEDIATE` through `COMMIT`/`ROLLBACK`. This prevents concurrent read
+//! tasks (`get`, `list`, `version_history`) from acquiring the same mutex and
+//! observing uncommitted state on the shared single connection.
 //!
-//! The `SqliteApplyTx` wraps the `SharedConn` (`Arc<tokio::sync::Mutex<Connection>>`)
-//! and acquires the blocking lock once inside `spawn_blocking`. All write
-//! methods lock-acquire on the already-held mutex guard via `blocking_lock()`.
-//! Since all work happens on the same blocking thread, there is no contention
-//! and no risk of deadlock.
+//! An explicit `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` SQL sequence manages
+//! the transaction so we never need to hold a `rusqlite::Transaction` (which
+//! is `!Send`) across the `spawn_blocking` boundary.
+//!
+//! The `SqliteMemoryStoreApplyTx` wrapper borrows `&Connection` directly from
+//! the held `MutexGuard`. Its lifetime is confined to this blocking task; it
+//! cannot escape the closure.
 
 use cairn_core::contract::memory_store::{
     apply::{ApplyToken, MemoryStoreApply, MemoryStoreApplyTx, private::Sealed},
@@ -23,7 +25,6 @@ use cairn_core::contract::memory_store::{
 use cairn_core::domain::{actor_ref::ActorRef, record::MemoryRecord, timestamp::Rfc3339Timestamp};
 use rusqlite::{Connection, params};
 
-use crate::conn::SharedConn;
 use crate::rowmap::store_err;
 
 impl Sealed for crate::SqliteMemoryStore {}
@@ -37,52 +38,52 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
     {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            // Phase 1: begin the transaction.
-            // Acquire lock → issue BEGIN IMMEDIATE → release lock.
-            // BEGIN IMMEDIATE acquires the SQLite write lock at the DB level,
-            // preventing any other connection from starting a write transaction.
-            // The Rust Mutex is released so individual method calls can re-acquire it.
-            {
-                let guard = conn.blocking_lock();
-                guard.execute_batch("BEGIN IMMEDIATE").map_err(store_err)?;
-                // `guard` drops here — Mutex released, SQLite write lock still held.
-            }
+            // Acquire the connection mutex for the ENTIRE closure execution.
+            // No other task can read or write through this connection until we
+            // return and the guard is dropped. This guarantees that concurrent
+            // readers (get/list/version_history) cannot observe uncommitted
+            // state from this in-progress write transaction.
+            let guard = conn.blocking_lock();
 
-            let mut tx = SqliteApplyTx { conn: conn.clone() };
+            guard.execute_batch("BEGIN IMMEDIATE").map_err(store_err)?;
 
-            // Phase 2: run the user closure inside catch_unwind so a panic in `f`
-            // still triggers a ROLLBACK before propagating. Without this, a panic
-            // in the closure would leave an open transaction on the pooled connection,
-            // blocking all subsequent writes until the connection is dropped.
+            // Borrow `&Connection` directly from the held guard so the wrapper
+            // can call SQL methods without any additional locking. The borrow
+            // is valid for the lifetime of `guard` on this thread.
+            let mut tx = SqliteMemoryStoreApplyTx { conn: &guard };
+
+            // Run the user closure inside catch_unwind so a panic in `f`
+            // still triggers a ROLLBACK before propagating. Without this, a
+            // panic in the closure would leave an open transaction on the
+            // connection, blocking all subsequent writes.
             //
-            // `AssertUnwindSafe` is sound here: the closure is `Send + 'static` (the
-            // trait bound), `SqliteApplyTx` holds only an `Arc<Mutex<Connection>>`,
-            // and we propagate the panic payload unchanged via `resume_unwind`, so
-            // callers observe the same abort semantics they would without the wrapper.
+            // `AssertUnwindSafe` is sound here: the closure is `Send + 'static`
+            // (the trait bound), `SqliteMemoryStoreApplyTx` holds only a raw
+            // reference scoped to this stack frame, and we propagate the panic
+            // payload unchanged via `resume_unwind`.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 f(&mut tx as &mut dyn MemoryStoreApplyTx)
             }));
 
-            // Phase 3: commit, rollback on error, or rollback + re-panic.
-            let guard = conn.blocking_lock();
             match outcome {
                 Ok(Ok(v)) => {
                     guard.execute_batch("COMMIT").map_err(store_err)?;
                     Ok(v)
+                    // `guard` drops here — mutex released after COMMIT.
                 }
                 Ok(Err(e)) => {
                     let _ = guard.execute_batch("ROLLBACK");
                     Err(e)
+                    // `guard` drops here — mutex released after ROLLBACK.
                 }
                 Err(payload) => {
                     let _ = guard.execute_batch("ROLLBACK");
-                    // `guard` drops before resume so the lock is not held across
-                    // the unwind.
+                    // Drop `guard` explicitly so the mutex is released before
+                    // unwinding; the lock is not held across the panic boundary.
                     drop(guard);
                     std::panic::resume_unwind(payload);
                 }
             }
-            // `guard` drops here for the Ok/Err arms.
         })
         .await
         .map_err(|e| StoreError::Backend(Box::new(e)))?
@@ -91,35 +92,23 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
 
 /// In-transaction write handle.
 ///
-/// Holds a reference to the shared connection. All methods acquire the
-/// connection mutex synchronously via `blocking_lock()` — safe because we
-/// are already on a `spawn_blocking` thread and no other task is competing
-/// (the outer `with_apply_tx` holds the `MutexGuard` for the outer
-/// `BEGIN`/`COMMIT` sequence).
-///
-/// `SqliteApplyTx` is `Send` because `SharedConn` (`Arc<Mutex<Connection>>`)
-/// is `Send` even though `Connection` itself is `!Sync`.
-struct SqliteApplyTx {
-    conn: SharedConn,
+/// Borrows `&Connection` directly from the `MutexGuard` held by
+/// `with_apply_tx`. All SQL calls go straight to the connection with no
+/// additional locking — safe because the guard is held for the entire
+/// duration of the blocking task.
+struct SqliteMemoryStoreApplyTx<'conn> {
+    conn: &'conn Connection,
 }
 
-impl Sealed for SqliteApplyTx {}
+impl Sealed for SqliteMemoryStoreApplyTx<'_> {}
 
-// Design note: each method acquires the connection mutex for the duration of
-// its SQL call, then releases it. The overall transaction is maintained by
-// the explicit `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` SQL commands in
-// `with_apply_tx`. The Mutex serializes concurrent access from read tasks;
-// the SQLite write lock from `BEGIN IMMEDIATE` prevents any other writer from
-// interleaving at the database level.
-
-impl MemoryStoreApplyTx for SqliteApplyTx {
+impl MemoryStoreApplyTx for SqliteMemoryStoreApplyTx<'_> {
     fn stage_version(
         &mut self,
         target_id: &TargetId,
         record: &MemoryRecord,
     ) -> Result<RecordId, StoreError> {
-        let conn = self.conn.blocking_lock();
-        stage_version_impl(&conn, target_id, record)
+        stage_version_impl(self.conn, target_id, record)
     }
 
     fn activate_version(
@@ -128,8 +117,7 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
         version: u64,
         expected_prior: Option<u64>,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.blocking_lock();
-        activate_version_impl(&conn, target_id, version, expected_prior)
+        activate_version_impl(self.conn, target_id, version, expected_prior)
     }
 
     fn tombstone_target(
@@ -137,8 +125,7 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
         target_id: &TargetId,
         actor: &ActorRef,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.blocking_lock();
-        tombstone_target_impl(&conn, target_id, actor)
+        tombstone_target_impl(self.conn, target_id, actor)
     }
 
     fn expire_active(
@@ -146,8 +133,7 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
         target_id: &TargetId,
         at: Rfc3339Timestamp,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.blocking_lock();
-        expire_active_impl(&conn, target_id, &at)
+        expire_active_impl(self.conn, target_id, &at)
     }
 
     fn purge_target(
@@ -156,13 +142,11 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
         op_id: &OpId,
         actor: &ActorRef,
     ) -> Result<PurgeOutcome, StoreError> {
-        let conn = self.conn.blocking_lock();
-        purge_target_impl(&conn, target_id, op_id, actor)
+        purge_target_impl(self.conn, target_id, op_id, actor)
     }
 
     fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError> {
-        let conn = self.conn.blocking_lock();
-        add_edge_impl(&conn, edge)
+        add_edge_impl(self.conn, edge)
     }
 
     fn remove_edge(
@@ -171,16 +155,14 @@ impl MemoryStoreApplyTx for SqliteApplyTx {
         to: &RecordId,
         kind: EdgeKind,
     ) -> Result<(), StoreError> {
-        let conn = self.conn.blocking_lock();
-        remove_edge_impl(&conn, from, to, kind)
+        remove_edge_impl(self.conn, from, to, kind)
     }
 
     fn append_consent_journal(
         &mut self,
         entry: &ConsentJournalEntry,
     ) -> Result<ConsentJournalRowId, StoreError> {
-        let conn = self.conn.blocking_lock();
-        append_consent_journal_impl(&conn, entry)
+        append_consent_journal_impl(self.conn, entry)
     }
 }
 

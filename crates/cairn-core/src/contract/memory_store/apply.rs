@@ -65,9 +65,13 @@ pub trait MemoryStoreApply: private::Sealed + Send + Sync {
 /// Implementations run on a blocking thread (e.g. `spawn_blocking`) while
 /// holding a live database transaction handle. All methods are synchronous.
 ///
+/// Implementations are NOT required to be `Send`: the object is created
+/// inside `spawn_blocking`, passed by `&mut` to the closure `F`, and dropped
+/// before the blocking task returns. It never crosses a thread boundary.
+///
 /// To implement this trait on an adapter type, also implement
 /// `cairn_core::contract::memory_store::apply::private::Sealed` for it.
-pub trait MemoryStoreApplyTx: private::Sealed + Send {
+pub trait MemoryStoreApplyTx: private::Sealed {
     /// Stage a new version of a record with `active = 0`.
     ///
     /// `target_id` is the stable logical identity for the record across all

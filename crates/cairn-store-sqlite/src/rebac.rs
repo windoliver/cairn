@@ -36,6 +36,11 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
     let taxonomy: Value = serde_json::from_str(taxonomy_json).unwrap_or(Value::Null);
 
     // Visibility lives in the taxonomy JSON, not the scope JSON.
+    // TODO(#46-followup): visibility lives in a synthesized taxonomy
+    // JSON document keyed off the writer's convention rather than a
+    // dedicated column. Future migration should add `visibility TEXT`
+    // with a CHECK constraint, eliminating JSON parse on every rebac
+    // check and resolving the schema/domain divergence.
     let visibility = taxonomy
         .get("visibility")
         .and_then(Value::as_str)
@@ -50,6 +55,11 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
             id_str == scope_user || id_str == scope_agent
         }
         "session" => {
+            // TODO(#46-followup): session tier is over-permissive — any
+            // identified principal can read session-scoped rows. Tighten to
+            // require scope.user == principal.identity (collapse to private)
+            // once Principal carries a session id.
+            //
             // P0 single-author vault: any identified principal may read
             // session-scoped rows. The row must actually have a session
             // dimension set; rowless session is treated as private.
