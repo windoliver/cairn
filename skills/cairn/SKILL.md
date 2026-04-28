@@ -36,6 +36,10 @@ cairn ingest --kind KIND --url URL
 ```
 
 ```bash
+cairn ingest --kind KIND --body BODY --session SESSION_ID
+```
+
+```bash
 cairn ingest --kind KIND --body BODY --tags TAGS
 ```
 
@@ -63,6 +67,10 @@ cairn search --mode keyword --limit 1 QUERY
 
 ```bash
 cairn search --mode keyword --filters '{"field":"kind","op":"eq","value":"note"}' QUERY
+```
+
+```bash
+cairn search --mode keyword --citations on QUERY
 ```
 
 ```bash
@@ -95,7 +103,19 @@ cairn retrieve --session SESSION_ID --limit 1
 ```
 
 ```bash
+cairn retrieve --session SESSION_ID --order asc
+```
+
+```bash
+cairn retrieve --session SESSION_ID --rehydrate
+```
+
+```bash
 cairn retrieve --session SESSION_ID --include tool_calls
+```
+
+```bash
+cairn retrieve --session SESSION_ID --cursor CURSOR
 ```
 
 ```bash
@@ -116,6 +136,10 @@ cairn retrieve --folder PATH --depth 0
 
 ```bash
 cairn retrieve --scope '{"user":"u"}'
+```
+
+```bash
+cairn retrieve --scope '{"user":"u"}' --cursor CURSOR
 ```
 
 ```bash
@@ -142,6 +166,18 @@ cairn retrieve --profile --agent AGENT
 cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 ```
 
+```bash
+cairn summarize --persist 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn summarize --kind KIND 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn summarize --citations on 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
 ## `cairn assemble_hot`
 
 **Use when:**
@@ -153,6 +189,10 @@ cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 **Exclusivity:** this is the canonical hot-prefix surface
 
 **Example:**
+
+```bash
+cairn assemble_hot --session SESSION_ID
+```
 
 ```bash
 cairn assemble_hot --budget 0
@@ -174,6 +214,10 @@ cairn assemble_hot --budget 0
 cairn capture_trace --from FROM
 ```
 
+```bash
+cairn capture_trace --from FROM --session SESSION_ID
+```
+
 ## `cairn lint`
 
 **Use when:**
@@ -183,6 +227,12 @@ cairn capture_trace --from FROM
 - do NOT call per turn — run on a cadence (daily / on PR)
 
 **Exclusivity:** this is the canonical vault-health surface
+
+**Example:**
+
+```bash
+cairn lint --write-report
+```
 
 ## `cairn forget`
 

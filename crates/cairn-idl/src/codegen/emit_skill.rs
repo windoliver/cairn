@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use super::ir::{CliCommand, CliFlag, CliShape, Document, VerbDef};
 use super::skill_compat::{
     any_of_required_branches, collect_arg_property_schemas, is_signed_int_source,
-    is_unsigned_int_source, list_enum_options, one_of_required_branches, required_excluding_const,
+    is_unsigned_int_source, one_of_required_branches, required_excluding_const,
     variant_required_specs,
 };
 use super::{CodegenError, GeneratedFile};
@@ -124,19 +124,25 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
             emitted_any = true;
         }
         // Once per branch we exercise required-field-only. Now layer in
-        // optional "interesting" flags one at a time so the compat gate
-        // sees them too. We use the first renderable branch's required
-        // set as the carrier so the line stays minimal.
+        // every optional flag one at a time so the compat gate sees the
+        // whole declared CLI surface — a rename or removal would block
+        // codegen (round-9 finding). Skip flags that belong to any
+        // anyOf/oneOf branch: those alter which disjunctive arm is
+        // satisfied and would create XOR collisions on top of the
+        // carrier (e.g., adding `--file` on top of the body branch).
         let carrier = branch_sets
             .iter()
             .find(|r| set_is_renderable(cmd, r))
             .cloned()
             .unwrap_or_default();
-        for flag in &cmd.flags {
-            if carrier.contains(&flag.name) {
-                continue;
+        let mut branch_flags: BTreeSet<String> = BTreeSet::new();
+        for branch in spec.any_of.iter().chain(spec.one_of.iter()) {
+            for f in branch {
+                branch_flags.insert(f.clone());
             }
-            if !is_interesting_optional(flag, prop_schemas.get(&flag.name)) {
+        }
+        for flag in &cmd.flags {
+            if carrier.contains(&flag.name) || branch_flags.contains(&flag.name) {
                 continue;
             }
             render_example(
@@ -226,29 +232,6 @@ fn expand_branches(spec: &super::skill_compat::VariantSpec) -> Vec<BTreeSet<Stri
         }
     }
     out
-}
-
-/// True for optional flag value sources where a rename or schema drift would
-/// be invisible to a required-only example: JSON, list, bounded ints, and
-/// primitive-`$ref` strings. Bool / freeform string flags don't add coverage
-/// the gate would otherwise miss.
-fn is_interesting_optional(flag: &CliFlag, prop_schema: Option<&serde_json::Value>) -> bool {
-    let src = flag.value_source.as_str();
-    if src == "json" || list_enum_options(src).is_some() || src.starts_with("list<") {
-        return true;
-    }
-    if (is_unsigned_int_source(src) || is_signed_int_source(src))
-        && let Some(p) = prop_schema
-        && (p.get("minimum").is_some() || p.get("maximum").is_some())
-    {
-        return true;
-    }
-    if let Some(p) = prop_schema
-        && p.get("$ref").is_some()
-    {
-        return true;
-    }
-    false
 }
 
 /// Render one `cairn <verb> ...` example into `buf`. `required` selects which

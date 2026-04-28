@@ -12,10 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::codegen::ir::{CliCommand, CliFlag, CliShape, Document, VerbDef};
 
-/// Recognised protocol preludes — emitted by `emit_skill` but not part of the
-/// eight-verb IDL surface.
-const PRELUDES: &[&str] = &["status", "handshake"];
-
 /// Long flags every CLI invocation may use even though they aren't declared on
 /// individual verbs. `--json` is the universal output mode (see `CLAUDE.md`
 /// §6.5); `--help` is provided by clap on every subcommand.
@@ -307,7 +303,12 @@ fn validate_cli_line_tokens(
     // `verb.id` flows through), with a fallback to `verb.id`. Preludes carry
     // no flags or positionals.
     let verb_def: Option<&VerbDef> = verb_for_command(doc, verb);
-    let cmds: Vec<&CliCommand> = if PRELUDES.contains(&verb) {
+    // Preludes are derived from the IR (not a hardcoded list) so a future
+    // change to the prelude set in `Document::preludes` flows through compat
+    // and a stale `cairn <prelude>` example fails the gate. Round-9 found
+    // the previous constant could fall out of sync silently.
+    let is_prelude = doc.preludes.iter().any(|p| p.id == verb);
+    let cmds: Vec<&CliCommand> = if is_prelude {
         Vec::new()
     } else if let Some(def) = verb_def {
         match &def.cli {

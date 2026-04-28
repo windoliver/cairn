@@ -554,6 +554,38 @@ fn cli_validator_enforces_variant_specific_cursor_max_length() {
 }
 
 #[test]
+fn live_skill_md_exercises_all_optional_flags() {
+    // Round-9 finding 2: every declared optional flag must appear in
+    // some example so a rename / removal blocks codegen. Spot-check
+    // flags previously skipped by the "interesting only" filter.
+    let md = live_skill_md();
+    for needle in ["--order", "--rehydrate", "--citations", "--write-report"] {
+        assert!(
+            md.contains(needle),
+            "live SKILL.md must contain `{needle}` so the compat gate exercises it"
+        );
+    }
+}
+
+#[test]
+fn cli_validator_rejects_unknown_prelude_token() {
+    // Round-9 finding 1: prelude allowlist comes from doc.preludes, not
+    // a hardcoded constant. A made-up prelude must still fail compat
+    // (proves the lookup actually consults the IR).
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn made_up_prelude --json".into(),
+        line: 1,
+    };
+    let err =
+        validate_cli_block(&block, &doc()).expect_err("unknown prelude token must fail compat");
+    assert!(
+        matches!(err, CompatError::UnknownVerb { ref verb, .. } if verb == "made_up_prelude"),
+        "expected UnknownVerb for prelude not in IR, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_inspects_wrapped_cairn_invocation() {
     // Round-8 finding 2: shell-wrapped lines must still be validated.
     // `env DEBUG=1 cairn ingest --bogus` previously slipped past compat
