@@ -428,6 +428,7 @@ fn validate_filter_node(
 }
 
 /// Mirrors the generated `validate_filter_leaf_shape` for `SearchArgsFilters::Leaf`.
+#[allow(clippy::too_many_lines)] // mirrors the generated 12-op grammar one-for-one
 fn validate_filter_leaf(v: &serde_json::Value) -> Result<(), SdkError> {
     let obj = v
         .as_object()
@@ -523,6 +524,67 @@ fn validate_filter_leaf(v: &serde_json::Value) -> Result<(), SdkError> {
         "exists" => {
             if !value.is_boolean() {
                 return Err(invalid("filter leaf: exists value must be a boolean"));
+            }
+        }
+        "between" => {
+            let arr = value.as_array().ok_or_else(|| {
+                invalid("filter leaf: between value must be a 2-element number array")
+            })?;
+            if arr.len() != 2 {
+                return Err(invalid(
+                    "filter leaf: between value must be a 2-element number array",
+                ));
+            }
+            for item in arr {
+                if !item.is_number() {
+                    return Err(invalid("filter leaf: between value items must be numbers"));
+                }
+            }
+        }
+        "array_contains" => {
+            if value.is_string() {
+                if value.as_str().unwrap_or("").is_empty() {
+                    return Err(invalid(
+                        "filter leaf: array_contains value must be a non-empty string or number",
+                    ));
+                }
+            } else if !value.is_number() {
+                return Err(invalid(
+                    "filter leaf: array_contains value must be a non-empty string or number",
+                ));
+            }
+        }
+        "array_contains_any" | "array_contains_all" => {
+            let arr = value.as_array().ok_or_else(|| {
+                invalid("filter leaf: array_contains_* value must be a non-empty array")
+            })?;
+            if arr.is_empty() {
+                return Err(invalid(
+                    "filter leaf: array_contains_* value must be a non-empty array",
+                ));
+            }
+            for item in arr {
+                if item.is_string() {
+                    if item.as_str().unwrap_or("").is_empty() {
+                        return Err(invalid(
+                            "filter leaf: array items must be non-empty strings or numbers",
+                        ));
+                    }
+                } else if !item.is_number() {
+                    return Err(invalid(
+                        "filter leaf: array items must be non-empty strings or numbers",
+                    ));
+                }
+            }
+        }
+        "array_size_eq" => {
+            let n = value.as_i64().ok_or_else(|| {
+                invalid("filter leaf: array_size_eq value must be a non-negative integer")
+            })?;
+            if n < 0 {
+                return Err(invalid(
+                    "filter leaf: array_size_eq value must be a non-negative integer",
+                ));
             }
         }
         _ => return Err(invalid("filter leaf: unknown op")),

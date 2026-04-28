@@ -334,6 +334,70 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
 }
 
 #[test]
+fn search_accepts_extended_filter_operators() {
+    // Mirrors the generated grammar: between, array_contains,
+    // array_contains_any/all, and array_size_eq must validate cleanly.
+    // With no capability advertised in P0 the call lands on
+    // CapabilityUnavailable — the point is leaf validation passed.
+    let valid_leaves = [
+        serde_json::json!({"field": "score", "op": "between", "value": [0, 10]}),
+        serde_json::json!({"field": "tags", "op": "array_contains", "value": "rust"}),
+        serde_json::json!({"field": "tags", "op": "array_contains", "value": 42}),
+        serde_json::json!({"field": "tags", "op": "array_contains_any", "value": ["a", "b"]}),
+        serde_json::json!({"field": "tags", "op": "array_contains_all", "value": [1, 2, 3]}),
+        serde_json::json!({"field": "tags", "op": "array_size_eq", "value": 0}),
+    ];
+    for leaf in valid_leaves {
+        let args = SearchArgs {
+            citations: None,
+            cursor: None,
+            filters: Some(SearchArgsFilters::Leaf(leaf.clone())),
+            limit: None,
+            mode: SearchArgsMode::Keyword,
+            query: "hi".to_owned(),
+            scope: None,
+        };
+        match sdk().search(&args).expect_err("P0 has no capability") {
+            SdkError::CapabilityUnavailable { .. } => {}
+            other => panic!("expected CapabilityUnavailable for {leaf:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
+    let bad_leaves = [
+        // between: wrong arity / non-numeric
+        serde_json::json!({"field": "x", "op": "between", "value": [1]}),
+        serde_json::json!({"field": "x", "op": "between", "value": [1, "two"]}),
+        // array_contains: empty string / wrong type
+        serde_json::json!({"field": "x", "op": "array_contains", "value": ""}),
+        serde_json::json!({"field": "x", "op": "array_contains", "value": true}),
+        // array_contains_any/all: empty / mixed-bad
+        serde_json::json!({"field": "x", "op": "array_contains_any", "value": []}),
+        serde_json::json!({"field": "x", "op": "array_contains_all", "value": [""]}),
+        // array_size_eq: negative / non-integer
+        serde_json::json!({"field": "x", "op": "array_size_eq", "value": -1}),
+        serde_json::json!({"field": "x", "op": "array_size_eq", "value": "10"}),
+    ];
+    for leaf in bad_leaves {
+        let args = SearchArgs {
+            citations: None,
+            cursor: None,
+            filters: Some(SearchArgsFilters::Leaf(leaf.clone())),
+            limit: None,
+            mode: SearchArgsMode::Keyword,
+            query: "hi".to_owned(),
+            scope: None,
+        };
+        match sdk().search(&args).expect_err("must reject") {
+            SdkError::InvalidArgs { .. } => {}
+            other => panic!("expected InvalidArgs for {leaf:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn search_rejects_malformed_cursor_with_invalid_args() {
     // Cursor newtype is publicly constructible; the SDK must re-apply the
     // generated Cursor::Deserialize rules (non-empty, ≤ 512 chars).
