@@ -47,9 +47,11 @@ pub const MIN_TAIL_LINES: usize = 2;
 /// per stage; bounding the input keeps peak working-set proportional
 /// to a small multiple of this value rather than letting a runaway
 /// terminal capture OOM the host. 64 MiB easily covers a verbose
-/// `cargo build`, large `npm test` runs, etc.; anything larger should
-/// be rejected at the gate so the dispatch driver can route it to a
-/// non-lossy path. Tracked for streaming refactor in #221-followup.
+/// `cargo build`, large `npm test` runs, etc. **Boundary**: any
+/// payload with `raw_bytes.len() >= MAX_INPUT_BYTES` is treated as
+/// oversize (i.e., the constant is the largest size that takes the
+/// staged path; one byte more enters the bypass). Tracked for
+/// streaming refactor in #221-followup.
 pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Hard ceiling on raw line cardinality before squash routes to the
@@ -58,8 +60,9 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 /// header per line on 64-bit + content. At 200K lines that is ~14 MiB
 /// of headers alone — a comfortable working-set budget for legitimate
 /// terminal captures (a verbose `cargo build` is ~10K lines, large
-/// `npm test` runs are ~50K). Above 200K, route to the bypass path's
-/// byte-slice strategy and skip the staged allocations entirely.
+/// `npm test` runs are ~50K). **Boundary**: any payload with newline
+/// count `>= MAX_INPUT_LINES` routes to the bypass; the constant is
+/// the largest count that takes the staged path.
 pub const MAX_INPUT_LINES: usize = 200_000;
 
 // Compile-time invariant: MIN_MAX_BYTES must hold the tail-locked pair
@@ -265,7 +268,7 @@ impl<'a> UnstructuredTextBytes<'a> {
         event
             .validate()
             .map_err(UnstructuredBindError::EventValidationFailed)?;
-        // NOTE: oversize payloads (> MAX_INPUT_BYTES) are NOT rejected
+        // NOTE: oversize payloads (>= MAX_INPUT_BYTES) are NOT rejected
         // here. `squash()` detects them and applies an in-band bypass
         // that does head+tail byte slicing without per-stage clones, so
         // the raw bytes are preserved (head + tail) rather than dropped.
@@ -710,7 +713,7 @@ mod wrapper_tests {
             "line-cardinality marker present: {body:?}"
         );
         assert!(
-            !body.contains("> MAX_INPUT_BYTES"),
+            !body.contains(">= MAX_INPUT_BYTES"),
             "byte-ceiling marker must not appear for line-cardinality bypass: {body:?}"
         );
     }
@@ -2217,10 +2220,10 @@ impl BypassReason {
     fn marker(self, raw_byte_len: usize, line_count: usize) -> String {
         match self {
             Self::ByteCeiling => format!(
-                "[…oversize bypass: {raw_byte_len} bytes > MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
+                "[…oversize bypass: {raw_byte_len} bytes >= MAX_INPUT_BYTES ({MAX_INPUT_BYTES}), squash skipped…]"
             ),
             Self::LineCardinality => format!(
-                "[…oversize bypass: {line_count} lines > MAX_INPUT_LINES ({MAX_INPUT_LINES}), squash skipped…]"
+                "[…oversize bypass: {line_count} lines >= MAX_INPUT_LINES ({MAX_INPUT_LINES}), squash skipped…]"
             ),
         }
     }
