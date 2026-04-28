@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
-    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, VerifiedSignedIntent,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId, VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -140,6 +140,10 @@ impl<'de> Deserialize<'de> for RecordId {
 pub struct MemoryRecord {
     /// ULID — the stable record identifier.
     pub id: RecordId,
+    /// Supersession lineage key. For a fresh fact this equals `id`. On
+    /// supersession (`updates`-edge), the new record carries the prior
+    /// record's `target_id`. Same wire form as `id`. Brief §3, §3.0.
+    pub target_id: TargetId,
     /// Memory kind (§6.1).
     pub kind: MemoryKind,
     /// Memory class (§6.2).
@@ -708,6 +712,7 @@ mod tests {
         let user_id = Identity::parse("usr:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
@@ -1366,5 +1371,32 @@ mod tests {
             .insert("zzz".to_owned(), serde_json::json!("bad"));
         let res: Result<MemoryRecord, _> = serde_json::from_value(value);
         assert!(res.is_err(), "unknown field should reject");
+    }
+
+    #[test]
+    fn target_id_independent_of_id() {
+        let r = sample_record();
+        // For a fresh record the convention is target_id == id, but the type
+        // does not enforce that — supersessions intentionally keep the prior
+        // target_id while issuing a new id.
+        assert_eq!(r.target_id.as_str(), r.id.as_str());
+    }
+
+    #[test]
+    fn target_id_round_trips_in_json() {
+        let mut r = sample_record();
+        let other = TargetId::parse("01HQZX9F5N1234567890ABCDEF").expect("valid");
+        r.target_id = other.clone();
+        let s = serde_json::to_string(&r).expect("ser");
+        let back: MemoryRecord = serde_json::from_str(&s).expect("de");
+        assert_eq!(back.target_id, other);
+    }
+
+    #[test]
+    fn missing_target_id_in_json_rejected() {
+        let mut value = serde_json::to_value(sample_record()).expect("ser");
+        value.as_object_mut().expect("object").remove("target_id");
+        let res: Result<MemoryRecord, _> = serde_json::from_value(value);
+        assert!(res.is_err(), "target_id is required");
     }
 }
