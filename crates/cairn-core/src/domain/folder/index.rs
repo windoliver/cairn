@@ -4,25 +4,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::contract::memory_store::StoredRecord;
+use crate::domain::Rfc3339Timestamp;
 use crate::domain::folder::links::Backlink;
 use crate::domain::folder::policy::{EffectivePolicy, FolderPolicy, resolve_policy};
 use crate::domain::record::RecordId;
-use crate::domain::{MemoryKind, Rfc3339Timestamp};
-
-/// Per-record summary line for a folder index.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordEntry {
-    /// Vault-relative path of the record file.
-    pub path: PathBuf,
-    /// Record id.
-    pub id: RecordId,
-    /// Memory kind.
-    pub kind: MemoryKind,
-    /// Last-update timestamp from the stored record.
-    pub updated_at: Rfc3339Timestamp,
-    /// Backlinks pointing at this record.
-    pub backlink_count: u32,
-}
 
 /// Per-subfolder aggregate row.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,9 +200,15 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
         for s in &state.records {
             // path = folder / "<kind>_<id>.md" — same as MarkdownProjector.
             let leaf = format!("{}_{}.md", s.record.kind.as_str(), s.record.id.as_str());
+            let projected_path = state.path.join(&leaf);
+            let backlink_count = state
+                .backlinks
+                .iter()
+                .filter(|bl| bl.target_path == projected_path)
+                .count();
             let _ = writeln!(
                 body,
-                "- [{leaf}]({leaf}) — {kind} · updated {upd}",
+                "- [{leaf}]({leaf}) — {kind} · updated {upd} · {backlink_count} backlinks",
                 kind = s.record.kind.as_str(),
                 upd = s.record.updated_at.as_str(),
             );
@@ -444,5 +435,59 @@ mod tests {
         assert!(!pf.content.contains("## Records"));
         assert!(!pf.content.contains("## Subfolders"));
         assert!(!pf.content.contains("## Backlinks"));
+    }
+
+    #[test]
+    fn project_records_section_renders_leaf_link_and_backlink_count() {
+        use crate::domain::record::tests::sample_stored_record;
+        let stored = sample_stored_record(1);
+        let leaf = format!(
+            "{}_{}.md",
+            stored.record.kind.as_str(),
+            stored.record.id.as_str()
+        );
+        let target_path = PathBuf::from(format!("raw/{leaf}"));
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: vec![stored.clone()],
+            subfolders: Vec::new(),
+            backlinks: vec![Backlink {
+                source_path: PathBuf::from("raw/other.md"),
+                target_path: target_path.clone(),
+                anchor: None,
+            }],
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        let row = format!("- [{leaf}]({leaf})");
+        assert!(
+            pf.content.contains(&row),
+            "expected leaf-only row link per brief §3.4, got:\n{}",
+            pf.content
+        );
+        assert!(
+            pf.content.contains("· 1 backlinks"),
+            "expected backlink count, got:\n{}",
+            pf.content
+        );
+    }
+
+    #[test]
+    fn project_records_section_renders_zero_backlinks_when_state_empty() {
+        use crate::domain::record::tests::sample_stored_record;
+        let stored = sample_stored_record(1);
+        let state = FolderState {
+            path: PathBuf::from("raw"),
+            records: vec![stored],
+            subfolders: Vec::new(),
+            backlinks: Vec::new(),
+            effective_policy: EffectivePolicy::default(),
+        };
+        let pf = project_index(&state);
+        assert!(
+            pf.content.contains("· 0 backlinks"),
+            "expected '· 0 backlinks' when state.backlinks is empty, got:\n{}",
+            pf.content
+        );
     }
 }
