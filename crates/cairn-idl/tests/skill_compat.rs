@@ -381,6 +381,66 @@ fn json_validator_resolves_cross_file_primitive_refs() {
 }
 
 #[test]
+fn cli_validator_rejects_invalid_ulid_in_string_flag() {
+    // Round-16 finding 1: `forget --record` is a string flag with a $ref
+    // to the Ulid primitive. A bogus value must fail compat the same way
+    // the runtime would, even though the value_source is the freeform
+    // "string".
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn forget --record not-a-ulid".into(),
+        line: 1,
+    };
+    let err =
+        validate_cli_block(&block, &doc()).expect_err("invalid Ulid in string flag must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_rejects_non_json_in_json_flag() {
+    // `forget --scope` is value_source `json`. A non-JSON literal must
+    // fail compat. Round-16 finding 1.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn forget --scope nope".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("non-JSON --scope value must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_dash_as_stdin_positional() {
+    // Round-16 finding 2: ingest documents `-` for stdin. Compat must
+    // accept bare `-` as a valid positional, not treat it as a flag.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND -".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("bare `-` must be accepted as stdin positional");
+}
+
+#[test]
+fn cli_validator_accepts_dash_value_for_string_flag() {
+    // Round-16 finding 2: `--body -` reads stdin at runtime; the gate
+    // must accept `-` as the flag's value rather than treat it as the
+    // next option.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND --body -".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("`--body -` must validate");
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.

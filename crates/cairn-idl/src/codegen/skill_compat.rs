@@ -636,6 +636,80 @@ fn validate_flag_value(
         check_integer_bounds(flag, i128::from(parsed), prop_schema, line)?;
     } else if let Some(allowed) = list_enum_options(source) {
         validate_list_enum_value(value, allowed, prop_schema, &bad)?;
+    } else if source == "string" || source == "path" {
+        // Freeform string/path: still honour the property schema's
+        // `pattern` / `minLength` / cross-file `$ref` (e.g.,
+        // `forget.record_id` is a Ulid). Without this a stale example
+        // like `cairn forget --record not-a-ulid` would silently pass.
+        if let Some(prop) = prop_schema {
+            check_string_constraints(value, prop, &bad)?;
+        }
+    } else if source == "json"
+        && let Some(prop) = prop_schema
+    {
+        // JSON-typed flag (e.g., `forget.scope`): parse the literal and
+        // validate it against the full property schema with our
+        // cross-file retriever wired in. A non-JSON value or one that
+        // misses required narrowing fails compat the way the runtime
+        // would.
+        check_json_flag_value(value, prop, &bad)?;
+    }
+    Ok(())
+}
+
+/// Validate a string/path flag value against the property schema's
+/// `pattern` / `minLength` and any well-known primitive `$ref`.
+fn check_string_constraints(
+    value: &str,
+    prop_schema: &serde_json::Value,
+    bad: &dyn Fn(String) -> CompatError,
+) -> Result<(), CompatError> {
+    if let Some(min_len) = prop_schema
+        .get("minLength")
+        .and_then(serde_json::Value::as_u64)
+        && (value.chars().count() as u64) < min_len
+    {
+        return Err(bad(format!(
+            "value `{value}` shorter than minLength {min_len}"
+        )));
+    }
+    let pattern = prop_schema
+        .get("pattern")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            let r = prop_schema
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)?;
+            primitive_ref_pattern(r)
+        });
+    if let Some(pattern) = pattern
+        && let Ok(re) = regex::Regex::new(&pattern)
+        && !re.is_match(value)
+    {
+        return Err(bad(format!(
+            "value `{value}` does not match pattern /{pattern}/"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a JSON-typed flag value: parse + validate against the full
+/// property schema (with the cross-file retriever wired in so any `$ref`
+/// resolves).
+fn check_json_flag_value(
+    value: &str,
+    prop_schema: &serde_json::Value,
+    bad: &dyn Fn(String) -> CompatError,
+) -> Result<(), CompatError> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(value).map_err(|e| bad(format!("not valid JSON: {e}")))?;
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(SchemaDirRetriever)
+        .build(prop_schema)
+        .map_err(|e| bad(format!("schema compile: {e}")))?;
+    if let Err(err) = validator.validate(&parsed) {
+        return Err(bad(format!("schema mismatch: {err}")));
     }
     Ok(())
 }
@@ -859,8 +933,13 @@ fn scan_tokens<'a>(
                 // Non-boolean flags require a value — either inline (`--x=v`)
                 // or the next non-flag token. Without one clap would reject
                 // the example at runtime, so fail compat too.
+                // Bare `-` (stdin sentinel) and `--` are valid values for
+                // many real flags (e.g., `cairn ingest --body -`), so accept
+                // them as the value rather than treating them as the next
+                // option. Anything else starting with `-` is still treated
+                // as the next flag, matching clap's default behavior.
                 let v = match iter.peek() {
-                    Some(n) if !n.starts_with('-') => {
+                    Some(n) if !n.starts_with('-') || *n == "-" || *n == "--" => {
                         let v = (*n).to_string();
                         let _ = iter.next();
                         Some(v)
@@ -897,7 +976,9 @@ fn scan_tokens<'a>(
                     validate_flag_value(name, &value, src, prop, source_line)?;
                 }
             }
-        } else if !tok.starts_with('-') {
+        } else if !tok.starts_with('-') || tok == "-" {
+            // Bare `-` is a positional (stdin sentinel for ingest etc.),
+            // not another flag.
             positional_count += 1;
             positional_values.push(tok.to_string());
         }
