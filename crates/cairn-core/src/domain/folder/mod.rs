@@ -8,6 +8,10 @@ pub mod index;
 pub mod links;
 pub mod policy;
 
+#[allow(unused_imports)] // links module is empty until Task 5
+pub use links::*;
+pub use policy::*;
+
 /// Errors raised by pure folder helpers.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
