@@ -508,6 +508,84 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-5 (new loop) regression: the oversize bypass tail slice
+    /// can begin mid-OSC/CSI sequence; the sanitizer anchors on ESC
+    /// and would treat the dangling bytes as plain text. Advance the
+    /// slice to the next `\n` boundary in raw bytes BEFORE decoding so
+    /// the sanitizer sees every introducer in-window.
+    #[test]
+    fn oversize_bypass_tail_slice_in_mid_osc_does_not_leak_url() {
+        // Layout: head + filler such that the retained tail window
+        // starts INSIDE an OSC-8 hyperlink URL body (the introducer
+        // ESC ] 8 ; ; sits before tail_raw_start). After the OSC URL
+        // there is BEL terminator, then "VISIBLE\n".
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head-line\n");
+        // Filler so tail_window cuts mid-OSC. Default cfg max_bytes
+        // = 16384, so tail_window ≈ 2 * 8000 = 16000.
+        raw.extend(std::iter::repeat_n(b'F', 50_000));
+        raw.push(b'\n');
+        // Place the OSC introducer just before the tail window starts.
+        // tail_raw_start = raw.len() - 16000 (computed at runtime). We
+        // construct the OSC so its introducer is well before that.
+        raw.extend_from_slice(
+            b"\x1b]8;;https://attacker.example/secret-token-aaaa-bbbb-cccc-dddd-eeee-ffff",
+        );
+        raw.extend(std::iter::repeat_n(b'X', 16_500));
+        // BEL ends the OSC, then a real visible line.
+        raw.push(0x07);
+        raw.extend_from_slice(b"VISIBLE\nFINAL-LINE\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            !body.contains("attacker.example"),
+            "URL must not leak into compacted: {body:?}"
+        );
+        assert!(
+            !body.contains("secret-token"),
+            "token must not leak: {body:?}"
+        );
+        // FINAL-LINE survives via the line-aligned tail.
+        assert!(
+            body.contains("FINAL-LINE"),
+            "final line preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    /// Round-5 (new loop) regression: oversized newline-free payloads
+    /// (minified JSON, base64) must NOT collapse the tail to empty.
+    /// Preserve a bounded suffix with an explicit degraded-tail marker
+    /// so consumers know the suffix may not start on a line boundary.
+    #[test]
+    fn oversize_bypass_newline_free_payload_preserves_suffix() {
+        // 100 KB of newline-free payload ending in a recognizable tag.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend(std::iter::repeat_n(b'B', 100_000));
+        raw.extend_from_slice(b"END-OF-STREAM-TAG");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("END-OF-STREAM-TAG"),
+            "suffix preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(
+            body.contains("tail mid-line"),
+            "degraded marker present: {body:?}"
+        );
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
     /// Round-3 (new loop) regression: the oversize bypass must run
     /// stage-2 ANSI/OSC sanitization on retained head/tail windows so
     /// raw control-plane bytes (CSI escapes, OSC titles/URLs) do not
@@ -1783,29 +1861,61 @@ fn oversize_bypass(
         None => head_trimmed,
     };
 
+    // Tail: the slice may begin mid-CSI/OSC, so the sanitizer (which
+    // anchors on ESC) cannot recognize a sequence whose introducer fell
+    // outside the window. Advance `tail_raw_start` to the byte AFTER
+    // the next `\n` in raw_bytes — that guarantees the slice begins on
+    // a source-line boundary, so any escape that crossed the boundary
+    // is fully outside the retained window.
     let tail_window = (half * 2).min(raw_bytes.len());
-    let tail_raw_start = raw_bytes.len() - tail_window;
-    let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
-    let mut tail_stripped = false;
-    let tail_sanitized = stage2_ansi_strip(&tail_decoded, &mut tail_stripped);
-    stats.ansi_stripped |= tail_stripped;
-    let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
-    // Line-align tail to the next `\n` so the retained tail starts on
-    // a line boundary (preserves the final-line invariant: the last
-    // diagnostic line is never split mid-content). If the retained
-    // window contains NO `\n` at all, the entire window is mid-line
-    // of one giant source line — emit nothing rather than a chopped
-    // suffix that would silently corrupt the final-line invariant.
-    let tail: &str = match tail_trimmed.find('\n') {
-        Some(idx) => &tail_trimmed[idx + 1..],
-        None => "",
-    };
+    let mut tail_raw_start = raw_bytes.len() - tail_window;
+    let mut tail_aligned_to_line = false;
+    if let Some(rel) = raw_bytes[tail_raw_start..].iter().position(|&b| b == b'\n') {
+        tail_raw_start += rel + 1;
+        tail_aligned_to_line = true;
+    }
     let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
     compacted_bytes.extend_from_slice(head.as_bytes());
     compacted_bytes.push(b'\n');
     compacted_bytes.extend_from_slice(marker_bytes);
     compacted_bytes.push(b'\n');
-    compacted_bytes.extend_from_slice(tail.as_bytes());
+
+    if tail_aligned_to_line {
+        // Standard path: slice begins on a line boundary, sanitizer
+        // sees every introducer in-window, no mid-sequence leak risk.
+        let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
+        let mut tail_stripped = false;
+        let tail_sanitized = stage2_ansi_strip(&tail_decoded, &mut tail_stripped);
+        stats.ansi_stripped |= tail_stripped;
+        let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
+        compacted_bytes.extend_from_slice(tail_trimmed.as_bytes());
+    } else if !raw_bytes.is_empty() {
+        // No `\n` exists in the entire retained window — the source
+        // is one extremely long line (minified JSON, base64, etc.).
+        // Per Round-5 reviewer: preserve a bounded suffix rather than
+        // dropping the tail entirely. Emit a degraded marker followed
+        // by up to `max_line_bytes` bytes of suffix, sanitized. The
+        // suffix may still contain mid-sequence bytes if a CSI/OSC
+        // introducer fell outside the suffix window; the degraded
+        // marker explicitly flags the tail as mid-line so consumers
+        // do not assume line-boundary safety.
+        let degraded = b"[\xe2\x80\xa6tail mid-line: oversized single-line payload, suffix may contain residual control bytes\xe2\x80\xa6]";
+        compacted_bytes.extend_from_slice(degraded);
+        compacted_bytes.push(b'\n');
+        let line_cap = cfg.max_line_bytes();
+        let suffix_window = line_cap.min(raw_bytes.len());
+        let suffix_start = raw_bytes.len() - suffix_window;
+        let suffix_decoded = stage1_lossy_utf8(&raw_bytes[suffix_start..]);
+        let mut suf_stripped = false;
+        let suffix_sanitized = stage2_ansi_strip(&suffix_decoded, &mut suf_stripped);
+        stats.ansi_stripped |= suf_stripped;
+        // Recompute remaining budget after head/marker/degraded marker
+        // so total stays under max_body.
+        let used = compacted_bytes.len();
+        let remaining = max_body.saturating_sub(used);
+        let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_sanitized, remaining);
+        compacted_bytes.extend_from_slice(suffix.as_bytes());
+    }
     assert!(
         compacted_bytes.len() <= max_body,
         "oversize bypass exceeded max_bytes: got {} > {}",
