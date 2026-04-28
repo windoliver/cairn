@@ -257,11 +257,11 @@ fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
 pub fn run(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
     let fix_markdown = sub.get_flag("fix-markdown");
+    let fix_folders = sub.get_flag("fix-folders");
 
-    if fix_markdown {
-        // TODO(#9): wire the real SQLite store here once `cairn-store-sqlite` is done.
-        // The handler is fully implemented and accepts a `&dyn MemoryStore`, so only
-        // this dispatch site needs updating when the store is available.
+    if fix_markdown || fix_folders {
+        // TODO(#46): wire the SQLite store. For now, return the same
+        // unimplemented envelope used by --fix-markdown.
         let resp = unimplemented_response(ResponseVerb::Lint);
         if json {
             emit_json(&resp);
@@ -269,7 +269,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
             human_error(
                 "lint",
                 "Internal",
-                "store not wired in this P0 build — --fix-markdown requires #46",
+                "store not wired in this P0 build — --fix-folders requires #46",
                 &resp.operation_id,
             );
         }
