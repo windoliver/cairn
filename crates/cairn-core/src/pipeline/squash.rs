@@ -39,9 +39,7 @@ pub const MIN_TAIL_LINES: usize = 2;
 
 // Compile-time invariant: MIN_MAX_BYTES must hold the tail-locked pair
 // + skip-marker + layout newlines.
-const _: () = assert!(
-    MIN_MAX_BYTES >= 2 * MIN_MAX_LINE_BYTES + MARKER_MAX_LEN + LAYOUT_OVERHEAD
-);
+const _: () = assert!(MIN_MAX_BYTES >= 2 * MIN_MAX_LINE_BYTES + MARKER_MAX_LEN + LAYOUT_OVERHEAD);
 
 /// Configuration for `squash`. Construct via `SquashConfig::new` or
 /// `SquashConfig::default()`. All fields private; accessors below.
@@ -294,7 +292,10 @@ mod config_tests {
     #[test]
     fn rejects_max_line_bytes_below_min() {
         let err = SquashConfig::new(16384, 100, 100, 2, MIN_MAX_LINE_BYTES - 1).unwrap_err();
-        assert!(matches!(err, SquashConfigError::MaxLineBytesTooSmall { .. }));
+        assert!(matches!(
+            err,
+            SquashConfigError::MaxLineBytesTooSmall { .. }
+        ));
     }
 
     #[test]
@@ -308,7 +309,10 @@ mod config_tests {
         let max_bytes = MIN_MAX_BYTES; // 512
         let max_line_bytes = 200; // 2*200+128+4 = 532 > 512
         let err = SquashConfig::new(max_bytes, 100, 100, 2, max_line_bytes).unwrap_err();
-        assert!(matches!(err, SquashConfigError::LineCapExceedsLayoutBudget { .. }));
+        assert!(matches!(
+            err,
+            SquashConfigError::LineCapExceedsLayoutBudget { .. }
+        ));
     }
 
     #[test]
@@ -336,15 +340,14 @@ mod wrapper_tests {
 
     fn payload_hash_of(bytes: &[u8]) -> PayloadHash {
         let digest = Sha256::digest(bytes);
-        PayloadHash::parse(format!("sha256:{digest:x}"))
-            .expect("sha256 string is well-formed")
+        PayloadHash::parse(format!("sha256:{digest:x}")).expect("sha256 string is well-formed")
     }
 
     fn ts() -> Rfc3339Timestamp {
         Rfc3339Timestamp::parse("2026-04-27T00:00:00Z").expect("valid timestamp")
     }
 
-    fn terminal_event(payload_bytes: &[u8]) -> CaptureEvent {
+    pub(super) fn terminal_event(payload_bytes: &[u8]) -> CaptureEvent {
         CaptureEvent {
             event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
             sensor_id: Identity::parse("snr:local:terminal:cli:v1").unwrap(),
@@ -485,7 +488,6 @@ use std::borrow::Cow;
 
 /// Stage 1: lossy UTF-8 decode. Invalid byte sequences become
 /// U+FFFD; valid input passes through borrowed.
-#[allow(dead_code)] // Used by higher stages in later tasks
 fn stage1_lossy_utf8(raw: &[u8]) -> Cow<'_, str> {
     String::from_utf8_lossy(raw)
 }
@@ -522,7 +524,6 @@ mod stage1_tests {
 /// (except `\n`, `\t`, `\r`), then normalize CRLF → LF (preserving lone CR).
 ///
 /// Sets `*stripped = true` whenever any byte is removed or normalized.
-#[allow(dead_code)] // Used by squash() entrypoint in Task 13
 #[allow(clippy::expect_used)] // invariant: only ASCII control bytes/ESC sequences removed; UTF-8 preserved
 fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
     let bytes = input.as_bytes();
@@ -690,7 +691,6 @@ mod stage2_tests {
 /// Stage 3: split on `\n`. Returns `(lines, trailing_newline_flag)`.
 /// Interior empty segments are preserved as empty lines; a trailing
 /// `\n` produces an empty final segment that is NOT a line.
-#[allow(dead_code)] // Used by squash() entrypoint in Task 13
 fn stage3_split_lines(s: &str) -> (Vec<&str>, bool) {
     if s.is_empty() {
         return (Vec::new(), false);
@@ -745,12 +745,7 @@ mod stage3_tests {
 /// exemption: when the final repeat run reaches the input's last line, the
 /// final line is preserved verbatim and earlier duplicates collapse to
 /// `<line> [×N-1]`. CR-bearing lines never collapse.
-#[allow(dead_code)] // Used by squash() entrypoint in Task 13
-fn stage4_dedup(
-    lines: &[String],
-    min_run: usize,
-    collapsed_runs: &mut usize,
-) -> Vec<String> {
+fn stage4_dedup(lines: &[String], min_run: usize, collapsed_runs: &mut usize) -> Vec<String> {
     if lines.is_empty() || min_run < 2 {
         return lines.to_vec();
     }
@@ -857,12 +852,7 @@ mod stage4_tests {
 /// Stage 5: per-line cap. `max_line_bytes` is the emitted budget inclusive of
 /// any inline truncation marker. Truncates at the nearest UTF-8 codepoint
 /// boundary.
-#[allow(dead_code)] // Used by squash() entrypoint in Task 13
-fn stage5_per_line_cap(
-    line: &str,
-    max_line_bytes: usize,
-    truncated_flag: &mut bool,
-) -> String {
+fn stage5_per_line_cap(line: &str, max_line_bytes: usize, truncated_flag: &mut bool) -> String {
     if line.len() <= max_line_bytes {
         return line.to_string();
     }
@@ -936,7 +926,6 @@ mod stage5_tests {
 /// `pair_at_end` indicates the last two lines form an atomic split-form
 /// dedup pair (`<line> [×N-1]` followed by `<line>` verbatim) — they must
 /// be kept together or dropped together.
-#[allow(dead_code)] // Used by squash() entrypoint in Task 13
 fn stage6_layout(
     lines: &[String],
     pair_at_end: bool,
@@ -946,8 +935,8 @@ fn stage6_layout(
     if lines.is_empty() {
         return String::new();
     }
-    let total_bytes: usize = lines.iter().map(String::len).sum::<usize>()
-        + lines.len().saturating_sub(1);
+    let total_bytes: usize =
+        lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
     if total_bytes <= cfg.max_bytes() {
         return lines.join("\n");
     }
@@ -955,8 +944,8 @@ fn stage6_layout(
     let tail_take = cfg.tail_lines().min(lines.len());
     let tail_start = lines.len() - tail_take;
     let tail_slice = &lines[tail_start..];
-    let tail_byte_len: usize = tail_slice.iter().map(String::len).sum::<usize>()
-        + tail_slice.len().saturating_sub(1);
+    let tail_byte_len: usize =
+        tail_slice.iter().map(String::len).sum::<usize>() + tail_slice.len().saturating_sub(1);
 
     let layout_overhead = if tail_take > 0 { 2 } else { 1 };
     let signed_head_budget = cfg
@@ -972,17 +961,11 @@ fn stage6_layout(
 
     if let Some(head_budget) = signed_head_budget {
         head_take = cfg.head_lines().min(tail_start);
-        let mut head_bytes: usize = lines[..head_take]
-            .iter()
-            .map(String::len)
-            .sum::<usize>()
-            + head_take.saturating_sub(1);
+        let mut head_bytes: usize =
+            lines[..head_take].iter().map(String::len).sum::<usize>() + head_take.saturating_sub(1);
         while head_bytes > head_budget && head_take > 0 {
             head_take -= 1;
-            head_bytes = lines[..head_take]
-                .iter()
-                .map(String::len)
-                .sum::<usize>()
+            head_bytes = lines[..head_take].iter().map(String::len).sum::<usize>()
                 + head_take.saturating_sub(1);
         }
         for line in &lines[head_take..current_tail_start] {
@@ -993,7 +976,9 @@ fn stage6_layout(
         // Tail alone exceeds max_bytes. Drop tail lines from the front,
         // respecting the pair lock at end if applicable.
         head_take = 0;
-        let target = cfg.max_bytes().saturating_sub(MARKER_MAX_LEN + layout_overhead);
+        let target = cfg
+            .max_bytes()
+            .saturating_sub(MARKER_MAX_LEN + layout_overhead);
         let mut remaining_tail = tail_byte_len;
         // The atomic-pair lock: when pair_at_end, the bottom 2 indices
         // (lines.len()-2 and lines.len()-1) must be kept together. So the
@@ -1067,6 +1052,110 @@ mod stage6_tests {
     }
 }
 
+/// Compact a verbose terminal-output payload into bounded bytes for storage.
+///
+/// Pure function: same `(raw, cfg)` always produces byte-identical
+/// `compacted_bytes`. See module docs and design spec for invariants.
+#[must_use]
+pub fn squash(raw: &UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutput {
+    let raw_bytes = raw.as_bytes();
+    let raw_hash = raw.raw_hash().clone();
+    let raw_byte_len = raw_bytes.len();
+
+    let mut stats = SquashStats::default();
+
+    if raw_bytes.is_empty() {
+        let compacted_hash = sha256_payload_hash(&[]);
+        return SquashOutput {
+            compacted_bytes: Vec::new(),
+            raw_hash,
+            raw_byte_len,
+            compacted_hash,
+            compacted_byte_len: 0,
+            stats,
+        };
+    }
+
+    let decoded = stage1_lossy_utf8(raw_bytes);
+    let stage2 = stage2_ansi_strip(&decoded, &mut stats.ansi_stripped);
+    let (raw_lines_borrow, trailing_newline) = stage3_split_lines(&stage2);
+    let raw_lines: Vec<String> = raw_lines_borrow.iter().map(|s| (*s).to_string()).collect();
+
+    stats.cr_bearing_lines = raw_lines.iter().filter(|l| l.contains('\r')).count();
+
+    let (post_dedup, pair_at_end) = stage4_dedup_with_pair_flag(
+        &raw_lines,
+        cfg.dedup_min_run(),
+        &mut stats.dedup_runs_collapsed,
+    );
+
+    let mut long_lines_count: usize = 0;
+    let post_cap: Vec<String> = post_dedup
+        .into_iter()
+        .map(|line| {
+            let mut t = false;
+            let r = stage5_per_line_cap(&line, cfg.max_line_bytes(), &mut t);
+            if t {
+                long_lines_count += 1;
+            }
+            r
+        })
+        .collect();
+    stats.long_lines_truncated = long_lines_count;
+
+    let mut compacted = stage6_layout(&post_cap, pair_at_end, cfg, &mut stats);
+    if trailing_newline && !compacted.is_empty() {
+        compacted.push('\n');
+    }
+
+    let compacted_bytes = compacted.into_bytes();
+    let compacted_byte_len = compacted_bytes.len();
+    let compacted_hash = sha256_payload_hash(&compacted_bytes);
+
+    SquashOutput {
+        compacted_bytes,
+        raw_hash,
+        raw_byte_len,
+        compacted_hash,
+        compacted_byte_len,
+        stats,
+    }
+}
+
+// Invariant: Sha256::digest produces a fixed 32-byte output that always
+// formats as a valid sha256 PayloadHash. The expect is therefore unreachable.
+#[allow(clippy::expect_used)]
+fn sha256_payload_hash(bytes: &[u8]) -> PayloadHash {
+    let digest = Sha256::digest(bytes);
+    PayloadHash::parse(format!("sha256:{digest:x}"))
+        .expect("sha256 hex digest is a well-formed PayloadHash")
+}
+
+/// Wraps `stage4_dedup` and additionally reports whether the input ends in a
+/// repeat run that triggered the split-form last-line exemption (the output
+/// will end with `<line> [×N-1]` followed by `<line>` and the pair must be
+/// kept atomic in stage 6).
+fn stage4_dedup_with_pair_flag(
+    lines: &[String],
+    min_run: usize,
+    collapsed_runs: &mut usize,
+) -> (Vec<String>, bool) {
+    if lines.is_empty() || min_run < 2 {
+        return (lines.to_vec(), false);
+    }
+    let last_idx = lines.len() - 1;
+    let last_line = &lines[last_idx];
+    let mut run_start = last_idx;
+    while run_start > 0 && &lines[run_start - 1] == last_line {
+        run_start -= 1;
+    }
+    let trailing_run = last_idx - run_start + 1;
+    let cr_bearing = last_line.contains('\r');
+    let pair_at_end = trailing_run > min_run && !cr_bearing;
+    let out = stage4_dedup(lines, min_run, collapsed_runs);
+    (out, pair_at_end)
+}
+
 #[cfg(test)]
 mod tail_lock_tests {
     use super::*;
@@ -1085,5 +1174,69 @@ mod tail_lock_tests {
         if has_final {
             assert!(has_marker, "count marker must accompany surviving final");
         }
+    }
+}
+
+#[cfg(test)]
+mod squash_integration_tests {
+    use super::wrapper_tests::terminal_event;
+    use super::*;
+
+    fn run_squash(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
+        let evt = terminal_event(raw);
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid wrapper");
+        squash(&wrapper, cfg)
+    }
+
+    #[test]
+    fn empty_input_yields_empty_output() {
+        let out = run_squash(b"", &SquashConfig::default());
+        assert!(out.compacted_bytes.is_empty());
+        assert_eq!(out.raw_byte_len, 0);
+        assert_eq!(out.compacted_byte_len, 0);
+        assert!(!out.stats.truncated);
+        assert_eq!(out.raw_hash, out.compacted_hash);
+    }
+
+    #[test]
+    fn short_input_passes_through() {
+        let raw = b"hello\nworld\n";
+        let out = run_squash(raw, &SquashConfig::default());
+        assert_eq!(out.compacted_bytes, raw);
+    }
+
+    #[test]
+    fn deterministic() {
+        let raw = b"line\nline\nline\nfinal\n";
+        let cfg = SquashConfig::default();
+        let a = run_squash(raw, &cfg);
+        let b = run_squash(raw, &cfg);
+        assert_eq!(a.compacted_bytes, b.compacted_bytes);
+        assert_eq!(a.stats, b.stats);
+        assert_eq!(a.compacted_hash, b.compacted_hash);
+    }
+
+    #[test]
+    fn last_content_line_preserved_under_pressure() {
+        // Use a tight budget so stage6 must truncate.
+        // cfg: max_bytes=512 (MIN), head=2, tail=2, dedup=2, line=128 (MIN)
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).expect("valid cfg");
+        let mut raw = Vec::new();
+        // 200 unique lines — not dedup'd — totalling far over 512 bytes
+        for i in 0_u32..200 {
+            raw.extend_from_slice(format!("log-line-{i:04}\n").as_bytes());
+        }
+        raw.extend_from_slice(b"FINAL_SENTINEL\n");
+        let out = run_squash(&raw, &cfg);
+        assert!(out.stats.truncated);
+        assert!(
+            String::from_utf8_lossy(&out.compacted_bytes).contains("FINAL_SENTINEL"),
+            "last content line must be preserved"
+        );
     }
 }
