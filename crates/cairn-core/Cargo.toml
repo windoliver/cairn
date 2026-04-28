@@ -10,6 +10,14 @@ homepage.workspace = true
 readme.workspace = true
 description = "Cairn verb layer, domain types, and error enums. No I/O, no adapters."
 
+[features]
+default = []
+# Re-exports the in-tree `sample_record` factory under
+# `cairn_core::domain::record::tests_export` so adapter crates can build the
+# same canonical fixture from `[dev-dependencies]`. Never enable in
+# production builds.
+test-fixtures = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

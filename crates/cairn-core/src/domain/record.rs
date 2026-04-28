@@ -700,15 +700,37 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{ActorChainEntry, ChainRole, Identity};
+/// Cross-crate test fixture re-export.
+///
+/// `sample_record` is the canonical valid `MemoryRecord` factory used by
+/// every test in this crate. Downstream crates (e.g. `cairn-store-sqlite`)
+/// need the same canonical sample for projection / round-trip tests, so the
+/// factory is hosted here under a `cfg(any(test, feature = "test-fixtures"))`
+/// gate. The `test-fixtures` feature is opt-in and intended for
+/// `[dev-dependencies]` only — it never lands in production binaries.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "fixture factory for tests; bad inputs would mean the test data \
+              itself is broken and a panic surfaces that immediately"
+)]
+pub mod tests_export {
+    use std::collections::BTreeMap;
 
-    pub(crate) fn sample_record() -> MemoryRecord {
-        // Single human author at P0: scope.user, originating_agent_id, and
-        // chain author all bind to `usr:tafeng`. Delegation chains arrive
-        // with P2 countersignatures.
+    use super::{Ed25519Signature, MemoryRecord, RecordId};
+    use crate::domain::{
+        ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
+        ScopeTuple, TargetId,
+        taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
+    };
+
+    /// Construct a canonical valid [`MemoryRecord`] for tests and adapter
+    /// fixtures. Single human author at P0: `scope.user`,
+    /// `originating_agent_id`, and the chain author all bind to
+    /// `usr:tafeng`. Delegation chains arrive with P2 countersignatures.
+    #[must_use]
+    pub fn sample_record() -> MemoryRecord {
         let user_id = Identity::parse("usr:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
@@ -744,6 +766,13 @@ mod tests {
             extra_frontmatter: BTreeMap::new(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::tests_export::sample_record;
+    use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
     #[test]
     fn valid_record_passes_validation() {
