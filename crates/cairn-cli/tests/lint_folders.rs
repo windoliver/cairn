@@ -57,3 +57,24 @@ async fn bad_policy_yaml_does_not_abort_run() {
     // The valid record's _index.md is still emitted.
     assert!(vault.path().join("raw/_index.md").exists());
 }
+
+#[tokio::test]
+async fn fixture_index_matches_snapshot() {
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw")).unwrap();
+
+    let _ = fix_folders_handler(&store, vault.path()).await.unwrap();
+    let content = std::fs::read_to_string(vault.path().join("raw/_index.md")).unwrap();
+
+    // Strip the timestamped `updated_at` line so the snapshot stays stable.
+    let stable: String = content
+        .lines()
+        .filter(|l| !l.starts_with("updated_at:") && !l.contains("· updated "))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    insta::assert_snapshot!("raw_index_single_record", stable);
+}
