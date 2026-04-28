@@ -108,6 +108,28 @@ jobs:
       - name: scripts/check-core-boundary.sh
         run: ./scripts/check-core-boundary.sh
 
+  filter-smoke:
+    # Exercises §5.2 redact + fence against the *non-dev* dependency
+    # graph. `cargo run --bin` does not activate dev-dependencies, so
+    # this catches the regex feature-unification bug class — where a
+    # missing feature in cairn-core's normal deps is masked at test
+    # time by proptest / insta pulling the feature in transitively
+    # but panics on first call from a downstream binary.
+    name: smoke / cairn-core filter pipeline (no dev-deps)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: filter-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo run -p cairn-core --bin filter_smoke
+        run: cargo run -p cairn-core --bin filter_smoke --features smoke --locked --release
+
   plugins-verify:
     name: plugins / cairn plugins verify
     runs-on: ubuntu-latest

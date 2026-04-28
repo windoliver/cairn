@@ -26,5 +26,19 @@ proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
 
+[features]
+# Off-by-default smoke target. Used only by the `filter-smoke` CI job
+# to compile and run the §5.2 Filter pipeline against the *normal*
+# (non-dev) dependency graph — feature unification through dev-deps
+# (proptest / insta etc.) previously masked a missing `regex`
+# `unicode-case` feature that panicked downstream binaries on first
+# call. Enabling this feature does not change library behavior.
+smoke = []
+
+[[bin]]
+name = "filter_smoke"
+path = "src/bin/filter_smoke.rs"
+required-features = ["smoke"]
+
 [lints]
 workspace = true
