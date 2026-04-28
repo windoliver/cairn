@@ -97,6 +97,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_subject_scope_idx"),
     ("trigger", "consent_journal_immutable"),
     ("trigger", "consent_journal_no_delete"),
+    // 0007_tombstone_reason
+    ("index", "records_tombstoned_reason_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {
