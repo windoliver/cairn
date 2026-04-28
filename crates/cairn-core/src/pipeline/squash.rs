@@ -521,6 +521,100 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-8 (newer loop) regression: when the tail-aligned slice
+    /// is one giant final line longer than the budget, the bypass
+    /// must NOT drop the line entirely. Emit a `[…final-line
+    /// truncated…]` marker followed by a bounded codepoint-safe
+    /// suffix.
+    #[test]
+    fn oversize_bypass_preserves_truncated_final_line() {
+        // Want tail_aligned_to_line=true (so we hit the "was_trimmed
+        // + no \n" final-line branch). Default cfg.max_bytes = 16384,
+        // half ≈ 8000, tail_window = 16000. Place a \n at position
+        // raw.len() - 12001, with a 12K-byte trailing line. The
+        // initial tail_raw_start = raw.len() - 16000; after advancing
+        // past that \n the slice is exactly the 12K final line, no
+        // newlines, so trim drops the front.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head-1\nhead-2\n");
+        raw.extend(std::iter::repeat_n(b'M', 5_000));
+        raw.push(b'\n');
+        raw.extend_from_slice(b"FINAL-DIAGNOSTIC-PREFIX-");
+        raw.extend(std::iter::repeat_n(b'X', 12_000));
+        raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("final-line truncated"),
+            "marker present: {body:.300}"
+        );
+        // The very-end suffix bytes must survive somewhere in the body.
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-SUFFIX"),
+            "final-line suffix preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+    }
+
+    /// Round-8 (newer loop) regression: when the bypass preserves a
+    /// final line without a trailing `\n`, drop accounting must not
+    /// treat that line as if it had been dropped.
+    #[test]
+    fn oversize_bypass_unterminated_final_line_in_drop_accounting() {
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head-1\n");
+        raw.extend(std::iter::repeat_n(b'F', 50_000));
+        raw.push(b'\n');
+        // Final line with NO trailing newline.
+        raw.extend_from_slice(b"unterminated-final");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("unterminated-final"),
+            "final line preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        // Drop accounting should NOT count the preserved tail bytes
+        // as dropped.
+        assert!(
+            out.stats.bytes_dropped_truncate < raw_byte_len,
+            "must not over-report drop: {} vs raw {}",
+            out.stats.bytes_dropped_truncate,
+            raw_byte_len,
+        );
+        // Specifically, dropped should be less than (raw - "unterminated-final").
+        let final_len = "unterminated-final".len();
+        assert!(
+            out.stats.bytes_dropped_truncate <= raw_byte_len - final_len,
+            "preserved bytes ({}) must not count as dropped (raw={}, dropped={})",
+            final_len,
+            raw_byte_len,
+            out.stats.bytes_dropped_truncate,
+        );
+    }
+
     /// Round-7 (newer loop) regression: `stats.truncated` must reflect
     /// any lossy transform, not just stage 5/6 budget loss. ANSI-only
     /// stripping or dedup-only collapse produces a non-verbatim
@@ -2421,14 +2515,28 @@ fn oversize_bypass(
         // bytes off the front — that's when the first byte can sit
         // mid-line again (Round-7 finding).
         let was_trimmed = tail_trimmed.len() < tail_sanitized.len();
+        // `final_line_truncated` triggers when the tail was actually
+        // trimmed AND the resulting suffix has no `\n` — i.e., the
+        // payload's last source line alone exceeds the tail budget.
+        // Rather than dropping the suffix (would lose the diagnostic
+        // line entirely), emit a stage-5-style truncation marker and
+        // the bounded suffix at the codepoint boundary already given
+        // by `tail_trimmed`.
+        let mut final_line_truncated = false;
         let tail_aligned: &str = if was_trimmed {
-            match tail_trimmed.find('\n') {
-                Some(idx) => &tail_trimmed[idx + 1..],
-                None => "",
+            if let Some(idx) = tail_trimmed.find('\n') {
+                &tail_trimmed[idx + 1..]
+            } else {
+                final_line_truncated = true;
+                tail_trimmed
             }
         } else {
             tail_trimmed
         };
+        if final_line_truncated {
+            let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
+            compacted_bytes.extend_from_slice(final_marker);
+        }
         compacted_bytes.extend_from_slice(tail_aligned.as_bytes());
         // Track raw-tail span for accounting: count newlines in
         // `tail_aligned` and find the matching position from end-of-raw.
@@ -2452,6 +2560,12 @@ fn oversize_bypass(
             if tail_source_bytes == 0 {
                 tail_source_bytes = raw_byte_len - tail_raw_start;
             }
+        } else if !tail_aligned.is_empty() {
+            // No newline in emitted tail (final_line_truncated case):
+            // the raw span ≈ the bytes we emitted from the source's
+            // last line. Capped at the post-line-align span so we
+            // never claim more preserved bytes than exist.
+            tail_source_bytes = tail_aligned.len().min(raw_byte_len - tail_raw_start);
         }
     } else if !raw_bytes.is_empty() {
         let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
