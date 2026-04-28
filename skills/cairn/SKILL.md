@@ -43,6 +43,10 @@ cairn ingest --kind KIND --body BODY --session SESSION_ID
 cairn ingest --kind KIND --body BODY --tags TAGS
 ```
 
+```bash
+cairn ingest --kind KIND SOURCE
+```
+
 ## `cairn search`
 
 **Use when:**

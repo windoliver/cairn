@@ -586,6 +586,20 @@ fn cli_validator_rejects_unknown_prelude_token() {
 }
 
 #[test]
+fn live_skill_md_exercises_positional_source_for_ingest() {
+    // Round-1 (post-cap) finding: the positional `source` path on
+    // `cairn ingest` was unrendered, leaving a documented CLI branch
+    // outside the compat gate. Synthesis must produce a positional
+    // example like `cairn ingest --kind KIND SOURCE` so a future
+    // regression in alias handling blocks codegen.
+    let md = live_skill_md();
+    assert!(
+        md.contains("cairn ingest --kind KIND SOURCE"),
+        "live SKILL.md must contain a positional-source ingest example"
+    );
+}
+
+#[test]
 fn cli_validator_rejects_empty_list_string_item() {
     // Round-10 finding 2: `ingest --tags` is `list<string>` and its
     // items declare `minLength: 1`. An empty `--tags ""` value must

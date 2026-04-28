@@ -154,6 +154,25 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
             );
             emitted_any = true;
         }
+        // Synthesize a positional-source example for verbs whose
+        // positional aliases a oneOf branch (e.g., `cairn ingest`'s
+        // `source` aliases `body|file|url`). Without this, the
+        // positional input path stays outside the compat gate even
+        // though it's part of the public CLI contract (round-1 finding).
+        if let Some(p) = &cmd.positional
+            && !p.aliases_one_of.is_empty()
+        {
+            let mut required_for_positional = spec.base.clone();
+            // Satisfy any anyOf branches with their first arm so the
+            // example still validates against the matched variant.
+            if let Some(first_any) = spec.any_of.first() {
+                required_for_positional.extend(first_any.iter().cloned());
+            }
+            // Mark the positional as required so render_example emits it.
+            required_for_positional.insert(p.name.clone());
+            render_example(&mut buf, cmd, &required_for_positional, &prop_schemas, None);
+            emitted_any = true;
+        }
     }
     if emitted_any {
         s.push_str("**Example:**\n\n");
