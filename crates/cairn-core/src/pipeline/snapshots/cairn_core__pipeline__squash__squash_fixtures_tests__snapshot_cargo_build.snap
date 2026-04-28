@@ -1,7 +1,6 @@
 ---
-source: crates/cairn-core/tests/squash_fixtures.rs
-assertion_line: 99
-expression: "run_squash(\"cargo_build.txt\", &SquashConfig::default())"
+source: crates/cairn-core/src/pipeline/squash.rs
+expression: "run_fixture(\"cargo_build.txt\", &SquashConfig::default())"
 ---
    Compiling proc-macro2 v1.0.86
    Compiling unicode-ident v1.0.13

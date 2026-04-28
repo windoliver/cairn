@@ -205,9 +205,19 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// event's `payload_ref` pointed at, and the sensor-supplied
     /// terminal context.
     ///
+    /// # Stability
+    /// Hidden from public docs and considered unstable until #218 lands.
+    /// The current signature accepts `TerminalContext` as a side input,
+    /// which lets a misbehaving caller reclassify a stored structured
+    /// payload as interactive and lose machine-readable bytes through
+    /// squash. Once `TerminalContext` is persisted on
+    /// `CapturePayload::Terminal` (see #218), this becomes derivable from
+    /// the event alone and the API stabilizes.
+    ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, or
     /// `StructuredContextRejected` per the spec's caller contract.
+    #[doc(hidden)]
     pub fn try_from_terminal_event(
         event: &CaptureEvent,
         raw: &'a [u8],
@@ -1205,12 +1215,21 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         })
         .collect();
     stats.long_lines_truncated = long_lines_count;
+    // Stage 5 truncation already makes the output lossy; reflect that in
+    // the contract bit so callers don't read a false negative.
+    if long_lines_count > 0 {
+        stats.truncated = true;
+    }
 
     // Reserve 1 byte for the trailing `\n` we will re-append below, so the
     // final compacted bytes never exceed cfg.max_bytes().
     let reserve_trailing = trailing_newline;
+    let had_lines = !post_cap.is_empty();
     let mut compacted = stage6_layout(&post_cap, pair_at_end, reserve_trailing, cfg, &mut stats);
-    if trailing_newline && !compacted.is_empty() {
+    // Re-append the trailing newline whenever the input had one and there
+    // was at least one logical line — otherwise a sole `"\n"` collapses to
+    // empty output even though it fits every byte budget.
+    if trailing_newline && had_lines {
         compacted.push('\n');
     }
 
@@ -1346,6 +1365,37 @@ mod squash_integration_tests {
         );
     }
 
+    /// Regression: stage 5 truncation alone (no stage 6 line-drop) must
+    /// still flip `stats.truncated`, otherwise callers see a false negative
+    /// while the output is already lossy.
+    #[test]
+    fn stage5_only_truncation_flips_stats_truncated() {
+        // One ultra-long line that fits within max_bytes but exceeds
+        // max_line_bytes. Stage 6 won't drop anything; stage 5 will.
+        let cfg = SquashConfig::default();
+        let mut raw = vec![b'x'; cfg.max_line_bytes() * 2];
+        raw.push(b'\n');
+        let out = run_squash(&raw, &cfg);
+        assert!(out.stats.long_lines_truncated >= 1);
+        assert!(
+            out.stats.truncated,
+            "stats.truncated must be set when stage 5 truncated"
+        );
+    }
+
+    /// Regression: a sole `"\n"` input must round-trip as `"\n"` instead of
+    /// collapsing to empty output.
+    #[test]
+    fn sole_newline_round_trips() {
+        let cfg = SquashConfig::default();
+        let out = run_squash(b"\n", &cfg);
+        assert_eq!(
+            out.compacted_bytes, b"\n",
+            "single blank line must pass through unchanged"
+        );
+        assert!(!out.stats.truncated);
+    }
+
     /// Regression: a newline-terminated payload whose body lands exactly at
     /// `max_bytes` must still respect `max_bytes` after the entrypoint
     /// re-appends the trailing `\n`.
@@ -1368,6 +1418,62 @@ mod squash_integration_tests {
                 n
             );
         }
+    }
+}
+
+// Inline golden-file snapshot tests. Live in the lib (not in `tests/`) so the
+// `try_from_terminal_event` constructor can stay `pub(crate)` until #218 lands.
+#[cfg(test)]
+mod squash_fixtures_tests {
+    use super::wrapper_tests::terminal_event;
+    use super::*;
+
+    fn workspace_root() -> std::path::PathBuf {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .parent()
+            .expect("crates/ parent")
+            .parent()
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = workspace_root().join("fixtures/v0/squash").join(name);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    fn run_fixture(name: &str, cfg: &SquashConfig) -> String {
+        let raw = fixture(name);
+        let evt = terminal_event(&raw);
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            TerminalContext::InteractiveTty,
+        )
+        .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
+        let out = squash(wrapper, cfg);
+        String::from_utf8_lossy(&out.compacted_bytes).into_owned()
+    }
+
+    #[test]
+    fn snapshot_short_ls() {
+        insta::assert_snapshot!(run_fixture("short_ls.txt", &SquashConfig::default()));
+    }
+
+    #[test]
+    fn snapshot_cargo_build() {
+        insta::assert_snapshot!(run_fixture("cargo_build.txt", &SquashConfig::default()));
+    }
+
+    #[test]
+    fn snapshot_npm_test() {
+        insta::assert_snapshot!(run_fixture("npm_test.txt", &SquashConfig::default()));
+    }
+
+    #[test]
+    fn snapshot_binary_junk() {
+        insta::assert_snapshot!(run_fixture("binary_junk.bin", &SquashConfig::default()));
     }
 }
 

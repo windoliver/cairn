@@ -1,7 +1,6 @@
 ---
-source: crates/cairn-core/tests/squash_fixtures.rs
-assertion_line: 104
-expression: "run_squash(\"npm_test.txt\", &SquashConfig::default())"
+source: crates/cairn-core/src/pipeline/squash.rs
+expression: "run_fixture(\"npm_test.txt\", &SquashConfig::default())"
 ---
 > @scope/pkg@1.0.0 test
 > jest
