@@ -12,6 +12,7 @@ pub mod emit_skill;
 pub mod fmt;
 pub mod ir;
 pub mod loader;
+pub mod skill_compat;
 
 use std::path::{Path, PathBuf};
 
@@ -105,7 +106,13 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
     all.extend(emit_sdk::emit(&doc)?);
     all.extend(emit_cli::emit(&doc)?);
     all.extend(emit_mcp::emit(&doc)?);
-    all.extend(emit_skill::emit(&doc)?);
+    let skill_files = emit_skill::emit(&doc)?;
+    // Run skill compat against freshly-emitted SKILL.md so any drift between
+    // the IDL and the templated examples (verbs, flags, JSON payloads) blocks
+    // both `--write` and `--check` (issue #70 acceptance: "compat checks run
+    // with contract drift CI").
+    check_skill_compat(&doc, &skill_files)?;
+    all.extend(skill_files);
 
     // Stable-sort outputs so reports are deterministic.
     all.sort_by(|a, b| a.path.cmp(&b.path));
@@ -172,6 +179,31 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
         }
     }
     Ok(report)
+}
+
+/// Validate every CLI invocation embedded in the freshly-emitted SKILL.md
+/// against the IR. Returns [`CodegenError::Emit`] on the first failure so a
+/// retired verb, an unknown flag, or a stale prelude reference fails the
+/// codegen run rather than shipping a broken skill.
+fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(), CodegenError> {
+    let Some(skill) = files
+        .iter()
+        .find(|f| f.path.ends_with("skills/cairn/SKILL.md"))
+    else {
+        return Ok(());
+    };
+    let body = std::str::from_utf8(&skill.bytes)
+        .map_err(|e| CodegenError::Emit(format!("SKILL.md not utf-8: {e}")))?;
+    for block in skill_compat::extract_code_blocks(body) {
+        let is_cli = matches!(block.lang.as_str(), "bash" | "shell" | "sh" | "inline")
+            && block.body.trim_start().starts_with("cairn ");
+        if !is_cli {
+            continue;
+        }
+        skill_compat::validate_cli_block(&block, doc)
+            .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Walk every [`OWNED_ROOTS`] entry under `workspace_root` and return the

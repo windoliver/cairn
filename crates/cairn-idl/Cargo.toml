@@ -20,10 +20,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 clap = { workspace = true }
 tempfile = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
-jsonschema = { workspace = true }
 proptest = { workspace = true }
 rstest = { workspace = true }
 serde_json = { workspace = true }
