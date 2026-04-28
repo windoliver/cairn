@@ -6,7 +6,8 @@
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+/// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
 /// Static capability declaration for a `MemoryStore` impl.
 ///
@@ -72,6 +73,280 @@ pub trait MemoryStorePlugin: MemoryStore + Sized {
     const SUPPORTED_VERSIONS: VersionRange;
 }
 
+// ── Verb-method support types (#46, #47) ──────────────────────────────────────
+
+use crate::domain::{
+    BodyHash, MemoryRecord, RecordId, ScopeTuple, TargetId,
+    filter::ValidatedFilter,
+    taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
+};
+
+/// Why a row was tombstoned. Distinguishes user-initiated retraction
+/// (`Update`, `Forget`) from system-initiated lifecycle events
+/// (`Expire`, `Purge`). Brief §5.6, §10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TombstoneReason {
+    /// Superseded by a fresh fact via an `updates` edge.
+    Update,
+    /// Aged out by the expiration workflow.
+    Expire,
+    /// User-requested forget (record-level).
+    Forget,
+    /// Hard purge (rare, after retention boundaries).
+    Purge,
+}
+
+impl TombstoneReason {
+    /// Stable lowercase label persisted in the `tombstone_reason` column.
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Update => "update",
+            Self::Expire => "expire",
+            Self::Forget => "forget",
+            Self::Purge => "purge",
+        }
+    }
+
+    /// Inverse of [`TombstoneReason::as_db_str`]. Returns `None` for
+    /// unrecognized labels — callers should treat that as a schema/version
+    /// mismatch.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "update" => Some(Self::Update),
+            "expire" => Some(Self::Expire),
+            "forget" => Some(Self::Forget),
+            "purge" => Some(Self::Purge),
+            _ => None,
+        }
+    }
+}
+
+/// Outcome of an `upsert` call. `content_changed = false` indicates the
+/// store treated the call as idempotent (same body hash) — no new version
+/// row was emitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpsertOutcome {
+    /// Identifier of the record row produced (or re-used) by the upsert.
+    pub record_id: RecordId,
+    /// Stable target identity the record belongs to.
+    pub target_id: TargetId,
+    /// Monotonic version index for this `target_id` after the upsert.
+    pub version: u32,
+    /// `false` when the store deduplicated against the prior body hash.
+    pub content_changed: bool,
+    /// Body hash of the previous active version, if any.
+    pub prior_hash: Option<BodyHash>,
+}
+
+/// Filter args for `list`. All `Option` fields are AND-combined.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListArgs {
+    /// Restrict to a single `MemoryKind`.
+    pub kind: Option<MemoryKind>,
+    /// Restrict to a single `MemoryClass`.
+    pub class: Option<MemoryClass>,
+    /// Visibility values the caller is allowed to see; empty = no filter.
+    pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Maximum number of records to return in this page.
+    pub limit: usize,
+    /// Optional resume cursor from the previous page.
+    pub cursor: Option<ListCursor>,
+}
+
+/// Opaque keyset cursor for `list`. Encoded base64-json on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListCursor {
+    /// `updated_at` epoch-seconds boundary of the previous page's tail.
+    pub updated_at: i64,
+    /// Tie-breaker record id from the previous page's tail row.
+    pub record_id: RecordId,
+}
+
+/// One page of records returned by `list`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListPage {
+    /// Records in the page, ordered newest-first by `(updated_at, record_id)`.
+    pub records: Vec<MemoryRecord>,
+    /// Cursor to fetch the next page, or `None` when exhausted.
+    pub next_cursor: Option<ListCursor>,
+}
+
+/// One row from `versions(target)` — schema-level metadata only, not the
+/// full hydrated record. Callers that want the body call `get(record_id)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordVersion {
+    /// Identifier of this version row.
+    pub record_id: RecordId,
+    /// Target identity this version belongs to.
+    pub target_id: TargetId,
+    /// Monotonic version index within the target.
+    pub version: u32,
+    /// Epoch-seconds when the row was created.
+    pub created_at: i64,
+    /// Epoch-seconds of the most recent metadata mutation.
+    pub updated_at: i64,
+    /// `true` if this row is the current active version for its target.
+    pub active: bool,
+    /// `true` if this row is tombstoned and excluded from queries.
+    pub tombstoned: bool,
+    /// Why the row was tombstoned, if applicable.
+    pub tombstone_reason: Option<TombstoneReason>,
+    /// blake3 body hash of the persisted payload.
+    pub body_hash: BodyHash,
+}
+
+/// Edge kinds supported at P0. Exhaustive — adding a new kind is a
+/// brief-level change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EdgeKind {
+    /// Fact-supersession (brief §3 line ~409). Endpoints must be
+    /// non-tombstoned with distinct `target_id`s; the store schema enforces
+    /// this with triggers.
+    Updates,
+    /// Cross-reference / mention.
+    Mentions,
+    /// Supports / corroborates.
+    Supports,
+}
+
+impl EdgeKind {
+    /// Stable lowercase label persisted in the `kind` column.
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Updates => "updates",
+            Self::Mentions => "mentions",
+            Self::Supports => "supports",
+        }
+    }
+
+    /// Inverse of [`EdgeKind::as_db_str`]. Returns `None` for unrecognized
+    /// labels — callers should treat that as a schema/version mismatch.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "updates" => Some(Self::Updates),
+            "mentions" => Some(Self::Mentions),
+            "supports" => Some(Self::Supports),
+            _ => None,
+        }
+    }
+}
+
+/// Directed edge between two records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edge {
+    /// Source endpoint of the edge.
+    pub src: RecordId,
+    /// Destination endpoint of the edge.
+    pub dst: RecordId,
+    /// Edge kind discriminator.
+    pub kind: EdgeKind,
+    /// Optional weight in `[0.0, 1.0]`; semantics depend on `kind`.
+    pub weight: Option<f32>,
+}
+
+/// Composite key identifying an edge (without its weight).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EdgeKey {
+    /// Source endpoint of the edge.
+    pub src: RecordId,
+    /// Destination endpoint of the edge.
+    pub dst: RecordId,
+    /// Edge kind discriminator.
+    pub kind: EdgeKind,
+}
+
+/// Direction selector for edge queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDir {
+    /// Outgoing edges (`src = pivot`).
+    Out,
+    /// Incoming edges (`dst = pivot`).
+    In,
+    /// Union of outgoing and incoming edges.
+    Both,
+}
+
+// ── Search types (used by trait stub here; impl in PR-B) ──────────────────────
+
+/// Args for the keyword (FTS5) branch of `search`.
+///
+/// Carries the lifetime of the borrowed [`ValidatedFilter`] so callers can
+/// validate once and pass the proof-token down to the store without
+/// allocation. `PartialEq` is intentionally omitted: `ValidatedFilter`
+/// holds a borrowed reference whose equality semantics are caller-defined.
+#[derive(Debug, Clone)]
+pub struct KeywordSearchArgs<'a> {
+    /// Raw FTS5 expression. Store does not validate FTS5 syntax; `SQLite`
+    /// surfaces parse errors which the store re-wraps in PR-B as a typed
+    /// FTS error variant on `StoreError`.
+    pub query: String,
+    /// Pre-validated filter tree from
+    /// [`crate::domain::filter::validate_filter`].
+    pub filter: Option<ValidatedFilter<'a>>,
+    /// Visibility values the caller is allowed to see; empty = no filter.
+    pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Maximum number of candidates to return in this page.
+    pub limit: usize,
+    /// Optional resume cursor from the previous page.
+    pub cursor: Option<KeywordCursor>,
+}
+
+/// Opaque keyset cursor for keyword search. Encoded base64-json on the wire.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordCursor {
+    /// BM25 score boundary of the previous page's tail row.
+    pub bm25: f64,
+    /// Tie-breaker record id from the previous page's tail row.
+    pub record_id: RecordId,
+}
+
+/// One page of candidates returned by the keyword branch of `search`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeywordSearchPage {
+    /// Candidates ordered by ascending BM25 (lower = better in `SQLite` FTS5).
+    pub candidates: Vec<SearchCandidate>,
+    /// Cursor to fetch the next page, or `None` when exhausted.
+    pub next_cursor: Option<KeywordCursor>,
+}
+
+/// A single candidate row from a search query, with the signal columns the
+/// reranker needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchCandidate {
+    /// Identifier of the candidate record.
+    pub record_id: RecordId,
+    /// Target identity the candidate belongs to.
+    pub target_id: TargetId,
+    /// Scope tuple of the candidate.
+    pub scope: ScopeTuple,
+    /// Memory kind of the candidate.
+    pub kind: MemoryKind,
+    /// Memory class of the candidate.
+    pub class: MemoryClass,
+    /// Visibility of the candidate.
+    pub visibility: MemoryVisibility,
+    /// FTS5 BM25 score (lower = better).
+    pub bm25: f64,
+    /// Seconds since the candidate's `updated_at`.
+    pub recency_seconds: i64,
+    /// Confidence value cached on the row (`[0.0, 1.0]`).
+    pub confidence: f32,
+    /// Salience value cached on the row (`[0.0, 1.0]`).
+    pub salience: f32,
+    /// Seconds since the candidate's last refresh; used for staleness penalty.
+    pub staleness_seconds: i64,
+    /// Snippet excerpt produced by FTS5 `snippet()`.
+    pub snippet: String,
+    /// Serialized `MemoryRecord` for callers that want full hydration
+    /// without a second round-trip. Never logged above `trace`.
+    pub record_json: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +375,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
 pub use provenance::Provenance;
-pub use record::MemoryRecord;
+pub use record::{MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};

@@ -29,7 +29,7 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// the compile-time guard below so the manifest range and the trait surface
 /// derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
 
 /// P0 stub `MemoryStore`. All capability flags are `false`; verb methods
 /// land with the storage implementation in #46.
