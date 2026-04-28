@@ -96,18 +96,37 @@ belongs to whichever crate owns the schema. New migration `0002_identity.sql`
 adds the tables. The `IdentityRegistry` trait is defined in `cairn-core`
 and implemented in `cairn-store-sqlite`.
 
-### 3.3 Wire-form rename `usr:` → `hmn:`
+### 3.3 Wire-form rename `usr:` → `hmn:` (atomic, multi-site migration)
 
 Brief §4.2 specifies `hmn:<slug>:<rev>` for `HumanIdentity`. The current
-`Identity::parse` accepts `usr:` (`crates/cairn-core/src/domain/identity.rs`,
-lines 37–38). Brief is source of truth (CLAUDE.md §1). Fixing it now is one
-parser site + a handful of tests; deferring it would mean a breaking change
-to every signed record once writes start landing. The IDL primitive at
-`crates/cairn-idl/schema/common/primitives.json` is updated in lockstep and
-codegen is re-run as part of this PR.
+tree hard-codes `usr:` in several places, not just the parser. The rename
+must land atomically across **all** of them in this PR; partial migration
+would cause records to parse in one site and fail validation in another.
 
-This is a load-bearing rename. Listed in the PR description’s “invariants
-touched” section.
+Sites that must change in lockstep:
+
+| File / generator | Reason |
+|---|---|
+| `crates/cairn-core/src/domain/identity.rs:37–38` | Hand-written `Identity::parse` prefix branch. |
+| `crates/cairn-core/src/domain/actor_chain.rs:51–57, 89–95` | Hand-written role validation: `Principal` is required to be a human. |
+| `crates/cairn-idl/schema/common/primitives.json` | IDL `Identity` primitive regex; source of every generated validator below. |
+| `crates/cairn-core/src/generated/common/mod.rs:91–95` | Generated validator — regenerated from IDL. |
+| `crates/cairn-core/src/generated/envelope/mod.rs:436, 507–513` | Generated envelope validator — regenerated from IDL. |
+| Any fixture or doctest that asserts on a `usr:` prefix. | Find via `rg -n 'usr:' crates/ tests/ fixtures/` before committing. |
+
+Implementation order in this PR (rides on impl-order step 1, §11):
+
+1. Update IDL primitive `crates/cairn-idl/schema/common/primitives.json`.
+2. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the
+   regenerated `generated/` files.
+3. Update `domain/identity.rs::parse` and `IdentityKind::Human` prefix.
+4. Update `domain/actor_chain.rs` hand-written role checks.
+5. `rg -n 'usr:' .` must return zero non-historical hits before the PR
+   moves on. CI gate `cargo nextest run --workspace` catches any missed
+   site because the generated validators flip first.
+
+Brief is source of truth (CLAUDE.md §1). This is a load-bearing rename.
+Listed in the PR description’s “invariants touched” section.
 
 ### 3.4 Pure provisioning logic in `cairn-core`
 
@@ -231,39 +250,54 @@ spec (`2026-04-26-bootstrap-design.md`) is updated in the same PR to add
 this single artefact; the receipt grows a `vault_id` field. This is the
 sole change to the bootstrap contract.
 
-**`vault.id` is non-regenerable once identities exist.** Because every
-keychain entry is namespaced under `cairn:<vault_id>`, regenerating
-`vault.id` would point the process at a fresh keychain namespace and
-desynchronize every active identity in one stroke. To prevent that, the
-bootstrap delta defined in this PR runs an explicit guard before minting
-a new id:
+**`vault.id` is non-regenerable once any keychain-backed key material
+exists.** Because every keychain entry is namespaced under
+`cairn:<vault_id>`, regenerating `vault.id` would point the process at a
+fresh keychain namespace and desynchronize every keychain entry in one
+stroke — including those for revoked, pending, or otherwise non-active
+identities. To prevent that, the bootstrap delta defined in this PR runs
+an explicit guard before minting a new id:
 
 1. If `.cairn/vault.id` exists → use it (idempotent path).
 2. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` does not
-   exist (or contains zero `identities` rows) → mint a fresh ULID and
+   exist (or contains zero `identity_keys` rows) → mint a fresh ULID and
    write the file.
 3. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` contains
-   one or more `identities` rows → bootstrap fails with
-   `BootstrapError::VaultIdLost` mapped to `EX_DATAERR = 65`. The CLI
-   hint instructs the operator to restore `.cairn/vault.id` from backup
-   or run the dedicated recovery command:
+   one or more `identity_keys` rows (any state — active, pending, or
+   superseded) → bootstrap fails with `BootstrapError::VaultIdLost`
+   mapped to `EX_DATAERR = 65`. The guard reads `identity_keys`, not
+   `identities`, because each row corresponds to a real keychain entry
+   that needs the original namespace.
 
    ```
-   cairn bootstrap: .cairn/vault.id is missing but the registry holds N identities.
+   cairn bootstrap: .cairn/vault.id is missing but the registry holds N keychain-backed keys.
      Restore the original .cairn/vault.id from backup, or run:
        cairn identity vault-id-recover --probe-keychain
-     Bootstrap will not mint a new vault id while identities exist; doing so
+     Bootstrap will not mint a new vault id while keys exist; doing so
      would desynchronize every keychain entry from the registry.
    ```
 
 `cairn identity vault-id-recover --probe-keychain` (new, in `cairn-cli`)
-walks every active identity in the registry, derives the candidate
-`SecretHandle` for each candidate `vault_id` it finds in the keychain
-(`keyring` lets us enumerate by service prefix `cairn:`), and accepts
-the unique `vault_id` for which **every** identity's stored public key
-matches the keychain-derived public key. Ambiguity or zero matches →
-fail closed; operator must restore from backup. Round-trip test covers
-the success path and the ambiguous-match failure path.
+walks every row in `identity_keys` regardless of its parent identity's
+`provisioning_state` (so revoked-only and pending-only vaults can still
+recover). For each candidate `vault_id` discovered in the keychain
+(`keyring` lets us enumerate by service prefix `cairn:`), it derives the
+candidate `SecretHandle` for **every** `identity_keys` row, loads the
+private key, derives the public key, and compares against the row's
+stored `public_key`. The recovery succeeds only when there is exactly
+one `vault_id` for which **every** `identity_keys` row matches:
+
+- Multiple matching candidates → ambiguous; fail closed.
+- Zero matching candidates → fail closed; operator must restore from
+  backup.
+- One matching candidate, but a subset of rows fail to match → fail
+  closed; the registry and keychain disagree on at least one key, which
+  is a tampering or partial-restore signal.
+
+Bootstrap guard, recovery proof model, and reconciliation are all keyed
+off `identity_keys` (not `identities`), so they agree on what counts as
+"key material exists" in every state combination. Test matrix covers the
+four state mixes: only-active, only-revoked, only-pending, and mixed.
 
 **Secret handle format.** `Keystore` uses:
 
@@ -343,6 +377,46 @@ treating a stuck identity as healthy.
 identity at startup and emits a `tracing` warn for any desynchronized
 entry, so long-lived processes (MCP server, workflow host) surface the
 condition without waiting for a verb to trip on it.
+
+### 3.9 Username → identity slug normalization
+
+The wire format limits the body to `[A-Za-z0-9._:-]+`. `whoami::username()`
+returns the raw OS account name, which on real workstations may contain
+spaces (`"Sophia Wang"`), apostrophes (`"o'connor"`), accented characters
+(`"renée"`), or non-Latin scripts. Feeding the raw value into
+`Identity::parse` would make `cairn identity init-defaults` fail on a
+perfectly normal first-run machine — and because the first-run gate
+(§3.7) blocks issuer-dependent verbs until defaults exist, that becomes
+an availability bug, not a cosmetic one.
+
+`cairn-core::domain::identity::provision::normalize_human_slug(raw: &str)
+-> Result<String, DomainError>` defines the canonical normalization
+exactly once. CLI bootstrap, MCP, and SDK all call it; nobody minds-their-
+own-business about Unicode rules:
+
+1. **NFKD normalize** the input.
+2. Strip combining marks (drops accents).
+3. Lowercase via `to_lowercase()`.
+4. Replace any character not in `[a-z0-9._:-]` with `-`.
+5. Collapse consecutive `-` to a single `-`.
+6. Trim leading and trailing `-` and `.`.
+7. If the result is empty (input was all punctuation / non-mappable
+   script) → fall back to the literal string `local`.
+8. If the result exceeds 63 bytes → truncate to 63 and re-trim trailing
+   `-`/`.`.
+
+`init-defaults` calls `normalize_human_slug(whoami::username())`. If the
+resulting `hmn:<slug>:v1` already exists in the registry under a
+**different** vault provenance (which can only happen via a
+re-run after manual identity deletion), the command appends a
+discriminator (`-2`, `-3`, …) and reports the chosen slug in its receipt.
+Operators who want a stable slug across machines can pass
+`--slug <explicit>` to `cairn identity provision --kind human`.
+
+Tests cover: ASCII account, account with spaces, all-Unicode account
+(`"伶悧"` → `local`), apostrophe (`"o'connor"` → `o-connor`), accented
+(`"renée"` → `renee`), 100-byte name (truncated to 63), and the empty
+fallback.
 
 ## 4. Crate-by-crate changes
 
@@ -591,7 +665,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | Layer | Test | Tool |
 |---|---|---|
 | `cairn-core::domain::identity` | parse/format round-trip across `hmn:`, `agt:`, `snr:`; reject unknown prefix; reject empty body | `proptest` + unit |
-| `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected | unit |
+| `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected; `normalize_human_slug` covers ASCII / spaces / apostrophe / accented / non-Latin / 100-byte / empty-fallback (§3.9) | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | identity CRUD; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade | integration (real SQLite tempdir) |
 | Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `cairn identity repair` round-trip; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `vault-id-recover`) succeed with zero defaults; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when DB has identities; `vault-id-recover --probe-keychain` round-trip success + ambiguous-match fail-closed | integration via `MemoryKeystore` |
@@ -650,9 +724,12 @@ cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 This is a teaser; the real implementation plan is written next via the
 `writing-plans` skill.
 
-1. Brief alignment + IDL primitive: `usr:` → `hmn:`. Re-run codegen.
+1. Brief alignment + IDL primitive: `usr:` → `hmn:`. Re-run codegen,
+   update hand-written `actor_chain.rs` role checks, sweep `rg -n 'usr:'`
+   for stragglers (§3.3).
 2. `cairn-core` types + traits + provisioning logic + tests (incl. the
-   `pending → active → revoked` state machine as pure functions).
+   `pending → active → revoked` state machine as pure functions, and the
+   `normalize_human_slug` helper from §3.9).
 3. `cairn-test-fixtures::keystore::MemoryKeystore`.
 4. `cairn-store-sqlite` migration + `SqliteIdentityRegistry` + reconciliation
    on `open` + tests.
