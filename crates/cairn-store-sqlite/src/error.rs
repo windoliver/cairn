@@ -65,6 +65,19 @@ pub enum StoreError {
         /// Description of the violated invariant.
         what: String,
     },
+
+    /// Method called on a store constructed via `Default::default()`
+    /// (the registry stub) instead of [`crate::open`] /
+    /// [`crate::open_in_memory`]. Distinct from `Invariant` so callers can
+    /// detect the misuse and surface a clear "open the store first" hint.
+    #[error(
+        "cairn-store-sqlite: {method} called on unconnected store \
+         (use cairn_store_sqlite::open(path).await first)"
+    )]
+    NotInitialized {
+        /// The trait-method name that was invoked.
+        method: &'static str,
+    },
 }
 
 // Note: the plan specifies an explicit

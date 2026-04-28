@@ -43,12 +43,9 @@ impl SqliteMemoryStore {
     /// in one place and shared between the trait surface and any internal
     /// caller that might bypass the trait.
     pub(crate) fn require_conn(&self, method: &'static str) -> Result<&Arc<AsyncConn>, StoreError> {
-        self.conn.as_ref().ok_or_else(|| StoreError::Invariant {
-            what: format!(
-                "cairn-store-sqlite: {method} called on unconnected store \
-                 (use cairn_store_sqlite::open(path).await first)"
-            ),
-        })
+        self.conn
+            .as_ref()
+            .ok_or(StoreError::NotInitialized { method })
     }
 }
 

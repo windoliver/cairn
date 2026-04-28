@@ -12,16 +12,13 @@ use cairn_core::contract::memory_store::{
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 
+use crate::error::StoreError as ConcreteError;
 use crate::open::CAPS;
 use crate::store::SqliteMemoryStore;
 use crate::{ACCEPTED_RANGE, PLUGIN_NAME};
 
 fn not_initialized<T>(method: &'static str) -> Result<T, StoreError> {
-    Err(format!(
-        "cairn-store-sqlite: {method} called on unconnected store \
-         (use cairn_store_sqlite::open(path).await first)"
-    )
-    .into())
+    Err(ConcreteError::NotInitialized { method }.into())
 }
 
 fn not_implemented<T>(method: &'static str, issue: u32) -> Result<T, StoreError> {
