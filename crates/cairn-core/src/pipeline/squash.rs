@@ -1246,14 +1246,16 @@ mod squash_integration_tests {
 
 #[cfg(test)]
 mod proptest_squash {
-    use super::*;
     use super::wrapper_tests::terminal_event;
+    use super::*;
     use proptest::prelude::*;
 
     fn run_squash_for_proptest(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
         let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-            &evt, raw, TerminalContext::InteractiveTty,
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
         )
         .expect("valid");
         squash(wrapper, cfg)
