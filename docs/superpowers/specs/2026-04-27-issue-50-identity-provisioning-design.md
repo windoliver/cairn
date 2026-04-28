@@ -248,12 +248,49 @@ The reconciliation sweep itself, when it does run, processes each
 Idempotent re-provision of the same `(identity, key_version)` is a no-op
 once `active`. A re-provision attempt while a different `pending` row
 exists for the same identity returns `RegistryError::ProvisioningInFlight`
-— the operator must wait for reconciliation or call
-`cairn identity reconcile` explicitly.
+**only** when the runtime cannot complete reconciliation — the
+default path is self-healing (see below).
 
-`cairn identity reconcile` is added as a maintenance subcommand for the
-case where the operator needs to force the sweep without restarting a
-long-lived process (MCP server, workflow host).
+**`init-defaults` and `provision` self-heal their own `pending` rows.**
+Both commands are the primary first-run / recovery surface, so they
+must converge from any state §3.5's reconciliation can resolve. Before
+attempting a fresh `reserve_identity`, both commands run a targeted
+reconciliation of the identity they are about to mint:
+
+1. `IdentityRegistry::list_pending_by_identity(target_id)` — returns
+   `pending` rows scoped to the identity, regardless of key version.
+2. For each pending row, run the §3.5 reconciliation rules
+   (keystore-present + match → activate; keystore-absent →
+   `delete_pending`; keystore-present + mismatch → fail closed with
+   `KeyMaterialMismatch` and route the operator to `repair` /
+   `purge`).
+3. After step 2 completes, the registry is in one of three states for
+   the target identity:
+   - `active` (reconciliation activated a prior pending row): the
+     command is a no-op and exits 0.
+   - `gone` (reconciliation deleted the orphan): proceed to a fresh
+     `reserve_identity` + `activate_identity`.
+   - `pending` (mismatch case): exit 65 with the routing hint.
+
+This makes `init-defaults` self-healing for the brand-new-vault crash
+path the brief flagged: a crash mid-default-provisioning leaves
+`pending` rows behind, and the operator's natural next command (`cairn
+identity init-defaults`) drives them to a healthy state on its own,
+without requiring a separate `reconcile` invocation. `provision` for
+non-default identities follows the same self-healing flow for the
+specific identity being minted.
+
+`ProvisioningInFlight` therefore surfaces only when reconciliation
+cannot resolve the row — i.e., the mismatch case in step 3 — and when
+the calling surface is one of the read-only inspection paths (`list`,
+`show`) that do not run reconciliation themselves.
+
+`cairn identity reconcile` is added as a maintenance subcommand for
+the case where the operator needs to force the sweep across **every**
+identity (not just one) without restarting a long-lived process
+(MCP server, workflow host). It remains the canonical bulk-recovery
+command; `init-defaults` and `provision` use the same engine but
+scoped to a single target.
 
 This satisfies CLAUDE.md invariant 5 ("WAL + two-phase apply for every
 mutation") in spirit even though identity mutations don’t enter the
@@ -408,6 +445,21 @@ keychain step is always recoverable from local disk alone:
    (with `vault_id` set from the argument so DB-first recovery in §3.7
    has the authoritative source), and reserves the first pending
    identity. Rolls back atomically if the sentinel is absent.
+
+   **`binding_path` is the pending sentinel** — i.e.,
+   `.cairn/vault.binding.pending` — for the entire pre-step-4 phase.
+   The caller (`commit_first_identity` or `finalise-binding` resume)
+   passes this path explicitly. `.cairn/vault.binding` does not exist
+   yet at step 3; requiring it would make the documented happy path
+   uncallable. The contract is:
+   `binding_path` MUST be the pending sentinel, MUST exist on disk
+   with mode 0600, and MUST contain a witness whose SHA-256 equals
+   the `witness_hash` argument. The adapter re-hashes the file
+   contents and rejects with `RegistryError::WitnessMismatch` if the
+   on-disk bytes do not match. Once step 4 promotes the pending file
+   to `.cairn/vault.binding` (hash-only), the registry's `vault_meta`
+   row becomes the authoritative witness record; subsequent reads
+   never re-stat the sentinel for verification.
 
    **Idempotent for resume.** If the row already exists with a
    matching `vault_id` + `witness_sha256` and the same first identity
@@ -1199,6 +1251,7 @@ pub trait IdentityRegistry: Send + Sync {
     async fn activate_identity(&self, id: &Identity, key_version: KeyVersion) -> Result<(), RegistryError>;
     async fn delete_pending(&self, id: &Identity, key_version: KeyVersion) -> Result<(), RegistryError>;
     async fn list_pending(&self) -> Result<Vec<PendingIdentityEntry>, RegistryError>;
+    async fn list_pending_by_identity(&self, id: &Identity) -> Result<Vec<PendingIdentityEntry>, RegistryError>;
 
     // Read paths. Visibility is typed so reconciliation, forensics,
     // and operational reads each pass exactly the filter they need.
@@ -1237,8 +1290,14 @@ pub trait IdentityRegistry: Send + Sync {
 
     // First-bind transaction. Atomically inserts the `vault_meta` row
     // (with vault_id + witness_sha256 + binding_path) and the first
-    // identity's pending row + key. The adapter `stat`s `binding_path`
-    // inside the transaction and rolls back if the sentinel is absent.
+    // identity's pending row + key. `binding_path` is the **pending**
+    // sentinel `.cairn/vault.binding.pending`; the adapter `stat`s it
+    // inside the transaction, re-hashes its contents, and rolls back
+    // if the file is absent or the SHA-256 does not match
+    // `witness_hash`. The final `.cairn/vault.binding` (hash-only) is
+    // written by the caller AFTER this transaction commits (step 4 of
+    // §3.7's commit_first_identity sequence) — the trait does not
+    // require it to exist.
     // There is no second method that can write `vault_meta`; the
     // contract is exactly-once for the lifetime of the registry.
     async fn reserve_first_identity(
