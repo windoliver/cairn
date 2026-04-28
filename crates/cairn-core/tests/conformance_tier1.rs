@@ -9,13 +9,17 @@ use std::sync::Arc;
 use cairn_core::contract::conformance::{CaseStatus, Tier, run_conformance_for_plugin};
 use cairn_core::contract::manifest::PluginManifest;
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities};
-use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::{
+    Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
+    MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason, UpsertOutcome,
+};
 use cairn_core::contract::registry::{PluginName, PluginRegistry};
 use cairn_core::contract::sensor_ingress::{SensorIngress, SensorIngressCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities,
 };
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 
 const STORE_MANIFEST: &str = r#"
 name = "stub-store"
@@ -58,6 +62,39 @@ impl MemoryStore for StubStore {
     }
     fn supported_contract_versions(&self) -> VersionRange {
         VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0))
+    }
+    async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+        Err("stub: upsert not implemented".into())
+    }
+    async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+        Ok(None)
+    }
+    async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+        Ok(ListPage {
+            records: vec![],
+            next_cursor: None,
+        })
+    }
+    async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+        Ok(vec![])
+    }
+    async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+    async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
+    }
+    async fn search_keyword(
+        &self,
+        _args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError> {
+        Err("stub: search_keyword not implemented".into())
     }
 }
 

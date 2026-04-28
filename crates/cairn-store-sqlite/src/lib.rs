@@ -15,8 +15,13 @@ mod verify;
 pub use error::StoreError;
 pub use open::{open, open_in_memory};
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+use cairn_core::contract::memory_store::StoreError as TraitStoreError;
+use cairn_core::contract::memory_store::{
+    CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+    ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion, TombstoneReason, UpsertOutcome,
+};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 use cairn_core::register_plugin;
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
@@ -54,6 +59,37 @@ impl MemoryStore for SqliteMemoryStore {
 
     fn supported_contract_versions(&self) -> VersionRange {
         ACCEPTED_RANGE
+    }
+
+    async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, TraitStoreError> {
+        Err("cairn-store-sqlite: upsert not yet implemented (#46)".into())
+    }
+    async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, TraitStoreError> {
+        Err("cairn-store-sqlite: get not yet implemented (#46)".into())
+    }
+    async fn list(&self, _args: &ListArgs) -> Result<ListPage, TraitStoreError> {
+        Err("cairn-store-sqlite: list not yet implemented (#46)".into())
+    }
+    async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), TraitStoreError> {
+        Err("cairn-store-sqlite: tombstone not yet implemented (#46)".into())
+    }
+    async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, TraitStoreError> {
+        Err("cairn-store-sqlite: versions not yet implemented (#46)".into())
+    }
+    async fn put_edge(&self, _e: &Edge) -> Result<(), TraitStoreError> {
+        Err("cairn-store-sqlite: put_edge not yet implemented (#46)".into())
+    }
+    async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, TraitStoreError> {
+        Err("cairn-store-sqlite: remove_edge not yet implemented (#46)".into())
+    }
+    async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, TraitStoreError> {
+        Err("cairn-store-sqlite: neighbours not yet implemented (#46)".into())
+    }
+    async fn search_keyword(
+        &self,
+        _args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, TraitStoreError> {
+        Err("cairn-store-sqlite: search_keyword not yet implemented (#47)".into())
     }
 }
 

@@ -9,6 +9,14 @@ use crate::contract::version::{ContractVersion, VersionRange};
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
+/// Errors raised by `MemoryStore` implementations. Adapters define their
+/// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
+/// trait-level alias to avoid leaking adapter types into core.
+///
+/// At the trait level, callers see `StoreError`. Concrete adapters
+/// substitute their own enum with `From` impls covering the trait surface.
+pub type StoreError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 /// Static capability declaration for a `MemoryStore` impl.
 ///
 /// Cairn queries this before dispatching ANN-, FTS-, or graph-using verbs;
@@ -43,6 +51,59 @@ pub trait MemoryStore: Send + Sync {
 
     /// Range of `MemoryStore::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+
+    // ── CRUD (#46) ────────────────────────────────────────────────────────
+
+    /// Insert a new record version, or no-op when the canonical body hash
+    /// matches the active row for `record.target_id`. Idempotent — safe
+    /// for replay. Brief §5.2.
+    async fn upsert(&self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError>;
+
+    /// Fetch one record by `record_id`. Returns `Ok(None)` for missing or
+    /// tombstoned rows; `tombstoned` rows are not exposed via `get`.
+    async fn get(&self, id: &RecordId) -> Result<Option<MemoryRecord>, StoreError>;
+
+    /// Page through active, non-tombstoned records ordered by
+    /// `(updated_at DESC, record_id)`. Brief §5.1.
+    async fn list(&self, args: &ListArgs) -> Result<ListPage, StoreError>;
+
+    /// Mark a specific record version as tombstoned with the given reason.
+    /// Idempotent — already-tombstoned rows return `Ok(())`.
+    async fn tombstone(&self, id: &RecordId, reason: TombstoneReason) -> Result<(), StoreError>;
+
+    /// Full version history for a target, oldest → newest. Includes
+    /// active and inactive rows.
+    async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError>;
+
+    // ── Edges (#46) ───────────────────────────────────────────────────────
+
+    /// Insert or replace an edge. `updates`-edge invariants are enforced
+    /// by schema triggers (distinct `target_id`s, non-tombstoned endpoints,
+    /// post-insert immutability) and surface as
+    /// [`StoreError`] when violated.
+    async fn put_edge(&self, edge: &Edge) -> Result<(), StoreError>;
+
+    /// Remove an edge. Returns `true` if a row was deleted, `false`
+    /// otherwise. `updates` edges are immutable and removal returns a
+    /// trigger error wrapped in [`StoreError`].
+    async fn remove_edge(&self, key: &EdgeKey) -> Result<bool, StoreError>;
+
+    /// Edges adjacent to `id`. `EdgeDir::Out` returns outgoing edges,
+    /// `EdgeDir::In` incoming, `EdgeDir::Both` the union. Endpoints
+    /// pointing into superseded or tombstoned records are dropped.
+    async fn neighbours(&self, id: &RecordId, dir: EdgeDir) -> Result<Vec<Edge>, StoreError>;
+
+    // ── Search (#47, stubbed in PR-A) ─────────────────────────────────────
+
+    /// Keyword search over `body` + `path` returning ranking-input
+    /// candidates. The shared ranker (brief §5.1) is a separate pure
+    /// function in `cairn-core`; this method does not produce a final
+    /// score. Returns a capability-unavailable error when the `fts`
+    /// capability is off.
+    async fn search_keyword(
+        &self,
+        args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError>;
 }
 
 /// Static identity descriptor for a [`MemoryStore`] plugin (§4.1).
@@ -369,6 +430,39 @@ mod tests {
         }
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
+        }
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
+        }
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
+            &self,
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 

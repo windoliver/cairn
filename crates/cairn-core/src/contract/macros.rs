@@ -33,8 +33,13 @@
 /// # Examples
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+/// # use cairn_core::contract::memory_store::{
+/// #     Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage,
+/// #     MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion, StoreError,
+/// #     TombstoneReason, UpsertOutcome,
+/// # };
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// # use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 /// use cairn_core::register_plugin;
 ///
 /// #[derive(Default)]
@@ -53,6 +58,19 @@
 ///         &CAPS
 ///     }
 ///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+///     async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> { Err("stub".into()) }
+///     async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> { Ok(None) }
+///     async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+///         Ok(ListPage { records: vec![], next_cursor: None })
+///     }
+///     async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> { Ok(()) }
+///     async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> { Ok(vec![]) }
+///     async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> { Ok(()) }
+///     async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> { Ok(false) }
+///     async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> { Ok(vec![]) }
+///     async fn search_keyword(&self, _args: &KeywordSearchArgs<'_>) -> Result<KeywordSearchPage, StoreError> {
+///         Err("stub".into())
+///     }
 /// }
 ///
 /// impl MemoryStorePlugin for MyStore {
@@ -74,8 +92,13 @@
 /// # Manifest-aware form (preferred for bundled plugins)
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+/// # use cairn_core::contract::memory_store::{
+/// #     Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage,
+/// #     MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion, StoreError,
+/// #     TombstoneReason, UpsertOutcome,
+/// # };
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// # use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 /// use cairn_core::register_plugin;
 ///
 /// const MANIFEST_TOML: &str = r#"
@@ -109,6 +132,19 @@
 ///         &CAPS
 ///     }
 ///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+///     async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> { Err("stub".into()) }
+///     async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> { Ok(None) }
+///     async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+///         Ok(ListPage { records: vec![], next_cursor: None })
+///     }
+///     async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> { Ok(()) }
+///     async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> { Ok(vec![]) }
+///     async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> { Ok(()) }
+///     async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> { Ok(false) }
+///     async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> { Ok(vec![]) }
+///     async fn search_keyword(&self, _args: &KeywordSearchArgs<'_>) -> Result<KeywordSearchPage, StoreError> {
+///         Err("stub".into())
+///     }
 /// }
 ///
 /// impl MemoryStorePlugin for MyStore {
@@ -354,8 +390,13 @@ macro_rules! __register_plugin_with_manifest_helper {
 /// # Examples
 ///
 /// ```
-/// # use cairn_core::contract::memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+/// # use cairn_core::contract::memory_store::{
+/// #     Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage,
+/// #     MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion, StoreError,
+/// #     TombstoneReason, UpsertOutcome,
+/// # };
 /// # use cairn_core::contract::version::{ContractVersion, VersionRange};
+/// # use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 /// use cairn_core::register_plugin_with;
 ///
 /// struct ConfigStore { vault_name: String }
@@ -370,6 +411,19 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///         &CAPS
 ///     }
 ///     fn supported_contract_versions(&self) -> VersionRange { Self::SUPPORTED_VERSIONS }
+///     async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> { Err("stub".into()) }
+///     async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> { Ok(None) }
+///     async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+///         Ok(ListPage { records: vec![], next_cursor: None })
+///     }
+///     async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> { Ok(()) }
+///     async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> { Ok(vec![]) }
+///     async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> { Ok(()) }
+///     async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> { Ok(false) }
+///     async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> { Ok(vec![]) }
+///     async fn search_keyword(&self, _args: &KeywordSearchArgs<'_>) -> Result<KeywordSearchPage, StoreError> {
+///         Err("stub".into())
+///     }
 /// }
 ///
 /// impl MemoryStorePlugin for ConfigStore {
