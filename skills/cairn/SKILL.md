@@ -33,6 +33,12 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical search surface for the active vault
 
+**Example:**
+
+```bash
+cairn search --mode MODE QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**
@@ -44,6 +50,28 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical by-id retrieval surface
 
+**Example:**
+
+```bash
+cairn retrieve ID
+```
+
+```bash
+cairn retrieve --session SESSION_ID
+```
+
+```bash
+cairn retrieve --session SESSION_ID --turn TURN_ID
+```
+
+```bash
+cairn retrieve --folder PATH
+```
+
+```bash
+cairn retrieve --scope SCOPE
+```
+
 ## `cairn summarize`
 
 **Use when:**
@@ -53,6 +81,12 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use to answer a general question — call search first
 
 **Exclusivity:** this is the canonical summarize surface
+
+**Example:**
+
+```bash
+cairn summarize RECORD_IDS
+```
 
 ## `cairn assemble_hot`
 
@@ -73,6 +107,12 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use for durable facts about the user or world — call ingest
 
 **Exclusivity:** this is the canonical trace-capture surface
+
+**Example:**
+
+```bash
+cairn capture_trace --from FROM
+```
 
 ## `cairn lint`
 
@@ -95,6 +135,20 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use on a draft the user wants to edit — that belongs to ingest with version bump
 
 **Exclusivity:** this is the single delete surface — there is no other delete path
+
+**Example:**
+
+```bash
+cairn forget --record RECORD_ID
+```
+
+```bash
+cairn forget --session SESSION_ID
+```
+
+```bash
+cairn forget --scope SCOPE
+```
 
 ---
 

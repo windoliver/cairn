@@ -309,8 +309,22 @@ fn scan_tokens<'a>(
                     line: source_line,
                 });
             };
-            if arity == 1 && !has_inline_value && iter.peek().is_some_and(|n| !n.starts_with('-')) {
-                let _ = iter.next();
+            if arity == 1 && !has_inline_value {
+                // Non-boolean flags require a value — either inline (`--x=v`)
+                // or the next non-flag token. Without one clap would reject
+                // the example at runtime, so fail compat too.
+                match iter.peek() {
+                    Some(n) if !n.starts_with('-') => {
+                        let _ = iter.next();
+                    }
+                    _ => {
+                        return Err(CompatError::Malformed {
+                            kind: "cli",
+                            detail: format!("flag `--{name}` requires a value"),
+                            line: source_line,
+                        });
+                    }
+                }
             }
         } else if !tok.starts_with('-') {
             positional_count += 1;
@@ -322,38 +336,81 @@ fn scan_tokens<'a>(
     })
 }
 
-/// Count how many variants of a tagged-union verb the example "selects" — a
-/// variant is selected when every one of its schema-required fields is
-/// satisfied by the example (either as a long-flag or as the positional).
+/// Count how many variants of a tagged-union verb the example "selects".
+///
+/// A variant is selected when:
+/// - every one of its schema-required fields is satisfied (long-flag or
+///   positional), AND
+/// - every flag the example used belongs to this variant's own flag set
+///   (so a strict superset like `--session --turn` selects only `ArgsTurn`,
+///   not also `ArgsSession`), AND
+/// - the example's positional count fits this variant's positional capacity.
 fn count_matching_variants(
     verb_def: &VerbDef,
     cmds: &[&CliCommand],
     used_field_names: &BTreeSet<String>,
     positional_count: usize,
 ) -> usize {
-    variant_required_fields(verb_def, cmds)
-        .iter()
+    let required_per_variant = variant_required_fields(verb_def, cmds);
+    cmds.iter()
         .enumerate()
-        .filter(|(idx, required)| {
+        .filter(|(idx, cmd)| {
+            let required = &required_per_variant[*idx];
             if required.is_empty() {
                 return false;
             }
-            required.iter().all(|field| {
+            let variant_flag_names: BTreeSet<&str> =
+                cmd.flags.iter().map(|f| f.name.as_str()).collect();
+            let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
+
+            // 1. All required fields satisfied.
+            let required_ok = required.iter().all(|field| {
                 used_field_names.contains(field)
-                    || (positional_count > 0
-                        && cmds[*idx]
-                            .positional
-                            .as_ref()
-                            .is_some_and(|p| &p.name == field))
-            })
+                    || (positional_count > 0 && positional_name == Some(field.as_str()))
+            });
+            if !required_ok {
+                return false;
+            }
+            // 2. No foreign flags — every used flag belongs to this variant.
+            let no_foreign_flags = used_field_names
+                .iter()
+                .all(|f| variant_flag_names.contains(f.as_str()));
+            if !no_foreign_flags {
+                return false;
+            }
+            // 3. Positional count must fit this variant.
+            let positional_capacity = usize::from(cmd.positional.is_some());
+            positional_count <= positional_capacity
         })
         .count()
 }
 
+/// Pull `required: [...]` from a JSON-Schema object, dropping any field whose
+/// `properties.<field>` schema declares a `const` (i.e., the discriminator —
+/// `target` for `retrieve`, `mode` for `forget`).
+pub(crate) fn required_excluding_const(schema: &serde_json::Value) -> BTreeSet<String> {
+    let Some(arr) = schema.get("required").and_then(serde_json::Value::as_array) else {
+        return BTreeSet::new();
+    };
+    let props = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object);
+    arr.iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|name| {
+            props
+                .and_then(|p| p.get(*name))
+                .and_then(|s| s.get("const"))
+                .is_none()
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 /// For a tagged-union verb, return the schema-required field set per
-/// `CliCommand` variant in `cmds` order. The `target` discriminator is
-/// stripped — what's left is what a CLI invocation must actually supply to
-/// satisfy that variant.
+/// `CliCommand` variant in `cmds` order. Discriminator fields (whose schema
+/// is a `const`) are stripped — what's left is what a CLI invocation must
+/// actually supply to satisfy that variant.
 fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTreeSet<String>> {
     // Best-effort schema parse; if anything is off, return empty sets so the
     // matcher falls back to "no variant selected" (and therefore rejects).
@@ -382,17 +439,9 @@ fn variant_required_fields(verb_def: &VerbDef, cmds: &[&CliCommand]) -> Vec<BTre
             out.push(BTreeSet::new());
             continue;
         };
-        let required: BTreeSet<String> = defs
+        let required = defs
             .get(name)
-            .and_then(|v| v.get("required"))
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .filter(|s| *s != "target")
-                    .map(str::to_string)
-                    .collect()
-            })
+            .map(required_excluding_const)
             .unwrap_or_default();
         out.push(required);
     }

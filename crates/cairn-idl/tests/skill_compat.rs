@@ -217,9 +217,11 @@ fn cli_validator_rejects_retrieve_with_two_discriminators() {
     };
     let err = validate_cli_block(&block, &doc())
         .expect_err("retrieve with multiple discriminators must fail");
+    // Either >1 or 0 matches is a failure surface — both indicate the
+    // example doesn't fit any single clap-required variant cleanly.
     assert!(
-        matches!(err, CompatError::AmbiguousVariant { matched_variants, .. } if matched_variants > 1),
-        "expected AmbiguousVariant with >1 match, got: {err:?}"
+        matches!(err, CompatError::AmbiguousVariant { matched_variants, .. } if matched_variants != 1),
+        "expected AmbiguousVariant with !=1 match, got: {err:?}"
     );
 }
 
