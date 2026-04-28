@@ -241,11 +241,15 @@ fn build(pat: &str) -> Regex {
 fn find_context_keyed_spans(input: &str) -> Vec<RedactionSpan> {
     static KEY_RE: OnceLock<Regex> = OnceLock::new();
     let key_re = KEY_RE.get_or_init(|| {
-        // Match the keyword + optional separator. `bearer` and the
-        // standalone `Bearer` after `Authorization:` both fall through
-        // to the value-consume step below.
+        // Match the keyword + optional close-key-quote + optional
+        // separator + optional whitespace. The optional `['"]?` runs
+        // both before and after `[:=]?` so JSON / YAML structured-key
+        // shapes (`"password":`, `'api_key' = `) align the post-key
+        // cursor on the value's first byte. `bearer` and the standalone
+        // `Bearer` after `Authorization:` both fall through to the
+        // value-consume step below.
         build(
-            r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|authorization|bearer)\b\s*[:=]?\s*",
+            r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|authorization|bearer)\b['"]?\s*[:=]?\s*"#,
         )
     });
 
@@ -331,8 +335,15 @@ fn consume_value(input: &str, i: usize) -> (usize, usize) {
         // newlines. A multiline quoted secret (e.g. an embedded PEM
         // body or a backslash-escaped multi-line string) must be
         // redacted in full — terminating at `\n` would leak everything
-        // after the first line.
+        // after the first line. Treat `\X` as an escape sequence and
+        // consume both bytes so a `\"` inside the value does not act
+        // as a close quote — that would split a JSON-escaped secret
+        // and leak the suffix.
         while j < bytes.len() && bytes[j] != q {
+            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                j += 2;
+                continue;
+            }
             j += 1;
         }
         if j < bytes.len() && bytes[j] == q {
@@ -599,6 +610,64 @@ mod tests {
         }
         // Bytes outside the quoted value are preserved.
         assert!(r.text.contains(" trailing"), "tail dropped: {}", r.text);
+    }
+
+    #[test]
+    fn redacts_json_quoted_password_field() {
+        // Standard JSON shape `{"password":"<value>"}` — round 6 codex
+        // flagged that the closing key-quote was not in the regex's
+        // separator set, so consume_value started on the `:` and
+        // emitted nothing.
+        for input in [
+            r#"{"password":"hunter2horsestaplebattery"}"#,
+            r#"{"api_key": "sk_live_abc123def456"}"#,
+            r#"{"secret":  "verysecretverylongtoken"}"#,
+            r#"{ "auth" : "bearer-token-xyz123" }"#,
+        ] {
+            let r = redact(input);
+            assert!(!r.spans.is_empty(), "no span fired for {input}");
+            for needle in [
+                "hunter2horsestaplebattery",
+                "sk_live_abc123def456",
+                "verysecretverylongtoken",
+                "bearer-token-xyz123",
+            ] {
+                assert!(
+                    !r.text.contains(needle),
+                    "JSON-quoted secret `{needle}` leaked for {input}: {}",
+                    r.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn redacts_yaml_single_quoted_password_field() {
+        // YAML / Python dict shape with single-quoted values.
+        let r = redact(r"config: 'password': 'verysecretpassword42'");
+        assert!(!r.spans.is_empty(), "no span for yaml-shaped key");
+        assert!(
+            !r.text.contains("verysecretpassword42"),
+            "yaml secret leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn redacts_json_escaped_quote_in_value_through_real_close() {
+        // The value contains an escaped `\"` which must not act as a
+        // close quote — without backslash-escape handling, the scanner
+        // would terminate after `abc` and leak `def-rest-of-secret`.
+        let input = r#"{"password":"abc\"def-rest-of-secret"}"#;
+        let r = redact(input);
+        assert!(!r.spans.is_empty(), "no span for escaped-quote secret");
+        for needle in ["abc\\\"def-rest-of-secret", "def-rest-of-secret"] {
+            assert!(
+                !r.text.contains(needle),
+                "escaped-quote suffix leaked for `{needle}`: {}",
+                r.text
+            );
+        }
     }
 
     #[test]
