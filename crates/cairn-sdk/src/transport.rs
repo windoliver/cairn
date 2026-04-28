@@ -120,14 +120,21 @@ impl<T: Transport> Sdk<T> {
     }
 
     /// `search` — hybrid keyword/semantic retrieval (brief §8.2).
-    pub fn search(&self, _args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
+    ///
+    /// Fail-closed (CLAUDE.md §4.6): the requested mode's capability must
+    /// be advertised by [`Self::status`], otherwise the call is rejected
+    /// with [`SdkError::CapabilityUnavailable`] before any dispatch.
+    pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
+        self.require_capability(args.mode.capability())?;
         Err(stub(ResponseVerb::Search))
     }
 
     /// `retrieve` — by-target fetch (record/session/turn/folder/scope/profile).
-    pub fn retrieve(&self, _args: &RetrieveArgs) -> Result<VerbResponse<RetrieveData>, SdkError> {
-        // RetrieveArgs is a tagged enum; structural validation happens at
-        // deserialization. No additional pre-dispatch validate() exists.
+    ///
+    /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
+    /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
+    pub fn retrieve(&self, args: &RetrieveArgs) -> Result<VerbResponse<RetrieveData>, SdkError> {
+        self.require_capability(args.capability())?;
         Err(stub(ResponseVerb::Retrieve))
     }
 
@@ -161,9 +168,38 @@ impl<T: Transport> Sdk<T> {
     }
 
     /// `forget` — record/session/scope tombstone + purge (brief §8.8, §5.6).
-    pub fn forget(&self, _args: &ForgetArgs) -> Result<VerbResponse<ForgetData>, SdkError> {
-        // ForgetArgs is a tagged enum. See `retrieve` rationale.
+    ///
+    /// Fail-closed (CLAUDE.md §4.6): the variant's capability must be
+    /// advertised by [`Self::status`], otherwise [`SdkError::CapabilityUnavailable`].
+    pub fn forget(&self, args: &ForgetArgs) -> Result<VerbResponse<ForgetData>, SdkError> {
+        self.require_capability(args.capability())?;
         Err(stub(ResponseVerb::Forget))
+    }
+
+    /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
+    /// not advertised by `status()`. Verbs whose IDL declares no
+    /// capability (`None`) are unconditionally allowed.
+    fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
+        let Some(cap) = required else {
+            return Ok(());
+        };
+        let advertised = self.status().capabilities;
+        let is_advertised = advertised.iter().any(|c| {
+            serde_json::to_value(c)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .as_deref()
+                == Some(cap)
+        });
+        if is_advertised {
+            Ok(())
+        } else {
+            Err(SdkError::CapabilityUnavailable {
+                capability: cap.to_owned(),
+                reason: "not advertised by `status` in this incarnation".to_owned(),
+                operation_id: crate::stub::new_operation_id(),
+            })
+        }
     }
 }
 

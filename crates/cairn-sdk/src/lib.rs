@@ -4,20 +4,29 @@
 //! The SDK is a thin wrapper over the same generated request/response types
 //! consumed by the CLI and MCP adapter. It provides:
 //!
-//! - A typed function per verb (the eight P0 verbs plus `status`,
-//!   `handshake`, and `bootstrap`).
+//! - A typed function per verb (the eight P0 verbs) plus `status` and
+//!   `handshake`.
 //! - A typed [`SdkError`] enum so consumers never parse CLI text.
 //! - Local in-process transport (no subprocess, no network) so the SDK can
 //!   be embedded in the same binary as the verbs.
 //!
+//! `bootstrap` is intentionally **not** part of the SDK: its I/O lives in
+//! `cairn-cli::vault` and is not yet exposed through `cairn-core`. Adding
+//! it is tracked as a follow-up to #60.
+//!
 //! ## Status
 //!
 //! P0 wires the canonical `status` and `handshake` responses (matching the
-//! CLI byte-for-byte) and stubs the eight verbs as `Internal — store not
-//! wired in this P0 build`. The verb dispatch itself is tracked under
-//! parent epic #9. When verb handlers move into `cairn-core::verbs::*`,
-//! every SDK fn becomes a one-line dispatch into the same handler the CLI
-//! uses, preserving the "CLI is ground truth" invariant.
+//! CLI byte-for-byte). Capability-gated verbs (`search`, `retrieve`,
+//! `forget`) reject with [`SdkError::CapabilityUnavailable`] when the
+//! requested mode/variant is not advertised in [`Sdk::status`] — fail-closed
+//! per CLAUDE.md §4.6. The remaining verbs return
+//! [`SdkError::Internal`] with the `store not wired in this P0 build`
+//! message so failures are distinguishable from capability skew. The verb
+//! dispatch itself is tracked under parent epic #9. When verb handlers move
+//! into `cairn-core::verbs::*`, every SDK fn becomes a one-line dispatch
+//! into the same handler the CLI uses, preserving the "CLI is ground truth"
+//! invariant.
 
 #![warn(missing_docs)]
 

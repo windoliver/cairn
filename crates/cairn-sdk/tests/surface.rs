@@ -112,23 +112,49 @@ fn ingest_valid_args_returns_internal_stub() {
 }
 
 #[test]
-fn search_returns_internal_stub() {
-    let args = SearchArgs {
-        citations: None,
-        cursor: None,
-        filters: None,
-        limit: None,
-        mode: SearchArgsMode::Keyword,
-        query: "hello".to_owned(),
-        scope: None,
-    };
-    assert_internal_stub(sdk().search(&args));
+fn search_rejects_unadvertised_modes_with_capability_unavailable() {
+    // P0 advertises no capabilities, so every search mode must fail closed
+    // with CapabilityUnavailable rather than the generic Internal stub.
+    for (mode, expected) in [
+        (SearchArgsMode::Keyword, "cairn.mcp.v1.search.keyword"),
+        (SearchArgsMode::Semantic, "cairn.mcp.v1.search.semantic"),
+        (SearchArgsMode::Hybrid, "cairn.mcp.v1.search.hybrid"),
+    ] {
+        let args = SearchArgs {
+            citations: None,
+            cursor: None,
+            filters: None,
+            limit: None,
+            mode,
+            query: "hello".to_owned(),
+            scope: None,
+        };
+        let err = sdk().search(&args).expect_err("must fail closed in P0");
+        match err {
+            SdkError::CapabilityUnavailable {
+                capability,
+                operation_id,
+                ..
+            } => {
+                assert_eq!(capability, expected);
+                assert_eq!(operation_id.0.len(), 26);
+            }
+            other => panic!("expected CapabilityUnavailable, got {other:?}"),
+        }
+    }
 }
 
 #[test]
-fn retrieve_returns_internal_stub() {
-    let args = RetrieveArgs::Record { id: ulid() };
-    assert_internal_stub(sdk().retrieve(&args));
+fn retrieve_rejects_unadvertised_target_with_capability_unavailable() {
+    let err = sdk()
+        .retrieve(&RetrieveArgs::Record { id: ulid() })
+        .expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.retrieve.record");
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
 }
 
 #[test]
@@ -167,9 +193,16 @@ fn lint_returns_internal_stub() {
 }
 
 #[test]
-fn forget_returns_internal_stub() {
-    let args = ForgetArgs::Record { record_id: ulid() };
-    assert_internal_stub(sdk().forget(&args));
+fn forget_rejects_unadvertised_target_with_capability_unavailable() {
+    let err = sdk()
+        .forget(&ForgetArgs::Record { record_id: ulid() })
+        .expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            assert_eq!(capability, "cairn.mcp.v1.forget.record");
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
 }
 
 #[track_caller]

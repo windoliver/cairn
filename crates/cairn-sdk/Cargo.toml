@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
-description = "Cairn SDK — typed in-process surface for the eight verbs, status, handshake, and bootstrap (brief §8)."
+description = "Cairn SDK — typed in-process surface for the eight verbs plus status and handshake (brief §8)."
 
 [dependencies]
 cairn-core = { path = "../cairn-core" }
