@@ -663,6 +663,69 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-10 regression: invalid UTF-8 in a payload large enough
+    /// that lossy `U+FFFD` expansion would balloon the staged path
+    /// past `MAX_INPUT_BYTES` must route through the bypass instead
+    /// of running stage 1 / stage 3 over a 3×-expanded buffer. Marker
+    /// must reflect the decode-expansion reason.
+    #[test]
+    #[ignore = "allocates > MAX_INPUT_BYTES/3 of invalid bytes; run with --ignored"]
+    fn decode_expansion_routes_to_bypass() {
+        // Just over the MAX_INPUT_BYTES/3 threshold + all-invalid
+        // bytes → from_utf8 fails fast and the gate triggers before
+        // any per-stage allocation. The test sizes the payload right
+        // at the threshold so it stays under the raw-byte ceiling.
+        let n = MAX_INPUT_BYTES / 3 + 1;
+        let raw = vec![0xFFu8; n];
+        let evt = terminal_event(&raw);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("decode expansion"),
+            "decode-expansion bypass marker present: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(out.stats.truncated);
+        assert!(out.compacted_bytes.len() <= cfg.max_bytes());
+    }
+
+    /// Round-10 regression: when stage 1 had to lossily replace
+    /// invalid UTF-8 with `U+FFFD`, the output is no longer a
+    /// verbatim copy of the input. `stats.truncated` (and the new
+    /// `utf8_replacement` flag) must reflect that even when no later
+    /// stage trims anything.
+    #[test]
+    fn truncated_set_for_utf8_replacement_only() {
+        // Tiny invalid payload: pure 0xFF bytes, well under
+        // MAX_INPUT_BYTES/3 so the decode-expansion gate doesn't
+        // fire and stage 1 actually runs. No ANSI, no dedup, no cap.
+        let raw = b"\xFF\xFF\xFFhello\n";
+        let evt = terminal_event(raw);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+        assert!(
+            out.stats.utf8_replacement,
+            "stage 1 lossy decode must set utf8_replacement"
+        );
+        assert!(
+            out.stats.truncated,
+            "any lossy transform — including decode loss — flips truncated"
+        );
+    }
+
     /// Round-7 (newer loop) regression: `stats.truncated` must reflect
     /// any lossy transform, not just stage 5/6 budget loss. ANSI-only
     /// stripping or dedup-only collapse produces a non-verbatim
@@ -1322,6 +1385,11 @@ pub struct SquashStats {
     /// budget-driven truncation. Hardening for truncated terminal
     /// captures whose final diagnostic line followed a stray `ESC ]`.
     pub osc_recovery_bytes_dropped: usize,
+    /// True iff stage 1 had to replace at least one invalid UTF-8 byte
+    /// sequence with `U+FFFD`. Distinct signal from later
+    /// budget-driven truncation so audit consumers can tell decode loss
+    /// apart from sanitization or trim loss. Always feeds `truncated`.
+    pub utf8_replacement: bool,
 }
 
 use std::borrow::Cow;
@@ -2357,6 +2425,9 @@ mod stage6_tests {
 // Wrapper is a validated witness; by-value enforces single-use semantics
 // at the type level (the spec pins this as the public surface).
 #[allow(clippy::needless_pass_by_value)]
+// Splitting hurts pipeline readability — gates and stages here are
+// linear and re-grouping into helpers obscures the dataflow.
+#[allow(clippy::too_many_lines)]
 pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutput {
     let raw_bytes = raw.as_bytes();
     let raw_hash = raw.raw_hash().clone();
@@ -2400,8 +2471,32 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
             BypassReason::LineCardinality,
         );
     }
+    // Decode-expansion gate: invalid UTF-8 turns each bad byte into a
+    // 3-byte `U+FFFD`, so the staged path can balloon a near-ceiling
+    // input to ~3× before stage 6 enforces the budget. Threshold of
+    // `MAX_INPUT_BYTES / 3` keeps worst-case decoded size at or under
+    // the original ceiling. `from_utf8` is a fast O(N) validity scan
+    // — far cheaper than the per-stage `Vec<String>` clones it
+    // protects against.
+    if raw_bytes.len() > MAX_INPUT_BYTES / 3 && std::str::from_utf8(raw_bytes).is_err() {
+        return oversize_bypass(
+            raw_bytes,
+            raw_hash,
+            raw_byte_len,
+            cfg,
+            stats,
+            BypassReason::DecodeExpansion,
+        );
+    }
 
     let decoded = stage1_lossy_utf8(raw_bytes);
+    // Stage 1 returns `Cow::Owned` iff `from_utf8_lossy` had to insert
+    // `U+FFFD`. Surface that as a distinct lossy signal AND fold it
+    // into `truncated` so audit consumers can't see "non-verbatim
+    // bytes" without the corresponding flag.
+    if matches!(decoded, Cow::Owned(_)) {
+        stats.utf8_replacement = true;
+    }
     let stage2 = stage2_ansi_strip(
         &decoded,
         &mut stats.ansi_stripped,
@@ -2439,6 +2534,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         || stats.osc_recovery_bytes_dropped > 0
         || stats.dedup_runs_collapsed > 0
         || long_lines_count > 0
+        || stats.utf8_replacement
     {
         stats.truncated = true;
     }
@@ -2484,6 +2580,11 @@ enum BypassReason {
     ByteCeiling,
     /// `\n` count exceeded `MAX_INPUT_LINES` (line-density OOM guard).
     LineCardinality,
+    /// Invalid UTF-8 in a payload large enough that lossy `U+FFFD`
+    /// expansion (worst case 3× per byte) would push the staged path
+    /// past `MAX_INPUT_BYTES` of working set. Routes to the bypass so
+    /// decode happens only on bounded head/tail windows.
+    DecodeExpansion,
 }
 
 impl BypassReason {
@@ -2494,6 +2595,9 @@ impl BypassReason {
             ),
             Self::LineCardinality => format!(
                 "[…oversize bypass: {line_count} lines >= MAX_INPUT_LINES ({MAX_INPUT_LINES}), squash skipped…]"
+            ),
+            Self::DecodeExpansion => format!(
+                "[…oversize bypass: {raw_byte_len} bytes invalid UTF-8 (decode expansion), squash skipped…]"
             ),
         }
     }
@@ -2529,7 +2633,7 @@ fn oversize_bypass(
             let n = raw_bytes.iter().filter(|&&b| b == b'\n').count();
             n
         }
-        BypassReason::ByteCeiling => 0, // not rendered for this branch
+        BypassReason::ByteCeiling | BypassReason::DecodeExpansion => 0, // not rendered for these branches
     };
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
