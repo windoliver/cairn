@@ -316,6 +316,8 @@ cargo test --doc --workspace --locked
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 # docs.yml
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+mdbook build docs/site
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
   cargo doc --workspace --no-deps --document-private-items --locked
 
@@ -332,6 +334,11 @@ cargo publish --dry-run --locked --allow-dirty -p cairn-core
 
 A PR that touches generated code must also re-run `cargo run -p cairn-idl
 --bin cairn-codegen` and commit the result.
+
+A PR that touches CLI flags, config defaults, bundled plugins, IDL/MCP
+metadata, workspace package membership, or user-facing docs must also re-run
+`cargo run -p cairn-cli --bin cairn-docgen -- --write` and commit the generated
+Markdown under `docs/site/src/reference/generated/`.
 
 ---
 

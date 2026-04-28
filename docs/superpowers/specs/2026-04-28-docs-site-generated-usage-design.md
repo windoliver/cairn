@@ -318,7 +318,7 @@ run: mdbook build docs/site
 Install mdBook using the official docs' Rust path:
 
 ```bash
-cargo install mdbook --no-default-features --features search --vers "^0.4" --locked
+cargo install mdbook --version 0.5.2 --no-default-features --features search --locked
 ```
 
 Use the same Rust cache policy as existing docs jobs. Pin action SHAs in the

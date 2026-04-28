@@ -9,7 +9,14 @@
 
 ---
 
-> **Status:** Pre-v0.1. The P0 Rust workspace scaffold is in place (eight crates: `cairn-core`, `cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`, `cairn-sensors-local`, `cairn-workflows`, `cairn-idl`, `cairn-test-fixtures`). No verb behaviour or storage code is implemented yet — the scaffold exists to accept the eight-verb implementation in follow-up issues. See `docs/design/architecture.md`.
+> **Status:** Pre-v0.1. The P0 Rust workspace is in place (eight crates:
+> `cairn-core`, `cairn-cli`, `cairn-mcp`, `cairn-store-sqlite`,
+> `cairn-sensors-local`, `cairn-workflows`, `cairn-idl`,
+> `cairn-test-fixtures`). The IDL/codegen surfaces, config bootstrap,
+> `status`, `handshake`, `plugins list`, and `plugins verify` are implemented.
+> The eight memory verbs are exposed but still fail closed as P0 stubs until
+> storage and dispatch land. See `docs/design/architecture.md` and
+> `docs/site/src/index.md`.
 
 Cairn is a memory framework for agent loops. It gives local and cloud agents a shared substrate for per-turn capture, search, retrieval, rolling summaries, trace learning, hot-memory assembly, promotion to reusable playbooks, and auditable forget-me flows.
 
@@ -41,6 +48,27 @@ Cairn's public surface is intentionally small: eight verbs, exposed consistently
 | `forget` | Tombstone, drain indexes, and physically purge records through auditable delete flows. |
 
 The CLI is the ground truth. MCP, SDK bindings, and the Cairn skill are thin surfaces over the same contract.
+
+## Current Usage
+
+Build and inspect the implemented surfaces:
+
+```bash
+cargo build -p cairn-cli --locked
+cargo run -p cairn-cli --locked -- status --json
+cargo run -p cairn-cli --locked -- handshake --json
+cargo run -p cairn-cli --locked -- bootstrap --vault-path .
+cargo run -p cairn-cli --locked -- plugins list
+cargo run -p cairn-cli --locked -- plugins verify
+```
+
+The docs site source lives in `docs/site/`. Generated usage/reference pages are
+committed under `docs/site/src/reference/generated/` and kept fresh by:
+
+```bash
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+mdbook build docs/site
+```
 
 ## Architecture
 
@@ -165,13 +193,13 @@ This README follows the latest design brief rule: v0.1 ships keyword, semantic, 
 
 ## Contributing
 
-Cairn is still at the design stage. The highest-value contributions right now are:
+Cairn is still pre-v0.1. The highest-value contributions right now are:
 
 - tightening the P0 scope,
 - resolving capability/versioning contradictions,
-- turning the eight verbs into precise request/response schemas,
+- wiring the eight P0 verb implementations behind the generated schemas,
 - defining conformance tests for each surface,
-- and cutting the first Rust crate layout.
+- and keeping generated docs/code in sync with user-facing changes.
 
 ## License
 
