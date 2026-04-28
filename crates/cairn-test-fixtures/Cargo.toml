@@ -14,7 +14,6 @@ description = "Shared test helpers and fixture loaders for Cairn crates."
 cairn-core = { workspace = true, features = ["test-fixtures"] }
 cairn-store-sqlite = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

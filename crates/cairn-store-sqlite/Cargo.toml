@@ -13,8 +13,6 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-bon = { workspace = true }
-blake3 = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 serde_json = { workspace = true }
