@@ -119,6 +119,83 @@ Keeps the core dependency-free (CLAUDE.md §3 boundary rule) and makes the
 provisioning logic deterministic-given-RNG, testable without keychain or
 SQLite.
 
+### 3.5 Cross-store provisioning atomicity (registry-first, with reconciliation)
+
+Provisioning crosses two adapters (keychain + SQLite) that cannot share a
+transaction. Order of operations and recovery behaviour are part of the
+contract — not left to the implementation.
+
+The state machine, persisted in `identities.provisioning_state`:
+
+```
+pending  → active     (happy path)
+pending  → orphaned   (reconciliation finds no keychain entry)
+active   → revoked    (operator revocation)
+```
+
+Provisioning flow (single identity):
+
+1. **Reserve.** Insert `identities` row with `provisioning_state = 'pending'`
+   plus the prospective `IdentityKeyEntry` in `identity_keys` inside one
+   SQLite transaction. The registry row carries no signing capability while
+   pending; reads through `IdentityRegistry::get_identity` filter pending
+   rows out by default.
+2. **Mint.** Generate the keypair in memory.
+3. **Persist secret.** `Keystore::store_keypair`. On failure: roll forward
+   to step 4 with an error; the pending row remains for reconciliation.
+4. **Activate.** Single SQLite UPDATE flips `provisioning_state` to
+   `'active'`. Failure here leaves the keychain entry with a pending
+   registry row — reconciliation handles it.
+
+Reconciliation runs at every `IdentityRegistry::open` (i.e., once per
+process start). For each `pending` row:
+
+- If the keychain entry exists → flip to `active`. (Crash between steps 3
+  and 4.)
+- If the keychain entry does not exist → delete the registry row, mark the
+  outcome `orphaned` in the audit log (`tracing` warn). (Crash before or
+  during step 3.)
+
+Idempotent re-provision of the same `(identity, key_version)` is a no-op
+once `active`. A re-provision attempt while a different `pending` row
+exists for the same identity returns `RegistryError::ProvisioningInFlight`
+— the operator must wait for reconciliation or call
+`cairn identity reconcile` explicitly.
+
+`cairn identity reconcile` is added as a maintenance subcommand for the
+case where the operator needs to force the sweep without restarting a
+long-lived process (MCP server, workflow host).
+
+This satisfies CLAUDE.md invariant 5 ("WAL + two-phase apply for every
+mutation") in spirit even though identity mutations don’t enter the
+record-WAL: the two-phase pattern lives inside this module.
+
+### 3.6 Key retention model (private keys ring-bounded, public keys immortal)
+
+Brief §4.2 says: "Each identity owns a key ring (current + up to two
+predecessors)" — but it also says "records signed by an older version still
+verify until TTL expires" and "Earlier operations remain valid…". Read
+together: the **signing** ring is bounded; the **verification** material
+must outlive any record that references it.
+
+P0 split:
+
+- **Keystore ring (private keys).** `Keystore` keeps current + ≤ 2
+  predecessor private keys. On rotation, the eldest private key is deleted
+  from the keychain. Reduces blast radius if a key is exfiltrated.
+- **Registry archive (public keys).** `identity_keys` rows are
+  **append-only**. Rotation inserts a new row; revocation marks the
+  identity but never deletes prior public-key rows. Verification of any
+  historical record is always possible via `IdentityRegistry::get_key`.
+- **No TTL-based purge in this PR.** A future issue introduces a record
+  scan that proves "no still-valid record references key version N" before
+  permitting public-key garbage collection. Until that scan exists, the
+  registry never deletes a public key.
+
+`identity_keys` schema gains a `superseded_at TEXT` column that records
+when a key version was rotated past — informational only; not used for
+deletion.
+
 ## 4. Crate-by-crate changes
 
 ### 4.1 `cairn-core`
@@ -175,6 +252,7 @@ pub trait IdentityRegistry: Send + Sync {
 ```
 
 `RegistryError` (`#[non_exhaustive]`): `NotFound`, `IdentityExists { id }`,
+`ProvisioningInFlight { id }`, `AlreadyRevoked { id }`,
 `KeyVersionConflict { existing, attempted }`, `Backend(#[source] …)`.
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
@@ -217,7 +295,9 @@ CREATE TABLE identities (
     id TEXT PRIMARY KEY NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('human', 'agent', 'sensor')),
     current_key_version INTEGER NOT NULL,
+    provisioning_state TEXT NOT NULL CHECK (provisioning_state IN ('pending', 'active', 'revoked')),
     created_at TEXT NOT NULL,
+    activated_at TEXT,
     revoked_at TEXT,
     revocation_signature BLOB
 );
@@ -228,15 +308,19 @@ CREATE TABLE identity_keys (
     public_key BLOB NOT NULL,
     signed_predecessor BLOB,
     created_at TEXT NOT NULL,
+    superseded_at TEXT,
     PRIMARY KEY (identity_id, key_version)
 );
 
 CREATE INDEX idx_identity_keys_identity ON identity_keys(identity_id);
 ```
 
-Key-ring depth (current + ≤ 2 predecessors) is enforced in `record_rotation`
-by deleting the oldest entry once the ring exceeds three. Keeps the schema
-simple; depth is a policy knob, not a wire constraint.
+`identity_keys` is append-only: rotation inserts a new row and stamps the
+prior row’s `superseded_at`; revocation flips `identities.provisioning_state`
+but does not delete keys. The keystore (private-key) ring is bounded
+separately to current + ≤ 2 predecessors (§3.6). Public-key garbage
+collection is gated on a future record-reference scan and is not part of
+this PR.
 
 `SqliteIdentityRegistry` implements `IdentityRegistry`. Integration tests
 hit a real SQLite file in `tempfile::tempdir()`. No mocking (CLAUDE.md
@@ -248,29 +332,45 @@ New subcommand `cairn identity`:
 
 ```
 cairn identity provision --kind {human|agent|sensor} [--slug …] [--harness …] [--model …] [--role …] [--family …] [--name …] [--host …] [--rev v1] [--json]
+cairn identity init-defaults [--json]
 cairn identity list [--kind …] [--json]
 cairn identity show <id> [--json]
 cairn identity rotate <id> [--json]
 cairn identity revoke <id> [--json]
+cairn identity reconcile [--json]
 ```
 
 Shape mirrors brief §4.2 conventions; flags use `clap` derive + `ValueEnum`
 for the kind enum. Snapshot tests cover human and `--json` output.
 
-Bootstrap (`cairn init` — already scaffolded per spec
-`docs/superpowers/specs/2026-04-26-bootstrap-design.md`) gains an
-identity-provisioning step:
+`init-defaults` is the explicit entry point that mints the local human and
+the Claude Code agent identity:
 
 1. Compute `slug` from `whoami::username()`. Mint `hmn:<slug>:v1`. Skip if
    the registry already has it.
 2. Mint `agt:claude-code:opus-4-7:main:v1`. Skip if already present.
-3. Do **not** mint sensor identities here.
+3. Do **not** mint sensor identities here (per AC: sensor identities
+   provision lazily on first enable).
 
-Idempotent: re-running bootstrap on an existing vault produces no diff.
+Idempotent: re-running `init-defaults` produces no registry diff.
+
+**`cairn bootstrap` is unchanged.** Per
+`docs/superpowers/specs/2026-04-26-bootstrap-design.md`, bootstrap is a
+filesystem-only command that does not create `.cairn/cairn.db` and must not
+depend on the OS keychain. Identity provisioning is therefore deliberately
+not wired into bootstrap; it requires a store-init pass that the bootstrap
+contract refuses to do.
+
+The recommended first-run path is two commands: `cairn bootstrap` (creates
+the directory tree, no DB, no keychain) followed by `cairn identity
+init-defaults` (opens / creates the DB and writes the default identities).
+Documenting this in the bootstrap human-readable hint output is a follow-up,
+tracked in §8.
 
 `IdentityService` struct in `cairn-cli/src/identity.rs` holds
 `Arc<dyn Keystore>` + `Arc<dyn IdentityRegistry>` and exposes the verbs
 the CLI handlers call. CLI handlers stay thin (CLAUDE.md §6.1).
+`IdentityService::open` runs §3.5 reconciliation before returning.
 
 ### 4.6 `cairn-sensors-local`
 
@@ -289,10 +389,13 @@ enable yet (out of scope).
 | Condition | Error | CLI exit | Notes |
 |---|---|---|---|
 | Keychain unavailable / locked | `KeystoreError::Backend` / `Locked` | `EX_UNAVAILABLE = 69` | Maps to `CapabilityUnavailable` in capability advertisement. |
-| Re-provision same identity (idempotent path) | none | 0 | `upsert_identity` is a no-op when row matches. |
+| Re-provision same identity (idempotent path) | none | 0 | `upsert_identity` is a no-op when row is `active` and matches. |
+| Re-provision while another attempt is `pending` | `RegistryError::ProvisioningInFlight` | 75 (`EX_TEMPFAIL`) | Run `cairn identity reconcile` or restart. |
 | Re-provision conflicts (different `key_version`) | `RegistryError::KeyVersionConflict` | 1 | Operator must `rotate` or `revoke` first. |
-| Rotation when ring is full | drop oldest | 0 | Logged at `info`. |
-| Revoke an already-revoked identity | `RegistryError::IdentityExists` (revoked variant) | 1 | Fail closed, no overwrite. |
+| Crash between keychain write and registry activate | recovered by §3.5 reconciliation on next `IdentityService::open` | n/a | Pending row flipped to active. Audit log entry at `info`. |
+| Crash before keychain write | recovered by §3.5 reconciliation: pending row deleted | n/a | Audit log warns "orphaned pending identity removed". |
+| Rotation when private-key ring is full | oldest **private key** deleted from keychain; corresponding public key **kept** in registry | 0 | Logged at `info`. Verification of historical records remains intact. |
+| Revoke an already-revoked identity | `RegistryError::AlreadyRevoked` | 1 | Fail closed, no overwrite. |
 | Sensor identity request before keystore is configured | `KeystoreError::Backend` | `EX_UNAVAILABLE = 69` | Sensor enable surfaces a typed error. |
 
 Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
@@ -320,7 +423,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | identity CRUD; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | bootstrap idempotency; rotation fixture; revocation fixture; vault contains no plaintext key bytes | integration via `MemoryKeystore` |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency; rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
@@ -350,12 +453,15 @@ cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 ## 9. Migration / rollout
 
-- Migration `0002_identity.sql` runs once on next `cairn init` or any
-  store-opening path. No data migration — no records exist yet.
+- Migration `0002_identity.sql` runs the first time the SQLite store is
+  opened. The store is opened by `cairn identity init-defaults`, by
+  any future verb that touches the registry, or explicitly by the operator.
 - The `usr:` → `hmn:` rename is a breaking change to the IDL primitive but
   no signed records exist in any vault, so there is no on-disk migration.
-- Bootstrap upgrade path: existing dev vaults (none in production) get
-  default identities provisioned on next `cairn init` call; idempotent.
+- Existing dev vaults (none in production) initialize identities via
+  `cairn identity init-defaults`; idempotent. `cairn bootstrap` is
+  unchanged and remains safe to run in headless / keychain-less
+  environments.
 
 ## 10. Acceptance check (from issue #50)
 
@@ -374,10 +480,14 @@ This is a teaser; the real implementation plan is written next via the
 `writing-plans` skill.
 
 1. Brief alignment + IDL primitive: `usr:` → `hmn:`. Re-run codegen.
-2. `cairn-core` types + traits + provisioning logic + tests.
+2. `cairn-core` types + traits + provisioning logic + tests (incl. the
+   `pending → active → revoked` state machine as pure functions).
 3. `cairn-test-fixtures::keystore::MemoryKeystore`.
-4. `cairn-store-sqlite` migration + `SqliteIdentityRegistry` + tests.
+4. `cairn-store-sqlite` migration + `SqliteIdentityRegistry` + reconciliation
+   on `open` + tests.
 5. `cairn-keychain` crate + per-OS round-trip tests.
-6. `cairn-cli identity` subcommand + bootstrap wiring + snapshot tests.
+6. `cairn-cli identity` subcommand (`provision`, `init-defaults`, `list`,
+   `show`, `rotate`, `revoke`, `reconcile`) + snapshot tests. **No change to
+   `cairn bootstrap`.**
 7. `cairn-sensors-local::provision_sensor_identity` helper + test.
 8. Verification checklist run; PR.
