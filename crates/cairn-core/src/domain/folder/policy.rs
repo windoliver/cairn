@@ -9,6 +9,12 @@ use crate::domain::{MemoryKind, MemoryVisibility};
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FolderPolicy {
+    /// Self-describing folder path; informational only — not validated against
+    /// the file's actual location, and not propagated to [`EffectivePolicy`].
+    /// Allows the brief §3.4 canonical YAML example to round-trip cleanly
+    /// under `deny_unknown_fields`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     /// Single-line per-folder purpose; echoed into `_index.md` frontmatter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -24,9 +30,9 @@ pub struct FolderPolicy {
     /// Agent that owns summary regeneration for this folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent: Option<String>,
-    /// Retention policy override.
+    /// Retention policy override (brief §3.4: `retention_days`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention: Option<RetentionPolicy>,
+    pub retention_days: Option<RetentionPolicy>,
     /// Cap for `_summary.md` regeneration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_max_tokens: Option<u32>,
@@ -128,7 +134,7 @@ pub struct EffectivePolicy {
     /// Owning agent; `None` if unset anywhere in the chain.
     pub owner_agent: Option<String>,
     /// Retention; falls back to `Unlimited`.
-    pub retention: RetentionPolicy,
+    pub retention_days: RetentionPolicy,
     /// Summary token cap; falls back to 200.
     pub summary_max_tokens: u32,
     /// Folder paths that contributed, shallowest first, deepest last.
@@ -143,7 +149,7 @@ impl Default for EffectivePolicy {
             visibility_default: crate::domain::MemoryVisibility::Private,
             consolidation_cadence: ConsolidationCadence::Daily,
             owner_agent: None,
-            retention: RetentionPolicy::Unlimited,
+            retention_days: RetentionPolicy::Unlimited,
             summary_max_tokens: 200,
             source_chain: Vec::new(),
         }
@@ -191,8 +197,8 @@ pub fn resolve_policy(
         if let Some(v) = &p.owner_agent {
             effective.owner_agent = Some(v.clone());
         }
-        if let Some(v) = p.retention {
-            effective.retention = v;
+        if let Some(v) = p.retention_days {
+            effective.retention_days = v;
         }
         if let Some(v) = p.summary_max_tokens {
             effective.summary_max_tokens = v;
@@ -213,7 +219,7 @@ allowed_kinds: [user, feedback]
 visibility_default: private
 consolidation_cadence: weekly
 owner_agent: agt:cairn-librarian:v2
-retention: 90
+retention_days: 90
 summary_max_tokens: 300
 ";
         let policy = parse_policy(yaml).expect("parse");
@@ -228,7 +234,40 @@ summary_max_tokens: 300
             policy.owner_agent.as_deref(),
             Some("agt:cairn-librarian:v2")
         );
-        assert_eq!(policy.retention, Some(RetentionPolicy::Days(90)));
+        assert_eq!(policy.retention_days, Some(RetentionPolicy::Days(90)));
+        assert_eq!(policy.summary_max_tokens, Some(300));
+    }
+
+    #[test]
+    fn parse_brief_canonical_example_round_trips() {
+        // Verbatim YAML from brief §3.4 (lines 905-913 of design-brief.md). Must
+        // parse cleanly under deny_unknown_fields, otherwise users following the
+        // brief get a PolicyParse error on day one.
+        let yaml = "\
+folder: wiki/entities/people
+allowed_kinds: [entity, reasoning]
+visibility_default: private
+consolidation_cadence: weekly
+owner_agent: agt:cairn-librarian:v2
+retention_days: unlimited
+summary_max_tokens: 300
+";
+        let policy = parse_policy(yaml).expect("brief canonical example must parse");
+        assert_eq!(policy.folder.as_deref(), Some("wiki/entities/people"));
+        assert_eq!(
+            policy.allowed_kinds.as_deref(),
+            Some(&[MemoryKind::Entity, MemoryKind::Reasoning][..]),
+        );
+        assert_eq!(policy.visibility_default, Some(MemoryVisibility::Private));
+        assert_eq!(
+            policy.consolidation_cadence,
+            Some(ConsolidationCadence::Weekly),
+        );
+        assert_eq!(
+            policy.owner_agent.as_deref(),
+            Some("agt:cairn-librarian:v2"),
+        );
+        assert_eq!(policy.retention_days, Some(RetentionPolicy::Unlimited));
         assert_eq!(policy.summary_max_tokens, Some(300));
     }
 
@@ -256,9 +295,9 @@ summary_max_tokens: 300
 
     #[test]
     fn retention_unlimited_round_trip() {
-        let yaml = "retention: unlimited\n";
+        let yaml = "retention_days: unlimited\n";
         let policy = parse_policy(yaml).expect("parse");
-        assert_eq!(policy.retention, Some(RetentionPolicy::Unlimited));
+        assert_eq!(policy.retention_days, Some(RetentionPolicy::Unlimited));
     }
 
     use std::collections::BTreeMap;
@@ -274,7 +313,7 @@ summary_max_tokens: 300
         let resolved = resolve_policy(target, &empty_chain());
         assert_eq!(resolved.visibility_default, MemoryVisibility::Private);
         assert_eq!(resolved.consolidation_cadence, ConsolidationCadence::Daily);
-        assert_eq!(resolved.retention, RetentionPolicy::Unlimited);
+        assert_eq!(resolved.retention_days, RetentionPolicy::Unlimited);
         assert_eq!(resolved.summary_max_tokens, 200);
         assert!(resolved.purpose.is_none());
         assert!(resolved.allowed_kinds.is_none());
@@ -417,12 +456,13 @@ summary_max_tokens: 300
             proptest::option::of(1u32..=1024),
         )
             .prop_map(|(purpose, cadence, retention, summary)| FolderPolicy {
+                folder: None,
                 purpose,
                 allowed_kinds: None,
                 visibility_default: None,
                 consolidation_cadence: cadence,
                 owner_agent: None,
-                retention,
+                retention_days: retention,
                 summary_max_tokens: summary,
             })
     }
