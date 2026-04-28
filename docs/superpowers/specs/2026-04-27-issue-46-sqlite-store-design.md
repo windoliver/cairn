@@ -105,41 +105,63 @@ pub trait MemoryStore: Send + Sync {
 }
 ```
 
-### 4.2 `MemoryStoreTx` (sealed)
+### 4.2 `MemoryStoreTx` (sealed, **sync** methods)
 
 ```rust
-#[async_trait::async_trait]
-pub trait MemoryStoreTx: Send {
-    async fn upsert(&mut self, record: &MemoryRecord) -> Result<(), StoreError>;
-    async fn tombstone(&mut self, id: &RecordId, actor: &ActorRef)
+pub trait MemoryStoreTx: sealed::Sealed + Send {
+    fn upsert(&mut self, record: &MemoryRecord) -> Result<(), StoreError>;
+    fn tombstone(&mut self, id: &RecordId, actor: &ActorRef)
         -> Result<(), StoreError>;
-    async fn expire(&mut self, id: &RecordId, at: Timestamp)
+    fn expire(&mut self, id: &RecordId, at: Timestamp)
         -> Result<(), StoreError>;
-    async fn purge(&mut self, id: &RecordId, journal: &ConsentJournalRef)
-        -> Result<(), StoreError>;
-    async fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError>;
-    async fn remove_edge(
+    fn purge(&mut self, id: &RecordId, journal: &ConsentJournalEntry)
+        -> Result<PurgeOutcome, StoreError>;
+    fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError>;
+    fn remove_edge(
         &mut self, from: &RecordId, to: &RecordId, kind: EdgeKind,
     ) -> Result<(), StoreError>;
 }
 ```
 
+Methods are **synchronous** because `rusqlite::Transaction<'_>` borrows the
+connection and is `!Send`/single-thread by construction. Async-per-method
+plus `spawn_blocking`-per-call cannot preserve a single SQLite tx across
+hops without `unsafe` or runtime blocking. So:
+
+### 4.3 Tx execution model
+
+```rust
+// MemoryStore::with_tx — async outer, sync inner closure
+async fn with_tx<F, T>(&self, f: F) -> Result<T, StoreError>
+where
+    F: FnOnce(&mut dyn MemoryStoreTx) -> Result<T, StoreError> + Send + 'static,
+    T: Send + 'static,
+```
+
+- The closure is **`FnOnce(&mut dyn MemoryStoreTx) -> Result<T>`** —
+  synchronous, no `BoxFuture`, no async per call.
+- `with_tx` does a single `tokio::task::spawn_blocking` that:
+  1. Locks the connection (`tokio::sync::Mutex` async-acquired before the
+     blocking hop, or held by the store across the hop via a
+     short-lived `OwnedMutexGuard` move).
+  2. Begins a `rusqlite::Transaction`.
+  3. Constructs a `SqliteMemoryStoreTx<'_>` wrapping the tx handle.
+  4. Calls the closure, awaits its sync result.
+  5. Commits on `Ok`, rolls back on `Err` or `panic` (transaction is dropped
+     on panic → automatic rollback via `rusqlite`'s drop guard).
+  6. Returns `T` to the caller.
+
+Compile-time guarantee: callers cannot leak the `&mut dyn MemoryStoreTx`
+beyond the closure (no `'static`-bound on `&mut`), and they cannot stash an
+owned tx because the trait is sealed.
+
+`async_trait` is therefore unnecessary on `MemoryStoreTx` (no async methods).
+`MemoryStore` itself keeps `async_trait` for `dyn` compatibility on the
+read-path methods and `with_tx`.
+
 Sealed via private supertrait (`mod sealed { pub trait Sealed {} }`) — no
 third-party impls. Justification: tx semantics couple tightly to backend
 internals; opening this for external impl invites correctness footguns.
-
-### 4.3 Why closure-based tx
-
-- **Compile-time guarantee** the tx is committed or rolled back — no leaked
-  open transactions if the caller panics or returns early.
-- Mirrors `sqlx::Pool::begin` / `tokio::task::spawn_blocking` ergonomics.
-- Lets `&mut dyn MemoryStoreTx` be `dyn`-compatible without leaking
-  connection lifetimes through the public type.
-
-The `BoxFuture` indirection is the price for `dyn`-compatibility +
-`async fn` in trait + closure args. Native RPITIT can't express
-`for<'tx> FnOnce(&'tx mut dyn Trait) -> impl Future` cleanly until
-async-closures stabilize.
 
 ## 5. Data model
 
@@ -170,25 +192,44 @@ async-closures stabilize.
   remains in `records` but flagged.
 - `expire(id, at)` — copy current row to `record_versions` with
   `change_kind=expire`, set `records.expired_at`. Row remains.
-- `purge(id, journal)` — physical deletion. In a single tx:
-  1. Write the supplied consent entry to `consent_journal` (raw row insert —
-     the table ships in #46 even though the consent UX/lint surface lands in
-     #17). Open `consent_journal_ref` is the row's PK; supplying a stale or
-     non-matching ref → `StoreError::Invariant`.
-  2. DELETE every row from `record_versions` where `record_id = id` (no
+- `purge(id, journal) -> PurgeOutcome` — physical deletion. **Idempotent.**
+  In a single tx:
+  1. Look up any existing purge marker for `id` in `record_versions` with
+     `change_kind=purge`.
+     - If found and its `consent_journal_id` resolves to a `consent_journal`
+       row whose contents are byte-equal to the supplied `journal` entry →
+       commit no-op tx, return `PurgeOutcome::AlreadyPurged { marker_id }`.
+       (Retry-after-commit/timeout path: caller sees deterministic success.)
+     - If found and the journal does not match → `StoreError::Conflict {
+       kind: ConsentMismatch }`. Operator must reconcile.
+  2. Otherwise: write the supplied consent entry to `consent_journal` (raw
+     row insert — the table ships in #46 even though the consent UX/lint
+     surface lands in #17). Capture the new journal row id.
+  3. DELETE every row from `record_versions` where `record_id = id` (no
      redaction-by-update — full row delete; bodies are not recoverable from
      the history table).
-  3. DELETE from `records` where `id = id`.
-  4. INSERT one final marker row into `record_versions` with
+  4. DELETE every row from `edges` where `from_id = id OR to_id = id`.
+  5. DELETE every row from `edge_versions` where `from_id = id OR to_id = id`
+     (covers historical edges that referenced the purged record).
+  6. DELETE from `records` where `id = id`.
+  7. DELETE matching rows from `records_fts` and (when present)
+     `records_vec` so derived indexes carry no residual content.
+  8. INSERT one final marker row into `record_versions` with
      `change_kind=purge`, body NULL, and `consent_journal_id` foreign-keying
      the just-written journal row. This row is the only post-purge artefact
      and contains no payload — only metadata + audit pointer.
-  5. DELETE matching rows from `records_fts` and (when present) `records_vec`
-     so derived indexes carry no residual content.
+  9. Return `PurgeOutcome::Purged { marker_id }`.
+
+  `PurgeOutcome` is `enum { Purged { marker_id: i64 }, AlreadyPurged {
+  marker_id: i64 } }` — callers can distinguish first-purge from idempotent
+  retry, but both are success.
 
   Acceptance: after `purge`, querying `record_versions` for the id returns
-  exactly one row (the marker) with `body IS NULL`; full-text search over the
-  body returns zero hits; `consent_journal` contains a permanent audit row.
+  exactly one row (the marker) with `body IS NULL`; FTS search for prior
+  body content returns zero hits; no row in `edges` / `edge_versions`
+  references the id; `consent_journal` contains exactly one audit row;
+  calling `purge` again with the same `(id, journal)` returns
+  `AlreadyPurged` and writes nothing.
 
 `get`/`list` filter out tombstoned and expired rows by default. `ListQuery`
 exposes `include_tombstoned: bool` / `include_expired: bool` toggles for
@@ -302,7 +343,7 @@ MemoryStoreCapabilities { fts: true, vector: false, graph_edges: true, transacti
 | File | Coverage |
 |---|---|
 | `crud_roundtrip.rs` | `upsert` → `get` returns byte-equal `MemoryRecord` (full provenance, actor_chain, evidence, scope, confidence, salience). |
-| `versioning.rs` | `upsert` × 2 → `tombstone` → `expire` → `purge` sequence. Pre-purge: `version_history` returns 4 rows. Post-purge: `version_history` returns exactly 1 row (the purge marker) with `body IS NULL`; FTS query for any prior body content returns zero hits; `consent_journal` contains the audit row referenced by the marker. |
+| `versioning.rs` | `upsert` × 2 → `tombstone` → `expire` → `purge` sequence. Pre-purge: `version_history` returns 4 rows. Post-purge: `version_history` returns exactly 1 row (the purge marker) with `body IS NULL`; FTS query for any prior body content returns zero hits; `consent_journal` contains the audit row referenced by the marker; `edges` and `edge_versions` contain zero rows referencing the purged id (after seeding edges before purge). Calling `purge` a second time with the same `(id, journal)` returns `PurgeOutcome::AlreadyPurged` and is a database no-op. |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back, connection still usable. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open. |
