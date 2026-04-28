@@ -167,7 +167,7 @@ fn ingest_rejects_schema_minlength_violations() {
         tags: None,
         url: None,
     };
-    let cases: [(&str, IngestArgs); 11] = [
+    let cases: [(&str, IngestArgs); 15] = [
         ("body", IngestArgs { body: Some(String::new()), ..bases() }),
         ("file", IngestArgs { body: None, file: Some(String::new()), ..bases() }),
         ("url",  IngestArgs { body: None, url: Some(String::new()), ..bases() }),
@@ -176,6 +176,11 @@ fn ingest_rejects_schema_minlength_violations() {
         ("url",  IngestArgs { body: None, url: Some("http:".to_owned()), ..bases() }),
         ("url",  IngestArgs { body: None, url: Some(":rest".to_owned()), ..bases() }),
         ("url",  IngestArgs { body: None, url: Some("1bad:rest".to_owned()), ..bases() }),
+        // Whitespace / control chars in any position must reject:
+        ("url",  IngestArgs { body: None, url: Some("http: ".to_owned()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some("http:\nfoo".to_owned()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some("http:\tfoo".to_owned()), ..bases() }),
+        ("url",  IngestArgs { body: None, url: Some("http:\u{0007}foo".to_owned()), ..bases() }),
         ("kind", IngestArgs { kind: String::new(), ..bases() }),
         ("session_id", IngestArgs { session_id: Some(String::new()), ..bases() }),
         ("tags", IngestArgs { tags: Some(vec![String::new()]), ..bases() }),

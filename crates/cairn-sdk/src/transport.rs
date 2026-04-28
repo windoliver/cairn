@@ -353,6 +353,14 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
     if s.is_empty() {
         return Err(invalid("url: must not be empty"));
     }
+    // RFC 3986 forbids ASCII whitespace and control characters anywhere in
+    // the URI; reject them upfront so values like "http: " or
+    // "http:\npath" cannot slip through the structural floor.
+    if s.chars()
+        .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+    {
+        return Err(invalid("url: must not contain whitespace or control chars"));
+    }
     let Some(colon) = s.find(':') else {
         return Err(invalid("url: must be a valid URI"));
     };
