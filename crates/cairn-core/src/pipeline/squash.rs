@@ -466,3 +466,40 @@ pub struct SquashStats {
     pub long_lines_truncated: usize,
     pub truncated: bool,
 }
+
+use std::borrow::Cow;
+
+/// Stage 1: lossy UTF-8 decode. Invalid byte sequences become
+/// U+FFFD; valid input passes through borrowed.
+#[allow(dead_code)] // Used by higher stages in later tasks
+fn stage1_lossy_utf8(raw: &[u8]) -> Cow<'_, str> {
+    String::from_utf8_lossy(raw)
+}
+
+#[cfg(test)]
+mod stage1_tests {
+    use super::*;
+
+    #[test]
+    fn valid_ascii_passes_through() {
+        assert_eq!(stage1_lossy_utf8(b"hello\n").as_ref(), "hello\n");
+    }
+
+    #[test]
+    fn valid_utf8_passes_through() {
+        let s = "héllo こんにちは\n";
+        assert_eq!(stage1_lossy_utf8(s.as_bytes()).as_ref(), s);
+    }
+
+    #[test]
+    fn invalid_utf8_replaced_with_u_fffd() {
+        let bytes = b"a\xFFb";
+        let out = stage1_lossy_utf8(bytes);
+        assert_eq!(out.as_ref(), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn empty_input_yields_empty() {
+        assert_eq!(stage1_lossy_utf8(b"").as_ref(), "");
+    }
+}
