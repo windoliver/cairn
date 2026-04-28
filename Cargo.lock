@@ -343,6 +343,7 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

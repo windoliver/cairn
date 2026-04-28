@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio_rusqlite = { workspace = true }
 tracing = { workspace = true }
+ulid = { workspace = true }
 
 [features]
 default = []

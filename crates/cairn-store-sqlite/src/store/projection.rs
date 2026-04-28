@@ -259,8 +259,8 @@ mod tests {
     fn json_round_trip_via_projection() {
         let r = sample();
         let body_hash = BodyHash::compute(&r.body);
-        let row = ProjectedRow::from_record(&r, 1, 1000, 2000, &body_hash, true, false)
-            .expect("project");
+        let row =
+            ProjectedRow::from_record(&r, 1, 1000, 2000, &body_hash, true, false).expect("project");
         let back = record_from_json(&row.record_json).expect("hydrate");
         assert_eq!(r, back);
     }
@@ -269,8 +269,11 @@ mod tests {
     fn target_id_explicit_mirrors_record() {
         let r = sample();
         let body_hash = BodyHash::compute(&r.body);
-        let row = ProjectedRow::from_record(&r, 1, 1000, 2000, &body_hash, true, false)
-            .expect("project");
-        assert_eq!(row.target_id_explicit.as_deref(), Some(r.target_id.as_str()));
+        let row =
+            ProjectedRow::from_record(&r, 1, 1000, 2000, &body_hash, true, false).expect("project");
+        assert_eq!(
+            row.target_id_explicit.as_deref(),
+            Some(r.target_id.as_str())
+        );
     }
 }

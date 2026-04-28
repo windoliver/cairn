@@ -770,8 +770,8 @@ pub mod tests_export {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::tests_export::sample_record;
+    use super::*;
     use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
     #[test]

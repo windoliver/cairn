@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use tokio_rusqlite::Connection as AsyncConn;
 
+use crate::error::StoreError;
+
 /// Async-fronted `SQLite` memory store.
 ///
 /// Two construction paths:
@@ -28,6 +30,26 @@ use tokio_rusqlite::Connection as AsyncConn;
 #[derive(Default, Clone)]
 pub struct SqliteMemoryStore {
     pub(crate) conn: Option<Arc<AsyncConn>>,
+}
+
+impl SqliteMemoryStore {
+    /// Borrow the underlying `tokio_rusqlite` handle, returning a typed
+    /// `not initialized` error when the store was constructed via
+    /// [`Default::default`] (registry stub).
+    ///
+    /// The trait-level `MemoryStore` impl performs an early `is_none` guard
+    /// before dispatching into the per-method `do_*` inherent methods; those
+    /// inherent methods route through this helper so the guard message stays
+    /// in one place and shared between the trait surface and any internal
+    /// caller that might bypass the trait.
+    pub(crate) fn require_conn(&self, method: &'static str) -> Result<&Arc<AsyncConn>, StoreError> {
+        self.conn.as_ref().ok_or_else(|| StoreError::Invariant {
+            what: format!(
+                "cairn-store-sqlite: {method} called on unconnected store \
+                 (use cairn_store_sqlite::open(path).await first)"
+            ),
+        })
+    }
 }
 
 impl std::fmt::Debug for SqliteMemoryStore {

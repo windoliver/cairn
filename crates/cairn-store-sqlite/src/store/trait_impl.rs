@@ -42,11 +42,11 @@ impl MemoryStore for SqliteMemoryStore {
         ACCEPTED_RANGE
     }
 
-    async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+    async fn upsert(&self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
         if self.conn.is_none() {
             return not_initialized("upsert");
         }
-        not_implemented("upsert", 46)
+        self.do_upsert(record).await.map_err(Into::into)
     }
 
     async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
