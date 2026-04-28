@@ -121,12 +121,13 @@ pub trait MemoryStore: Send + Sync {
     /// line 1624). The query lets the verb layer push filters down to SQL.
     async fn list(&self, query: &ListQuery) -> Result<Vec<MemoryRecord>, StoreError>;
 
-    /// Full version history for a logical `target_id`, ordered by `version`
-    /// ascending. Includes superseded (active=0), tombstoned, and expired
-    /// versions. Used by audit/forensic paths and by the WAL executor when
-    /// computing pre-images.
+    /// Full lifecycle history for a logical `target_id`. Returns concrete
+    /// `Version` entries first (ordered by `version` ASC, including
+    /// superseded/tombstoned/expired rows), then any `Purge` markers from
+    /// `record_purges`. Used by audit/forensic paths and by the WAL
+    /// executor when computing pre-images. See §5.4 for `HistoryEntry`.
     async fn version_history(&self, target_id: &TargetId)
-        -> Result<Vec<RecordVersion>, StoreError>;
+        -> Result<Vec<HistoryEntry>, StoreError>;
 }
 ```
 
@@ -198,14 +199,20 @@ pub mod apply {
             &mut self, target_id: &TargetId, at: Timestamp,
         ) -> Result<(), StoreError>;
 
-        /// Phase B primitive: DELETE every row with `target_id`. Caller
-        /// is the WAL state machine; this method does not touch
-        /// `consent_journal` or `wal_ops` (those are the executor's job).
-        /// Edges/edge_versions where from_id or to_id == record_id of any
-        /// version are also drained — the brief audit invariant (line
-        /// 2030) requires no edge survives `forget_record`.
-        fn purge_target(&mut self, target_id: &TargetId)
-            -> Result<(), StoreError>;
+        /// Phase B primitive. In one tx: write a `record_purges` audit
+        /// marker keyed by `(target_id, op_id)` (idempotent — repeat with
+        /// the same `op_id` is a no-op), then DELETE every row with
+        /// `target_id` plus matching `edges`/`edge_versions`/`records_fts`
+        /// rows. The brief audit invariant (line 2030) requires no body
+        /// or edge survives; the marker carries no body, only audit
+        /// metadata. This method does not touch `consent_journal` or
+        /// `wal_ops` — those are the executor's job.
+        fn purge_target(
+            &mut self,
+            target_id: &TargetId,
+            op_id: &OpId,
+            actor: &ActorRef,
+        ) -> Result<PurgeOutcome, StoreError>;
 
         fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError>;
         fn remove_edge(
@@ -277,8 +284,13 @@ CREATE TABLE records (
   version        INTEGER NOT NULL,                 -- monotonic per target_id
   active         INTEGER NOT NULL DEFAULT 0,       -- 1 for currently visible
   tombstoned     INTEGER NOT NULL DEFAULT 0,       -- set on every version during forget
-  expired_at     TEXT,                             -- ISO-8601; non-null hides from get/list
-  created_at     TEXT NOT NULL,
+  -- lifecycle audit columns (populated once each, never overwritten)
+  created_at     TEXT NOT NULL,                    -- ISO-8601; set on stage_version
+  created_by     TEXT NOT NULL,                    -- ActorRef of stage_version caller
+  tombstoned_at  TEXT,                             -- ISO-8601; set once on tombstone_target
+  tombstoned_by  TEXT,                             -- ActorRef of tombstone_target caller
+  expired_at     TEXT,                             -- ISO-8601; set once on expire_active
+  -- payload + metadata
   body           TEXT NOT NULL,
   provenance     TEXT NOT NULL,                    -- JSON
   actor_chain    TEXT NOT NULL,                    -- JSON
@@ -288,6 +300,17 @@ CREATE TABLE records (
   confidence     REAL NOT NULL,
   salience       REAL NOT NULL,
   UNIQUE (target_id, version)
+) STRICT;
+
+-- Append-only audit marker table, keyed by (target_id, op_id) for
+-- idempotency. Survives every records DELETE issued by purge_target.
+CREATE TABLE record_purges (
+  target_id        TEXT NOT NULL,
+  op_id            TEXT NOT NULL,
+  purged_at        TEXT NOT NULL,
+  purged_by        TEXT NOT NULL,                  -- ActorRef
+  body_hash_salt   TEXT NOT NULL,
+  PRIMARY KEY (target_id, op_id)
 ) STRICT;
 
 CREATE UNIQUE INDEX records_active_target_idx
@@ -344,21 +367,41 @@ CREATE INDEX records_target_idx ON records(target_id);
 
 ### 5.4 `version_history` semantics
 
-Returns a `Vec<RecordVersion>` reconstructed from BOTH `records` and
-`record_purges` rows for the given `target_id`, ordered by `version` ASC
-(records first, then a synthesized purge marker if `record_purges` has
-an entry).
-
-Each `RecordVersion` carries the **full lifecycle event log** for that
-version, not a single derived `change_kind`:
+Signature:
 
 ```rust
+async fn version_history(&self, target_id: &TargetId)
+    -> Result<Vec<HistoryEntry>, StoreError>;
+```
+
+`HistoryEntry` is an enum so a purged target — which has no `record_id`
+because every `records` row is gone — has its own variant rather than a
+sentinel `RecordVersion`:
+
+```rust
+#[non_exhaustive]
+pub enum HistoryEntry {
+    /// One concrete version of the record. Sourced from a `records` row
+    /// that still exists.
+    Version(RecordVersion),
+    /// A purge audit marker. Sourced from `record_purges`. No body, no
+    /// `record_id` — only `target_id`, `op_id`, and the purge event.
+    Purge(PurgeMarker),
+}
+
 pub struct RecordVersion {
-    pub record_id: RecordId,        // per-version
+    pub record_id: RecordId,        // per-version, always present
     pub target_id: TargetId,
     pub version: u64,
     pub active: bool,
     pub events: Vec<RecordEvent>,   // ordered by event timestamp ASC
+}
+
+pub struct PurgeMarker {
+    pub target_id: TargetId,
+    pub op_id: OpId,
+    pub event: RecordEvent,         // kind = Purge
+    pub body_hash_salt: String,
 }
 
 pub struct RecordEvent {
@@ -368,27 +411,30 @@ pub struct RecordEvent {
 }
 ```
 
-Lifecycle events are sourced from row columns:
+Order: all `Version` entries first, sorted by `version` ASC; then any
+`Purge` entries from `record_purges` for the target, sorted by
+`purged_at` ASC.
 
-- `events[0]` always exists with `kind=Update, at=created_at, actor=
-  created_by` — the version's birth.
-- If `tombstoned_at` is non-NULL: append `kind=Tombstone, at=
-  tombstoned_at, actor=tombstoned_by`. Because `tombstoned_at` is
-  immutable (set once on Phase A and never overwritten), tombstoning a
-  target with multiple versions does **not** rewrite earlier `Update`
-  events — every version still reports its `Update` at birth and a
-  later `Tombstone` event at the tombstone time. Forensic queries see
-  the full sequence.
-- If `expired_at` is non-NULL on the active version: append
-  `kind=Expire, at=expired_at, actor=None`.
+Per-version lifecycle events are sourced from immutable row columns:
 
-For purged targets, `version_history` synthesizes one trailing
-`RecordVersion` with `version = u64::MAX`, no `record_id`, and a single
-`events` entry of `kind=Purge, at=record_purges.purged_at, actor=
-record_purges.purged_by`. The body is gone but the audit fact survives.
+- `events[0]` always exists: `kind=Update, at=created_at,
+  actor=Some(created_by)` — the version's birth.
+- If `tombstoned_at` is non-NULL: append `kind=Tombstone,
+  at=tombstoned_at, actor=Some(tombstoned_by)`. Because `tombstoned_at`
+  is immutable (set once on Phase A and never overwritten), tombstoning
+  a target with multiple versions does **not** rewrite earlier `Update`
+  events — every version still reports its birth `Update` and a later
+  `Tombstone` event at the tombstone time.
+- If `expired_at` is non-NULL on the active version: append `kind=Expire,
+  at=expired_at, actor=None`.
 
-`ChangeKind::Purge` is therefore an emitted variant in #46 (sourced
-from `record_purges`), not a reserved-only variant.
+For purged targets, `version_history` returns one or more
+`HistoryEntry::Purge` entries (one per `record_purges` row — every retry
+under a different `op_id` becomes its own marker; same `op_id` retries
+are coalesced by the PK). The body is gone but the audit fact survives.
+
+`ChangeKind::Purge` is an emitted variant in #46 (sourced from
+`record_purges` rows), not a reserved-only variant.
 
 ### 5.5 Edge semantics
 
@@ -511,10 +557,10 @@ mint an `ApplyToken` and exercise `MemoryStoreApply`.
 |---|---|
 | `crud_roundtrip.rs` | `stage_version` → `activate_version` → `get` returns byte-equal `MemoryRecord` (full provenance, actor_chain, evidence, scope, confidence, salience). |
 | `cow_versioning.rs` | Stage v1 → activate v1 → stage v2 → activate v2 → assert: (a) `version_history(target)` returns 2 rows; (b) `get(target)` returns v2's body; (c) partial unique index rejects a second active row; (d) FTS5 returns only v2 because read filter joins on `active=1`. |
-| `tombstone_preserves_history.rs` | Stage v1 → activate → stage v2 → activate → tombstone target. Assert `version_history` returns 2 `RecordVersion` entries; v1's events are `[Update(at=v1.created_at), Tombstone(at=ts)]`; v2's events are `[Update(at=v2.created_at), Tombstone(at=ts)]`. **The earlier Update events are not rewritten.** `get` returns `None`. |
+| `tombstone_preserves_history.rs` | Stage v1 → activate → stage v2 → activate → tombstone target. Assert `version_history` returns 2 `HistoryEntry::Version` entries; v1's events are `[Update(at=v1.created_at), Tombstone(at=ts)]`; v2's events are `[Update(at=v2.created_at), Tombstone(at=ts)]`. **The earlier Update events are not rewritten.** `get` returns `None`. |
 | `expire_active.rs` | Expire active version → `get` returns `None` after the expiry; `include_expired=true` surfaces it; FTS5 search for the body returns zero hits **without** `include_expired` (covers expiry fence in §5.1 records_fts row). |
 | `activate_validates_existence.rs` | `activate_version(target, version=999)` for a non-existent version → returns `StoreError::NotFound`, no row's `active` flag changes (assert by reading post-error). Re-issue with the correct version → succeeds; exactly one active row. |
-| `purge_audit_marker.rs` | Stage 3 versions + edges + FTS rows, then `purge_target(target, op_id, actor)` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts`; **assert one row in `record_purges`**; `version_history(target)` returns one synthesized `RecordVersion` with `events=[Purge(at, by=actor)]`. Re-invoking with the same `op_id` is a no-op (idempotency key UNIQUE on `(target_id, op_id)`). |
+| `purge_audit_marker.rs` | Stage 3 versions + edges + FTS rows, then `purge_target(target, op_id, actor)` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts`; **assert one row in `record_purges`** with `purged_by=actor`; `version_history(target)` returns one `HistoryEntry::Purge` with `event.kind=Purge`, `event.at=purged_at`, `event.actor=Some(actor)`. Re-invoking with the same `op_id` returns `PurgeOutcome::AlreadyPurged` and writes nothing (PK on `(target_id, op_id)` enforces idempotency). |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back (rusqlite drop guard), connection still usable for the next `with_apply_tx`. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open; migration ids/checksums match across `cargo test --no-default-features` and `cargo test --all-features`. |
