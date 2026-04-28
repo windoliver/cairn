@@ -75,7 +75,7 @@ fn bench_squash(c: &mut Criterion) {
 
     c.bench_function("squash 50KB", |b| {
         b.iter(|| {
-            let w = UnstructuredTextBytes::try_from_terminal_event(
+            let w = UnstructuredTextBytes::try_from_terminal_event_unstable(
                 &evt,
                 &raw,
                 TerminalContext::InteractiveTty,

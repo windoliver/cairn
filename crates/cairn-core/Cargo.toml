@@ -25,9 +25,16 @@ proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
 
+[features]
+# Exposes unstable APIs needed by benches and out-of-crate dev consumers
+# while #218 (TerminalContext binding) is open. Not enabled by default;
+# never depend on this feature in non-dev builds.
+internal-unstable = []
+
 [lints]
 workspace = true
 
 [[bench]]
 name = "squash"
 harness = false
+required-features = ["internal-unstable"]

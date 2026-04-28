@@ -206,19 +206,25 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// terminal context.
     ///
     /// # Stability
-    /// Hidden from public docs and considered unstable until #218 lands.
-    /// The current signature accepts `TerminalContext` as a side input,
-    /// which lets a misbehaving caller reclassify a stored structured
-    /// payload as interactive and lose machine-readable bytes through
-    /// squash. Once `TerminalContext` is persisted on
-    /// `CapturePayload::Terminal` (see #218), this becomes derivable from
-    /// the event alone and the API stabilizes.
+    /// `pub(crate)` until #218 lands. The current signature accepts
+    /// `TerminalContext` as a side input, which lets a misbehaving caller
+    /// reclassify a stored structured payload as interactive and lose
+    /// machine-readable bytes through squash. Once `TerminalContext` is
+    /// persisted on `CapturePayload::Terminal` (see #218), this becomes
+    /// derivable from the event alone and the API stabilizes. A
+    /// feature-gated public shim
+    /// (`try_from_terminal_event_unstable`) exists for benches and
+    /// in-tree dev consumers; that shim is only compiled with
+    /// `--features internal-unstable` and must not be used in production.
     ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, or
     /// `StructuredContextRejected` per the spec's caller contract.
-    #[doc(hidden)]
-    pub fn try_from_terminal_event(
+    // Only reachable from #[cfg(test)] modules and the
+    // `internal-unstable` feature shim; default-feature non-test builds
+    // legitimately leave it dead.
+    #[allow(dead_code)]
+    pub(crate) fn try_from_terminal_event(
         event: &CaptureEvent,
         raw: &'a [u8],
         context: TerminalContext,
@@ -251,6 +257,27 @@ impl<'a> UnstructuredTextBytes<'a> {
     #[must_use]
     pub fn raw_hash(&self) -> &PayloadHash {
         &self.raw_hash
+    }
+}
+
+/// Unstable shim that forwards to the crate-private constructor.
+/// Compiled only with `--features internal-unstable`. Exists so the
+/// criterion bench (and any in-tree dev tool) can build the wrapper
+/// while #218 is open. Will be removed once `TerminalContext` is
+/// persisted on `CapturePayload::Terminal`.
+#[cfg(feature = "internal-unstable")]
+impl<'a> UnstructuredTextBytes<'a> {
+    /// See [`UnstructuredTextBytes::try_from_terminal_event`].
+    ///
+    /// # Errors
+    /// Same as the crate-private constructor.
+    #[doc(hidden)]
+    pub fn try_from_terminal_event_unstable(
+        event: &CaptureEvent,
+        raw: &'a [u8],
+        context: TerminalContext,
+    ) -> Result<Self, UnstructuredBindError> {
+        Self::try_from_terminal_event(event, raw, context)
     }
 }
 
@@ -1054,8 +1081,18 @@ fn stage6_layout(
         return lines.join("\n");
     }
 
-    let tail_take = cfg.tail_lines().min(lines.len());
-    let tail_start = lines.len() - tail_take;
+    // Tail selection: anchor on the last non-empty (content) line so trailing
+    // blank suffixes never evict the actual final content from the preserved
+    // tail. If all lines are blank, fall back to anchoring on the last index.
+    let last_content_idx = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .unwrap_or(lines.len() - 1);
+    let mut tail_start = lines.len() - cfg.tail_lines().min(lines.len());
+    if tail_start > last_content_idx {
+        tail_start = last_content_idx;
+    }
+    let tail_take = lines.len() - tail_start;
     let tail_slice = &lines[tail_start..];
     let tail_byte_len: usize =
         tail_slice.iter().map(String::len).sum::<usize>() + tail_slice.len().saturating_sub(1);
@@ -1380,6 +1417,32 @@ mod squash_integration_tests {
         assert!(
             out.stats.truncated,
             "stats.truncated must be set when stage 5 truncated"
+        );
+    }
+
+    /// Regression: when an input ends with multiple blank lines, the tail
+    /// must still anchor on the last *non-empty* line — otherwise a trailing
+    /// `\n\n\n` suffix could evict the real final content from the preserved
+    /// tail under truncation pressure.
+    #[test]
+    fn trailing_blank_lines_do_not_evict_last_content_line() {
+        // tail_lines = 2, but the input has 3 trailing blanks. The "natural"
+        // tail (last 2 raw lines) would be `["", ""]`; the fix shifts the
+        // anchor to keep `FINAL` in the tail.
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        // Build many head lines so stage 6 must truncate, then a content line
+        // followed by trailing blanks.
+        let mut raw = Vec::new();
+        for i in 0..200 {
+            raw.extend_from_slice(format!("noise-{i:04}\n").as_bytes());
+        }
+        raw.extend_from_slice(b"FINAL\n\n\n");
+        let out = run_squash(&raw, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(out.stats.truncated);
+        assert!(
+            body.contains("FINAL"),
+            "last non-empty content line must survive trailing blanks; got: {body:?}"
         );
     }
 
