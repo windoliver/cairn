@@ -65,7 +65,7 @@ impl MemoryStore for crate::SqliteMemoryStore {
                      WHERE target_id = ?1 \
                        AND active = 1 \
                        AND tombstoned = 0 \
-                       AND (expired_at IS NULL OR expired_at > datetime('now'))"
+                       AND (expired_at IS NULL OR unixepoch(expired_at) > unixepoch('now'))"
                 ))
                 .map_err(store_err)?;
             let mut rows = stmt.query(params![target_id.as_str()]).map_err(store_err)?;
@@ -100,7 +100,7 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 sql.push_str(" AND tombstoned = 0");
             }
             if !q.include_expired {
-                sql.push_str(" AND (expired_at IS NULL OR expired_at > datetime('now'))");
+                sql.push_str(" AND (expired_at IS NULL OR unixepoch(expired_at) > unixepoch('now'))");
             }
             // Always restrict to active versions for normal reads.
             sql.push_str(" AND active = 1");

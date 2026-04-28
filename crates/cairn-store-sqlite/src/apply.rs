@@ -429,6 +429,26 @@ fn add_edge_impl(conn: &Connection, edge: &Edge) -> Result<(), StoreError> {
     let now = Rfc3339Timestamp::now();
     let kind_str = edge_kind_str(edge.kind);
 
+    // Endpoint integrity: both record_ids must exist in `records`.
+    // Schema-level FKs would require rebuilding the existing table; in
+    // the meantime fail-closed at write time so dangling edges cannot
+    // persist (purge cleanup walks `records`, so dangling rows would be
+    // silently retained).
+    for endpoint in [edge.from.as_str(), edge.to.as_str()] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM records WHERE record_id = ?1",
+                params![endpoint],
+                |r| r.get(0),
+            )
+            .map_err(store_err)?;
+        if exists == 0 {
+            return Err(StoreError::Conflict {
+                kind: ConflictKind::ForeignKey,
+            });
+        }
+    }
+
     let prior: Option<(f64, String)> = conn
         .query_row(
             "SELECT weight, metadata FROM edges \

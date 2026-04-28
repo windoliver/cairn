@@ -16,9 +16,9 @@ use serde_json::Value;
 /// P0 rules:
 /// - `"private"` visibility  → owner match: `scope.user` == principal's
 ///   identity string, OR `scope.agent` == principal's identity string.
-/// - `"session"` visibility  → `scope.session_id` must be non-empty
-///   (P0: no per-session principal field yet; any identified principal
-///   can read session-scoped rows within the single-author vault).
+/// - `"session"` visibility  → owner match (collapses to `private`
+///   semantics until `Principal` carries a session id; granting access
+///   by row-tag alone would leak across users).
 /// - `"team"`, `"org"`, `"public"` → any identified principal may read.
 /// - Unknown / missing visibility → deny (fail closed).
 #[must_use]
@@ -55,19 +55,15 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
             id_str == scope_user || id_str == scope_agent
         }
         "session" => {
-            // TODO(#46-followup): session tier is over-permissive — any
-            // identified principal can read session-scoped rows. Tighten to
-            // require scope.user == principal.identity (collapse to private)
-            // once Principal carries a session id.
-            //
-            // P0 single-author vault: any identified principal may read
-            // session-scoped rows. The row must actually have a session
-            // dimension set; rowless session is treated as private.
-            let row_session = scope
-                .get("session_id")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            !row_session.is_empty()
+            // P0 `Principal` carries no session id, so session tier
+            // collapses to owner-match (private semantics) to fail closed.
+            // Promoting back to per-session rules waits on a follow-up
+            // that adds a session field to `Principal`; until then,
+            // granting access by mere row-tagging would leak one user's
+            // session data to any other identified principal.
+            let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
+            let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
+            id_str == scope_user || id_str == scope_agent
         }
         "team" | "org" | "public" => true,
         _ => false,
