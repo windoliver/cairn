@@ -586,6 +586,25 @@ fn cli_validator_rejects_unknown_prelude_token() {
 }
 
 #[test]
+fn cli_validator_rejects_empty_list_string_item() {
+    // Round-10 finding 2: `ingest --tags` is `list<string>` and its
+    // items declare `minLength: 1`. An empty `--tags ""` value must
+    // fail the gate — the prior code only validated `list<enum(...)>`
+    // and let generic lists through unchecked.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn ingest --kind KIND --body BODY --tags ''".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("empty list<string> item must fail items.minLength");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_inspects_wrapped_cairn_invocation() {
     // Round-8 finding 2: shell-wrapped lines must still be validated.
     // `env DEBUG=1 cairn ingest --bogus` previously slipped past compat

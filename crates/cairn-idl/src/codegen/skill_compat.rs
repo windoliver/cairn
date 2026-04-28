@@ -494,16 +494,63 @@ fn apply_value_validation(
             continue;
         };
         let prop = cmd_props.get(flag.name.as_str());
-        let combined = values.join(",");
-        validate_flag_value(
-            long_name,
-            &combined,
-            &flag.value_source,
-            prop,
-            base_id,
-            owner_defs,
-            source_line,
-        )?;
+        let src = flag.value_source.as_str();
+        if list_enum_options(src).is_some() {
+            // Closed `list<enum(...)>` — the per-element membership +
+            // uniqueItems / minItems checks live in
+            // `validate_list_enum_value`. Reuse the existing path by
+            // joining occurrences and routing through `validate_flag_value`.
+            let combined = values.join(",");
+            validate_flag_value(
+                long_name,
+                &combined,
+                src,
+                prop,
+                base_id,
+                owner_defs,
+                source_line,
+            )?;
+        } else {
+            // Generic `list<...>` (e.g., `list<string>`): build the array
+            // from the raw occurrences and validate against the property
+            // schema so `items.minLength`, `minItems`, `uniqueItems`, etc.
+            // are all enforced. Round-10 finding 2.
+            let bad = move |detail: String| CompatError::Malformed {
+                kind: "cli",
+                detail: format!("flag `--{long_name}`: {detail}"),
+                line: source_line,
+            };
+            if let Some(prop) = prop {
+                check_list_flag_value(values, prop, base_id, owner_defs, &bad)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a generic `list<...>` flag's accumulated values as a JSON array
+/// against the property schema (items, minItems, uniqueItems, etc.) using
+/// the wrapped-schema + retriever path.
+fn check_list_flag_value(
+    values: &[String],
+    prop_schema: &serde_json::Value,
+    base_id: Option<&str>,
+    owner_defs: Option<&serde_json::Value>,
+    bad: &dyn Fn(String) -> CompatError,
+) -> Result<(), CompatError> {
+    let array = serde_json::Value::Array(
+        values
+            .iter()
+            .map(|v| serde_json::Value::String(v.clone()))
+            .collect(),
+    );
+    let wrapper = wrap_property_schema(prop_schema, base_id, owner_defs);
+    let validator = jsonschema::draft202012::options()
+        .with_retriever(SchemaDirRetriever)
+        .build(&wrapper)
+        .map_err(|e| bad(format!("schema compile: {e}")))?;
+    if let Err(err) = validator.validate(&array) {
+        return Err(bad(format!("array {array} violates schema: {err}")));
     }
     Ok(())
 }
@@ -750,11 +797,54 @@ impl referencing::Retrieve for SchemaDirRetriever {
                 "skill-compat retriever: unexpected URI `{raw}` (only `{PREFIX}*` is supported)"
             )
         })?;
-        let path = std::path::Path::new(crate::SCHEMA_DIR).join(rel);
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("skill-compat retriever: read `{}`: {e}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("skill-compat retriever: parse `{}`: {e}", path.display()))?;
+        // Reject path-traversal escapes BEFORE filesystem touch: a `$ref`
+        // containing `..`, an absolute component, or a Windows-style drive
+        // could otherwise read arbitrary local files during codegen
+        // (round-10 finding 1). Canonicalize and verify the result still
+        // sits under SCHEMA_DIR as defence in depth.
+        let rel_path = std::path::Path::new(rel);
+        for component in rel_path.components() {
+            use std::path::Component;
+            match component {
+                Component::Normal(_) => {}
+                _ => {
+                    return Err(format!(
+                        "skill-compat retriever: rejecting non-normal path component in `{rel}`"
+                    )
+                    .into());
+                }
+            }
+        }
+        let root = std::path::Path::new(crate::SCHEMA_DIR);
+        let joined = root.join(rel_path);
+        let canon_root = root
+            .canonicalize()
+            .map_err(|e| format!("skill-compat retriever: canonicalize SCHEMA_DIR: {e}"))?;
+        let canon_target = joined.canonicalize().map_err(|e| {
+            format!(
+                "skill-compat retriever: canonicalize `{}`: {e}",
+                joined.display()
+            )
+        })?;
+        if !canon_target.starts_with(&canon_root) {
+            return Err(format!(
+                "skill-compat retriever: `{}` resolves outside schema root",
+                canon_target.display()
+            )
+            .into());
+        }
+        let bytes = std::fs::read(&canon_target).map_err(|e| {
+            format!(
+                "skill-compat retriever: read `{}`: {e}",
+                canon_target.display()
+            )
+        })?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "skill-compat retriever: parse `{}`: {e}",
+                canon_target.display()
+            )
+        })?;
         Ok(value)
     }
 }
@@ -1215,7 +1305,12 @@ fn scan_tokens<'a>(
                 None
             };
             if let (Some(value), Some(src), Some(field)) = (value, value_source, field_name) {
-                if list_enum_options(src).is_some() {
+                // Aggregate every `list<...>` source (enum and freeform
+                // alike) so the array-as-a-whole is validated against the
+                // property schema. Round-10 found that `list<string>`
+                // flags like `ingest --tags` previously fell through with
+                // no schema check at all.
+                if src.starts_with("list<") {
                     list_flag_values
                         .entry(name.to_string())
                         .or_default()
