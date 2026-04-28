@@ -417,14 +417,17 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// Sync write trait. `with_apply_tx` is the entry point; methods listed
-/// here run inside that closure.
+/// Apply trait. `with_apply_tx` is the entry point; the closure is
+/// synchronous (matches `rusqlite::Transaction`'s thread affinity) but
+/// `with_apply_tx` is async so the implementation can dispatch the
+/// closure to `tokio::task::spawn_blocking` and await the join.
+#[async_trait::async_trait]
 #[allow(clippy::module_name_repetitions)]
 pub trait MemoryStoreApply: sealed::Sealed + Send + Sync {
     /// Run a synchronous closure inside one rusqlite transaction. Commit
     /// on `Ok`; rollback on `Err` or panic. The token-take prevents
     /// callers without a WAL-issued `ApplyToken` from compiling.
-    fn with_apply_tx<F, T>(
+    async fn with_apply_tx<F, T>(
         &self,
         token: ApplyToken,
         f: F,
@@ -561,8 +564,9 @@ mod tests {
 
     impl Sealed for StubStore {}
 
+    #[async_trait::async_trait]
     impl MemoryStoreApply for StubStore {
-        fn with_apply_tx<F, T>(&self, _: ApplyToken, _f: F) -> Result<T, StoreError>
+        async fn with_apply_tx<F, T>(&self, _: ApplyToken, _f: F) -> Result<T, StoreError>
         where
             F: FnOnce(&mut dyn MemoryStoreApplyTx) -> Result<T, StoreError>
                 + Send + 'static,
@@ -577,11 +581,11 @@ mod tests {
         assert!(s.capabilities().fts);
     }
 
-    #[test]
-    fn dyn_compatible_apply() {
+    #[tokio::test]
+    async fn dyn_compatible_apply() {
         let s: Box<dyn MemoryStoreApply> = Box::new(StubStore);
         let token = crate::wal::test_apply_token();
-        let result = s.with_apply_tx(token, |_tx| Ok::<(), StoreError>(()));
+        let result = s.with_apply_tx(token, |_tx| Ok::<(), StoreError>(())).await;
         assert!(matches!(result, Err(StoreError::Invariant(_))));
     }
 }
@@ -1820,8 +1824,9 @@ use rusqlite::{params, Transaction};
 
 impl Sealed for crate::SqliteMemoryStore {}
 
+#[async_trait::async_trait]
 impl MemoryStoreApply for crate::SqliteMemoryStore {
-    fn with_apply_tx<F, T>(
+    async fn with_apply_tx<F, T>(
         &self, _token: ApplyToken, f: F,
     ) -> Result<T, StoreError>
     where
@@ -1832,7 +1837,7 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
         let conn = self.conn.clone();
         // Single spawn_blocking holding the connection for the entire
         // closure. Tokio runtime hop is at the boundaries only.
-        let handle = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let mut conn = conn.blocking_lock();
             let tx = conn.transaction().map_err(store_err)?;
             let mut wrap = SqliteMemoryStoreApplyTx { tx: &tx };
@@ -1841,16 +1846,9 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
                 Ok(v) => { tx.commit().map_err(store_err)?; Ok(v) }
                 Err(e) => { let _ = tx.rollback(); Err(e) }
             }
-        });
-        // Sync wrapper: the impl is sync per trait signature. Block with
-        // the runtime handle. CALLERS MUST INVOKE FROM ASYNC CONTEXT —
-        // the WAL executor in #8 awaits this; #46 tests use
-        // `tokio::runtime::Runtime::block_on` from sync test fns, OR
-        // are themselves `#[tokio::test]` and call this through the
-        // executor's wrapper. We do not call `block_on` inside async
-        // here.
-        futures::executor::block_on(handle)
-            .map_err(|e| StoreError::Backend(Box::new(e)))?
+        })
+        .await
+        .map_err(|e| StoreError::Backend(Box::new(e)))?
     }
 }
 
@@ -2132,44 +2130,7 @@ fn edge_kind_str(k: EdgeKind) -> &'static str {
 }
 ```
 
-Note about `futures::executor::block_on`: that's gated by CLAUDE.md §6.3 ("No `block_on` inside async. No mixing `futures::executor` with tokio."). The trait signature requires sync return, so the alternative is to make `with_apply_tx` itself `async`. **Adapt: make `with_apply_tx` an `async fn` in the trait** (match the read API) and `await` the join. Update `apply.rs` in `cairn-core`:
-
-```rust
-pub trait MemoryStoreApply: sealed::Sealed + Send + Sync {
-    fn with_apply_tx<'a, F, T>(
-        &'a self,
-        token: ApplyToken,
-        f: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, StoreError>> + Send + 'a>>
-    where
-        F: FnOnce(&mut dyn MemoryStoreApplyTx) -> Result<T, StoreError>
-            + Send + 'static,
-        T: Send + 'static;
-}
-```
-
-Then in the SQLite impl, return `Box::pin(async move { handle.await... })`. Update Task 1 step 1.6 + Task 3 step 3.4 accordingly. (Mention this in the commit body — the trait shape is the same, just async-returning.)
-
-If the user prefers cleaner ergonomics, an alternative is `#[async_trait::async_trait]` on `MemoryStoreApply` (consistent with `MemoryStore`). That's the simpler path — adopt it: make `with_apply_tx` an `async fn` under `#[async_trait::async_trait]`. Update both `apply.rs` files.
-
-Adopt `async_trait` on `MemoryStoreApply` for consistency:
-
-```rust
-#[async_trait::async_trait]
-pub trait MemoryStoreApply: sealed::Sealed + Send + Sync {
-    async fn with_apply_tx<F, T>(
-        &self,
-        token: ApplyToken,
-        f: F,
-    ) -> Result<T, StoreError>
-    where
-        F: FnOnce(&mut dyn MemoryStoreApplyTx) -> Result<T, StoreError>
-            + Send + 'static,
-        T: Send + 'static;
-}
-```
-
-And in the impl, replace the `futures::executor::block_on` call with `handle.await`.
+**Replace** the `futures::executor::block_on(handle)` line in the snippet above with `handle.await.map_err(|e| StoreError::Backend(Box::new(e)))?`. The `with_apply_tx` impl is now an `async fn` body matching the `#[async_trait::async_trait]` declaration set in Task 1 step 1.6.
 
 - [ ] **3.5: Wire impls into `lib.rs`**
 
