@@ -9,6 +9,10 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 description = "Cairn SDK — typed in-process surface for the eight verbs plus status and handshake (brief §8)."
+# Verb dispatch lands in #9; do not publish to crates.io until the
+# happy paths exist. Re-enable when status() advertises real capabilities
+# and at least one verb has a non-stub success path.
+publish = false
 
 [dependencies]
 cairn-core = { path = "../cairn-core" }

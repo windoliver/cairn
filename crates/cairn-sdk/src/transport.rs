@@ -49,20 +49,38 @@ impl Transport for InProcess {}
 
 /// SDK client.
 ///
-/// Construct with [`Sdk::new`] for the default in-process transport. Every
-/// verb fn returns either a typed [`VerbResponse`] or an [`SdkError`]; no
-/// CLI parsing required.
-#[derive(Debug, Default, Clone, Copy)]
+/// Construct with [`Sdk::new`] for the default in-process transport. The
+/// client owns one `incarnation` ULID and `started_at` timestamp for its
+/// entire lifetime — every [`Sdk::status`] call returns the same values
+/// (brief §8.0.a wire-compat: `status` is byte-stable across an
+/// incarnation), and capability gating reads from this stable snapshot
+/// rather than minting a fresh one per call.
+///
+/// Every verb fn returns either a typed [`VerbResponse`] or an
+/// [`SdkError`]; no CLI parsing required.
+#[derive(Debug, Clone)]
 pub struct Sdk<T: Transport = InProcess> {
     _transport: T,
+    incarnation: cairn_core::generated::common::Ulid,
+    started_at: String,
+}
+
+impl Default for Sdk<InProcess> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Sdk<InProcess> {
-    /// Construct an in-process SDK client.
+    /// Construct an in-process SDK client. Mints the incarnation ULID and
+    /// `started_at` timestamp once; both are stable for the client's
+    /// lifetime.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             _transport: InProcess,
+            incarnation: crate::stub::new_operation_id(),
+            started_at: now_rfc3339_seconds(),
         }
     }
 }
@@ -77,19 +95,19 @@ impl<T: Transport> Sdk<T> {
     /// `status` — capability discovery (brief §8.0.a).
     ///
     /// Returns the contract version, advertised capabilities, and server
-    /// info. Byte-for-byte parity with `cairn status --json` (modulo
-    /// `started_at` and `incarnation`, which are minted per call by design
-    /// — P0 has no daemon).
+    /// info. The `incarnation` and `started_at` fields are minted once
+    /// when the client is constructed and remain stable for its lifetime,
+    /// so consumers can correlate operation IDs against a single
+    /// incarnation snapshot.
     #[must_use]
     pub fn status(&self) -> StatusResponse {
-        let started_at = now_rfc3339_seconds();
         StatusResponse {
             contract: CONTRACT.to_owned(),
             server_info: StatusResponseServerInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 build: build_profile(),
-                started_at,
-                incarnation: crate::stub::new_operation_id(),
+                started_at: self.started_at.clone(),
+                incarnation: self.incarnation.clone(),
             },
             capabilities: p0_capabilities(),
             extensions: vec![],

@@ -37,6 +37,24 @@ fn version_matches_status_server_info() {
 }
 
 #[test]
+fn status_incarnation_is_stable_per_client_instance() {
+    // Brief §8.0.a wire-compat: status must be byte-identical across an
+    // incarnation. The SDK's natural incarnation unit is the client.
+    let s = sdk();
+    let a = s.status();
+    let b = s.status();
+    assert_eq!(a.server_info.incarnation, b.server_info.incarnation);
+    assert_eq!(a.server_info.started_at, b.server_info.started_at);
+
+    // A new client mints a new incarnation.
+    let other = Sdk::new();
+    assert_ne!(
+        s.status().server_info.incarnation,
+        other.status().server_info.incarnation
+    );
+}
+
+#[test]
 fn status_advertises_no_capabilities_in_p0() {
     let resp = sdk().status();
     // Mirrors `cairn status` — store not wired, so no capabilities.
