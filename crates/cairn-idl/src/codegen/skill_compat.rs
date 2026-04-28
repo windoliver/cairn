@@ -184,6 +184,18 @@ fn extract_inline_cairn_spans(line: &str, line_no: usize) -> Vec<CodeBlock> {
     out
 }
 
+/// Extract the verb file's top-level `$id` so JSON-typed flag values can
+/// resolve relative `$ref`s through the schema retriever.
+fn verb_base_id(verb_def: &VerbDef) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
+        .ok()
+        .and_then(|s| {
+            s.get("$id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 /// Validate one CLI block against the IDL.
 ///
 /// Accepts any `cairn <verb> [flags]` line where `<verb>` is either a
@@ -282,11 +294,19 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
         usize::from(cmds.iter().any(|c| c.positional.is_some()))
     };
 
+    let base_id = verb_def.and_then(verb_base_id);
     let TokenScan {
         positional_count,
         used_field_names,
         positional_values,
-    } = scan_tokens(verb, source_line, tokens, &allowed_flags, &prop_schemas)?;
+    } = scan_tokens(
+        verb,
+        source_line,
+        tokens,
+        &allowed_flags,
+        &prop_schemas,
+        base_id.as_deref(),
+    )?;
 
     if positional_count > positional_capacity {
         return Err(CompatError::Malformed {
@@ -607,6 +627,7 @@ fn validate_flag_value(
     value: &str,
     source: &str,
     prop_schema: Option<&serde_json::Value>,
+    base_id: Option<&str>,
     line: usize,
 ) -> Result<(), CompatError> {
     if is_placeholder(value) {
@@ -652,7 +673,7 @@ fn validate_flag_value(
         // cross-file retriever wired in. A non-JSON value or one that
         // misses required narrowing fails compat the way the runtime
         // would.
-        check_json_flag_value(value, prop, &bad)?;
+        check_json_flag_value(value, prop, base_id, &bad)?;
     }
     Ok(())
 }
@@ -700,13 +721,34 @@ fn check_string_constraints(
 fn check_json_flag_value(
     value: &str,
     prop_schema: &serde_json::Value,
+    base_id: Option<&str>,
     bad: &dyn Fn(String) -> CompatError,
 ) -> Result<(), CompatError> {
     let parsed: serde_json::Value =
         serde_json::from_str(value).map_err(|e| bad(format!("not valid JSON: {e}")))?;
+    // Wrap the property schema with the owning verb's `$id` so any relative
+    // `$ref` (e.g., scope's `../common/scope_filter.json`) resolves through
+    // the retriever. Without the base URI those refs have no anchor and
+    // schema compilation fails on real `--scope '{...}'` examples.
+    let schema = if let Some(id) = base_id {
+        let mut wrapper = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": id,
+        });
+        if let Some(obj) = wrapper.as_object_mut()
+            && let Some(prop_obj) = prop_schema.as_object()
+        {
+            for (k, v) in prop_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        wrapper
+    } else {
+        prop_schema.clone()
+    };
     let validator = jsonschema::draft202012::options()
         .with_retriever(SchemaDirRetriever)
-        .build(prop_schema)
+        .build(&schema)
         .map_err(|e| bad(format!("schema compile: {e}")))?;
     if let Err(err) = validator.validate(&parsed) {
         return Err(bad(format!("schema mismatch: {err}")));
@@ -893,6 +935,7 @@ fn scan_tokens<'a>(
     tokens: impl Iterator<Item = &'a str>,
     allowed_flags: &BTreeMap<&str, &CliFlag>,
     prop_schemas: &BTreeMap<String, serde_json::Value>,
+    base_id: Option<&str>,
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
@@ -973,7 +1016,7 @@ fn scan_tokens<'a>(
                         .push(value);
                 } else {
                     let prop = field_name.and_then(|f| prop_schemas.get(f));
-                    validate_flag_value(name, &value, src, prop, source_line)?;
+                    validate_flag_value(name, &value, src, prop, base_id, source_line)?;
                 }
             }
         } else if !tok.starts_with('-') || tok == "-" {
@@ -991,7 +1034,14 @@ fn scan_tokens<'a>(
         };
         let prop = prop_schemas.get(flag.name.as_str());
         let combined = values.join(",");
-        validate_flag_value(long_name, &combined, &flag.value_source, prop, source_line)?;
+        validate_flag_value(
+            long_name,
+            &combined,
+            &flag.value_source,
+            prop,
+            base_id,
+            source_line,
+        )?;
     }
     Ok(TokenScan {
         positional_count,

@@ -75,7 +75,7 @@ cairn retrieve --folder PATH
 ```
 
 ```bash
-cairn retrieve --scope SCOPE
+cairn retrieve --scope '{"user":"u"}'
 ```
 
 ```bash
@@ -157,7 +157,7 @@ cairn forget --session SESSION_ID
 ```
 
 ```bash
-cairn forget --scope SCOPE
+cairn forget --scope '{"user":"u"}'
 ```
 
 ---

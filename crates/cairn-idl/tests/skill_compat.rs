@@ -441,6 +441,38 @@ fn cli_validator_accepts_dash_value_for_string_flag() {
 }
 
 #[test]
+fn cli_validator_accepts_concrete_scope_via_relative_ref() {
+    // Round-2 finding 2: `--scope` is `json` whose property schema is a
+    // relative `$ref` (`../common/scope_filter.json`). The compat gate
+    // must wrap it with the verb's `$id` so the retriever can resolve
+    // the ref. A schema-valid object must pass.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: r#"cairn forget --scope '{"user":"u"}'"#.into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc())
+        .expect("concrete --scope JSON must validate via cross-file $ref");
+}
+
+#[test]
+fn cli_validator_rejects_invalid_scope_via_relative_ref() {
+    // The same path must reject a payload that doesn't satisfy the
+    // ScopeFilter anyOf (no recognised predicate).
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn forget --scope '{}'".into(),
+        line: 1,
+    };
+    let err =
+        validate_cli_block(&block, &doc()).expect_err("empty scope must fail anyOf narrowing");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.

@@ -122,9 +122,10 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) {
                     let exemplar = exemplar_for_flag(
                         &flag.name,
                         &flag.value_source,
+                        flag.cli_exemplar.as_deref(),
                         prop_schemas.get(&flag.name),
                     );
-                    let _ = write!(buf, " --{} {exemplar}", flag.long);
+                    let _ = write!(buf, " --{} {}", flag.long, shell_quote(&exemplar));
                 }
             }
         }
@@ -154,6 +155,20 @@ fn placeholder_for(field: &str) -> String {
     field.to_ascii_uppercase()
 }
 
+/// Wrap a value in single quotes if it contains characters that would break
+/// shell parsing (whitespace, JSON braces). `ALL_CAPS` placeholders and bare
+/// values are emitted unquoted.
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '{' | '}' | '[' | ']' | '"' | '\''))
+    {
+        format!("'{value}'")
+    } else {
+        value.to_string()
+    }
+}
+
 /// Pick a schema-valid concrete value for a required flag where the IDL
 /// constrains it to a closed set (`enum(a,b,c)`, `list<enum(...)>`, integer
 /// with `minimum`). For freeform value sources (`string`, `path`, `json`,
@@ -165,8 +180,12 @@ fn placeholder_for(field: &str) -> String {
 fn exemplar_for_flag(
     field: &str,
     value_source: &str,
+    cli_exemplar: Option<&str>,
     prop_schema: Option<&serde_json::Value>,
 ) -> String {
+    if let Some(custom) = cli_exemplar {
+        return custom.to_string();
+    }
     if let Some(rest) = value_source.strip_prefix("enum(")
         && let Some(inner) = rest.strip_suffix(')')
         && let Some(first) = inner.split(',').next()

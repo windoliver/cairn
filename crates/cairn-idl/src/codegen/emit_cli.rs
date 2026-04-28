@@ -395,6 +395,7 @@ mod tests {
                     name: "session_id".to_string(),
                     long: "session".to_string(),
                     value_source: "string".to_string(),
+                    cli_exemplar: None,
                 }],
                 positional: None,
             },

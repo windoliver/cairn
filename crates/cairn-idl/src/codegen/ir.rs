@@ -120,6 +120,11 @@ pub struct CliFlag {
     pub name: String,
     pub long: String,
     pub value_source: String,
+    /// Optional concrete exemplar rendered into generated SKILL.md examples
+    /// for value sources that have no natural placeholder synthesis (e.g.,
+    /// `json` flags whose schema requires a structured payload). Read from
+    /// `x-cairn-cli.flags[*].cli_exemplar` in the IDL.
+    pub cli_exemplar: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -711,6 +716,10 @@ pub(crate) fn parse_cli_block(value: &Value) -> Result<CliCommand, CodegenError>
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string(),
+                        cli_exemplar: f
+                            .get("cli_exemplar")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect::<Result<Vec<_>, CodegenError>>()
