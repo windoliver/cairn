@@ -8,7 +8,7 @@
 //! - SDK responses serialize into the same envelope shape the CLI emits.
 
 use cairn_sdk::error::ErrorCode;
-use cairn_sdk::generated::common::Ulid;
+use cairn_sdk::generated::common::{Cursor, ScopeFilter, Ulid};
 use cairn_sdk::generated::verbs::{
     assemble_hot::AssembleHotArgs,
     capture_trace::CaptureTraceArgs,
@@ -259,6 +259,72 @@ fn retrieve_profile_requires_user_or_agent() {
             assert!(reason.contains("user, agent"), "reason: {reason}");
         }
         other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_malformed_cursor_with_invalid_args() {
+    // Cursor newtype is publicly constructible; the SDK must re-apply the
+    // generated Cursor::Deserialize rules (non-empty, ≤ 512 chars).
+    let args = SearchArgs {
+        citations: None,
+        cursor: Some(Cursor(String::new())),
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hi".to_owned(),
+        scope: None,
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_rejects_empty_scope_filter_with_invalid_args() {
+    // Empty ScopeFilter: every field None — must mirror RawScopeFilter
+    // TryFrom's "at least one of [...]" check.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hi".to_owned(),
+        scope: Some(empty_scope_filter()),
+    };
+    match sdk().search(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("at least one of"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn forget_record_rejects_malformed_ulid_with_invalid_args() {
+    let args = ForgetArgs::Record {
+        record_id: Ulid("not-a-ulid".to_owned()),
+    };
+    match sdk().forget(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("ULID"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+fn empty_scope_filter() -> ScopeFilter {
+    ScopeFilter {
+        agent: None,
+        entity: None,
+        kind: None,
+        record_ids: None,
+        session_id: None,
+        tags: None,
+        tenant: None,
+        tier: None,
+        user: None,
+        workspace: None,
     }
 }
 

@@ -254,15 +254,112 @@ fn invalid(reason: &'static str) -> SdkError {
     }
 }
 
+/// Validate a [`Ulid`] newtype against the same rules the generated
+/// `Deserialize` enforces (26 chars, Crockford base32 alphabet). Direct
+/// construction in Rust skips those checks; the SDK reapplies them so
+/// malformed IDs cannot cross the boundary.
+fn validate_ulid(id: &cairn_core::generated::common::Ulid) -> Result<(), SdkError> {
+    if id.0.len() != 26 {
+        return Err(invalid("ULID: must be 26 chars"));
+    }
+    if !id
+        .0
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'))
+    {
+        return Err(invalid(
+            "ULID: must be Crockford base32 (uppercase, no I/L/O/U)",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a [`Cursor`] against `Cursor::Deserialize` rules
+/// (non-empty, ≤ 512 chars).
+fn validate_cursor(cursor: &cairn_core::generated::common::Cursor) -> Result<(), SdkError> {
+    if cursor.0.is_empty() {
+        return Err(invalid("Cursor: must not be empty"));
+    }
+    if cursor.0.len() > 512 {
+        return Err(invalid("Cursor: must be <= 512 chars"));
+    }
+    Ok(())
+}
+
+/// Validate a [`ScopeFilter`] against the generated `TryFrom<RawScopeFilter>`
+/// rules (at least one predicate present, no empty strings or empty arrays).
+fn validate_scope_filter(
+    scope: &cairn_core::generated::common::ScopeFilter,
+) -> Result<(), SdkError> {
+    let any_present = scope.user.is_some()
+        || scope.agent.is_some()
+        || scope.tenant.is_some()
+        || scope.workspace.is_some()
+        || scope.entity.is_some()
+        || scope.tier.is_some()
+        || scope.session_id.is_some()
+        || scope.kind.is_some()
+        || scope.tags.is_some()
+        || scope.record_ids.is_some();
+    if !any_present {
+        return Err(invalid(
+            "scope: at least one of [user, agent, tenant, workspace, entity, tier, session_id, kind, tags, record_ids] is required",
+        ));
+    }
+    let nonempty = |opt: Option<&String>, msg: &'static str| -> Result<(), SdkError> {
+        if let Some(v) = opt
+            && v.is_empty()
+        {
+            return Err(invalid(msg));
+        }
+        Ok(())
+    };
+    nonempty(scope.user.as_ref(), "user: must not be empty")?;
+    nonempty(scope.agent.as_ref(), "agent: must not be empty")?;
+    nonempty(scope.tenant.as_ref(), "tenant: must not be empty")?;
+    nonempty(scope.workspace.as_ref(), "workspace: must not be empty")?;
+    nonempty(scope.entity.as_ref(), "entity: must not be empty")?;
+    nonempty(scope.session_id.as_ref(), "session_id: must not be empty")?;
+    if let Some(kinds) = &scope.kind {
+        if kinds.is_empty() {
+            return Err(invalid("kind: must contain at least one item"));
+        }
+        for k in kinds {
+            if k.is_empty() {
+                return Err(invalid("kind: items must not be empty"));
+            }
+        }
+    }
+    if let Some(tags) = &scope.tags {
+        if tags.is_empty() {
+            return Err(invalid("tags: must contain at least one item"));
+        }
+        for t in tags {
+            if t.is_empty() {
+                return Err(invalid("tags: items must not be empty"));
+            }
+        }
+    }
+    if let Some(ids) = &scope.record_ids {
+        if ids.is_empty() {
+            return Err(invalid("record_ids: must contain at least one item"));
+        }
+        for id in ids {
+            validate_ulid(id)?;
+        }
+    }
+    Ok(())
+}
+
 /// `IngestArgs` has an explicit IDL `validate()` for its exactly-one-of group.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     args.validate().map_err(invalid)
 }
 
 /// Mirrors the wire constraints from `SearchArgs`'s generated
-/// `TryFrom<RawSearchArgs>` without a serde round-trip — direct
-/// construction in Rust skips the deserializer, but the SDK still has to
-/// enforce the same invariants the CLI/MCP surfaces enforce.
+/// `TryFrom<RawSearchArgs>` plus nested type validators (`Cursor`,
+/// `ScopeFilter`) — direct Rust construction bypasses the deserializer for
+/// these inner types too.
 fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
     if args.query.is_empty() {
         return Err(invalid("query: must not be empty"));
@@ -271,6 +368,12 @@ fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
         && !(1..=1000).contains(&lim)
     {
         return Err(invalid("limit: must be in [1, 1000]"));
+    }
+    if let Some(cursor) = &args.cursor {
+        validate_cursor(cursor)?;
+    }
+    if let Some(scope) = &args.scope {
+        validate_scope_filter(scope)?;
     }
     Ok(())
 }
@@ -281,13 +384,17 @@ fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
 fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::retrieve::RetrieveArgs as A;
     match args {
-        A::Record { .. } => Ok(()),
+        A::Record { id } => validate_ulid(id),
         A::Session {
             session_id,
             limit,
             include,
+            cursor,
             ..
         } => {
+            if let Some(c) = cursor {
+                validate_cursor(c)?;
+            }
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
@@ -341,7 +448,10 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
             }
             Ok(())
         }
-        A::Scope { cursor, .. } => {
+        A::Scope { cursor, scope } => {
+            // Note: A::Scope.cursor is Option<String>, not the Cursor newtype
+            // (the IDL passes the raw cursor here). Mirror the inline string
+            // checks the generated TryFrom enforces.
             if let Some(c) = cursor {
                 if c.is_empty() {
                     return Err(invalid("cursor: must not be empty"));
@@ -350,7 +460,7 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
                     return Err(invalid("cursor: must be <= 512 chars"));
                 }
             }
-            Ok(())
+            validate_scope_filter(scope)
         }
         A::Profile { user, agent } => {
             if user.is_none() && agent.is_none() {
@@ -374,15 +484,22 @@ fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
     }
 }
 
-/// Mirrors the wire constraint from `ForgetArgs`'s generated `TryFrom<RawForgetArgs>`.
+/// Mirrors every wire constraint in `ForgetArgs`'s generated
+/// `TryFrom<RawForgetArgs>` plus nested type validators (`Ulid`, `ScopeFilter`).
 fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::forget::ForgetArgs as F;
-    if let F::Session { session_id } = args
-        && session_id.is_empty()
-    {
-        return Err(invalid("session_id: must not be empty"));
+    match args {
+        F::Record { record_id } => validate_ulid(record_id),
+        F::Session { session_id } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
+            }
+            Ok(())
+        }
+        F::Scope { scope } => validate_scope_filter(scope),
+        // Forward-compat for #[non_exhaustive].
+        _ => Err(invalid("unsupported forget target variant")),
     }
-    Ok(())
 }
 
 /// Canonical P0 stub: every verb returns [`SdkError::Unimplemented`] until
