@@ -109,20 +109,26 @@ Sites that must change in lockstep:
 |---|---|
 | `crates/cairn-core/src/domain/identity.rs:37–38` | Hand-written `Identity::parse` prefix branch. |
 | `crates/cairn-core/src/domain/actor_chain.rs:51–57, 89–95` | Hand-written role validation: `Principal` is required to be a human. |
+| `crates/cairn-core/src/domain/record.rs:463–547` | Hand-written `MemoryRecord` validator — checks issuer prefix on the write path. |
 | `crates/cairn-idl/schema/common/primitives.json` | IDL `Identity` primitive regex; source of every generated validator below. |
+| `crates/cairn-idl/src/codegen/emit_sdk.rs:429–435, 2623, 2700–2707` | IDL → SDK code generator — emits identity-prefix checks into every downstream SDK. Updating only the JSON without re-running the generator and updating the emitter constants leaves stale string literals in the generated SDK output. |
 | `crates/cairn-core/src/generated/common/mod.rs:91–95` | Generated validator — regenerated from IDL. |
 | `crates/cairn-core/src/generated/envelope/mod.rs:436, 507–513` | Generated envelope validator — regenerated from IDL. |
-| Any fixture or doctest that asserts on a `usr:` prefix. | Find via `rg -n 'usr:' crates/ tests/ fixtures/` before committing. |
+| Any other generated MCP/SDK schema artefact under `crates/*/src/generated/` or `crates/cairn-idl/schema/**`. | Sweep after codegen run. |
+| Any fixture, doctest, or test asset that asserts on a `usr:` prefix. | Find via `rg -n 'usr:' crates/ tests/ fixtures/` before committing. |
 
 Implementation order in this PR (rides on impl-order step 1, §11):
 
 1. Update IDL primitive `crates/cairn-idl/schema/common/primitives.json`.
-2. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the
-   regenerated `generated/` files.
-3. Update `domain/identity.rs::parse` and `IdentityKind::Human` prefix.
-4. Update `domain/actor_chain.rs` hand-written role checks.
-5. `rg -n 'usr:' .` must return zero non-historical hits before the PR
-   moves on. CI gate `cargo nextest run --workspace` catches any missed
+2. Update the SDK emitter constants in `crates/cairn-idl/src/codegen/emit_sdk.rs`
+   (lines 429–435, 2623, 2700–2707) so the regenerator emits `hmn:`.
+3. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the
+   regenerated `generated/` files across every crate.
+4. Update `domain/identity.rs::parse` and `IdentityKind::Human` prefix.
+5. Update `domain/actor_chain.rs` hand-written role checks.
+6. Update `domain/record.rs` hand-written `MemoryRecord` validator.
+7. Sweep `rg -n 'usr:' .` — must return zero non-historical hits before the
+   PR moves on. CI gate `cargo nextest run --workspace` catches any missed
    site because the generated validators flip first.
 
 Brief is source of truth (CLAUDE.md §1). This is a load-bearing rename.
@@ -334,13 +340,16 @@ when defaults are missing or desynchronized:
 | `cairn identity provision …` | Allowed; this is how defaults get created. |
 | `cairn identity init-defaults` | Allowed; primary remediation path. |
 | `cairn identity reconcile` | Allowed; cleans up `pending` rows regardless of which identities exist. |
-| `cairn identity repair <id>` | Allowed; needed to restore a desynchronized identity even if it is one of the defaults. |
+| `cairn identity repair <id>` | Allowed; reconciliation only — never mutates trust state (§3.10). |
+| `cairn identity purge <id>` | Allowed; requires `.cairn/maintenance/purge-ack`. Audit gap is logged and surfaced in the receipt. |
 | `cairn identity vault-id-recover` | Allowed; runs without ever opening `IdentityService` in a write-capable way. |
 
 `cairn identity rotate` and `cairn identity revoke` **do** require the
 default-issuer gate because revocation/rotation is itself a signed
 operation that must be attributable. The CLI hint when they fail tells
-the operator to run `init-defaults` first.
+the operator to run `init-defaults` first, or — in genuinely
+unrecoverable scenarios — to use `cairn identity purge` (§3.10) which
+makes the audit gap explicit instead of silently bypassing attribution.
 
 `cairn bootstrap` human-readable output gains a final line:
 
@@ -418,6 +427,68 @@ Tests cover: ASCII account, account with spaces, all-Unicode account
 (`"renée"` → `renee`), 100-byte name (truncated to 63), and the empty
 fallback.
 
+### 3.10 `repair` is reconciliation-only; trust-state mutations require attribution
+
+Earlier drafts let `cairn identity repair` "atomically revoke the active
+row and re-provision a new key version" without sitting behind the
+default-issuer gate. That is the wrong contract: revocation is a signed,
+attributable trust-state mutation, and authorising it precisely when
+attribution is broken (no defaults / desynchronized identity) is exactly
+the audit hole adversarial reviews flag.
+
+P0 split, all gate-aware:
+
+1. **`cairn identity repair <id>`** — reconciliation only. It runs the
+   §3.5 reconciliation step against a single identity:
+   - `pending` row, keychain entry missing → `delete_pending`.
+   - `pending` row, keychain entry present, public-key match →
+     `activate_identity`.
+   - `pending` row, keychain entry present, public-key mismatch → fail
+     closed (`KeyMaterialMismatch`); the operator must `purge` first.
+   - `active` row, keychain entry healthy → no-op (already healthy).
+   - `active` row, keychain entry missing or mismatched → fail closed
+     with `KeyMaterialDesynchronized`; `repair` does **not** auto-revoke.
+     The operator's options are recorded explicitly in the CLI hint:
+
+     ```
+     cairn identity repair <id>: active identity is desynchronized.
+       Options:
+         (a) restore the keychain backup that contains the original key, then re-run repair.
+         (b) if the original key cannot be restored, run:
+               cairn identity rotate <id>
+             (requires the default-issuer gate; rotates the identity to a new key
+              version while preserving the historical public-key archive.)
+         (c) if the identity is unrecoverable and operator accepts the audit gap:
+               cairn identity purge <id>
+             (requires writing .cairn/maintenance/purge-ack manually; produces no
+              signed revocation receipt; intended only for last-resort cleanup.)
+     ```
+
+   `repair` therefore stays safe to expose without the default-issuer
+   gate: every code path it can take either no-ops, transitions a
+   pending row, or fails closed.
+
+2. **`cairn identity rotate` and `cairn identity revoke`** — unchanged
+   from §3.7: they require the default-issuer gate because they emit
+   signed operations attributable to the rotating / revoking signer.
+
+3. **`cairn identity purge <id>`** (new, in `cairn-cli`) — operator-of-
+   last-resort. Deletes the registry row and key archive for an identity
+   without producing a signed revocation receipt. Requires the operator
+   to have written `.cairn/maintenance/purge-ack` on local disk
+   (containing the identity wire form being purged) before the command
+   runs; the command verifies the file content matches, performs the
+   purge, and deletes the file. This makes the audit gap explicit:
+   `tracing::error!` records the purge with `audit_gap = "no_signed_revocation"`
+   and the receipt JSON includes the same field. Tests assert the
+   operation is impossible from the MCP surface (no filesystem access of
+   the correct shape) and from the `cairn-cli` happy path (the ack file
+   does not exist by default).
+
+This decouples "fix a half-completed provisioning" (safe, gateless) from
+"mutate trust state without an attributable signer" (loud, deliberate,
+auditable as an explicit gap rather than a silent override).
+
 ## 4. Crate-by-crate changes
 
 ### 4.1 `cairn-core`
@@ -464,14 +535,53 @@ New contract module `contract::identity_registry`:
 
 ```rust
 pub trait IdentityRegistry: Send + Sync {
-    async fn upsert_identity(&self, record: &PublicIdentityRecord, key: &IdentityKeyEntry) -> Result<(), RegistryError>;
-    async fn get_identity(&self, id: &Identity) -> Result<Option<PublicIdentityRecord>, RegistryError>;
-    async fn list_identities(&self, kind: Option<IdentityKind>) -> Result<Vec<PublicIdentityRecord>, RegistryError>;
+    // Provisioning state machine (§3.5). reserve + activate must be
+    // separate so the runtime can persist the keychain entry between them.
+    async fn reserve_identity(&self, record: &PublicIdentityRecord, key: &IdentityKeyEntry) -> Result<(), RegistryError>;
+    async fn activate_identity(&self, id: &Identity, key_version: KeyVersion) -> Result<(), RegistryError>;
+    async fn delete_pending(&self, id: &Identity, key_version: KeyVersion) -> Result<(), RegistryError>;
+    async fn list_pending(&self) -> Result<Vec<PendingIdentityEntry>, RegistryError>;
+
+    // Read paths. `include_pending = false` is the default; reconciliation
+    // and recovery paths pass `true`.
+    async fn get_identity(&self, id: &Identity, include_pending: bool) -> Result<Option<PublicIdentityRecord>, RegistryError>;
+    async fn list_identities(&self, kind: Option<IdentityKind>, include_pending: bool) -> Result<Vec<PublicIdentityRecord>, RegistryError>;
     async fn list_keys(&self, id: &Identity) -> Result<Vec<IdentityKeyEntry>, RegistryError>;
+
+    // Counts used by §3.7 bootstrap guard and §3.8 vault-id-recover.
+    // count_keys covers all identity_keys rows regardless of parent state.
+    async fn count_keys(&self) -> Result<u64, RegistryError>;
+    async fn list_all_keys(&self) -> Result<Vec<IdentityKeyEntry>, RegistryError>;
+
+    // Mutations on already-active identities. Both produce a signed
+    // operation; the caller must supply attribution.
     async fn record_rotation(&self, id: &Identity, new_key: &IdentityKeyEntry) -> Result<(), RegistryError>;
     async fn record_revocation(&self, id: &Identity, at: DateTime<Utc>, signature: Signature) -> Result<(), RegistryError>;
+
+    // Operator-of-last-resort: deletes the registry row and key archive
+    // for an identity without producing a signed revocation receipt
+    // (§3.10). Caller must hold a per-vault on-disk acknowledgement file
+    // (see `purge_acknowledgement_path`) so this cannot be triggered by a
+    // remote MCP caller.
+    async fn purge_identity(&self, id: &Identity, ack: &PurgeAcknowledgement) -> Result<(), RegistryError>;
 }
 ```
+
+`PendingIdentityEntry` carries `(identity, key_version, public_key,
+created_at)` — everything reconciliation needs without a second round
+trip. `reserve_identity` is the only writer that can leave a row in
+`pending`; `activate_identity` is the only path from `pending → active`;
+`delete_pending` is the only path from `pending → (gone)`. Together the
+four methods make the §3.5 state machine implementable through the trait
+alone, with no SQLite-specific escape hatch.
+
+`PurgeAcknowledgement` is a typed token whose only constructor reads a
+caller-supplied file path that must live on local disk under
+`.cairn/maintenance/purge-ack`. `cairn identity purge` writes that file,
+calls `purge_identity`, and deletes the file. MCP / SDK callers cannot
+construct a `PurgeAcknowledgement` because they do not have local
+filesystem access of the right shape; this is the same pattern the
+brief uses for human-only operations (§14).
 
 `RegistryError` (`#[non_exhaustive]`): `NotFound`, `IdentityExists { id }`,
 `ProvisioningInFlight { id }`, `AlreadyRevoked { id }`,
@@ -573,7 +683,8 @@ cairn identity show <id> [--json]
 cairn identity rotate <id> [--json]
 cairn identity revoke <id> [--json]
 cairn identity reconcile [--json]
-cairn identity repair <id> [--force] [--json]
+cairn identity repair <id> [--json]
+cairn identity purge <id> [--json]
 cairn identity vault-id-recover [--probe-keychain] [--json]
 ```
 
@@ -667,8 +778,8 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity` | parse/format round-trip across `hmn:`, `agt:`, `snr:`; reject unknown prefix; reject empty body | `proptest` + unit |
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected; `normalize_human_slug` covers ASCII / spaces / apostrophe / accented / non-Latin / 100-byte / empty-fallback (§3.9) | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
-| `cairn-store-sqlite` | identity CRUD; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `cairn identity repair` round-trip; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `vault-id-recover`) succeed with zero defaults; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when DB has identities; `vault-id-recover --probe-keychain` round-trip success + ambiguous-match fail-closed | integration via `MemoryKeystore` |
+| `cairn-store-sqlite` | reserve/activate/delete-pending state-machine transitions; `list_pending` correctness; `count_keys` covers all states; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade; `purge_identity` requires valid `PurgeAcknowledgement` and emits the audit-gap log | integration (real SQLite tempdir) |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `repair` reconciles pending rows and **never** mutates active trust state (§3.10); `purge` requires the ack file and emits the audit-gap log line; `purge` is unreachable from the MCP surface; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `purge`, `vault-id-recover`) succeed with zero defaults; `rotate` / `revoke` fail with `DefaultsNotInitialized` when defaults missing; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when DB has any `identity_keys` row (active, pending, or revoked); `vault-id-recover --probe-keychain` round-trip success + ambiguous-match fail-closed | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
@@ -735,11 +846,11 @@ This is a teaser; the real implementation plan is written next via the
    on `open` + tests.
 5. `cairn-keychain` crate + per-OS round-trip tests.
 6. `cairn-cli identity` subcommand (`provision`, `init-defaults`, `list`,
-   `show`, `rotate`, `revoke`, `reconcile`, `repair`, `vault-id-recover`)
-   + snapshot tests. Bootstrap delta: mint `.cairn/vault.id` only when
-   safe (§3.7 guard), extend `BootstrapReceipt` with `vault_id`, add
-   `next: cairn identity init-defaults` hint line, update bootstrap test
-   snapshots, and add a regression test for the `VaultIdLost`-with-active-
-   identities refusal.
+   `show`, `rotate`, `revoke`, `reconcile`, `repair`, `purge`,
+   `vault-id-recover`) + snapshot tests. Bootstrap delta: mint
+   `.cairn/vault.id` only when safe (§3.7 guard, keyed off `identity_keys`
+   count), extend `BootstrapReceipt` with `vault_id`, add `next: cairn
+   identity init-defaults` hint line, update bootstrap test snapshots,
+   and add a regression test for the `VaultIdLost`-with-any-keys refusal.
 7. `cairn-sensors-local::provision_sensor_identity` helper + test.
 8. Verification checklist run; PR.
