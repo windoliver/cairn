@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/apply_token_new_call.rs:7:26
+  |
+7 |     let _t = ApplyToken::new();
+  |                          ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/cairn-core/src/wal/mod.rs
+  |
+  |     fn new() -> Self {
+  |     ---------------- private associated function defined here

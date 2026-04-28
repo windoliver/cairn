@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+pub mod store_conformance;
+
 /// Absolute path to the workspace-level `fixtures/` directory.
 ///
 /// Resolves at runtime from `CARGO_MANIFEST_DIR` (this crate's dir) and walks

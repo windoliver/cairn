@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `ApplyToken` is private
+ --> tests/ui/apply_token_struct_literal.rs:8:27
+  |
+8 |     let _t = ApplyToken { _private: () };
+  |                           ^^^^^^^^ private field
