@@ -663,6 +663,62 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-1 (newer loop) regression: when the giant-final-line
+    /// suffix path WOULD start mid OSC/CSI sequence (because an ESC
+    /// introducer sits in the dropped prefix of the final line), the
+    /// bypass must fall back to the degraded sentinel rather than
+    /// leaking dangling URL/params bytes via a sanitizer that no
+    /// longer sees the introducer.
+    #[test]
+    fn oversize_bypass_unsafe_suffix_falls_back_to_degraded_sentinel() {
+        // "head\n" + filler + OSC introducer + URL + filler so the
+        // tail window starts AFTER the introducer (window has no \n
+        // and no ESC, sanitizer would otherwise treat URL bytes as
+        // plain text). Default cfg → tail_window ≈ 16254.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        // 30K bytes of filler that starts with an OSC 8 hyperlink whose
+        // introducer (ESC ]) we want to be inside the DROPPED prefix.
+        raw.push(0x1B);
+        raw.extend_from_slice(b"]8;;https://evil.example/payload\x1b\\");
+        raw.extend(std::iter::repeat_n(b'X', 30_000));
+        // Then put more filler so tail window's start sits well after
+        // the introducer position.
+        raw.extend(std::iter::repeat_n(b'Y', 30_000));
+        raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Must use the degraded path — final-line preservation would
+        // leak control-plane bytes here.
+        assert!(
+            body.contains("oversized single-line payload"),
+            "degraded sentinel emitted instead of unsafe suffix preservation: ...{}",
+            &body[body.len().saturating_sub(300)..]
+        );
+        // The dangling URL/params must NOT appear in the output —
+        // that's the whole point of the quarantine.
+        assert!(
+            !body.contains("evil.example"),
+            "control-plane URL leaked through the bypass: ...{}",
+            &body[body.len().saturating_sub(300)..]
+        );
+        assert!(
+            !body.contains("FINAL-DIAGNOSTIC-SUFFIX"),
+            "suffix must not be preserved when introducer was sliced off"
+        );
+    }
+
     /// Round-10 regression: invalid UTF-8 in a payload large enough
     /// that lossy `U+FFFD` expansion would balloon the staged path
     /// past `MAX_INPUT_BYTES` must route through the bypass instead
@@ -2764,7 +2820,29 @@ fn oversize_bypass(
         //       Cannot prove a safe sequence boundary; emit only the
         //       degraded sentinel (Round-6 strict-quarantine rule).
         let last_raw_nl = raw_bytes.iter().rposition(|&b| b == b'\n');
-        if let Some(nl_pos) = last_raw_nl {
+        // Round-1 (newer loop) hardening: the giant-final-line suffix
+        // path slices `raw_bytes` at an arbitrary byte offset. If an
+        // ANSI ESC introducer (`0x1B`) sits anywhere in the dropped
+        // prefix of the final line, the kept suffix may begin INSIDE
+        // an OSC/CSI sequence whose introducer was sliced off — and
+        // `stage2_ansi_strip` would then pass the dangling URL/params
+        // through as plain text, leaking control-plane payload that
+        // the bypass is supposed to quarantine. To prove the suffix
+        // can't begin mid-escape, require the dropped prefix of the
+        // final line to be ESC-free; otherwise fall back to the
+        // degraded sentinel.
+        let safe_to_preserve_suffix = match last_raw_nl {
+            Some(nl_pos) => {
+                let final_line_start = nl_pos + 1;
+                let suffix_window_start =
+                    final_line_start.max(raw_byte_len.saturating_sub(half * 2));
+                !raw_bytes[final_line_start..suffix_window_start].contains(&0x1B)
+            }
+            None => false,
+        };
+        if let Some(nl_pos) = last_raw_nl
+            && safe_to_preserve_suffix
+        {
             // The final line spans raw_bytes[nl_pos+1..]. Decode +
             // sanitize the last `tail_window` bytes of it (capped at
             // the line length), then trim to half the byte budget at
