@@ -58,7 +58,8 @@ pub struct VisibilityPolicy {
 /// 2. If `policy.override_for_source` has an entry for `source` and it
 ///    is **a safe narrowing** of the matrix value, use it. Otherwise
 ///    keep the matrix value — overrides cannot broaden, and Session →
-///    Private is *not* a safe narrowing (see [`is_safe_narrowing`]).
+///    Private is *not* a safe narrowing (see `is_safe_narrowing`
+///    below — Session and Private are treated as incomparable).
 /// 3. If `policy.ceiling` is set and it is a safe narrowing of the
 ///    current value, clamp down to it. The same Session-vs-Private
 ///    asymmetry applies.
@@ -162,7 +163,7 @@ fn is_safe_narrowing(from: MemoryVisibility, to: MemoryVisibility) -> bool {
 /// validate. Codex round 8 caught a related case: collapsing every
 /// malformed triple to `Private` actually broadens the lifetime of
 /// sensor-shaped data from "this turn" to "vault-wide" (Session and
-/// Private are incomparable, see [`is_safe_narrowing`]). For
+/// Private are incomparable per `is_safe_narrowing`). For
 /// malformed triples we therefore preserve the *lifetime* property of
 /// the source family: sensor sources stay at `Session` (turn-local),
 /// non-sensor sources fail closed at `Private`.
