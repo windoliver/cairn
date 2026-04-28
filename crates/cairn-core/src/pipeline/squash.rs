@@ -930,3 +930,160 @@ mod stage5_tests {
         assert!(out.len() <= MIN_MAX_LINE_BYTES);
     }
 }
+
+/// Stage 6: head/marker/tail layout. Returns the joined output (no trailing
+/// newline; the squash entrypoint re-adds one if the input had one).
+/// `pair_at_end` indicates the last two lines form an atomic split-form
+/// dedup pair (`<line> [×N-1]` followed by `<line>` verbatim) — they must
+/// be kept together or dropped together.
+#[allow(dead_code)] // Used by squash() entrypoint in Task 13
+fn stage6_layout(
+    lines: &[String],
+    pair_at_end: bool,
+    cfg: &SquashConfig,
+    stats: &mut SquashStats,
+) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let total_bytes: usize = lines.iter().map(String::len).sum::<usize>()
+        + lines.len().saturating_sub(1);
+    if total_bytes <= cfg.max_bytes() {
+        return lines.join("\n");
+    }
+
+    let tail_take = cfg.tail_lines().min(lines.len());
+    let tail_start = lines.len() - tail_take;
+    let tail_slice = &lines[tail_start..];
+    let tail_byte_len: usize = tail_slice.iter().map(String::len).sum::<usize>()
+        + tail_slice.len().saturating_sub(1);
+
+    let layout_overhead = if tail_take > 0 { 2 } else { 1 };
+    let signed_head_budget = cfg
+        .max_bytes()
+        .checked_sub(tail_byte_len)
+        .and_then(|x| x.checked_sub(MARKER_MAX_LEN))
+        .and_then(|x| x.checked_sub(layout_overhead));
+
+    let mut dropped_lines: usize = 0;
+    let mut dropped_bytes: usize = 0;
+    let mut head_take: usize;
+    let mut current_tail_start = tail_start;
+
+    if let Some(head_budget) = signed_head_budget {
+        head_take = cfg.head_lines().min(tail_start);
+        let mut head_bytes: usize = lines[..head_take]
+            .iter()
+            .map(String::len)
+            .sum::<usize>()
+            + head_take.saturating_sub(1);
+        while head_bytes > head_budget && head_take > 0 {
+            head_take -= 1;
+            head_bytes = lines[..head_take]
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
+                + head_take.saturating_sub(1);
+        }
+        for line in &lines[head_take..current_tail_start] {
+            dropped_lines += 1;
+            dropped_bytes += line.len();
+        }
+    } else {
+        // Tail alone exceeds max_bytes. Drop tail lines from the front,
+        // respecting the pair lock at end if applicable.
+        head_take = 0;
+        let target = cfg.max_bytes().saturating_sub(MARKER_MAX_LEN + layout_overhead);
+        let mut remaining_tail = tail_byte_len;
+        // The atomic-pair lock: when pair_at_end, the bottom 2 indices
+        // (lines.len()-2 and lines.len()-1) must be kept together. So the
+        // drop loop's lower bound is lines.len() - 2 instead of lines.len() - 1.
+        let pair_floor = if pair_at_end { 2 } else { 1 };
+        while remaining_tail > target && current_tail_start + pair_floor < lines.len() {
+            let drop_line = &lines[current_tail_start];
+            remaining_tail = remaining_tail.saturating_sub(drop_line.len() + 1);
+            dropped_lines += 1;
+            dropped_bytes += drop_line.len();
+            current_tail_start += 1;
+        }
+        for line in &lines[..tail_start] {
+            dropped_lines += 1;
+            dropped_bytes += line.len();
+        }
+    }
+
+    let head_slice = &lines[..head_take];
+    let tail_slice_final = &lines[current_tail_start..];
+    let marker = format!("[…skipped {dropped_lines} lines, {dropped_bytes} bytes…]");
+    debug_assert!(marker.len() <= MARKER_MAX_LEN, "marker bound");
+
+    stats.lines_dropped_truncate = dropped_lines;
+    stats.bytes_dropped_truncate = dropped_bytes;
+    stats.truncated = true;
+
+    let mut parts: Vec<&str> = Vec::with_capacity(head_slice.len() + 1 + tail_slice_final.len());
+    parts.extend(head_slice.iter().map(String::as_str));
+    parts.push(marker.as_str());
+    parts.extend(tail_slice_final.iter().map(String::as_str));
+    let joined = parts.join("\n");
+    debug_assert!(joined.len() <= cfg.max_bytes());
+    joined
+}
+
+#[cfg(test)]
+mod stage6_tests {
+    use super::*;
+
+    #[test]
+    fn fits_under_max_bytes_passes_through() {
+        let cfg = SquashConfig::default();
+        let lines: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        assert_eq!(out, "a\nb\nc");
+        assert!(!stats.truncated);
+    }
+
+    #[test]
+    fn exceeds_max_bytes_inserts_marker() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let lines: Vec<String> = (0..200).map(|i| format!("line-{i:04}")).collect();
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        assert!(stats.truncated);
+        assert!(out.len() <= cfg.max_bytes());
+        assert!(out.contains("skipped"));
+        assert!(out.ends_with("line-0199"));
+    }
+
+    #[test]
+    fn last_line_preserved_for_extreme_input() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let lines: Vec<String> = (0..10_000).map(|i| format!("L{i}")).collect();
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, false, &cfg, &mut stats);
+        assert!(out.ends_with("L9999"));
+        assert!(out.len() <= cfg.max_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tail_lock_tests {
+    use super::*;
+
+    #[test]
+    fn tail_locked_pair_not_split_under_pressure() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let mut lines: Vec<String> = (0..100).map(|i| format!("head-{i:03}")).collect();
+        lines.push("x [×3]".into());
+        lines.push("x".into());
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, true, &cfg, &mut stats);
+        let has_marker = out.contains("x [×3]");
+        let has_final = out.contains("\nx") || out.starts_with('x');
+        assert!(has_final, "final line must survive");
+        if has_final {
+            assert!(has_marker, "count marker must accompany surviving final");
+        }
+    }
+}
