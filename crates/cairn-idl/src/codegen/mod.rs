@@ -194,14 +194,27 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
     };
     let body = std::str::from_utf8(&skill.bytes)
         .map_err(|e| CodegenError::Emit(format!("SKILL.md not utf-8: {e}")))?;
-    for block in skill_compat::extract_code_blocks(body) {
-        let is_cli = matches!(block.lang.as_str(), "bash" | "shell" | "sh" | "inline")
-            && block.body.trim_start().starts_with("cairn ");
-        if !is_cli {
-            continue;
+    for (verb_ctx, block) in skill_compat::extract_verb_scoped_blocks(body) {
+        match block.lang.as_str() {
+            "bash" | "shell" | "sh" | "inline" if block.body.trim_start().starts_with("cairn ") => {
+                skill_compat::validate_cli_block(&block, doc)
+                    .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+            }
+            "json" => {
+                // JSON examples must declare a verb context via the enclosing
+                // `## ` heading. A block sitting outside any verb section
+                // can't be unambiguously matched to a schema, so reject.
+                let Some(verb) = verb_ctx else {
+                    return Err(CodegenError::Emit(format!(
+                        "skill compat: json block at line {} is not inside a verb section",
+                        block.line
+                    )));
+                };
+                skill_compat::validate_json_block(&block, doc, &verb)
+                    .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+            }
+            _ => {}
         }
-        skill_compat::validate_cli_block(&block, doc)
-            .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
     }
     Ok(())
 }

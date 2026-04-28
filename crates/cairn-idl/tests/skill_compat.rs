@@ -5,7 +5,8 @@
 //! cannot drift away from the IDL contract.
 
 use cairn_idl::codegen::skill_compat::{
-    CodeBlock, CompatError, extract_code_blocks, validate_cli_block, validate_json_block,
+    CodeBlock, CompatError, extract_code_blocks, extract_verb_scoped_blocks, validate_cli_block,
+    validate_json_block,
 };
 use cairn_idl::codegen::{ir, loader};
 
@@ -120,6 +121,56 @@ fn json_validator_rejects_invalid_payload_for_verb() {
         matches!(err, CompatError::SchemaMismatch { line: 3, ref verb, .. } if verb == "ingest"),
         "expected SchemaMismatch for ingest at line 3, got: {err:?}"
     );
+}
+
+#[test]
+fn cli_validator_rejects_excess_positional_args() {
+    // `assemble_hot` has no positional defined; two stray tokens must fail.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn assemble_hot foo bar".into(),
+        line: 11,
+    };
+    let err = validate_cli_block(&block, &doc()).expect_err("excess positional must fail");
+    assert!(
+        matches!(
+            err,
+            CompatError::Malformed {
+                kind: "cli",
+                line: 11,
+                ..
+            }
+        ),
+        "expected Malformed cli error at line 11, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_consumes_value_token_after_value_flag() {
+    // `--mode` is value-bearing; `hybrid` is its value, not a positional.
+    // `search` has an optional positional, so 1 trailing positional is OK.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn search --mode hybrid query".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("flag value must not be miscounted as a positional");
+}
+
+#[test]
+fn extract_verb_scoped_blocks_attaches_heading_verb() {
+    let md = "# Skill\n\n## `cairn ingest`\n\n```json\n{\"kind\":\"fact\"}\n```\n\n## `cairn search`\n\n```bash\ncairn search foo\n```\n";
+    let scoped = extract_verb_scoped_blocks(md);
+    let json = scoped
+        .iter()
+        .find(|(_, b)| b.lang == "json")
+        .expect("json block present");
+    assert_eq!(json.0.as_deref(), Some("ingest"));
+    let bash = scoped
+        .iter()
+        .find(|(_, b)| b.lang == "bash")
+        .expect("bash block present");
+    assert_eq!(bash.0.as_deref(), Some("search"));
 }
 
 #[test]

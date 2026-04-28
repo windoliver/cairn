@@ -8,9 +8,9 @@
 //! These checks run alongside drift detection so the skill cannot reference a
 //! retired verb, an invented kind, or a flag that no longer exists.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
-use crate::codegen::ir::{CliCommand, CliShape, Document};
+use crate::codegen::ir::{CliCommand, CliFlag, CliShape, Document};
 
 /// Recognised protocol preludes — emitted by `emit_skill` but not part of the
 /// eight-verb IDL surface.
@@ -174,12 +174,18 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
             });
         };
 
-        let allowed_flags = if PRELUDES.contains(&verb) {
-            BTreeSet::new()
+        // Build (long-name → flag) map and positional capacity. Preludes carry
+        // no flags or positionals; verb variants merge the union of all
+        // variant flag tables and accept a positional iff any variant does.
+        let (allowed_flags, positional_capacity) = if PRELUDES.contains(&verb) {
+            (BTreeMap::new(), 0usize)
         } else if let Some(cmds) = cli_commands_for(doc, verb) {
-            cmds.iter()
-                .flat_map(|c| c.flags.iter().map(|f| f.long.clone()))
-                .collect::<BTreeSet<_>>()
+            let map: BTreeMap<&str, &CliFlag> = cmds
+                .iter()
+                .flat_map(|c| c.flags.iter().map(|f| (f.long.as_str(), f)))
+                .collect();
+            let cap = usize::from(cmds.iter().any(|c| c.positional.is_some()));
+            (map, cap)
         } else {
             return Err(CompatError::UnknownVerb {
                 verb: verb.to_string(),
@@ -187,26 +193,123 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
             });
         };
 
-        for tok in tokens {
-            let Some(flag_body) = tok.strip_prefix("--") else {
-                continue;
-            };
-            // Strip `--name=value` → `name`.
-            let name = flag_body.split('=').next().unwrap_or(flag_body);
-            if name.is_empty() {
-                continue;
+        let mut positional_count = 0usize;
+        let mut iter = tokens.peekable();
+        while let Some(tok) = iter.next() {
+            if let Some(flag_body) = tok.strip_prefix("--") {
+                // `--name` or `--name=value`.
+                let (name, has_inline_value) = flag_body
+                    .split_once('=')
+                    .map_or((flag_body, false), |(n, _)| (n, true));
+                if name.is_empty() {
+                    continue;
+                }
+                let arity = if UNIVERSAL_FLAGS.contains(&name) {
+                    0
+                } else if let Some(flag) = allowed_flags.get(name) {
+                    usize::from(flag.value_source != "bool")
+                } else {
+                    return Err(CompatError::UnknownFlag {
+                        verb: verb.to_string(),
+                        flag: name.to_string(),
+                        line: block.line,
+                    });
+                };
+                // Consume the next token as the flag's value when the flag
+                // takes one and didn't carry it inline. Without this the
+                // value would be miscounted as a stray positional.
+                if arity == 1
+                    && !has_inline_value
+                    && iter.peek().is_some_and(|n| !n.starts_with('-'))
+                {
+                    let _ = iter.next();
+                }
+            } else if tok.starts_with('-') {
+                // Short flags (`-h`, `-j`) — skip without arity tracking.
+            } else {
+                positional_count += 1;
             }
-            if UNIVERSAL_FLAGS.contains(&name) || allowed_flags.contains(name) {
-                continue;
-            }
-            return Err(CompatError::UnknownFlag {
-                verb: verb.to_string(),
-                flag: name.to_string(),
+        }
+
+        if positional_count > positional_capacity {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: format!(
+                    "verb `{verb}` accepts {positional_capacity} positional arg(s), got {positional_count}"
+                ),
                 line: block.line,
             });
         }
     }
     Ok(())
+}
+
+/// Walk `markdown`, returning each code block paired with the verb id from the
+/// most recent `cairn <verb>` H2 heading (or `None` when the block sits
+/// outside any verb section). Used by the codegen drift gate to validate JSON
+/// payload examples against the right schema.
+#[must_use]
+pub fn extract_verb_scoped_blocks(markdown: &str) -> Vec<(Option<String>, CodeBlock)> {
+    let mut out = Vec::new();
+    let mut current_verb: Option<String> = None;
+    let mut in_fence = false;
+    let mut fence_lang = String::new();
+    let mut fence_body = String::new();
+    let mut fence_open_line = 0usize;
+    let mut fence_verb: Option<String> = None;
+
+    for (idx, line) in markdown.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+
+        if !in_fence && let Some(rest) = trimmed.strip_prefix("## ") {
+            current_verb = parse_verb_heading(rest);
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("```") {
+            if in_fence {
+                out.push((
+                    fence_verb.take(),
+                    CodeBlock {
+                        lang: std::mem::take(&mut fence_lang),
+                        body: std::mem::take(&mut fence_body),
+                        line: fence_open_line,
+                    },
+                ));
+                in_fence = false;
+            } else {
+                in_fence = true;
+                fence_lang = rest.trim().to_string();
+                fence_body.clear();
+                fence_open_line = line_no;
+                fence_verb.clone_from(&current_verb);
+            }
+            continue;
+        }
+        if in_fence {
+            if !fence_body.is_empty() {
+                fence_body.push('\n');
+            }
+            fence_body.push_str(line);
+        } else {
+            for span in extract_inline_cairn_spans(line, line_no) {
+                out.push((current_verb.clone(), span));
+            }
+        }
+    }
+    out
+}
+
+/// Parse a section heading of the form `cairn <verb>` (with or without
+/// surrounding backticks) and return the verb id when present.
+fn parse_verb_heading(heading: &str) -> Option<String> {
+    let stripped = heading.trim().trim_matches('`');
+    let rest = stripped.strip_prefix("cairn ")?;
+    let verb = rest.split_whitespace().next()?;
+    if verb.is_empty() {
+        return None;
+    }
+    Some(verb.to_string())
 }
 
 /// Validate one JSON block against the input schema of `verb`.
