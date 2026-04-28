@@ -615,6 +615,54 @@ mod wrapper_tests {
         );
     }
 
+    /// Round-9 regression: when the retained tail window has no `\n`
+    /// (entire window sits inside one giant final line) but the raw
+    /// payload DOES have a `\n` somewhere earlier, the bypass must
+    /// still emit a `[…final-line truncated…]` marker plus a bounded
+    /// suffix of the final line — not just drop everything.
+    #[test]
+    fn oversize_bypass_tail_window_inside_giant_final_line_preserves_suffix() {
+        // Default cfg.max_bytes = 16384 → tail_window ≈ 16254. Build a
+        // payload where the only `\n` lives BEFORE tail_raw_start so
+        // the tail window is entirely inside the giant final line.
+        // "head\n" + 50_000 'X's puts the \n at byte 4 and the tail
+        // window (last ~16254 bytes) all inside the run of X's.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        raw.extend(std::iter::repeat_n(b'X', 50_000));
+        raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("final-line truncated"),
+            "marker present: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-SUFFIX"),
+            "tail end of giant final line preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        // Must NOT degrade to the strict-quarantine sentinel — that's
+        // for the no-`\n`-anywhere case only.
+        assert!(
+            !body.contains("oversized single-line payload"),
+            "wrong branch: degraded sentinel emitted instead of suffix preservation"
+        );
+        assert!(out.compacted_bytes.len() <= cfg.max_bytes());
+    }
+
     /// Round-7 (newer loop) regression: `stats.truncated` must reflect
     /// any lossy transform, not just stage 5/6 budget loss. ANSI-only
     /// stripping or dedup-only collapse produces a non-verbatim
@@ -2092,11 +2140,20 @@ fn stage6_layout(
             head_bytes = lines[..head_take].iter().map(String::len).sum::<usize>()
                 + head_take.saturating_sub(1);
         }
+        let middle_count = current_tail_start.saturating_sub(head_take);
         for line in &lines[head_take..current_tail_start] {
             dropped_lines += 1;
             // Each dropped line also removes its trailing LF separator
             // from the joined body, so account for it in audit metadata.
             dropped_bytes += line.len() + 1;
+        }
+        // When the middle is wedged between a retained head and a retained
+        // tail, the source slice contributing to the middle includes one
+        // extra LF separator (the boundary between head and the first
+        // dropped line) that is not captured by per-line `+ 1`. Add it so
+        // `bytes_dropped_truncate` matches the source-slice byte length.
+        if middle_count > 0 && head_take > 0 && tail_take > 0 {
+            dropped_bytes += 1;
         }
     } else {
         // Tail alone exceeds max_bytes. Drop in two phases so the anchored
@@ -2252,6 +2309,32 @@ mod stage6_tests {
             stats.lines_dropped_truncate,
             stats.lines_dropped_truncate * 5,
             stats.bytes_dropped_truncate,
+        );
+    }
+
+    /// Round-9 regression: in mode A (`signed_head_budget` is `Some`),
+    /// when both head and tail are retained the marker zone replaces a
+    /// source slice of the form `\nXm…Xn\n` — i.e. `sum(line.len()) +
+    /// dropped_lines + 1` bytes (the extra LF is the boundary separator
+    /// between the kept head and the first dropped line). Per-line `+ 1`
+    /// alone under-reports by exactly one byte.
+    #[test]
+    fn mode_a_drop_accounting_counts_boundary_separator() {
+        // 8 lines × 150 bytes = 1200 + 7 LFs = 1207 source bytes,
+        // forces stage6 to truncate against max_bytes=1024 with head=2,
+        // tail=2 → drops lines[2..6] (4 middle lines).
+        let cfg = SquashConfig::new(1024, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let lines: Vec<String> = (0..8).map(|i| format!("{i:0150}")).collect();
+        let mut stats = SquashStats::default();
+        let _ = stage6_layout(&lines, None, false, &cfg, &mut stats);
+        // Source slice replaced by the marker spans
+        // `\nL2\nL3\nL4\nL5\n` = 4*150 + 4 LFs + 1 boundary LF (the
+        // separator between kept head and first dropped line) = 605
+        // bytes. `bytes_dropped_truncate` must report this exactly.
+        assert_eq!(stats.lines_dropped_truncate, 4);
+        assert_eq!(
+            stats.bytes_dropped_truncate, 605,
+            "expected 4*150 + 4 LFs between dropped lines + 1 boundary LF = 605",
         );
     }
 
@@ -2568,8 +2651,46 @@ fn oversize_bypass(
             tail_source_bytes = tail_aligned.len().min(raw_byte_len - tail_raw_start);
         }
     } else if !raw_bytes.is_empty() {
-        let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
-        compacted_bytes.extend_from_slice(degraded);
+        // No `\n` exists in the retained tail window. Two sub-cases:
+        //   (a) The source has at least one `\n` somewhere earlier — i.e.,
+        //       the FINAL source line alone is longer than the tail
+        //       window. Preserve a bounded codepoint-safe suffix of the
+        //       final line with an explicit truncation marker. (Round 9.)
+        //   (b) The entire source is one line with no `\n` anywhere.
+        //       Cannot prove a safe sequence boundary; emit only the
+        //       degraded sentinel (Round-6 strict-quarantine rule).
+        let last_raw_nl = raw_bytes.iter().rposition(|&b| b == b'\n');
+        if let Some(nl_pos) = last_raw_nl {
+            // The final line spans raw_bytes[nl_pos+1..]. Decode +
+            // sanitize the last `tail_window` bytes of it (capped at
+            // the line length), then trim to half the byte budget at
+            // a codepoint boundary.
+            let final_line_start = nl_pos + 1;
+            let suffix_window_start = final_line_start.max(raw_byte_len.saturating_sub(half * 2));
+            let suffix_decoded = stage1_lossy_utf8(&raw_bytes[suffix_window_start..]);
+            let mut suf_stripped = false;
+            let suffix_sanitized = stage2_ansi_strip(
+                &suffix_decoded,
+                &mut suf_stripped,
+                &mut stats.osc_recovery_bytes_dropped,
+            );
+            stats.cr_bearing_lines += suffix_sanitized
+                .split('\n')
+                .filter(|l| l.contains('\r'))
+                .count();
+            stats.ansi_stripped |= suf_stripped;
+            // Reserve room for the final-line marker before trimming.
+            let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
+            let used = compacted_bytes.len();
+            let remaining = max_body.saturating_sub(used + final_marker.len());
+            let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_sanitized, remaining);
+            compacted_bytes.extend_from_slice(final_marker);
+            compacted_bytes.extend_from_slice(suffix.as_bytes());
+            tail_source_bytes = suffix.len().min(raw_byte_len - suffix_window_start);
+        } else {
+            let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
+            compacted_bytes.extend_from_slice(degraded);
+        }
     }
     assert!(
         compacted_bytes.len() <= max_body,
