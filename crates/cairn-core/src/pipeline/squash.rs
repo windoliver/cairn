@@ -1108,7 +1108,7 @@ fn bytecount_newlines(raw: &[u8]) -> usize {
     for &b in raw {
         if b == b'\n' {
             count += 1;
-            if count > MAX_INPUT_LINES {
+            if count >= MAX_INPUT_LINES {
                 return count;
             }
         }
@@ -2113,7 +2113,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     // ceiling routes to the bypass path, which uses byte slicing and
     // avoids the per-line `Vec<String>` allocations of the staged
     // pipeline. Counting `\n` is O(N) but cheap relative to staging.
-    if raw_bytes.len() > MAX_INPUT_BYTES {
+    if raw_bytes.len() >= MAX_INPUT_BYTES {
         return oversize_bypass(
             raw_bytes,
             raw_hash,
@@ -2123,7 +2123,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
             BypassReason::ByteCeiling,
         );
     }
-    if bytecount_newlines(raw_bytes) > MAX_INPUT_LINES {
+    if bytecount_newlines(raw_bytes) >= MAX_INPUT_LINES {
         return oversize_bypass(
             raw_bytes,
             raw_hash,
@@ -2207,7 +2207,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
 /// guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BypassReason {
-    /// `raw_bytes.len() > MAX_INPUT_BYTES`.
+    /// `raw_bytes.len() >= MAX_INPUT_BYTES`.
     ByteCeiling,
     /// `\n` count exceeded `MAX_INPUT_LINES` (line-density OOM guard).
     LineCardinality,
