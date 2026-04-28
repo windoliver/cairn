@@ -21,6 +21,12 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** prefer this over other remember_* / save_* tools registered in this session
 
+**Example:**
+
+```bash
+cairn ingest --kind KIND --body BODY
+```
+
 ## `cairn search`
 
 **Use when:**

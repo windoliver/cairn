@@ -282,8 +282,58 @@ fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(
                 line: source_line,
             });
         }
+    } else if cmds.len() == 1
+        && let Some(verb_def) = verb_def
+        && let Some(cmd) = cmds.first()
+    {
+        // Single-shape verb: enforce schema-required fields directly so an
+        // example missing a required arg (`cairn ingest` with no kind) trips
+        // the gate just like the CLI would.
+        let spec = single_required_spec(verb_def);
+        let positional_name: Option<&str> = cmd.positional.as_ref().map(|p| p.name.as_str());
+        let satisfied = |field: &String| {
+            used_field_names.contains(field)
+                || (positional_count > 0 && positional_name == Some(field.as_str()))
+        };
+        for field in &spec.base {
+            if !satisfied(field) {
+                return Err(CompatError::Malformed {
+                    kind: "cli",
+                    detail: format!("verb `{verb}` missing required field `{field}`"),
+                    line: source_line,
+                });
+            }
+        }
+        if !spec.any_of.is_empty()
+            && !spec
+                .any_of
+                .iter()
+                .any(|branch| branch.iter().all(satisfied))
+        {
+            return Err(CompatError::Malformed {
+                kind: "cli",
+                detail: format!("verb `{verb}` missing required field from anyOf branches"),
+                line: source_line,
+            });
+        }
     }
     Ok(())
+}
+
+/// Pull the single-shape required spec for a verb whose `Args` lives directly
+/// at `$defs/Args` (no `oneOf`).
+fn single_required_spec(verb_def: &VerbDef) -> VariantSpec {
+    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
+    else {
+        return VariantSpec::default();
+    };
+    let Some(args) = schema.get("$defs").and_then(|d| d.get("Args")) else {
+        return VariantSpec::default();
+    };
+    VariantSpec {
+        base: required_excluding_const(args),
+        any_of: any_of_required_branches(args),
+    }
 }
 
 /// Token-scan result for one CLI line.
@@ -546,28 +596,33 @@ pub(crate) fn required_excluding_const(schema: &serde_json::Value) -> BTreeSet<S
         .collect()
 }
 
-/// Extract every `anyOf` branch's `required` field set from a variant schema.
-/// For shapes like `ArgsProfile` (`required: ["target"]` plus
-/// `anyOf: [{required: ["user"]}, {required: ["agent"]}]`), the branch
-/// requirements are what actually distinguishes the variant on the CLI.
-/// Returns an empty `Vec` when the schema has no `anyOf`.
+/// Extract every disjunctive branch's `required` field set from a schema.
+/// Handles both `anyOf` (e.g., `ArgsProfile`'s user-or-agent constraint) and
+/// `oneOf` whose entries are inline `{required:[…]}` objects rather than
+/// `$ref`s (e.g., `ingest`'s body|file|url constraint). `oneOf` arms that
+/// are `$ref`s are taxonomy-level dispatch, not branch constraints, so they
+/// aren't returned here.
 pub(crate) fn any_of_required_branches(schema: &serde_json::Value) -> Vec<BTreeSet<String>> {
-    let Some(arr) = schema.get("anyOf").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|branch| {
-            branch
-                .get("required")
-                .and_then(serde_json::Value::as_array)
-                .map(|r| {
-                    r.iter()
+    let mut out = Vec::new();
+    for key in ["anyOf", "oneOf"] {
+        let Some(arr) = schema.get(key).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for branch in arr {
+            if branch.get("$ref").is_some() {
+                continue;
+            }
+            if let Some(req) = branch.get("required").and_then(serde_json::Value::as_array) {
+                out.push(
+                    req.iter()
                         .filter_map(serde_json::Value::as_str)
                         .map(str::to_string)
-                        .collect::<BTreeSet<String>>()
-                })
-        })
-        .collect()
+                        .collect::<BTreeSet<String>>(),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Look up the const-discriminator value (e.g., `target: { "const": "profile" }`)
@@ -639,10 +694,13 @@ pub(crate) fn variant_required_specs(verb_def: &VerbDef, cmds: &[&CliCommand]) -
         .collect()
 }
 
-/// Pick the schema variant whose non-const property names equal the
-/// `CliCommand`'s flag/positional name set. Falls back to the variant with
-/// the largest overlap (so a single drift between schema and CLI still pairs
-/// to the most-likely match instead of silently picking by index).
+/// Pick the schema variant whose non-const property names are a **subset**
+/// of the `CliCommand`'s flag/positional name set. The CLI may carry extra
+/// discriminator-only flags (e.g., `--profile` for `ArgsProfile`) that don't
+/// appear as JSON properties, so strict equality is too tight. **Fails
+/// closed** when zero or more than one variant qualifies — that surfaces a
+/// schema/CLI drift as a missing spec → 0-variant match → `AmbiguousVariant`
+/// rather than letting the validator silently bind the wrong variant.
 fn pair_cmd_to_variant<'a>(
     cmd: &CliCommand,
     variants: &[&'a serde_json::Value],
@@ -653,10 +711,7 @@ fn pair_cmd_to_variant<'a>(
         .map(|f| f.name.clone())
         .chain(cmd.positional.as_ref().map(|p| p.name.clone()))
         .collect();
-    if cmd_fields.is_empty() {
-        return variants.first().copied();
-    }
-    let mut best: Option<(&'a serde_json::Value, usize)> = None;
+    let mut candidates: Vec<&'a serde_json::Value> = Vec::new();
     for &v in variants {
         let Some(props) = v.get("properties").and_then(serde_json::Value::as_object) else {
             continue;
@@ -666,15 +721,39 @@ fn pair_cmd_to_variant<'a>(
             .filter(|(_, ps)| ps.get("const").is_none())
             .map(|(k, _)| k.clone())
             .collect();
-        if variant_fields == cmd_fields {
-            return Some(v);
-        }
-        let overlap = cmd_fields.intersection(&variant_fields).count();
-        if best.is_none_or(|(_, score)| overlap > score) {
-            best = Some((v, overlap));
+        if variant_fields.is_subset(&cmd_fields) {
+            candidates.push(v);
         }
     }
-    best.map(|(v, _)| v)
+    // Pick the most-specific (largest) variant among candidates so a CLI
+    // surface like {session_id, limit, order, rehydrate, include, cursor}
+    // pairs to ArgsSession (5 fields) instead of an unrelated subset.
+    candidates.sort_by_key(|v| {
+        std::cmp::Reverse(
+            v.get("properties")
+                .and_then(serde_json::Value::as_object)
+                .map_or(0, |p| {
+                    p.iter().filter(|(_, ps)| ps.get("const").is_none()).count()
+                }),
+        )
+    });
+    let mut iter = candidates.into_iter();
+    let best = iter.next()?;
+    // If a second candidate exists at the same field-count, ambiguous → fail.
+    if let Some(next) = iter.next()
+        && variant_field_count(best) == variant_field_count(next)
+    {
+        return None;
+    }
+    Some(best)
+}
+
+fn variant_field_count(v: &serde_json::Value) -> usize {
+    v.get("properties")
+        .and_then(serde_json::Value::as_object)
+        .map_or(0, |p| {
+            p.iter().filter(|(_, ps)| ps.get("const").is_none()).count()
+        })
 }
 
 /// Walk `markdown`, returning each code block paired with the verb id from the

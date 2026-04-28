@@ -58,9 +58,10 @@ fn extract_finds_inline_cairn_spans() {
 
 #[test]
 fn cli_validator_accepts_canonical_verb_with_known_flag() {
+    // search requires both query (positional) and mode.
     let block = CodeBlock {
         lang: "bash".into(),
-        body: "cairn search --mode hybrid".into(),
+        body: "cairn search --mode hybrid QUERY".into(),
         line: 1,
     };
     validate_cli_block(&block, &doc()).expect("canonical search invocation must validate");
@@ -148,7 +149,7 @@ fn cli_validator_rejects_excess_positional_args() {
 #[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
-    // `search` has an optional positional, so 1 trailing positional is OK.
+    // `search` requires a positional `query`; `query` here serves that role.
     let block = CodeBlock {
         lang: "bash".into(),
         body: "cairn search --mode hybrid query".into(),
@@ -312,7 +313,7 @@ fn cli_validator_accepts_uppercase_placeholder_for_enum() {
     // examples valid.
     let block = CodeBlock {
         lang: "bash".into(),
-        body: "cairn search --mode MODE".into(),
+        body: "cairn search --mode MODE QUERY".into(),
         line: 1,
     };
     validate_cli_block(&block, &doc()).expect("placeholder enum values must validate");
@@ -324,7 +325,7 @@ fn cli_validator_accepts_quoted_positional_value() {
     // string must remain one positional, not split into two.
     let block = CodeBlock {
         lang: "bash".into(),
-        body: "cairn search \"project status\"".into(),
+        body: "cairn search --mode hybrid \"project status\"".into(),
         line: 1,
     };
     validate_cli_block(&block, &doc())
