@@ -508,6 +508,83 @@ mod wrapper_tests {
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 
+    /// Round-3 (new loop) regression: the oversize bypass must run
+    /// stage-2 ANSI/OSC sanitization on retained head/tail windows so
+    /// raw control-plane bytes (CSI escapes, OSC titles/URLs) do not
+    /// leak into compacted output. Calls `oversize_bypass` directly so
+    /// the test stays fast.
+    #[test]
+    fn oversize_bypass_sanitizes_ansi_and_osc() {
+        // Build a payload with embedded ANSI + OSC across both head
+        // and tail regions. Body in the middle is filler.
+        let head_chunk = b"\x1b[31mHEADRED\x1b[0m\nhead-line-A\nhead-line-B\n";
+        let tail_chunk = b"tail-line-A\ntail-line-B\n\x1b]0;hidden-title\x07TAILEND\n";
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(head_chunk);
+        raw.extend(std::iter::repeat_n(b'F', 50_000));
+        raw.push(b'\n');
+        raw.extend_from_slice(tail_chunk);
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Sanitization happened.
+        assert!(out.stats.ansi_stripped, "ansi_stripped flag must be set");
+        // No raw ESC bytes leaked.
+        assert!(!body.contains('\x1b'), "ESC must not leak: {body:?}");
+        // OSC title body must NOT survive (well-formed OSC is fully
+        // stripped by stage 2).
+        assert!(!body.contains("hidden-title"), "OSC body must be stripped");
+        // SGR-decorated content survives without color codes.
+        assert!(body.contains("HEADRED"), "head content survives");
+        assert!(body.contains("TAILEND"), "tail content survives");
+        // Marker present.
+        assert!(body.contains("oversize bypass"), "marker present");
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    /// Round-3 (new loop) regression: the oversize bypass must
+    /// line-align the retained tail so the final diagnostic line is
+    /// preserved whole (or omitted), never truncated mid-content.
+    #[test]
+    fn oversize_bypass_tail_is_line_aligned() {
+        // Construct a payload where the retained tail window starts
+        // mid-line; the bypass must skip to the next `\n` boundary.
+        let prefix = b"head\n";
+        let filler: Vec<u8> = std::iter::repeat_n(b'M', 60_000).collect();
+        let mid_line_marker = b"MIDLINEFRAG"; // appears before final \n
+        let final_line = b"\nFINAL-DIAGNOSTIC-LINE\n";
+        let mut raw = Vec::new();
+        raw.extend_from_slice(prefix);
+        raw.extend_from_slice(&filler);
+        raw.extend_from_slice(mid_line_marker);
+        raw.extend_from_slice(final_line);
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(&raw, raw_hash, raw_byte_len, &cfg, stats);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // Final diagnostic line preserved whole.
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-LINE"),
+            "final line preserved: ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        // Find the post-marker tail; first line of tail must NOT begin
+        // with a partial mid-line fragment (the leading 'M' filler that
+        // sits before any `\n` in the retained window).
+        if let Some((_, after_marker)) = body.rsplit_once("squash skipped…]\n") {
+            let first_tail_line = after_marker.lines().next().unwrap_or("");
+            assert!(
+                !first_tail_line.starts_with('M'),
+                "tail first line must not be a mid-line fragment: {first_tail_line:?}"
+            );
+        }
+    }
+
     /// Round-2 (new loop) regression: the oversize bypass must enforce
     /// `compacted_byte_len <= cfg.max_bytes()` in release builds even
     /// for non-UTF8 payloads, because lossy decoding expands each
@@ -1694,13 +1771,39 @@ fn oversize_bypass(
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
     let half = budget / 2;
+    // Head/tail windows are sized at 2x the byte budget so lossy
+    // decoding (1B → 3B for invalid bytes) and stage-2 sanitization
+    // both have headroom before the final byte trim.
     let head_raw_end = (half * 2).min(raw_bytes.len());
     let head_decoded = stage1_lossy_utf8(&raw_bytes[..head_raw_end]);
-    let head = trim_to_byte_budget_at_boundary(&head_decoded, half);
+    // Stage-2 ANSI/OSC sanitization: oversized captures must NOT leak
+    // control-plane bytes (titles, OSC-8 URLs, raw escapes) just because
+    // they took the bypass path.
+    let mut head_stripped = false;
+    let head_sanitized = stage2_ansi_strip(&head_decoded, &mut head_stripped);
+    stats.ansi_stripped |= head_stripped;
+    let head_trimmed = trim_to_byte_budget_at_boundary(&head_sanitized, half);
+    // Drop any trailing partial line from head so we don't emit a
+    // half-line before the marker.
+    let head: &str = match head_trimmed.rfind('\n') {
+        Some(idx) => &head_trimmed[..idx],
+        None => head_trimmed,
+    };
+
     let tail_window = (half * 2).min(raw_bytes.len());
     let tail_raw_start = raw_bytes.len() - tail_window;
     let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
-    let tail = trim_to_byte_budget_at_boundary_from_end(&tail_decoded, half);
+    let mut tail_stripped = false;
+    let tail_sanitized = stage2_ansi_strip(&tail_decoded, &mut tail_stripped);
+    stats.ansi_stripped |= tail_stripped;
+    let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
+    // Line-align tail to the next `\n` so the retained tail starts on
+    // a line boundary (preserves the final-line invariant: the last
+    // diagnostic line is never split mid-content).
+    let tail: &str = match tail_trimmed.find('\n') {
+        Some(idx) => &tail_trimmed[idx + 1..],
+        None => tail_trimmed,
+    };
     let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
     compacted_bytes.extend_from_slice(head.as_bytes());
     compacted_bytes.push(b'\n');
