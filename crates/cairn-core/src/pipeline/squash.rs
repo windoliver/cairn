@@ -239,6 +239,11 @@ impl<'a> UnstructuredTextBytes<'a> {
         raw: &'a [u8],
         context: TerminalContext,
     ) -> Result<Self, UnstructuredBindError> {
+        // Reject malformed envelopes outright — we never want to lossily
+        // compact bytes whose source_family / sensor / payload disagree.
+        event
+            .validate()
+            .map_err(UnstructuredBindError::EventValidationFailed)?;
         if !matches!(event.payload, CapturePayload::Terminal { .. }) {
             return Err(UnstructuredBindError::NotTerminalPayload);
         }
@@ -282,7 +287,7 @@ pub enum TerminalContext {
 }
 
 /// Errors returned by [`UnstructuredTextBytes::try_from_terminal_event`].
-#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum UnstructuredBindError {
     /// The event payload is not `CapturePayload::Terminal`.
@@ -298,6 +303,11 @@ pub enum UnstructuredBindError {
          dispatch driver must bypass squash for this context"
     )]
     StructuredContextRejected,
+    /// The supplied `CaptureEvent` failed envelope validation
+    /// ([`CaptureEvent::validate`]). The wrapper refuses to operate on
+    /// malformed events to avoid lossy compaction of unintended bytes.
+    #[error("CaptureEvent failed envelope validation: {0}")]
+    EventValidationFailed(#[source] crate::domain::error::DomainError),
 }
 
 #[cfg(test)]
@@ -482,6 +492,28 @@ mod wrapper_tests {
         assert_eq!(wrapped.as_bytes(), bytes);
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
+
+    /// Round-6 regression: malformed envelopes (e.g., `source_family` /
+    /// payload-variant disagreement) must be rejected before squash sees
+    /// the bytes. Otherwise an in-crate caller could route non-terminal
+    /// bytes through the lossy stage.
+    #[test]
+    fn rejects_envelope_validation_failure() {
+        let bytes = b"hello\n";
+        let mut evt = terminal_event(bytes);
+        // Force source_family / payload-variant disagreement.
+        evt.source_family = SourceFamily::Hook;
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            TerminalContext::InteractiveTty,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, UnstructuredBindError::EventValidationFailed(_)),
+            "got: {err:?}"
+        );
+    }
 }
 
 /// Result of a successful squash: compacted bytes plus audit metadata.
@@ -594,22 +626,31 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool) -> String {
                     }
                     // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (0x1B 0x5C)
                     0x5D => {
-                        i += 2; // skip ESC ]
-                        loop {
-                            if i >= bytes.len() {
-                                // unterminated OSC: drop to EOF
-                                break;
+                        // Scan ahead for a terminator without committing to
+                        // consume. If the OSC is unterminated (e.g., capture
+                        // truncated mid-escape), preserve the trailing bytes
+                        // by dropping only the lone ESC and re-processing
+                        // `]` and remainder through the outer loop. This
+                        // guarantees no tail-data loss on degraded captures.
+                        let mut j = i + 2;
+                        let term = loop {
+                            if j >= bytes.len() {
+                                break None;
                             }
-                            if bytes[i] == 0x07 {
-                                // BEL terminator
-                                i += 1;
-                                break;
+                            if bytes[j] == 0x07 {
+                                break Some(j + 1);
                             }
-                            if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == 0x5C {
-                                // ST (String Terminator): ESC \
-                                i += 2;
-                                break;
+                            if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                                break Some(j + 2);
                             }
+                            j += 1;
+                        };
+                        if let Some(end) = term {
+                            i = end;
+                        } else {
+                            // Unterminated: drop only the ESC byte; the
+                            // outer loop will then process `]` (printable)
+                            // and the rest of the stream normally.
                             i += 1;
                         }
                     }
@@ -722,6 +763,22 @@ mod stage2_tests {
         let (out, stripped) = s2("download 1%\rdownload 2%\n");
         assert_eq!(out, "download 1%\rdownload 2%\n");
         assert!(!stripped);
+    }
+
+    /// Round-7 regression: a truncated/unterminated OSC must NOT consume
+    /// the rest of the capture. Truncated terminal captures are common
+    /// (timeouts, buffering); dropping to EOF would erase trailing
+    /// error lines and violate the last-line preservation goal.
+    #[test]
+    fn unterminated_osc_does_not_drop_trailing_bytes() {
+        // ESC ] starts an OSC but no BEL or ESC \ ever arrives.
+        // Expect: ESC stripped, `]0;title` and the trailing "FINAL\n"
+        // preserved as printable content (the lone introducer is dropped
+        // but the would-be OSC body and the rest of the stream survive).
+        let (out, stripped) = s2("\x1b]0;titleFINAL\n");
+        assert!(stripped);
+        assert!(out.ends_with("FINAL\n"), "got: {out:?}");
+        assert!(out.contains(']'), "got: {out:?}");
     }
 }
 
