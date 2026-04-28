@@ -134,19 +134,30 @@ pending  → orphaned   (reconciliation finds no keychain entry)
 active   → revoked    (operator revocation)
 ```
 
-Provisioning flow (single identity):
+Provisioning flow (single identity). **Mint first, persist second:** the
+keypair must exist before any row containing its public key is written, so
+that reconciliation has real material to compare against.
 
-1. **Reserve.** Insert `identities` row with `provisioning_state = 'pending'`
-   plus the prospective `IdentityKeyEntry` in `identity_keys` inside one
-   SQLite transaction. The registry row carries no signing capability while
-   pending; reads through `IdentityRegistry::get_identity` filter pending
+1. **Mint.** Generate the Ed25519 keypair in memory using the injected
+   CSPRNG. Pure, in-process, no I/O — it cannot crash between sub-steps.
+   Derive the public key.
+2. **Reserve.** Open one SQLite transaction:
+   - Insert `identities` row with `provisioning_state = 'pending'` and
+     `current_key_version = N`.
+   - Insert `identity_keys` row with the **derived public key from step 1**.
+   Commit. Reads through `IdentityRegistry::get_identity` filter pending
    rows out by default.
-2. **Mint.** Generate the keypair in memory.
-3. **Persist secret.** `Keystore::store_keypair`. On failure: roll forward
-   to step 4 with an error; the pending row remains for reconciliation.
+3. **Persist secret.** `Keystore::store_keypair` writes the private-key
+   bytes under the `SecretHandle` for `(vault_id, identity, key_version)`.
+   On failure: return the error; the pending row remains for reconciliation
+   to clean up (no keychain entry → orphan path).
 4. **Activate.** Single SQLite UPDATE flips `provisioning_state` to
-   `'active'`. Failure here leaves the keychain entry with a pending
-   registry row — reconciliation handles it.
+   `'active'` and stamps `activated_at`. Failure here leaves the keychain
+   entry with a pending registry row, both carrying matching public-key
+   material — reconciliation can confirm and activate.
+
+The public key written at step 2 is the **same bytes** that step 4 needs
+to verify against in the keychain — minting is the only producer.
 
 Reconciliation runs at every `IdentityService::open` (i.e., once per
 process start). For each `pending` row:
@@ -220,6 +231,40 @@ spec (`2026-04-26-bootstrap-design.md`) is updated in the same PR to add
 this single artefact; the receipt grows a `vault_id` field. This is the
 sole change to the bootstrap contract.
 
+**`vault.id` is non-regenerable once identities exist.** Because every
+keychain entry is namespaced under `cairn:<vault_id>`, regenerating
+`vault.id` would point the process at a fresh keychain namespace and
+desynchronize every active identity in one stroke. To prevent that, the
+bootstrap delta defined in this PR runs an explicit guard before minting
+a new id:
+
+1. If `.cairn/vault.id` exists → use it (idempotent path).
+2. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` does not
+   exist (or contains zero `identities` rows) → mint a fresh ULID and
+   write the file.
+3. If `.cairn/vault.id` is missing **and** `.cairn/cairn.db` contains
+   one or more `identities` rows → bootstrap fails with
+   `BootstrapError::VaultIdLost` mapped to `EX_DATAERR = 65`. The CLI
+   hint instructs the operator to restore `.cairn/vault.id` from backup
+   or run the dedicated recovery command:
+
+   ```
+   cairn bootstrap: .cairn/vault.id is missing but the registry holds N identities.
+     Restore the original .cairn/vault.id from backup, or run:
+       cairn identity vault-id-recover --probe-keychain
+     Bootstrap will not mint a new vault id while identities exist; doing so
+     would desynchronize every keychain entry from the registry.
+   ```
+
+`cairn identity vault-id-recover --probe-keychain` (new, in `cairn-cli`)
+walks every active identity in the registry, derives the candidate
+`SecretHandle` for each candidate `vault_id` it finds in the keychain
+(`keyring` lets us enumerate by service prefix `cairn:`), and accepts
+the unique `vault_id` for which **every** identity's stored public key
+matches the keychain-derived public key. Ambiguity or zero matches →
+fail closed; operator must restore from backup. Round-trip test covers
+the success path and the ambiguous-match failure path.
+
 **Secret handle format.** `Keystore` uses:
 
 - service: `cairn:<vault_id>` (e.g., `cairn:01HXY…`)
@@ -228,18 +273,40 @@ sole change to the bootstrap contract.
 Wrong-vault leakage is impossible: the service segment carries the vault
 id and is verified by the keystore on every load.
 
-**First-run gate.** `cairn bootstrap` exits 0 with a vault that has zero
-identities. Any verb that needs an issuer (`ingest`, `capture_trace`,
-`forget`, `cairn identity rotate`, etc.) opens `IdentityService`, which
-checks for at least one `active` identity of kind `Human` **and** kind
-`Agent`. If absent, the verb fails fast with a typed
-`IdentityServiceError::DefaultsNotInitialized` mapped to `EX_USAGE = 64`
-and a human-readable hint:
+**First-run gate (issuer-dependent verbs only).** `cairn bootstrap` exits
+0 with a vault that has zero identities. Verbs that need to **issue** a
+signed envelope — `ingest`, `capture_trace`, `forget`, `cairn identity
+rotate`, `cairn identity revoke` — call
+`IdentityService::require_default_issuer()` before doing work. If no
+`active` identity of kind `Human` **and** kind `Agent` is present, they
+fail fast with a typed `IdentityServiceError::DefaultsNotInitialized`
+mapped to `EX_USAGE = 64` and a human-readable hint:
 
 ```
 cairn ingest: no default identities found
   run `cairn identity init-defaults` to provision the local human + agent identities
 ```
+
+**Recovery + inspection commands bypass the gate.** `IdentityService::open`
+itself never enforces the default-issuer check — that would lock the
+operator out of the very commands they need to fix the problem. The
+following subcommands open the service and return useful output even
+when defaults are missing or desynchronized:
+
+| Command | Behaviour without defaults |
+|---|---|
+| `cairn identity list` | Returns whatever rows exist (empty list is valid output). |
+| `cairn identity show <id>` | Returns the row or `NotFound`. |
+| `cairn identity provision …` | Allowed; this is how defaults get created. |
+| `cairn identity init-defaults` | Allowed; primary remediation path. |
+| `cairn identity reconcile` | Allowed; cleans up `pending` rows regardless of which identities exist. |
+| `cairn identity repair <id>` | Allowed; needed to restore a desynchronized identity even if it is one of the defaults. |
+| `cairn identity vault-id-recover` | Allowed; runs without ever opening `IdentityService` in a write-capable way. |
+
+`cairn identity rotate` and `cairn identity revoke` **do** require the
+default-issuer gate because revocation/rotation is itself a signed
+operation that must be attributable. The CLI hint when they fail tells
+the operator to run `init-defaults` first.
 
 `cairn bootstrap` human-readable output gains a final line:
 
@@ -433,6 +500,7 @@ cairn identity rotate <id> [--json]
 cairn identity revoke <id> [--json]
 cairn identity reconcile [--json]
 cairn identity repair <id> [--force] [--json]
+cairn identity vault-id-recover [--probe-keychain] [--json]
 ```
 
 Shape mirrors brief §4.2 conventions; flags use `clap` derive + `ValueEnum`
@@ -490,7 +558,9 @@ enable yet (out of scope).
 | Keychain unavailable / locked | `KeystoreError::Backend` / `Locked` | `EX_UNAVAILABLE = 69` | Maps to `CapabilityUnavailable` in capability advertisement. |
 | Re-provision same identity (idempotent path) | none | 0 | No-op only after §3.8 liveness check passes (registry row + keychain entry + matching public key). |
 | Active row, keychain entry missing or pubkey mismatch | `IdentityServiceError::KeyMaterialDesynchronized { id, reason }` | 65 (`EX_DATAERR`) | CLI hint: run `cairn identity repair <id>`. |
-| `.cairn/vault.id` missing | `IdentityServiceError::VaultIdMissing` | 78 (`EX_CONFIG`) | Operator must re-run `cairn bootstrap` (idempotent; preserves existing vault id if any). |
+| `.cairn/vault.id` missing, registry empty | `BootstrapError::VaultIdLost` raised by next bootstrap; restored on re-run | 65 (`EX_DATAERR`) at boot; n/a at identity layer (registry is empty so `IdentityService` opens cleanly once vault id is restored). |
+| `.cairn/vault.id` missing, identities exist | `BootstrapError::VaultIdLost` (refuses to mint new id) | 65 (`EX_DATAERR`) | CLI hint: restore from backup or `cairn identity vault-id-recover --probe-keychain`. |
+| `IdentityService::open` succeeds with zero defaults | none — service opens; recovery commands stay usable; issuer-dependent verbs gate themselves via `require_default_issuer` | 0 / 64 depending on verb | First-run gate is per-verb, not per-open. |
 | Re-provision while another attempt is `pending` | `RegistryError::ProvisioningInFlight` | 75 (`EX_TEMPFAIL`) | Run `cairn identity reconcile` or restart. |
 | Re-provision conflicts (different `key_version`) | `RegistryError::KeyVersionConflict` | 1 | Operator must `rotate` or `revoke` first. |
 | Crash between keychain write and registry activate | recovered by §3.5 reconciliation on next `IdentityService::open` | n/a | Pending row flipped to active. Audit log entry at `info`. |
@@ -524,7 +594,7 @@ Every typed error preserves source via `#[source]` per CLAUDE.md §6.2. No
 | `cairn-core::domain::identity::provision` | deterministic plan given seeded RNG; rev wraparound rejected | unit |
 | `cairn-keychain` | round-trip `store / load / delete`; `NotFound` on missing handle; `Locked` mapping | per-OS `#[cfg]` integration |
 | `cairn-store-sqlite` | identity CRUD; key-ring depth ≤ 3; revocation atomicity; foreign-key cascade | integration (real SQLite tempdir) |
-| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `cairn identity repair` round-trip; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band | integration via `MemoryKeystore` |
+| Cross-crate (in `cairn-cli` integration tests) | `init-defaults` idempotency (incl. §3.8 liveness check); rotation fixture (private-key ring bounded, public-key archive intact); revocation fixture; vault contains no plaintext key bytes; reconciliation recovers from injected mid-flow crash; reconciliation **fails closed on injected pubkey mismatch**; `cairn identity repair` round-trip; **two-vault isolation** (provisioning in vault A leaves vault B's keychain entries untouched); first-run gate (`cairn ingest` before `init-defaults` returns `EX_USAGE = 64`); recovery commands (`list`, `reconcile`, `repair`, `vault-id-recover`) succeed with zero defaults; `KeyMaterialDesynchronized` raised when keychain entry deleted out-of-band; **`vault.id` regeneration refused** when DB has identities; `vault-id-recover --probe-keychain` round-trip success + ambiguous-match fail-closed | integration via `MemoryKeystore` |
 | `cairn-cli` | snapshot tests for `cairn identity list --json`, `show`, `provision` (success + duplicate) | `insta` |
 
 CI commands (per CLAUDE.md §8):
@@ -588,9 +658,11 @@ This is a teaser; the real implementation plan is written next via the
    on `open` + tests.
 5. `cairn-keychain` crate + per-OS round-trip tests.
 6. `cairn-cli identity` subcommand (`provision`, `init-defaults`, `list`,
-   `show`, `rotate`, `revoke`, `reconcile`, `repair`) + snapshot tests.
-   Bootstrap delta: mint `.cairn/vault.id`, extend `BootstrapReceipt` with
-   `vault_id`, add `next: cairn identity init-defaults` hint line, update
-   bootstrap test snapshots.
+   `show`, `rotate`, `revoke`, `reconcile`, `repair`, `vault-id-recover`)
+   + snapshot tests. Bootstrap delta: mint `.cairn/vault.id` only when
+   safe (§3.7 guard), extend `BootstrapReceipt` with `vault_id`, add
+   `next: cairn identity init-defaults` hint line, update bootstrap test
+   snapshots, and add a regression test for the `VaultIdLost`-with-active-
+   identities refusal.
 7. `cairn-sensors-local::provision_sensor_identity` helper + test.
 8. Verification checklist run; PR.
