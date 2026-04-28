@@ -40,14 +40,15 @@ pub use error::SdkError;
 pub use transport::{Sdk, Transport};
 
 use cairn_core::generated::common::Ulid;
-use cairn_core::generated::envelope::{ResponsePolicyTrace, ResponseVerb};
+use cairn_core::generated::envelope::{ResponsePolicyTrace, ResponseStatus, ResponseVerb};
 
 /// Successful verb response.
 ///
-/// Carries the operation correlation ID, policy trace, and typed verb data.
-/// The wire envelope's `contract`, `verb`, and `status` fields are implicit
-/// (`cairn.mcp.v1`, the verb the SDK fn was called on, and `Ok` for the
-/// `Ok(_)` arm).
+/// Serializes to the canonical wire envelope (brief §8.0.b): the JSON
+/// shape includes `contract` (`cairn.mcp.v1`), `status` (`committed`),
+/// `verb`, `operation_id`, `policy_trace`, and `data`. CLI / MCP / SDK
+/// therefore emit byte-compatible success envelopes for the same
+/// operation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerbResponse<D> {
     /// Correlation ID for tracing this call across surfaces.
@@ -59,6 +60,24 @@ pub struct VerbResponse<D> {
     pub verb: ResponseVerb,
     /// Typed verb-specific data payload.
     pub data: D,
+}
+
+impl<D: serde::Serialize> serde::Serialize for VerbResponse<D> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        // Field count matches the canonical envelope's success arm
+        // (`contract`, `status`, `verb`, `operation_id`, `policy_trace`,
+        // `data`). Errors and the retrieve-only `target` discriminator are
+        // intentionally omitted on the success path.
+        let mut s = ser.serialize_struct("Response", 6)?;
+        s.serialize_field("contract", CONTRACT)?;
+        s.serialize_field("status", &ResponseStatus::Committed)?;
+        s.serialize_field("verb", &self.verb)?;
+        s.serialize_field("operation_id", &self.operation_id)?;
+        s.serialize_field("policy_trace", &self.policy_trace)?;
+        s.serialize_field("data", &self.data)?;
+        s.end()
+    }
 }
 
 /// Crate version as reported by `Sdk::version`. Matches the `server_info.version`

@@ -52,13 +52,11 @@ impl Transport for InProcess {}
 /// verb fn returns either a typed [`VerbResponse`] or an [`SdkError`]; no
 /// CLI parsing required.
 ///
-/// `status.server_info.incarnation` and `started_at` come from a
-/// **process-wide** snapshot (a [`std::sync::OnceLock`] inside the crate),
-/// not from the client instance. Two `Sdk` handles in the same process
-/// therefore report the same incarnation, so callers using
-/// `incarnation` for cache invalidation or restart detection see real
-/// process restarts only — never spurious churn from re-instantiating
-/// the SDK.
+/// `status.server_info.incarnation` and `started_at` are minted **fresh on
+/// every call**, matching the P0 CLI ground-truth (`cairn status` —
+/// `crates/cairn-cli/src/verbs/status.rs`). Once the store adapter lands
+/// (issue #9), both surfaces will read the canonical values from the
+/// daemon table; until then SDK and CLI behave identically.
 #[derive(Debug, Clone, Copy)]
 pub struct Sdk<T: Transport = InProcess> {
     _transport: T,
@@ -66,17 +64,8 @@ pub struct Sdk<T: Transport = InProcess> {
 
 impl Sdk<InProcess> {
     /// Construct an in-process SDK client.
-    ///
-    /// The first `Sdk::new()` call in a process primes the
-    /// process-wide incarnation snapshot, so `started_at` reflects when
-    /// the SDK service started in this process rather than when something
-    /// happened to call [`Sdk::status`] for the first time.
     #[must_use]
     pub fn new() -> Self {
-        // Prime the snapshot so `started_at` is bound to client construction,
-        // not to the first `status()` call. Subsequent constructions see the
-        // already-initialized OnceLock and are no-ops.
-        let _ = process_incarnation();
         Self {
             _transport: InProcess,
         }
@@ -89,14 +78,6 @@ impl Default for Sdk<InProcess> {
     }
 }
 
-/// Process-wide incarnation snapshot. Initialized lazily on first
-/// [`Sdk::status`] call and stable for the lifetime of the process.
-fn process_incarnation() -> &'static (cairn_core::generated::common::Ulid, String) {
-    static SNAPSHOT: std::sync::OnceLock<(cairn_core::generated::common::Ulid, String)> =
-        std::sync::OnceLock::new();
-    SNAPSHOT.get_or_init(|| (crate::stub::new_operation_id(), now_rfc3339_seconds()))
-}
-
 impl<T: Transport> Sdk<T> {
     /// SDK / contract version. Mirrors `status().server_info.version`.
     #[must_use]
@@ -107,20 +88,17 @@ impl<T: Transport> Sdk<T> {
     /// `status` — capability discovery (brief §8.0.a).
     ///
     /// Returns the contract version, advertised capabilities, and server
-    /// info. `incarnation` and `started_at` come from a process-wide
-    /// snapshot — every `Sdk` instance in the same process reports
-    /// identical values, so the field correctly identifies the embedded
-    /// service lifecycle rather than the client object.
+    /// info. `incarnation` and `started_at` are minted per-call to match
+    /// the CLI's P0 behavior (no daemon table yet — see issue #9).
     #[must_use]
     pub fn status(&self) -> StatusResponse {
-        let (incarnation, started_at) = process_incarnation();
         StatusResponse {
             contract: CONTRACT.to_owned(),
             server_info: StatusResponseServerInfo {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 build: build_profile(),
-                started_at: started_at.clone(),
-                incarnation: incarnation.clone(),
+                started_at: now_rfc3339_seconds(),
+                incarnation: crate::stub::new_operation_id(),
             },
             capabilities: p0_capabilities(),
             extensions: vec![],

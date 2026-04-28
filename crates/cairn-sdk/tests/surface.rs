@@ -20,7 +20,9 @@ use cairn_sdk::generated::verbs::{
     search::{SearchArgs, SearchArgsMode},
     summarize::SummarizeArgs,
 };
-use cairn_sdk::{Sdk, SdkError, version};
+use cairn_sdk::generated::envelope::ResponseVerb;
+use cairn_sdk::generated::verbs::ingest::IngestData;
+use cairn_sdk::{Sdk, SdkError, VerbResponse, version};
 
 fn sdk() -> Sdk {
     Sdk::new()
@@ -39,42 +41,49 @@ fn version_matches_status_server_info() {
 }
 
 #[test]
-fn started_at_is_bound_to_sdk_construction_not_first_status_call() {
-    // Sdk::new() must prime the incarnation snapshot so `started_at`
-    // reflects when the SDK service started in this process, not whenever
-    // something happens to call status() first.
-    let s = Sdk::new();
-    let constructed_at = s.status().server_info.started_at.clone();
-
-    // Doing other work, then calling status again, must not advance
-    // started_at — same process, same incarnation.
-    std::thread::sleep(std::time::Duration::from_millis(1));
-    let later = s.status().server_info.started_at;
-    assert_eq!(constructed_at, later);
-}
-
-#[test]
-fn status_incarnation_is_stable_process_wide() {
-    // Brief §8.0.a wire-compat: status is byte-identical across an
-    // incarnation. The SDK's incarnation unit is the *process*, not the
-    // client instance — re-instantiating Sdk must NOT look like a server
-    // restart to anything correlating against incarnation.
+fn status_mints_fresh_incarnation_per_call_matching_cli() {
+    // P0 parity (issue #60): until the daemon-backed incarnation table
+    // lands (issue #9), both `cairn status` and `Sdk::status()` mint a
+    // fresh incarnation ULID per invocation. Asserting freshness here
+    // pins the cross-surface contract so future drift is caught.
     let s = sdk();
     let a = s.status();
     let b = s.status();
-    assert_eq!(a.server_info.incarnation, b.server_info.incarnation);
-    assert_eq!(a.server_info.started_at, b.server_info.started_at);
+    assert_ne!(
+        a.server_info.incarnation, b.server_info.incarnation,
+        "incarnation must be minted per call to match CLI"
+    );
+    // started_at is RFC-3339 with second precision, so two back-to-back
+    // calls usually share the same value — assert only that the field is
+    // populated and well-formed.
+    assert_eq!(a.server_info.started_at.len(), 20);
+    assert!(a.server_info.started_at.ends_with('Z'));
+}
 
-    let other = Sdk::new();
-    assert_eq!(
-        s.status().server_info.incarnation,
-        other.status().server_info.incarnation,
-        "two Sdk instances in the same process must report the same incarnation"
-    );
-    assert_eq!(
-        s.status().server_info.started_at,
-        other.status().server_info.started_at
-    );
+#[test]
+fn verb_response_serializes_as_canonical_envelope() {
+    // VerbResponse must round-trip into the wire envelope shape (brief
+    // §8.0.b): contract, status=committed, verb, operation_id,
+    // policy_trace, data. Adapters and observability code can then
+    // forward SDK successes over MCP without hand-rolling serialization.
+    let resp: VerbResponse<IngestData> = VerbResponse {
+        operation_id: ulid(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Ingest,
+        data: IngestData {
+            record_id: ulid(),
+            session_id: "sess-1".to_owned(),
+        },
+    };
+    let value = serde_json::to_value(&resp).expect("serializes");
+    let obj = value.as_object().expect("envelope is object");
+    assert_eq!(obj.get("contract").and_then(|v| v.as_str()), Some("cairn.mcp.v1"));
+    assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("committed"));
+    assert_eq!(obj.get("verb").and_then(|v| v.as_str()), Some("ingest"));
+    for k in ["operation_id", "policy_trace", "data"] {
+        assert!(obj.contains_key(k), "envelope missing {k}");
+    }
+    assert!(obj["data"].is_object());
 }
 
 #[test]
