@@ -84,14 +84,22 @@ impl SquashConfig {
                 min: MIN_TAIL_LINES,
             });
         }
-        let needed = 2 * max_line_bytes + MARKER_MAX_LEN + LAYOUT_OVERHEAD;
-        if needed > max_bytes {
-            return Err(SquashConfigError::LineCapExceedsLayoutBudget {
-                line: max_line_bytes,
-                marker: MARKER_MAX_LEN,
-                overhead: LAYOUT_OVERHEAD,
-                total: max_bytes,
-            });
+        // Use checked arithmetic so a near-`usize::MAX` `max_line_bytes`
+        // can't wrap into an apparently-valid budget in release builds.
+        let needed = max_line_bytes
+            .checked_mul(2)
+            .and_then(|x| x.checked_add(MARKER_MAX_LEN))
+            .and_then(|x| x.checked_add(LAYOUT_OVERHEAD));
+        match needed {
+            Some(n) if n <= max_bytes => {}
+            _ => {
+                return Err(SquashConfigError::LineCapExceedsLayoutBudget {
+                    line: max_line_bytes,
+                    marker: MARKER_MAX_LEN,
+                    overhead: LAYOUT_OVERHEAD,
+                    total: max_bytes,
+                });
+            }
         }
         Ok(Self {
             max_bytes,
@@ -339,6 +347,17 @@ mod config_tests {
     fn rejects_tail_lines_below_min() {
         let err = SquashConfig::new(16384, 100, 1, 2, 4096).unwrap_err();
         assert!(matches!(err, SquashConfigError::TailLinesTooSmall { .. }));
+    }
+
+    #[test]
+    fn rejects_overflow_on_extreme_max_line_bytes() {
+        // 2 × max_line_bytes overflows `usize` in release; checked
+        // arithmetic must reject rather than wrap into an apparent fit.
+        let err = SquashConfig::new(usize::MAX, 100, 100, 2, usize::MAX - 1).unwrap_err();
+        assert!(matches!(
+            err,
+            SquashConfigError::LineCapExceedsLayoutBudget { .. }
+        ));
     }
 
     #[test]
@@ -808,8 +827,15 @@ fn stage4_dedup_structured(
         let run_len = j - i;
         let run_contains_last = j - 1 == last_idx;
         let cr_bearing = line.contains('\r');
+        // Empty-line runs pass through verbatim — collapsing them to
+        // `[×N]` would synthesize a non-empty summary line that fools
+        // stage 6's "last content line" anchor and crowds out real
+        // content under truncation. Blank lines are cheap (0 content
+        // bytes + 1 separator) and stage 6's trailing-blank-suffix
+        // trim handles any byte-budget pressure they create.
+        let is_blank = line.is_empty();
 
-        if run_len >= min_run && !cr_bearing {
+        if run_len >= min_run && !cr_bearing && !is_blank {
             if run_contains_last {
                 let count = run_len - 1;
                 if count >= min_run {
@@ -1107,6 +1133,7 @@ fn stage6_layout(
     let mut dropped_bytes: usize = 0;
     let mut head_take: usize;
     let mut current_tail_start = tail_start;
+    let mut current_tail_end = lines.len();
 
     if let Some(head_budget) = signed_head_budget {
         head_take = cfg.head_lines().min(tail_start);
@@ -1122,22 +1149,35 @@ fn stage6_layout(
             dropped_bytes += line.len();
         }
     } else {
-        // Tail alone exceeds max_bytes. Drop tail lines from the front,
-        // respecting the pair lock at end if applicable.
+        // Tail alone exceeds max_bytes. Drop in two phases so the anchored
+        // last-content line — and its split-form `[×N]` companion when
+        // pair_at_end — never falls before a trailing blank-only line.
         head_take = 0;
         let target = max_body.saturating_sub(MARKER_MAX_LEN + layout_overhead);
         let mut remaining_tail = tail_byte_len;
-        // The atomic-pair lock: when pair_at_end, the bottom 2 indices
-        // (lines.len()-2 and lines.len()-1) must be kept together. So the
-        // drop loop's lower bound is lines.len() - 2 instead of lines.len() - 1.
+
+        // Phase A: trim trailing blank-only suffix past last_content_idx.
+        while remaining_tail > target && current_tail_end > last_content_idx + 1 {
+            let drop_line = &lines[current_tail_end - 1];
+            remaining_tail = remaining_tail.saturating_sub(drop_line.len() + 1);
+            dropped_lines += 1;
+            dropped_bytes += drop_line.len();
+            current_tail_end -= 1;
+        }
+
+        // Phase B: drop from the front of the preserved tail, stopping
+        // before the atomic region around last_content_idx (and its
+        // split-form pair partner when pair_at_end).
         let pair_floor = if pair_at_end { 2 } else { 1 };
-        while remaining_tail > target && current_tail_start + pair_floor < lines.len() {
+        let min_tail_start = (last_content_idx + 1).saturating_sub(pair_floor);
+        while remaining_tail > target && current_tail_start < min_tail_start {
             let drop_line = &lines[current_tail_start];
             remaining_tail = remaining_tail.saturating_sub(drop_line.len() + 1);
             dropped_lines += 1;
             dropped_bytes += drop_line.len();
             current_tail_start += 1;
         }
+
         for line in &lines[..tail_start] {
             dropped_lines += 1;
             dropped_bytes += line.len();
@@ -1145,7 +1185,7 @@ fn stage6_layout(
     }
 
     let head_slice = &lines[..head_take];
-    let tail_slice_final = &lines[current_tail_start..];
+    let tail_slice_final = &lines[current_tail_start..current_tail_end];
     let marker = format!("[…skipped {dropped_lines} lines, {dropped_bytes} bytes…]");
     debug_assert!(marker.len() <= MARKER_MAX_LEN, "marker bound");
 
@@ -1305,6 +1345,13 @@ fn stage4_dedup_structured_with_pair_flag(
     if lines.is_empty() || min_run < 2 {
         return (lines.iter().map(|l| (l.clone(), None)).collect(), false);
     }
+    // pair_at_end mirrors stage 4's split-form emission rule: the run that
+    // ends at the *literal* last index is the only one promoted to
+    // `(content, Some(N-1))` + `(content, None)`. Detecting against the
+    // last content index would over-set the flag for runs that don't
+    // actually emit a split-form pair (e.g., a repeated content run
+    // followed by trailing blanks — there stage 4 emits a single
+    // `(content, Some(N))` instead, and there is no companion to lock).
     let last_idx = lines.len() - 1;
     let last_line = &lines[last_idx];
     let mut run_start = last_idx;
@@ -1417,6 +1464,55 @@ mod squash_integration_tests {
         assert!(
             out.stats.truncated,
             "stats.truncated must be set when stage 5 truncated"
+        );
+    }
+
+    /// Regression: when the preserved tail itself overflows the byte budget
+    /// (mode B), trailing blank lines past the anchor must be dropped before
+    /// the anchored content line. We disable dedup (high `dedup_min_run`)
+    /// so the blank suffix actually reaches stage 6 instead of being
+    /// collapsed into a `[×N]` marker upstream.
+    #[test]
+    fn trailing_blank_suffix_dropped_before_anchored_content() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 10_000, MIN_MAX_LINE_BYTES).unwrap();
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"FINAL\n");
+        // 1000 trailing blanks: with dedup disabled, each contributes 1
+        // separator-newline byte, so the joined body alone exceeds max_body.
+        raw.extend(std::iter::repeat_n(b'\n', 1000));
+        let out = run_squash(&raw, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(out.stats.truncated);
+        assert!(
+            body.contains("FINAL"),
+            "anchored last-content line must outlive trailing-blank suffix; got: {body:?}"
+        );
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    /// Regression: a repeated content run followed by trailing blanks
+    /// stays a single `(content, Some(N))` entry in stage 4 (not split-form,
+    /// because the run does not contain the literal last index), and stage 6
+    /// must preserve that combined `<content> [×N]` line under truncation.
+    #[test]
+    fn repeated_run_with_trailing_blanks_keeps_count_marker() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let mut raw = Vec::new();
+        for i in 0..50 {
+            raw.extend_from_slice(format!("noise-{i:04}\n").as_bytes());
+        }
+        // 4 repeats of FINAL: stage 4 emits a single ("FINAL", Some(4))
+        // because the run does not reach the literal last index.
+        for _ in 0..4 {
+            raw.extend_from_slice(b"FINAL\n");
+        }
+        raw.extend(std::iter::repeat_n(b'\n', 3));
+        let out = run_squash(&raw, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(out.stats.truncated);
+        assert!(
+            body.contains("FINAL [×4]"),
+            "single combined dedup line must survive: {body:?}"
         );
     }
 
