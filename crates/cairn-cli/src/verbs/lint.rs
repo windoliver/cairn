@@ -144,11 +144,7 @@ pub async fn fix_folders_handler(
     let (policies_by_dir, policy_errors, tainted_dirs) = collect_policies(vault_root).await?;
 
     if !tainted_dirs.is_empty() {
-        record_paths.retain(|_, path| {
-            !tainted_dirs
-                .iter()
-                .any(|bad| path.starts_with(bad))
-        });
+        record_paths.retain(|_, path| !tainted_dirs.iter().any(|bad| path.starts_with(bad)));
     }
 
     // 3. Reverse-map backlinks.
