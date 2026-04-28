@@ -16,40 +16,55 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{CaptureMode, IdentityKind, MemoryVisibility, SourceFamily};
 
-/// Per-vault overrides for the default visibility matrix.
+/// Per-vault narrowing overrides for the default visibility matrix.
 ///
 /// Stored under `_policy.yaml` per brief §3.0; the parser lives in
-/// `crate::config` (this module accepts the parsed struct only). All fields
-/// default to `None`, in which case [`default_visibility`] returns the
-/// hard-coded matrix value.
+/// `crate::config` (this module accepts the parsed struct only). All
+/// fields default to `None`/empty, in which case [`default_visibility`]
+/// returns the hard-coded matrix value.
 ///
-/// `floor` raises the default to at least the given tier (clamped upward,
-/// never demoted). `override_for_source` replaces the default for a
-/// specific [`SourceFamily`]; the override is applied **after** the
-/// matrix lookup but **before** the floor.
+/// **Both fields are narrowing-only.** The Filter stage never broadens
+/// visibility — promotion above the matrix default requires an audited
+/// `consent.log` entry per §14, and that path lives outside this
+/// module. A configuration that tries to broaden via either field is
+/// silently clamped back to the matrix value rather than silently
+/// promoting the capture without consent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VisibilityPolicy {
-    /// Optional tier the default is clamped up to (never down). Use to
-    /// force a more-private floor for a vault — e.g. `Private` blocks any
-    /// path that would have started at `Session`.
+    /// Optional **upper bound** the resolved default is clamped down to.
+    /// Use this to force a more-private ceiling on the whole vault —
+    /// e.g. `ceiling: Private` collapses every capture (including
+    /// Auto+sensor's `Session` default) down to `Private`. A `ceiling`
+    /// broader than the matrix value is a no-op for that capture; it
+    /// can never promote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub floor: Option<MemoryVisibility>,
+    pub ceiling: Option<MemoryVisibility>,
 
-    /// Per-source overrides. A present entry replaces the matrix default
-    /// for that source family, prior to the floor clamp.
+    /// Per-source narrowing overrides. A present entry **lowers** the
+    /// matrix default for that [`SourceFamily`] toward `Private`. An
+    /// override broader than the matrix value is silently ignored — the
+    /// matrix value wins. After this step, [`Self::ceiling`] applies as
+    /// a final clamp toward `Private`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub override_for_source: HashMap<SourceFamily, MemoryVisibility>,
 }
 
-/// Resolve the default [`MemoryVisibility`] for a capture (§6.3).
+/// Resolve the default [`MemoryVisibility`] for a capture (§6.3, §14).
 ///
-/// The resolution is:
+/// Resolution order:
 ///
 /// 1. Look up the matrix entry for `(identity_kind, mode, source)`.
-/// 2. If `policy.override_for_source` has an entry for `source`, use it
-///    instead.
-/// 3. Clamp the result up to `policy.floor` (never down).
+/// 2. If `policy.override_for_source` has an entry for `source` and it
+///    is **stricter** (more private) than the matrix value, use it.
+///    Otherwise keep the matrix value — overrides cannot broaden.
+/// 3. If `policy.ceiling` is set and it is **stricter** than the
+///    current value, clamp down to it. The ceiling cannot broaden.
+///
+/// The whole resolution is monotonically non-broadening: the output
+/// is always less-or-equal-to the matrix default, never above it.
+/// Promotion to broader tiers requires a consent.log entry and is
+/// performed outside the Filter stage.
 ///
 /// **Defaults (§14 deny-by-default):** every triple lands at `Private`
 /// unless it is an automatic sensor capture (Mode A from a real sensor
@@ -66,13 +81,12 @@ pub fn default_visibility(
     policy: &VisibilityPolicy,
 ) -> MemoryVisibility {
     let matrix = matrix_lookup(identity_kind, mode, source);
-    let after_override = policy
-        .override_for_source
-        .get(&source)
-        .copied()
-        .unwrap_or(matrix);
-    match policy.floor {
-        Some(floor) if after_override < floor => floor,
+    let after_override = match policy.override_for_source.get(&source).copied() {
+        Some(o) if o < matrix => o,
+        _ => matrix,
+    };
+    match policy.ceiling {
+        Some(c) if c < after_override => c,
         _ => after_override,
     }
 }
@@ -253,15 +267,14 @@ mod tests {
         }
     }
 
-    // ── Policy overrides ─────────────────────────────────────────────
+    // ── Policy overrides (narrowing only) ────────────────────────────
 
     #[test]
-    fn policy_floor_clamps_upward_only() {
-        // floor=Project: an Auto+Hook (default Session) lands at Project,
-        // an Explicit+Cli (default Private) lands at Project — both
-        // raised to the floor.
+    fn ceiling_clamps_downward_only() {
+        // ceiling=Private: an Auto+Hook (default Session) gets clamped
+        // down to Private. An Explicit+Cli (already Private) stays put.
         let policy = VisibilityPolicy {
-            floor: Some(MemoryVisibility::Project),
+            ceiling: Some(MemoryVisibility::Private),
             ..Default::default()
         };
         assert_eq!(
@@ -271,7 +284,7 @@ mod tests {
                 SourceFamily::Hook,
                 &policy
             ),
-            MemoryVisibility::Project,
+            MemoryVisibility::Private,
         );
         assert_eq!(
             default_visibility(
@@ -280,15 +293,18 @@ mod tests {
                 SourceFamily::Cli,
                 &policy
             ),
-            MemoryVisibility::Project,
+            MemoryVisibility::Private,
         );
     }
 
     #[test]
-    fn policy_floor_never_demotes() {
-        // floor=Private cannot lower an Auto+Hook (default Session) to Private.
+    fn ceiling_cannot_broaden_default() {
+        // ceiling=Project applied to Auto+Hook (default Session) is a
+        // no-op — Session is already stricter than Project. The Filter
+        // stage must never broaden visibility; promotion lives behind
+        // the audited consent.log path (§14).
         let policy = VisibilityPolicy {
-            floor: Some(MemoryVisibility::Private),
+            ceiling: Some(MemoryVisibility::Project),
             ..Default::default()
         };
         assert_eq!(
@@ -299,19 +315,36 @@ mod tests {
                 &policy
             ),
             MemoryVisibility::Session,
-            "floor must clamp upward only — never demote"
+            "ceiling broader than matrix must not promote"
+        );
+        // Same for Explicit + Cli (Private). A Public ceiling would not
+        // broaden it either.
+        let public_ceiling = VisibilityPolicy {
+            ceiling: Some(MemoryVisibility::Public),
+            ..Default::default()
+        };
+        assert_eq!(
+            default_visibility(
+                IdentityKind::Human,
+                CaptureMode::Explicit,
+                SourceFamily::Cli,
+                &public_ceiling
+            ),
+            MemoryVisibility::Private,
         );
     }
 
     #[test]
-    fn source_override_replaces_matrix_default() {
-        let mut overrides = HashMap::new();
-        overrides.insert(SourceFamily::Clipboard, MemoryVisibility::Private);
+    fn source_override_only_narrows() {
+        // Auto+Clipboard defaults to Session. An override to Private is
+        // narrower → applies. An override to Project would be broader
+        // → silently ignored, default preserved.
+        let mut narrow = HashMap::new();
+        narrow.insert(SourceFamily::Clipboard, MemoryVisibility::Private);
         let policy = VisibilityPolicy {
-            override_for_source: overrides,
+            override_for_source: narrow,
             ..Default::default()
         };
-        // Default would be Session (Auto + sensor); override forces Private.
         assert_eq!(
             default_visibility(
                 IdentityKind::Sensor,
@@ -321,7 +354,13 @@ mod tests {
             ),
             MemoryVisibility::Private,
         );
-        // Other sources unaffected.
+
+        let mut broaden = HashMap::new();
+        broaden.insert(SourceFamily::Hook, MemoryVisibility::Project);
+        let policy = VisibilityPolicy {
+            override_for_source: broaden,
+            ..Default::default()
+        };
         assert_eq!(
             default_visibility(
                 IdentityKind::Sensor,
@@ -330,16 +369,20 @@ mod tests {
                 &policy
             ),
             MemoryVisibility::Session,
+            "broadening source override must be ignored"
         );
     }
 
     #[test]
-    fn override_then_floor_compose() {
-        // Override drops Hook to Private, then floor=Project raises it to Project.
+    fn override_and_ceiling_both_narrow_compose() {
+        // Override Hook (Session) down to Project — but Project is
+        // broader than Session, so override is ignored. Then ceiling
+        // Private clamps the matrix value (Session) down to Private.
+        // Net effect: Private.
         let mut overrides = HashMap::new();
-        overrides.insert(SourceFamily::Hook, MemoryVisibility::Private);
+        overrides.insert(SourceFamily::Hook, MemoryVisibility::Project);
         let policy = VisibilityPolicy {
-            floor: Some(MemoryVisibility::Project),
+            ceiling: Some(MemoryVisibility::Private),
             override_for_source: overrides,
         };
         assert_eq!(
@@ -349,8 +392,70 @@ mod tests {
                 SourceFamily::Hook,
                 &policy
             ),
-            MemoryVisibility::Project,
+            MemoryVisibility::Private,
         );
+    }
+
+    #[test]
+    fn no_policy_combination_can_broaden_matrix() {
+        // Property: for every (kind, mode, source) and every policy
+        // combination from the six visibility tiers, the resolved
+        // default is never broader than the unpoliced matrix value.
+        let kinds = [
+            IdentityKind::Human,
+            IdentityKind::Agent,
+            IdentityKind::Sensor,
+        ];
+        let modes = [
+            CaptureMode::Auto,
+            CaptureMode::Explicit,
+            CaptureMode::Proactive,
+        ];
+        let sources = [
+            SourceFamily::Hook,
+            SourceFamily::Ide,
+            SourceFamily::Terminal,
+            SourceFamily::Clipboard,
+            SourceFamily::Voice,
+            SourceFamily::Screen,
+            SourceFamily::RecordingBatch,
+            SourceFamily::Cli,
+            SourceFamily::Mcp,
+            SourceFamily::Proactive,
+        ];
+        let tiers = [
+            MemoryVisibility::Private,
+            MemoryVisibility::Session,
+            MemoryVisibility::Project,
+            MemoryVisibility::Team,
+            MemoryVisibility::Org,
+            MemoryVisibility::Public,
+        ];
+        let baseline = VisibilityPolicy::default();
+        for k in kinds {
+            for m in modes {
+                for s in sources {
+                    let unpoliced = default_visibility(k, m, s, &baseline);
+                    for ceiling in tiers {
+                        for override_tier in tiers {
+                            let mut overrides = HashMap::new();
+                            overrides.insert(s, override_tier);
+                            let p = VisibilityPolicy {
+                                ceiling: Some(ceiling),
+                                override_for_source: overrides,
+                            };
+                            let resolved = default_visibility(k, m, s, &p);
+                            assert!(
+                                resolved <= unpoliced,
+                                "policy broadened {k:?},{m:?},{s:?}: \
+                                 unpoliced={unpoliced:?} resolved={resolved:?} \
+                                 ceiling={ceiling:?} override={override_tier:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ── Serde ────────────────────────────────────────────────────────
@@ -365,11 +470,11 @@ mod tests {
     }
 
     #[test]
-    fn policy_round_trips_with_floor_and_overrides() {
+    fn policy_round_trips_with_ceiling_and_overrides() {
         let mut overrides = HashMap::new();
         overrides.insert(SourceFamily::Voice, MemoryVisibility::Private);
         let p = VisibilityPolicy {
-            floor: Some(MemoryVisibility::Session),
+            ceiling: Some(MemoryVisibility::Session),
             override_for_source: overrides,
         };
         let s = serde_json::to_string(&p).expect("serialize");

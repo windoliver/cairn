@@ -164,10 +164,13 @@ fn proactive_agent_capture_with_injection_only_proceeds_after_fencing() {
     assert_eq!(visibility, MemoryVisibility::Private);
 }
 
-// ── Vault policy floor raises an Auto+Hook draft to Project ──────────
+// ── Vault policy clamps Auto+Hook down from Session to Private ───────
 
 #[test]
-fn policy_floor_lifts_default_above_session() {
+fn policy_ceiling_clamps_default_toward_private() {
+    // §14: the Filter stage must never broaden visibility — promotion
+    // requires an audited consent.log entry. Vault policy can only
+    // narrow toward Private; the ceiling enforces that direction.
     let raw = "PostToolUse: tests passed";
     let redacted = redact(raw);
     let fenced = fence(&redacted.text);
@@ -175,7 +178,7 @@ fn policy_floor_lifts_default_above_session() {
     let decision = should_memorize(&inputs);
 
     let policy = VisibilityPolicy {
-        floor: Some(MemoryVisibility::Project),
+        ceiling: Some(MemoryVisibility::Private),
         ..VisibilityPolicy::default()
     };
     let visibility = default_visibility(
@@ -186,7 +189,39 @@ fn policy_floor_lifts_default_above_session() {
     );
 
     assert_eq!(decision, Decision::Proceed);
-    assert_eq!(visibility, MemoryVisibility::Project);
+    // Auto+Hook would default to Session, but the policy ceiling
+    // collapses it down to Private without any consent path.
+    assert_eq!(visibility, MemoryVisibility::Private);
+}
+
+#[test]
+fn policy_cannot_broaden_default_visibility_via_filter_stage() {
+    // Adversarial: a misconfigured `_policy.yaml` tries to broaden a
+    // private capture to project tier. The Filter stage rejects the
+    // broadening — promotion lives behind the audited consent.log path.
+    let raw = "remember: prefer rust over python";
+    let redacted = redact(raw);
+    let fenced = fence(&redacted.text);
+    let inputs = FilterInputs::new(&redacted, &fenced);
+    let decision = should_memorize(&inputs);
+
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert(SourceFamily::Cli, MemoryVisibility::Project);
+    let policy = VisibilityPolicy {
+        ceiling: Some(MemoryVisibility::Public),
+        override_for_source: overrides,
+    };
+    let visibility = default_visibility(
+        IdentityKind::Human,
+        CaptureMode::Explicit,
+        SourceFamily::Cli,
+        &policy,
+    );
+
+    assert_eq!(decision, Decision::Proceed);
+    // Despite ceiling=Public and override=Project, the resolved
+    // visibility stays at the matrix default of Private.
+    assert_eq!(visibility, MemoryVisibility::Private);
 }
 
 // ── Idempotence: full pipe is stable when re-run on its own output ───

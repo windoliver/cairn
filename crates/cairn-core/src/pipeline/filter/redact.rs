@@ -36,9 +36,11 @@ pub enum RedactionTag {
     Ipv4,
     /// AWS access key ID (`AKIA...` / `ASIA...`).
     AwsAccessKeyId,
-    /// GitHub personal-access token (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_`).
+    /// GitHub personal-access token (`ghp_` / `gho_` / `ghu_` / `ghs_` / `ghr_`)
+    /// or fine-grained PAT (`github_pat_...`).
     GithubToken,
-    /// Slack token (`xox[baprs]-...`).
+    /// Slack token (`xox[abceoprs]-...`, including `xoxe-` refresh,
+    /// `xoxc-` user, `xoxo-` legacy).
     SlackToken,
     /// JSON Web Token (`<header>.<body>.<sig>`).
     Jwt,
@@ -46,6 +48,13 @@ pub enum RedactionTag {
     Ssn,
     /// Generic high-entropy hex secret (≥32 chars).
     HexSecret,
+    /// Opaque vendor API key with a stable prefix
+    /// (`sk-`, `sk_live_`, `sk_test_`, `pk_live_`, `pk_test_`,
+    /// `rk_live_`, `whsec_`, `AIza...` Google API).
+    OpaqueApiKey,
+    /// Context-keyed secret in `key=value` form
+    /// (`api_key=...`, `secret=...`, `token=...`, `password=...`).
+    ContextKeyedSecret,
 }
 
 impl RedactionTag {
@@ -62,6 +71,8 @@ impl RedactionTag {
             Self::Jwt => "jwt",
             Self::Ssn => "ssn",
             Self::HexSecret => "hex_secret",
+            Self::OpaqueApiKey => "opaque_api_key",
+            Self::ContextKeyedSecret => "context_keyed_secret",
         }
     }
 }
@@ -168,7 +179,38 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
             ),
             (
                 RedactionTag::SlackToken,
-                build(r"\bxox[abprs]-[A-Za-z0-9-]{10,200}\b"),
+                // Cover the full xox-family: bot/user/admin/refresh/
+                // configuration/legacy/external — `[abceoprs]`.
+                build(r"\bxox[abceoprs]-[A-Za-z0-9-]{10,200}\b"),
+            ),
+            (
+                // Opaque vendor API keys with stable prefixes. Bounded
+                // suffix lengths keep regex linear-time. Order before
+                // HexSecret so a hex-shaped suffix doesn't win.
+                RedactionTag::OpaqueApiKey,
+                build(
+                    r"\b(?:sk_live|sk_test|pk_live|pk_test|rk_live|whsec)_[A-Za-z0-9]{16,128}\b",
+                ),
+            ),
+            (
+                // OpenAI / Anthropic style `sk-...` and `sk-proj-...`.
+                RedactionTag::OpaqueApiKey,
+                build(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,200}\b"),
+            ),
+            (
+                // Google API keys.
+                RedactionTag::OpaqueApiKey,
+                build(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+            ),
+            (
+                // Context-keyed secret assignments: `api_key=...`,
+                // `secret: ...`, `token=...`, `password=...`. The
+                // value is bounded to non-whitespace/quote characters
+                // so we don't swallow surrounding prose.
+                RedactionTag::ContextKeyedSecret,
+                build(
+                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth)\s*[:=]\s*['"]?[A-Za-z0-9_./+=-]{16,200}"#,
+                ),
             ),
             (
                 RedactionTag::Email,
@@ -265,6 +307,79 @@ mod tests {
             one_tag("post xoxb-1234567890-abcdef done"),
             RedactionTag::SlackToken
         );
+    }
+
+    #[test]
+    fn detects_slack_refresh_and_config_tokens() {
+        // xoxe = refresh, xoxc = config — both must redact.
+        assert_eq!(
+            one_tag("refresh xoxe-1234567890-abcdef done"),
+            RedactionTag::SlackToken,
+        );
+        assert_eq!(
+            one_tag("config xoxc-1234567890-abcdef done"),
+            RedactionTag::SlackToken,
+        );
+    }
+
+    #[test]
+    fn detects_openai_style_sk_key() {
+        let r = redact("OPENAI_API_KEY=sk-proj-aB3dEfGhIjKlMnOpQrStUv done");
+        // The context-keyed assignment fires first and swallows the
+        // value; either tag is acceptable as long as the raw key is
+        // not in the masked text.
+        assert!(!r.spans.is_empty(), "no span fired");
+        assert!(
+            !r.text.contains("sk-proj-aB3dEfGhIjKlMnOpQrStUv"),
+            "sk- key leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn detects_stripe_style_sk_live_key() {
+        assert_eq!(
+            one_tag("token sk_live_aB3dEfGhIjKlMnOpQrStUv done"),
+            RedactionTag::OpaqueApiKey
+        );
+    }
+
+    #[test]
+    fn detects_google_api_key() {
+        // Exactly 35 chars after `AIza`.
+        let key: String = std::iter::repeat_n('A', 35).collect();
+        assert_eq!(
+            one_tag(&format!("token AIza{key} done")),
+            RedactionTag::OpaqueApiKey,
+        );
+    }
+
+    #[test]
+    fn detects_context_keyed_secret() {
+        let r = redact("config: password=hunter2horsestaplebattery and rest");
+        assert!(!r.spans.is_empty(), "no span fired");
+        assert!(
+            !r.text.contains("hunter2horsestaplebattery"),
+            "context-keyed secret leaked: {}",
+            r.text
+        );
+    }
+
+    #[test]
+    fn detects_api_key_assignment_dash_and_underscore() {
+        for variant in [
+            "api_key=verysecretverylongtokenstring",
+            "api-key: verysecretverylongtokenstring",
+            "auth=verysecretverylongtokenstring",
+        ] {
+            let r = redact(variant);
+            assert!(!r.spans.is_empty(), "no span fired for {variant}");
+            assert!(
+                !r.text.contains("verysecretverylongtokenstring"),
+                "secret leaked for {variant}: {}",
+                r.text
+            );
+        }
     }
 
     #[test]
