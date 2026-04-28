@@ -288,6 +288,7 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
     // first — without this, `cairn retrieve --session S \\n  --include bogus`
     // would only validate the leading line and silently accept the stale
     // continuation.
+    let mut found_cairn_invocation = false;
     for logical in join_continuations(&block.body) {
         let line = logical.trim();
         if line.is_empty() {
@@ -295,20 +296,44 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
         }
         let owned = shell_split(line, block.line)?;
         for segment in command_segments(&owned) {
-            // Skip env-var assignments (`FOO=bar …`) and known wrappers
-            // (`time cairn …`, `env -i cairn …`, `sudo -u alice cairn …`)
-            // until we hit `cairn`. If the wrapped invocation isn't
-            // actually `cairn` (e.g., `echo cairn …`, `sudo -u alice ls`)
-            // the segment is skipped — round-3 found the prior bare-token
-            // skip mistreated `sudo -u alice cairn …` as wrapper option
-            // pointing at `alice`.
+            // Skip env-var assignments (`FOO=bar …`), recognized shell prefix
+            // words (`!`, `command`, reserved words like `if`/`then`/`do`),
+            // and known wrappers (`time cairn …`, `env -i cairn …`,
+            // `sudo -u alice cairn …`) until we hit `cairn`. If the wrapped
+            // command word isn't `cairn` (e.g., `echo cairn …`,
+            // `sudo -u alice ls`), the segment is skipped.
             let Some(cmd_pos) = locate_cairn_command(segment) else {
                 continue;
             };
             validate_cli_line_tokens(&segment[cmd_pos..], block.line, doc)?;
+            found_cairn_invocation = true;
         }
     }
+    // Round-8 finding: any bash-like block that *mentions* `cairn` but never
+    // yields a validatable invocation is suspicious — it's probably a
+    // compound shell form (`(cairn …)`, `if cairn …; then`) the parser
+    // can't model. Fail closed so a stale example can't ship just by being
+    // wrapped in unsupported syntax.
+    if !found_cairn_invocation && body_mentions_cairn(&block.body) {
+        return Err(CompatError::Malformed {
+            kind: "cli",
+            detail: "block mentions `cairn` but no cairn invocation could be \
+                     extracted — rewrite the example as a plain `cairn …` \
+                     command (compound shell forms are not validated)"
+                .to_string(),
+            line: block.line,
+        });
+    }
     Ok(())
+}
+
+/// True when `body` contains a whitespace-separated `cairn` token (with the
+/// trailing/leading punctuation a real shell would strip — `(cairn`, `cairn;`,
+/// `cairn)`). Used to fail closed when a bash block mentions cairn but the
+/// parser found no validatable invocation.
+fn body_mentions_cairn(body: &str) -> bool {
+    body.split_whitespace()
+        .any(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '_') == "cairn")
 }
 
 /// Split a token stream on shell control operators (`;`, `&&`, `||`, `|`,
@@ -353,6 +378,14 @@ fn locate_cairn_command(segment: &[Token]) -> Option<usize> {
         let tok = &segment[i];
         let val = tok.value.as_str();
         if !tok.quoted && is_env_var_assignment(val) {
+            i += 1;
+            continue;
+        }
+        // Round-8 finding: skip recognized shell prefix words so compound
+        // forms like `! cairn …`, `command cairn …`, `if cairn …; then`
+        // still get validated instead of being silently treated as
+        // non-cairn command words.
+        if !tok.quoted && is_shell_prefix_word(val) {
             i += 1;
             continue;
         }
@@ -445,6 +478,17 @@ fn wrapper_options_with_value(name: &str) -> Option<&'static [&'static str]> {
         "nohup" | "exec" => Some(&[]),
         _ => None,
     }
+}
+
+/// Recognized prefix words that introduce a simple command without changing
+/// what command word follows. `!` (negation), `command` (skip function lookup),
+/// and the bash reserved words that may appear immediately before a simple
+/// command in compound constructs.
+fn is_shell_prefix_word(tok: &str) -> bool {
+    matches!(
+        tok,
+        "!" | "command" | "if" | "then" | "elif" | "else" | "while" | "until" | "do" | "case"
+    )
 }
 
 fn is_env_var_assignment(tok: &str) -> bool {

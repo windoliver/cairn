@@ -711,14 +711,62 @@ fn cli_validator_inspects_wrapper_with_long_options() {
 }
 
 #[test]
-fn cli_validator_skips_wrapper_with_non_cairn_command() {
-    // Round-5 finding: prior wrapper handling kept scanning past the
-    // wrapper's command word (`printenv`, `grep`) until it found a
-    // literal `cairn` token, misclassifying `env printenv cairn` and
-    // `sudo grep cairn file` as Cairn invocations. After parsing the
-    // wrapper's option syntax precisely, the first non-option token is
-    // the wrapped command word; if it isn't `cairn`, the segment is
-    // skipped.
+fn cli_validator_handles_recognized_shell_prefix_words() {
+    // Round-8 finding: compound shell forms like `command cairn …`,
+    // `! cairn …`, `if cairn …; then` are real invocations. The parser
+    // must skip the prefix word and validate the embedded cairn command
+    // (instead of treating the segment as a non-cairn command and
+    // ignoring it).
+    for body in [
+        "command cairn ingest --bogus",
+        "! cairn search --bogus QUERY",
+        "if cairn ingest --bogus; then echo ok; fi",
+    ] {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.to_string(),
+            line: 1,
+        };
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(body);
+        // Flag may parse as `bogus` or `bogus;` depending on whether a
+        // trailing operator was glued to the token by the simple
+        // tokenizer — either way the gate fires on `--bogus`.
+        assert!(
+            matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag.starts_with("bogus")),
+            "expected UnknownFlag starting with `bogus` inside `{body}`, got: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_validator_fails_closed_on_unparsed_compound_form() {
+    // Round-8 finding catch-all: a bash block that mentions `cairn` but
+    // never yields a validatable invocation (subshell, brace group, or
+    // anything else this parser doesn't model) is rejected so the only
+    // escape hatch is to drop the example, not hide it behind unsupported
+    // syntax.
+    for body in ["(cairn ingest --bogus)", "{ cairn ingest --bogus; }"] {
+        let block = CodeBlock {
+            lang: "bash".into(),
+            body: body.to_string(),
+            line: 1,
+        };
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(body);
+        assert!(
+            matches!(err, CompatError::Malformed { kind: "cli", .. }),
+            "expected Malformed (fail-closed) for `{body}`, got: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn cli_validator_rejects_wrapper_with_non_cairn_command() {
+    // Round-5: the parser must NOT misinterpret `env printenv cairn` as a
+    // Cairn invocation pointing at `printenv`.
+    // Round-8 update: with the fail-closed gate, a bash block that mentions
+    // `cairn` but never yields a real invocation is itself rejected. The
+    // parser still classifies the wrapped command correctly (not `cairn`),
+    // but the catch-all surfaces the suspicious example as Malformed.
     for body in [
         "env printenv cairn",
         "sudo grep cairn file",
@@ -729,8 +777,11 @@ fn cli_validator_skips_wrapper_with_non_cairn_command() {
             body: body.to_string(),
             line: 1,
         };
-        validate_cli_block(&block, &doc())
-            .unwrap_or_else(|e| panic!("wrapper segment `{body}` must be skipped, got: {e:?}"));
+        let err = validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty(body);
+        assert!(
+            matches!(err, CompatError::Malformed { kind: "cli", .. }),
+            "expected Malformed for `{body}`, got: {err:?}"
+        );
     }
 }
 
@@ -761,19 +812,24 @@ fn cli_validator_accepts_quoted_hyphen_value() {
 }
 
 #[test]
-fn cli_validator_skips_quoted_or_argument_cairn_text() {
-    // Round-2 finding 1: `cairn` appearing as an argument to `echo`
-    // (or any non-cairn command) must not be treated as a Cairn
-    // invocation. Without segment + command-word handling the validator
-    // would parse `echo cairn search foo` and try to interpret
-    // `--bogus` against the search verb.
+fn cli_validator_does_not_misinterpret_cairn_as_other_command_argument() {
+    // Round-2: `cairn` appearing as an argument to `echo` must NOT be
+    // interpreted against the search verb (`--bogus` against search).
+    // Round-8 update: the fail-closed gate now rejects any bash block that
+    // mentions `cairn` but doesn't yield a real invocation, so this case
+    // surfaces as Malformed (not UnknownFlag against `search`). Either way
+    // the example is rejected, which is the correct posture.
     let block = CodeBlock {
         lang: "bash".into(),
         body: "echo cairn search --bogus".into(),
         line: 1,
     };
-    validate_cli_block(&block, &doc())
-        .expect("`cairn` as an argument to another command must be skipped, not validated");
+    let err =
+        validate_cli_block(&block, &doc()).unwrap_err_or_else_pretty("echo cairn search --bogus");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed (fail-closed), not UnknownFlag against search; got: {err:?}"
+    );
 }
 
 #[test]
