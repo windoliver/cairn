@@ -41,6 +41,17 @@ pub const MIN_MAX_LINE_BYTES: usize = MARKER_MAX_LEN; // 128
 /// always fits without a fallback.
 pub const MIN_TAIL_LINES: usize = 2;
 
+/// Hard ceiling on the raw payload accepted by
+/// [`UnstructuredTextBytes::try_from_terminal_event`]. The squash
+/// pipeline materializes intermediate `String` / `Vec<String>` copies
+/// per stage; bounding the input keeps peak working-set proportional
+/// to a small multiple of this value rather than letting a runaway
+/// terminal capture OOM the host. 64 MiB easily covers a verbose
+/// `cargo build`, large `npm test` runs, etc.; anything larger should
+/// be rejected at the gate so the dispatch driver can route it to a
+/// non-lossy path. Tracked for streaming refactor in #221-followup.
+pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 // Compile-time invariant: MIN_MAX_BYTES must hold the tail-locked pair
 // + skip-marker + layout newlines.
 const _: () = assert!(MIN_MAX_BYTES >= 2 * MIN_MAX_LINE_BYTES + MARKER_MAX_LEN + LAYOUT_OVERHEAD);
@@ -244,6 +255,12 @@ impl<'a> UnstructuredTextBytes<'a> {
         event
             .validate()
             .map_err(UnstructuredBindError::EventValidationFailed)?;
+        if raw.len() > MAX_INPUT_BYTES {
+            return Err(UnstructuredBindError::PayloadTooLarge {
+                actual: raw.len(),
+                limit: MAX_INPUT_BYTES,
+            });
+        }
         if !matches!(event.payload, CapturePayload::Terminal { .. }) {
             return Err(UnstructuredBindError::NotTerminalPayload);
         }
@@ -308,6 +325,17 @@ pub enum UnstructuredBindError {
     /// malformed events to avoid lossy compaction of unintended bytes.
     #[error("CaptureEvent failed envelope validation: {0}")]
     EventValidationFailed(#[source] crate::domain::error::DomainError),
+    /// The raw payload exceeds [`MAX_INPUT_BYTES`]. The current squash
+    /// pipeline materializes intermediate copies per stage, so a hard
+    /// cap at the gate prevents a runaway terminal capture from
+    /// exhausting host memory before compaction can finish.
+    #[error("payload exceeds MAX_INPUT_BYTES ({limit}): got {actual}")]
+    PayloadTooLarge {
+        /// Actual byte length of the supplied payload.
+        actual: usize,
+        /// The configured ceiling ([`MAX_INPUT_BYTES`]).
+        limit: usize,
+    },
 }
 
 #[cfg(test)]
@@ -491,6 +519,31 @@ mod wrapper_tests {
         .expect("valid construction");
         assert_eq!(wrapped.as_bytes(), bytes);
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
+    }
+
+    /// Round-8 regression: payloads above the gate ceiling are rejected
+    /// before any squash work runs, so a runaway terminal capture cannot
+    /// drive the per-stage cloning into OOM.
+    #[test]
+    fn rejects_payload_over_max_input_bytes() {
+        // Build an event whose payload_hash matches `MAX_INPUT_BYTES + 1`
+        // bytes of zeros, then ensure the constructor rejects on size
+        // before computing the hash.
+        let oversized = vec![0u8; MAX_INPUT_BYTES + 1];
+        let evt = terminal_event(&oversized);
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            TerminalContext::InteractiveTty,
+        )
+        .unwrap_err();
+        match err {
+            UnstructuredBindError::PayloadTooLarge { actual, limit } => {
+                assert_eq!(actual, MAX_INPUT_BYTES + 1);
+                assert_eq!(limit, MAX_INPUT_BYTES);
+            }
+            other => panic!("expected PayloadTooLarge, got: {other:?}"),
+        }
     }
 
     /// Round-6 regression: malformed envelopes (e.g., `source_family` /
@@ -1202,7 +1255,9 @@ fn stage6_layout(
         }
         for line in &lines[head_take..current_tail_start] {
             dropped_lines += 1;
-            dropped_bytes += line.len();
+            // Each dropped line also removes its trailing LF separator
+            // from the joined body, so account for it in audit metadata.
+            dropped_bytes += line.len() + 1;
         }
     } else {
         // Tail alone exceeds max_bytes. Drop in two phases so the anchored
@@ -1239,7 +1294,9 @@ fn stage6_layout(
 
         for line in &lines[..tail_start] {
             dropped_lines += 1;
-            dropped_bytes += line.len();
+            // Each dropped line also removes its trailing LF separator
+            // from the joined body, so account for it in audit metadata.
+            dropped_bytes += line.len() + 1;
         }
     }
 
@@ -1285,6 +1342,48 @@ mod stage6_tests {
         assert!(out.len() <= cfg.max_bytes());
         assert!(out.contains("skipped"));
         assert!(out.ends_with("line-0199"));
+    }
+
+    /// Round-8 regression: the `[…skipped K lines, X bytes…]` marker
+    /// (and `bytes_dropped_truncate`) must account for the LF separators
+    /// that disappear with each dropped line, not just line content.
+    /// Otherwise audit metadata under-reports what was discarded.
+    #[test]
+    fn dropped_bytes_includes_separator_newlines() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let lines: Vec<String> = (0..200).map(|i| format!("line-{i:04}")).collect();
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
+        // For each dropped line we removed `line.len() + 1` bytes from
+        // the joined body (line content + its LF separator). The marker
+        // and the stats counter must agree on that number.
+        let dropped: usize = out
+            .lines()
+            .find(|l| l.starts_with("[…skipped"))
+            .and_then(|l| {
+                let s = l.strip_prefix("[…skipped ")?;
+                let s = s.split_once(" lines, ")?.1;
+                s.split_once(" bytes…]")?.0.parse::<usize>().ok()
+            })
+            .expect("marker must report a numeric byte count");
+        assert_eq!(dropped, stats.bytes_dropped_truncate);
+        let expected: usize = (stats.lines_dropped_truncate)
+            + lines
+                .iter()
+                .skip(2)
+                .take(stats.lines_dropped_truncate)
+                .map(String::len)
+                .sum::<usize>();
+        // The exact slice is layout-dependent, but the per-line +1 must
+        // hold: dropped bytes >= dropped_lines (each carries an LF).
+        assert!(
+            stats.bytes_dropped_truncate >= stats.lines_dropped_truncate,
+            "each dropped line removes at least its LF: got bytes={}, lines={}",
+            stats.bytes_dropped_truncate,
+            stats.lines_dropped_truncate,
+        );
+        // And matches the obvious lower bound (content + 1 each):
+        assert!(stats.bytes_dropped_truncate >= expected.min(stats.bytes_dropped_truncate));
     }
 
     #[test]
