@@ -480,7 +480,7 @@ fn primitive_ref_exemplar(reference: &str) -> Option<&'static str> {
     let suffix = reference.rsplit('/').next()?;
     match suffix {
         "Ulid" => Some("01H8XGJWBWBAQ4N1NQK1A8X9YZ"),
-        "Identity" => Some("usr:alice"),
+        "Identity" => Some("hmn:alice"),
         _ => None,
     }
 }

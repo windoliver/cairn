@@ -77,7 +77,7 @@ impl<'de> Deserialize<'de> for SessionId {
 /// the idle window resolves to the same session.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionIdentity {
-    /// `usr:` identity of the human principal.
+    /// `hmn:` identity of the human principal.
     pub user: Identity,
     /// `agt:` identity of the agent on whose behalf the verb runs.
     pub agent: Identity,
@@ -95,7 +95,7 @@ impl SessionIdentity {
     /// the unique index over `COALESCE(project_root, '')`.
     ///
     /// Rules:
-    /// - `user` must be a `usr:` identity, `agent` must be `agt:` (§8.1).
+    /// - `user` must be a `hmn:` identity, `agent` must be `agt:` (§8.1).
     /// - `project_root`, when supplied, must be a non-empty absolute path
     ///   (`starts_with('/')` on POSIX; on Windows the typed-path call site
     ///   is responsible for upstream canonicalization since `cairn-core`
@@ -114,7 +114,7 @@ impl SessionIdentity {
     ) -> Result<Self, DomainError> {
         if user.kind() != IdentityKind::Human {
             return Err(DomainError::InvalidIdentity {
-                message: format!("session user must be `usr:` identity, got `{user}`"),
+                message: format!("session user must be `hmn:` identity, got `{user}`"),
             });
         }
         if agent.kind() != IdentityKind::Agent {
@@ -149,7 +149,7 @@ impl SessionIdentity {
     /// version of the resolver (which permitted relative `project_root`
     /// values) can still hydrate its existing rows. The write path keeps
     /// the strict validator: every newly persisted identity is canonical.
-    /// Identity-kind checks (`usr:` / `agt:`) are still applied because
+    /// Identity-kind checks (`hmn:` / `agt:`) are still applied because
     /// they reflect a structural invariant of the row, not a string-shape
     /// guard.
     ///
@@ -169,7 +169,7 @@ impl SessionIdentity {
     ) -> Result<Self, DomainError> {
         if user.kind() != IdentityKind::Human {
             return Err(DomainError::InvalidIdentity {
-                message: format!("session user must be `usr:` identity, got `{user}`"),
+                message: format!("session user must be `hmn:` identity, got `{user}`"),
             });
         }
         if agent.kind() != IdentityKind::Agent {
@@ -465,7 +465,7 @@ mod tests {
     use super::*;
 
     fn ident_user() -> Identity {
-        Identity::parse("usr:alice").expect("valid")
+        Identity::parse("hmn:alice").expect("valid")
     }
 
     fn ident_agent() -> Identity {

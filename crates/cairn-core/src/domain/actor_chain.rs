@@ -48,7 +48,7 @@ pub struct ActorChainEntry {
 ///   author bracketed by zero-or-more principals/delegators before and
 ///   sensors after.
 /// - Each role carries an identity of the matching kind:
-///   - `Principal`  → `Human`  (`usr:` prefix only)
+///   - `Principal`  → `Human`  (`hmn:` prefix only)
 ///   - `Delegator`  → `Agent`  (`agt:` prefix only)
 ///   - `Author`     → any kind — humans, agents, *and* sensors author
 ///     records. Sensors are the canonical authors of `sensor_observation`
@@ -89,7 +89,7 @@ pub fn validate_chain(entries: &[ActorChainEntry]) -> Result<(), DomainError> {
                 if kind != IdentityKind::Human {
                     return Err(DomainError::InvalidIdentity {
                         message: format!(
-                            "role `principal` requires a `usr:` identity, got `{}`",
+                            "role `principal` requires a `hmn:` identity, got `{}`",
                             entry.identity.as_str()
                         ),
                     });
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn full_p2_chain_ok() {
         let chain = vec![
-            entry(ChainRole::Principal, "usr:tafeng"),
+            entry(ChainRole::Principal, "hmn:tafeng"),
             entry(ChainRole::Delegator, "agt:claude-code:opus-4-7:main:v3"),
             entry(ChainRole::Author, "agt:claude-code:opus-4-7:reviewer:v1"),
             entry(ChainRole::Sensor, "snr:local:hook:cc-session:v1"),
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn missing_author_rejected() {
-        let chain = vec![entry(ChainRole::Principal, "usr:tafeng")];
+        let chain = vec![entry(ChainRole::Principal, "hmn:tafeng")];
         let err = validate_chain(&chain).unwrap_err();
         assert!(matches!(err, DomainError::MissingSignature { .. }));
     }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn delegator_must_be_agent() {
         let chain = vec![
-            entry(ChainRole::Delegator, "usr:tafeng"),
+            entry(ChainRole::Delegator, "hmn:tafeng"),
             entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1"),
         ];
         let err = validate_chain(&chain).unwrap_err();
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn author_can_be_human() {
-        let chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+        let chain = vec![entry(ChainRole::Author, "hmn:tafeng")];
         validate_chain(&chain).expect("human author allowed");
     }
 
