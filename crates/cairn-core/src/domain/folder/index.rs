@@ -214,11 +214,7 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
         let _ = write!(body, "\n## Records ({})\n", state.records.len());
         for s in &state.records {
             // path = folder / "<kind>_<id>.md" — same as MarkdownProjector.
-            let leaf = format!(
-                "{}_{}.md",
-                s.record.kind.as_str(),
-                s.record.id.as_str(),
-            );
+            let leaf = format!("{}_{}.md", s.record.kind.as_str(), s.record.id.as_str(),);
             let _ = writeln!(
                 body,
                 "- [{leaf}]({leaf}) — {kind} · updated {upd}",

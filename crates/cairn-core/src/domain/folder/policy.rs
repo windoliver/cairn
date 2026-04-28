@@ -224,7 +224,10 @@ summary_max_tokens: 300
             policy.consolidation_cadence,
             Some(ConsolidationCadence::Weekly),
         );
-        assert_eq!(policy.owner_agent.as_deref(), Some("agt:cairn-librarian:v2"));
+        assert_eq!(
+            policy.owner_agent.as_deref(),
+            Some("agt:cairn-librarian:v2")
+        );
         assert_eq!(policy.retention, Some(RetentionPolicy::Days(90)));
         assert_eq!(policy.summary_max_tokens, Some(300));
     }

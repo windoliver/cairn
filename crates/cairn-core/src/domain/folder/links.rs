@@ -100,9 +100,7 @@ fn find_close(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn is_external(target: &str) -> bool {
-    target.starts_with("http://")
-        || target.starts_with("https://")
-        || target.starts_with("mailto:")
+    target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:")
 }
 
 fn parse_wiki(source_path: &Path, raw: &str) -> Option<RawLink> {
@@ -142,15 +140,17 @@ fn parse_markdown(source_path: &Path, raw: &str) -> Option<RawLink> {
     let target_path = {
         use std::path::Component;
         let first = target.components().next();
-        let is_nav =
-            matches!(first, Some(Component::CurDir | Component::ParentDir));
+        let is_nav = matches!(first, Some(Component::CurDir | Component::ParentDir));
         if is_nav {
             resolve_source_relative(source_path, target)
         } else {
             normalize(target)
         }
     };
-    Some(RawLink { target_path, anchor })
+    Some(RawLink {
+        target_path,
+        anchor,
+    })
 }
 
 /// Resolve `target` against the parent directory of `source_path`.
@@ -278,8 +278,8 @@ mod tests {
     }
 
     use crate::contract::memory_store::StoredRecord;
-    use crate::domain::record::tests::sample_stored_record;
     use crate::domain::record::RecordId;
+    use crate::domain::record::tests::sample_stored_record;
     use std::collections::BTreeMap;
 
     fn record_with_body(version: u32, body: &str) -> StoredRecord {
@@ -321,8 +321,7 @@ mod tests {
         let r1 = record_with_body(1, "[a](raw/alice.md)");
         let mut r2 = record_with_body(1, "[a](raw/alice.md)");
         // Mutate id so paths differ.
-        r2.record.id =
-            RecordId::parse("01HQZX9F5N0000000000000ZZZ".to_owned()).expect("valid");
+        r2.record.id = RecordId::parse("01HQZX9F5N0000000000000ZZZ".to_owned()).expect("valid");
         let mut paths = BTreeMap::new();
         paths.insert(r1.record.id.clone(), PathBuf::from("raw/zzz.md"));
         paths.insert(r2.record.id.clone(), PathBuf::from("raw/aaa.md"));

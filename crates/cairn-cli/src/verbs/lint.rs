@@ -130,8 +130,7 @@ pub async fn fix_folders_handler(
 
     // 1. Build record_paths from MarkdownProjector — same shape used by
     //    --fix-markdown, so callers get a coherent view.
-    let mut record_paths: BTreeMap<cairn_core::domain::record::RecordId, PathBuf> =
-        BTreeMap::new();
+    let mut record_paths: BTreeMap<cairn_core::domain::record::RecordId, PathBuf> = BTreeMap::new();
     for stored in &records {
         let pf = projector.project(stored);
         record_paths.insert(stored.record.id.clone(), pf.path);

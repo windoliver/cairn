@@ -72,10 +72,7 @@ pub trait FolderSummaryWriter: Send + Sync {
     /// Returns [`FolderSummaryError::Unimplemented`] when no writer is
     /// registered, or [`FolderSummaryError::Internal`] for I/O / encoding
     /// failures.
-    async fn write_summary(
-        &self,
-        summary: FolderSummary,
-    ) -> Result<(), FolderSummaryError>;
+    async fn write_summary(&self, summary: FolderSummary) -> Result<(), FolderSummaryError>;
 }
 
 #[cfg(test)]
