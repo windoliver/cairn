@@ -554,6 +554,24 @@ fn cli_validator_enforces_variant_specific_cursor_max_length() {
 }
 
 #[test]
+fn cli_validator_inspects_wrapped_cairn_invocation() {
+    // Round-8 finding 2: shell-wrapped lines must still be validated.
+    // `env DEBUG=1 cairn ingest --bogus` previously slipped past compat
+    // because the validator only ran when the first token was `cairn`.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "env DEBUG=1 cairn ingest --bogus".into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("wrapped cairn invocation must still be validated");
+    assert!(
+        matches!(err, CompatError::UnknownFlag { ref flag, .. } if flag == "bogus"),
+        "expected UnknownFlag for --bogus inside wrapped invocation, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_inspects_bash_block_with_leading_comment() {
     // Round-6 finding 1: a fenced bash block whose first line is a comment
     // (or any non-`cairn` shell prefix) was previously skipped entirely.

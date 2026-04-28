@@ -254,16 +254,20 @@ pub fn validate_cli_block(block: &CodeBlock, doc: &Document) -> Result<(), Compa
     // continuation.
     for logical in join_continuations(&block.body) {
         let line = logical.trim();
-        // Match on the *first whitespace-delimited token* equalling
-        // `cairn`. A bare `starts_with("cairn")` here would let
-        // `cairn-cli ...` or `cairn2 ...` lines slip through compat
-        // (round-7 finding) — and any real Cairn command must have
-        // whitespace after the executable name.
-        let first_tok = line.split_whitespace().next();
-        if first_tok != Some("cairn") {
+        if line.is_empty() {
             continue;
         }
-        validate_cli_line(line, block.line, doc)?;
+        // Shell-split, then locate the *first* `cairn` token. This both
+        // anchors the line at the executable (so `cairn-cli`, `cairn2` are
+        // ignored — round-7) AND validates wrapped invocations like
+        // `env DEBUG=1 cairn …`, `time cairn …`, `FOO=bar cairn …`
+        // (round-8). A line with no `cairn` token is non-Cairn shell and
+        // is skipped — no false positives, no silent bypass.
+        let owned = shell_split(line, block.line)?;
+        let Some(cairn_pos) = owned.iter().position(|t| t == "cairn") else {
+            continue;
+        };
+        validate_cli_line_tokens(&owned[cairn_pos..], block.line, doc)?;
     }
     Ok(())
 }
@@ -290,8 +294,11 @@ fn join_continuations(body: &str) -> Vec<String> {
 }
 
 /// Validate one whitespace-tokenised `cairn …` line.
-fn validate_cli_line(line: &str, source_line: usize, doc: &Document) -> Result<(), CompatError> {
-    let owned = shell_split(line, source_line)?;
+fn validate_cli_line_tokens(
+    owned: &[String],
+    source_line: usize,
+    doc: &Document,
+) -> Result<(), CompatError> {
     let mut tokens = owned.iter().map(String::as_str);
     let verb = consume_executable_and_verb(&mut tokens, source_line)?;
 

@@ -94,7 +94,6 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
         CliShape::Single(c) => vec![c],
         CliShape::Variants(v) => v.iter().collect(),
     };
-    let is_tagged_union = cmds.len() > 1;
     let specs = variant_specs_per_command(verb, &cmds);
     let prop_schemas = collect_arg_property_schemas(verb);
     let mut emitted_any = false;
@@ -102,13 +101,18 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) -> Result<(), CodegenError
     for (idx, cmd) in cmds.iter().enumerate() {
         let spec = specs.get(idx).cloned().unwrap_or_default();
         let branch_sets = expand_branches(&spec);
-        // Variant must yield at least one renderable branch. Empty here
-        // means the spec couldn't be paired to any schema branch — likely
-        // CLI/schema drift. Fail closed for tagged-union verbs.
+        let no_required_at_all =
+            spec.base.is_empty() && spec.any_of.is_empty() && spec.one_of.is_empty();
         let any_renderable = branch_sets.iter().any(|req| set_is_renderable(cmd, req));
-        if is_tagged_union && !any_renderable {
+        // Fail closed for every command (single-shape or tagged-union
+        // variant) whose schema *has* required fields but none of them
+        // line up with a CLI flag/positional. A silent skip here would
+        // hide CLI/schema drift on a verb that previously had a working
+        // example (round-8 finding). Verbs with genuinely no required
+        // fields (e.g., `assemble_hot`) keep their bare example below.
+        if !no_required_at_all && !any_renderable {
             return Err(CodegenError::Emit(format!(
-                "verb `{}` variant `{}` (idx {idx}): no required field could be paired to a schema variant — CLI/schema drift likely",
+                "verb `{}` command `{}` (idx {idx}): no required field could be paired to a schema variant — CLI/schema drift likely",
                 verb.id, cmd.command
             )));
         }
