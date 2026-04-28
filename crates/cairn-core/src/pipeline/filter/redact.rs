@@ -203,13 +203,32 @@ fn detectors() -> &'static [(RedactionTag, Regex)] {
                 build(r"\bAIza[0-9A-Za-z_-]{35}\b"),
             ),
             (
-                // Context-keyed secret assignments: `api_key=...`,
-                // `secret: ...`, `token=...`, `password=...`. The
-                // value is bounded to non-whitespace/quote characters
-                // so we don't swallow surrounding prose.
+                // Context-keyed secret assignments — quoted form
+                // (`api_key="..."` / `password='...'`). The value can
+                // contain any non-quote, non-newline byte so passwords
+                // with `!`, `@`, `$`, `%`, `:`, etc. are covered.
                 RedactionTag::ContextKeyedSecret,
                 build(
-                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth)\s*[:=]\s*['"]?[A-Za-z0-9_./+=-]{16,200}"#,
+                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*"[^"\n]{6,200}""#,
+                ),
+            ),
+            (
+                // Context-keyed secret assignments — single-quoted form.
+                RedactionTag::ContextKeyedSecret,
+                build(
+                    r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*'[^'\n]{6,200}'",
+                ),
+            ),
+            (
+                // Context-keyed secret assignments — unquoted form.
+                // The value is bounded by whitespace, common
+                // delimiters (`,`, `;`, `)`, `}`), or end-of-input,
+                // so prose isn't swallowed; the character class is
+                // intentionally broad enough to cover real-world
+                // secrets containing `!`, `@`, `$`, `%`, `&`, `:`, etc.
+                RedactionTag::ContextKeyedSecret,
+                build(
+                    r#"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|auth|bearer)\s*[:=]\s*[^\s,;)}'"<>]{8,200}"#,
                 ),
             ),
             (
@@ -380,6 +399,51 @@ mod tests {
                 r.text
             );
         }
+    }
+
+    #[test]
+    fn detects_context_keyed_secret_with_punctuation() {
+        // Real-world passwords / tokens often contain `!`, `$`, `@`,
+        // `%`, `:`, etc. — a narrow value charset would let the leading
+        // punctuation escape the regex and ship the secret to disk.
+        for variant in [
+            r#"password="abc!defghijklmnopqrstuv""#,
+            r"password='abc$defghijklmnopqrstuv'",
+            "password=abc@defghijklmnopqrstuv",
+            "secret=abc%defghijklmnopqrstuv",
+            "token=ab:cdefghijklmnopqrstuvwxyz",
+            "bearer Token: ab&cdefghijklmnopqrstuv",
+        ] {
+            let r = redact(variant);
+            assert!(!r.spans.is_empty(), "no span fired for {variant}");
+            for needle in [
+                "abc!defghijklmnopqrstuv",
+                "abc$defghijklmnopqrstuv",
+                "abc@defghijklmnopqrstuv",
+                "abc%defghijklmnopqrstuv",
+                "ab:cdefghijklmnopqrstuvwxyz",
+                "ab&cdefghijklmnopqrstuv",
+            ] {
+                assert!(
+                    !r.text.contains(needle),
+                    "secret `{needle}` leaked for {variant}: {}",
+                    r.text
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn detects_quoted_password_with_punctuation_after_short_prefix() {
+        // The exact case from the round-3 review: short accepted
+        // prefix, then punctuation, then the rest of the value.
+        let r = redact(r#"password="abc!defghijklmnopqrstuv""#);
+        assert!(!r.spans.is_empty(), "redactor missed quoted password");
+        assert!(
+            !r.text.contains("abc!defghijklmnopqrstuv"),
+            "secret leaked: {}",
+            r.text
+        );
     }
 
     #[test]
