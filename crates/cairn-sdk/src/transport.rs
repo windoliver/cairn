@@ -275,58 +275,103 @@ fn validate_search(args: &SearchArgs) -> Result<(), SdkError> {
     Ok(())
 }
 
-/// Mirrors the wire constraints from `RetrieveArgs`'s generated `TryFrom<RawRetrieveArgs>`.
+/// Mirrors every wire constraint from `RetrieveArgs`'s generated
+/// `TryFrom<RawRetrieveArgs>` — Record (no constraints), Session, Turn,
+/// Folder, Scope, and Profile.
 fn validate_retrieve(args: &RetrieveArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::retrieve::RetrieveArgs as A;
-    let (session_id, limit, include) = match args {
+    match args {
+        A::Record { .. } => Ok(()),
         A::Session {
             session_id,
             limit,
             include,
             ..
-        } => (
-            session_id,
-            *limit,
-            include
-                .as_deref()
-                .map(|s| s.iter().map(|i| *i as u8).collect::<Vec<_>>()),
-        ),
+        } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
+            }
+            if let Some(lim) = *limit
+                && !(1..=10000).contains(&lim)
+            {
+                return Err(invalid("limit: must be in [1, 10000]"));
+            }
+            if let Some(inc) = include {
+                if inc.is_empty() {
+                    return Err(invalid("include: must contain at least one item"));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for item in inc {
+                    if !seen.insert(*item as u8) {
+                        return Err(invalid("include: items must be unique"));
+                    }
+                }
+            }
+            Ok(())
+        }
         A::Turn {
             session_id,
             include,
             ..
-        } => (
-            session_id,
-            None,
-            include
-                .as_deref()
-                .map(|s| s.iter().map(|i| *i as u8).collect::<Vec<_>>()),
-        ),
-        // Record/Folder/Scope/Profile have no top-level Args constraints
-        // — their structural checks live in the response-side subtype
-        // deserializers, not in `RawRetrieveArgs::TryFrom`.
-        _ => return Ok(()),
-    };
-    if session_id.is_empty() {
-        return Err(invalid("session_id: must not be empty"));
-    }
-    if let Some(lim) = limit
-        && !(1..=10000).contains(&lim)
-    {
-        return Err(invalid("limit: must be in [1, 10000]"));
-    }
-    if let Some(inc) = include {
-        if inc.is_empty() {
-            return Err(invalid("include: must contain at least one item"));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for item in &inc {
-            if !seen.insert(*item) {
-                return Err(invalid("include: items must be unique"));
+        } => {
+            if session_id.is_empty() {
+                return Err(invalid("session_id: must not be empty"));
             }
+            if let Some(inc) = include {
+                if inc.is_empty() {
+                    return Err(invalid("include: must contain at least one item"));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for item in inc {
+                    if !seen.insert(*item as u8) {
+                        return Err(invalid("include: items must be unique"));
+                    }
+                }
+            }
+            Ok(())
         }
+        A::Folder { path, depth } => {
+            if path.is_empty() {
+                return Err(invalid("path: must not be empty"));
+            }
+            if let Some(d) = *depth
+                && d > 16
+            {
+                return Err(invalid("depth: must be in [0, 16]"));
+            }
+            Ok(())
+        }
+        A::Scope { cursor, .. } => {
+            if let Some(c) = cursor {
+                if c.is_empty() {
+                    return Err(invalid("cursor: must not be empty"));
+                }
+                if c.len() > 512 {
+                    return Err(invalid("cursor: must be <= 512 chars"));
+                }
+            }
+            Ok(())
+        }
+        A::Profile { user, agent } => {
+            if user.is_none() && agent.is_none() {
+                return Err(invalid("at least one of [user, agent] is required"));
+            }
+            if let Some(u) = user
+                && u.is_empty()
+            {
+                return Err(invalid("user: must not be empty"));
+            }
+            if let Some(a) = agent
+                && a.is_empty()
+            {
+                return Err(invalid("agent: must not be empty"));
+            }
+            Ok(())
+        }
+        // Forward-compat: RetrieveArgs is #[non_exhaustive]; reject unknown
+        // future variants rather than silently accept them.
+        _ => Err(invalid("unsupported retrieve target variant")),
     }
-    Ok(())
 }
 
 /// Mirrors the wire constraint from `ForgetArgs`'s generated `TryFrom<RawForgetArgs>`.

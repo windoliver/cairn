@@ -225,6 +225,57 @@ fn search_rejects_unadvertised_modes_with_capability_unavailable() {
 }
 
 #[test]
+fn retrieve_folder_rejects_empty_path_with_invalid_args() {
+    let args = RetrieveArgs::Folder {
+        path: String::new(),
+        depth: None,
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("path"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn retrieve_folder_rejects_excess_depth_with_invalid_args() {
+    let args = RetrieveArgs::Folder {
+        path: "/x".to_owned(),
+        depth: Some(17),
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => assert!(reason.contains("depth"), "reason: {reason}"),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn retrieve_profile_requires_user_or_agent() {
+    let args = RetrieveArgs::Profile {
+        user: None,
+        agent: None,
+    };
+    match sdk().retrieve(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("user, agent"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn forget_session_rejects_empty_session_id_with_invalid_args() {
+    let args = ForgetArgs::Session {
+        session_id: String::new(),
+    };
+    match sdk().forget(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
 fn retrieve_rejects_unadvertised_target_with_capability_unavailable() {
     let err = sdk()
         .retrieve(&RetrieveArgs::Record { id: ulid() })
