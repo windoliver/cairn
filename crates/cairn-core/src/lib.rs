@@ -12,5 +12,9 @@ pub mod config;
 pub mod contract;
 pub mod domain;
 pub mod generated;
-pub mod pipeline;
+// `pipeline` is crate-internal until the dispatch driver (#217) and
+// persisted `TerminalContext` (#218) land. The squash gate's eligibility
+// must be derivable from persisted capture data, not a caller-supplied
+// side input — keep the surface inside the crate to prevent misuse.
+pub(crate) mod pipeline;
 pub mod verifier;

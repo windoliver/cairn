@@ -5,7 +5,11 @@
 //! Pure function. No I/O. Deterministic: same `(raw, cfg)` always
 //! produces byte-identical `compacted_bytes`.
 
-#![allow(clippy::module_name_repetitions)] // Squash* names are intentional
+#![allow(clippy::module_name_repetitions)]
+// Squash* names are intentional
+// The module is `pub(crate)` until the dispatch driver (#217) is the sole
+// entry point; until then most items are only reachable from tests.
+#![allow(dead_code)]
 
 /// Maximum byte length of any truncation marker emitted by `squash`.
 ///
@@ -219,18 +223,16 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// reclassify a stored structured payload as interactive and lose
     /// machine-readable bytes through squash. Once `TerminalContext` is
     /// persisted on `CapturePayload::Terminal` (see #218), this becomes
-    /// derivable from the event alone and the API stabilizes. A
-    /// feature-gated public shim
-    /// (`try_from_terminal_event_unstable`) exists for benches and
-    /// in-tree dev consumers; that shim is only compiled with
-    /// `--features internal-unstable` and must not be used in production.
+    /// derivable from the event alone and the API stabilizes. The
+    /// surrounding `pipeline` module is also `pub(crate)` until the
+    /// dispatch driver (#217) is the sole entry point.
     ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, or
     /// `StructuredContextRejected` per the spec's caller contract.
-    // Only reachable from #[cfg(test)] modules and the
-    // `internal-unstable` feature shim; default-feature non-test builds
-    // legitimately leave it dead.
+    // Only reachable from #[cfg(test)] modules until #217 wires the
+    // dispatch driver; default-feature non-test builds legitimately
+    // leave it dead.
     #[allow(dead_code)]
     pub(crate) fn try_from_terminal_event(
         event: &CaptureEvent,
