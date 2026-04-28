@@ -59,7 +59,7 @@ cairn search --mode keyword QUERY
 **Example:**
 
 ```bash
-cairn retrieve ID
+cairn retrieve 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 ```
 
 ```bash
@@ -95,7 +95,7 @@ cairn retrieve --profile --user USER
 **Example:**
 
 ```bash
-cairn summarize RECORD_ID_1 RECORD_ID_2
+cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 ```
 
 ## `cairn assemble_hot`
@@ -149,7 +149,7 @@ cairn capture_trace --from FROM
 **Example:**
 
 ```bash
-cairn forget --record RECORD_ID
+cairn forget --record 01H8XGJWBWBAQ4N1NQK1A8X9YZ
 ```
 
 ```bash
