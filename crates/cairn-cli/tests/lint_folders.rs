@@ -43,7 +43,13 @@ async fn idempotent_second_run_reports_unchanged() {
 }
 
 #[tokio::test]
-async fn bad_policy_yaml_does_not_abort_run() {
+async fn bad_policy_yaml_taints_subtree_and_skips_indexing() {
+    // Brief invariant 6 (fail-closed): a folder with an unparseable
+    // _policy.yaml must skip its entire subtree, not silently fall back to
+    // default policy. The sample record projects to `raw/<kind>_<id>.md`,
+    // so a broken `raw/_policy.yaml` taints the parent of every record we
+    // emit — no `_index.md` should be written, but the parse failure is
+    // surfaced via `policy_errors`.
     let store = FixtureStore::default();
     store.upsert(sample_record()).await.unwrap();
 
@@ -54,8 +60,40 @@ async fn bad_policy_yaml_does_not_abort_run() {
     let result = fix_folders_handler(&store, vault.path()).await.unwrap();
     assert_eq!(result.policy_errors.len(), 1);
     assert!(result.policy_errors[0].path.ends_with("raw/_policy.yaml"));
-    // The valid record's _index.md is still emitted.
-    assert!(vault.path().join("raw/_index.md").exists());
+    // Tainted prefix → record dropped → no index for `raw/`.
+    assert!(
+        result.written.is_empty(),
+        "expected no _index.md when raw/ is tainted, got {:?}",
+        result.written,
+    );
+    assert!(
+        !vault.path().join("raw/_index.md").exists(),
+        "raw/_index.md must not be written under a tainted policy",
+    );
+}
+
+#[tokio::test]
+async fn sibling_subtree_unaffected_by_broken_policy() {
+    // A broken policy under `raw/broken/` must not taint `raw/` itself.
+    // The sample record sits directly in `raw/`, outside the tainted
+    // subtree, so its index is still written.
+    let store = FixtureStore::default();
+    store.upsert(sample_record()).await.unwrap();
+
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("raw/broken")).unwrap();
+    std::fs::write(
+        vault.path().join("raw/broken/_policy.yaml"),
+        "unknown_key: 42\n",
+    )
+    .unwrap();
+
+    let result = fix_folders_handler(&store, vault.path()).await.unwrap();
+    assert_eq!(result.policy_errors.len(), 1);
+    assert!(
+        vault.path().join("raw/_index.md").exists(),
+        "sibling subtree raw/ should still be indexed",
+    );
 }
 
 #[tokio::test]

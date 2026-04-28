@@ -136,13 +136,28 @@ pub async fn fix_folders_handler(
         record_paths.insert(stored.record.id.clone(), pf.path);
     }
 
-    // 2. Walk vault for files named `_policy.yaml`.
-    let (policies_by_dir, policy_errors) = collect_policies(vault_root).await?;
+    // 2. Walk vault for files named `_policy.yaml`. Folders whose policy
+    //    failed to parse are returned as `tainted_dirs`; per brief invariant 6
+    //    (fail-closed) we drop every record under those subtrees so the
+    //    handler does not silently fall back to default policy below a
+    //    misconfigured folder.
+    let (policies_by_dir, policy_errors, tainted_dirs) = collect_policies(vault_root).await?;
+
+    if !tainted_dirs.is_empty() {
+        record_paths.retain(|_, path| {
+            !tainted_dirs
+                .iter()
+                .any(|bad| path.starts_with(bad))
+        });
+    }
 
     // 3. Reverse-map backlinks.
     let backlinks_by_target = materialize_backlinks(&records, &record_paths);
 
-    // 4. Aggregate.
+    // 4. Aggregate. `aggregate_folders` looks up each record's path in
+    //    `record_paths` and silently skips records with no entry, so dropping
+    //    tainted entries from the map is sufficient — no parallel filter on
+    //    `records` is needed.
     let states = aggregate_folders(
         &records,
         &record_paths,
@@ -197,13 +212,24 @@ pub async fn fix_folders_handler(
     })
 }
 
-/// Walk `vault_root` for `_policy.yaml` files and parse them. Bad policies
-/// are recorded as [`PolicyError`] entries — they do not abort the walk.
+/// Walk `vault_root` for `_policy.yaml` files and parse them.
+///
+/// Returns the parsed policies keyed by their containing directory, the list
+/// of [`PolicyError`] entries for files that failed to parse, and a list of
+/// tainted directories — folders whose `_policy.yaml` was unparseable. The
+/// caller must skip every record under a tainted directory (brief invariant 6,
+/// fail-closed): defaulting silently below a broken policy would let writes
+/// land outside the configured `allowed_kinds`/`visibility_default`.
 async fn collect_policies(
     vault_root: &Path,
-) -> anyhow::Result<(BTreeMap<PathBuf, FolderPolicy>, Vec<PolicyError>)> {
+) -> anyhow::Result<(
+    BTreeMap<PathBuf, FolderPolicy>,
+    Vec<PolicyError>,
+    Vec<PathBuf>,
+)> {
     let mut policies_by_dir: BTreeMap<PathBuf, FolderPolicy> = BTreeMap::new();
     let mut policy_errors: Vec<PolicyError> = Vec::new();
+    let mut tainted_dirs: Vec<PathBuf> = Vec::new();
     // Skip hidden subdirectories (e.g. `.cairn/`, `.git/`) but never reject
     // the vault root itself — `tempfile::tempdir()` and similar tools
     // commonly produce dot-prefixed root paths.
@@ -237,10 +263,11 @@ async fn collect_policies(
                     path: rel,
                     reason: e.to_string(),
                 });
+                tainted_dirs.push(dir);
             }
         }
     }
-    Ok((policies_by_dir, policy_errors))
+    Ok((policies_by_dir, policy_errors, tainted_dirs))
 }
 
 fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
