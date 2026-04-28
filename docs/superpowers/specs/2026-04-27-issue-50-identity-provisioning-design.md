@@ -218,6 +218,30 @@ block the very commands designed to fix problems:
   a stale or hand-edited `.cairn/vault.id`. After the consistency
   check passes, runs the full reconciliation sweep below; any
   per-identity
+
+  **Vault-degraded mode on KeyMaterialMismatch.** A
+  `KeyMaterialMismatch` is not an ordinary liveness signal — the
+  spec classifies it as evidence of cross-vault namespace collision
+  or out-of-band tampering (see "Mismatch" in the sweep below).
+  Because the keystore namespace is shared across every identity in
+  this vault, mismatch evidence on **any** identity contaminates
+  trust for **all** identities in the same namespace. When the
+  reconciliation sweep produces ≥1 `KeyMaterialMismatch`,
+  `IdentityService::open()` returns the `ReconciliationReport` with
+  `vault_degraded = true`. Issuer-dependent verbs check the flag and
+  refuse with `IdentityServiceError::VaultDegraded { mismatched_ids
+  }` (mapped to `EX_TEMPFAIL = 75`). Maintenance commands continue
+  to work because they go through `open_for_maintenance()` (which
+  skips the sweep entirely), so the operator can still reach
+  `repair`, `purge`, `vault-id-recover`, and `init-defaults` to
+  diagnose and resolve the mismatch. Once the mismatch is resolved
+  (the offending row is purged, repaired, or rotated) a subsequent
+  `open()` produces an empty report and `vault_degraded` clears.
+  Plain liveness gaps (`KeyMaterialDesynchronized` — keychain entry
+  simply missing for an `active` identity) do **not** trigger
+  vault-degraded mode; they remain scoped per-identity per the
+  rules below, because a missing private key is recoverable through
+  rotation and is not evidence of namespace contamination.
   `KeyMaterialMismatch` is reported as `tracing::error!` plus accumulated
   into a `ReconciliationReport` returned to the caller. Per-identity
   mismatches are **never** propagated as fatal errors out of `open`
@@ -269,6 +293,38 @@ once `active`. A re-provision attempt while a different `pending` row
 exists for the same identity returns `RegistryError::ProvisioningInFlight`
 **only** when the runtime cannot complete reconciliation — the
 default path is self-healing (see below).
+
+**`init-defaults` recovers from purged/revoked/desynchronized
+defaults by bumping revision.** Without this rule, `init-defaults`
+hits a permanent dead-end after the last default is purged: the row
+still exists (purged is non-deleting), so a naive idempotent skip
+would refuse to mint a replacement and the vault would lose every
+issuer-dependent verb. The flow:
+
+1. For each default slot (`hmn:<user>:v<n>`, `agt:<harness>/<model>/<role>:v<n>`),
+   look up the highest-revision row matching the slug.
+2. If the row is `active`: skip (this is the steady-state idempotent
+   case).
+3. If the row is `pending`: run targeted reconciliation per the
+   self-healing rule below; on `active` exit; on `gone` proceed to
+   step 4 with the same revision; on stuck-mismatch route to repair.
+4. If the row is `revoked`, `revoke_pending`, `purge_pending`,
+   `purged`, or `KeyMaterialDesynchronized`: **mint a new
+   revision** (`v<n+1>`) and provision it as the new default. The
+   prior revision stays in the registry for forensics / historical
+   verification (`identity_keys` is append-only); only the new
+   revision is the operational default. Audit log records
+   `default_replaced { slot, prior_revision, new_revision, reason }`
+   so the rotation trail is explicit.
+5. If no row exists for the slug at any revision: provision `v1`.
+
+This makes "the last default broke" a recoverable, self-service
+operation: the operator runs `cairn identity init-defaults` and the
+vault converges to a healthy default signer at a fresh revision,
+without requiring manual SQL or external intervention. The same
+rule applies whether the prior revision was purged (operator chose
+this), revoked (signed trust-state mutation), or desynchronized
+(key material lost) — in every case `v<n+1>` is provisioned.
 
 **`init-defaults` and `provision` self-heal their own `pending` rows.**
 Both commands are the primary first-run / recovery surface, so they
@@ -1671,6 +1727,7 @@ wraps the two adapter errors plus the cross-cutting cases):
 `NoLiveAttributableSigner` (rotate/revoke target was the only live default; see §3.10),
 `VaultIdMissing` (bootstrap not run or `.cairn/vault.id` removed),
 `VaultIdConflict { file_id: VaultId, db_id: VaultId }` (filesystem and DB disagree on vault binding; mapped to `EX_DATAERR = 65`),
+`VaultDegraded { mismatched_ids: Vec<Identity> }` (one or more reconciliation `KeyMaterialMismatch` errors detected — vault-wide block on signed writes; mapped to `EX_TEMPFAIL = 75`),
 `IdentityLockBusy { id }` (per-identity advisory lock held by another mutation; mapped to `EX_TEMPFAIL = 75`).
 
 `Cargo.toml` additions: `ed25519-dalek` (default-features-off, `+ zeroize`),
