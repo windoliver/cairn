@@ -42,7 +42,7 @@ cairn ingest --kind KIND --body BODY
 **Example:**
 
 ```bash
-cairn search --mode MODE QUERY
+cairn search --mode keyword QUERY
 ```
 
 ## `cairn retrieve`
@@ -67,7 +67,7 @@ cairn retrieve --session SESSION_ID
 ```
 
 ```bash
-cairn retrieve --session SESSION_ID --turn TURN_ID
+cairn retrieve --session SESSION_ID --turn 0
 ```
 
 ```bash

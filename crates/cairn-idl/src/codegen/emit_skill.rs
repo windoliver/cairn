@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use super::ir::{CliCommand, CliShape, Document, VerbDef};
 use super::skill_compat::{
-    any_of_required_branches, one_of_required_branches, required_excluding_const,
+    any_of_required_branches, collect_arg_property_schemas, is_signed_int_source,
+    is_unsigned_int_source, one_of_required_branches, required_excluding_const,
     variant_required_specs,
 };
 use super::{CodegenError, GeneratedFile};
@@ -91,6 +92,7 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) {
         CliShape::Variants(v) => v.iter().collect(),
     };
     let required_per_cmd = required_args_per_command(verb, &cmds);
+    let prop_schemas = collect_arg_property_schemas(verb);
     let mut emitted_any = false;
     let mut buf = String::new();
     for (idx, cmd) in cmds.iter().enumerate() {
@@ -117,7 +119,12 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) {
                 if flag.value_source == "bool" {
                     let _ = write!(buf, " --{}", flag.long);
                 } else {
-                    let _ = write!(buf, " --{} {}", flag.long, placeholder_for(&flag.name));
+                    let exemplar = exemplar_for_flag(
+                        &flag.name,
+                        &flag.value_source,
+                        prop_schemas.get(&flag.name),
+                    );
+                    let _ = write!(buf, " --{} {exemplar}", flag.long);
                 }
             }
         }
@@ -145,6 +152,42 @@ fn push_verb_examples(s: &mut String, verb: &VerbDef) {
 /// → `SESSION_ID`).
 fn placeholder_for(field: &str) -> String {
     field.to_ascii_uppercase()
+}
+
+/// Pick a schema-valid concrete value for a required flag where the IDL
+/// constrains it to a closed set (`enum(a,b,c)`, `list<enum(...)>`, integer
+/// with `minimum`). For freeform value sources (`string`, `path`, `json`,
+/// `list<string>`, …) fall back to an `ALL_CAPS` placeholder — the user is
+/// expected to substitute their own value.
+///
+/// Emitting concrete exemplars for closed forms is what lets the skill-compat
+/// gate validate the value (the validator bypasses `ALL_CAPS` placeholders).
+fn exemplar_for_flag(
+    field: &str,
+    value_source: &str,
+    prop_schema: Option<&serde_json::Value>,
+) -> String {
+    if let Some(rest) = value_source.strip_prefix("enum(")
+        && let Some(inner) = rest.strip_suffix(')')
+        && let Some(first) = inner.split(',').next()
+    {
+        return first.trim().to_string();
+    }
+    if let Some(rest) = value_source.strip_prefix("list<enum(")
+        && let Some(inner) = rest.strip_suffix(")>")
+        && let Some(first) = inner.split(',').next()
+    {
+        return first.trim().to_string();
+    }
+    if is_unsigned_int_source(value_source) || is_signed_int_source(value_source) {
+        if let Some(p) = prop_schema
+            && let Some(min) = p.get("minimum").and_then(serde_json::Value::as_i64)
+        {
+            return min.to_string();
+        }
+        return "0".to_string();
+    }
+    placeholder_for(field)
 }
 
 /// For each `CliCommand` index, return the set of schema-required field names

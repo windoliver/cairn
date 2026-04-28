@@ -480,8 +480,32 @@ fn validate_flag_value(
             .parse::<i64>()
             .map_err(|_| bad(format!("value `{value}` is not an integer")))?;
         check_integer_bounds(flag, i128::from(parsed), prop_schema, line)?;
+    } else if let Some(allowed) = list_enum_options(source) {
+        // `list<enum(a,b,c)>` is the closed list-of-enum form (e.g.,
+        // retrieve's `--include`). Split the CLI value on `,` and reject any
+        // item not in the allow-set so a stale `--include nonsense` slips
+        // exactly the way the real clap parser would.
+        let allowed_set: BTreeSet<&str> = allowed.split(',').map(str::trim).collect();
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            if !allowed_set.contains(item) {
+                return Err(bad(format!("list item `{item}` is not in {{{allowed}}}")));
+            }
+        }
     }
     Ok(())
+}
+
+/// Parse a `list<enum(a,b,c)>` value-source into the inner `a,b,c`. Returns
+/// `None` for any other shape so the caller can fall through to the
+/// freeform/unchecked path.
+fn list_enum_options(source: &str) -> Option<&str> {
+    source
+        .strip_prefix("list<enum(")
+        .and_then(|rest| rest.strip_suffix(")>"))
 }
 
 /// Enforce JSON-Schema `minimum` / `maximum` for an integer-typed flag value.
@@ -519,7 +543,9 @@ fn check_integer_bounds(
 /// verbs (e.g., `retrieve`) the same logical field can appear under several
 /// variants — first definition wins, since downstream we only need the type
 /// shape and bounds, which are identical across variants by convention.
-fn collect_arg_property_schemas(verb_def: &VerbDef) -> BTreeMap<String, serde_json::Value> {
+pub(crate) fn collect_arg_property_schemas(
+    verb_def: &VerbDef,
+) -> BTreeMap<String, serde_json::Value> {
     let mut out = BTreeMap::new();
     let Ok(schema) = serde_json::from_slice::<serde_json::Value>(&verb_def.args_schema_bytes)
     else {
@@ -545,11 +571,11 @@ fn collect_arg_property_schemas(verb_def: &VerbDef) -> BTreeMap<String, serde_js
     out
 }
 
-fn is_unsigned_int_source(s: &str) -> bool {
+pub(crate) fn is_unsigned_int_source(s: &str) -> bool {
     matches!(s, "u8" | "u16" | "u32" | "u64" | "usize")
 }
 
-fn is_signed_int_source(s: &str) -> bool {
+pub(crate) fn is_signed_int_source(s: &str) -> bool {
     matches!(s, "i8" | "i16" | "i32" | "i64" | "isize" | "integer")
 }
 

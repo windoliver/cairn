@@ -212,6 +212,33 @@ fn cli_validator_rejects_integer_flag_above_maximum() {
 }
 
 #[test]
+fn cli_validator_rejects_invalid_list_enum_item() {
+    // `retrieve --include` is `list<enum(tool_calls,reasoning)>`. A stale
+    // example with --include nonsense must fail compat (round-11 finding 2).
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID --turn 0 --include nonsense".into(),
+        line: 1,
+    };
+    let err =
+        validate_cli_block(&block, &doc()).expect_err("invalid list<enum(...)> item must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
+fn cli_validator_accepts_valid_list_enum_items() {
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body: "cairn retrieve --session SESSION_ID --turn 0 --include tool_calls,reasoning".into(),
+        line: 1,
+    };
+    validate_cli_block(&block, &doc()).expect("valid list<enum> items must pass");
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.
