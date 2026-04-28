@@ -60,11 +60,11 @@ impl MemoryStore for SqliteMemoryStore {
         self.do_list(args).await.map_err(Into::into)
     }
 
-    async fn tombstone(&self, _id: &RecordId, _reason: TombstoneReason) -> Result<(), StoreError> {
+    async fn tombstone(&self, id: &RecordId, reason: TombstoneReason) -> Result<(), StoreError> {
         if self.conn.is_none() {
             return not_initialized("tombstone");
         }
-        not_implemented("tombstone", 46)
+        self.do_tombstone(id, reason).await.map_err(Into::into)
     }
 
     async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {

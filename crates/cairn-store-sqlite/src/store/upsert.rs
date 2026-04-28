@@ -256,4 +256,3 @@ fn mint_record_id() -> Result<RecordId, StoreError> {
         what: format!("ulid produced invalid RecordId `{raw}`: {e}"),
     })
 }
-
