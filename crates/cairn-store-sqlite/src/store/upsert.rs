@@ -83,11 +83,11 @@ impl SqliteMemoryStore {
 /// drops (rolling back) on `Err`. Pulled out of `do_upsert` so the async
 /// shell stays under the workspace's `clippy::too_many_lines` limit.
 /// Synchronous upsert against an open `rusqlite::Transaction`. Shared by
-/// [`Self::do_upsert`] (which opens its own tx via the worker thread) and
-/// [`crate::store::tx::StoreTx::upsert`] (which inherits the caller's tx
-/// from `with_tx`). Encapsulates the content-hash idempotency, version
-/// bump, and `record_id` synthesis decisions so both call sites stay
-/// in lockstep.
+/// `SqliteMemoryStore::do_upsert` (which opens its own tx via the worker
+/// thread) and `crate::store::tx::StoreTx::upsert` (which inherits the
+/// caller's tx from `with_tx`). Encapsulates the content-hash idempotency,
+/// version bump, and `record_id` synthesis decisions so both call sites
+/// stay in lockstep.
 pub(crate) fn upsert_in_tx(
     tx: &mut Transaction<'_>,
     record: &MemoryRecord,
