@@ -13,7 +13,7 @@ pub fn ingest_subcommand() -> clap::Command {
         .arg(clap::Arg::new("file").long("file").value_name("PATH").value_parser(clap::builder::PathBufValueParser::new()))
         .arg(clap::Arg::new("url").long("url").value_name("STRING"))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
-        .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
+        .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append).value_delimiter(','))
         .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.").required(false))
 }
 
@@ -40,7 +40,7 @@ pub fn retrieve_subcommand() -> clap::Command {
         .arg(clap::Arg::new("limit").long("limit").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("order").long("order").value_name("ENUM").value_parser(["asc", "desc"]))
         .arg(clap::Arg::new("rehydrate").long("rehydrate").action(clap::ArgAction::SetTrue))
-        .arg(clap::Arg::new("include").long("include").value_name("ENUM").value_parser(["tool_calls", "reasoning"]).action(clap::ArgAction::Append))
+        .arg(clap::Arg::new("include").long("include").value_name("ENUM").value_parser(["tool_calls", "reasoning"]).action(clap::ArgAction::Append).value_delimiter(','))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
         .arg(clap::Arg::new("turn_id").long("turn").value_name("U64").value_parser(clap::value_parser!(u64)))
         .arg(clap::Arg::new("path").long("folder").value_name("STRING"))
@@ -60,7 +60,7 @@ pub fn summarize_subcommand() -> clap::Command {
         .arg(clap::Arg::new("persist").long("persist").action(clap::ArgAction::SetTrue))
         .arg(clap::Arg::new("kind").long("kind").value_name("STRING"))
         .arg(clap::Arg::new("citations").long("citations").value_name("ENUM").value_parser(["on", "compact", "off"]))
-        .arg(clap::Arg::new("record_ids").help("One or more record ULIDs.").required(false))
+        .arg(clap::Arg::new("record_ids").help("One or more record ULIDs.").required(false).num_args(1..))
 }
 
 /// `cairn assemble_hot` subcommand builder.

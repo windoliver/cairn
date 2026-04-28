@@ -693,6 +693,12 @@ fn scan_tokens<'a>(
 ) -> Result<TokenScan, CompatError> {
     let mut positional_count = 0usize;
     let mut used_field_names: BTreeSet<String> = BTreeSet::new();
+    // Aggregate values for `list<...>` flags across repeated occurrences so a
+    // user-written `--include a --include b` (clap's `ArgAction::Append`
+    // form) is validated as the same logical list as the comma-delimited
+    // `--include a,b` form. Without this, `uniqueItems` and `minItems`
+    // would only see one occurrence at a time.
+    let mut list_flag_values: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut iter = tokens.peekable();
     while let Some(tok) = iter.next() {
         if let Some(flag_body) = tok.strip_prefix("--") {
@@ -719,38 +725,57 @@ fn scan_tokens<'a>(
                     line: source_line,
                 });
             };
-            let prop = field_name.and_then(|f| prop_schemas.get(f));
-            if arity == 1 && !has_inline_value {
+            let value: Option<String> = if arity == 1 && !has_inline_value {
                 // Non-boolean flags require a value — either inline (`--x=v`)
                 // or the next non-flag token. Without one clap would reject
                 // the example at runtime, so fail compat too.
-                let value = match iter.peek() {
+                let v = match iter.peek() {
                     Some(n) if !n.starts_with('-') => {
-                        let v = *n;
+                        let v = (*n).to_string();
                         let _ = iter.next();
                         Some(v)
                     }
                     _ => None,
                 };
-                let Some(value) = value else {
+                let Some(v) = v else {
                     return Err(CompatError::Malformed {
                         kind: "cli",
                         detail: format!("flag `--{name}` requires a value"),
                         line: source_line,
                     });
                 };
-                if let Some(src) = value_source {
-                    validate_flag_value(name, value, src, prop, source_line)?;
+                Some(v)
+            } else if arity == 1 {
+                flag_body.split_once('=').map(|(_, v)| v.to_string())
+            } else {
+                None
+            };
+            if let (Some(value), Some(src)) = (value, value_source) {
+                if src.starts_with("list<") {
+                    // Defer list validation until all occurrences are
+                    // collected (see post-loop block below).
+                    list_flag_values
+                        .entry(name.to_string())
+                        .or_default()
+                        .push(value);
+                } else {
+                    let prop = field_name.and_then(|f| prop_schemas.get(f));
+                    validate_flag_value(name, &value, src, prop, source_line)?;
                 }
-            } else if arity == 1
-                && let Some(src) = value_source
-                && let Some((_, value)) = flag_body.split_once('=')
-            {
-                validate_flag_value(name, value, src, prop, source_line)?;
             }
         } else if !tok.starts_with('-') {
             positional_count += 1;
         }
+    }
+    // Validate aggregated `list<...>` flag values once each. `--include a
+    // --include b` and `--include a,b` collapse to the same input here.
+    for (long_name, values) in &list_flag_values {
+        let Some(flag) = allowed_flags.get(long_name.as_str()) else {
+            continue;
+        };
+        let prop = prop_schemas.get(flag.name.as_str());
+        let combined = values.join(",");
+        validate_flag_value(long_name, &combined, &flag.value_source, prop, source_line)?;
     }
     Ok(TokenScan {
         positional_count,

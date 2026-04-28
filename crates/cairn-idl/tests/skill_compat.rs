@@ -300,6 +300,26 @@ fn cli_validator_rejects_unterminated_quote() {
 }
 
 #[test]
+fn cli_validator_aggregates_repeated_list_flag_occurrences() {
+    // clap's ArgAction::Append exposes `--include a --include b` as the
+    // canonical repeated form. Round-13 finding 1: compat must aggregate
+    // and apply uniqueItems / minItems across occurrences.
+    let block = CodeBlock {
+        lang: "bash".into(),
+        body:
+            "cairn retrieve --session SESSION_ID --turn 0 --include tool_calls --include tool_calls"
+                .into(),
+        line: 1,
+    };
+    let err = validate_cli_block(&block, &doc())
+        .expect_err("repeated --include with duplicate must fail");
+    assert!(
+        matches!(err, CompatError::Malformed { kind: "cli", .. }),
+        "expected Malformed cli error, got: {err:?}"
+    );
+}
+
+#[test]
 fn cli_validator_consumes_value_token_after_value_flag() {
     // `--mode` is value-bearing; `hybrid` is its value, not a positional.
     // `search` requires a positional `query`; `query` here serves that role.

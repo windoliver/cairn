@@ -140,9 +140,17 @@ fn write_single_command(w: &mut RustWriter, cmd: &CliCommand) {
     }
     if let Some(pos) = &cmd.positional {
         w.line(&format!(
-            ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false))",
+            ".arg(clap::Arg::new(\"{}\").help(\"{}\").required(false){})",
             pos.name,
-            escape_rust_str(&pos.description)
+            escape_rust_str(&pos.description),
+            if pos.repeatable {
+                // Repeatable positional → clap `num_args(1..)` so the parser
+                // accepts `cairn summarize ID1 ID2 …` instead of treating
+                // every token after the first as an excess arg.
+                ".num_args(1..)"
+            } else {
+                ""
+            }
         ));
     }
     w.dedent();
@@ -270,6 +278,14 @@ fn render_flag_arg(flag: &CliFlag) -> String {
     }
     if let Some(action) = action {
         let _ = write!(out, ".action({action})");
+    }
+    // For `list<...>` flags, expose comma-delimited single-token form in
+    // addition to repeated occurrences — `--include a,b` and
+    // `--include a --include b` are both accepted. The skill-compat gate
+    // validates the comma-delimited form, so this keeps the generator and
+    // the gate in lockstep.
+    if flag.value_source.starts_with("list<") {
+        let _ = write!(out, ".value_delimiter(',')");
     }
     out
 }
