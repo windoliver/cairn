@@ -326,44 +326,64 @@ CREATE INDEX records_target_idx ON records(target_id);
   `(target_id, version)` is the brief's "second idempotency key" (line
   364): a retry cannot stage version N+1 twice. On `UNIQUE` violation,
   return `StoreError::Conflict { kind: VersionAlreadyStaged }`.
-- `activate_version(target_id, version)` — single SQL transaction:
+- `activate_version(target_id, version, expected_prior: Option<u64>)`
+  — monotonic compare-and-swap:
   ```sql
   -- Step 1: confirm the target/version row exists.
   SELECT 1 FROM records WHERE target_id = ?1 AND version = ?2;
   --   missing → return StoreError::NotFound (no UPDATE issued).
-  -- Step 2: flip flags atomically.
+  -- Step 2: monotonicity guard. Read the current active version.
+  SELECT version FROM records WHERE target_id = ?1 AND active = 1;
+  --   if expected_prior is Some(v) and current != v
+  --     → return StoreError::Conflict { kind: ActivationRaced }.
+  --   if current >= ?2 (i.e. requested version is not strictly newer)
+  --     → return StoreError::Conflict { kind: ActivationRaced }.
+  -- Step 3: flip flags atomically.
   UPDATE records SET active = (version = ?2) WHERE target_id = ?1;
-  -- Step 3: assert exactly one row is now active for the target.
+  -- Step 4: assert exactly one row is now active for the target.
   SELECT COUNT(*) FROM records WHERE target_id = ?1 AND active = 1;
   --   != 1 → rollback + return StoreError::Invariant("activate_version: no row activated")
   ```
-  The check-then-update guards against a stale `version` parameter
-  silently clearing every active row — the partial unique index only
-  enforces *at most one* active, never *exactly one*. Total-or-error.
-  The brief pairs this with a `consent_journal` insert in the same
-  transaction — but that insert is the **WAL executor's** job, not
-  the store's. The store provides the activate primitive only.
+  `expected_prior=None` is allowed only on first activation (no current
+  active row). For all subsequent activations, the WAL executor passes
+  the version it read at op-stage time; a stale or duplicated apply
+  fails closed rather than silently rolling readers back to v2 after v3
+  is already active. Total-or-error, monotonic, retry-safe.
+
+  The brief pairs activation with a `consent_journal` insert in the
+  same transaction. See §5.6 below for how the store exposes the
+  consent-row write to the executor.
 - `tombstone_target(target_id, actor)` — sets `tombstoned=1` on every
   version of the target. Idempotent: re-tombstoning is a no-op. The
   `actor` is recorded into `tombstoned_by`/`tombstoned_at` columns
   (added to schema; default NULL pre-tombstone).
 - `expire_active(target_id, at)` — sets `expired_at` on the active
   version only. Reads filter on `expired_at IS NULL OR expired_at > now()`.
-- `purge_target(target_id, op_id, actor)` — single tx:
-  1. INSERT a metadata-only marker into `record_purges` with
+- `purge_target(target_id, op_id, actor)` — single tx, ordered to keep
+  the per-version `record_id` set discoverable until edges/FTS are
+  drained:
+  1. **Capture** the per-version key set:
+     `SELECT record_id FROM records WHERE target_id = ?1` → `Vec<RecordId>`.
+     Used by all subsequent deletes; never re-derived after `records` is
+     emptied.
+  2. INSERT a metadata-only marker into `record_purges` with
      `(target_id, op_id, purged_at=now(), purged_by=actor,
-      body_hash_salt=random())`. This row survives the physical
-     deletion and is the only post-purge audit artefact in the store.
-  2. DELETE every row from `records` with `target_id`.
-  3. DELETE every `edges` / `edge_versions` row whose `from_id` or
-     `to_id` references any per-version `record_id` of the target.
-  4. DELETE matching rows from `records_fts`.
-  Idempotent: re-invoking with the same `op_id` is a no-op (the marker
-  is the idempotency key — `(target_id, op_id)` UNIQUE). The brief's
-  audit invariant (line 2030) requires no body, edge, or index entry
-  survives; `record_purges` carries no body, only audit metadata, so
-  the invariant holds. Pre-image zeroing in `wal_ops`/`wal_steps` is
-  the executor's job; the store does not know op-step linkage.
+      body_hash_salt=random())`. Idempotency key is `(target_id, op_id)`.
+     If the marker already exists for this `op_id`, return
+     `PurgeOutcome::AlreadyPurged` and commit a no-op tx.
+  3. DELETE from `edges` and `edge_versions` where `from_id` or `to_id`
+     is in the captured set.
+  4. DELETE from `records_fts` where the row's `record_id` is in the
+     captured set.
+  5. DELETE from `records` where `target_id = ?1` — the body delete is
+     last so prior steps still see the per-version keys.
+  6. Return `PurgeOutcome::Purged`.
+
+  Capture-first ordering closes the audit invariant: no edge or FTS
+  row referencing a purged `record_id` can survive, even though the
+  primary delete needs to happen for the brief's "no body in
+  `cairn.db`" invariant. Pre-image zeroing in `wal_ops`/`wal_steps`
+  is the executor's job; the store does not know op-step linkage.
 
 ### 5.4 `version_history` semantics
 
@@ -447,6 +467,61 @@ are coalesced by the PK). The body is gone but the audit fact survives.
 - Tombstoning a record does **not** cascade-delete edges. Read paths
   filter via JOIN against `records.active = 1 AND tombstoned = 0`.
   Physical purge (in `purge_target`) removes them entirely.
+
+### 5.6 Consent journal in the same transaction
+
+Brief §5.6 (line 2029) requires the consent-journal row and the state
+change (e.g. `primary.activate`, `primary.mark_tombstone`) to commit
+in the **same** SQLite transaction so readers cannot observe a state
+change without a matching journal row, and the journal cannot survive
+a rolled-back state change.
+
+`MemoryStoreApplyTx` therefore exposes one consent-journal primitive:
+
+```rust
+fn append_consent_journal(
+    &mut self,
+    entry: &ConsentJournalEntry,
+) -> Result<ConsentJournalRowId, StoreError>;
+```
+
+The WAL executor calls this inside the same `with_apply_tx` closure that
+performs the state change. The store does not write consent rows on its
+own — every entry is the executor's choice — but it does provide the
+in-tx insert path so the brief's atomicity invariant holds.
+
+`ConsentJournalEntry` is a typed payload (op_id, kind, target_id,
+actor, payload-hash, timestamp) defined in `cairn-core::domain`. The
+store treats the JSON-serialized form as opaque: it round-trips bytes
+through the table.
+
+`MemoryStoreApplyTx`'s revised method list:
+
+```rust
+fn stage_version(&mut self, record: &MemoryRecord) -> Result<RecordId, StoreError>;
+fn activate_version(
+    &mut self,
+    target_id: &TargetId,
+    version: u64,
+    expected_prior: Option<u64>,
+) -> Result<(), StoreError>;
+fn tombstone_target(
+    &mut self, target_id: &TargetId, actor: &ActorRef,
+) -> Result<(), StoreError>;
+fn expire_active(
+    &mut self, target_id: &TargetId, at: Timestamp,
+) -> Result<(), StoreError>;
+fn purge_target(
+    &mut self, target_id: &TargetId, op_id: &OpId, actor: &ActorRef,
+) -> Result<PurgeOutcome, StoreError>;
+fn add_edge(&mut self, edge: &Edge) -> Result<(), StoreError>;
+fn remove_edge(
+    &mut self, from: &RecordId, to: &RecordId, kind: EdgeKind,
+) -> Result<(), StoreError>;
+fn append_consent_journal(
+    &mut self, entry: &ConsentJournalEntry,
+) -> Result<ConsentJournalRowId, StoreError>;
+```
 
 ## 6. Error handling
 
@@ -561,6 +636,8 @@ mint an `ApplyToken` and exercise `MemoryStoreApply`.
 | `expire_active.rs` | Expire active version → `get` returns `None` after the expiry; `include_expired=true` surfaces it; FTS5 search for the body returns zero hits **without** `include_expired` (covers expiry fence in §5.1 records_fts row). |
 | `activate_validates_existence.rs` | `activate_version(target, version=999)` for a non-existent version → returns `StoreError::NotFound`, no row's `active` flag changes (assert by reading post-error). Re-issue with the correct version → succeeds; exactly one active row. |
 | `purge_audit_marker.rs` | Stage 3 versions + edges + FTS rows, then `purge_target(target, op_id, actor)` → assert zero rows in `records`/`edges`/`edge_versions`/`records_fts`; **assert one row in `record_purges`** with `purged_by=actor`; `version_history(target)` returns one `HistoryEntry::Purge` with `event.kind=Purge`, `event.at=purged_at`, `event.actor=Some(actor)`. Re-invoking with the same `op_id` returns `PurgeOutcome::AlreadyPurged` and writes nothing (PK on `(target_id, op_id)` enforces idempotency). |
+| `activate_monotonicity.rs` | Stage v1+v2+v3, activate v3, then attempt `activate_version(target, version=2, expected_prior=Some(3))` → `StoreError::Conflict { kind: ActivationRaced }`. Same with `expected_prior=None`. v3 stays active; reads see v3. |
+| `consent_journal_atomicity.rs` | Inside one `with_apply_tx`, call `activate_version` then `append_consent_journal`, then return `Err`. Assert post-rollback: no records change AND no consent_journal row. Same closure but returning `Ok` → both writes visible. Proves the brief's atomicity invariant. |
 | `tx_rollback.rs` | Closure returning `Err`: partial writes invisible. `panic!` inside closure: tx rolled back (rusqlite drop guard), connection still usable for the next `with_apply_tx`. |
 | `edges.rs` | `add_edge` upsert semantics; `remove_edge` history; backlinks query (manual SQL inside test) returns expected set; tombstoning a record leaves edges intact. |
 | `migrations.rs` | Apply on empty DB; re-apply is no-op; tampered ledger checksum aborts open; migration ids/checksums match across `cargo test --no-default-features` and `cargo test --all-features`. |
@@ -619,6 +696,26 @@ cargo machete
    test.
 
 ## 11. Risks & open questions
+
+- **OPEN — brief contradicts itself on the auth boundary.** Brief line
+  1624 (§5.1) says "the harness never reaches the store directly — it
+  always goes through Scope Resolve and Rank & Filter." That implies
+  `MemoryStore` is an internal storage primitive; visibility/scope
+  filtering happens above it. But brief line 2557 (§8 retrieve --scope),
+  line 3287 (rebac revocation), and line 4136 (§14 privacy) all say
+  ReBAC and visibility filters are enforced **at the `MemoryStore`
+  layer**, with hidden rows never surfaced to the caller. These two
+  positions cannot both be implemented as written: enforcing rebac
+  per-row at the store requires the read API to take a principal/scope
+  context, which the read-as-internal-primitive position rules out.
+
+  This spec currently follows §5.1 (no principal in read API). If
+  maintainer review prefers §6.3/§13/§14, the read trait gains a
+  `Principal` parameter (or wraps every read in a typed query carrying
+  one) and the store gains rebac evaluation against the row's `scope`
+  + `actor_chain` columns. **Flag for maintainer decision before
+  implementation begins.** Either resolution is workable in the
+  proposed schema; the trait surface is the only thing that flips.
 
 - **`ApplyToken` is a discipline mechanism, not a security boundary.**
   Anyone with mutable repo access can mint a constructor. The token
