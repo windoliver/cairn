@@ -1,5 +1,6 @@
 ---
 source: crates/cairn-cli/tests/plugins_list_snapshot.rs
+assertion_line: 16
 expression: json
 ---
 {
@@ -35,9 +36,9 @@ expression: json
     },
     {
       "capabilities": {
-        "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "fts": true,
+        "graph_edges": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",

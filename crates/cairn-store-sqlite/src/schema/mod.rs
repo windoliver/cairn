@@ -87,6 +87,12 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0008_meta.sql"),
             checksum: checksum_for("0008_meta.sql"),
         },
+        Migration {
+            id: 9,
+            name: "0009_add_record_json.sql",
+            sql: include_str!("../../migrations/0009_add_record_json.sql"),
+            checksum: checksum_for("0009_add_record_json.sql"),
+        },
     ]
 });
 

@@ -1,91 +1,87 @@
-//! `SQLite` record store for Cairn.
+//! `SQLite` record store for Cairn (P0).
 //!
-//! This crate is mid-migration for issue #46. The full `MemoryStore` read
-//! impl (`get` / `list` / `version_history`) and the sealed `MemoryStoreApply`
-//! write impl land in Task 3 of that issue. Until then the `MemoryStore`
-//! trait impl returns placeholder errors so `register_plugin!` compiles and
-//! the plugin manifest appears in the registry.
+//! Provides `SqliteMemoryStore` — a `rusqlite`-backed implementation of
+//! both `MemoryStore` (read, via `store.rs`) and `MemoryStoreApply` (write,
+//! via `apply.rs`). Opens `.cairn/cairn.db`, applies forward-only migrations,
+//! and exposes the store behind a `tokio::sync::Mutex<Connection>` so async
+//! callers can dispatch blocking work to `tokio::task::spawn_blocking`.
 //!
-//! See TODO markers tagged `#46 Task 3` for the sites to restore.
+//! The `register_plugin!` macro wires this crate into the `PluginRegistry`
+//! at startup. Registration constructs the store via `Default::default()`,
+//! which opens an in-memory `SQLite` database — safe and side-effect-free for
+//! capability probes. Real usage goes through `SqliteMemoryStore::open(path)`.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod apply;
 pub mod conn;
 pub mod error;
+pub mod rebac;
+pub mod rowmap;
 pub mod schema;
+pub mod store;
 
-use cairn_core::contract::memory_store::{
-    CONTRACT_VERSION, HistoryEntry, ListQuery, ListResult, MemoryStore, MemoryStoreCapabilities,
-    StoreError, TargetId,
-};
+use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::domain::{Principal, record::MemoryRecord};
 use cairn_core::register_plugin;
 
-/// Stable plugin name. Matches `name = ...` in `plugin.toml`.
+/// Stable plugin name — must match the `name` field in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 
-/// Plugin capability manifest TOML (parsed at registration time).
+/// Embedded plugin manifest TOML.
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts. Shared by the compile-time
-/// guard so the manifest range and the trait surface derive from one binding.
+/// Contract version range this crate accepts.
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 
-/// Static capability advertisement. All flags `false` until Task 3 wires
-/// up the real `rusqlite` backing store.
-static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-    fts: false,
-    vector: false,
-    graph_edges: false,
-    transactions: false,
-};
-
 // Compile-time assertion: our declared range must contain the host's
-// CONTRACT_VERSION so the registry version check passes.
+// CONTRACT_VERSION so the registry version check passes on every build.
 const _: () = assert!(
     ACCEPTED_RANGE.accepts(CONTRACT_VERSION),
-    "host CONTRACT_VERSION outside this crate's declared range",
+    "host CONTRACT_VERSION outside this crate's declared range"
 );
 
-/// `SQLite`-backed `MemoryStore`. Full field set and impl arrive in #46 Task 3.
-#[derive(Default)]
-pub struct SqliteMemoryStore;
+/// `SQLite`-backed `MemoryStore` and `MemoryStoreApply`.
+///
+/// Construction:
+/// - **Normal path:** `SqliteMemoryStore::open(path).await` — opens or
+///   creates the database, applies pending migrations.
+/// - **Registry / capability-probe path:** `Default::default()` — opens an
+///   in-memory (`:memory:`) database; no persistent state, no I/O side
+///   effects.
+pub struct SqliteMemoryStore {
+    pub(crate) conn: conn::SharedConn,
+}
 
-// TODO #46 Task 3: replace stub method bodies with real rusqlite impl.
-#[async_trait::async_trait]
-impl MemoryStore for SqliteMemoryStore {
-    fn name(&self) -> &str {
-        PLUGIN_NAME
+impl SqliteMemoryStore {
+    /// Async constructor. Opens (or creates) the database at `path`, applies
+    /// WAL/FK pragmas, and runs all pending migrations.
+    ///
+    /// Dispatches the blocking open to `tokio::task::spawn_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`error::SqliteStoreError`] if the file cannot be opened or
+    /// any migration fails.
+    pub async fn open(path: &std::path::Path) -> Result<Self, error::SqliteStoreError> {
+        let path = path.to_owned();
+        let shared = tokio::task::spawn_blocking(move || conn::open_blocking(&path))
+            .await
+            .map_err(|e| error::SqliteStoreError::Io(std::io::Error::other(e.to_string())))??;
+        Ok(Self { conn: shared })
     }
+}
 
-    fn capabilities(&self) -> &MemoryStoreCapabilities {
-        &CAPS
-    }
-
-    fn supported_contract_versions(&self) -> VersionRange {
-        ACCEPTED_RANGE
-    }
-
-    async fn get(
-        &self,
-        _principal: &Principal,
-        _target_id: &TargetId,
-    ) -> Result<Option<MemoryRecord>, StoreError> {
-        Err(StoreError::Invariant("not implemented until Task 3 (#46)"))
-    }
-
-    async fn list(&self, _query: &ListQuery) -> Result<ListResult, StoreError> {
-        Err(StoreError::Invariant("not implemented until Task 3 (#46)"))
-    }
-
-    async fn version_history(
-        &self,
-        _principal: &Principal,
-        _target_id: &TargetId,
-    ) -> Result<Vec<HistoryEntry>, StoreError> {
-        Err(StoreError::Invariant("not implemented until Task 3 (#46)"))
+/// `Default` impl for use by `register_plugin!`. Opens an in-memory
+/// database so capability probes work without touching the filesystem.
+impl Default for SqliteMemoryStore {
+    fn default() -> Self {
+        // in-memory open must succeed; any failure here is a build-time bug.
+        #[allow(clippy::expect_used)]
+        let conn = conn::open_blocking(std::path::Path::new(":memory:"))
+            .expect("invariant: in-memory SQLite open must not fail for registry probes");
+        Self { conn }
     }
 }
 
