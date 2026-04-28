@@ -408,6 +408,24 @@ keychain step is always recoverable from local disk alone:
    (with `vault_id` set from the argument so DB-first recovery in §3.7
    has the authoritative source), and reserves the first pending
    identity. Rolls back atomically if the sentinel is absent.
+
+   **Idempotent for resume.** If the row already exists with a
+   matching `vault_id` + `witness_sha256` and the same first identity
+   in `pending`, the call returns `Ok(())` rather than
+   `RegistryError::IdentityExists`. If `vault_meta` exists but the
+   stored `vault_id` or `witness_sha256` disagrees with the argument,
+   the adapter returns `RegistryError::FirstBindMismatch { stored,
+   attempted }` (mapped to `EX_DATAERR = 65`) — this is corruption,
+   not a resume. This makes step 3 safe to re-drive from
+   `finalise-binding` after a crash that committed the SQLite
+   transaction but left the rename in step 4 incomplete. The
+   companion read API used by `finalise-binding` to decide whether to
+   re-drive is `IdentityRegistry::get_first_bind_state(vault_id) ->
+   Result<FirstBindState, RegistryError>` returning the closed enum
+   `FirstBindState::{Absent, Reserved { record, key }, Activated}`.
+   `Reserved` covers "step 3 committed, step 4 may or may not have
+   run, step 6 has not"; `Activated` covers "step 6 ran". Recovery
+   only re-runs the steps after the highest committed state.
 4. Atomically rename `.cairn/vault.binding.pending` →
    `.cairn/vault.binding` (final, hash-only — `fs::write(...,
    sha256(witness))` followed by `fs::remove_file(pending)`, or a true
@@ -1232,6 +1250,35 @@ pub trait IdentityRegistry: Send + Sync {
         binding_path: &Path,
     ) -> Result<(), RegistryError>;
 
+    // Resume support for the first-bind two-phase sentinel (§3.7).
+    // `finalise-binding` calls this to decide whether the SQLite half
+    // of the first-bind already committed during a prior run. Pure
+    // read; never mutates. Returns `FirstBindState::Absent` when no
+    // `vault_meta` row exists for `vault_id`.
+    async fn get_first_bind_state(
+        &self,
+        vault_id: &VaultId,
+    ) -> Result<FirstBindState, RegistryError>;
+
+    // Rotation eviction reconciliation (§3.6). Cleared by
+    // `cairn identity reconcile` after the eldest predecessor private
+    // key is verifiably absent from the keystore. Runs in its own
+    // SQLite transaction, no keystore coupling. Idempotent: clearing
+    // an already-cleared receipt is `Ok(())`.
+    async fn clear_pending_eviction(
+        &self,
+        receipt_id: &ReceiptId,
+    ) -> Result<(), RegistryError>;
+    async fn list_pending_evictions(&self) -> Result<Vec<PendingEvictionEntry>, RegistryError>;
+
+    // Symmetric pair for revocation's cross-store retained-ring disable
+    // (§3.10). Same idempotency rules.
+    async fn clear_pending_key_disable(
+        &self,
+        receipt_id: &ReceiptId,
+    ) -> Result<(), RegistryError>;
+    async fn list_pending_key_disables(&self) -> Result<Vec<PendingKeyDisableEntry>, RegistryError>;
+
     // Operator-of-last-resort two-phase tombstone (§3.10). The trait
     // exposes the state machine explicitly: there is no shortcut
     // method that flips straight to `purged`. Implementations must
@@ -1302,7 +1349,31 @@ across an injected mid-step-2 crash and is still consumable by
 `KeyVersionConflict { existing, attempted }`,
 `InvalidPurgeStartState { id, state }`,
 `PurgeIncomplete { id, remaining_versions }`,
+`FirstBindMismatch { stored: VaultId, attempted: VaultId }`,
 `Backend(#[source] …)`.
+
+`FirstBindState` (closed enum, exported from `cairn-core`):
+
+```rust
+#[derive(Debug, Clone)]
+pub enum FirstBindState {
+    Absent,
+    Reserved {
+        record: PublicIdentityRecord,
+        key: IdentityKeyEntry,
+        witness_hash: WitnessHash,
+    },
+    Activated {
+        record: PublicIdentityRecord,
+        key: IdentityKeyEntry,
+    },
+}
+```
+
+`PendingEvictionEntry { receipt_id: ReceiptId, identity: Identity,
+evict_version: KeyVersion, rotated_at: DateTime<Utc> }`.
+`PendingKeyDisableEntry { receipt_id: ReceiptId, identity: Identity,
+revoked_at: DateTime<Utc>, retained_versions: Vec<KeyVersion> }`.
 
 `IdentityServiceError` (top-level error returned by `IdentityService`,
 wraps the two adapter errors plus the cross-cutting cases):
@@ -1417,6 +1488,18 @@ CREATE TABLE identity_receipts (
     signed_payload BLOB NOT NULL,         -- canonical JSON of (op_kind, target, signer, signer_key_version, old/new key versions, issued_at)
     signature BLOB NOT NULL,              -- ed25519 signature over signed_payload by (signer_identity, signer_key_version)
 
+    -- Cross-store reconciliation flags. Both default 0; set to 1 by
+    -- apply_rotation / apply_revocation when the corresponding
+    -- post-commit keystore step (predecessor eviction for rotation;
+    -- retained-ring disable for revocation) has not yet completed.
+    -- `cairn identity reconcile` re-drives the keystore step and
+    -- calls `clear_pending_eviction(receipt_id)` /
+    -- `clear_pending_key_disable(receipt_id)` to flip the flag back
+    -- to 0 once the keystore is verifiably clean. Indexed for
+    -- efficient reconciliation scans.
+    pending_eviction INTEGER NOT NULL DEFAULT 0 CHECK (pending_eviction IN (0, 1)),
+    pending_key_disable INTEGER NOT NULL DEFAULT 0 CHECK (pending_key_disable IN (0, 1)),
+
     -- Composite foreign keys: every key version referenced by a
     -- receipt must exist in identity_keys. Receipts can therefore
     -- only land for real keys; a regression in adapter code that
@@ -1432,6 +1515,8 @@ CREATE TABLE identity_receipts (
 
 CREATE INDEX idx_identity_receipts_target ON identity_receipts(target_identity);
 CREATE INDEX idx_identity_receipts_signer ON identity_receipts(signer_identity);
+CREATE INDEX idx_identity_receipts_pending_eviction ON identity_receipts(pending_eviction) WHERE pending_eviction = 1;
+CREATE INDEX idx_identity_receipts_pending_key_disable ON identity_receipts(pending_key_disable) WHERE pending_key_disable = 1;
 ```
 
 The `vault_meta` row is inserted exactly once: the first time

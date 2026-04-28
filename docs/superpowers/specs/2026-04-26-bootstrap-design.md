@@ -160,3 +160,97 @@ Existing `config.rs` tests updated: `bootstrap_fails_if_file_already_exists` cha
 - Invariant 3 (CLI is ground truth): `bootstrap` is a management command, not a core verb; logic lives in `cairn-cli`
 - Invariant 4 (seven contracts, pure functions otherwise): no new contract added; `vault::bootstrap` is a plain function with `Result` return
 - No WAL involvement (bootstrap is not a memory mutation)
+
+---
+
+## Amendment 2026-04-27 — vault id + identity-aware re-bootstrap guard (issue #50)
+
+Issue #50 (`Provision local human, agent, and sensor identities`) extends
+this design with the minimum surface bootstrap needs in order to support
+keychain-namespaced identity provisioning. The amendment is additive — it
+does not change any of the dirs/files listed in the original tables — and
+is the **only** load-bearing change to the bootstrap contract for #50.
+The full identity design lives in
+`2026-04-27-issue-50-identity-provisioning-design.md`; this section
+records the bootstrap-side delta so the two specs cannot drift.
+
+### New artefacts
+
+| File | Content | Owned by |
+|---|---|---|
+| `.cairn/vault.id` | A single line containing a freshly minted ULID. | bootstrap (mints once; preserved on every subsequent run) |
+
+`vault.id` joins `.cairn/config.yaml` in the placeholder-files table.
+First run mints; subsequent runs preserve. `--force` does **not** rewrite
+`vault.id` — see "Re-bootstrap guard" below.
+
+### `BootstrapReceipt` change
+
+`BootstrapReceipt` gains one field:
+
+```rust
+pub struct BootstrapReceipt {
+    // ... existing fields ...
+    pub vault_id: VaultId,        // NEW — always populated, even on idempotent runs
+}
+```
+
+The human-readable output gains one line under the `config` block:
+
+```
+  vault id  01HV6N5K7Q9R3F8E2W7B4M5Z9X
+```
+
+### Re-bootstrap guard (DB-aware)
+
+`vault.id` is non-regenerable once the vault has bound itself to the OS
+keychain (every keychain entry is namespaced under `cairn:<vault_id>`,
+so reminting a new id would orphan every key). Bootstrap therefore
+performs a **read-only** SQLite probe before considering reminting:
+
+1. If `.cairn/vault.id` exists, parse it; the file is the authoritative
+   source. Skip step 2.
+2. If `.cairn/vault.id` is missing, open `.cairn/cairn.db` **read-only**
+   (`?mode=ro&immutable=0`) and `SELECT vault_id FROM vault_meta LIMIT
+   1`. The `vault_meta` table is created by identity migration
+   `0002_identity.sql`; `IdentityRegistry::reserve_first_identity` is
+   the only writer.
+   - **Row present:** the keychain is already bound. Bootstrap restores
+     `.cairn/vault.id` from the row and proceeds idempotently. The
+     receipt notes `vault_id_recovered = true`.
+   - **Row absent (table exists, no rows):** no first-bind has run yet;
+     mint a fresh ULID and write `.cairn/vault.id`.
+   - **Table missing or DB file missing:** identity migrations have not
+     run yet; mint a fresh ULID and write `.cairn/vault.id`.
+   - **Any other error** (DB present, schema readable, but the SELECT
+     fails — corruption, locked, permission denied, etc.): fail closed
+     with `BootstrapError::VaultStateUnreadable` mapped to
+     `EX_DATAERR = 65`. Do **not** mint a new id under ambiguity.
+
+This guard closes the silent-desynchronization path where a deleted
+`.cairn/vault.id` would let bootstrap mint a fresh namespace while the
+SQLite registry and OS keychain still reference the original — every
+identity would appear orphaned.
+
+### `--force` semantics
+
+`--force` continues to overwrite `purpose.md`, `index.md`, and `log.md`.
+It does **not** overwrite `.cairn/vault.id` or `.cairn/config.yaml`
+once the keychain is bound (i.e., `vault_meta` row present). To
+intentionally rebind a vault to a fresh namespace, the operator runs
+`cairn identity vault-id-recover --abandon` (defined in the identity
+spec §3.10), which is loud, audited, and requires
+`.cairn/maintenance/vault-rebind-ack`. `bootstrap --force` alone never
+crosses that boundary.
+
+### New tests
+
+Added to `crates/cairn-cli/tests/bootstrap.rs`:
+
+| Test | Asserts |
+|---|---|
+| `bootstrap_mints_vault_id_first_run` | `.cairn/vault.id` exists, valid ULID, receipt populates `vault_id` |
+| `bootstrap_preserves_vault_id` | Second run leaves `.cairn/vault.id` byte-identical |
+| `bootstrap_recovers_vault_id_from_db` | Delete `.cairn/vault.id`, run bootstrap; file restored from `vault_meta`; receipt has `vault_id_recovered = true` |
+| `bootstrap_fails_closed_on_unreadable_db` | Corrupt `.cairn/cairn.db` (truncate header), run bootstrap; exits `65`; `.cairn/vault.id` not touched |
+| `bootstrap_force_does_not_rewrite_vault_id` | `--force` after first-bind leaves vault id intact |
