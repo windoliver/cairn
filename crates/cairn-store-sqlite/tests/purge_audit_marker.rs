@@ -242,3 +242,57 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
         "re-purge must not add extra audit rows; still expect exactly 1"
     );
 }
+
+/// Non-system principals must also see the `Purge` marker so they can
+/// distinguish "target never existed" from "target was purged"
+/// (`version_history` contract).
+#[tokio::test]
+async fn purge_marker_visible_to_non_system_principal() {
+    let dir = tempdir().expect("tempdir");
+    let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
+        .await
+        .expect("open");
+
+    let target = TargetId::new("purge-marker-vis");
+    store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            move |tx| {
+                let rec = make_record("01HQZX9F5N0000000000000054", "to be purged");
+                tx.stage_version(&t, &rec)?;
+                tx.activate_version(&t, 1, None)?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("stage+activate");
+
+    let actor = ActorRef::from_string("usr:purgetest");
+    let op_id = OpId::new("op-purge-vis");
+    store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            let op = op_id.clone();
+            let a = actor.clone();
+            move |tx| tx.purge_target(&t, &op, &a)
+        })
+        .await
+        .expect("purge");
+
+    // A non-system principal queries history.
+    let alice = Principal::from_identity(Identity::parse("usr:alice").expect("valid"));
+    let history = store
+        .version_history(&alice, &target)
+        .await
+        .expect("version_history");
+    assert_eq!(
+        history.len(),
+        1,
+        "non-system principal must observe the purge marker"
+    );
+    assert!(
+        matches!(history[0], HistoryEntry::Purge(_)),
+        "expected a Purge entry; got: {:?}",
+        history[0]
+    );
+}

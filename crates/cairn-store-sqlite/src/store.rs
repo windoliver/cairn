@@ -158,6 +158,19 @@ impl MemoryStore for crate::SqliteMemoryStore {
             let mut hidden = 0usize;
 
             for (scope_json, taxonomy_json, record_json_opt) in rows_iter {
+                if let Some(want_kind) = q.kind_filter.as_deref() {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&taxonomy_json).unwrap_or(serde_json::Value::Null);
+                    let row_kind = parsed
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if row_kind != want_kind {
+                        // Kind mismatches are not "hidden" rebac drops;
+                        // skip silently so callers see only requested kind.
+                        continue;
+                    }
+                }
                 if !principal_can_read(&q.principal, &scope_json, &taxonomy_json) {
                     hidden += 1;
                     continue;
@@ -223,22 +236,24 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .map(|(rv, _, _)| rv)
                 .collect();
 
-            // Purge markers: system principal sees them; non-system does not
-            // (purge markers contain no body but do reveal the fact of purge).
-            let purges: Vec<PurgeMarker> = if principal.is_system() {
-                let mut p = conn
-                    .prepare(
-                        "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt \
-                         FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
-                    )
-                    .map_err(store_err)?;
-                p.query_map(params![target_id.as_str()], row_to_purge_marker)
-                    .map_err(store_err)?
-                    .collect::<Result<_, _>>()
-                    .map_err(store_err)?
-            } else {
-                vec![]
-            };
+            // Purge markers carry only target_id + op_id + timestamp +
+            // actor + salt — no record body or scope content. The
+            // `version_history` contract requires them in the result so
+            // a caller can distinguish "never existed" from "was purged".
+            // Return them to every principal; the trait-level rebac filter
+            // applies to `Version` rows only.
+            let mut p = conn
+                .prepare(
+                    "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt \
+                     FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
+                )
+                .map_err(store_err)?;
+            let purges: Vec<PurgeMarker> = p
+                .query_map(params![target_id.as_str()], row_to_purge_marker)
+                .map_err(store_err)?
+                .collect::<Result<_, _>>()
+                .map_err(store_err)?;
+            let _ = principal; // intentionally unused after rebac filter on `visible`
 
             Ok(into_history(visible, purges))
         })

@@ -57,6 +57,9 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
         actor: Some(ActorRef::from_string(&created_by)),
     }];
 
+    // Emit a `Tombstone` event whenever the column is set, regardless of
+    // current `active` state — historical events must not vanish when a
+    // version is later superseded.
     if tombstoned == 1
         && let (Some(at_str), Some(by_str)) = (tombstoned_at, tombstoned_by)
     {
@@ -67,16 +70,25 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
         });
     }
 
-    // Expire event only on the active version.
-    if active == 1
-        && let Some(at_str) = expired_at
-    {
+    // Same for `Expire`: persist if the column is set, even when the row
+    // has since been superseded.
+    if let Some(at_str) = expired_at {
         events.push(RecordEvent {
             kind: ChangeKind::Expire,
             at: Rfc3339Timestamp::parse(&at_str).ok(),
             actor: None,
         });
     }
+
+    // The `RecordVersion` contract documents events as ascending by
+    // timestamp. Sort by parsed `at` (None last; equal timestamps keep
+    // insertion order via `sort_by`'s stability).
+    events.sort_by(|a, b| match (a.at.as_ref(), b.at.as_ref()) {
+        (Some(x), Some(y)) => x.as_str().cmp(y.as_str()),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
 
     Ok(RecordVersion {
         record_id: RecordId(record_id),
