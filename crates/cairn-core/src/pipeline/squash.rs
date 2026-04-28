@@ -191,6 +191,91 @@ pub enum SquashConfigError {
     },
 }
 
+use crate::domain::capture::{CaptureEvent, CapturePayload, PayloadHash};
+use sha2::{Digest, Sha256};
+
+/// Bytes the dispatch driver classified as unstructured terminal text.
+/// Constructor verifies variant + hash + interactive-TTY context.
+#[derive(Debug)]
+pub struct UnstructuredTextBytes<'a> {
+    bytes: &'a [u8],
+    raw_hash: PayloadHash,
+}
+
+impl<'a> UnstructuredTextBytes<'a> {
+    /// Construct from a `CaptureEvent` plus the raw payload bytes the
+    /// event's `payload_ref` pointed at, and the sensor-supplied
+    /// terminal context.
+    ///
+    /// # Errors
+    /// `NotTerminalPayload`, `HashMismatch`, or
+    /// `StructuredContextRejected` per the spec's caller contract.
+    pub fn try_from_terminal_event(
+        event: &CaptureEvent,
+        raw: &'a [u8],
+        context: TerminalContext,
+    ) -> Result<Self, UnstructuredBindError> {
+        if !matches!(event.payload, CapturePayload::Terminal { .. }) {
+            return Err(UnstructuredBindError::NotTerminalPayload);
+        }
+        if context != TerminalContext::InteractiveTty {
+            return Err(UnstructuredBindError::StructuredContextRejected);
+        }
+        let digest = Sha256::digest(raw);
+        let computed = PayloadHash::parse(format!("sha256:{digest:x}"))
+            .map_err(|_| UnstructuredBindError::HashMismatch)?;
+        if computed != event.payload_hash {
+            return Err(UnstructuredBindError::HashMismatch);
+        }
+        Ok(Self {
+            bytes: raw,
+            raw_hash: computed,
+        })
+    }
+
+    /// The raw payload bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes
+    }
+
+    /// The SHA-256 hash of the raw payload bytes.
+    #[must_use]
+    pub fn raw_hash(&self) -> &PayloadHash {
+        &self.raw_hash
+    }
+}
+
+/// Sensor-supplied execution context for a Terminal payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TerminalContext {
+    /// The terminal session is an interactive TTY; output is unstructured.
+    InteractiveTty,
+    /// Non-interactive session or structured (machine-readable) output;
+    /// squash must be bypassed.
+    NonInteractiveOrStructured,
+}
+
+/// Errors returned by [`UnstructuredTextBytes::try_from_terminal_event`].
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+#[non_exhaustive]
+pub enum UnstructuredBindError {
+    /// The event payload is not `CapturePayload::Terminal`.
+    #[error("expected CapturePayload::Terminal; got a different source family")]
+    NotTerminalPayload,
+    /// The SHA-256 of the supplied bytes does not match `event.payload_hash`.
+    #[error("payload_hash mismatch: bytes do not match the captured payload's sha256")]
+    HashMismatch,
+    /// The terminal context was non-interactive or structured; squash must be
+    /// bypassed for this context.
+    #[error(
+        "Terminal capture was non-interactive or structured-output; \
+         dispatch driver must bypass squash for this context"
+    )]
+    StructuredContextRejected,
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
@@ -234,5 +319,127 @@ mod config_tests {
         assert_eq!(cfg.tail_lines(), 100);
         assert_eq!(cfg.dedup_min_run(), 2);
         assert_eq!(cfg.max_line_bytes(), 4_096);
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::*;
+    use crate::domain::actor_chain::{ActorChainEntry, ChainRole};
+    use crate::domain::capture::{
+        CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
+        SourceFamily,
+    };
+    use crate::domain::identity::Identity;
+    use crate::domain::timestamp::Rfc3339Timestamp;
+    use sha2::{Digest, Sha256};
+
+    fn payload_hash_of(bytes: &[u8]) -> PayloadHash {
+        let digest = Sha256::digest(bytes);
+        PayloadHash::parse(format!("sha256:{digest:x}"))
+            .expect("sha256 string is well-formed")
+    }
+
+    fn ts() -> Rfc3339Timestamp {
+        Rfc3339Timestamp::parse("2026-04-27T00:00:00Z").expect("valid timestamp")
+    }
+
+    fn terminal_event(payload_bytes: &[u8]) -> CaptureEvent {
+        CaptureEvent {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap(),
+            sensor_id: Identity::parse("snr:local:terminal:cli:v1").unwrap(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: Identity::parse("snr:local:terminal:cli:v1").unwrap(),
+                at: ts(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some("sess".into()),
+                turn_id: Some("turn".into()),
+                tool_id: None,
+            }),
+            payload_hash: payload_hash_of(payload_bytes),
+            payload_ref: "sources/terminal/01ARZ3NDEKTSV4RRFFQ69G5FAV.txt".into(),
+            captured_at: ts(),
+            payload: CapturePayload::Terminal {
+                command: "echo hi".into(),
+                exit_code: Some(0),
+            },
+            source_family: SourceFamily::Terminal,
+        }
+    }
+
+    fn hook_event(payload_bytes: &[u8]) -> CaptureEvent {
+        let mut e = terminal_event(payload_bytes);
+        e.sensor_id = Identity::parse("snr:local:hook:cc-session:v1").unwrap();
+        e.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: Identity::parse("snr:local:hook:cc-session:v1").unwrap(),
+            at: ts(),
+        }];
+        e.payload = CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: Some("Read".into()),
+        };
+        e.source_family = SourceFamily::Hook;
+        e
+    }
+
+    #[test]
+    fn rejects_non_terminal_variant() {
+        let bytes = b"hello\n";
+        let evt = hook_event(bytes);
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            TerminalContext::InteractiveTty,
+        )
+        .unwrap_err();
+        assert!(matches!(err, UnstructuredBindError::NotTerminalPayload));
+    }
+
+    #[test]
+    fn rejects_hash_mismatch() {
+        let bytes = b"hello\n";
+        let mut evt = terminal_event(bytes);
+        evt.payload_hash = payload_hash_of(b"different bytes");
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            TerminalContext::InteractiveTty,
+        )
+        .unwrap_err();
+        assert!(matches!(err, UnstructuredBindError::HashMismatch));
+    }
+
+    #[test]
+    fn rejects_structured_context() {
+        let bytes = b"hello\n";
+        let evt = terminal_event(bytes);
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            TerminalContext::NonInteractiveOrStructured,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            UnstructuredBindError::StructuredContextRejected
+        ));
+    }
+
+    #[test]
+    fn accepts_terminal_interactive_tty_with_matching_hash() {
+        let bytes = b"hello\n";
+        let evt = terminal_event(bytes);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid construction");
+        assert_eq!(wrapped.as_bytes(), bytes);
+        assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
 }
