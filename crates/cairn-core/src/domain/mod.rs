@@ -25,6 +25,7 @@ pub mod capture_manifest;
 pub mod error;
 pub mod evidence;
 pub mod filter;
+pub mod folder;
 pub mod identity;
 pub mod intent;
 pub mod projection;
