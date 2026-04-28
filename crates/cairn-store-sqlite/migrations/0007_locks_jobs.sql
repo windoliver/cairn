@@ -17,7 +17,7 @@ CREATE TABLE reader_fence (
 ) STRICT;
 
 CREATE TABLE jobs (
-  rowid_alias  INTEGER PRIMARY KEY AUTOINCREMENT,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   workflow     TEXT NOT NULL,
   state        TEXT NOT NULL,
   payload      TEXT NOT NULL,

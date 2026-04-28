@@ -20,7 +20,7 @@ CREATE TABLE challenges (
 ) STRICT;
 
 CREATE TABLE consent_journal (
-  rowid_alias INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
   op_id       TEXT NOT NULL,
   kind        TEXT NOT NULL,
   target_id   TEXT,

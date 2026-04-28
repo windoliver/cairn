@@ -11,7 +11,7 @@ CREATE TABLE edges (
 CREATE INDEX edges_to_idx ON edges(to_id);
 
 CREATE TABLE edge_versions (
-  rowid_alias INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
   from_id     TEXT NOT NULL,
   to_id       TEXT NOT NULL,
   kind        TEXT NOT NULL,

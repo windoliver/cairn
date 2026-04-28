@@ -76,6 +76,7 @@ fn p0_tables_present() {
     let expected = [
         "records",
         "record_purges",
+        "records_fts",
         "edges",
         "edge_versions",
         "wal_ops",

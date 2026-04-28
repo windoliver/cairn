@@ -5,8 +5,8 @@ CREATE VIRTUAL TABLE records_fts USING fts5(
 );
 
 -- Row-level sync: triggers add/remove FTS rows in lockstep with records.
+-- Visibility filtering (tombstone, expiry) is applied at query time, not here.
 CREATE TRIGGER records_fts_ai AFTER INSERT ON records
-WHEN NEW.tombstoned = 0
 BEGIN
   INSERT INTO records_fts(rowid, body, title, tags)
   VALUES (NEW.rowid, NEW.body, COALESCE(json_extract(NEW.taxonomy, '$.title'), ''),
@@ -16,13 +16,17 @@ END;
 CREATE TRIGGER records_fts_ad AFTER DELETE ON records
 BEGIN
   INSERT INTO records_fts(records_fts, rowid, body, title, tags)
-  VALUES ('delete', OLD.rowid, OLD.body, '', '');
+  VALUES ('delete', OLD.rowid, OLD.body,
+          COALESCE(json_extract(OLD.taxonomy, '$.title'), ''),
+          COALESCE(json_extract(OLD.taxonomy, '$.tags'), ''));
 END;
 
 CREATE TRIGGER records_fts_au AFTER UPDATE ON records
 BEGIN
   INSERT INTO records_fts(records_fts, rowid, body, title, tags)
-  VALUES ('delete', OLD.rowid, OLD.body, '', '');
+  VALUES ('delete', OLD.rowid, OLD.body,
+          COALESCE(json_extract(OLD.taxonomy, '$.title'), ''),
+          COALESCE(json_extract(OLD.taxonomy, '$.tags'), ''));
   INSERT INTO records_fts(rowid, body, title, tags)
   VALUES (NEW.rowid, NEW.body, COALESCE(json_extract(NEW.taxonomy, '$.title'), ''),
           COALESCE(json_extract(NEW.taxonomy, '$.tags'), ''));
