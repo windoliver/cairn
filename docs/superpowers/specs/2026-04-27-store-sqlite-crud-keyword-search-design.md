@@ -84,14 +84,24 @@ pub trait MemoryStore: Send + Sync {
     // Keyword search (#47)
     async fn search_keyword(&self, args: &KeywordSearchArgs)
         -> Result<KeywordSearchPage, StoreError>;
-
-    // Tx (#46)
-    async fn with_tx<F, T>(&self, f: F) -> Result<T, StoreError>
-    where
-        F: FnOnce(&mut StoreTx<'_>) -> Result<T, StoreError> + Send + 'static,
-        T: Send + 'static;
 }
 ```
+
+> **`with_tx` is exposed as an inherent method on `SqliteMemoryStore`, not on the
+> trait.** Generic `F` and `T` parameters break `dyn MemoryStore` object-safety,
+> which several downstream paths require (registry storage, plugin dispatch,
+> dyn-erased verb wiring). Verb-layer code that needs transactional composition
+> takes `Arc<SqliteMemoryStore>` (the concrete type) directly. The inherent
+> signature lives in `crates/cairn-store-sqlite/src/store/tx.rs`:
+>
+> ```rust
+> impl SqliteMemoryStore {
+>     pub async fn with_tx<F, T>(&self, f: F) -> Result<T, StoreError>
+>     where
+>         F: FnOnce(&mut StoreTx<'_>) -> Result<T, StoreError> + Send + 'static,
+>         T: Send + 'static;
+> }
+> ```
 
 Supporting types (in `cairn-core::contract::memory_store`):
 
@@ -248,6 +258,17 @@ Existing schema is row-per-version, with `(target_id, version)` unique and a par
 3. **No prior row:** insert new with `version = 1, active = 1`. Outcome: `content_changed: true, prior_hash: None`.
 4. **Prior row, `body_hash` matches:** no-op. Outcome: `content_changed: false, version: prior.version`. Idempotent — safe for replay (#8).
 5. **Prior row, `body_hash` differs:** in single tx — `UPDATE records SET active=0 WHERE record_id=prior_id`, then `INSERT … version = prior.version + 1, active = 1`. Outcome: `content_changed: true, prior_hash: Some(prior.body_hash)`.
+
+> **`record_id` rotates per version.** `records.record_id` is the table
+> PRIMARY KEY, so each new version row needs a fresh primary key. The first
+> version of a target uses the caller's `record.id` (matches the `target_id
+> == id` shape that fresh facts have); supersession versions get a freshly
+> minted ULID. The `target_id` is the stable lineage key that callers use
+> to ask "give me all versions of this fact". `UpsertOutcome.record_id`
+> always reflects the row's *actual* primary key, which on the idempotent
+> branch is read from the DB (not echoed from the caller). This is what
+> makes the `UpsertOutcome.record_id` doc-comment ("produced (or re-used)
+> by the upsert") load-bearing.
 
 `created_at` carries from prior row when one exists; `updated_at = now`. Caller-controlled fields write through unchanged. `body_hash` is computed by store, never trusted from caller.
 
@@ -498,3 +519,35 @@ Each PR opens with: link to this spec, brief sections cited, invariants touched,
 - **FTS5 drop+recreate in `0009`** — safe at P0 because no live vaults exist. Document in the migration that this is a P0-only allowance; later FTS schema changes use online table-rebuild patterns.
 - **Search ranking** — store returns ranking inputs only. The `Ranker` pure function in `cairn-core` (brief §5.1) is a separate concern; this spec does not implement it. If ranking surfaces later need a field this spec did not include, extend `SearchCandidate` and bump trait version.
 - **Concurrency** — single-connection serialization is a known throughput ceiling. Acceptable for P0; P1 swap to a pool is API-compatible.
+
+## 12. PR-A as-built notes
+
+Recorded here so future readers see the deviations from this spec without
+trawling commit history. None of these change the behavioural contract; they
+are implementation shapes that this spec did not pre-specify.
+
+- **`SqliteMemoryStore { conn: Option<Arc<AsyncConn>> }`.** The
+  `register_plugin!` macro requires `Default` for registry-stub
+  construction, and brief §4.1 forbids side effects in `Default`. So the
+  struct holds an `Option`: `Default::default()` produces an unconnected
+  stub used only for identity/capability advertisement; `open(path).await`
+  / `open_in_memory().await` produces a connected store. Trait verb
+  methods early-return `StoreError::NotInitialized` on the unconnected
+  variant via the `require_conn(method)` helper.
+- **`StoreError::NotInitialized { method: &'static str }`** — typed
+  variant added so callers can distinguish "you forgot to `open()` the
+  store" from generic invariant violations.
+- **Sync open helpers feature-gated.** `open_sync(path)` and
+  `open_in_memory_sync()` return raw `rusqlite::Connection` for
+  integration tests that drive SQL directly (drift detection, migration
+  validation). They are gated behind a `test-helpers` Cargo feature so
+  they cannot leak into the production API.
+- **`UpsertOutcome.record_id` is read from the DB on the idempotent
+  branch**, not echoed from the caller. See §4.3 callout.
+- **Edges trigger surface** — `INSERT OR REPLACE INTO edges` is implemented
+  by SQLite as DELETE-then-INSERT. The current `0001_records.sql` trigger
+  `edges_updates_immutable_after_insert` fires on `BEFORE UPDATE` only, so
+  REPLACE bypasses it for `updates`-kind edges. Test
+  `tests/edges_crud.rs::updates_edge_immutable_via_remove_returns_error`
+  pins this current behavior and will catch a future schema strengthening
+  that adds `BEFORE DELETE` enforcement.
