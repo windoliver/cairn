@@ -229,6 +229,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "toml",
+ "ulid",
 ]
 
 [[package]]

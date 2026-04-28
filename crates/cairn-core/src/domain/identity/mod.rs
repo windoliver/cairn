@@ -5,6 +5,8 @@
 //! and `body` matches `[A-Za-z0-9._:-]+`. The pattern matches the
 //! `Identity` schema in `crates/cairn-idl/schema/common/primitives.json`.
 
+pub mod keys;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainError;
