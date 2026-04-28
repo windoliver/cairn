@@ -67,9 +67,10 @@ pub enum StoreError {
     },
 
     /// Method called on a store constructed via `Default::default()`
-    /// (the registry stub) instead of [`crate::open`] /
-    /// [`crate::open_in_memory`]. Distinct from `Invariant` so callers can
-    /// detect the misuse and surface a clear "open the store first" hint.
+    /// (the registry stub) instead of [`crate::open()`] /
+    /// [`crate::open_in_memory()`]. Distinct from `Invariant` so callers
+    /// can detect the misuse and surface a clear "open the store first"
+    /// hint.
     #[error(
         "cairn-store-sqlite: {method} called on unconnected store \
          (use cairn_store_sqlite::open(path).await first)"
