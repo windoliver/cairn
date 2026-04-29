@@ -80,6 +80,29 @@ pub enum StoreError {
         session_id: String,
     },
 
+    /// An explicit session id was supplied but no such session exists in
+    /// the store. Brief §8.1: explicit ids are authoritative — a typo or
+    /// stale `CAIRN_SESSION_ID` should fail closed rather than silently
+    /// fall through to auto-discover, which would split writes into a
+    /// different session.
+    #[error("explicit session id `{session_id}` does not exist")]
+    SessionNotFound {
+        /// The session id that was not found.
+        session_id: String,
+    },
+
+    /// An explicit session id was supplied but the row has already been
+    /// closed (`ended_at IS NOT NULL`). Brief §8.1: the caller asked
+    /// specifically for this session — silently moving them to a new
+    /// session would mix two conversations.
+    #[error("explicit session id `{session_id}` is ended (closed at {ended_at_unix_ms}ms)")]
+    SessionEnded {
+        /// The session id that was found but ended.
+        session_id: String,
+        /// Unix epoch milliseconds when the session was ended.
+        ended_at_unix_ms: i64,
+    },
+
     /// Sustained write contention exceeded the operation's deadline.
     /// Distinct from `Sqlite(SQLITE_BUSY)` so callers can classify this as
     /// retriable on the next user action without scraping error codes.

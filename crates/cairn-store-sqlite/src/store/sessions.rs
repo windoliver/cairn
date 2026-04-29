@@ -239,27 +239,32 @@ impl SqliteMemoryStore {
     /// a leaked or copied id from a different `(user, agent, project_root)`
     /// would otherwise let the caller hijack writes from another identity.
     ///
-    /// Behaviour:
-    /// - Fetches the row by id; `Ok(None)` when no such row exists.
-    /// - When found, compares the persisted `(user, agent, project_root)`
-    ///   against `expected`; on mismatch returns
-    ///   [`StoreError::SessionIdentityMismatch`] (the caller should treat
-    ///   this as a hard authentication failure, not a missing row).
-    /// - When found and matching, bumps `last_activity_at` (under the same
-    ///   busy-retry policy) so liveness tracks the access — except when
-    ///   the row is already ended, in which case we return `Ok(None)`
-    ///   (the session is no longer usable; auto-discovery should fall
-    ///   through to create-new on the next call).
+    /// Explicit ids are authoritative: callers who name a session expect
+    /// that exact session, not a silently-substituted new one. A typo, a
+    /// stale `CAIRN_SESSION_ID`, or a previously-ended row therefore fails
+    /// closed (`SessionNotFound` / `SessionEnded`) rather than falling
+    /// through to auto-discover.
+    ///
+    /// Atomicity: the lookup, identity check, and `last_activity_at` bump
+    /// run inside a single `BEGIN IMMEDIATE` transaction with the same
+    /// CAS-on-`last_activity_at` guard the resolve-or-create path uses.
+    /// A concurrent `end_session` between our SELECT and UPDATE causes the
+    /// CAS to match zero rows; we restart the tx, observe `ended_at IS NOT
+    /// NULL`, and return [`StoreError::SessionEnded`] — never a closed row
+    /// dressed up as live.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::NotInitialized`] when the store was constructed
-    /// via `Default::default()`. Returns [`StoreError::Worker`] /
-    /// [`StoreError::Sqlite`] for SQL failures. Returns
-    /// [`StoreError::SessionIdentityMismatch`] when the session id exists
-    /// but is owned by a different identity. Returns [`StoreError::Busy`]
-    /// when sustained write contention exceeds the retry deadline on the
-    /// liveness bump.
+    /// - [`StoreError::NotInitialized`] when the store was constructed via
+    ///   `Default::default()`.
+    /// - [`StoreError::SessionNotFound`] when the id does not exist.
+    /// - [`StoreError::SessionEnded`] when the row exists but has already
+    ///   been closed.
+    /// - [`StoreError::SessionIdentityMismatch`] when the row exists but
+    ///   belongs to a different `(user, agent, project_root)`.
+    /// - [`StoreError::Busy`] when sustained write contention exceeds the
+    ///   retry deadline.
+    /// - [`StoreError::Worker`] / [`StoreError::Sqlite`] for SQL failures.
     #[instrument(
         skip(self, expected),
         err,
@@ -274,26 +279,93 @@ impl SqliteMemoryStore {
         &self,
         id: &SessionId,
         expected: &SessionIdentity,
-    ) -> Result<Option<Session>, StoreError> {
-        let Some(stored) = self.get_session(id).await? else {
-            return Ok(None);
-        };
-        if stored.identity != *expected {
-            return Err(StoreError::SessionIdentityMismatch {
-                session_id: id.as_str().to_owned(),
-            });
-        }
-        if stored.ended_at_unix_ms.is_some() {
-            // Caller named a session that has already been closed. Surface
-            // as "no live session for this id" so dispatchers fall through
-            // to auto-discover / create instead of operating on a corpse.
-            return Ok(None);
-        }
-        // Bump last_activity_at — explicit reuse counts as activity.
-        // touch_session itself runs under the busy-retry helper.
-        let _bumped = self.touch_session(id).await?;
-        // Re-fetch so the returned struct reflects the bumped timestamp.
-        self.get_session(id).await
+    ) -> Result<Session, StoreError> {
+        let conn = self.require_conn("resolve_explicit_session")?.clone();
+        let id_str = id.as_str().to_owned();
+        let expected_clone = expected.clone();
+
+        let outcome = conn
+            .call(move |c| {
+                let start = std::time::Instant::now();
+                let deadline = start + RESOLVE_BUSY_DEADLINE;
+                let mut backoff_ms = INITIAL_BACKOFF_MS;
+                loop {
+                    let tx_result =
+                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
+                    let tx = match tx_result {
+                        Ok(tx) => tx,
+                        Err(e) => {
+                            if let rusqlite::Error::SqliteFailure(err, _) = &e {
+                                let code = err.code as i32;
+                                if code != rusqlite::ffi::SQLITE_BUSY
+                                    && err.extended_code != rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
+                                {
+                                    return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                                }
+                                // Transient — backoff + retry below.
+                            } else {
+                                return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                            }
+                            sleep_with_backoff_or_break(start, deadline, &mut backoff_ms);
+                            if std::time::Instant::now() >= deadline {
+                                return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Busy {
+                                    operation: "resolve_explicit_session",
+                                    elapsed_ms: u64::try_from(start.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                }));
+                            }
+                            continue;
+                        }
+                    };
+
+                    match resolve_explicit_in_tx(&tx, &id_str, &expected_clone) {
+                        Ok(session) => {
+                            tx.commit()?;
+                            return Ok::<_, tokio_rusqlite::Error>(Ok(session));
+                        }
+                        Err(InTxError::StaleSnapshot) => {
+                            drop(tx);
+                            sleep_with_backoff_or_break(start, deadline, &mut backoff_ms);
+                            if std::time::Instant::now() >= deadline {
+                                return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Busy {
+                                    operation: "resolve_explicit_session",
+                                    elapsed_ms: u64::try_from(start.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                }));
+                            }
+                        }
+                        Err(InTxError::UniqueViolation) => {
+                            drop(tx);
+                            return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
+                                what: "resolve_explicit_session: unexpected unique-violation \
+                                       (read-only path)"
+                                    .into(),
+                            }));
+                        }
+                        Err(InTxError::Sqlite(e)) => {
+                            drop(tx);
+                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                        }
+                        Err(InTxError::Codec(e)) => {
+                            drop(tx);
+                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                        }
+                        Err(InTxError::Invariant(s)) => {
+                            drop(tx);
+                            return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
+                                what: s,
+                            }));
+                        }
+                        Err(InTxError::Terminal(e)) => {
+                            drop(tx);
+                            return Ok::<_, tokio_rusqlite::Error>(Err(e));
+                        }
+                    }
+                }
+            })
+            .await??;
+
+        Ok(outcome)
     }
 
     /// Atomically resolve-or-create the active session for `identity`.
@@ -400,6 +472,10 @@ impl SqliteMemoryStore {
                                     return Ok::<_, tokio_rusqlite::Error>(Err(
                                         StoreError::Invariant { what: s },
                                     ));
+                                }
+                                Err(InTxError::Terminal(e)) => {
+                                    drop(tx);
+                                    return Ok::<_, tokio_rusqlite::Error>(Err(e));
                                 }
                             }
                         }
@@ -654,6 +730,155 @@ enum BusyOr {
 /// exponential backoff + jitter, or surfaces it as
 /// `Err(StoreError::Sqlite(_))` on a non-busy failure. After the deadline
 /// it returns `Err(StoreError::Busy { operation, elapsed_ms })`.
+/// Sleep one truncated-exponential-backoff step (with jitter), bounded by
+/// the operation's deadline. Used by paths that interleave multiple
+/// retry classes (busy + stale-snapshot + unique-violation) and need
+/// inline backoff between attempts. Mutates `backoff_ms` for the next
+/// iteration. The caller still has to check `Instant::now() >= deadline`
+/// itself before continuing.
+fn sleep_with_backoff_or_break(
+    start: std::time::Instant,
+    deadline: std::time::Instant,
+    backoff_ms: &mut u64,
+) {
+    let now = std::time::Instant::now();
+    if now >= deadline {
+        return;
+    }
+    let elapsed_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let jitter = (elapsed_ns.wrapping_mul(6_364_136_223_846_793_005)).rotate_left(13) & 0x3FF;
+    let raw_sleep_ms = backoff_ms.saturating_add(jitter / 1024);
+    let remaining_ms = u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
+    let sleep_ms = raw_sleep_ms.min(remaining_ms.max(1));
+    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+    *backoff_ms = backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS);
+}
+
+/// In-tx body for [`SqliteMemoryStore::resolve_explicit_session`].
+///
+/// SELECTs the row for `id_str`, validates `(user, agent, project_root)`
+/// matches `expected`, then bumps `last_activity_at` with a CAS guard on
+/// the snapshotted value. A concurrent `end_session` between SELECT and
+/// UPDATE makes the CAS match zero rows; the caller restarts the tx.
+///
+/// Maps row state to typed errors:
+/// - missing row → [`StoreError::SessionNotFound`]
+/// - `ended_at IS NOT NULL` → [`StoreError::SessionEnded`]
+/// - identity mismatch → [`StoreError::SessionIdentityMismatch`]
+fn resolve_explicit_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    id_str: &str,
+    expected: &SessionIdentity,
+) -> Result<Session, InTxError> {
+    let row: Option<SessionRow> = tx
+        .query_row(
+            "SELECT session_id, user_id, agent_id, project_root, \
+                    title, channel, priority, tags, \
+                    created_at, last_activity_at, ended_at \
+             FROM sessions WHERE session_id = ?1",
+            params![id_str],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some(row) = row else {
+        return Err(InTxError::Terminal(StoreError::SessionNotFound {
+            session_id: id_str.to_owned(),
+        }));
+    };
+    let session = session_from_row(row)?;
+
+    if session.identity != *expected {
+        return Err(InTxError::Terminal(StoreError::SessionIdentityMismatch {
+            session_id: id_str.to_owned(),
+        }));
+    }
+    if let Some(ended) = session.ended_at_unix_ms {
+        return Err(InTxError::Terminal(StoreError::SessionEnded {
+            session_id: id_str.to_owned(),
+            ended_at_unix_ms: ended,
+        }));
+    }
+
+    // CAS bump: if a concurrent end_session between SELECT and UPDATE has
+    // closed the row, last_activity_at no longer matches the snapshot AND
+    // ended_at is no longer NULL. Either makes this UPDATE affect zero
+    // rows; we surface as StaleSnapshot so the outer loop restarts the tx
+    // and observes the closed row on the next pass.
+    let now_ms = current_unix_ms();
+    let updated = tx.execute(
+        "UPDATE sessions SET last_activity_at = ?1 \
+         WHERE session_id = ?2 \
+           AND ended_at IS NULL \
+           AND last_activity_at = ?3",
+        params![now_ms, id_str, session.last_activity_at_unix_ms],
+    )?;
+    if updated == 0 {
+        return Err(InTxError::StaleSnapshot);
+    }
+
+    Ok(Session {
+        last_activity_at_unix_ms: now_ms,
+        ..session
+    })
+}
+
+/// Decode a `SessionRow` tuple to the typed [`Session`] domain struct,
+/// surfacing structural failures as [`InTxError::Invariant`].
+fn session_from_row(row: SessionRow) -> Result<Session, InTxError> {
+    let (
+        sid,
+        user,
+        agent,
+        project_root,
+        title,
+        channel,
+        priority,
+        tags_json,
+        created_at,
+        last_activity,
+        ended,
+    ) = row;
+    let id = SessionId::parse(&sid)
+        .map_err(|e| InTxError::Invariant(format!("session_id round-trip failed: {e}")))?;
+    let user = cairn_core::domain::Identity::parse(&user)
+        .map_err(|e| InTxError::Invariant(format!("session.user_id round-trip failed: {e}")))?;
+    let agent = cairn_core::domain::Identity::parse(&agent)
+        .map_err(|e| InTxError::Invariant(format!("session.agent_id round-trip failed: {e}")))?;
+    let identity = SessionIdentity::new(user, agent, project_root)
+        .map_err(|e| InTxError::Invariant(format!("session identity round-trip failed: {e}")))?;
+    let tags: Vec<String> = tags_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(Session {
+        id,
+        identity,
+        title,
+        channel,
+        priority,
+        tags,
+        created_at_unix_ms: created_at,
+        last_activity_at_unix_ms: last_activity,
+        ended_at_unix_ms: ended,
+    })
+}
+
 fn retry_busy<T, F>(
     operation: &'static str,
     mut f: F,
@@ -722,6 +947,11 @@ enum InTxError {
     Codec(serde_json::Error),
     /// Stored row violated a structural invariant (corrupt id, bad identity).
     Invariant(String),
+    /// Terminal store-level error (not retriable, surfaced verbatim).
+    /// Used by paths that need to return typed errors like
+    /// [`StoreError::SessionNotFound`] / [`StoreError::SessionEnded`] /
+    /// [`StoreError::SessionIdentityMismatch`] from inside the in-tx body.
+    Terminal(StoreError),
 }
 
 impl From<rusqlite::Error> for InTxError {

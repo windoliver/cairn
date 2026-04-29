@@ -145,11 +145,14 @@ impl SessionIdentity {
 /// Normalize a `project_root` string for the active-session uniqueness
 /// invariant.
 ///
-/// - Requires the path to be absolute (`starts_with('/')`). Relative paths
-///   are rejected because two callers in different CWDs would otherwise
-///   share the same `relative/path` string and collapse into one session.
-/// - Trims trailing `/` so `/repo` and `/repo/` collapse to one identity.
-///   The leading `/` is preserved (a single `/` becomes empty otherwise).
+/// - Requires the path to be absolute via [`std::path::Path::is_absolute`],
+///   which accepts both POSIX (`/repo`) and Windows (`C:\repo`, `\\?\…`,
+///   UNC `\\server\share`) absolute forms. Relative paths are rejected
+///   because two callers in different CWDs would otherwise share the same
+///   `relative/path` string and collapse into one session.
+/// - Trims trailing `/` and `\` so `/repo`, `/repo/`, `C:\repo`, and
+///   `C:\repo\` collapse to one identity per platform. A lone `/` (POSIX
+///   root) or `C:\` (Windows drive root) is preserved.
 /// - Rejects whitespace-only paths.
 ///
 /// Filesystem canonicalization (symlink resolution, `..` collapse) is the
@@ -161,16 +164,20 @@ fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
             field: "project_root",
         });
     }
-    if !raw.starts_with('/') {
+    if !std::path::Path::new(raw).is_absolute() {
         return Err(DomainError::InvalidProjectRoot {
             message: format!("project_root must be an absolute path, got `{raw}`"),
         });
     }
-    // Trim trailing slashes but keep the leading one so a literal "/" still
-    // resolves to "/" (not "").
-    let trimmed = raw.trim_end_matches('/');
-    if trimmed.is_empty() {
-        Ok("/".to_owned())
+    // Trim trailing separators but keep enough that the path remains
+    // absolute. POSIX `/repo/` → `/repo`, `/` stays `/`. Windows `C:\repo\`
+    // → `C:\repo`, `C:\` stays `C:\`.
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || !std::path::Path::new(trimmed).is_absolute() {
+        // Trimming removed the trailing separator that made the path
+        // absolute (e.g. `/` → `` or `C:\` → `C:`). Keep the original
+        // canonical root form.
+        Ok(raw.to_owned())
     } else {
         Ok(trimmed.to_owned())
     }

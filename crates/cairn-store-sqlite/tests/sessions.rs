@@ -665,7 +665,11 @@ async fn explicit_session_resolution_rejects_foreign_identity() {
         .resolve_explicit_session(&session.id, &alice)
         .await
         .expect("alice ok");
-    assert!(resolved.is_some());
+    assert_eq!(resolved.id, session.id);
+    assert!(
+        resolved.last_activity_at_unix_ms >= session.last_activity_at_unix_ms,
+        "explicit resolve must bump last_activity_at",
+    );
 
     // Bob using alice's id is rejected as identity mismatch — not a
     // missing-row, not an internal error.
@@ -681,7 +685,10 @@ async fn explicit_session_resolution_rejects_foreign_identity() {
 }
 
 #[tokio::test]
-async fn explicit_session_resolution_returns_none_for_ended_or_missing() {
+async fn explicit_session_resolution_fails_closed_for_missing() {
+    // Brief §8.1: explicit session ids are authoritative. A typo in
+    // --session, a stale CAIRN_SESSION_ID, or any other garbage must
+    // fail closed rather than silently fall through to auto-discover.
     let store = open_in_memory().await.expect("open");
 
     let alice = SessionIdentity::new(
@@ -691,26 +698,43 @@ async fn explicit_session_resolution_returns_none_for_ended_or_missing() {
     )
     .expect("identity");
 
-    // Missing id → Ok(None), not an error. Lets the dispatcher fall through
-    // to auto-discover.
     let unknown = cairn_core::domain::session::SessionId::parse("01HXMISSING0000000000000001")
         .expect("parse");
-    let got = store
+    let err = store
         .resolve_explicit_session(&unknown, &alice)
         .await
-        .expect("ok");
-    assert!(got.is_none());
+        .expect_err("missing id must surface a typed error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("does not exist"),
+        "expected SessionNotFound, got {msg}",
+    );
+}
 
-    // Ended session also returns None — operating on a corpse would let
-    // the caller resurrect a closed session via touch.
+#[tokio::test]
+async fn explicit_session_resolution_fails_closed_for_ended() {
+    // An already-closed session is also authoritative: the caller asked
+    // for *that* session, and silently moving them to a new one would
+    // mix two conversations.
+    let store = open_in_memory().await.expect("open");
+
+    let alice = SessionIdentity::new(
+        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("identity");
+
     let session = store
         .create_session(&alice, NewSessionMetadata::default())
         .await
         .expect("create");
     assert!(store.end_session(&session.id).await.expect("end"));
-    let got = store
+
+    let err = store
         .resolve_explicit_session(&session.id, &alice)
         .await
-        .expect("ok");
-    assert!(got.is_none(), "ended session must surface as None");
+        .expect_err("ended session must surface a typed error");
+    let msg = format!("{err}");
+    assert!(msg.contains("is ended"), "expected SessionEnded, got {msg}");
 }
