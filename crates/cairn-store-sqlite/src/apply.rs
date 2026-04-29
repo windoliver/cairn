@@ -825,6 +825,14 @@ fn append_consent_journal_impl(
     let canonical_payload = serde_json::to_string(&canonicalize_json(&entry.payload))?;
     let target_id_str = entry.target_id.as_ref().map(TargetId::as_str);
 
+    // The store owns the canonical journal time. Caller-supplied
+    // `entry.at` is intentionally ignored: it is forgeable, can drift
+    // across retries, and conflating "audit time" with caller wall
+    // clock makes incident reconstruction harder. Stamping the `at`
+    // here means the persisted timestamp reflects when the journal
+    // row actually landed, and retries cannot silently rewrite it.
+    let stamped_at = Rfc3339Timestamp::now();
+
     // Two partial unique indexes (migration 0013) give idempotency
     // without an in-band sentinel: one over `(op_id, kind, target_id)`
     // when target_id IS NOT NULL, and one over `(op_id, kind)` when
@@ -841,7 +849,7 @@ fn append_consent_journal_impl(
             target_id_str,
             entry.actor.as_str(),
             payload,
-            entry.at.as_str(),
+            stamped_at.as_str(),
         ],
     );
 
