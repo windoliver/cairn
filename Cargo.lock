@@ -364,7 +364,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "cairn-core",
+ "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "rusqlite",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
 ]
