@@ -289,6 +289,93 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
 }
 
 #[tokio::test]
+async fn migration_dedupes_preexisting_active_null_project_duplicates() {
+    // Migration 0012 created the unique index that treats NULL as distinct,
+    // so a vault that hit the original §8.1 race could carry multiple
+    // active rows for the same (user, agent, project_root=NULL). Migration
+    // 0013's stricter index would otherwise abort migration on those
+    // vaults. The dedup step must keep the most recent row and end the
+    // others. Simulate this by running migrations 1..=12, seeding the
+    // duplicate state, then running migration 13 and asserting open
+    // succeeds with one active row.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    // Stage 1: open the DB at migration 12 (no unique index over NULL).
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 12");
+
+        // Seed two active rows for the same vault-only identity at the
+        // same NULL project_root — legal at this schema, illegal under 13.
+        for (sid, last) in [("S_OLD", 100i64), ("S_NEW", 200i64)] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, 'usr:alice', 'agt:cli:x:y:v1', NULL, '', ?2, ?2, NULL)",
+                rusqlite::params![sid, last],
+            )
+            .expect("insert");
+        }
+    }
+
+    // Stage 2: open via the production helper, which runs migration 13
+    // (and any future ones). The dedup must succeed.
+    let store = open(&db_path).await.expect("open after dedup");
+
+    // The newer row (S_NEW, last_activity=200) wins; the older (S_OLD,
+    // last_activity=100) is ended.
+    let id = SessionIdentity::new(
+        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("agt:cli:x:y:v1").expect("agent"),
+        None,
+    )
+    .expect("identity");
+    let found = store
+        .find_active_session(&id)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(found.id.as_str(), "S_NEW");
+
+    // Sanity: the older row is no longer touchable (ended_at set).
+    let old_id = cairn_core::domain::session::SessionId::parse("S_OLD").expect("parse");
+    assert!(!store.touch_session(&old_id).await.expect("touch"));
+}
+
+#[tokio::test]
 async fn cross_connection_resolvers_converge_on_one_session() {
     // Use two independently-opened stores against the same on-disk DB to
     // exercise real cross-connection contention. BEGIN IMMEDIATE on one

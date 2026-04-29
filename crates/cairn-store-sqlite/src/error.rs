@@ -66,6 +66,17 @@ pub enum StoreError {
         what: String,
     },
 
+    /// Sustained write contention exceeded the operation's deadline.
+    /// Distinct from `Sqlite(SQLITE_BUSY)` so callers can classify this as
+    /// retriable on the next user action without scraping error codes.
+    #[error("store busy after {elapsed_ms}ms of retries on `{operation}`")]
+    Busy {
+        /// The store operation that exhausted its retry deadline.
+        operation: &'static str,
+        /// Elapsed time spent retrying, in milliseconds.
+        elapsed_ms: u64,
+    },
+
     /// Method called on a store constructed via `Default::default()`
     /// (the registry stub) instead of [`crate::open()`] /
     /// [`crate::open_in_memory()`]. Distinct from `Invariant` so callers

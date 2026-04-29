@@ -20,6 +20,30 @@
 -- '' would fail this migration with a uniqueness error and refuse to open.
 UPDATE sessions SET project_root = NULL WHERE project_root = '';
 
+-- Step 1b: deduplicate any pre-existing duplicate active rows for the
+-- same (user, agent, COALESCE(project_root, '')) triple. Migration 0012's
+-- index treated NULL values as distinct, so under the §8.1 race a vault
+-- could legitimately hold multiple active rows for the same vault-only
+-- identity. The new unique index would otherwise abort migration on those
+-- vaults and refuse to open. Resolution: keep the row with the most
+-- recent last_activity_at (tie-breaking on session_id for determinism)
+-- and mark the rest ended_at = strftime millis. Live writers cannot lose
+-- in-flight writes here because a database under migration is single-
+-- writer by construction (rusqlite_migration runs to_latest in one tx).
+WITH duplicates AS (
+  SELECT
+    s.session_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY s.user_id, s.agent_id, COALESCE(s.project_root, '')
+      ORDER BY s.last_activity_at DESC, s.session_id DESC
+    ) AS rn
+  FROM sessions s
+  WHERE s.ended_at IS NULL
+)
+UPDATE sessions
+   SET ended_at = strftime('%s','now') * 1000
+ WHERE session_id IN (SELECT session_id FROM duplicates WHERE rn > 1);
+
 DROP INDEX sessions_one_active_per_identity_idx;
 
 CREATE UNIQUE INDEX sessions_one_active_per_identity_idx

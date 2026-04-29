@@ -53,6 +53,23 @@ impl ResolveOutcome {
     }
 }
 
+/// Wall-clock deadline for retrying transient conflicts in
+/// [`SqliteMemoryStore::resolve_or_create_session`].
+///
+/// Sized to be well past `busy_timeout=5s` (set in `open.rs`) so a single
+/// long writer pinning the lock can't repeatedly trip both. After this
+/// deadline, the operation surfaces [`StoreError::Busy`] and the caller
+/// can decide whether to retry on the next user action.
+pub const RESOLVE_BUSY_DEADLINE_MS: u64 = 7_500;
+
+/// Constants for the truncated exponential backoff in
+/// [`SqliteMemoryStore::resolve_or_create_session`]. Kept private — the
+/// only knob external callers see is [`RESOLVE_BUSY_DEADLINE_MS`].
+const RESOLVE_BUSY_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(RESOLVE_BUSY_DEADLINE_MS);
+const INITIAL_BACKOFF_MS: u64 = 1;
+const MAX_BACKOFF_MS: u64 = 32;
+
 /// Subset of session metadata accepted at create time. All fields default
 /// to "unset" — the resolver / verb layer fills only what it has.
 #[derive(Debug, Default, Clone)]
@@ -234,9 +251,11 @@ impl SqliteMemoryStore {
     ///
     /// Returns [`StoreError::NotInitialized`] when the store was constructed
     /// via `Default::default()`. Returns [`StoreError::Worker`] /
-    /// [`StoreError::Sqlite`] for SQL failures, or [`StoreError::Invariant`]
-    /// when the conflict-retry budget is exhausted (a higher-than-expected
-    /// concurrency level — surfaced rather than silently looping).
+    /// [`StoreError::Sqlite`] for SQL failures, or [`StoreError::Busy`]
+    /// when sustained write contention exceeds the operation deadline
+    /// ([`RESOLVE_BUSY_DEADLINE_MS`]). `Busy` is retriable on the caller's
+    /// next user action; it is distinct from invariant violations so
+    /// dispatchers don't conflate availability with corruption.
     #[instrument(
         skip(self, identity, metadata),
         err,
@@ -253,8 +272,6 @@ impl SqliteMemoryStore {
         idle_window_secs: u64,
         metadata: NewSessionMetadata,
     ) -> Result<ResolveOutcome, StoreError> {
-        const MAX_RACE_RETRIES: u32 = 8;
-
         let conn = self.require_conn("resolve_or_create_session")?.clone();
         let user = identity.user.as_str().to_owned();
         let agent = identity.agent.as_str().to_owned();
@@ -264,7 +281,10 @@ impl SqliteMemoryStore {
 
         let outcome = conn
             .call(move |c| {
-                for _attempt in 0..MAX_RACE_RETRIES {
+                let start = std::time::Instant::now();
+                let deadline = start + RESOLVE_BUSY_DEADLINE;
+                let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
+                loop {
                     // BEGIN IMMEDIATE acquires a RESERVED lock up front so
                     // a concurrent writer can't sneak in between our SELECT
                     // and our UPDATE — under WAL this avoids the
@@ -272,74 +292,89 @@ impl SqliteMemoryStore {
                     // hits when a reader tries to upgrade after another
                     // connection commits. Cross-process bursts therefore
                     // deterministically converge through the retry loop
-                    // instead of escaping as terminal store errors.
-                    // BEGIN IMMEDIATE itself can return SQLITE_BUSY when
-                    // another connection already holds the write lock and
-                    // the busy_timeout expires. Treat that as a transient
-                    // conflict — the same loop handles in-transaction
-                    // BUSY/UniqueViolation/StaleSnapshot — instead of
-                    // escaping as a terminal Worker error to the caller.
-                    let tx = match c
-                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    {
-                        Ok(tx) => tx,
+                    // instead of escaping as terminal store errors. BEGIN
+                    // IMMEDIATE itself can also return SQLITE_BUSY when
+                    // another connection holds the write lock past
+                    // busy_timeout; we classify that as transient and
+                    // retry through the same backoff path the in-tx body
+                    // uses for UniqueViolation / StaleSnapshot.
+                    let tx_result =
+                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate);
+                    match tx_result {
+                        Ok(tx) => {
+                            let res = resolve_or_create_in_tx(
+                                &tx,
+                                &user,
+                                &agent,
+                                project_root.as_deref(),
+                                idle_window_secs,
+                                &identity_clone,
+                                &metadata_clone,
+                            );
+                            match res {
+                                Ok(outcome) => {
+                                    tx.commit()?;
+                                    return Ok::<_, tokio_rusqlite::Error>(Ok(outcome));
+                                }
+                                Err(InTxError::UniqueViolation | InTxError::StaleSnapshot) => {
+                                    // Drop tx → ROLLBACK; fall through to
+                                    // backoff + retry.
+                                    drop(tx);
+                                }
+                                Err(InTxError::Sqlite(e)) => {
+                                    drop(tx);
+                                    return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                                }
+                                Err(InTxError::Codec(e)) => {
+                                    drop(tx);
+                                    return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                                }
+                                Err(InTxError::Invariant(s)) => {
+                                    drop(tx);
+                                    return Ok::<_, tokio_rusqlite::Error>(Err(
+                                        StoreError::Invariant { what: s },
+                                    ));
+                                }
+                            }
+                        }
                         Err(e) => {
                             if let rusqlite::Error::SqliteFailure(err, _) = &e {
                                 let code = err.code as i32;
-                                if code == rusqlite::ffi::SQLITE_BUSY
-                                    || err.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
+                                if code != rusqlite::ffi::SQLITE_BUSY
+                                    && err.extended_code != rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
                                 {
-                                    // Bounded backoff so we don't pin the
-                                    // worker thread spinning on a hot
-                                    // contended lock.
-                                    std::thread::sleep(std::time::Duration::from_millis(2));
-                                    continue;
+                                    return Err(tokio_rusqlite::Error::Other(Box::new(e)));
                                 }
+                                // Transient — fall through to backoff.
+                            } else {
+                                return Err(tokio_rusqlite::Error::Other(Box::new(e)));
                             }
-                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
-                        }
-                    };
-                    let res = resolve_or_create_in_tx(
-                        &tx,
-                        &user,
-                        &agent,
-                        project_root.as_deref(),
-                        idle_window_secs,
-                        &identity_clone,
-                        &metadata_clone,
-                    );
-                    match res {
-                        Ok(outcome) => {
-                            tx.commit()?;
-                            return Ok::<_, tokio_rusqlite::Error>(Ok(outcome));
-                        }
-                        Err(InTxError::UniqueViolation | InTxError::StaleSnapshot) => {
-                            // Drop tx → ROLLBACK; loop falls through to retry.
-                            // Both variants signal a transient conflict
-                            // resolved by re-running the SELECT.
-                            drop(tx);
-                        }
-                        Err(InTxError::Sqlite(e)) => {
-                            drop(tx);
-                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
-                        }
-                        Err(InTxError::Codec(e)) => {
-                            drop(tx);
-                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
-                        }
-                        Err(InTxError::Invariant(s)) => {
-                            drop(tx);
-                            return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
-                                what: s,
-                            }));
                         }
                     }
+
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        let elapsed_ms =
+                            u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                        return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Busy {
+                            operation: "resolve_or_create_session",
+                            elapsed_ms,
+                        }));
+                    }
+                    // Truncated exponential backoff with deterministic jitter
+                    // (LCG over the elapsed nanoseconds — no rand dep needed).
+                    let elapsed_ns =
+                        u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    let jitter = (elapsed_ns.wrapping_mul(6_364_136_223_846_793_005))
+                        .rotate_left(13)
+                        & 0x3FF; // 0..1023 ≈ up to ~1 ms when divided by 1024
+                    let raw_sleep_ms = backoff_ms.saturating_add(jitter / 1024);
+                    let remaining_ms =
+                        u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
+                    let sleep_ms = raw_sleep_ms.min(remaining_ms.max(1));
+                    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    backoff_ms = (backoff_ms.saturating_mul(2)).min(MAX_BACKOFF_MS);
                 }
-                Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
-                    what: format!(
-                        "resolve_or_create_session: {MAX_RACE_RETRIES} conflict retries exhausted"
-                    ),
-                }))
             })
             .await??;
 
