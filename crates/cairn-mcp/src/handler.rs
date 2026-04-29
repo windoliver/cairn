@@ -36,12 +36,20 @@ impl CairnMcpHandler {
 impl ServerHandler for CairnMcpHandler {
     /// Return server identity and advertise tool capability.
     fn get_info(&self) -> ServerInfo {
-        let mut caps = ServerCapabilities::default();
-        caps.tools = Some(ToolsCapability { list_changed: None });
-        let mut info = ServerInfo::default();
-        info.capabilities = caps;
-        info.server_info = Implementation::new("cairn", env!("CARGO_PKG_VERSION"));
-        info
+        ServerInfo {
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability { list_changed: None }),
+                ..ServerCapabilities::default()
+            },
+            server_info: Implementation {
+                name: "cairn".to_owned(),
+                title: None,
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                icons: None,
+                website_url: None,
+            },
+            ..ServerInfo::default()
+        }
     }
 
     /// Return all Cairn verbs as MCP tools.

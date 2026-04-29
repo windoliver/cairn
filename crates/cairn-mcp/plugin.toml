@@ -12,7 +12,7 @@ minor = 2
 patch = 0
 
 [features]
-stdio = false
+stdio = true
 sse = false
 http_streamable = false
 extensions = false
