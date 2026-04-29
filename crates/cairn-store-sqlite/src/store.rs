@@ -284,12 +284,8 @@ impl MemoryStore for crate::SqliteMemoryStore {
             // versions. Falling back to the latest-version single
             // snapshot (`scope_snapshot`/`taxonomy_snapshot`) covers
             // pre-0014 markers. Markers with neither field predate the
-            // visibility-snapshot model entirely (pre-0010); they are
-            // surfaced to all principals because hiding them silently
-            // erases audit history for legitimate readers, and the
-            // marker itself only exposes that *some* record was purged
-            // for the queried target_id — no scope, taxonomy, or body
-            // is leaked.
+            // visibility-snapshot model entirely (pre-0010) and fail
+            // closed to system-only readers.
             let mut p = conn
                 .prepare(
                     "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt, \
@@ -332,17 +328,21 @@ impl MemoryStore for crate::SqliteMemoryStore {
                         return if any_readable { Some(marker) } else { None };
                     }
                     // Fallback for pre-0014 markers.
+                    // Pre-0010 markers (no scope_snapshot, no
+                    // version_snapshots) fail closed to system-only:
+                    // exposing them lets unprivileged callers probe
+                    // target_ids and learn that a record existed plus
+                    // its purge metadata. Privacy precedence over
+                    // audit continuity is the safer default; operators
+                    // who need legacy markers can read them via a
+                    // system principal.
                     match (scope_snap, tax_snap) {
                         (Some(scope), Some(tax))
                             if principal_can_read(&principal, &scope, &tax) =>
                         {
                             Some(marker)
                         }
-                        (Some(_), Some(_)) => None,
-                        // Pre-0010: no snapshot was ever captured.
-                        // Surface to all principals to preserve audit
-                        // continuity across the upgrade boundary.
-                        _ => Some(marker),
+                        _ => None,
                     }
                 })
                 .collect();

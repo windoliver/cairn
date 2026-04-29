@@ -1,20 +1,27 @@
--- Migration 0016: drop unrecoverable pre-0009 rows from `records`.
+-- Migration 0016: quarantine unrecoverable pre-0009 rows.
 --
 -- Migration 0009 added the `record_json` column without a backfill —
 -- there is no source of truth for the original `MemoryRecord` payload
 -- of rows written before 0009. The post-migration legacy-row gate in
 -- `open_blocking()` refused to open any database that still contained
 -- such rows, which makes the normal upgrade path an operational
--- outage rather than a graceful upgrade.
+-- outage.
 --
--- The data in those rows is unrecoverable: every read path would
--- already report them as missing, so deleting them is the only honest
--- option. We do not write purge markers because the row's `scope` and
--- `taxonomy` may also be missing or incoherent for pre-0009 schemas,
--- and a marker without provenance creates the same audit-corruption
--- risk that motivated migration 0015's redesign.
+-- We cannot reconstruct the rows, but we also cannot silently delete
+-- them: that would make rollback and forensic recovery materially
+-- harder. Instead, move them verbatim into a quarantine table that
+-- preserves every column we have. Operators can inspect, export, or
+-- restore at their discretion; the runtime ignores the quarantine
+-- table entirely.
 --
--- The open-time legacy-row gate is retained as defense-in-depth for
--- direct schema tampering. The normal upgrade path no longer trips
--- it.
+-- After this migration, `records` contains no NULL-`record_json`
+-- rows, so `open_blocking()`'s legacy-row gate no longer trips on
+-- the normal upgrade path. The gate is retained as defense-in-depth
+-- for direct schema tampering or partial migration runs.
+CREATE TABLE IF NOT EXISTS records_legacy_quarantine AS
+  SELECT * FROM records WHERE 0 = 1;
+
+INSERT INTO records_legacy_quarantine
+  SELECT * FROM records WHERE record_json IS NULL;
+
 DELETE FROM records WHERE record_json IS NULL;
