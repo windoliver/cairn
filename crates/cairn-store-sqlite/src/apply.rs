@@ -249,10 +249,24 @@ fn stage_version_impl(
     let actor_chain = serde_json::to_string(&record.actor_chain)?;
     let evidence = serde_json::to_string(&record.evidence)?;
     let scope = serde_json::to_string(&record.scope)?;
+    // FTS triggers (migration 0004) extract `$.title` and `$.tags`
+    // from the stored taxonomy JSON. `tags` is a domain field on
+    // MemoryRecord; `title` is conventional frontmatter and lives on
+    // `extra_frontmatter`. Persist both so title/tag search hits
+    // newly written rows. Tags are space-joined for FTS tokenization;
+    // missing title falls through to the trigger's COALESCE-to-empty.
+    let title = record
+        .extra_frontmatter
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let tags_joined = record.tags.join(" ");
     let taxonomy = serde_json::json!({
         "kind": record.kind,
         "class": record.class,
         "visibility": record.visibility,
+        "title": title,
+        "tags": tags_joined,
     })
     .to_string();
     let record_json = serde_json::to_string(record)?;
@@ -595,22 +609,38 @@ fn add_edge_impl(conn: &Connection, edge: &Edge) -> Result<(), StoreError> {
     let now = Rfc3339Timestamp::now();
     let kind_str = edge_kind_str(edge.kind);
 
-    // Endpoint integrity: both record_ids must exist in `records`.
-    // Schema-level FKs would require rebuilding the existing table; in
-    // the meantime fail-closed at write time so dangling edges cannot
-    // persist (purge cleanup walks `records`, so dangling rows would be
-    // silently retained).
+    // Endpoint integrity: both record_ids must exist in `records` AND
+    // belong to a target that has not been tombstoned. Schema-level FKs
+    // would require rebuilding the existing table; in the meantime
+    // fail-closed at write time so dangling edges cannot persist
+    // (purge cleanup walks `records`, so dangling rows would be
+    // silently retained). The tombstone gate prevents new live
+    // references from accumulating onto retired records during the
+    // tombstone→purge window — without it, backlink/audit traversals
+    // could keep revealing the forgotten target's existence.
     for endpoint in [edge.from.as_str(), edge.to.as_str()] {
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM records WHERE record_id = ?1",
-                params![endpoint],
-                |r| r.get(0),
-            )
-            .map_err(store_err)?;
-        if exists == 0 {
+        let row: Option<(i64,)> = match conn.query_row(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM records r2 \
+                 WHERE r2.target_id = ( \
+                     SELECT target_id FROM records WHERE record_id = ?1 \
+                 ) AND r2.tombstoned = 1 \
+             ) FROM records WHERE record_id = ?1",
+            params![endpoint],
+            |r| Ok((r.get(0)?,)),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(store_err(e)),
+        };
+        let Some((target_tombstoned,)) = row else {
             return Err(StoreError::Conflict {
                 kind: ConflictKind::ForeignKey,
+            });
+        };
+        if target_tombstoned != 0 {
+            return Err(StoreError::Conflict {
+                kind: ConflictKind::UniqueViolation,
             });
         }
     }

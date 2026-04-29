@@ -19,14 +19,14 @@ use serde_json::Value;
 ///   it names the lifecycle-owning agent runtime, which can be shared
 ///   across users, so allowing agent-equality reads would leak rows
 ///   between tenants on the same agent identity.
-/// - `"session"` visibility  → owner match (collapses to `private`
-///   semantics until `Principal` carries a session id; granting access
-///   by row-tag alone would leak across users).
-/// - `"project"` visibility  → owner match (collapses to `private`
-///   semantics until `Principal` carries a verified project context).
-/// - `"team"`, `"org"` → owner match (fail closed until `Principal`
-///   carries verifiable membership context — granting access by row
-///   tag alone would expose data across tenants).
+/// - `"session"`, `"project"`, `"team"`, `"org"` → fail closed for
+///   non-system principals. These tiers require verified context
+///   (session id, project membership, team/org membership) that the
+///   current `Principal` cannot carry. Aliasing them to owner-match
+///   would silently broaden access — a `"session"` row would be
+///   readable by every later session of the same user, when the
+///   contract says it is session-scoped. Reject until the
+///   authorization inputs exist.
 /// - `"public"` → any identified principal may read (public-by-design).
 /// - Unknown / missing visibility → deny (fail closed).
 #[must_use]
@@ -62,11 +62,13 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
     // expand once `Principal` carries verified session and membership
     // context (separate issue).
     match visibility {
-        "private" | "session" | "project" | "team" | "org" => {
+        "private" => {
             let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
             !scope_user.is_empty() && id_str == scope_user
         }
         "public" => true,
+        // session/project/team/org: fail closed until Principal carries
+        // verified session id and membership context.
         _ => false,
     }
 }
@@ -95,11 +97,15 @@ mod tests {
     }
 
     #[test]
-    fn team_owner_match() {
+    fn team_owner_fails_closed_until_membership_context_exists() {
+        // Even the owner is denied: `team` requires verified team
+        // membership in `Principal`, which P0 does not carry. Aliasing
+        // to owner-match would silently broaden access to non-team
+        // members who happen to be the writer.
         let p = principal_for("usr:alice");
         let scope = r#"{"user":"usr:alice"}"#;
         let tax = r#"{"visibility":"team"}"#;
-        assert!(principal_can_read(&p, scope, tax));
+        assert!(!principal_can_read(&p, scope, tax));
     }
 
     #[test]
@@ -133,21 +139,17 @@ mod tests {
     }
 
     #[test]
-    fn project_visibility_owner_match() {
-        // Regression: `project` is one of the 6 documented visibility
-        // tiers and must not fall into the default deny path.
-        let p = principal_for("usr:alice");
+    fn project_visibility_fails_closed_for_all_non_system_principals() {
+        // `project` is one of the 6 documented visibility tiers but
+        // its semantics require verified project membership context
+        // that P0 does not plumb. Owner and non-owner are both denied;
+        // system principals (e.g. WAL executor) bypass.
+        let owner = principal_for("usr:alice");
+        let non_owner = principal_for("usr:bob");
         let scope = r#"{"user":"usr:alice"}"#;
         let tax = r#"{"visibility":"project"}"#;
-        assert!(principal_can_read(&p, scope, tax));
-    }
-
-    #[test]
-    fn project_visibility_non_owner_denied() {
-        let p = principal_for("usr:bob");
-        let scope = r#"{"user":"usr:alice"}"#;
-        let tax = r#"{"visibility":"project"}"#;
-        assert!(!principal_can_read(&p, scope, tax));
+        assert!(!principal_can_read(&owner, scope, tax));
+        assert!(!principal_can_read(&non_owner, scope, tax));
     }
 
     #[test]

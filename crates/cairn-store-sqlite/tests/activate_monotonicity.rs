@@ -62,6 +62,10 @@ fn make_record(id_suffix: u8, body: &str) -> MemoryRecord {
 /// Then attempt to activate v2 again with `expected_prior=Some(3)` → must return
 /// `Conflict { kind: ActivationRaced }`. v3 must remain active.
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear three-stage table-driven scenario"
+)]
 async fn downgrade_activation_returns_activation_raced() {
     use cairn_core::contract::memory_store::MemoryStore;
     use cairn_core::domain::principal::Principal;
