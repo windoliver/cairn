@@ -37,7 +37,9 @@ fn visibility_floor_serializes_to_floor_and_tier() {
 #[test]
 fn scope_mismatch_emits_required_tier_only() {
     // Caller's actual scope is never echoed; only the *required* tier.
-    let d = PolicyDetail::ScopeMismatch { required_tier: MemoryVisibility::Project };
+    let d = PolicyDetail::ScopeMismatch {
+        required_tier: MemoryVisibility::Project,
+    };
     assert_eq!(d.to_wire_string(), "scope_required:project");
 }
 

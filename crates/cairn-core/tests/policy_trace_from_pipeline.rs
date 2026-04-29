@@ -22,12 +22,18 @@ fn decision_discard_maps_to_deny_with_reason() {
     let e: PolicyTraceEntry = (&d).into();
     assert_eq!(e.gate, PolicyGate::FilterShouldMemorize);
     assert_eq!(e.outcome, PolicyOutcome::Deny);
-    assert_eq!(e.detail, PolicyDetail::DiscardReason(DiscardReason::PiiBlocked));
+    assert_eq!(
+        e.detail,
+        PolicyDetail::DiscardReason(DiscardReason::PiiBlocked)
+    );
 }
 
 #[test]
 fn redacted_with_no_spans_is_pass_with_none() {
-    let payload = RedactedPayload { text: String::from("clean"), spans: Vec::new() };
+    let payload = RedactedPayload {
+        text: String::from("clean"),
+        spans: Vec::new(),
+    };
     let e: PolicyTraceEntry = (&payload).into();
     assert_eq!(e.gate, PolicyGate::PresidioRedaction);
     assert_eq!(e.outcome, PolicyOutcome::Pass);
@@ -39,9 +45,21 @@ fn redacted_with_spans_aggregates_counts() {
     let payload = RedactedPayload {
         text: String::from("***"),
         spans: vec![
-            RedactionSpan { start: 0, end: 1, tag: RedactionTag::Email },
-            RedactionSpan { start: 2, end: 3, tag: RedactionTag::Email },
-            RedactionSpan { start: 4, end: 5, tag: RedactionTag::Ssn },
+            RedactionSpan {
+                start: 0,
+                end: 1,
+                tag: RedactionTag::Email,
+            },
+            RedactionSpan {
+                start: 2,
+                end: 3,
+                tag: RedactionTag::Email,
+            },
+            RedactionSpan {
+                start: 4,
+                end: 5,
+                tag: RedactionTag::Ssn,
+            },
         ],
     };
     let e: PolicyTraceEntry = (&payload).into();

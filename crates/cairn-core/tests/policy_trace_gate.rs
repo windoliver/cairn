@@ -25,5 +25,8 @@ fn display_matches_wire_vocabulary() {
 
 #[test]
 fn debug_is_camel_case() {
-    assert_eq!(format!("{:?}", PolicyGate::PresidioRedaction), "PresidioRedaction");
+    assert_eq!(
+        format!("{:?}", PolicyGate::PresidioRedaction),
+        "PresidioRedaction"
+    );
 }

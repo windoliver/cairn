@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use cairn_core::domain::{MemoryVisibility, consent::ConsentEvent};
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
-use cairn_core::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire};
+use cairn_core::policy_trace::{
+    PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
+};
 
 fn walk(v: &serde_json::Value) {
     match v {
@@ -57,7 +59,9 @@ fn sample_entries() -> Vec<PolicyTraceEntry> {
         ),
         PolicyTraceEntry::deny(
             PolicyGate::ScopeCheck,
-            PolicyDetail::ScopeMismatch { required_tier: MemoryVisibility::Project },
+            PolicyDetail::ScopeMismatch {
+                required_tier: MemoryVisibility::Project,
+            },
         ),
         PolicyTraceEntry::error(PolicyGate::ConsentJournalAppend, "wal_failure"),
     ]

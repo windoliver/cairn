@@ -21,7 +21,11 @@ impl PolicyTraceEntry {
     /// Construct an entry with explicit `gate`, `outcome`, and `detail`.
     #[must_use]
     pub const fn new(gate: PolicyGate, outcome: PolicyOutcome, detail: PolicyDetail) -> Self {
-        Self { gate, outcome, detail }
+        Self {
+            gate,
+            outcome,
+            detail,
+        }
     }
 
     /// `(gate, Pass, None)` — the most common shape.
@@ -58,7 +62,11 @@ fn to_wire_one(entry: &PolicyTraceEntry) -> ResponsePolicyTrace {
         PolicyOutcome::Error => ResponsePolicyTraceResult::Error,
     };
     let detail_str = entry.detail.to_wire_string();
-    let detail = if detail_str.is_empty() { None } else { Some(detail_str) };
+    let detail = if detail_str.is_empty() {
+        None
+    } else {
+        Some(detail_str)
+    };
     ResponsePolicyTrace {
         gate: entry.gate.as_str().to_owned(),
         result,
