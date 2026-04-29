@@ -285,6 +285,7 @@ dependencies = [
  "proptest",
  "rusqlite",
  "rusqlite_migration",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
@@ -309,7 +310,12 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "cairn-core",
+ "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
 ]

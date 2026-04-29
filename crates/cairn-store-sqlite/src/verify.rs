@@ -97,6 +97,14 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_subject_scope_idx"),
     ("trigger", "consent_journal_immutable"),
     ("trigger", "consent_journal_no_delete"),
+    // 0007_consent_event
+    ("index", "consent_journal_op_idx"),
+    ("index", "consent_journal_actor_idx"),
+    ("index", "consent_journal_sensor_idx"),
+    ("index", "consent_journal_kind_idx"),
+    ("trigger", "consent_journal_kind_domain"),
+    ("trigger", "consent_journal_event_requires_iso"),
+    ("trigger", "consent_journal_forget_receipt_body_free"),
 ];
 
 fn hash_hex(content: &str) -> String {
