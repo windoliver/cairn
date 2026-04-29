@@ -132,15 +132,38 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     // --- placeholder files ---
     let config_yaml = serde_yaml::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
-    write_once(&config_path, &config_yaml, opts.force, &mut receipt)?;
     write_once(
+        vault,
+        &config_path,
+        &config_yaml,
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
+    write_once(
+        vault,
         &vault.join("purpose.md"),
         PURPOSE_MD,
         opts.force,
-        &mut receipt,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
     )?;
-    write_once(&vault.join("index.md"), "", opts.force, &mut receipt)?;
-    write_once(&vault.join("log.md"), "", opts.force, &mut receipt)?;
+    write_once(
+        vault,
+        &vault.join("index.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
+    write_once(
+        vault,
+        &vault.join("log.md"),
+        "",
+        opts.force,
+        &mut receipt.files_created,
+        &mut receipt.files_skipped,
+    )?;
 
     Ok(receipt)
 }
@@ -175,47 +198,94 @@ pub fn render_human(receipt: &BootstrapReceipt) -> String {
     )
 }
 
-fn write_once(
-    path: &std::path::Path,
-    content: &str,
-    force: bool,
-    receipt: &mut BootstrapReceipt,
-) -> Result<()> {
-    use std::io::Write as _;
-
-    // Validate the parent directory first, before any path — including the
-    // early-return skip path.  A symlink-swapped parent (e.g. `.cairn`)
-    // would redirect every subsequent operation, so we reject it on every
-    // code path, not just the write path.
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    if let Ok(meta) = std::fs::symlink_metadata(dir)
-        && meta.file_type().is_symlink()
-    {
-        anyhow::bail!(
-            "parent directory {} is a symlink — bootstrap will not write through it",
-            dir.display()
-        );
+/// No-follow validation for a write target. Rejects symlinked parents,
+/// symlinked / non-regular destinations, AND any symlinked ancestor between
+/// `vault_root` (exclusive) and the destination's parent (inclusive).
+///
+/// Why every ancestor: `symlink_metadata` only refuses to follow the
+/// **final** path component; intermediate components are still resolved
+/// through symlinks. So `lstat("vault/raw/a/_index.md".parent())` returns
+/// metadata for the leaf `a` even if `raw` itself is a symlink that
+/// silently redirects every nested write outside the vault. Walking each
+/// segment from the vault root closes that gap.
+///
+/// Callers that want to read the file before deciding whether to write
+/// (e.g. `lint --fix-folders` skipping unchanged indexes) MUST run this
+/// first; otherwise a symlinked `_index.md` would be read through to its
+/// target before the no-follow guards in [`write_once`] get a chance to
+/// fire.
+pub(crate) fn check_write_safe(vault_root: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    // Walk every existing ancestor between vault_root (exclusive) and the
+    // destination's parent (inclusive).  `vault_root` itself is the user's
+    // working directory and is intentionally not validated — outside our
+    // trust boundary — but everything beneath it must be a real directory.
+    let parent = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(rel) = parent.strip_prefix(vault_root) {
+        let mut cur = vault_root.to_path_buf();
+        for comp in rel.components() {
+            cur.push(comp);
+            if let Ok(meta) = std::fs::symlink_metadata(&cur)
+                && meta.file_type().is_symlink()
+            {
+                anyhow::bail!(
+                    "ancestor {} is a symlink — cairn will not write through it",
+                    cur.display()
+                );
+            }
+        }
+    } else {
+        // `path` is not under `vault_root` — fall back to the immediate
+        // parent check.  This preserves prior behavior for callers that
+        // pass a working-directory-relative path.
+        if let Ok(meta) = std::fs::symlink_metadata(parent)
+            && meta.file_type().is_symlink()
+        {
+            anyhow::bail!(
+                "parent directory {} is a symlink — cairn will not write through it",
+                parent.display()
+            );
+        }
     }
-
-    // Inspect the final target without following symlinks.
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         let ft = meta.file_type();
         if ft.is_symlink() {
             anyhow::bail!(
-                "{} is a symlink — bootstrap will not write through it",
+                "{} is a symlink — cairn will not write through it",
                 path.display()
             );
         }
         if !ft.is_file() {
-            // A directory or special file at a placeholder path means the
-            // vault is in an inconsistent state; bootstrap cannot repair it.
             anyhow::bail!(
-                "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                "{} exists but is not a regular file — cairn cannot overwrite it",
                 path.display()
             );
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_once(
+    vault_root: &std::path::Path,
+    path: &std::path::Path,
+    content: &str,
+    force: bool,
+    created: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<()> {
+    use std::io::Write as _;
+
+    // Validate every ancestor + target with no-follow lstat.  This rejects
+    // a symlink-swapped parent (e.g. `.cairn`) AND a symlink anywhere
+    // between `vault_root` and the target, before any read or write
+    // touches them.
+    check_write_safe(vault_root, path)?;
+
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        // Path exists and `check_write_safe` confirmed it is a regular file.
+        let _ = meta;
         if !force {
-            receipt.files_skipped.push(path.to_owned());
+            skipped.push(path.to_owned());
             return Ok(());
         }
         // force=true, regular file — fall through to atomic overwrite
@@ -254,16 +324,16 @@ fn write_once(
                 // propagate all other outcomes (errors, NotFound, non-regular).
                 match std::fs::symlink_metadata(path) {
                     Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
-                        "{} is a symlink — bootstrap will not write through it",
+                        "{} is a symlink — cairn will not write through it",
                         path.display()
                     ),
                     Ok(m) if !m.file_type().is_file() => anyhow::bail!(
-                        "{} exists but is not a regular file — bootstrap cannot overwrite it",
+                        "{} exists but is not a regular file — cairn cannot overwrite it",
                         path.display()
                     ),
                     Ok(_) => {
                         // is_file() is the only remaining case after the arms above.
-                        receipt.files_skipped.push(path.to_owned());
+                        skipped.push(path.to_owned());
                         return Ok(());
                     }
                     Err(re) => {
@@ -280,6 +350,6 @@ fn write_once(
         }
     }
 
-    receipt.files_created.push(path.to_owned());
+    created.push(path.to_owned());
     Ok(())
 }

@@ -12,6 +12,7 @@ pub mod emit_skill;
 pub mod fmt;
 pub mod ir;
 pub mod loader;
+pub mod skill_compat;
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,26 @@ pub enum RunMode {
     Check,
 }
 
+/// Build the `cairn-codegen` maintainer CLI command tree.
+#[must_use]
+pub fn codegen_command() -> clap::Command {
+    clap::Command::new("cairn-codegen")
+        .about("Cairn IDL → Rust + JSON codegen")
+        .arg(
+            clap::Arg::new("check")
+                .long("check")
+                .action(clap::ArgAction::SetTrue)
+                .help("Run in check mode: compare emitted bytes against on-disk; exit 1 on drift"),
+        )
+        .arg(
+            clap::Arg::new("out")
+                .long("out")
+                .value_name("PATH")
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Workspace root (defaults to the parent of CARGO_MANIFEST_DIR)"),
+        )
+}
+
 /// Summary returned to the caller.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
@@ -105,7 +126,13 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
     all.extend(emit_sdk::emit(&doc)?);
     all.extend(emit_cli::emit(&doc)?);
     all.extend(emit_mcp::emit(&doc)?);
-    all.extend(emit_skill::emit(&doc)?);
+    let skill_files = emit_skill::emit(&doc)?;
+    // Run skill compat against freshly-emitted SKILL.md so any drift between
+    // the IDL and the templated examples (verbs, flags, JSON payloads) blocks
+    // both `--write` and `--check` (issue #70 acceptance: "compat checks run
+    // with contract drift CI").
+    check_skill_compat(&doc, &skill_files)?;
+    all.extend(skill_files);
 
     // Stable-sort outputs so reports are deterministic.
     all.sort_by(|a, b| a.path.cmp(&b.path));
@@ -174,6 +201,73 @@ pub fn run(opts: &RunOpts) -> Result<Report, CodegenError> {
     Ok(report)
 }
 
+/// Validate every CLI invocation embedded in the freshly-emitted SKILL.md
+/// against the IR. Returns [`CodegenError::Emit`] on the first failure so a
+/// retired verb, an unknown flag, or a stale prelude reference fails the
+/// codegen run rather than shipping a broken skill.
+fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(), CodegenError> {
+    let Some(skill) = files
+        .iter()
+        .find(|f| f.path.ends_with("skills/cairn/SKILL.md"))
+    else {
+        return Ok(());
+    };
+    let body = std::str::from_utf8(&skill.bytes)
+        .map_err(|e| CodegenError::Emit(format!("SKILL.md not utf-8: {e}")))?;
+    let blocks = skill_compat::extract_verb_scoped_blocks(body)
+        .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+    for (verb_ctx, block) in blocks {
+        match block.lang.as_str() {
+            "bash" | "shell" | "sh" | "inline" => {
+                // Validate every bash/inline block — `validate_cli_block`
+                // handles per-line filtering so a `cairn …` invocation
+                // sitting after a comment, `set -e`, or any other shell
+                // boilerplate still gets inspected. Gating on the first
+                // line starting with `cairn ` was a formatting-based
+                // bypass of the gate (round-6 finding).
+                skill_compat::validate_cli_block(&block, doc)
+                    .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+            }
+            "json" => {
+                // JSON examples are validated *only* when they sit under a
+                // `## cairn <verb>` heading — that's the contract surface.
+                // Blocks under documentation headings like
+                // `## Output format` (response-shape examples) are
+                // illustrative prose, not args payloads, so skip them.
+                if let Some(verb) = verb_ctx {
+                    skill_compat::validate_json_block(&block, doc, &verb)
+                        .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+                }
+            }
+            other => {
+                // Round-7 finding: any non-bash, non-json fence (e.g. `zsh`,
+                // `console`, `text`, or unlabeled) containing a `cairn`
+                // invocation would otherwise silently bypass the gate. Fail
+                // closed so the only escape hatch is to drop the example
+                // entirely, not to relabel its fence.
+                // Round-9 finding: a token like `(cairn` or `cairn;` shows
+                // up after split_whitespace as a single chunk and would
+                // bypass an exact-match check. Strip surrounding shell
+                // punctuation before comparing so wrapped invocations get
+                // caught too.
+                let mentions_cairn = block
+                    .body
+                    .split_whitespace()
+                    .any(|t| t.trim_matches(|c: char| !c.is_alphanumeric() && c != '_') == "cairn");
+                if mentions_cairn {
+                    let line = block.line;
+                    return Err(CodegenError::Emit(format!(
+                        "skill compat: fenced block at line {line} uses unsupported language \
+                         `{other}` but contains a `cairn` token — relabel as `bash`/`shell`/`sh` \
+                         so the compat gate can validate it"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Walk every [`OWNED_ROOTS`] entry under `workspace_root` and return the
 /// workspace-relative paths of files NOT in `expected`. Missing roots are
 /// silently skipped — the generator may legitimately run before the directory
@@ -225,4 +319,143 @@ fn walk_files(
         // and following them risks straying outside the workspace.
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc() -> ir::Document {
+        let raw = loader::load(std::path::Path::new(crate::SCHEMA_DIR))
+            .expect("invariant: SCHEMA_DIR loads");
+        ir::build(&raw).expect("invariant: IR builds")
+    }
+
+    fn skill_md(body: &str) -> Vec<GeneratedFile> {
+        vec![GeneratedFile {
+            path: PathBuf::from("skills/cairn/SKILL.md"),
+            bytes: body.as_bytes().to_vec(),
+        }]
+    }
+
+    #[test]
+    fn check_skill_compat_rejects_unsupported_fence_with_cairn_token() {
+        // Round-7 finding 2: any fence language other than bash/shell/sh/json
+        // (`zsh`, `console`, `text`, unlabeled) used to silently bypass the
+        // gate. Fail closed when the body mentions `cairn`, so the only
+        // escape is to drop the example, not relabel its fence.
+        let body = "## Ingest\n\n```zsh\ncairn ingest --bogus\n```\n";
+        let err = check_skill_compat(&doc(), &skill_md(body))
+            .expect_err("unsupported fence with cairn token must fail");
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("unsupported language `zsh`")),
+            "expected emit error citing zsh, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_skill_compat_rejects_unsupported_fence_with_wrapped_cairn() {
+        // Round-9 finding 1: a token like `(cairn` appears as a single
+        // whitespace chunk and used to slip past the exact-match check.
+        // Strip surrounding shell punctuation before comparing so wrapped
+        // invocations in unsupported fences also fail closed.
+        let body = "## Ingest\n\n```zsh\n(cairn ingest --bogus)\n```\n";
+        let err = check_skill_compat(&doc(), &skill_md(body))
+            .expect_err("wrapped cairn in unsupported fence must fail");
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("unsupported language `zsh`")),
+            "expected emit error citing zsh, got: {err:?}"
+        );
+    }
+
+    /// Run the real emitter, mutate the resulting SKILL bytes via
+    /// `mutate`, and assert `check_skill_compat` rejects the mutated
+    /// bytes. This is the e2e drift-injection harness — without it we
+    /// only know the gate accepts the live SKILL, not that it would
+    /// catch a corruption.
+    fn assert_drift_rejected(label: &str, mutate: impl FnOnce(String) -> String) -> CodegenError {
+        let d = doc();
+        let mut skill_files = emit_skill::emit(&d).expect("emit_skill");
+        let skill = skill_files
+            .iter_mut()
+            .find(|f| f.path.ends_with("skills/cairn/SKILL.md"))
+            .expect("emitter produces SKILL.md");
+        let original = std::str::from_utf8(&skill.bytes)
+            .expect("SKILL is utf8")
+            .to_string();
+        let mutated = mutate(original);
+        skill.bytes = mutated.into_bytes();
+        check_skill_compat(&d, &skill_files)
+            .err()
+            .unwrap_or_else(|| panic!("drift `{label}` must be rejected by compat gate"))
+    }
+
+    #[test]
+    fn drift_injection_unknown_flag_blocks_codegen() {
+        // Inject a stale flag into the first ingest example. The compat
+        // gate must surface it as UnknownFlag (Emit error) so codegen's
+        // --check fails.
+        let err = assert_drift_rejected("unknown flag", |body| {
+            body.replacen(
+                "cairn ingest --kind",
+                "cairn ingest --bogus-stale --kind",
+                1,
+            )
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("--bogus-stale") || m.contains("bogus-stale")),
+            "expected emit error mentioning bogus-stale, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_renamed_verb_blocks_codegen() {
+        // Pretend a verb got renamed in the IDL but the SKILL still
+        // references the old name. The gate must reject it as
+        // UnknownVerb.
+        let err = assert_drift_rejected("renamed verb", |body| {
+            // Mutate inside a fenced example, not the section heading.
+            body.replacen("cairn search --mode", "cairn searchx --mode", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("searchx")),
+            "expected emit error mentioning searchx, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_inline_prelude_break_blocks_codegen() {
+        // SKILL.md uses inline `cairn handshake --json` / `cairn status
+        // --json` as protocol preludes. A drift that renames `--json`
+        // must be caught at the inline-span path.
+        let err = assert_drift_rejected("inline prelude rename", |body| {
+            body.replacen("`cairn handshake --json`", "`cairn handshake --jsno`", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("jsno")),
+            "expected emit error mentioning typo'd flag, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn drift_injection_compound_shell_form_blocks_codegen() {
+        // A maintainer wraps a real example in a subshell. The fail-closed
+        // catch-all must reject it (round-8 invariant).
+        let err = assert_drift_rejected("subshell wrap", |body| {
+            body.replacen("cairn assemble_hot\n", "(cairn assemble_hot)\n", 1)
+        });
+        assert!(
+            matches!(err, CodegenError::Emit(ref m) if m.contains("compound") || m.contains("no cairn invocation") || m.contains("could be extracted")),
+            "expected emit error citing fail-closed catch-all, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_skill_compat_ignores_unsupported_fence_without_cairn_token() {
+        // The gate must only fail closed for blocks that actually contain a
+        // `cairn` invocation — generic prose snippets in `text` fences are
+        // fine.
+        let body = "## Ingest\n\n```text\nlorem ipsum dolor\n```\n";
+        check_skill_compat(&doc(), &skill_md(body)).expect("unrelated fence must not fail compat");
+    }
 }

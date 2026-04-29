@@ -1,15 +1,27 @@
-//! `SQLite` record store for Cairn (P0 scaffold).
+//! `SQLite` record store for Cairn.
 //!
-//! Schema, migrations, FTS5 and sqlite-vec integration arrive in
-//! follow-up issues (#46 and later). For now this crate ships only the
-//! plugin manifest, a stub `MemoryStore` impl with all capability flags
-//! `false`, and a `register()` entry point so the host can include it
-//! in `cairn plugins list/verify`.
+//! Ships the embedded migration set (records + FTS5, WAL ops, replay
+//! ledger, locks, consent journal). Verb-level method bodies on the
+//! `MemoryStore` impl land in follow-up issues; this crate currently
+//! exposes [`open()`], [`open_in_memory()`], the plugin manifest, and a
+//! P0 stub impl whose CRUD methods return
+//! [`cairn_core::contract::memory_store::StoreError::Unimplemented`].
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+pub mod error;
+pub mod migrations;
+mod open;
+mod verify;
+
+pub use error::StoreError;
+pub use open::{open, open_in_memory};
+
+use cairn_core::contract::memory_store::{
+    self as ms_contract, CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities,
+};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
+use cairn_core::domain::record::MemoryRecord;
 use cairn_core::register_plugin;
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
@@ -18,14 +30,17 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts. Shared by the trait impl and
-/// the compile-time guard below so the manifest range and the trait surface
-/// derive from one binding.
+/// Contract-version range this crate accepts (`[0.2.0, 0.3.0)`). Shared by
+/// the trait impl and the compile-time guard below so the manifest range
+/// and the trait surface derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
-/// P0 stub `MemoryStore`. All capability flags are `false`; verb methods
-/// land with the storage implementation in #46.
+/// SQLite-backed [`MemoryStore`] implementation.
+///
+/// **P0 stub:** `get`, `upsert`, and `list_active` return
+/// [`ms_contract::StoreError::Unimplemented`]. Callers must treat those
+/// errors as `CapabilityUnavailable` until the full schema lands in #46.
 #[derive(Default)]
 pub struct SqliteMemoryStore;
 
@@ -47,6 +62,24 @@ impl MemoryStore for SqliteMemoryStore {
 
     fn supported_contract_versions(&self) -> VersionRange {
         ACCEPTED_RANGE
+    }
+
+    async fn get(
+        &self,
+        _target_id: &str,
+    ) -> Result<Option<ms_contract::StoredRecord>, ms_contract::StoreError> {
+        Err(ms_contract::StoreError::Unimplemented)
+    }
+
+    async fn upsert(
+        &self,
+        _record: MemoryRecord,
+    ) -> Result<ms_contract::StoredRecord, ms_contract::StoreError> {
+        Err(ms_contract::StoreError::Unimplemented)
+    }
+
+    async fn list_active(&self) -> Result<Vec<ms_contract::StoredRecord>, ms_contract::StoreError> {
+        Err(ms_contract::StoreError::Unimplemented)
     }
 }
 

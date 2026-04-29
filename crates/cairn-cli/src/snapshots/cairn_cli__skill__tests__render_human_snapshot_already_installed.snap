@@ -1,0 +1,13 @@
+---
+source: crates/cairn-cli/src/skill.rs
+expression: render_human(&receipt)
+---
+cairn skill install: already up to date at /home/user/.cairn/skills/cairn (v0.0.1)
+  (pass --force to overwrite generated files)
+  SKILL.md  [skipped]
+  conventions.md  [skipped]
+  .version  [skipped]
+
+Registration hint:
+  # Add to your CLAUDE.md:
+  @~/.cairn/skills/cairn/SKILL.md

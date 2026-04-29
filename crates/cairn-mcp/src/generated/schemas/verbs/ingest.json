@@ -121,6 +121,11 @@
       }
     ],
     "positional": {
+      "aliases_one_of": [
+        "body",
+        "file",
+        "url"
+      ],
       "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
       "name": "source"
     }
