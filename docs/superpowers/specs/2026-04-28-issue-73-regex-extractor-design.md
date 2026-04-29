@@ -29,7 +29,8 @@ In scope:
 - Two-phase dispatch with **untruncatable built-in rules** (Phase A) and budget-bounded user rules (Phase B). Built-ins cover all §11.6 / §18.a explicit triggers, so truncation cannot silently lose `remember` / `forget` / `skillify` intents.
 - Clause-aware text-rule dispatch: bodies are split on a small fixed separator set so compound utterances like `"forget X, remember Y"` produce both outputs (first-match-wins applies *per clause*, not per body). Bounded clause cap to keep adversarial inputs cheap.
 - Hardened `forget` resolver contract: regex-originated substring matches **never** auto-authorize delete; resolver routes them to an interactive `forget_ambiguous` outcome. Auto-proceed is gated on `match_strategy == Exact` (quoted-string capture) plus a unique candidate, or on a stable `record_id` passed by an out-of-band caller.
-- Pinned canonical text source for `Proactive` events: the user-visible message body, never the agent's `rationale`.
+- **Runtime-enforced** body source via `BodyResolution::Resolved { text, source: BodySource }`. The `BodySource` enum has no variant for agent rationale, so internal reasoning literally cannot be passed in as a user utterance — the privacy invariant is encoded in the type, not in caller discipline.
+- 64 KiB hard cap on body length before regex text-rule dispatch. Bodies above the cap skip Phase A and Phase B and route to LLM via `llm_eligible_spans`. Closes the latency-DoS path on always-on Phase A.
 - Per-rule wall-clock budget enforcement and hard `max_drafts` cap on Phase B; typed `TruncationReason` returned to the caller (§6).
 - Documented chain handoff contract for #74: regex emits typed `llm_eligible_spans` derived from clause spans minus high-confidence (≥0.9) regex coverage, plus any `ClauseCapExceeded` tail. Suppression is **span-scoped, not event-scoped**, and **confidence-gated** even under truncation: low-confidence regex spans remain LLM-eligible so weak matches cannot block LLM recovery.
 - Unit, integration, property, and a CI-friendly latency assertion test.
@@ -108,12 +109,51 @@ pub enum BodyResolution<'a> {
     /// silently skipped; this is not an error.
     NotApplicable,
     /// Body bytes were materialized from `payload_ref` and verified
-    /// against `payload_hash`. Text rules run against `&str`.
-    Resolved(&'a str),
+    /// against `payload_hash`. The `source` tag pins which trust boundary
+    /// the bytes came from — the extractor refuses to dispatch text rules
+    /// against any source that is not a user-visible utterance.
+    Resolved {
+        text: &'a str,
+        source: BodySource,
+    },
     /// Body resolution attempted but failed. The extractor returns
     /// `ExtractError::BodyResolution` so the caller can surface a typed
     /// error rather than treating the event as bodyless.
     Failed(BodyResolutionError),
+}
+
+/// The trust boundary a resolved body came from.
+///
+/// **There is deliberately no `Rationale` variant.** Internal agent
+/// reasoning (`CapturePayload::Proactive.rationale`, any future
+/// reasoning-trace field) cannot be encoded in this enum, so the
+/// extractor cannot accidentally process it as a user utterance.
+/// The chain dispatcher (#74) builds a `BodyResolution::Resolved` only
+/// for the variants below; if it cannot tag the source as one of these,
+/// it must pass `BodyResolution::NotApplicable`. Runtime-enforced; not
+/// caller discipline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum BodySource {
+    /// `cairn ingest` Mode B body — the user-supplied text payload of a
+    /// `Cli` or `Mcp` envelope.
+    UserIngest,
+    /// User utterance captured by a harness hook (e.g. `UserPromptSubmit`).
+    HookUtterance,
+    /// Proactive Mode C body — the user-visible message body the agent
+    /// produced. Distinct from `Proactive.rationale`, which never
+    /// reaches this enum.
+    ProactiveMessage,
+}
+
+impl BodyResolution<'_> {
+    /// Inspect whether the resolved body's source is on the allowlist
+    /// for text-rule extraction. Currently every `BodySource` variant
+    /// is allowlisted because the enum has no non-allowlisted variants;
+    /// this method is the seam for any future read-only-source addition.
+    pub fn allows_text_rules(&self) -> bool {
+        matches!(self, BodyResolution::Resolved { .. })
+    }
 }
 
 /// Reason a body could not be resolved. Stable variants the chain branches on.
@@ -397,16 +437,26 @@ This separation means a hash mismatch or I/O error on `payload_ref` cannot be mi
 
 Dispatch runs in two phases per event:
 
-1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. **Phase A is never truncated.** No `max_drafts` check, no per-rule `max_wall_ms` check. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex) — together they fit well under the 2 ms budget on commodity hardware. Phase A's runtime is the floor of `max_wall_ms`; if the deployment's hardware genuinely cannot meet 2 ms for built-ins, that is a configuration error, surfaced as a startup self-check (out of scope for #73; tracked as a follow-up).
-2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
+**Phase 0 — body-size guard.** Before either phase, the extractor checks `body.len() > MAX_BODY_LEN_FOR_REGEX` (default 64 KiB; constant exposed for #74's tuning). If exceeded:
+
+1. Skip Phase A and Phase B entirely for text rules. Hook and tool-frame rules still run.
+2. Set `truncated = TruncationReason::BodyTooLarge { body_len }`.
+3. Append the entire body span as a single range to `llm_eligible_spans` so the LLM extractor (which can chunk-process) handles it.
+4. Emit `tracing::warn!(worker = "regex", body_len, "body exceeds MAX_BODY_LEN_FOR_REGEX, deferring to LLM")`.
+
+This is the round-8 fix for the latency-DoS path: an adversarial multi-megabyte `remember <body>` cannot force every built-in to scan the whole input. 64 KiB is generous (≈ 16 dense paragraphs) and well below the latency floor; tunable per deployment but pinned for this PR.
+
+1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. Within Phase A, **`max_drafts` is not enforced**, but a Phase-A wall-clock guard (`MAX_PHASE_A_WALL_MS`, default 2 ms) is checked once after Phase A completes; if exceeded, the extractor emits `tracing::warn!` and the deployment self-check (follow-up issue) flags the configuration. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex on bodies ≤ 64 KiB), so this is an observability rail, not a fall-through.
+2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only general-truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
 
 **Clause-aware first-match-wins for text rules.** Bodies are split into clauses on a deliberately conservative separator set:
 
 - `;` (semicolon) — always a clause boundary.
-- `.` followed by whitespace or end-of-string — sentence boundary, always a clause boundary. Decimal points and abbreviations (`U.S.`) are followed by a non-whitespace character so they don't split.
 - `,` followed by whitespace and a **trigger-prefix lookahead** — only splits when the next clause starts with one of `remember`, `forget`, `correction`, `skillify`, or `this is how` (case-insensitive, word-anchored). This means `"forget X, remember Y"` splits but `"alice, bob, and carol are on call"` does not.
 - conjunction (`\band\b`, `\bbut\b`, `\bthen\b`) followed by whitespace and the **same trigger-prefix lookahead**. `"forget X and remember Y"` splits; `"remember that Alice and Bob are on call"` stays intact (the `and` is not followed by a trigger prefix).
 - Quote-aware: separators inside `"…"`, `'…'`, or backticks do not split. Implemented with a tiny one-pass scanner; the regex crate doesn't need to support balanced groups.
+
+**Periods are not separators.** An earlier draft split on `.` followed by whitespace, with the claim that abbreviations like `U.S.` would not split because they are followed by a non-whitespace character — but in ordinary prose like `"remember that I live in the U.S. and prefer cash"`, `U.S.` is followed by a space, so the splitter would have split mid-sentence and produced a high-confidence partial draft (`"I live in the U.S"`) that suppressed LLM repair on the rest. To preserve common abbreviations and initialisms unconditionally, we drop period splitting entirely. Sentence-spanning compound utterances are still handled by trigger-prefix-gated conjunctions and explicit `;`. If a deployment ships data where multi-sentence trigger compounds are common (rare in practice), they can add a user rule for the specific construction; the built-in splitter stays conservative.
 
 Each resulting clause is dispatched independently, with first-match-wins **per clause** (not per body). Empty clauses (after trimming) are skipped. Hook and tool-frame rules ignore clause splitting and continue to run at most once per event.
 
@@ -469,6 +519,9 @@ pub enum TruncationReason {
     /// Body had > 8 clauses; first 8 dispatched, the remainder is part
     /// of `llm_eligible_spans` for the LLM extractor to pick up.
     ClauseCapExceeded { processed: u8, body_len: u32 },
+    /// Body exceeded `MAX_BODY_LEN_FOR_REGEX`; text rules skipped, full
+    /// body added to `llm_eligible_spans`.
+    BodyTooLarge { body_len: u32 },
 }
 ```
 
@@ -589,7 +642,9 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - **Forget contract — substring stays substring:** `forget` rule fires on `"forget my old address"`; assert `match_strategy == Substring` (not `Exact`). Round-trip serde preserves it.
 - **Forget contract — Fuzzy rejected:** `RuleSet::from_config(<rule with match_strategy: Fuzzy>)` returns `Err(InvalidRule)`. (This guards the resolver contract: even if a future user-config tries to declare `Fuzzy`, the extractor refuses to compile it until #75 is wired up.)
 - **Forget contract — user `Exact` requires `quoted_capture: true`:** user rule with `match_strategy: Exact` and `quoted_capture: false` (or absent) → `InvalidRule`.
-- **Proactive canonical source:** test fixture verifies a `Proactive` envelope is dispatched with `body = message_body`, never `rationale`. (The check sits in the test fixture builder so a future test author cannot accidentally pass `rationale` through.)
+- **Proactive runtime enforcement:** `BodySource` has no `Rationale` variant — confirmed by an exhaustive-match test. A test fixture for a `Proactive` event constructs `BodyResolution::Resolved { text: message_body, source: BodySource::ProactiveMessage }`. There is no compilable path that lets a test pass `rationale` text in: it would need a `BodySource` variant that does not exist.
+- **Body-size cap:** synthesize an `ExtractInput` with a 65 KiB body containing the substring `"remember that …"`; assert (a) `outputs` is empty (text rules skipped), (b) `truncated == BodyTooLarge { body_len: 66560 }` (or whatever exact length is used), (c) `llm_eligible_spans` contains exactly one range covering the whole body, (d) one `body exceeds MAX_BODY_LEN_FOR_REGEX` warn fires.
+- **Period non-splitting (round-8 regression):** body `"remember that I live in the U.S. and prefer cash"`; assert `outputs.len() == 1` and the captured body is `"I live in the U.S. and prefer cash"` (whole sentence). Mirror with `"remember that prices have rounded to $9.99 today"` (decimal point), `"the rule applies to dr. smith and dr. jones equally"` (lowercase abbreviation case where the rule does not fire — should produce no output, not a partial one).
 - **Span discipline:** every text-rule output has `source_span = Some(_)`; every Hook / ToolFrame output has `source_span = None`. Property test asserts the invariant across `extract` outputs.
 - `max_drafts` enforcement: build a `RuleSet` whose **user**-rule list contains `max_drafts + 5` always-matching rules and an empty built-in set; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches user-rule declaration order.
 - `max_wall_ms` zero-output path: empty built-ins, set `budget.max_wall_ms = 0`, one user rule that does work; assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
