@@ -13,7 +13,7 @@
 //! schema's `record_json`-driven projection.
 
 use cairn_core::contract::memory_store::{
-    KeywordCursor, KeywordSearchArgs, MemoryStore, TombstoneReason,
+    Edge, EdgeKind, KeywordCursor, KeywordSearchArgs, MemoryStore, TombstoneReason,
 };
 use cairn_core::domain::filter::validate_filter;
 use cairn_core::domain::taxonomy::{MemoryKind, MemoryVisibility};
@@ -234,6 +234,57 @@ async fn filter_path_string_contains_narrows_by_projected_path() {
         page.candidates.len(),
         2,
         "all projected paths share `vault/`"
+    );
+}
+
+// ── Supersession: `updates`-edge dst rows are hidden from search ─────────────
+
+#[tokio::test]
+async fn updates_edge_dst_is_hidden_from_search() {
+    let store = open_in_memory().await.expect("open");
+    // Two records on distinct target_ids; same body so both match the
+    // FTS query. Then declare r2 supersedes r1 via an `updates` edge.
+    let r1 = record_with('1', "shared body keyword needle", MemoryKind::Fact);
+    let r2 = record_with('2', "shared body keyword needle", MemoryKind::Fact);
+    store.upsert(&r1).await.expect("r1");
+    store.upsert(&r2).await.expect("r2");
+    let r1_id = RecordId::parse("01HQZX9F5N0000000000000001").expect("valid");
+    let r2_id = RecordId::parse("01HQZX9F5N0000000000000002").expect("valid");
+    store
+        .put_edge(&Edge {
+            src: r2_id.clone(),
+            dst: r1_id.clone(),
+            kind: EdgeKind::Updates,
+            weight: None,
+        })
+        .await
+        .expect("supersede");
+
+    // r1 is the dst of an `updates` edge → hidden by `records_latest`
+    // semantics. Search must respect the same exclusion.
+    let page = store
+        .search_keyword(&args("needle", 10))
+        .await
+        .expect("search");
+    assert_eq!(page.candidates.len(), 1, "superseded record stays hidden");
+    assert_eq!(page.candidates[0].record_id, r2_id);
+}
+
+// ── FTS column-filter syntax surfaces as FtsQuery, not generic SQL ───────────
+
+#[tokio::test]
+async fn fts_column_filter_against_unindexed_column_is_typed() {
+    // `records_fts` only indexes `body`, so `title:postgres` triggers
+    // FTS5's column-filter parser to error with `no such column: title`.
+    // The verb layer needs that surfaced as `StoreError::FtsQuery` so it
+    // can return an actionable error instead of a generic SQL failure.
+    let store = seed().await;
+    let result = store.search_keyword(&args("title:postgres", 10)).await;
+    let err = result.expect_err("malformed FTS column filter must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("FTS5 query parse error"),
+        "expected typed FtsQuery error, got: {msg}",
     );
 }
 

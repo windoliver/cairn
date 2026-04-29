@@ -105,9 +105,14 @@ impl SqliteMemoryStore {
                 )
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
 
+                // `prepare` runs SQL parsing + name resolution against the
+                // outer query (records, edges, generated columns, filter
+                // SQL). An error here is a schema/SQL bug in *our* string,
+                // not an FTS5 user-syntax issue, so we don't widen
+                // classification to runtime-only message shapes.
                 let mut stmt = c
                     .prepare(&sql)
-                    .map_err(|e| classify_fts_error(e).into_tokio())?;
+                    .map_err(|e| classify_fts_error(e, FtsErrorStage::Prepare).into_tokio())?;
                 let rows = stmt
                     .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                         Ok(RawRow {
@@ -126,9 +131,9 @@ impl SqliteMemoryStore {
                             record_json: row.get::<_, String>(12)?,
                         })
                     })
-                    .map_err(|e| classify_fts_error(e).into_tokio())?
+                    .map_err(|e| classify_fts_error(e, FtsErrorStage::Runtime).into_tokio())?
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| classify_fts_error(e).into_tokio())?;
+                    .map_err(|e| classify_fts_error(e, FtsErrorStage::Runtime).into_tokio())?;
 
                 project_page(rows, limit, now_ms)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
@@ -273,6 +278,13 @@ fn build_search_query(
     let mut params: Vec<SqlVal> = Vec::new();
     let mut sql = String::with_capacity(512);
 
+    // The supersession predicate matches the `records_latest` view in
+    // migration 0001 (brief §3 lines ~417-426): a record version is
+    // "latest" only when no `updates` edge points to it. ConflictDAG /
+    // PromotionWorkflow emit `updates` edges to retire stale facts, and
+    // keyword search must respect the same exclusion as graph traversal —
+    // otherwise a body match against an `updates`.dst can resurface a
+    // fact the consolidator already retired.
     sql.push_str(
         "SELECT \
             r.record_id, r.target_id, r.scope, r.kind, r.class, r.visibility, \
@@ -286,7 +298,12 @@ fn build_search_query(
               FROM records_fts \
              WHERE records_fts MATCH ? \
          ) fts ON fts.rowid = r.rowid \
-         WHERE r.active = 1 AND r.tombstoned = 0",
+         WHERE r.active = 1 \
+           AND r.tombstoned = 0 \
+           AND NOT EXISTS ( \
+                 SELECT 1 FROM edges e \
+                  WHERE e.kind = 'updates' AND e.dst = r.record_id \
+           )",
     );
     params.push(SqlVal::Text(SNIPPET_OPEN.to_owned()));
     params.push(SqlVal::Text(SNIPPET_CLOSE.to_owned()));
@@ -349,37 +366,61 @@ fn json_to_sql(v: &serde_json::Value) -> SqlVal {
     }
 }
 
+/// Pipeline stage at which a `SQLite` error surfaced. The classifier
+/// widens its FTS5 prefix set at runtime because the outer query and
+/// filter SQL are statically authored — at runtime the only source of
+/// `"no such column: ..."` is the FTS5 module parsing the user-supplied
+/// MATCH operand (e.g. `title:foo` against a body-only FTS table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FtsErrorStage {
+    /// `prepare` returned an error. SQL parse / name resolution against
+    /// the outer query — not user-driven, so don't classify as FTS.
+    Prepare,
+    /// `query_map` / row iteration. The MATCH operand is evaluated here,
+    /// so column-filter parse errors flow through as runtime errors.
+    Runtime,
+}
+
 /// Convert a `rusqlite::Error` into [`StoreError::FtsQuery`] when the
 /// underlying `SQLite` message identifies it as an FTS5 parse failure.
 ///
-/// FTS5 emits three message shapes for malformed `MATCH` operands
+/// FTS5 emits four message shapes for malformed `MATCH` operands
 /// (observed against the bundled `SQLite` 3.46 build):
 /// 1. `"fts5: syntax error near \"...\""`
 /// 2. `"unknown special query: ..."`
 /// 3. `"unterminated string"`
+/// 4. `"no such column: <name>"` — column-filter syntax (`title:foo`)
+///    against a column not indexed by the FTS table. Runtime-only.
 ///
-/// All three are wire-stable across `SQLite` versions used in P0; the
+/// All four are wire-stable across `SQLite` versions used in P0; the
 /// classifier matches on each prefix so the verb layer can return a
 /// user-actionable error instead of a generic SQL failure.
-fn classify_fts_error(err: rusqlite::Error) -> StoreError {
+fn classify_fts_error(err: rusqlite::Error, stage: FtsErrorStage) -> StoreError {
     let message = match &err {
         rusqlite::Error::SqliteFailure(_, Some(m)) => m.clone(),
         other => other.to_string(),
     };
-    if is_fts_message(&message) {
+    if is_fts_message(&message, stage) {
         StoreError::FtsQuery { message }
     } else {
         StoreError::from(err)
     }
 }
 
-fn is_fts_message(msg: &str) -> bool {
+fn is_fts_message(msg: &str, stage: FtsErrorStage) -> bool {
     let lower_starts_with = |needle: &str| {
         msg.len() >= needle.len() && msg[..needle.len()].eq_ignore_ascii_case(needle)
     };
-    lower_starts_with("fts5:")
+    if lower_starts_with("fts5:")
         || lower_starts_with("unknown special query")
         || lower_starts_with("unterminated string")
+    {
+        return true;
+    }
+    // `no such column` is ambiguous between FTS column-filter syntax and
+    // a real outer-query schema bug. We only recognize it at runtime —
+    // the static outer SQL would fail at prepare for a real schema bug.
+    stage == FtsErrorStage::Runtime && lower_starts_with("no such column")
 }
 
 /// Helper trait so the worker callback can map a `StoreError` into a
