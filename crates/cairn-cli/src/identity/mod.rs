@@ -32,6 +32,7 @@ use cairn_core::{
 use cairn_keychain::OsKeystore;
 use cairn_store_sqlite::SqliteIdentityRegistry;
 
+pub use first_bind::commit_first_identity;
 pub use status::ReconciliationReport;
 
 /// Orchestrator for the identity subsystem (spec §3.5 / §4.1).

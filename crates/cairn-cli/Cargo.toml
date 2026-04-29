@@ -49,6 +49,7 @@ walkdir = { workspace = true }
 ed25519-dalek = { workspace = true }
 unicode-normalization = { workspace = true }
 fs2 = { workspace = true }
+rand_core = { workspace = true }
 whoami = { workspace = true }
 >>>>>>> dcfeba5 (feat(cli): IdentityService skeleton + VaultBindingLock (#50))
 
