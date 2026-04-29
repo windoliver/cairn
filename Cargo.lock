@@ -361,6 +361,9 @@ dependencies = [
  "cairn-core",
  "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "chrono",
+ "ed25519-dalek",
+ "parking_lot",
  "proptest",
  "rusqlite",
  "rusqlite_migration",
@@ -1805,10 +1808,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
 dependencies = [
  "bitflags",
+ "chrono",
  "fallible-iterator",
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
+ "serde_json",
  "smallvec",
 ]
 
