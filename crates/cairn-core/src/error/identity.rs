@@ -161,6 +161,20 @@ pub enum IdentityServiceError {
     /// disambiguate.
     #[error("keychain probe found multiple vault namespaces — pass --vault-id to disambiguate")]
     AmbiguousVaultNamespaces,
+
+    /// A previous purge crashed mid-flow and left the identity in
+    /// `PurgePending` state. Resuming a partial purge is destructive and
+    /// requires explicit `--resume` to confirm operator intent.
+    ///
+    /// Re-run `cairn identity purge <id> --resume` (after re-confirming the
+    /// purge-ack file) to continue.
+    #[error(
+        "identity is in purge_pending state from a prior crashed purge — pass --resume to confirm resumption"
+    )]
+    PurgeResumeRequired {
+        /// The identity stuck in `PurgePending`.
+        id: Identity,
+    },
 }
 
 #[cfg(test)]

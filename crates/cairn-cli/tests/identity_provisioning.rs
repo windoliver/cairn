@@ -953,7 +953,7 @@ async fn purge_refuses_without_ack_file() {
     let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
 
     let err = svc
-        .purge(&alice_id, PurgeReason("test".to_owned()))
+        .purge(&alice_id, PurgeReason("test".to_owned()), false)
         .await
         .expect_err("purge must fail without ack file");
 
@@ -993,7 +993,7 @@ async fn purge_full_path_lands_purged() {
     let ack_path = maintenance_dir.join("purge-ack");
     fs::write(&ack_path, alice_id.as_str()).expect("write purge-ack");
 
-    svc.purge(&alice_id, PurgeReason("GDPR erasure".to_owned()))
+    svc.purge(&alice_id, PurgeReason("GDPR erasure".to_owned()), false)
         .await
         .expect("purge must succeed");
 
@@ -1428,4 +1428,95 @@ async fn status_clean_vault_reports_no_degradation() {
         "vault.binding file is written by commit_first_identity → state must be Bound",
     );
     assert!(report.vault_id.is_some(), "vault_id must be populated");
+}
+
+// ── Regression tests for adversarial-review findings ─────────────────────────
+
+/// **Regression — codex review round 1 finding #2 (data-loss):** repair must
+/// never delete the freshly active key. The bug: `list_pending_evictions`
+/// returned `new_key_version` as `evict_version`, and `repair` deleted that
+/// version from the keystore. Combined with the rotate path setting
+/// `pending_eviction = true` unconditionally, the first repair after a
+/// rotation would destroy the current signer.
+///
+/// This test rotates an identity, then runs `repair`, and verifies the
+/// current key still loads from the keystore.
+#[tokio::test]
+async fn repair_after_rotation_does_not_delete_current_key() {
+    use cairn_core::{
+        contract::identity_registry::IdentityVisibility, domain::identity::keys::SecretHandle,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Rotate once. (First rotation does NOT trigger eviction since key count
+    // stays ≤ MAX_KEY_HISTORY=3, so pending_eviction should be false here.)
+    let _receipt = svc.rotate(&alice_id).await.expect("rotate must succeed");
+
+    let row = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity")
+        .expect("alice must exist");
+    let current_kv = row.current_key_version;
+
+    // Run repair. With the bug, repair would have walked
+    // list_pending_evictions, found the receipt with evict_version=current,
+    // and deleted the active key.
+    svc.repair(&alice_id).await.expect("repair must succeed");
+
+    // The current key must still load.
+    let handle = SecretHandle::for_identity(svc.vault_id.clone(), alice_id.clone(), current_kv);
+    svc.keystore
+        .load_signing_key(&handle)
+        .await
+        .expect("repair must NOT have deleted the current active key");
+}
+
+/// **Regression — codex review round 1 finding #3:** purging an identity
+/// already in `PurgePending` state without `--resume` must fail closed.
+/// The bug: `purge()` silently resumed any partial purge as long as the ack
+/// file was present, defeating the explicit operator opt-in the CLI
+/// advertises.
+#[tokio::test]
+async fn purge_refuses_implicit_resume_of_purge_pending() {
+    use cairn_core::contract::identity_registry::PurgeReason;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Write the ack file once.
+    let maintenance_dir = dir.path().join(".cairn/maintenance");
+    fs::create_dir_all(&maintenance_dir).expect("create maintenance dir");
+    let ack_path = maintenance_dir.join("purge-ack");
+    fs::write(&ack_path, alice_id.as_str()).expect("write purge-ack");
+
+    // First call: drives target into PurgePending. Use the per-identity lock
+    // path; we need to interrupt before finalise. Easiest: directly mark
+    // purge-pending via the registry, simulating a crash mid-flow.
+    let ack = cairn_core::contract::identity_registry::PurgeAcknowledgement::for_test();
+    svc.registry
+        .mark_purge_pending(&alice_id, &ack, PurgeReason("crash".to_owned()))
+        .await
+        .expect("mark_purge_pending");
+
+    // Re-write the ack file (a real operator might leave it in place).
+    fs::write(&ack_path, alice_id.as_str()).expect("re-write purge-ack");
+
+    // Second call WITHOUT --resume: must refuse with PurgeResumeRequired.
+    let err = svc
+        .purge(&alice_id, PurgeReason("retry".to_owned()), false)
+        .await
+        .expect_err("purge without --resume must refuse to resume PurgePending");
+    assert!(
+        matches!(err, IdentityServiceError::PurgeResumeRequired { .. }),
+        "expected PurgeResumeRequired, got: {err:?}",
+    );
+
+    // Third call WITH --resume: must succeed.
+    svc.purge(&alice_id, PurgeReason("retry".to_owned()), true)
+        .await
+        .expect("purge --resume must complete the PurgePending purge");
 }

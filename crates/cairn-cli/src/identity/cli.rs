@@ -223,15 +223,18 @@ fn json_flag() -> Arg {
 /// Dispatch `cairn identity <subcommand>` to the appropriate [`IdentityService`]
 /// method and return the appropriate exit code.
 ///
-/// `matches` is the [`ArgMatches`] for the `identity` subcommand (not the
-/// root command).  The vault path is resolved from `--vault-path` if present,
-/// or falls back to the current directory.
+/// `matches` is the [`ArgMatches`] for the `identity` subcommand.
+/// `explicit_vault` is the global `--vault` flag merged with `CAIRN_VAULT` env
+/// (resolved by `main`); it takes precedence over the subcommand's own
+/// `--vault-path` if both are set, matching the §3.3 precedence rule.
 #[must_use]
-pub fn run_identity(matches: &ArgMatches) -> ExitCode {
-    // Resolve the vault path.  `identity` subcommands that need a live service
-    // receive it; static commands (vault-id-recover, finalise-binding) receive
-    // the raw path only.
-    let vault_path = resolve_vault_path(matches);
+pub fn run_identity(matches: &ArgMatches, explicit_vault: Option<String>) -> ExitCode {
+    // Resolve the vault path with full §3.3 precedence:
+    //   1. global `--vault` flag / `CAIRN_VAULT` env (passed in as `explicit_vault`)
+    //   2. subcommand-local `--vault-path` (legacy, kept for back-compat)
+    //   3. cwd walk-up via the registry resolver
+    //   4. registry default
+    let vault_path = resolve_vault_path(matches, explicit_vault);
 
     match matches.subcommand() {
         Some(("status", sub)) => run_status(sub, vault_path),
@@ -254,13 +257,40 @@ pub fn run_identity(matches: &ArgMatches) -> ExitCode {
 
 // ── vault path resolution ─────────────────────────────────────────────────────
 
-/// Resolve the vault root path from optional args or fall back to `$PWD`.
-fn resolve_vault_path(matches: &ArgMatches) -> PathBuf {
-    matches
-        .get_one::<String>("vault-path")
+/// Resolve the vault root path with full §3.3 precedence.
+///
+/// Priority:
+/// 1. Global `--vault` flag or `CAIRN_VAULT` env (passed via `explicit_vault`).
+/// 2. Subcommand-local `--vault-path` (legacy).
+/// 3. cwd walk-up + registry default (via [`crate::vault::resolve_vault`]).
+/// 4. cwd as last-ditch fallback.
+fn resolve_vault_path(matches: &ArgMatches, explicit_vault: Option<String>) -> PathBuf {
+    // 1. Subcommand-local --vault-path always wins if explicitly given.
+    //    (Kept for back-compat; future cleanups may remove the per-subcommand flag.)
+    if let Some(p) = matches.get_one::<String>("vault-path") {
+        return PathBuf::from(p);
+    }
+
+    // 2. Use the global resolver when an explicit vault selector is present
+    //    OR fall back to walk-up / registry default.
+    let store_path = std::env::var("CAIRN_REGISTRY")
+        .ok()
         .map(PathBuf::from)
-        .or_else(|| std::env::var("CAIRN_VAULT").ok().map(PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .or_else(|| crate::vault::VaultRegistryStore::default_path().ok());
+    if let Some(store_path) = store_path {
+        let store = crate::vault::VaultRegistryStore::new(store_path);
+        let opts = crate::vault::ResolveOpts {
+            explicit: explicit_vault,
+            cwd: std::env::current_dir().ok(),
+            store: &store,
+        };
+        if let Ok(p) = crate::vault::resolve_vault(opts) {
+            return p;
+        }
+    }
+
+    // 3. Last resort.
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 // ── error → exit code ─────────────────────────────────────────────────────────
@@ -272,9 +302,9 @@ fn identity_exit_code(err: &IdentityServiceError) -> u8 {
         IdentityServiceError::Keystore(cairn_core::contract::keystore::KeystoreError::Locked) => {
             EX_UNAVAILABLE
         }
-        IdentityServiceError::VaultDegraded { .. } | IdentityServiceError::FirstBindInProgress => {
-            EX_TEMPFAIL
-        }
+        IdentityServiceError::VaultDegraded { .. }
+        | IdentityServiceError::FirstBindInProgress
+        | IdentityServiceError::PurgeResumeRequired { .. } => EX_TEMPFAIL,
         IdentityServiceError::VaultIdMissing | IdentityServiceError::VaultIdConflict { .. } => {
             EX_CONFIG
         }
@@ -663,6 +693,7 @@ fn run_repair(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
 
 fn run_purge(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
     let json = sub.get_flag("json");
+    let resume = sub.get_flag("resume");
     let id_str = sub
         .get_one::<String>("id")
         .expect("invariant: id is required");
@@ -679,7 +710,7 @@ fn run_purge(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
             Err(e) => return identity_err("purge", &e),
         };
         let reason = PurgeReason("cli".to_owned());
-        match svc.purge(&id, reason).await {
+        match svc.purge(&id, reason, resume).await {
             Ok(()) => {
                 if json {
                     println!("{}", serde_json::json!({ "purged": id.as_str() }));

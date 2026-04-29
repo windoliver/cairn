@@ -59,7 +59,7 @@ fn main() -> ExitCode {
             }
         };
         let resolve_result = cairn_cli::vault::resolve_vault(cairn_cli::vault::ResolveOpts {
-            explicit: explicit_vault,
+            explicit: explicit_vault.clone(),
             cwd: std::env::current_dir().ok(),
             store: &store,
         });
@@ -102,7 +102,7 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
-        Some(("identity", sub)) => identity::cli::run_identity(sub),
+        Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.

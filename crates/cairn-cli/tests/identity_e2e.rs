@@ -351,7 +351,7 @@ async fn purge_after_rotation_evicts_all_key_versions() {
     fs::write(maintenance_dir.join("purge-ack"), carol_id.as_str()).expect("write purge-ack");
 
     // Purge carol.
-    svc.purge(&carol_id, PurgeReason("GDPR erasure".to_owned()))
+    svc.purge(&carol_id, PurgeReason("GDPR erasure".to_owned()), false)
         .await
         .expect("purge must succeed");
 
