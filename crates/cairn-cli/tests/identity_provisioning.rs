@@ -1,5 +1,6 @@
-//! Integration tests for [`IdentityService::open`] and
-//! [`IdentityService::open_for_maintenance`] (issue #50, D2).
+//! Integration tests for [`IdentityService::open`],
+//! [`IdentityService::open_for_maintenance`] (issue #50, D2), and
+//! `commit_first_identity` (D3).
 
 use std::fs;
 
@@ -12,7 +13,12 @@ use cairn_core::{
     },
     error::identity::IdentityServiceError,
 };
+use cairn_core::{
+    contract::keystore::Keystore as _,
+    domain::identity::provision::{ProvisionInput, build_provisioning_plan},
+};
 use cairn_store_sqlite::SqliteIdentityRegistry;
+use cairn_test_fixtures::MemoryKeystore;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -152,3 +158,165 @@ async fn open_succeeds_when_file_and_db_agree() {
         "vault must not be degraded for a freshly bound registry with no keystore keys",
     );
 }
+
+// ── D3 helpers ────────────────────────────────────────────────────────────────
+
+/// Build a minimal [`ProvisioningPlan`] for a human identity with slug `slug`.
+fn make_plan_for(
+    slug: &str,
+) -> (
+    VaultId,
+    cairn_core::domain::identity::provision::ProvisioningPlan,
+) {
+    let vault_id = VaultId::mint();
+    let id = Identity::parse(format!("hmn:{slug}:v1")).expect("valid identity");
+    let input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let plan = build_provisioning_plan(input, &mut rand_core::OsRng, chrono::Utc::now());
+    (vault_id, plan)
+}
+
+// ── D3 tests ──────────────────────────────────────────────────────────────────
+
+/// `commit_first_identity` must refuse when the witness slot in the keystore is
+/// already populated for the given vault id (namespace already claimed by
+/// another process or node).
+///
+/// Verifies the namespace-ownership probe in step 0 of spec §3.7.
+#[tokio::test]
+async fn first_bind_refuses_when_namespace_already_has_witness() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let keystore = MemoryKeystore::new();
+    let vault_id = VaultId::mint();
+
+    // Pre-populate the witness slot so the namespace appears claimed.
+    keystore
+        .store_secret(
+            &cairn_core::domain::identity::keys::SecretHandle::for_witness(vault_id.clone()),
+            &[0u8; 32],
+        )
+        .await
+        .expect("store witness");
+
+    // Build a plan (the plan's vault_id must match the pre-populated one).
+    let id = Identity::parse("hmn:taken:v1").expect("valid identity");
+    let input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let plan = build_provisioning_plan(input, &mut rand_core::OsRng, chrono::Utc::now());
+
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+
+    let err = cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id,
+        plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect_err("must fail when namespace is already claimed");
+
+    assert!(
+        matches!(err, IdentityServiceError::VaultNamespaceClaimed { .. }),
+        "expected VaultNamespaceClaimed, got: {err:?}",
+    );
+}
+
+/// Happy path: `commit_first_identity` completes all six steps and leaves the
+/// vault in a consistent, fully activated state.
+///
+/// Postconditions verified (spec §3.7):
+/// - `.cairn/vault.binding` exists and contains exactly 32 bytes (the witness hash).
+/// - `.cairn/vault.binding.pending` has been removed.
+/// - `registry.read_vault_meta()` returns `Some` (first-bind committed).
+/// - `registry.get_identity(id, Operational)` returns `Some` with `state = Active`.
+/// - `keystore.load_signing_key(secret_handle)` matches `plan`'s public key.
+#[tokio::test]
+async fn first_bind_full_path_lands_active_identity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let keystore = MemoryKeystore::new();
+
+    let (vault_id, plan) = make_plan_for("alice");
+    let identity_id = plan.identity.id.clone();
+    let secret_handle = plan.secret_handle.clone();
+    let expected_pubkey = plan.signing_key.verifying_key().to_bytes();
+
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("commit_first_identity must succeed on the happy path");
+
+    // ── File-system postconditions ────────────────────────────────────────────
+
+    let binding_path = dir.path().join(".cairn/vault.binding");
+    let binding_bytes = fs::read(&binding_path).expect(".cairn/vault.binding must exist");
+    assert_eq!(
+        binding_bytes.len(),
+        32,
+        "vault.binding must contain exactly 32 bytes (witness hash)",
+    );
+
+    let pending_path = dir.path().join(".cairn/vault.binding.pending");
+    assert!(
+        !pending_path.exists(),
+        "vault.binding.pending must have been removed after successful commit",
+    );
+
+    // ── Registry postconditions ───────────────────────────────────────────────
+
+    let vault_meta = registry
+        .read_vault_meta()
+        .await
+        .expect("read_vault_meta")
+        .expect("vault_meta must be Some after commit");
+    assert_eq!(
+        vault_meta.0.as_str(),
+        vault_id.as_str(),
+        "vault_meta vault_id must match the one we committed",
+    );
+
+    let record = registry
+        .get_identity(
+            &identity_id,
+            cairn_core::contract::identity_registry::IdentityVisibility::Operational,
+        )
+        .await
+        .expect("get_identity")
+        .expect("identity must be visible at Operational level after activation");
+    assert_eq!(
+        record.provisioning_state,
+        ProvisioningState::Active,
+        "identity must be Active after commit_first_identity",
+    );
+
+    // ── Keystore postcondition ────────────────────────────────────────────────
+
+    let loaded_key = keystore
+        .load_signing_key(&secret_handle)
+        .await
+        .expect("signing key must be stored after commit");
+    assert_eq!(
+        loaded_key.verifying_key().to_bytes(),
+        expected_pubkey,
+        "stored public key must match the plan's signing key",
+    );
+}
+
+// Note: a "lock-busy" test is omitted intentionally — it would block for up to
+// 30 seconds waiting for VaultBindingLock::acquire to time out, making the test
+// suite unacceptably slow. The lock machinery is unit-tested in lock.rs instead.
