@@ -23,10 +23,13 @@ use cairn_core::{
         keystore::{Keystore, KeystoreError},
     },
     domain::identity::{
-        Identity, IdentityKind, ProvisioningState,
-        keys::{SecretHandle, VaultId},
-        provision::{ProvisionInput, build_provisioning_plan},
-        records::IdentityKeyEntry,
+        DefaultsState, Identity, IdentityKind, ProvisioningState,
+        keys::{IdentityRevision, SecretHandle, VaultId},
+        provision::{
+            ProvisionInput, build_provisioning_plan, mint_agent_id, mint_human_id,
+            normalize_human_slug,
+        },
+        records::{IdentityKeyEntry, PublicIdentityRecord},
     },
     error::identity::IdentityServiceError,
 };
@@ -301,6 +304,163 @@ impl IdentityService {
         Ok(target_id)
     }
 
+    /// Provision default human and agent identities, applying the §3.5
+    /// revision-bump rule (spec §4.5).
+    ///
+    /// For each default slot (human = OS username; agent = `claude-code /
+    /// opus-4-7 / main`):
+    ///
+    /// 1. Query all rows for the slot kind at any lifecycle state.
+    /// 2. Filter to rows whose identity string matches the slug/triple.
+    /// 3. Find the highest-revision row among those.
+    /// 4. Apply the bump rule:
+    ///    - Highest row in a terminal state (`Revoked`, `RevokePending`,
+    ///      `PurgePending`, `Purged`) → mint at `current_rev + 1`.
+    ///    - Highest row is `Active` → no-op (idempotent).
+    ///    - Highest row is `Pending` → self-heal via [`Self::provision`].
+    ///    - No row at all → mint at [`IdentityRevision::FIRST`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityServiceError`] for registry failures, keystore
+    /// failures, or revision-overflow.
+    pub async fn init_defaults(
+        &self,
+        rng: &mut impl rand_core::CryptoRngCore,
+    ) -> Result<DefaultsState, IdentityServiceError> {
+        // ── Determine default slugs/triples ──────────────────────────────────
+        let human_slug = normalize_human_slug(&whoami::username());
+        let (agent_harness, agent_model, agent_role) = ("claude-code", "opus-4-7", "main");
+
+        // ── Human slot ───────────────────────────────────────────────────────
+        let human_id = self.provision_default_slot_human(&human_slug, rng).await?;
+
+        // ── Agent slot ───────────────────────────────────────────────────────
+        let agent_id = self
+            .provision_default_slot_agent(agent_harness, agent_model, agent_role, rng)
+            .await?;
+
+        Ok(DefaultsState::Active {
+            human: human_id,
+            agent: agent_id,
+        })
+    }
+
+    /// Inner helper: apply the revision-bump rule for the default human slot.
+    async fn provision_default_slot_human(
+        &self,
+        slug: &str,
+        rng: &mut impl rand_core::CryptoRngCore,
+    ) -> Result<Identity, IdentityServiceError> {
+        let all_rows = self
+            .registry
+            .list_identities(Some(IdentityKind::Human), IdentityVisibility::Audit)
+            .await?;
+        let slot_rows: Vec<&PublicIdentityRecord> = all_rows
+            .iter()
+            .filter(|r| slug_matches_human(r, slug))
+            .collect();
+        let highest = highest_revision_row(&slot_rows);
+        self.apply_revision_bump_rule(
+            IdentityKind::Human,
+            highest,
+            |rev| {
+                mint_human_id(slug, rev).map_err(|e| {
+                    IdentityServiceError::Registry(RegistryError::Backend(Box::new(e)))
+                })
+            },
+            rng,
+        )
+        .await
+    }
+
+    /// Inner helper: apply the revision-bump rule for the default agent slot.
+    async fn provision_default_slot_agent(
+        &self,
+        harness: &str,
+        model: &str,
+        role: &str,
+        rng: &mut impl rand_core::CryptoRngCore,
+    ) -> Result<Identity, IdentityServiceError> {
+        let all_rows = self
+            .registry
+            .list_identities(Some(IdentityKind::Agent), IdentityVisibility::Audit)
+            .await?;
+        let slot_rows: Vec<&PublicIdentityRecord> = all_rows
+            .iter()
+            .filter(|r| slug_matches_agent(r, harness, model, role))
+            .collect();
+        let highest = highest_revision_row(&slot_rows);
+        self.apply_revision_bump_rule(
+            IdentityKind::Agent,
+            highest,
+            |rev| {
+                mint_agent_id(harness, model, role, rev).map_err(|e| {
+                    IdentityServiceError::Registry(RegistryError::Backend(Box::new(e)))
+                })
+            },
+            rng,
+        )
+        .await
+    }
+
+    /// Core revision-bump rule applied to the highest-revision row for a slot.
+    async fn apply_revision_bump_rule(
+        &self,
+        kind: IdentityKind,
+        highest: Option<&PublicIdentityRecord>,
+        mint: impl Fn(IdentityRevision) -> Result<Identity, IdentityServiceError>,
+        rng: &mut impl rand_core::CryptoRngCore,
+    ) -> Result<Identity, IdentityServiceError> {
+        match highest {
+            None => {
+                // No existing row — mint at v1.
+                let id = mint(IdentityRevision::FIRST)?;
+                let input = ProvisionInput {
+                    vault_id: self.vault_id.clone(),
+                    id,
+                    kind,
+                    revision: IdentityRevision::FIRST,
+                };
+                self.provision(kind, input, rng).await
+            }
+            Some(row) => match row.provisioning_state {
+                ProvisioningState::Active => {
+                    // Already active — idempotent no-op.
+                    Ok(row.id.clone())
+                }
+                ProvisioningState::Pending => {
+                    // Self-heal: re-drive the pending row through provision.
+                    let rev = revision_of(&row.id);
+                    let input = ProvisionInput {
+                        vault_id: self.vault_id.clone(),
+                        id: row.id.clone(),
+                        kind,
+                        revision: rev,
+                    };
+                    self.provision(kind, input, rng).await
+                }
+                // Terminal / in-flight terminal states → bump revision.
+                ProvisioningState::Revoked
+                | ProvisioningState::RevokePending
+                | ProvisioningState::PurgePending
+                | ProvisioningState::Purged => {
+                    let next_rev = revision_of(&row.id).next().map_err(|e| {
+                        IdentityServiceError::Registry(RegistryError::Backend(Box::new(e)))
+                    })?;
+                    let id = mint(next_rev)?;
+                    let input = ProvisionInput {
+                        vault_id: self.vault_id.clone(),
+                        id,
+                        kind,
+                        revision: next_rev,
+                    };
+                    self.provision(kind, input, rng).await
+                }
+            },
+        }
+    }
+
     /// Open in maintenance mode.
     ///
     /// - [`MaintenanceMode::ReadOnly`]: skips the consistency check; uses
@@ -368,4 +528,66 @@ impl IdentityService {
             keystore,
         })
     }
+}
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
+
+/// Extract the [`IdentityRevision`] from an [`Identity`]'s wire form.
+///
+/// Parses the `:v<N>` suffix from the rightmost colon-delimited segment.
+/// Returns [`IdentityRevision::FIRST`] if the suffix is absent or malformed.
+fn revision_of(id: &Identity) -> IdentityRevision {
+    id.as_str()
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.strip_prefix('v'))
+        .and_then(|n| n.parse::<u32>().ok())
+        .and_then(std::num::NonZeroU32::new)
+        .map_or(IdentityRevision::FIRST, IdentityRevision::new)
+}
+
+/// Return the row with the highest revision from `rows`.
+fn highest_revision_row<'a>(rows: &[&'a PublicIdentityRecord]) -> Option<&'a PublicIdentityRecord> {
+    rows.iter()
+        .copied()
+        .max_by_key(|r| revision_of(&r.id).as_u32())
+}
+
+/// True if `record` belongs to the human default slot for `slug`.
+///
+/// Matches `hmn:<slug>:v<N>` — parses by splitting on `:` and comparing
+/// the prefix-stripped body up to the final `:v<N>` component.
+fn slug_matches_human(record: &PublicIdentityRecord, slug: &str) -> bool {
+    // Wire form: "hmn:<slug>:v<N>"
+    let s = record.id.as_str();
+    if let Some(body) = s.strip_prefix("hmn:") {
+        // body is "<slug>:v<N>"
+        if let Some((candidate_slug, _rev)) = body.rsplit_once(':') {
+            return candidate_slug == slug;
+        }
+    }
+    false
+}
+
+/// True if `record` belongs to the agent default slot for `(harness, model, role)`.
+///
+/// Matches `agt:<harness>:<model>:<role>:v<N>`.
+fn slug_matches_agent(
+    record: &PublicIdentityRecord,
+    harness: &str,
+    model: &str,
+    role: &str,
+) -> bool {
+    // Wire form: "agt:<harness>:<model>:<role>:v<N>"
+    let s = record.id.as_str();
+    if let Some(body) = s.strip_prefix("agt:") {
+        // body is "<harness>:<model>:<role>:v<N>"
+        // Strip the trailing ":v<N>" by finding the last ':'
+        if let Some((triple, _rev)) = body.rsplit_once(':') {
+            // triple is "<harness>:<model>:<role>"
+            let expected = format!("{harness}:{model}:{role}");
+            return triple == expected;
+        }
+    }
+    false
 }

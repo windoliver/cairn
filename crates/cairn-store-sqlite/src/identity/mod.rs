@@ -713,8 +713,10 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         let states = visibility_states(visibility);
 
         // Build the kind filter dynamically.
+        // States occupy placeholders ?1..?states.len(); kind is appended next
+        // at ?{states.len()+1} (the `+ 2` in earlier revisions was an off-by-one).
         let kind_clause = if kind.is_some() {
-            format!(" AND kind = ?{}", states.len() + 2)
+            format!(" AND kind = ?{}", states.len() + 1)
         } else {
             String::new()
         };

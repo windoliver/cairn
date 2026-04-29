@@ -1,6 +1,6 @@
 //! Integration tests for [`IdentityService::open`],
-//! [`IdentityService::open_for_maintenance`] (issue #50, D2), and
-//! `commit_first_identity` (D3).
+//! [`IdentityService::open_for_maintenance`] (issue #50, D2),
+//! `commit_first_identity` (D3), and `init_defaults` (D5).
 
 use std::fs;
 
@@ -492,5 +492,203 @@ async fn provision_fresh_human_identity_lands_active() {
         row.provisioning_state,
         ProvisioningState::Active,
         "fresh provisioned identity must be Active",
+    );
+}
+
+// ── D5 helpers ────────────────────────────────────────────────────────────────
+
+/// Create a service after first-bind, provision a human identity at v1, then
+/// immediately purge it (Active → `PurgePending` → Purged), and return the service
+/// together with the v1 identity id and the slug used.
+///
+/// Uses `cairn_core::contract::identity_registry::PurgeAcknowledgement::for_test`
+/// which is available under `cfg(test)`.
+async fn setup_service_with_purged_default_human(
+    dir: &tempfile::TempDir,
+) -> (cairn_cli::identity::IdentityService, String) {
+    use cairn_core::{
+        contract::identity_registry::{PurgeAcknowledgement, PurgeReason},
+        domain::identity::normalize_human_slug,
+    };
+
+    let (svc, vault_id) = setup_service_after_first_bind(dir).await;
+
+    // Determine the slug that `init_defaults` will use.
+    let slug = normalize_human_slug(&whoami::username());
+
+    // Provision the v1 human.
+    let v1_id = Identity::parse(format!("hmn:{slug}:v1")).expect("valid v1 id");
+    let v1_input = ProvisionInput {
+        vault_id,
+        id: v1_id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, v1_input, &mut rand_core::OsRng)
+        .await
+        .expect("provision v1 human");
+
+    // Purge it directly: Active → PurgePending → Purged.
+    let ack = PurgeAcknowledgement::for_test();
+    let reason = PurgeReason("test purge".to_owned());
+    svc.registry
+        .mark_purge_pending(&v1_id, &ack, reason)
+        .await
+        .expect("mark_purge_pending");
+    svc.registry
+        .finalise_purge(&v1_id)
+        .await
+        .expect("finalise_purge");
+
+    // Return svc with a fresh Arc-wrapped keystore (same underlying data).
+    // We need to reconstruct from parts because setup_service_after_first_bind
+    // returns owned IdentityService which we already used.
+    // The svc still holds the same registry and keystore — just return it.
+    (svc, slug)
+}
+
+// ── D5 tests ──────────────────────────────────────────────────────────────────
+
+/// `init_defaults` on a fresh vault (no prior defaults) must provision v1 for
+/// both the default human and the default agent, both in `Active` state.
+#[tokio::test]
+async fn init_defaults_creates_v1_when_none_exist() {
+    use cairn_core::{
+        contract::identity_registry::IdentityVisibility,
+        domain::identity::{DefaultsState, normalize_human_slug},
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, _) = setup_service_after_first_bind(&dir).await;
+
+    let result = svc
+        .init_defaults(&mut rand_core::OsRng)
+        .await
+        .expect("init_defaults must succeed on a fresh vault");
+
+    let DefaultsState::Active { human, agent } = result else {
+        panic!("expected DefaultsState::Active");
+    };
+
+    // Human must be v1.
+    let human_row = svc
+        .registry
+        .get_identity(&human, IdentityVisibility::Operational)
+        .await
+        .expect("get human identity")
+        .expect("human must exist");
+    assert_eq!(
+        human_row.provisioning_state,
+        ProvisioningState::Active,
+        "default human at v1 must be Active",
+    );
+    let expected_slug = normalize_human_slug(&whoami::username());
+    assert!(
+        human.as_str().starts_with(&format!("hmn:{expected_slug}:")),
+        "human id must embed the OS username slug, got: {}",
+        human.as_str(),
+    );
+
+    // Agent must be v1.
+    let agent_row = svc
+        .registry
+        .get_identity(&agent, IdentityVisibility::Operational)
+        .await
+        .expect("get agent identity")
+        .expect("agent must exist");
+    assert_eq!(
+        agent_row.provisioning_state,
+        ProvisioningState::Active,
+        "default agent at v1 must be Active",
+    );
+    assert_eq!(
+        agent.as_str(),
+        "agt:claude-code:opus-4-7:main:v1",
+        "default agent id must match the hardcoded triple",
+    );
+}
+
+/// `init_defaults` must be idempotent: calling it a second time when both
+/// defaults are already `Active` must return the same ids without touching
+/// the registry.
+#[tokio::test]
+async fn init_defaults_is_idempotent_when_already_active() {
+    use cairn_core::domain::identity::DefaultsState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, _) = setup_service_after_first_bind(&dir).await;
+
+    let first = svc
+        .init_defaults(&mut rand_core::OsRng)
+        .await
+        .expect("first call must succeed");
+    let second = svc
+        .init_defaults(&mut rand_core::OsRng)
+        .await
+        .expect("second call must succeed");
+
+    let DefaultsState::Active {
+        human: h1,
+        agent: a1,
+    } = first
+    else {
+        panic!("expected Active after first call");
+    };
+    let DefaultsState::Active {
+        human: h2,
+        agent: a2,
+    } = second
+    else {
+        panic!("expected Active after second call");
+    };
+    assert_eq!(h1, h2, "human id must be stable across calls");
+    assert_eq!(a1, a2, "agent id must be stable across calls");
+}
+
+/// `init_defaults` must mint v2 when the v1 default human has been purged.
+///
+/// Spec §3.5 revision-bump rule: if the highest-revision row is in a
+/// terminal state (`Purged`), the next default identity is provisioned at
+/// `current_rev + 1`.
+#[tokio::test]
+async fn init_defaults_mints_v2_after_v1_purged() {
+    use cairn_core::{
+        contract::identity_registry::IdentityVisibility, domain::identity::DefaultsState,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, slug) = setup_service_with_purged_default_human(&dir).await;
+
+    let result = svc
+        .init_defaults(&mut rand_core::OsRng)
+        .await
+        .expect("init_defaults must succeed after purge");
+
+    // The returned human id must be at v2.
+    let DefaultsState::Active { human, .. } = result else {
+        panic!("expected DefaultsState::Active");
+    };
+
+    let human_row = svc
+        .registry
+        .get_identity(&human, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity")
+        .expect("v2 human must exist");
+
+    assert_eq!(
+        human_row.provisioning_state,
+        ProvisioningState::Active,
+        "v2 human must be Active",
+    );
+
+    // The identity string must embed the correct slug at v2.
+    // (The DB does not store revision separately; it is encoded in the
+    // identity string itself — derive it from the `:v<N>` suffix.)
+    let expected_v2 = format!("hmn:{slug}:v2");
+    assert_eq!(
+        human.as_str(),
+        expected_v2,
+        "v2 human id must be hmn:{slug}:v2",
     );
 }
