@@ -778,6 +778,10 @@ async fn migration_ends_active_rows_with_relative_project_root() {
             ("S_WIN", "usr:abs2", "agt:cli:x:y:v1", Some(r"C:\repo")),
             ("S_UNC", "usr:abs3", "agt:cli:x:y:v1", Some(r"\\srv\share")),
             ("S_WINFWD", "usr:abs5", "agt:cli:x:y:v1", Some("C:/repo")),
+            // Single leading backslash is *not* UNC and *not* absolute on
+            // any platform — POSIX treats `\` as a filename character, and
+            // Windows requires `\\server\share` for UNC. Must be ended.
+            ("S_BS_REL", "usr:legacy2", "agt:cli:x:y:v1", Some(r"\repo")),
             ("S_NULL", "usr:abs4", "agt:cli:x:y:v1", None),
         ] {
             conn.execute(
@@ -800,6 +804,7 @@ async fn migration_ends_active_rows_with_relative_project_root() {
         ("S_WIN", "usr:abs2", Some(r"C:\repo"), false),
         ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
         ("S_WINFWD", "usr:abs5", Some("C:/repo"), false),
+        ("S_BS_REL", "usr:legacy2", Some(r"\repo"), true),
         ("S_NULL", "usr:abs4", None, false),
     ] {
         let sess = store
