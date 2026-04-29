@@ -19,14 +19,16 @@ This PR also lands the foundational types — `MemoryDraft`, `ExtractorWorker` t
 In scope:
 
 - `MemoryDraft` domain type with provenance + audit fields.
-- `ForgetIntent` domain type for forget-trigger output.
-- `ExtractInput<'a>` (envelope reference + caller-resolved body slice; preserves the existing `payload_ref` / `payload_hash` privacy boundary).
-- `ExtractorWorker` trait + `ExtractBudget`, `ExtractOutput`, `ExtractResult`, `TruncationReason`, `ExtractError`.
+- `ForgetIntent` domain type — structured selector (normalized text + match strategy + optional kind filter + source span), not free-form text. Documents the resolver contract #75 must obey to avoid over- or under-deletion.
+- `ExtractInput<'a>` with `BodyResolution<'a>` (a 3-way enum: `NotApplicable` | `Resolved(&str)` | `Failed(BodyResolutionError)`) so payload-load failures cannot masquerade as "no body" and silently drop explicit intents.
+- `ExtractorWorker` trait + `ExtractBudget`, `ExtractOutput`, `ExtractResult`, `TruncationReason`, `ExtractError` (including `BodyResolution` and `BudgetExceeded` variants).
 - `RegexRule` enum with four variants: `TriggerPhrase`, `ForgetPhrase`, `HookEvent`, `ToolFrame`.
 - `RegexExtractor` struct implementing `ExtractorWorker`.
 - Built-in default rule set covering §11.6 + §18.a triggers and the most common hook / tool-frame events.
 - Schema-validated user-rule extension hook (`RuleSet::from_config`) without binding to `.cairn/config.yaml` yet.
-- Per-rule wall-clock budget enforcement and hard `max_drafts` cap with a typed `TruncationReason` returned to the caller (§6).
+- Two-phase dispatch with **untruncatable built-in rules** (Phase A) and budget-bounded user rules (Phase B). Built-ins cover all §11.6 / §18.a explicit triggers, so truncation cannot silently lose `remember` / `forget` / `skillify` intents.
+- Per-rule wall-clock budget enforcement and hard `max_drafts` cap on Phase B; typed `TruncationReason` returned to the caller (§6).
+- Documented chain handoff contract for #74: `(source_event, kind_hint)` dedup key on truncation so the LLM extractor can safely run on the same body without re-emitting Phase A drafts.
 - Unit, integration, property, and a CI-friendly latency assertion test.
 
 Explicitly **not** modified by this PR:
@@ -56,7 +58,7 @@ pipeline/
 ├── mod.rs              # add `pub mod extract;`
 ├── filter/             # unchanged
 └── extract/
-    ├── mod.rs          # ExtractorWorker, ExtractInput, ExtractBudget, ExtractError, ExtractOutput, ExtractResult, TruncationReason
+    ├── mod.rs          # ExtractorWorker, ExtractInput, BodyResolution, BodyResolutionError, ExtractBudget, ExtractError, ExtractOutput, ExtractResult, TruncationReason
     ├── draft.rs        # MemoryDraft + Confidence + KindHint + TextSpan
     ├── intent.rs       # ForgetIntent
     ├── regex/
@@ -83,14 +85,46 @@ use crate::domain::CaptureEvent;
 /// `CaptureEvent` itself — the envelope remains metadata-only and the
 /// privacy/replay boundary documented in `domain/capture.rs:362-377` is
 /// preserved (no inline raw prompts in serialized fixtures).
-///
-/// `body` is `None` for events whose source family does not carry an
-/// extractable text body (e.g., `Voice`, `Screen`, `Clipboard` — handled
-/// by sensor-specific extractors in later issues) or whose payload is
-/// non-textual.
 pub struct ExtractInput<'a> {
     pub event: &'a CaptureEvent,
-    pub body: Option<&'a str>,
+    pub body: BodyResolution<'a>,
+}
+
+/// Body-resolution result, threaded through the extractor chain.
+///
+/// Distinguishing `NotApplicable` from a resolution failure is load-bearing:
+/// collapsing both into `None` would silently drop explicit `remember` /
+/// `forget` requests when payload-loading or hash-verification fails. The
+/// `Failed` variant forces the chain dispatcher to either retry, fall
+/// through with full information, or surface the failure — never to treat
+/// it as "no text body."
+#[derive(Clone, Debug)]
+pub enum BodyResolution<'a> {
+    /// The event's source family does not carry extractable text (e.g.
+    /// `Voice`, `Screen`, `Clipboard`, `RecordingBatch`). Text rules are
+    /// silently skipped; this is not an error.
+    NotApplicable,
+    /// Body bytes were materialized from `payload_ref` and verified
+    /// against `payload_hash`. Text rules run against `&str`.
+    Resolved(&'a str),
+    /// Body resolution attempted but failed. The extractor returns
+    /// `ExtractError::BodyResolution` so the caller can surface a typed
+    /// error rather than treating the event as bodyless.
+    Failed(BodyResolutionError),
+}
+
+/// Reason a body could not be resolved. Stable variants the chain branches on.
+#[derive(Clone, Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BodyResolutionError {
+    #[error("payload_ref not found: {0}")]
+    NotFound(String),
+    #[error("payload_hash mismatch (expected {expected}, got {got})")]
+    HashMismatch { expected: String, got: String },
+    #[error("payload bytes are not valid UTF-8")]
+    NotUtf8,
+    #[error("transient I/O error reading payload_ref: {0}")]
+    Io(String),
 }
 
 pub trait ExtractorWorker: Send + Sync {
@@ -121,6 +155,12 @@ pub enum ExtractError {
     BudgetExceeded { worker: &'static str, elapsed_ms: u32 },
     #[error("invalid rule `{rule_id}`: {reason}")]
     InvalidRule { rule_id: String, reason: String },
+    #[error("body resolution failed for event {event_id}")]
+    BodyResolution {
+        event_id: String,
+        #[source]
+        source: BodyResolutionError,
+    },
 }
 ```
 
@@ -158,17 +198,63 @@ pub struct Confidence(f32); // [0.0, 1.0]
 
 ### 4.3 `ForgetIntent`
 
+`ForgetIntent` is a structured selector, not free-form text — `forget` is irreversible, so `target_text` alone would force #75 to guess which records to delete.
+
 ```rust
 // pipeline/extract/intent.rs
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ForgetIntent {
-    pub target_text: String,
+    /// Normalized free-text selector lifted from the trigger (lowercased,
+    /// whitespace-collapsed, leading/trailing stop-words trimmed).
+    /// Carried as a hint, never as the sole basis for deletion.
+    pub target_text_normalized: String,
+
+    /// How the downstream resolver should compare `target_text_normalized`
+    /// against candidate record bodies. The default rule emits `Substring`;
+    /// the resolver may upgrade to `Exact` if the user's phrasing was
+    /// quoted, or to `Fuzzy` once #75 ships fuzzy matching.
+    pub match_strategy: ForgetMatchStrategy,
+
+    /// Optional kind hint to narrow the candidate set (e.g. user-said
+    /// "forget the rule about X" → `Some(KindHint::from(MemoryKind::Rule))`).
+    /// Default rule leaves this `None`; user rules can encode it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind_filter: Option<KindHint>,
+
+    /// Byte span within the resolved body where the trigger fired —
+    /// audit + debug only. Filter/Classify must not derive deletion
+    /// scope from this span.
+    pub source_span: TextSpan,
+
     pub source_event: CaptureEventId,
     pub trigger_id: String,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ForgetMatchStrategy {
+    /// Body matches `target_text_normalized` after the same normalization.
+    Exact,
+    /// `target_text_normalized` is a substring of the (normalized) body.
+    /// Default for the built-in `forget` rule.
+    Substring,
+    /// Reserved for #75; rejected at construction time in this PR.
+    Fuzzy,
+}
 ```
 
-`ForgetIntent` is a hint, not a verb invocation; the Filter/forget-routing logic in #75 + the `forget` verb own actually deleting records.
+**Resolver contract for #75 (documented here so the dependency is visible):**
+
+A `ForgetIntent` is a *candidate* for deletion, never an instruction. The resolver in #75 must:
+
+1. Find the candidate set using `kind_filter` + `match_strategy(target_text_normalized)`.
+2. If the candidate set has exactly one record, the `forget` verb proceeds (still subject to consent + WAL — §5.6).
+3. If the candidate set is empty, write a `lint`-surfaced `forget_unresolved` event; never delete.
+4. If the candidate set has more than one record, **never** silently pick one. Instead emit an interactive `forget_ambiguous` outcome (CLI / MCP / SDK surface) listing matches; the user disambiguates with a follow-up call. Documented as part of #75's scope.
+
+This PR ships only the structured `ForgetIntent` type and the populated fields from regex-matched triggers; it does not implement the resolver.
 
 ## 5. Rule shape
 
@@ -218,17 +304,27 @@ The compiled form (`CompiledRule`) wraps each variant with a pre-built `regex::R
 
 ```rust
 pub struct RuleSet {
-    text_rules: Vec<CompiledRule>,    // TriggerPhrase + ForgetPhrase
-    hook_rules: Vec<CompiledRule>,    // HookEvent
-    tool_frame_rules: Vec<CompiledRule>,
+    /// Built-in rules that always run to completion. Cannot be truncated by
+    /// `max_drafts` or `max_wall_ms`. The set is bounded and cheap (~10
+    /// rules in §7); load-bearing for the privacy guarantee that explicit
+    /// `remember`/`forget`/`skillify` triggers are never silently dropped.
+    builtin_text_rules: Vec<CompiledRule>,
+    builtin_hook_rules: Vec<CompiledRule>,
+    builtin_tool_frame_rules: Vec<CompiledRule>,
+    /// User-supplied rules. Subject to `max_drafts` and `max_wall_ms`.
+    user_text_rules: Vec<CompiledRule>,
+    user_hook_rules: Vec<CompiledRule>,
+    user_tool_frame_rules: Vec<CompiledRule>,
 }
 
 impl RuleSet {
     pub fn builtin() -> Self { /* defaults.rs */ }
     pub fn from_config(rules: Vec<RegexRule>) -> Result<Self, ExtractError> { /* validate + compile */ }
-    pub fn merged(builtin: Self, user: Self) -> Self { /* user appends */ }
+    pub fn with_user_rules(self, user: Vec<RegexRule>) -> Result<Self, ExtractError> { /* compile + append, reject duplicate ids */ }
 }
 ```
+
+The split between built-in and user-rule buckets is the load-bearing fix for "truncation could drop explicit user intents": built-ins are the universe of triggers documented in brief §11.6 / §18.a, and they always run.
 
 ## 6. Dispatch
 
@@ -245,24 +341,47 @@ impl RuleSet {
 
 For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector.
 
-**First-match-wins for text rules (per body).** Within `text_rules`, dispatch is ordered and stops at the first match: once any `TriggerPhrase` or `ForgetPhrase` matches the body, the remaining text rules are skipped for that body. Hook rules and tool-frame rules are unaffected (a single event can carry both a hook signal and a text body, and those are independent dimensions). Rationale: text triggers are mutually-exclusive intents — a single utterance is either a `remember`, a `forget`, a `correction`, or a recipe; producing two drafts with different `kind_hint`s for the same body is a write-amplification bug. First-match-wins makes overlap impossible by construction; rule ordering in §7 then encodes priority.
+### 6.1 Body resolution
+
+Before dispatching text rules, the extractor inspects `input.body`:
+
+| `BodyResolution` | Behaviour |
+|---|---|
+| `Resolved(s)` | `s` is the input to text rules. |
+| `NotApplicable` | Text rules are silently skipped. Hook + tool-frame rules still run. Not an error. |
+| `Failed(err)` | Returns `Err(ExtractError::BodyResolution { event_id, source: err })`. The chain dispatcher (#74) decides retry vs. surface; the extractor must not produce any outputs from a partial dispatch on a failed body. |
+
+This separation means a hash mismatch or I/O error on `payload_ref` cannot be misread as "no body" and therefore cannot silently drop an explicit `remember` / `forget` request.
+
+### 6.2 Two-phase dispatch (built-in then user)
+
+Dispatch runs in two phases per event:
+
+1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. **Phase A is never truncated.** No `max_drafts` check, no per-rule `max_wall_ms` check. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex) — together they fit well under the 2 ms budget on commodity hardware. Phase A's runtime is the floor of `max_wall_ms`; if the deployment's hardware genuinely cannot meet 2 ms for built-ins, that is a configuration error, surfaced as a startup self-check (out of scope for #73; tracked as a follow-up).
+2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
+
+**First-match-wins for text rules (per body, per phase).** Within text rules, dispatch is ordered and stops at the first match: once any `TriggerPhrase` or `ForgetPhrase` matches the body in Phase A, Phase A's text rules stop and Phase B's text rules are also skipped for that body. (Built-ins win over user rules; intent overlap between user-config and a built-in trigger is resolved in favor of the built-in semantics. User rules can still cover sensor-specific signals via Hook / ToolFrame, which run on independent payload dimensions.) Rationale: text triggers are mutually-exclusive intents — a single utterance is either a `remember`, a `forget`, a `correction`, or a recipe; producing two drafts with different `kind_hint`s for the same body is a write-amplification bug.
 
 **No multi-fire per rule per event.** A given rule fires at most once per event (no scanning the body for multiple matches of the same pattern). Hook and tool-frame rules likewise produce at most one output per matching event.
 
-**`max_drafts` enforcement (hard cap).** Checked inside the per-rule loop, after pushing each output. When `outputs.len() >= budget.max_drafts`:
+### 6.3 Budget enforcement (Phase B only)
 
-1. Stop scanning further rules immediately (do not finish the current family).
-2. Emit exactly one `tracing::warn!(worker = "regex", event_id, max_drafts, "regex extractor reached max_drafts cap")` — never the body.
-3. Set `truncated = true` on the returned envelope (see below) and return `Ok(...)`.
+Built-ins always run to completion (§6.2). The budget governs Phase B.
 
-**`max_wall_ms` enforcement (per-rule check).** `Instant::now()` is captured at extract entry. Elapsed time is checked **inside the per-rule loop**, immediately after each rule evaluation completes — *not* only at family boundaries. When elapsed exceeds `budget.max_wall_ms`:
+**`max_drafts` (hard cap on user-rule output).** After each Phase-B rule push, check `outputs.len() >= budget.max_drafts`. When the cap is reached:
 
-- if zero outputs have been produced, return `Err(BudgetExceeded { worker, elapsed_ms })` so the chain (#74) falls through to the next extractor;
-- otherwise stop scanning, `tracing::warn!` with elapsed time, set `truncated = true`, and return `Ok(...)`.
+1. Stop scanning further user rules.
+2. Emit exactly one `tracing::warn!(worker = "regex", event_id, max_drafts, "regex extractor reached max_drafts cap during user-rule dispatch")` — never the body.
+3. Set `truncated = TruncationReason::MaxDrafts`.
 
-The per-rule check ensures a large user-rule list (which all lands in a single `text_rules` bucket) cannot blow the budget unchecked. Cost of the check: a single `Instant::now()` per rule, ~10 ns on x86_64 — negligible against any non-trivial regex match.
+**`max_wall_ms` (per-rule wall-clock check on user-rule loop).** `Instant::now()` is captured at the start of Phase B. Elapsed time is checked **after each user-rule evaluation**. When elapsed exceeds `budget.max_wall_ms` mid-Phase-B:
 
-**Truncation envelope.** To make budget-driven truncation visible to downstream stages (so the chain dispatcher in #74 can decide whether to invoke the LLM extractor for the remainder), `extract` returns a small struct, not a bare `Vec`:
+- if Phase A produced zero outputs **and** zero Phase-B outputs, return `Err(BudgetExceeded { worker, elapsed_ms })` (full fall-through);
+- otherwise stop scanning user rules, `tracing::warn!` with elapsed time, set `truncated = TruncationReason::MaxWallMs { elapsed_ms }`.
+
+The per-rule check ensures a large or pathological user-rule list cannot blow the budget unchecked. Cost: one `Instant::now()` per user rule, ~10 ns on x86_64.
+
+### 6.4 Return shape
 
 ```rust
 pub struct ExtractResult {
@@ -278,19 +397,27 @@ pub enum TruncationReason {
 }
 ```
 
-The trait signature becomes `async fn extract(...) -> Result<ExtractResult, ExtractError>`. Downstream stages can branch on `result.truncated` without re-running budget arithmetic. `ExtractError::BudgetExceeded` is reserved for the **zero-output** wall-clock case (chain falls through); over-cap or wall-clock-with-partial cases are `Ok` with `truncated` set.
+Trait signature: `async fn extract(...) -> Result<ExtractResult, ExtractError>`.
 
-**Partial-handoff contract (terminal-on-truncation).** When `truncated != TruncationReason::None`, the chain dispatcher (#74) **must not** invoke any subsequent extractor on the same body. The truncated regex pass is the terminal extraction for that event:
+### 6.5 Chain handoff (informs #74)
 
-- The regex pass already produced one or more outputs from the body. Re-running the LLM extractor on the same body would re-emit those same drafts (different `trigger_id`, same body text), creating duplicate writes — there is no stable cross-extractor dedup key in this PR (`MemoryDraft.body` is the closest, and substrings/paraphrases mean LLM output won't byte-match regex output).
-- Conversely, the unmatched portion of the body is not knowable: text rules use first-match-wins on the whole body, not span-anchored windows, so we cannot describe a "remainder" by byte range. Inventing one would require a span-tracking redesign that is out of scope for #73.
-- Truncation already produces a `tracing::warn!`; the chain dispatcher additionally emits a `chain.regex_truncated_terminal` metric (defined in #74) so operators can observe how often this fires. If it fires often, the right fix is to grow `max_drafts` / `max_wall_ms`, not to chain-on-truncation.
+The chain dispatcher in #74 enforces the following match on this PR's output. It is documented here to keep the contract close to where it is produced:
 
-Stated as a rule the chain enforces: **`Ok(result)` with `result.truncated != None`** terminates the chain for that event with `result.outputs` as the final extraction. **`Err(BudgetExceeded { .. })`** (zero outputs) falls through to the next extractor. The two cases are disjoint and exhaustive for budget-related outcomes; #74 will encode this in its dispatcher with a single match arm.
+| Outcome | Chain behaviour | Why safe |
+|---|---|---|
+| `Err(ExtractError::BudgetExceeded { .. })` | Fall through to LLM extractor on the same body. | No regex output exists, so no duplicate-write risk. |
+| `Err(ExtractError::BodyResolution { .. })` | Surface or retry per the failure variant; **do not** treat as bodyless. | Failed resolution is not "no body". |
+| `Ok(result)` with `truncated == MaxDrafts` | Fall through to LLM extractor on the same body. **Dedup contract:** `MemoryDraft.kind_hint` from a built-in trigger acts as the dedup key — the LLM extractor must skip producing drafts that share `(source_event, kind_hint)` with any draft already in `result.outputs`. This is fine because built-ins always run to completion: any explicit trigger that fired regex-side is already represented in `result.outputs` and must not be re-emitted by the LLM. | Built-ins finished, so explicit user intents are captured and dedupable; only user-rule discovery is incomplete. |
+| `Ok(result)` with `truncated == MaxWallMs { .. }` | Same as `MaxDrafts`. | Same rationale. |
+| `Ok(result)` with `truncated == None` | Fall through to LLM extractor unless `result.outputs` already contains a forget intent (in which case stop the chain — forget intents must not be re-emitted). | Non-truncated regex pass is complete; LLM is then doing additive enrichment, not re-derivation. |
 
-Determinism: rules are dispatched in a stable order — built-in rules first (declaration order in `defaults.rs`), then user rules in `from_config` declaration order. Two identical events therefore produce identical truncated sets when the cap is hit.
+The dedup contract by `(source_event, kind_hint)` makes built-ins idempotent across the regex→LLM boundary even under truncation: any trigger phrase that the regex caught will be in `outputs`, and the LLM will be instructed to skip those kinds for the same event. **Explicit `remember` / `forget` / `skillify` requests are therefore never lost to truncation** — they are always covered by Phase A, which runs to completion.
 
-Rationale on the `Ok` vs `Err` split: brief §5.2.a says "exceeding `budget` returns `ExtractBudgetExceeded`, falls through to next extractor." We honor that for the all-or-nothing case (zero outputs → fall through). For partial success we surface truncation as data, not error, so the chain has full information without exception-style control flow.
+#74 will own the actual dispatcher implementation and metrics (`chain.regex_truncated`, `chain.body_resolution_failed`); this PR's job is to produce the inputs that contract takes.
+
+### 6.6 Determinism
+
+Built-ins dispatch in `defaults.rs` declaration order. User rules dispatch in `from_config` declaration order. Two identical inputs produce identical outputs and identical `truncated` flags.
 
 ## 7. Default rule set (`defaults.rs`)
 
@@ -339,11 +466,15 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - Duplicate ids rejected.
 - `RegexExtractor::name() == "regex"`, default budget = `{max_wall_ms: 2, max_drafts: 16}`.
 - **Overlap regression:** body `"remember never share API keys"` produces exactly one output, with `kind_hint = "rule"` (matched by `remember.rule`, not `remember.preference`). Body `"remember that I prefer dark mode"` produces exactly one output with `kind_hint = "user"`. First-match-wins: a body that synthetically matches two TriggerPhrase rules emits only the first.
-- **Terminal-on-truncation contract:** `ExtractResult` with `truncated == MaxDrafts` from a body that *also* would have matched additional unscanned rules — assert `outputs.len() == max_drafts`. (The chain dispatcher's enforcement of "no LLM on truncated" is exercised in #74; this PR's responsibility is producing the correct truncation flag.)
-- `max_drafts` enforcement: synthesize a `RuleSet` whose user-rule list contains `max_drafts + 5` always-matching rules; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches rule declaration order.
-- `max_wall_ms` zero-output path: stub a sleeping rule (or set `budget.max_wall_ms = 0`); assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
-- `max_wall_ms` partial-output path: feed a body that matches one early rule, then trip the wall-clock budget; assert `truncated == TruncationReason::MaxWallMs { .. }` and `outputs.len() == 1`.
-- `ExtractInput.body == None` path: pass a `Cli` envelope with no body; assert text rules don't match and the result is empty (not an error).
+- **Built-ins are untruncatable:** synthesize a `RuleSet` with `builtin()` plus a user-rule list of `max_drafts + 5` always-matching rules; pass a body that the built-in `remember.preference` matches. Assert (a) the built-in fires (Phase A produced its draft), (b) `truncated == TruncationReason::MaxDrafts` from Phase B, (c) `outputs[0].kind_hint == "user"` (built-in came first), (d) `outputs.len() == max_drafts`. Demonstrates that truncation cannot silently drop a `remember` trigger.
+- **Body resolution failure:** `ExtractInput.body = BodyResolution::Failed(BodyResolutionError::HashMismatch { .. })`; assert `extract` returns `Err(ExtractError::BodyResolution { event_id, source: HashMismatch { .. } })` and produces zero outputs (no partial side effects).
+- `max_drafts` enforcement: build a `RuleSet` whose **user**-rule list contains `max_drafts + 5` always-matching rules and an empty built-in set; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches user-rule declaration order.
+- `max_wall_ms` zero-output path: empty built-ins, set `budget.max_wall_ms = 0`, one user rule that does work; assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
+- `max_wall_ms` partial-output path: empty built-ins, two user rules — first matches, second sleeps past the budget; assert `truncated == TruncationReason::MaxWallMs { .. }` and `outputs.len() == 1`.
+- `BodyResolution::NotApplicable`: `Voice` envelope; assert text rules don't run (no error, no outputs from text rules); hook/tool-frame rules still run if the variant carries them.
+- `ForgetIntent` shape: `forget` rule fires on `"forget that I mentioned my address"`; assert `target_text_normalized == "i mentioned my address"`, `match_strategy == Substring`, `kind_filter == None`, `source_span` covers the matched portion of the body.
+- `ForgetMatchStrategy::Fuzzy` is rejected by `RuleSet::from_config` for user rules (out of scope for this PR; deferred to #75).
+- `with_user_rules` rejects a user rule whose `id` collides with a built-in id; returns `InvalidRule`.
 
 ### 10.2 Integration tests (`crates/cairn-core/tests/pipeline_extract_regex.rs`)
 
@@ -377,6 +508,8 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 1. **Trait input.** §5.2.a writes `extract(event: &CaptureEvent) -> Vec<MemoryDraft>`. We widen the input to `&ExtractInput<'_>` so the caller can supply the resolved-body slice without expanding the `CaptureEvent` envelope. The envelope continues to carry `payload_ref` + `payload_hash`; the body is read once by the chain dispatcher and threaded into `ExtractInput` for every worker in the chain. Non-breaking — the trait is brand-new.
 2. **Trait return type.** §5.2.a writes `Vec<MemoryDraft>`. We return `Result<ExtractResult, ExtractError>` so the trait can carry (a) `ForgetIntent` outputs alongside drafts via `ExtractOutput`, and (b) typed truncation reasons (`max_drafts` / `max_wall_ms`) the chain dispatcher uses to decide whether to invoke the LLM extractor for the remainder. `BudgetExceeded` is reserved for the zero-output wall-clock case.
 3. **`MemoryDraft` fields.** Brief §5.2.a lists `{kind, body, entities, confidence}` plus #74's `{evidence, discard candidates}`. Regex output cannot produce `entities` / `evidence` reliably, so this PR ships `kind_hint`, `body`, `confidence`, `source_event`, `source_span`, `trigger_id`. #74 will add `entities` / `evidence` as `Option`-wrapped fields when the LLM extractor populates them.
+4. **`ForgetIntent` is structured, not free text.** The brief does not pin a shape for forget intents; this PR formalizes it (normalized target + match strategy + optional kind filter + span) and documents the resolver contract #75 must obey (no silent over-deletion, multi-match → ambiguous outcome).
+5. **Two-phase dispatch.** Brief §5.2.a treats the extractor as a single function. We split into Phase A (built-ins, untruncatable) and Phase B (user rules, budget-bounded) so explicit user triggers cannot be lost to truncation. The trait return is unchanged; the split is internal to `RegexExtractor`.
 
 ## 12. Workspace impact
 
