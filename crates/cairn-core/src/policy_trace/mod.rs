@@ -12,11 +12,13 @@
 
 mod detail;
 mod entry;
+mod exclusion;
 mod from_pipeline;
 mod gate;
 mod outcome;
 
 pub use detail::PolicyDetail;
 pub use entry::{PolicyTraceEntry, to_wire};
+pub use exclusion::RecordExclusion;
 pub use gate::PolicyGate;
 pub use outcome::PolicyOutcome;
