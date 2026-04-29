@@ -109,13 +109,32 @@ pub(super) async fn purge(
         }
     }
 
-    // ── Step 5: delete all key versions from keystore ────────────────────────
+    // ── Step 5: delete all key versions from keystore + read-back verify ─────
+    //
+    // `purged` is the strongest terminal state. We must NOT advance the
+    // registry to `purged` until every targeted keystore handle is verified
+    // absent — otherwise a backend that reports successful delete while
+    // leaving the secret behind would let signing material survive a
+    // "completed" purge, silently breaking the §3.10 erasure contract.
     let key_entries = svc.registry.list_keys(target).await?;
     for entry in &key_entries {
         let handle =
             SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), entry.key_version);
         match svc.keystore.delete_keypair(&handle).await {
             Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "purge: keystore entry survived delete for key_version={}",
+                        entry.key_version
+                    ),
+                });
+            }
             Err(e) => return Err(IdentityServiceError::Keystore(e)),
         }
     }
@@ -129,6 +148,19 @@ pub(super) async fn purge(
             Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
             Err(e) => return Err(IdentityServiceError::Keystore(e)),
         }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "purge: keystore entry survived delete for pending_rotation \
+                         key_version={planned_version}"
+                    ),
+                });
+            }
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
         match svc
             .registry
             .delete_pending_rotation(target, planned_version)
@@ -139,7 +171,8 @@ pub(super) async fn purge(
         }
     }
 
-    // ── Step 7: phase 2 — finalise purge ─────────────────────────────────────
+    // ── Step 7: phase 2 — finalise purge (only after read-back proves every
+    //              targeted handle is absent) ────────────────────────────────
     svc.registry.finalise_purge(target).await?;
 
     // ── Step 8: remove ack file (best-effort) ─────────────────────────────────

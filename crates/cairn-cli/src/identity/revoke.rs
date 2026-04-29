@@ -122,38 +122,11 @@ pub(super) async fn revoke(
     // ── Step 4: phase 1 — write revoke_pending WAL row ────────────────────────
     svc.registry.begin_revocation(&receipt).await?;
 
-    // ── Step 5: delete all key versions from keystore ────────────────────────
-    let key_entries = svc.registry.list_keys(target).await?;
-    for entry in &key_entries {
-        let handle =
-            SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), entry.key_version);
-        match svc.keystore.delete_keypair(&handle).await {
-            Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
-            Err(e) => return Err(IdentityServiceError::Keystore(e)),
-        }
-    }
+    // ── Step 5: delete + verify-absent every keystore handle for target ──────
+    delete_and_verify_target_keys(svc, target).await?;
 
-    // ── Step 6: delete pending rotation WAL rows + their keystore entries ─────
-    let pending_rotations = svc.registry.list_pending_rotations(target).await?;
-    for (planned_version, _planned_handle) in pending_rotations {
-        let handle =
-            SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), planned_version);
-        match svc.keystore.delete_keypair(&handle).await {
-            Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
-            Err(e) => return Err(IdentityServiceError::Keystore(e)),
-        }
-        // Clean up the WAL row; ignore NotFound (may have already been cleared).
-        match svc
-            .registry
-            .delete_pending_rotation(target, planned_version)
-            .await
-        {
-            Ok(()) | Err(RegistryError::NotFound) => {}
-            Err(e) => return Err(IdentityServiceError::Registry(e)),
-        }
-    }
-
-    // ── Step 7: phase 2 — finalise revocation ────────────────────────────────
+    // ── Step 7: phase 2 — finalise revocation (only after read-back proves
+    //              every targeted handle is absent) ──────────────────────────
     svc.registry.finalise_revocation(target).await?;
 
     Ok(receipt)
@@ -179,4 +152,75 @@ impl IdentityService {
     ) -> Result<RevocationReceipt, IdentityServiceError> {
         revoke(self, target, signer).await
     }
+}
+
+/// Delete every keystore handle associated with `target` and read-back verify
+/// each one is absent before returning. Covers both the active key versions
+/// (`identity_keys`) and any in-flight pending rotation handles.
+///
+/// Returns [`IdentityServiceError::KeyMaterialDesynchronized`] if any handle
+/// still loads after the delete call — this signals a backend that lied about
+/// success or a concurrent rewrite, and prevents the caller from advancing the
+/// registry to a terminal state while signing material survives.
+async fn delete_and_verify_target_keys(
+    svc: &IdentityService,
+    target: &Identity,
+) -> Result<(), IdentityServiceError> {
+    use cairn_core::contract::keystore::KeystoreError;
+
+    // Active key versions.
+    for entry in svc.registry.list_keys(target).await? {
+        let handle =
+            SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), entry.key_version);
+        match svc.keystore.delete_keypair(&handle).await {
+            Ok(()) | Err(KeystoreError::NotFound) => {}
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "revoke: keystore entry survived delete for key_version={}",
+                        entry.key_version
+                    ),
+                });
+            }
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+    }
+
+    // Pending rotation handles.
+    for (planned_version, _planned_handle) in svc.registry.list_pending_rotations(target).await? {
+        let handle =
+            SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), planned_version);
+        match svc.keystore.delete_keypair(&handle).await {
+            Ok(()) | Err(KeystoreError::NotFound) => {}
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "revoke: keystore entry survived delete for pending_rotation \
+                         key_version={planned_version}"
+                    ),
+                });
+            }
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+        match svc
+            .registry
+            .delete_pending_rotation(target, planned_version)
+            .await
+        {
+            Ok(()) | Err(RegistryError::NotFound) => {}
+            Err(e) => return Err(IdentityServiceError::Registry(e)),
+        }
+    }
+
+    Ok(())
 }
