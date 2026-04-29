@@ -198,6 +198,7 @@ impl RuleSet {
     /// Returns [`super::super::ExtractError::InvalidRule`] if any rule fails
     /// compilation or validation.
     pub fn from_config(rules: &[RegexRule]) -> Result<Self, super::super::ExtractError> {
+        reject_duplicate_user_ids(&std::collections::HashSet::new(), rules)?;
         let mut set = Self::empty();
         for rule in rules {
             compile_user_rule(&mut set, rule)?;
@@ -210,7 +211,8 @@ impl RuleSet {
     /// # Errors
     ///
     /// Returns [`super::super::ExtractError::InvalidRule`] if any rule id
-    /// collides with a built-in id, or if any rule fails compilation.
+    /// collides with a built-in id, an already-merged user id, or another
+    /// rule in the same incoming batch, or if any rule fails compilation.
     pub fn with_user_rules(
         mut self,
         rules: &[RegexRule],
@@ -220,21 +222,40 @@ impl RuleSet {
             .iter()
             .chain(self.builtin_hook.iter())
             .chain(self.builtin_tool_frame.iter())
+            .chain(self.user_text.iter())
+            .chain(self.user_hook.iter())
+            .chain(self.user_tool_frame.iter())
             .map(|r| r.id.as_str())
             .collect();
-        for rule in rules {
-            if existing_ids.contains(rule.id()) {
-                return Err(super::super::ExtractError::InvalidRule {
-                    rule_id: rule.id().to_owned(),
-                    reason: "user rule id collides with built-in".to_owned(),
-                });
-            }
-        }
+        reject_duplicate_user_ids(&existing_ids, rules)?;
         for rule in rules {
             compile_user_rule(&mut self, rule)?;
         }
         Ok(self)
     }
+}
+
+fn reject_duplicate_user_ids(
+    existing: &std::collections::HashSet<&str>,
+    rules: &[RegexRule],
+) -> Result<(), super::super::ExtractError> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for rule in rules {
+        let id = rule.id();
+        if existing.contains(id) {
+            return Err(super::super::ExtractError::InvalidRule {
+                rule_id: id.to_owned(),
+                reason: "user rule id collides with an existing rule".to_owned(),
+            });
+        }
+        if !seen.insert(id) {
+            return Err(super::super::ExtractError::InvalidRule {
+                rule_id: id.to_owned(),
+                reason: "duplicate user rule id within the same config".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn compile_user_rule(
@@ -691,6 +712,50 @@ mod tests {
         match err {
             super::super::super::ExtractError::InvalidRule { reason, .. } => {
                 assert!(reason.contains("target_group 2 out of range"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn from_config_rejects_duplicate_user_ids() {
+        let json = r#"[
+            {"type":"trigger_phrase","id":"u.dup","pattern":"^x .+",
+             "kind_hint":"user","confidence":0.5},
+            {"type":"trigger_phrase","id":"u.dup","pattern":"^y .+",
+             "kind_hint":"user","confidence":0.5}
+        ]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        let err = RuleSet::from_config(&rules).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { rule_id, reason } => {
+                assert_eq!(rule_id, "u.dup");
+                assert!(reason.contains("duplicate"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn with_user_rules_rejects_duplicate_against_already_merged_user_rule() {
+        let first_json = r#"[{
+            "type":"trigger_phrase","id":"u.x","pattern":"^x .+",
+            "kind_hint":"user","confidence":0.5
+        }]"#;
+        let first: Vec<RegexRule> = serde_json::from_str(first_json).unwrap();
+        let set = RuleSet::builtin()
+            .with_user_rules(&first)
+            .expect("first ok");
+
+        let second_json = r#"[{
+            "type":"trigger_phrase","id":"u.x","pattern":"^y .+",
+            "kind_hint":"user","confidence":0.5
+        }]"#;
+        let second: Vec<RegexRule> = serde_json::from_str(second_json).unwrap();
+        let err = set.with_user_rules(&second).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { rule_id, .. } => {
+                assert_eq!(rule_id, "u.x");
             }
             _ => panic!("wrong error"),
         }
