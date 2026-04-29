@@ -95,64 +95,110 @@ pub struct ExtractInput<'a> {
 }
 
 /// Body-resolution result, threaded through the extractor chain.
-///
-/// Distinguishing `NotApplicable` from a resolution failure is load-bearing:
-/// collapsing both into `None` would silently drop explicit `remember` /
-/// `forget` requests when payload-loading or hash-verification fails. The
-/// `Failed` variant forces the chain dispatcher to either retry, fall
-/// through with full information, or surface the failure — never to treat
-/// it as "no text body."
 #[derive(Clone, Debug)]
 pub enum BodyResolution<'a> {
-    /// The event's source family does not carry extractable text (e.g.
-    /// `Voice`, `Screen`, `Clipboard`, `RecordingBatch`). Text rules are
-    /// silently skipped; this is not an error.
     NotApplicable,
-    /// Body bytes were materialized from `payload_ref` and verified
-    /// against `payload_hash`. The `source` tag pins which trust boundary
-    /// the bytes came from — the extractor refuses to dispatch text rules
-    /// against any source that is not a user-visible utterance.
-    Resolved {
-        text: &'a str,
-        source: BodySource,
-    },
-    /// Body resolution attempted but failed. The extractor returns
-    /// `ExtractError::BodyResolution` so the caller can surface a typed
-    /// error rather than treating the event as bodyless.
+    /// A `ResolvedBody`, constructed only via the named-by-source
+    /// constructors below. Public field access is disallowed; readers go
+    /// through `text()` / `source()` accessors.
+    Resolved(ResolvedBody<'a>),
     Failed(BodyResolutionError),
+}
+
+/// Resolved body bytes plus their trust-boundary source. The fields are
+/// **private** to `cairn_core::pipeline::extract`. Construction goes
+/// through one of the named functions below, each tied to a specific
+/// `BodySource` and to the typed payload variant the bytes came from.
+/// External callers cannot construct a `ResolvedBody { text, source }`
+/// directly, so a buggy or stale caller cannot label `rationale` bytes
+/// as `ProactiveMessage` by accident.
+#[derive(Clone, Debug)]
+pub struct ResolvedBody<'a> {
+    text: &'a str,
+    source: BodySource,
+}
+
+impl<'a> ResolvedBody<'a> {
+    /// Construct from a `CapturePayload::Cli` or `::Mcp` envelope after
+    /// the caller has materialized and hash-verified the user-supplied
+    /// payload bytes. The `payload_kind` argument is taken by reference
+    /// to bind the lifetime, and exists primarily to make the call site
+    /// self-documenting; the function name is the contract.
+    pub fn from_user_ingest(
+        text: &'a str,
+        payload_kind: UserIngestPayloadKind,
+    ) -> Self {
+        let _ = payload_kind;
+        Self { text, source: BodySource::UserIngest }
+    }
+
+    /// Construct from a `CapturePayload::Hook` envelope after the caller
+    /// has materialized and hash-verified the user utterance bytes
+    /// (e.g. `UserPromptSubmit`).
+    pub fn from_hook_utterance(text: &'a str, hook_name: &'a str) -> Self {
+        let _ = hook_name;
+        Self { text, source: BodySource::HookUtterance }
+    }
+
+    /// Construct from a `CapturePayload::Proactive` envelope's
+    /// **message body**, NOT from `rationale`. The caller passes the
+    /// hash-verified message-body bytes plus a reference to the
+    /// `Proactive` payload so the constructor can perform a defensive
+    /// runtime check: if `text == payload.rationale`, the constructor
+    /// returns an error rather than producing a `ResolvedBody`. This
+    /// catches the obvious bug where a caller passes the wrong field.
+    /// More-subtle mislabelling is still possible at the byte level, so
+    /// the caller's read path is also responsible for sourcing bytes
+    /// from the message-body field; the runtime check is a backstop,
+    /// not a substitute for that discipline.
+    pub fn from_proactive_message(
+        text: &'a str,
+        payload: &ProactiveBodyContext<'a>,
+    ) -> Result<Self, BodyResolutionError> {
+        if text == payload.rationale {
+            return Err(BodyResolutionError::ProactiveRationaleMislabel);
+        }
+        Ok(Self { text, source: BodySource::ProactiveMessage })
+    }
+
+    pub fn text(&self) -> &str { self.text }
+    pub fn source(&self) -> BodySource { self.source }
+}
+
+/// Marker for the `Cli` / `Mcp` payload variant the bytes came from.
+/// Carried for tracing and audit; `from_user_ingest` does not branch on
+/// it — the function name itself is the contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserIngestPayloadKind {
+    Cli,
+    Mcp,
+}
+
+/// Reference into `CapturePayload::Proactive` for the runtime
+/// rationale-mislabel check.
+pub struct ProactiveBodyContext<'a> {
+    pub rationale: &'a str,
 }
 
 /// The trust boundary a resolved body came from.
 ///
-/// **There is deliberately no `Rationale` variant.** Internal agent
-/// reasoning (`CapturePayload::Proactive.rationale`, any future
-/// reasoning-trace field) cannot be encoded in this enum, so the
-/// extractor cannot accidentally process it as a user utterance.
-/// The chain dispatcher (#74) builds a `BodyResolution::Resolved` only
-/// for the variants below; if it cannot tag the source as one of these,
-/// it must pass `BodyResolution::NotApplicable`. Runtime-enforced; not
-/// caller discipline.
+/// **There is deliberately no `Rationale` variant.** Combined with the
+/// private constructors on `ResolvedBody`, the only way to produce a
+/// `ResolvedBody` tagged `ProactiveMessage` is via
+/// `from_proactive_message`, which (a) is named after the message-body
+/// field, (b) takes the message-body text and (c) defensively rejects
+/// text equal to `rationale`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BodySource {
-    /// `cairn ingest` Mode B body — the user-supplied text payload of a
-    /// `Cli` or `Mcp` envelope.
     UserIngest,
-    /// User utterance captured by a harness hook (e.g. `UserPromptSubmit`).
     HookUtterance,
-    /// Proactive Mode C body — the user-visible message body the agent
-    /// produced. Distinct from `Proactive.rationale`, which never
-    /// reaches this enum.
     ProactiveMessage,
 }
 
 impl BodyResolution<'_> {
-    /// Inspect whether the resolved body's source is on the allowlist
-    /// for text-rule extraction. Currently every `BodySource` variant
-    /// is allowlisted because the enum has no non-allowlisted variants;
-    /// this method is the seam for any future read-only-source addition.
     pub fn allows_text_rules(&self) -> bool {
-        matches!(self, BodyResolution::Resolved { .. })
+        matches!(self, BodyResolution::Resolved(_))
     }
 }
 
@@ -168,6 +214,8 @@ pub enum BodyResolutionError {
     NotUtf8,
     #[error("transient I/O error reading payload_ref: {0}")]
     Io(String),
+    #[error("ResolvedBody::from_proactive_message called with text equal to rationale — refusing to extract internal reasoning as user memory")]
+    ProactiveRationaleMislabel,
 }
 
 /// `#[async_trait]` is required, not native async-fn-in-traits + RPITIT.
@@ -281,6 +329,15 @@ pub struct ForgetIntent {
     /// scope from this span.
     pub source_span: TextSpan,
 
+    /// How confident the rule was that this clause is a forget intent.
+    /// Same `Confidence` newtype as `MemoryDraft.confidence`. The
+    /// LLM-suppression algorithm in §6.5 treats `ForgetIntent` outputs
+    /// uniformly with `MemoryDraft` outputs: if `confidence >=
+    /// CONFIDENCE_GATE_FOR_SUPPRESSION` (0.9), the span is removed
+    /// from `llm_eligible_spans`; otherwise it stays eligible. The
+    /// built-in `forget` rule emits 0.95.
+    pub confidence: Confidence,
+
     pub source_event: CaptureEventId,
     pub trigger_id: String,
 }
@@ -339,6 +396,12 @@ pub enum RegexRule {
         id: String,
         pattern: String,
         target_group: u8,
+        /// Confidence emitted into `ForgetIntent.confidence`. Carries
+        /// the same semantics as `MemoryDraft.confidence`: the chain
+        /// dispatcher uses it to decide LLM suppression (§6.5). The
+        /// built-in `forget` rule emits 0.95; user rules pick their own
+        /// (validated `[0.0, 1.0]`).
+        confidence: Confidence,
         /// Match strategy emitted by this rule into the resulting
         /// `ForgetIntent`. The default rule emits `Substring`; the
         /// resolver in #75 routes substring intents to interactive
@@ -582,7 +645,7 @@ The chain dispatcher in #74 enforces the following match on this PR's output. It
 
 **Suppression is span-scoped, not event-scoped.** A regex `Forget` intent on clause 1 does not suppress LLM forget extraction on clauses 2–N. The LLM dispatcher passes each uncovered span to its own extraction call; forget detection on each span is independent.
 
-**Suppression is also confidence-gated.** Regex drafts with `confidence < 0.9` do **not** mark their span as covered for LLM purposes. This means a low-confidence pickup like `remember that → body="that"` (the §6.2 "low quality" example) leaves its span eligible for LLM re-extraction; the LLM may produce a competing draft with a higher-quality body, and Filter (#75) keeps the better one. Built-in trigger rules above 0.9 (most of §7) do gate their span; they are unambiguous user intents and re-extraction would only duplicate. The 0.9 threshold is a constant in `extract::CONFIDENCE_GATE_FOR_SUPPRESSION`; tunable per future research, but pinned for #74's contract.
+**Suppression is also confidence-gated, uniformly across `MemoryDraft` and `ForgetIntent`.** Both output variants carry `confidence: Confidence`. Regex outputs with `confidence < 0.9` do **not** mark their span as covered for LLM purposes; outputs at or above 0.9 do. This means a low-confidence pickup like `remember that → body="that"` (the §6.2 "low quality" example) leaves its span eligible for LLM re-extraction, and a low-confidence (user-defined) forget rule does the same. Built-in trigger rules above 0.9 (every entry in §7, including `forget` at 0.95) gate their span; they are unambiguous user intents and re-extraction would only duplicate. The 0.9 threshold is a constant in `extract::CONFIDENCE_GATE_FOR_SUPPRESSION`; tunable per future research, but pinned for #74's contract.
 
 **Span discipline:** every `MemoryDraft` and every `ForgetIntent` produced by a text rule must populate `source_span` (clause start/end in the original body's byte offsets). The regex emitter is the only path that creates these and has the offsets in scope. Hook and tool-frame outputs carry `source_span = None`; the LLM dispatcher never runs on those events, so the dedup key is well-defined wherever it is needed.
 
@@ -609,7 +672,7 @@ Text rules are listed in dispatch order (most specific first); first-match-wins 
 | 3 | `correction` | TriggerPhrase | `^\s*correction:?\s+(.+?)\s*$` | `feedback` | 0.95 |
 | 4 | `success.recipe` | TriggerPhrase | `^\s*this is how we did it\s*[—-]\s*it worked\s*$` | `strategy_success` | 0.85 |
 | 5 | `skillify` | TriggerPhrase | `^\s*skillify\s+(?:this|it)\s*$` | `playbook` | 0.95 |
-| 6 | `forget` | ForgetPhrase | `^\s*forget\s+(?:that\s+|what\s+)?(.+?)\s*$` | n/a (target = group 1) | n/a |
+| 6 | `forget` | ForgetPhrase | `^\s*forget\s+(?:that\s+|what\s+)?(.+?)\s*$` | n/a (target = group 1) | 0.95 |
 | — | `hook.post_tool_use` | HookEvent | hook=`PostToolUse` | `trace` | 0.8 |
 | — | `hook.stop` | HookEvent | hook=`Stop` | `trace` | 0.7 |
 | — | `hook.pre_compact` | HookEvent | hook=`PreCompact` | `trace` | 0.7 |
@@ -656,10 +719,11 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - **Confidence gate under truncation:** combine the previous test with a Phase-B truncation (`max_drafts: 1`, two always-matching low-confidence user rules); assert `truncated == MaxDrafts`, `outputs.len() == 1`, and `llm_eligible_spans` includes both the matched span (low confidence) and the unprocessed clause's span. The earlier-spec failure mode ("low-confidence match becomes terminal under truncation") is forbidden — guard with a regression test.
 - **Span-scoped forget suppression:** body `"forget my address. anyway, please also forget that other thing"`; built-in `forget` matches the first clause. Assert `outputs[0]` is the `Forget` intent on clause 1, `llm_eligible_spans` contains the second clause's range (so the LLM dispatcher in #74 can run `forget` re-extraction on clause 2 independently). The contract that "regex Forget does NOT suppress LLM forget on other spans" is asserted via a unit test on the contract documentation.
 - **Within-clause first-match-wins:** body `"remember never share API keys"`; assert single output with `kind = "rule"`. (The clause splitter must not break this case — `"remember never share API keys"` stays as one clause because there is no separator.)
-- **Forget contract — substring stays substring:** `forget` rule fires on `"forget my old address"`; assert `match_strategy == Substring` (not `Exact`). Round-trip serde preserves it.
+- **Forget contract — substring stays substring:** `forget` rule fires on `"forget my old address"`; assert `match_strategy == Substring` (not `Exact`) and `confidence == 0.95`. Round-trip serde preserves both.
+- **Forget LLM-suppression uniformity:** synthesize a user `ForgetPhrase` rule with `confidence: 0.5`; pass a body that matches it. Assert (a) the intent is in `outputs`, (b) the span stays in `llm_eligible_spans` (low-confidence forget remains LLM-eligible). Mirror with `confidence: 0.95`: span is removed from `llm_eligible_spans`. The contract that "forget intents are treated uniformly with drafts under the 0.9 gate" is asserted by direct comparison.
 - **Forget contract — Fuzzy rejected:** `RuleSet::from_config(<rule with match_strategy: Fuzzy>)` returns `Err(InvalidRule)`. (This guards the resolver contract: even if a future user-config tries to declare `Fuzzy`, the extractor refuses to compile it until #75 is wired up.)
 - **Forget contract — user `Exact` requires `quoted_capture: true`:** user rule with `match_strategy: Exact` and `quoted_capture: false` (or absent) → `InvalidRule`.
-- **Proactive runtime enforcement:** `BodySource` has no `Rationale` variant — confirmed by an exhaustive-match test. A test fixture for a `Proactive` event constructs `BodyResolution::Resolved { text: message_body, source: BodySource::ProactiveMessage }`. There is no compilable path that lets a test pass `rationale` text in: it would need a `BodySource` variant that does not exist.
+- **Proactive runtime enforcement:** `BodySource` has no `Rationale` variant (exhaustive-match test). `ResolvedBody`'s fields are private — there is no compilable path to construct a `Resolved` variant outside `cairn_core::pipeline::extract`. Test that `ResolvedBody::from_proactive_message(rationale_str, &ProactiveBodyContext { rationale: rationale_str })` returns `Err(BodyResolutionError::ProactiveRationaleMislabel)` (defensive runtime check). Test that `ResolvedBody::from_proactive_message(message_body_str, ...)` returns `Ok(_)` and the resulting `BodySource` is `ProactiveMessage`.
 - **Oversize body still extracts triggers (round-9 regression):** synthesize a 1 MiB body whose last line is `"forget my old address"`; assert (a) `outputs.len() == 1` containing the `Forget` intent (Phase A prefilter found the trigger), (b) `truncated == BodyTooLarge { body_len: 1048576 + … }`, (c) `llm_eligible_spans` covers the body (LLM still gets enrichment), (d) Phase B was skipped (no user-rule output), (e) one `body exceeds MAX_BODY_LEN_FOR_REGEX, skipping Phase B user rules` warn fires. The earlier-spec failure mode ("oversize body skips text rules entirely") is forbidden.
 - **Multi-sentence trigger (round-9 regression):** body `"FYI, old address is stale. forget my old address"`; assert `outputs.len() == 1`, the single output is `Forget(target_text_normalized = "my old address")`, `source_span` covers only the second sentence. The first sentence (no trigger keyword) does not appear in `outputs` and is in `llm_eligible_spans`. Mirror tests: `"One more thing. remember that I prefer cash"`, `"Got it; remember that meetings move to 3 PM"`.
 - **Abbreviation safety:** body `"remember that I live in the U.S. and prefer cash"`; assert `outputs.len() == 1` and the captured body is `"I live in the U.S. and prefer cash"` (whole sentence). The prefilter finds one `remember` at position 0; no second hit at `U.S.`; the window runs to end-of-body. Mirror with decimal points (`"remember that prices have rounded to $9.99 today"`) and `"e.g."`.
