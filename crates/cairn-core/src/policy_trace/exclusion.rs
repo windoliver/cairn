@@ -26,6 +26,11 @@ impl RecordExclusion {
     /// Construct an exclusion. Panics on a non-`ReadFilter*` gate;
     /// this is a programmer error and a fail-closed safety check
     /// against leaking record ids through Tier-1 gates.
+    ///
+    /// Returns `Self` (not `Result`) by design: a wrong gate is an
+    /// internal bug, not user input, and pushing the panic-or-ignore
+    /// decision up to every caller would defeat the fail-closed
+    /// guarantee.
     #[must_use]
     pub fn new(target_id: TargetId, gate: PolicyGate, detail: PolicyDetail) -> Self {
         assert!(
