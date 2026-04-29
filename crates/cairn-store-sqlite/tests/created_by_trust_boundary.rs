@@ -35,7 +35,10 @@ fn record_authored_by(forged_author: &str) -> MemoryRecord {
         kind: MemoryKind::User,
         class: MemoryClass::Semantic,
         visibility: MemoryVisibility::Public,
-        scope: ScopeTuple::default(),
+        scope: ScopeTuple {
+            user: Some("usr:trustcheck".to_owned()),
+            ..ScopeTuple::default()
+        },
         body: "forged content".to_owned(),
         provenance: Provenance {
             source_sensor: Identity::parse("snr:local:hook:cc-session:v1").expect("valid"),

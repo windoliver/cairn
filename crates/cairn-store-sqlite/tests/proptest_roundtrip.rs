@@ -79,7 +79,7 @@ proptest! {
     #[test]
     fn stage_activate_get_roundtrip(
         // ULIDs are 32-char [0-9A-F]; build the body from any printable ASCII range.
-        body in prop::string::string_regex("[ -~]{0,128}").expect("regex"),
+        body in prop::string::string_regex("[ -~]{1,128}").expect("regex"),
         salience in 0.0_f32..=1.0,
         confidence in 0.0_f32..=1.0,
         seed in 0u64..u64::from(u32::MAX),

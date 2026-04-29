@@ -196,6 +196,16 @@ fn stage_version_impl(
     record: &MemoryRecord,
     created_by: &ActorRef,
 ) -> Result<RecordId, StoreError> {
+    // Domain validation: this is the last durable boundary before
+    // `records`/`record_json`. Upstream callers should validate, but
+    // relying on that is too weak — a malformed record (out-of-range
+    // scalars, missing scope.user on a private record, empty/invalid
+    // actor chain, sensor/role inconsistency) becomes unreadable
+    // store state that requires manual repair. Reject early.
+    record
+        .validate()
+        .map_err(|e| StoreError::Backend(Box::new(e)))?;
+
     let target_id_str = target_id.as_str();
 
     // Once a target_id has been purged, the namespace is permanently
