@@ -1,6 +1,7 @@
 //! Integration tests for [`IdentityService::open`],
 //! [`IdentityService::open_for_maintenance`] (issue #50, D2),
-//! `commit_first_identity` (D3), and `init_defaults` (D5).
+//! `commit_first_identity` (D3), `init_defaults` (D5), and
+//! `status_report` (D9).
 
 use std::fs;
 
@@ -1293,4 +1294,138 @@ async fn finalise_binding_renames_pending_when_db_consistent() {
         vault_id.as_str(),
         "vault.id must contain the correct vault_id",
     );
+}
+
+// ── D9 tests ──────────────────────────────────────────────────────────────────
+
+/// `status_report` must detect a keystore/registry pubkey mismatch and set
+/// `vault_degraded = true` with a non-empty `mismatched_ids` list.
+///
+/// Setup:
+/// 1. First-bind + provision an active identity (`hmn:status-test:v1`).
+/// 2. Overwrite the keystore entry for that identity with a *different*
+///    signing key so the pubkey in the keystore no longer matches the pubkey
+///    row in the registry.
+/// 3. Build a fresh `IdentityService` via `new_for_test` with the corrupted
+///    keystore and call `status_report` — must surface the mismatch.
+#[tokio::test]
+async fn status_reports_vault_degraded_on_cold_start_with_mismatch() {
+    use cairn_core::domain::identity::keys::{SecretHandle, SigningKey};
+    use cairn_test_fixtures::MemoryKeystore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    // Step 1: first-bind using a MemoryKeystore we hold onto directly.
+    let vault_id = VaultId::mint();
+    let keystore = MemoryKeystore::new();
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+
+    let sys_id = Identity::parse("hmn:sys:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind");
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id.clone(),
+        Arc::new(registry),
+        Arc::new(keystore.clone()),
+    );
+
+    // Step 2: provision an additional active identity.
+    let target_id = Identity::parse("hmn:status-test:v1").expect("valid");
+    let target_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: target_id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, target_input, &mut rand_core::OsRng)
+        .await
+        .expect("provision target identity");
+
+    // Verify the identity is active and get its key version.
+    let row = svc
+        .registry
+        .get_identity(
+            &target_id,
+            cairn_core::contract::identity_registry::IdentityVisibility::Operational,
+        )
+        .await
+        .expect("get_identity")
+        .expect("identity must be present");
+    assert_eq!(row.provisioning_state, ProvisioningState::Active);
+
+    // Step 3: corrupt the keystore — overwrite with a different signing key.
+    // The registry still holds the *original* pubkey, so the sweep will detect
+    // a mismatch.
+    let corrupt_key = SigningKey::generate(&mut rand_core::OsRng);
+    let handle =
+        SecretHandle::for_identity(vault_id.clone(), target_id.clone(), row.current_key_version);
+    keystore
+        .store_keypair(&handle, &corrupt_key)
+        .await
+        .expect("store corrupt key");
+
+    // Run status_report — must detect the mismatch.
+    let report = svc
+        .status_report()
+        .await
+        .expect("status_report must not error");
+
+    assert!(
+        report.vault_degraded,
+        "vault must be degraded when keystore pubkey != registry pubkey",
+    );
+    assert!(
+        !report.mismatched_ids.is_empty(),
+        "mismatched_ids must be non-empty when a mismatch is detected",
+    );
+    assert!(
+        report.mismatched_ids.contains(&target_id),
+        "mismatched_ids must include the corrupted identity",
+    );
+}
+
+/// Happy path: a clean vault with no tampered keys must report
+/// `vault_degraded = false` and an empty `mismatched_ids` list.
+#[tokio::test]
+async fn status_clean_vault_reports_no_degradation() {
+    use cairn_core::domain::identity::status::BindingState;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, _vault_id) = setup_service_after_first_bind(&dir).await;
+
+    let report = svc
+        .status_report()
+        .await
+        .expect("status_report must not error");
+
+    assert!(!report.vault_degraded, "clean vault must not be degraded");
+    assert!(
+        report.mismatched_ids.is_empty(),
+        "clean vault must have no mismatched ids",
+    );
+    assert!(
+        matches!(report.binding_state, BindingState::Bound),
+        "vault.binding file is written by commit_first_identity → state must be Bound",
+    );
+    assert!(report.vault_id.is_some(), "vault_id must be populated");
 }
