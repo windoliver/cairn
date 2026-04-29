@@ -197,6 +197,7 @@ dependencies = [
  "base64",
  "cairn-core",
  "cairn-mcp",
+ "cairn-sdk",
  "cairn-sensors-local",
  "cairn-store-sqlite",
  "cairn-test-fixtures",

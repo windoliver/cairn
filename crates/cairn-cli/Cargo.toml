@@ -34,6 +34,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+cairn-sdk = { workspace = true }
 cairn-test-fixtures = { workspace = true }
 insta = { workspace = true }
 async-trait = { workspace = true }
