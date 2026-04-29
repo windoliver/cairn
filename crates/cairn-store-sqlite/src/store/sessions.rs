@@ -536,8 +536,8 @@ impl SqliteMemoryStore {
     ///
     /// For internal store paths that need to read by id without an
     /// identity check (e.g. integration tests asserting on a seeded
-    /// row's stored shape), use
-    /// [`SqliteMemoryStore::get_session_unchecked`].
+    /// row's stored shape), use `get_session_unchecked` (gated behind
+    /// the `test-helpers` feature).
     ///
     /// # Errors
     ///
@@ -588,8 +588,8 @@ impl SqliteMemoryStore {
 
     /// Internal session-row reader used by [`SqliteMemoryStore::get_session`]
     /// (after identity filtering) and the `test-helpers`-gated
-    /// [`SqliteMemoryStore::get_session_unchecked`]. Crate-private so the
-    /// raw lookup never crosses the public API surface.
+    /// `get_session_unchecked`. Crate-private so the raw lookup never
+    /// crosses the public API surface.
     ///
     /// # Errors
     ///

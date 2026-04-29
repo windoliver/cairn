@@ -49,7 +49,7 @@ pub enum SessionSourceError {
 }
 
 /// Trait the resolver uses to look up environment variables. Production
-/// passes [`StdEnv`]; tests pass a [`HashMap`]-backed fake.
+/// passes [`StdEnv`]; tests pass a `HashMap`-backed fake.
 pub trait EnvLookup {
     /// Read `key` from the environment. Returns `None` if unset.
     fn get(&self, key: &str) -> Option<String>;
