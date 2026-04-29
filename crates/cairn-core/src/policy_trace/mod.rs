@@ -10,8 +10,10 @@
 //! No I/O. No store dependency. No allocations beyond what `Vec<…>` and
 //! `BTreeMap<…>` require for the trace itself.
 
+mod detail;
 mod gate;
 mod outcome;
 
+pub use detail::PolicyDetail;
 pub use gate::PolicyGate;
 pub use outcome::PolicyOutcome;

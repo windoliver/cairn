@@ -1,3 +1,6 @@
+//! `PolicyOutcome` wire serialization: `as_str` and `Display` produce
+//! the stable codes used in the policy-trace envelope.
+
 use cairn_core::policy_trace::PolicyOutcome;
 
 #[test]
