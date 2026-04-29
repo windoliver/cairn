@@ -41,6 +41,8 @@ pub enum Capabilities {
     CairnMcpV1ExtensionFederation,
     #[serde(rename = "cairn.mcp.v1.extension.sessiontree")]
     CairnMcpV1ExtensionSessiontree,
+    #[serde(rename = "cairn.mcp.v1.policy_trace.v1")]
+    CairnMcpV1PolicyTraceV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
