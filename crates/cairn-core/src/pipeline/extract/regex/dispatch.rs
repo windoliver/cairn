@@ -156,8 +156,18 @@ pub(crate) async fn dispatch(
     // built-in tool-frames, Phase A built-in text, Phase B user text).
     // This makes `budget.max_drafts` a true contract for downstream
     // back-pressure rather than a Phase-B-only guard.
+    //
+    // The spans of dropped outputs are re-added to `llm_eligible_spans`
+    // so the LLM extractor in #74 can recover the truncated intents —
+    // otherwise high-confidence Phase A coverage would silently suppress
+    // both regex output AND fallback extraction for the same bytes.
     let max_drafts = usize::from(budget.max_drafts);
     if outputs.len() > max_drafts {
+        for dropped in &outputs[max_drafts..] {
+            if let Some(span) = dropped.source_span() {
+                llm_spans.push(span);
+            }
+        }
         outputs.truncate(max_drafts);
         if matches!(truncated, TruncationReason::None) {
             truncated = TruncationReason::MaxDrafts;
@@ -585,6 +595,50 @@ mod tests {
             result.outputs.len()
         );
         assert_eq!(result.truncated, TruncationReason::MaxDrafts);
+    }
+
+    #[tokio::test]
+    async fn truncated_outputs_remain_llm_eligible() {
+        // With max_drafts=2 and a body containing 5 explicit `remember`
+        // clauses, the last 3 outputs are truncated. Their spans must
+        // appear in llm_eligible_spans so #74's LLM extractor can recover.
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 100,
+            max_drafts: 2,
+        };
+        let body_text = "remember A. remember B. remember C. remember D. remember E";
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            body_text,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        );
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+        };
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+        assert_eq!(result.outputs.len(), 2);
+        assert_eq!(result.truncated, TruncationReason::MaxDrafts);
+        assert!(
+            !result.llm_eligible_spans.is_empty(),
+            "dropped outputs must remain LLM-eligible"
+        );
+        // The last clause "remember E" must be inside some llm-eligible span.
+        let body_len = body_text.len();
+        let covered = result.llm_eligible_spans.iter().any(|s| {
+            (s.start as usize) <= body_len.saturating_sub(10) && body_len <= (s.end as usize)
+        });
+        assert!(
+            covered,
+            "tail of body should be llm-eligible after truncation: {:?}",
+            result.llm_eligible_spans
+        );
     }
 
     #[test]

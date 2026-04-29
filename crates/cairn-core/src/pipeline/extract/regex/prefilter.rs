@@ -269,7 +269,7 @@ fn find_window_stop(bytes: &[u8], start: usize, hard_stop: usize) -> usize {
     while i < hard_stop {
         let b = bytes[i];
         match b {
-            b';' | b'\n' => return i,
+            b';' | b'\n' | b'!' | b'?' => return i,
             b'.' => {
                 let after_is_ws_or_eob = i + 1 == bytes.len() || bytes[i + 1].is_ascii_whitespace();
                 if after_is_ws_or_eob && is_period_sentence_boundary(bytes, i) {
@@ -394,6 +394,28 @@ mod tests {
             windows[0].span,
             TextSpan::new(0, u32::try_from(body.len()).unwrap())
         );
+    }
+
+    #[test]
+    fn build_windows_stops_at_exclamation() {
+        let body = "remember that I prefer tea! Also, my address changed";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert_eq!(windows.len(), 1);
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that I prefer tea");
+    }
+
+    #[test]
+    fn build_windows_stops_at_question_mark() {
+        let body = "remember that I prefer tea? then forget my address";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan);
+        assert!(!windows.is_empty());
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that I prefer tea");
     }
 
     #[test]
