@@ -1,4 +1,4 @@
--- Migration 0013: enforce the active-session uniqueness invariant for
+-- Migration 0014: enforce the active-session uniqueness invariant for
 -- vault-only contexts (project_root IS NULL).
 -- Brief source: §8.1 Session Lifecycle (single active session invariant).
 --
@@ -74,4 +74,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (13, '0013_sessions_unique_active_coalesce', '', strftime('%s','now') * 1000);
+  VALUES (14, '0014_sessions_unique_active_coalesce', '', strftime('%s','now') * 1000);

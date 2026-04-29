@@ -1,4 +1,4 @@
--- Migration 0011: sessions table for auto-discovery + auto-create.
+-- Migration 0012: sessions table for auto-discovery + auto-create.
 -- Brief source: §8.1 Session Lifecycle.
 --
 -- Sessions key turns to a (user_id, agent_id, project_root) triple. The
@@ -32,4 +32,4 @@ CREATE INDEX sessions_last_activity_idx
   ON sessions(last_activity_at DESC);
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (11, '0011_sessions', '', strftime('%s','now') * 1000);
+  VALUES (12, '0012_sessions', '', strftime('%s','now') * 1000);

@@ -330,12 +330,16 @@ async fn migration_dedupes_preexisting_active_null_project_duplicates() {
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 12");
@@ -756,15 +760,19 @@ async fn migration_ends_active_rows_with_relative_project_root() {
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 13");
@@ -872,18 +880,22 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 14");
@@ -1014,18 +1026,22 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 14");
@@ -1105,21 +1121,25 @@ async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolv
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_canonicalize_windows_paths.sql"
+                "../src/migrations/sql/0016_sessions_canonicalize_windows_paths.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 15");
@@ -1212,21 +1232,25 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
             M::up(include_str!(
                 "../src/migrations/sql/0008_record_extensions.sql"
             )),
+            M::up(include_str!("../src/migrations/sql/0009_consent_event.sql")),
             M::up(include_str!(
                 "../src/migrations/sql/0010_ranking_indexes.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0012_sessions_unique_active.sql"
+                "../src/migrations/sql/0011_consent_event_hardening.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_canonicalize_windows_paths.sql"
+                "../src/migrations/sql/0016_sessions_canonicalize_windows_paths.sql"
             )),
         ]);
         migrations.to_latest(&mut conn).expect("migrate to 15");

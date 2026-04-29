@@ -1,4 +1,4 @@
--- Migration 0016: strip Windows verbatim-path prefixes and case-fold
+-- Migration 0017: strip Windows verbatim-path prefixes and case-fold
 -- Windows-shape `project_root` values to match the runtime canonical
 -- form `SessionIdentity::new` produces.
 -- Brief source: §8.1 Session Lifecycle (canonical project_root).
@@ -139,4 +139,4 @@ UPDATE sessions
       OR project_root LIKE '\\%' );
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (16, '0016_sessions_strip_verbatim_and_case_fold', '', strftime('%s','now') * 1000);
+  VALUES (17, '0017_sessions_strip_verbatim_and_case_fold', '', strftime('%s','now') * 1000);

@@ -12,12 +12,20 @@ description = "Background workflows host (consolidate, promote, expire, evaluate
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-store-sqlite = { workspace = true }
 async-trait = { workspace = true }
+fs4 = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

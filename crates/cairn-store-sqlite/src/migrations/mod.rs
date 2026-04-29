@@ -13,17 +13,19 @@ const M0005_CONSENT: &str = include_str!("sql/0005_consent.sql");
 const M0006_DRIFT_HARDENING: &str = include_str!("sql/0006_drift_hardening.sql");
 const M0007_TOMBSTONE_REASON: &str = include_str!("sql/0007_tombstone_reason.sql");
 const M0008_RECORD_EXTENSIONS: &str = include_str!("sql/0008_record_extensions.sql");
+const M0009_CONSENT_EVENT: &str = include_str!("sql/0009_consent_event.sql");
 const M0010_RANKING_INDEXES: &str = include_str!("sql/0010_ranking_indexes.sql");
-const M0011_SESSIONS: &str = include_str!("sql/0011_sessions.sql");
-const M0012_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0012_sessions_unique_active.sql");
-const M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
-    include_str!("sql/0013_sessions_unique_active_coalesce.sql");
-const M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
-    include_str!("sql/0014_sessions_close_relative_project_root.sql");
-const M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
-    include_str!("sql/0015_sessions_canonicalize_windows_paths.sql");
-const M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
-    include_str!("sql/0016_sessions_strip_verbatim_and_case_fold.sql");
+const M0011_CONSENT_EVENT_HARDENING: &str = include_str!("sql/0011_consent_event_hardening.sql");
+const M0012_SESSIONS: &str = include_str!("sql/0012_sessions.sql");
+const M0013_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0013_sessions_unique_active.sql");
+const M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
+    include_str!("sql/0014_sessions_unique_active_coalesce.sql");
+const M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
+    include_str!("sql/0015_sessions_close_relative_project_root.sql");
+const M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
+    include_str!("sql/0016_sessions_canonicalize_windows_paths.sql");
+const M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
+    include_str!("sql/0017_sessions_strip_verbatim_and_case_fold.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -36,32 +38,38 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (6, "0006_drift_hardening", M0006_DRIFT_HARDENING),
     (7, "0007_tombstone_reason", M0007_TOMBSTONE_REASON),
     (8, "0008_record_extensions", M0008_RECORD_EXTENSIONS),
+    (9, "0009_consent_event", M0009_CONSENT_EVENT),
     (10, "0010_ranking_indexes", M0010_RANKING_INDEXES),
-    (11, "0011_sessions", M0011_SESSIONS),
     (
-        12,
-        "0012_sessions_unique_active",
-        M0012_SESSIONS_UNIQUE_ACTIVE,
+        11,
+        "0011_consent_event_hardening",
+        M0011_CONSENT_EVENT_HARDENING,
     ),
+    (12, "0012_sessions", M0012_SESSIONS),
     (
         13,
-        "0013_sessions_unique_active_coalesce",
-        M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE,
+        "0013_sessions_unique_active",
+        M0013_SESSIONS_UNIQUE_ACTIVE,
     ),
     (
         14,
-        "0014_sessions_close_relative_project_root",
-        M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT,
+        "0014_sessions_unique_active_coalesce",
+        M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE,
     ),
     (
         15,
-        "0015_sessions_canonicalize_windows_paths",
-        M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS,
+        "0015_sessions_close_relative_project_root",
+        M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT,
     ),
     (
         16,
-        "0016_sessions_strip_verbatim_and_case_fold",
-        M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
+        "0016_sessions_canonicalize_windows_paths",
+        M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS,
+    ),
+    (
+        17,
+        "0017_sessions_strip_verbatim_and_case_fold",
+        M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
     ),
 ];
 
@@ -78,12 +86,14 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0006_DRIFT_HARDENING),
         M::up(M0007_TOMBSTONE_REASON),
         M::up(M0008_RECORD_EXTENSIONS),
+        M::up(M0009_CONSENT_EVENT),
         M::up(M0010_RANKING_INDEXES),
-        M::up(M0011_SESSIONS),
-        M::up(M0012_SESSIONS_UNIQUE_ACTIVE),
-        M::up(M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE),
-        M::up(M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
-        M::up(M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
-        M::up(M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
+        M::up(M0011_CONSENT_EVENT_HARDENING),
+        M::up(M0012_SESSIONS),
+        M::up(M0013_SESSIONS_UNIQUE_ACTIVE),
+        M::up(M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE),
+        M::up(M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
+        M::up(M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
+        M::up(M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
     ])
 }

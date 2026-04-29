@@ -1,4 +1,4 @@
--- Migration 0012: placeholder for the partial unique index on
+-- Migration 0013: placeholder for the partial unique index on
 -- (user_id, agent_id, project_root) WHERE ended_at IS NULL.
 -- Brief source: §8.1 Session Lifecycle (single active session invariant).
 --
@@ -17,4 +17,4 @@
 -- for the actual index definition and dedup pass.
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (12, '0012_sessions_unique_active', '', strftime('%s','now') * 1000);
+  VALUES (13, '0013_sessions_unique_active', '', strftime('%s','now') * 1000);

@@ -23,6 +23,7 @@ pub mod canonical;
 pub mod capture;
 pub mod capture_attribution;
 pub mod capture_manifest;
+pub mod consent;
 pub mod error;
 pub mod evidence;
 pub mod filter;
@@ -47,6 +48,7 @@ pub use capture::{
 };
 pub use capture_attribution::attribute;
 pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};
+pub use consent::{ConsentEvent, ConsentEventError, ConsentKind, ConsentPayload};
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};
