@@ -41,6 +41,7 @@ whoami = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+cairn-core = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 insta = { workspace = true }
