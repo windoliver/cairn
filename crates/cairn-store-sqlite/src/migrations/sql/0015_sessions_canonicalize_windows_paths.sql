@@ -31,6 +31,11 @@
 -- callers can distinguish "your id is foreign" from "your id is over"
 -- — collapsing them silently would defeat that distinction.
 --
+-- Note: `//srv/share` is *not* classified as UNC here. The runtime
+-- classifier treats it as POSIX (a valid POSIX double-slash absolute
+-- path), so silently rewriting `/` to `\` would corrupt a legitimate
+-- POSIX identity. Only the literal `\\...` form is handled as UNC.
+--
 -- The canonical form combines: REPLACE('/', '\') to collapse slash
 -- spellings, then RTRIM(_, '\') to drop trailing separators — except
 -- for the drive-root case (`C:\` is exactly 3 chars and trimming it
@@ -53,7 +58,6 @@ WITH canonical AS (
       WHEN s.project_root IS NULL THEN NULL
       WHEN s.project_root LIKE '_:/%'
         OR s.project_root LIKE '_:\%'
-        OR s.project_root LIKE '//%'
         OR s.project_root LIKE '\\%' THEN
           CASE
             -- Drive root `X:\` (after slash-collapse, length 3) is
@@ -96,7 +100,6 @@ UPDATE sessions
  WHERE project_root IS NOT NULL
    AND ( project_root LIKE '_:/%'
       OR project_root LIKE '_:\%'
-      OR project_root LIKE '//%'
       OR project_root LIKE '\\%' );
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)

@@ -214,18 +214,21 @@ enum AbsoluteShape {
 /// Returns `None` for relative or otherwise-unrecognized inputs.
 ///
 /// Recognized forms:
-/// - POSIX: `/...` (but not `//...`, which is UNC).
+/// - Windows UNC: starts with `\\` (two literal backslashes).
 /// - Windows drive: `X:\...` or `X:/...` where `X` is `[A-Za-z]`.
-/// - Windows UNC: starts with `\\` or `//` (server-share follows).
+/// - POSIX: starts with `/` (including `//foo`, which POSIX permits as
+///   an implementation-defined absolute pathname). Treating `//...` as
+///   POSIX rather than Windows-UNC-with-forward-slashes is the safer
+///   choice: a POSIX path is only ever rewritten by user action, while
+///   a UNC misclassification would have the migration silently rewrite
+///   `/` to `\` inside a legitimate POSIX identity.
 fn classify_absolute(raw: &str) -> Option<AbsoluteShape> {
     let bytes = raw.as_bytes();
-    // UNC: two leading separators, in either spelling. Has to come
-    // before the POSIX check, otherwise `//srv/share` would classify as
-    // POSIX and collapse to a different identity.
-    if bytes.len() >= 2
-        && (bytes[0] == b'\\' || bytes[0] == b'/')
-        && (bytes[1] == b'\\' || bytes[1] == b'/')
-    {
+    // UNC: two literal leading backslashes. The forward-slash form
+    // `//srv/share` exists on Windows but is also a valid POSIX path
+    // shape, and we cannot disambiguate from a string alone — defer to
+    // POSIX classification below.
+    if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
         return Some(AbsoluteShape::WindowsUnc);
     }
     // Windows drive: `X:\` or `X:/`.
@@ -524,10 +527,15 @@ mod tests {
             .expect("Windows UNC must hydrate on any host");
         assert_eq!(unc.project_root.as_deref(), Some(r"\\srv\share"));
 
-        // Forward-slash UNC also classifies as UNC and canonicalizes.
-        let unc_fwd = SessionIdentity::new(ident_user(), ident_agent(), Some("//srv/share".into()))
-            .expect("forward-slash UNC must hydrate on any host");
-        assert_eq!(unc_fwd.project_root.as_deref(), Some(r"\\srv\share"));
+        // `//srv/share` is POSIX double-slash, not Windows UNC. We
+        // can't disambiguate the two from a string alone, so we pick
+        // the conservative interpretation — preserving a POSIX
+        // identity is safer than silently rewriting it to backslash
+        // form.
+        let posix_double =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("//srv/share".into()))
+                .expect("POSIX double-slash absolute is accepted");
+        assert_eq!(posix_double.project_root.as_deref(), Some("//srv/share"));
     }
 
     #[test]

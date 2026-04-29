@@ -123,7 +123,7 @@ async fn touch_advances_last_activity() {
         .await
         .expect("create");
     let before = store
-        .get_session(&session.id)
+        .get_session(&session.id, &id)
         .await
         .expect("get")
         .expect("present");
@@ -137,7 +137,7 @@ async fn touch_advances_last_activity() {
         "active session should bump",
     );
     let after = store
-        .get_session(&session.id)
+        .get_session(&session.id, &id)
         .await
         .expect("get")
         .expect("present");
@@ -174,9 +174,10 @@ async fn touch_on_ended_session_is_noop() {
 #[tokio::test]
 async fn metadata_round_trips() {
     let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
     let session = store
         .create_session(
-            &identity(Some("/repo")),
+            &id,
             NewSessionMetadata {
                 channel: Some("chat".into()),
                 priority: Some("high".into()),
@@ -187,7 +188,7 @@ async fn metadata_round_trips() {
         .expect("create");
 
     let got = store
-        .get_session(&session.id)
+        .get_session(&session.id, &id)
         .await
         .expect("get")
         .expect("present");
@@ -810,7 +811,9 @@ async fn migration_ends_active_rows_with_relative_project_root() {
         ("S_NULL", "usr:abs4", None, false),
     ] {
         let sess = store
-            .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
+            .get_session_unchecked(
+                &cairn_core::domain::session::SessionId::parse(sid).expect("parse"),
+            )
             .await
             .expect("get")
             .unwrap_or_else(|| panic!("{sid} present"));
@@ -889,7 +892,9 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         // also not be corrupted into `\`.
         for (sid, user, root) in [
             ("S_DRV_FWD", "usr:win1", "C:/repo"),
-            ("S_UNC_FWD", "usr:win2", "//srv/share"),
+            // `//srv/share` is treated as POSIX, not UNC, so it
+            // passes through migration 0015 unchanged.
+            ("S_POSIX_DBL", "usr:win2", "//srv/share"),
             ("S_DRV_OK", "usr:win3", r"D:\repo"),
             ("S_POSIX_OK", "usr:nix1", "/abs/repo"),
             // Mixed-slash variants — a drive path that starts canonical
@@ -925,7 +930,7 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
 
     for (sid, expect_root) in [
         ("S_DRV_FWD", r"C:\repo"),
-        ("S_UNC_FWD", r"\\srv\share"),
+        ("S_POSIX_DBL", "//srv/share"),
         ("S_DRV_OK", r"D:\repo"),
         ("S_POSIX_OK", "/abs/repo"),
         ("S_DRV_MIX", r"E:\foo\bar"),
@@ -935,7 +940,9 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         ("S_DRV_ROOT", r"G:\"),
     ] {
         let sess = store
-            .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
+            .get_session_unchecked(
+                &cairn_core::domain::session::SessionId::parse(sid).expect("parse"),
+            )
             .await
             .expect("get")
             .unwrap_or_else(|| panic!("{sid} present"));
