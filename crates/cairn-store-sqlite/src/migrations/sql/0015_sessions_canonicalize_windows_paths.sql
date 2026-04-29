@@ -1,28 +1,43 @@
 -- Migration 0015: canonicalize legacy Windows-shape `project_root`
--- values to backslash form so they match the canonical strings produced
--- by `SessionIdentity::new`.
+-- values to the backslash + trimmed-trailing-separator form
+-- `SessionIdentity::new` produces.
 -- Brief source: §8.1 Session Lifecycle (canonical project_root).
 --
--- The current `normalize_project_root` rewrites `C:/repo` → `C:\repo`
--- and `//srv/share` → `\\srv\share` before lookup/insert, but the store
--- keys the lookup query (`project_root IS ?3`) and the partial unique
--- index (`COALESCE(project_root, '')`) on the raw stored string. Legacy
--- rows stored as `C:/repo` (or with mixed slashes) would therefore stop
--- matching post-upgrade callers normalized to `C:\repo`, leaving the
--- old session active but unreachable while resolve_or_create mints a
--- replacement — a silent session split.
+-- `normalize_project_root` collapses every Windows-shape variant to one
+-- string: `C:\repo`, `C:/repo`, `C:\repo\`, `C:/repo/`, and the
+-- mixed-slash forms in between all become `C:\repo`. The store keys
+-- the lookup query (`project_root IS ?3`) and the partial unique index
+-- (`COALESCE(project_root, '')`) on the raw stored string, so any
+-- legacy row that doesn't already match the runtime canonical form
+-- becomes unreachable post-upgrade — a silent session split that
+-- defeats the §8.1 single-active-session invariant and leaves explicit
+-- ids effectively unrecoverable.
 --
--- Step 1: deduplicate. After canonicalization, two legacy rows like
--- `C:/repo` and `C:\repo` for the same `(user, agent)` collapse to one
--- canonical key and would violate
--- `sessions_one_active_per_identity_idx`. Mirror migration 0013's
--- ROW_NUMBER pattern over the canonical key, end all but the newest
--- (last_activity_at DESC, session_id DESC) per partition.
+-- Two-step migration:
 --
--- Step 2: rewrite. Update the survivors so their stored
--- `project_root` matches the canonical form. Restrict the rewrite to
--- Windows-shape rows (drive `_:/...` or UNC `//...`) so POSIX paths
--- containing `/` are not corrupted into `\`.
+-- Step 1 (dedup): partition active rows on the canonical form and
+-- end all but the newest per partition. Mirrors migration 0013's
+-- ROW_NUMBER pattern. Without this, the rewrite step would violate
+-- `sessions_one_active_per_identity_idx` whenever two legacy
+-- spellings of the same path coexist.
+--
+-- Step 2 (rewrite): rewrite every Windows-shape row — active or
+-- ended — to the canonical form. Ended rows must be rewritten too so
+-- `resolve_explicit_session` can still match them: that path checks
+-- identity equality before the ended-state check, so an ended row
+-- still carrying the legacy raw string would surface as
+-- `SessionIdentityMismatch` (a security-class error) instead of the
+-- `SessionEnded` the caller expects. Both error variants exist so
+-- callers can distinguish "your id is foreign" from "your id is over"
+-- — collapsing them silently would defeat that distinction.
+--
+-- The canonical form combines: REPLACE('/', '\') to collapse slash
+-- spellings, then RTRIM(_, '\') to drop trailing separators — except
+-- for the drive-root case (`C:\` is exactly 3 chars and trimming it
+-- to `C:` would make it drive-relative). UNC roots like `\\` are not
+-- representable as a meaningful project root on their own, so the
+-- runtime never produces them and the migration doesn't try to
+-- preserve them.
 
 WITH canonical AS (
   SELECT
@@ -30,12 +45,25 @@ WITH canonical AS (
     s.user_id,
     s.agent_id,
     s.last_activity_at,
-    -- Canonicalize only Windows-shape rows. POSIX rows pass through.
+    -- Canonicalize only Windows-shape rows. POSIX rows pass through
+    -- (their `/` characters are real path separators that must not
+    -- become `\`, and trailing `\` on POSIX is a filename character
+    -- that must not be trimmed).
     CASE
-      WHEN s.project_root LIKE '_:/%' OR s.project_root LIKE '_:\%'
-        THEN REPLACE(s.project_root, '/', '\')
-      WHEN s.project_root LIKE '//%' OR s.project_root LIKE '\\%'
-        THEN REPLACE(s.project_root, '/', '\')
+      WHEN s.project_root IS NULL THEN NULL
+      WHEN s.project_root LIKE '_:/%'
+        OR s.project_root LIKE '_:\%'
+        OR s.project_root LIKE '//%'
+        OR s.project_root LIKE '\\%' THEN
+          CASE
+            -- Drive root `X:\` (after slash-collapse, length 3) is
+            -- already canonical and must not have its trailing `\`
+            -- trimmed.
+            WHEN length(REPLACE(s.project_root, '/', '\')) = 3
+                 AND REPLACE(s.project_root, '/', '\') LIKE '_:\'
+              THEN REPLACE(s.project_root, '/', '\')
+            ELSE RTRIM(REPLACE(s.project_root, '/', '\'), '\')
+          END
       ELSE s.project_root
     END AS canon_root
   FROM sessions s
@@ -53,18 +81,19 @@ UPDATE sessions
    SET ended_at = strftime('%s','now') * 1000
  WHERE session_id IN (SELECT session_id FROM ranked WHERE rn > 1);
 
--- Step 2: rewrite survivors. Cover every Windows-shape row — drive in
--- either spelling (`_:/%`, `_:\%`) and UNC in either spelling (`//%`,
--- `\\%`) — so mixed-slash legacy values like `C:\foo/bar` and
--- `\\srv/share/sub` also collapse to the canonical backslash form
--- `SessionIdentity::new` produces. REPLACE on a string with no `/` is
--- a no-op, so listing already-canonical shapes here is harmless. Limit
--- to active rows so already-ended legacy rows keep their original
--- audit trail.
+-- Step 2: rewrite every Windows-shape row (active OR ended) to the
+-- canonical form. Same two-step CASE: slash-collapse, then trim
+-- trailing `\` except when the result is the bare drive root.
 UPDATE sessions
-   SET project_root = REPLACE(project_root, '/', '\')
- WHERE ended_at IS NULL
-   AND project_root IS NOT NULL
+   SET project_root = (
+     CASE
+       WHEN length(REPLACE(project_root, '/', '\')) = 3
+            AND REPLACE(project_root, '/', '\') LIKE '_:\'
+         THEN REPLACE(project_root, '/', '\')
+       ELSE RTRIM(REPLACE(project_root, '/', '\'), '\')
+     END
+   )
+ WHERE project_root IS NOT NULL
    AND ( project_root LIKE '_:/%'
       OR project_root LIKE '_:\%'
       OR project_root LIKE '//%'

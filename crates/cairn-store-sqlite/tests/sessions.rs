@@ -826,6 +826,10 @@ async fn migration_ends_active_rows_with_relative_project_root() {
 }
 
 #[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "exhaustive seed/expect tables document every Windows-shape variant the migration covers; splitting them would obscure the intent"
+)]
 async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
     // A vault from a prior resolver that stored `C:/repo` (or
     // `//srv/share`) survives migration 0014 (those are absolute paths
@@ -895,6 +899,16 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
             // canonical backslash form by the rewrite step.
             ("S_DRV_MIX", "usr:win4", r"E:\foo/bar"),
             ("S_UNC_MIX", "usr:win5", r"\\srv\share/sub"),
+            // Trailing-separator variants — runtime
+            // `normalize_project_root` trims these, so the migration
+            // must too or upgrade splits the session.
+            ("S_DRV_TRAIL", "usr:win6", "F:/repo/"),
+            ("S_UNC_TRAIL", "usr:win7", r"\\srv\share\"),
+            // Drive-root case: `G:\` must NOT be trimmed to `G:` (which
+            // would be drive-relative on Windows and rejected by the
+            // runtime classifier). Slash variant `G:/` must collapse to
+            // `G:\` and stay there.
+            ("S_DRV_ROOT", "usr:win8", "G:/"),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -916,6 +930,9 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         ("S_POSIX_OK", "/abs/repo"),
         ("S_DRV_MIX", r"E:\foo\bar"),
         ("S_UNC_MIX", r"\\srv\share\sub"),
+        ("S_DRV_TRAIL", r"F:\repo"),
+        ("S_UNC_TRAIL", r"\\srv\share"),
+        ("S_DRV_ROOT", r"G:\"),
     ] {
         let sess = store
             .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
@@ -948,6 +965,97 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         .expect("find")
         .expect("present");
     assert_eq!(found.id.as_str(), "S_DRV_FWD");
+}
+
+#[tokio::test]
+async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve() {
+    // `resolve_explicit_session` checks identity equality before the
+    // ended-state check (so a foreign-id reuse can never reach a
+    // store-level "this session ended" probe). If 0015 left ended
+    // legacy rows in their raw `C:/repo` form, a caller reopening
+    // their own historical session under the canonical `C:\repo`
+    // would see `SessionIdentityMismatch` instead of `SessionEnded`,
+    // breaking the §8.1 fail-closed semantics. Ended rows must be
+    // canonicalized too.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 14");
+
+        // Seed an *ended* legacy row stored as `C:/repo/`.
+        conn.execute(
+            "INSERT INTO sessions \
+               (session_id, user_id, agent_id, project_root, title, \
+                created_at, last_activity_at, ended_at) \
+             VALUES ('S_ENDED_LEG', 'usr:winx', 'agt:cli:x:y:v1', \
+                     'C:/repo/', '', 100, 100, 200)",
+            [],
+        )
+        .expect("insert ended");
+    }
+
+    let store = open(&db_path).await.expect("open after 0015");
+
+    // Caller's canonical identity for the same project.
+    let canonical = SessionIdentity::new(
+        Identity::parse("usr:winx").expect("user"),
+        Identity::parse("agt:cli:x:y:v1").expect("agent"),
+        Some(r"C:\repo".into()),
+    )
+    .expect("identity");
+    let id = cairn_core::domain::session::SessionId::parse("S_ENDED_LEG").expect("parse");
+
+    // Without canonicalization of ended rows, this would surface
+    // SessionIdentityMismatch. With 0015's full canonicalization, it
+    // surfaces SessionEnded — the §8.1 contract.
+    let err = store
+        .resolve_explicit_session(&id, &canonical)
+        .await
+        .expect_err("ended legacy row must surface a typed error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("is ended"),
+        "expected SessionEnded for canonicalized ended row, got `{msg}`",
+    );
 }
 
 #[tokio::test]
