@@ -44,7 +44,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cairn_core::domain::ConsentEvent;
-use cairn_store_sqlite::consent::{max_rowid, read_since_rowid};
+use cairn_store_sqlite::consent::read_since_rowid;
 use cairn_store_sqlite::error::StoreError;
 use fs4::fs_std::FileExt;
 use rusqlite::Connection;
@@ -199,11 +199,24 @@ impl ConsentLogMaterializer {
     pub fn tick(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
         // Re-read the authoritative cursor under the lock — a peer
-        // process may have advanced past us since `open`.
-        if let Some(rowid) = recover_cursor_from_log(&self.log_path)?.cursor
-            && rowid > self.cursor
-        {
-            self.cursor = rowid;
+        // process may have advanced past us since `open`. Fail closed
+        // on the same condition `open()` does: the log is non-empty
+        // and the bounded recovery scan found nothing parseable. A
+        // long-lived materializer with a stale in-memory cursor would
+        // otherwise append after garbage or skip already-mirrored rows.
+        match recover_cursor_from_log(&self.log_path)?.cursor {
+            Some(rowid) if rowid > self.cursor => self.cursor = rowid,
+            Some(_) => {}
+            None => {
+                if log_is_empty(&self.log_path)? {
+                    // Log went empty (e.g., truncate-by-operator) —
+                    // reset the in-memory cursor so the next read
+                    // replays from rowid 0.
+                    self.cursor = 0;
+                } else {
+                    return Err(MirrorError::LogCorrupt);
+                }
+            }
         }
 
         let pending = read_since_rowid(conn, self.cursor)?;
@@ -259,8 +272,8 @@ impl ConsentLogMaterializer {
             .sync_all()?;
         let _guard = LockGuard::acquire(&lock_path)?;
 
-        rebuild_log_to(&log_path, conn)?;
-        let cursor = max_rowid(conn)?;
+        let rebuild = rebuild_log_to(&log_path, conn)?;
+        let cursor = rebuild.high_water;
         let _ = write_cursor_hint(&cursor_path, cursor);
 
         Ok(Self {
@@ -284,10 +297,13 @@ impl ConsentLogMaterializer {
     /// Returns [`MirrorError`] on store, I/O, or encoding failure.
     pub fn rebuild_from_db(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
-        let written = rebuild_log_to(&self.log_path, conn)?;
-        self.cursor = max_rowid(conn).unwrap_or(0);
+        let rebuild = rebuild_log_to(&self.log_path, conn)?;
+        // Advance only to the rowid we proved was serialized — never to
+        // `max_rowid(conn)`, which could include rows inserted after the
+        // replay query and would create an audit gap.
+        self.cursor = rebuild.high_water;
         let _ = write_cursor_hint(&self.cursor_path, self.cursor);
-        Ok(written)
+        Ok(rebuild.written)
     }
 
     /// Read the on-disk log line by line, returning the JSON envelope
@@ -378,14 +394,25 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
     Ok(())
 }
 
+/// Outcome of [`rebuild_log_to`]: the rows actually serialized and the
+/// highest rowid among them. The cursor must be set to `high_water`,
+/// not to `max_rowid(conn)` — concurrent writers can insert past the
+/// replay snapshot, and advancing past unserialized rows would create
+/// an append-only audit gap on the next tick.
+struct RebuildOutcome {
+    written: usize,
+    high_water: i64,
+}
+
 /// Build the rebuilt log in a temp file, then atomically rename it over
 /// the live log. A crash or store error between truncate and replay-
 /// complete never leaves the vault with a half-empty audit mirror —
 /// readers see either the old log or the fully-replayed new one,
 /// nothing in between. Caller must hold the vault lock.
-fn rebuild_log_to(log_path: &Path, conn: &Connection) -> Result<usize, MirrorError> {
+fn rebuild_log_to(log_path: &Path, conn: &Connection) -> Result<RebuildOutcome, MirrorError> {
     let tmp = log_path.with_extension("log.tmp");
     let mut written = 0usize;
+    let mut high_water = 0i64;
     {
         let mut f = OpenOptions::new()
             .create(true)
@@ -396,6 +423,7 @@ fn rebuild_log_to(log_path: &Path, conn: &Connection) -> Result<usize, MirrorErr
         for (rowid, event) in pending {
             let line = serde_json::to_string(&LogLine { rowid, event })?;
             writeln!(f, "{line}")?;
+            high_water = rowid;
             written += 1;
         }
         f.flush()?;
@@ -403,7 +431,10 @@ fn rebuild_log_to(log_path: &Path, conn: &Connection) -> Result<usize, MirrorErr
     }
     std::fs::rename(&tmp, log_path)?;
     fsync_parent(log_path)?;
-    Ok(written)
+    Ok(RebuildOutcome {
+        written,
+        high_water,
+    })
 }
 
 /// Result of a tail scan: the recovered cursor (if any) and the byte

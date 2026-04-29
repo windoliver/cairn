@@ -455,15 +455,16 @@ fn consent_journal_payload_missing_shape_is_rejected() {
     // Round 4 hardening: an empty object `{}` with no `shape` key bypassed
     // the original trigger because `json_extract` returned NULL and a NULL
     // WHEN clause never fires. Now the trigger guards on `json_type` of
-    // `$.shape` returning the literal `'text'`.
+    // `$.shape` returning the literal `'text'`. We use `policy_change` to
+    // isolate this assertion from the round-5 hash-payload trigger.
     let conn = open_in_memory().expect("open");
     let err = conn
         .execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-noshape', 'hash:11111111111111111111111111111111', \
-                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+             VALUES ('c-noshape', 'sensors.x', \
+                     'global', 'GRANT', 'usr:t', 0, 'policy_change', \
                      'usr:t', '2026-04-28T12:00:00Z', '{}')",
             [],
         )
@@ -597,6 +598,83 @@ fn consent_journal_hash_kind_target_id_hash_shape_enforced() {
         format!("{err}").contains("target_id_hash must be sha256:64hex or hash:32..128hex"),
         "raw target_id_hash must be rejected, got: {err}"
     );
+}
+
+#[test]
+fn consent_journal_sensor_payload_requires_sensor_label() {
+    // Round 5 hardening: the previous trigger only fired when
+    // `sensor_label` was a text mismatch, letting payloads without
+    // `sensor_label` through. Serde would then fail to decode the
+    // append-only row at mirror time. Now the trigger fires on missing /
+    // non-text values too.
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, sensor_id, payload_json) \
+             VALUES ('c-no-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
+                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'local:hook:host:v1', '{\"shape\":\"sensor_toggle\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor_id must equal payload.sensor_label"),
+        "missing sensor_label must be rejected, got: {err}"
+    );
+
+    // Numeric (non-text) sensor_label is also rejected.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, sensor_id, payload_json) \
+             VALUES ('c-num-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
+                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'local:hook:host:v1', '{\"shape\":\"sensor_toggle\",\"sensor_label\":42}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor_id must equal payload.sensor_label"),
+        "non-text sensor_label must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_hash_kind_requires_target_id_hash_text() {
+    // Round 5 hardening: payloads missing or non-text `target_id_hash`
+    // were previously accepted because the trigger only ran when
+    // `json_type = 'text'`. Now missing / null / numeric all fail.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    for (label, payload) in &[
+        ("missing", "{\"shape\":\"intent_receipt\"}".to_owned()),
+        (
+            "null",
+            "{\"shape\":\"intent_receipt\",\"target_id_hash\":null}".to_owned(),
+        ),
+        (
+            "number",
+            "{\"shape\":\"intent_receipt\",\"target_id_hash\":7}".to_owned(),
+        ),
+    ] {
+        let err = conn
+            .execute(
+                "INSERT INTO consent_journal \
+                  (consent_id, subject, scope, decision, granted_by, decided_at, \
+                   kind, actor, decided_at_iso, payload_json) \
+                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                         'usr:t', '2026-04-28T12:00:00Z', ?)",
+                params![format!("c-{label}"), hash, payload],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("target_id_hash"),
+            "{label} target_id_hash must be rejected, got: {err}"
+        );
+    }
 }
 
 #[test]

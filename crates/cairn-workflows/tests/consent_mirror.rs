@@ -162,6 +162,47 @@ fn forget_receipt_log_is_body_free() {
 }
 
 #[test]
+fn tick_fails_closed_when_log_corrupted_after_open() {
+    // Round 5 hardening: a long-lived materializer must not silently
+    // continue when the on-disk log is replaced with garbage between
+    // ticks. `tick()` re-reads the cursor under the lock and fails
+    // closed if recovery finds nothing parseable in a non-empty log.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    mirror.tick(&conn).expect("first tick");
+
+    // Corrupt the log behind the materializer's back.
+    std::fs::write(dir.path().join("consent.log"), "garbage line\n").expect("corrupt");
+
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    let err = mirror.tick(&conn).expect_err("tick must fail closed");
+    assert!(matches!(err, MirrorError::LogCorrupt));
+}
+
+#[test]
+fn tick_resets_cursor_when_log_truncated_to_empty() {
+    // Truncation-to-empty is recoverable in-place: there are no
+    // unparseable bytes to honor, so the materializer resets its
+    // cursor and replays from rowid 0 on the next read.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    mirror.tick(&conn).expect("first tick");
+
+    // Operator truncates the log to zero bytes.
+    std::fs::write(dir.path().join("consent.log"), "").expect("truncate");
+
+    let n = mirror.tick(&conn).expect("re-tick after truncate");
+    assert_eq!(n, 1, "must re-mirror the existing row");
+    assert_eq!(mirror.read_lines().expect("read").len(), 1);
+}
+
+#[test]
 fn cursor_recovery_uses_log_when_sidecar_lies() {
     // The log is the authoritative cursor source. If the sidecar
     // disagrees with the log (e.g., crash between fsync and rename), the

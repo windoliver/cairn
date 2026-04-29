@@ -185,6 +185,11 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal sensor kinds require sensor_id');
 END;
 
+-- Sensor kinds require `payload.sensor_label` to be present, of JSON
+-- text type, and equal to `sensor_id`. Without the absence/non-text
+-- branch, a direct-SQL writer could insert a sensor row missing
+-- `sensor_label`; serde would then fail to deserialize the row at
+-- mirror time and the append-only journal would brick the materializer.
 CREATE TRIGGER consent_journal_sensor_id_matches_payload
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -192,10 +197,13 @@ CREATE TRIGGER consent_journal_sensor_id_matches_payload
    AND NEW.sensor_id IS NOT NULL
    AND NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
-   AND json_type(NEW.payload_json, '$.sensor_label') = 'text'
-   AND json_extract(NEW.payload_json, '$.sensor_label') IS NOT NEW.sensor_id
+   AND (
+        json_type(NEW.payload_json, '$.sensor_label') IS NOT 'text'
+     OR json_extract(NEW.payload_json, '$.sensor_label') IS NOT NEW.sensor_id
+   )
 BEGIN
-  SELECT RAISE(ABORT, 'consent_journal sensor_id must equal payload.sensor_label');
+  SELECT RAISE(ABORT,
+    'consent_journal sensor_id must equal payload.sensor_label (and payload.sensor_label must be text)');
 END;
 
 -- Subject body must equal the sensor identity (`snr:` + label) for
@@ -248,14 +256,20 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal hash-kind subject must be sha256:64hex or hash:32..128hex');
 END;
 
+-- Hash-kind payloads MUST carry `target_id_hash` as a JSON text value of
+-- the canonical hash shape. The trigger fires when the field is missing
+-- or non-text (`json_type IS NOT 'text'`) so a row missing the field
+-- cannot reach the journal — serde would otherwise fail at mirror time
+-- and brick decoding.
 CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
   WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
    AND NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
-   AND json_type(NEW.payload_json, '$.target_id_hash') = 'text'
-   AND NOT (
+   AND (
+        json_type(NEW.payload_json, '$.target_id_hash') IS NOT 'text'
+     OR NOT (
         (substr(json_extract(NEW.payload_json, '$.target_id_hash'), 1, 7) = 'sha256:'
            AND length(json_extract(NEW.payload_json, '$.target_id_hash')) = 71
            AND substr(json_extract(NEW.payload_json, '$.target_id_hash'), 8)
@@ -264,10 +278,11 @@ CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
            AND length(json_extract(NEW.payload_json, '$.target_id_hash')) BETWEEN 37 AND 133
            AND substr(json_extract(NEW.payload_json, '$.target_id_hash'), 6)
                  NOT GLOB '*[^0-9a-f]*')
+        )
    )
 BEGIN
   SELECT RAISE(ABORT,
-    'consent_journal hash-kind payload.target_id_hash must be sha256:64hex or hash:32..128hex');
+    'consent_journal hash-kind payload.target_id_hash must be sha256:64hex or hash:32..128hex (text)');
 END;
 
 -- Forget-intent rows get a kind-specific error message so operators can
