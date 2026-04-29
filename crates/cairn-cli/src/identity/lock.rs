@@ -4,9 +4,14 @@
 //! `.cairn/vault.binding.lock`.  The lock is released automatically when the
 //! guard is dropped.  Callers that need the 30-second retry window use
 //! [`VaultBindingLock::acquire`].
+//!
+//! [`IdentityLockGuard`] wraps a per-identity exclusive flock on
+//! `.cairn/identity/<slug>.lock`.  This prevents concurrent rotations or
+//! other mutating operations on the same identity from racing each other
+//! (spec §3.6 step 0).
 
 use std::{
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io,
     path::Path,
     thread,
@@ -86,6 +91,104 @@ impl VaultBindingLock {
 }
 
 impl Drop for VaultBindingLock {
+    fn drop(&mut self) {
+        // fs2's `FileExt::unlock()` releases the flock; ignore errors on drop.
+        let _ = self.file.unlock();
+    }
+}
+
+// ── IdentityLockGuard ─────────────────────────────────────────────────────────
+
+/// Duration after which [`IdentityLockGuard::acquire`] gives up (when
+/// `wait = true`).
+const IDENTITY_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to sleep between identity-lock retries.
+const IDENTITY_LOCK_RETRY: Duration = Duration::from_millis(100);
+
+/// Errors returned by [`IdentityLockGuard::acquire`].
+#[derive(Debug, thiserror::Error)]
+pub(super) enum IdentityLockError {
+    /// The lock is held by another process and `wait = false` was requested,
+    /// or the 30-second retry window expired.
+    #[error("identity lock busy")]
+    Busy,
+    /// An OS-level I/O error prevented opening or locking the lock file.
+    #[error("identity lock I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// RAII guard that holds an exclusive advisory flock on a per-identity lock
+/// file for the duration of a mutating identity operation (spec §3.6 step 0).
+///
+/// Lock files are stored at `.cairn/identity/<slug>.lock` where `<slug>` is
+/// derived from the identity wire form by replacing `:` with `_`.  The file
+/// is **not** deleted on drop — subsequent acquirers flock it again without a
+/// TOCTOU window.
+pub(super) struct IdentityLockGuard {
+    // Named `file` (not `_file`) so Drop can call unlock() on it.
+    #[allow(clippy::used_underscore_binding)]
+    file: File,
+}
+
+impl IdentityLockGuard {
+    /// Acquire an exclusive per-identity flock.
+    ///
+    /// The lock file is `.cairn/identity/<slug>.lock` where `<slug>` is the
+    /// identity wire form with `:` replaced by `_`.
+    ///
+    /// When `wait = true` the call blocks (retrying every 100 ms) for up to
+    /// 30 seconds.  When `wait = false` the call returns
+    /// [`IdentityLockError::Busy`] immediately if the lock is held.
+    ///
+    /// # Errors
+    /// Returns [`IdentityLockError::Busy`] if the lock cannot be acquired
+    /// within the timeout, or [`IdentityLockError::Io`] on OS errors.
+    pub(super) fn acquire(
+        cairn_dir: &Path,
+        identity_wire: &str,
+        wait: bool,
+    ) -> Result<Self, IdentityLockError> {
+        // Derive a filesystem-safe slug from the wire form.
+        let slug = identity_wire.replace(':', "_");
+        let lock_dir = cairn_dir.join("identity");
+        fs::create_dir_all(&lock_dir)?;
+        let lock_path = lock_dir.join(format!("{slug}.lock"));
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        if !wait {
+            // Non-blocking: return Busy immediately if held.
+            return match file.try_lock_exclusive() {
+                Ok(()) => Ok(Self { file }),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(IdentityLockError::Busy),
+                Err(e) => Err(IdentityLockError::Io(e)),
+            };
+        }
+
+        // Blocking with 30-second timeout.
+        let deadline = Instant::now() + IDENTITY_LOCK_TIMEOUT;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self { file }),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(IdentityLockError::Busy);
+                    }
+                    thread::sleep(IDENTITY_LOCK_RETRY);
+                }
+                Err(e) => return Err(IdentityLockError::Io(e)),
+            }
+        }
+    }
+}
+
+impl Drop for IdentityLockGuard {
     fn drop(&mut self) {
         // fs2's `FileExt::unlock()` releases the flock; ignore errors on drop.
         let _ = self.file.unlock();
