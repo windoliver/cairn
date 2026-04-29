@@ -18,6 +18,7 @@
 //!   JSON form so a YAML projector reuses the same `serde` derive.
 
 pub mod actor_chain;
+pub mod body_hash;
 pub mod canonical;
 pub mod capture;
 pub mod capture_attribution;
@@ -32,10 +33,12 @@ pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
+pub mod target_id;
 pub mod taxonomy;
 pub mod timestamp;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
+pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{
     CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
@@ -51,7 +54,8 @@ pub use projection::{
     ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
 };
 pub use provenance::Provenance;
-pub use record::MemoryRecord;
+pub use record::{MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
+pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use timestamp::Rfc3339Timestamp;

@@ -343,7 +343,7 @@ mod tests {
         };
     }
 
-    use crate::domain::record::tests::sample_stored_record;
+    use crate::domain::record::tests_export::sample_stored_record;
 
     fn fixture_record(suffix_id: &str) -> StoredRecord {
         // RecordId is constructed via `parse` — the suffix must be valid
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn project_records_section_renders_leaf_link_and_backlink_count() {
-        use crate::domain::record::tests::sample_stored_record;
+        use crate::domain::record::tests_export::sample_stored_record;
         let stored = sample_stored_record(1);
         let leaf = format!(
             "{}_{}.md",
@@ -558,7 +558,7 @@ mod tests {
         // A record at `raw/a/x.md` (not the `<kind>_<id>.md` reconstructed
         // shape) must render its leaf as `a/x.md` from `raw/_index.md`, and
         // its backlink count must be matched against the actual path.
-        use crate::domain::record::tests::sample_stored_record;
+        use crate::domain::record::tests_export::sample_stored_record;
         let stored = sample_stored_record(1);
         let actual_path = PathBuf::from("raw/a/x.md");
         let state = FolderState {
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn project_records_section_renders_zero_backlinks_when_state_empty() {
-        use crate::domain::record::tests::sample_stored_record;
+        use crate::domain::record::tests_export::sample_stored_record;
         let stored = sample_stored_record(1);
         let leaf = format!(
             "{}_{}.md",

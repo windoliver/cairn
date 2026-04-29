@@ -368,7 +368,7 @@ mod tests {
 
     use crate::contract::memory_store::StoredRecord;
     use crate::domain::record::RecordId;
-    use crate::domain::record::tests::sample_stored_record;
+    use crate::domain::record::tests_export::sample_stored_record;
     use std::collections::BTreeMap;
 
     fn record_with_body(version: u32, body: &str) -> StoredRecord {

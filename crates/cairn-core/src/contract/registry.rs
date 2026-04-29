@@ -544,8 +544,11 @@ mod tests {
     use super::*;
     use crate::contract::llm_provider::LLMProviderPlugin;
     use crate::contract::memory_store::{
-        CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
+        CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+        ListPage, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion,
+        StoreError, TombstoneReason, UpsertOutcome,
     };
+    use crate::domain::{MemoryRecord, RecordId, TargetId};
 
     // -- PluginName tests -------------------------------------------------
 
@@ -612,42 +615,49 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             self.range
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<crate::contract::memory_store::StoredRecord>,
-            crate::contract::memory_store::StoreError,
-        > {
-            Err(crate::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: crate::domain::record::MemoryRecord,
-        ) -> Result<
-            crate::contract::memory_store::StoredRecord,
-            crate::contract::memory_store::StoreError,
-        > {
-            Err(crate::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<crate::contract::memory_store::StoredRecord>,
-            crate::contract::memory_store::StoreError,
-        > {
-            Err(crate::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0))
     }
 
     fn incompatible() -> VersionRange {

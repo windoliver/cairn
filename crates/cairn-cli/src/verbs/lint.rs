@@ -37,7 +37,11 @@ pub async fn fix_markdown_handler(
     vault_root: &Path,
 ) -> anyhow::Result<FixMarkdownResult> {
     let projector = MarkdownProjector;
-    let records = store.list_active().await.context("store: list_active")?;
+    let records = store
+        .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: list_active_stored")?;
     let mut written = Vec::new();
     let mut already_current: usize = 0;
 
@@ -126,7 +130,11 @@ pub async fn fix_folders_handler(
     vault_root: &Path,
 ) -> anyhow::Result<FixFoldersResult> {
     let projector = MarkdownProjector;
-    let records = store.list_active().await.context("store: list_active")?;
+    let records = store
+        .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: list_active_stored")?;
 
     // 1. Build record_paths from MarkdownProjector — same shape used by
     //    --fix-markdown, so callers get a coherent view.
@@ -412,7 +420,7 @@ mod tests {
 
         let store = FixtureStore::default();
         let record = sample_record();
-        store.upsert(record).await.unwrap();
+        store.upsert(&record).await.unwrap();
 
         let vault_root = tempfile::tempdir().unwrap();
         let result = fix_markdown_handler(&store, vault_root.path())

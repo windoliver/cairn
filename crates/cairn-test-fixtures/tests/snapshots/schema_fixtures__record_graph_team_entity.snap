@@ -4,6 +4,7 @@ expression: "&r"
 ---
 {
   "id": "01HQZX9F5N0000000000000004",
+  "target_id": "01HQZX9F5N0000000000000004",
   "kind": "entity",
   "class": "graph",
   "visibility": "team",

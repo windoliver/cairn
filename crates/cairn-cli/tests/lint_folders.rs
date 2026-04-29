@@ -7,7 +7,8 @@ use cairn_test_fixtures::store::{FixtureStore, sample_record};
 #[tokio::test]
 async fn rebuilds_index_from_empty_markdown_tree() {
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     // Bootstrap-style minimal layout: just .cairn/ and raw/.
@@ -29,7 +30,8 @@ async fn rebuilds_index_from_empty_markdown_tree() {
 #[tokio::test]
 async fn idempotent_second_run_reports_unchanged() {
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -51,7 +53,8 @@ async fn bad_policy_yaml_taints_subtree_and_skips_indexing() {
     // emit — no `_index.md` should be written, but the parse failure is
     // surfaced via `policy_errors`.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -78,7 +81,8 @@ async fn sibling_subtree_unaffected_by_broken_policy() {
     // The sample record sits directly in `raw/`, outside the tainted
     // subtree, so its index is still written.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw/broken")).unwrap();
@@ -105,7 +109,8 @@ async fn corrupt_non_utf8_index_is_overwritten() {
     // instead of `read_to_string`, so the corrupt file is simply marked
     // stale and overwritten atomically.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -131,7 +136,8 @@ async fn corrupt_non_utf8_index_is_overwritten() {
 #[tokio::test]
 async fn atomic_writes_overwrite_stale_and_leave_no_tmp() {
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -167,7 +173,8 @@ async fn symlinked_index_destination_is_rejected_even_when_unchanged() {
     // fast-path read through the symlink with `read_to_string` and skipped
     // `write_once`, bypassing its symlink guard.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     let attacker = tempfile::tempdir().unwrap();
@@ -198,7 +205,8 @@ async fn write_through_symlinked_parent_is_rejected() {
     // parent of `raw/_index.md`) must be rejected, not silently written
     // through to the symlink target.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     let attacker = tempfile::tempdir().unwrap();
@@ -222,7 +230,8 @@ async fn write_through_symlinked_ancestor_is_rejected() {
     // outside the vault even with the immediate-parent guard. The fix walks
     // every ancestor between vault_root and the target.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     let attacker = tempfile::tempdir().unwrap();
@@ -253,7 +262,8 @@ async fn symlinked_policy_yaml_taints_subtree() {
     // `walkdir(follow_links=false)` returns symlinks as non-files, and the
     // earlier code skipped non-files silently — fail-OPEN, not fail-closed.
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -288,7 +298,8 @@ async fn symlinked_policy_yaml_taints_subtree() {
 #[cfg(unix)]
 async fn non_utf8_policy_yaml_taints_subtree_not_run() {
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();
@@ -317,7 +328,8 @@ async fn non_utf8_policy_yaml_taints_subtree_not_run() {
 #[tokio::test]
 async fn fixture_index_matches_snapshot() {
     let store = FixtureStore::default();
-    store.upsert(sample_record()).await.unwrap();
+    let r = sample_record();
+    store.upsert(&r).await.unwrap();
 
     let vault = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(vault.path().join("raw")).unwrap();

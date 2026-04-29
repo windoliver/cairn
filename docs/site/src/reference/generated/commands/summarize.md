@@ -9,10 +9,10 @@ cairn.mcp.v1 verb: summarize
 ```text
 cairn.mcp.v1 verb: summarize
 
-Usage: summarize [OPTIONS] [record_ids]
+Usage: summarize [OPTIONS] [record_ids]...
 
 Arguments:
-  [record_ids]
+  [record_ids]...
           One or more record ULIDs.
 
 Options:

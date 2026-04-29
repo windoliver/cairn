@@ -10,12 +10,28 @@ homepage.workspace = true
 readme.workspace = true
 description = "Cairn verb layer, domain types, and error enums. No I/O, no adapters."
 
+[features]
+default = []
+# Re-exports the in-tree `sample_record` factory under
+# `cairn_core::domain::record::tests_export` so adapter crates can build the
+# same canonical fixture from `[dev-dependencies]`. Never enable in
+# production builds.
+test-fixtures = []
+# Off-by-default smoke target. Used only by the `filter-smoke` CI job
+# to compile and run the §5.2 Filter pipeline against the *normal*
+# (non-dev) dependency graph — feature unification through dev-deps
+# (proptest / insta etc.) previously masked a missing `regex`
+# `unicode-case` feature that panicked downstream binaries on first
+# call. Enabling this feature does not change library behavior.
+smoke = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true, features = ["unicode-perl", "unicode-case"] }
@@ -27,15 +43,6 @@ proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
-
-[features]
-# Off-by-default smoke target. Used only by the `filter-smoke` CI job
-# to compile and run the §5.2 Filter pipeline against the *normal*
-# (non-dev) dependency graph — feature unification through dev-deps
-# (proptest / insta etc.) previously masked a missing `regex`
-# `unicode-case` feature that panicked downstream binaries on first
-# call. Enabling this feature does not change library behavior.
-smoke = []
 
 [[bin]]
 name = "filter_smoke"

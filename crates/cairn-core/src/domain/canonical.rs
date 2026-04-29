@@ -162,13 +162,14 @@ mod tests {
     fn sample() -> MemoryRecord {
         use crate::domain::{
             ActorChainEntry, ChainRole, EvidenceVector, Identity, MemoryClass, MemoryKind,
-            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+            MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
             record::{Ed25519Signature, RecordId},
         };
         use std::collections::BTreeMap;
         let user = Identity::parse("usr:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,

@@ -1,6 +1,6 @@
 //! Round-trip semantics for `records_latest` view + `updates`-edge supersession.
 
-use cairn_store_sqlite::open_in_memory;
+use cairn_store_sqlite::open_in_memory_sync as open_in_memory;
 use rusqlite::{Connection, params};
 
 fn insert_record(conn: &Connection, id: &str, target: &str, body: &str, tombstoned: i64) {

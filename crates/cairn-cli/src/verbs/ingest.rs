@@ -51,6 +51,10 @@ pub struct ResyncResult {
 ///
 /// Returns an error if the file cannot be read, fails to parse, the store
 /// operation fails, or a conflict is detected.
+#[allow(
+    clippy::too_many_lines,
+    reason = "CLI dispatcher: parse → load prior → conflict-check → upsert each step is linear and best read top-to-bottom"
+)]
 pub async fn resync_handler(
     store: &dyn MemoryStore,
     path: &Path,
@@ -102,7 +106,13 @@ pub async fn resync_handler(
         );
     }
 
-    let current = store.get(&parsed.target_id).await.context("store: get")?;
+    let target = cairn_core::domain::TargetId::parse(parsed.target_id.clone())
+        .with_context(|| format!("ingest --resync: invalid target_id `{}`", parsed.target_id))?;
+    let current = store
+        .get_active_by_target(&target)
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: get_active_by_target")?;
 
     let outcome = projector.check_conflict(&parsed, current.as_ref());
 
@@ -135,22 +145,30 @@ pub async fn resync_handler(
                 r.body = parsed.body.clone();
                 r.tags = parsed.tags.clone();
                 r.extra_frontmatter = extra_frontmatter;
-                let new_stored = store.upsert(r).await.context("store: upsert")?;
+                let outcome = store
+                    .upsert(&r)
+                    .await
+                    .map_err(anyhow::Error::msg)
+                    .context("store: upsert")?;
                 Ok(ResyncResult {
                     status: "updated",
                     path: path.to_path_buf(),
                     target_id: parsed.target_id,
-                    version: new_stored.version,
+                    version: outcome.version,
                 })
             } else {
                 // New record — build_record_from_parsed (deferred to #46)
                 let record = build_record_from_parsed(&parsed)?;
-                let new_stored = store.upsert(record).await.context("store: upsert")?;
+                let outcome = store
+                    .upsert(&record)
+                    .await
+                    .map_err(anyhow::Error::msg)
+                    .context("store: upsert")?;
                 Ok(ResyncResult {
                     status: "updated",
                     path: path.to_path_buf(),
                     target_id: parsed.target_id,
-                    version: new_stored.version,
+                    version: outcome.version,
                 })
             }
         }
@@ -332,7 +350,7 @@ mod tests {
         let store = FixtureStore::default();
         // Pre-populate store with version 1.
         let stored = sample_stored_record(1);
-        store.upsert(stored.record.clone()).await.unwrap();
+        store.upsert(&stored.record).await.unwrap();
 
         // Project to markdown, then modify the body so the resync is a real
         // edit (not a noop).  Version still matches → Clean → upsert.
@@ -367,7 +385,7 @@ mod tests {
         let store = FixtureStore::default();
         // Pre-populate store with version 1.
         let stored = sample_stored_record(1);
-        store.upsert(stored.record.clone()).await.unwrap();
+        store.upsert(&stored.record).await.unwrap();
 
         // Project to markdown and resync it — body/tags are identical → noop.
         let proj = MarkdownProjector;
@@ -391,14 +409,16 @@ mod tests {
     #[tokio::test]
     async fn resync_conflict_writes_quarantine_file() {
         let store = FixtureStore::default();
-        // Store a record and then upsert it multiple times to advance the
-        // version to 5, while keeping a v1 projected file.
+        // Store a record and then upsert mutated bodies to advance the
+        // version to 5, while keeping a v1 projected file. Upsert is
+        // body-hash idempotent, so each call must mutate `body` to bump
+        // the version.
         let base = sample_stored_record(1);
-        store.upsert(base.record.clone()).await.unwrap(); // → v1
-        store.upsert(base.record.clone()).await.unwrap(); // → v2
-        store.upsert(base.record.clone()).await.unwrap(); // → v3
-        store.upsert(base.record.clone()).await.unwrap(); // → v4
-        store.upsert(base.record.clone()).await.unwrap(); // → v5
+        for v in 1..=5_u32 {
+            let mut r = base.record.clone();
+            r.body = format!("{} v{v}", base.record.body);
+            store.upsert(&r).await.unwrap();
+        }
 
         // Write a file that claims to be at version 1 (stale).
         let proj = MarkdownProjector;
