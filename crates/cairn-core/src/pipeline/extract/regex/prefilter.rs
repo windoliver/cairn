@@ -1,0 +1,242 @@
+//! Trigger-keyword prefilter. Spec §6.2.
+
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
+
+use super::super::TextSpan;
+
+/// Fixed trigger keyword set the prefilter scans for.
+const TRIGGER_KEYWORDS: &[&str] = &[
+    "remember",
+    "forget",
+    "correction",
+    "skillify",
+    "this is how",
+];
+
+/// Pre-built trigger prefilter. One instance per `RegexExtractor`.
+pub struct TriggerPrefilter {
+    ac: AhoCorasick,
+}
+
+impl Default for TriggerPrefilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TriggerPrefilter {
+    /// Build the (case-insensitive) prefilter.
+    #[must_use]
+    pub fn new() -> Self {
+        let ac = AhoCorasickBuilder::new()
+            .ascii_case_insensitive(true)
+            .match_kind(MatchKind::LeftmostFirst)
+            .build(TRIGGER_KEYWORDS)
+            .unwrap_or_else(|e| {
+                // SAFETY: TRIGGER_KEYWORDS are static ASCII literals; build never fails.
+                panic!("invariant: static patterns build: {e}")
+            });
+        Self { ac }
+    }
+
+    /// Find every keyword occurrence whose start position is at a
+    /// sentence-start (per [`is_sentence_start`]) and not inside a
+    /// quoted span. Returns `(start, end)` byte offsets in the original
+    /// body. Capped at `MAX_PHRASE_WINDOWS` hits.
+    #[must_use]
+    pub fn scan(&self, body: &str) -> PrefilterScan {
+        let quote_spans = collect_quote_spans(body);
+        let mut hits: Vec<TextSpan> = Vec::new();
+        let mut truncated = false;
+        let bytes = body.as_bytes();
+        for m in self.ac.find_iter(body) {
+            let start = m.start();
+            let end = m.end();
+            if quote_spans
+                .iter()
+                .any(|(qs, qe)| *qs <= start && end <= *qe)
+            {
+                continue;
+            }
+            if !is_sentence_start(bytes, start) {
+                continue;
+            }
+            if hits.len() >= super::super::MAX_PHRASE_WINDOWS {
+                truncated = true;
+                tracing::warn!(
+                    body_len = body.len(),
+                    cap = super::super::MAX_PHRASE_WINDOWS,
+                    "regex extractor: phrase-window cap reached"
+                );
+                break;
+            }
+            hits.push(TextSpan::new(
+                u32::try_from(start).unwrap_or(u32::MAX),
+                u32::try_from(end).unwrap_or(u32::MAX),
+            ));
+        }
+        PrefilterScan { hits, truncated }
+    }
+}
+
+/// Result of a single prefilter scan.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PrefilterScan {
+    /// Byte spans of accepted trigger hits in the body.
+    pub hits: Vec<TextSpan>,
+    /// True when the scan stopped at `MAX_PHRASE_WINDOWS`.
+    pub truncated: bool,
+}
+
+/// Whether the byte offset `pos` is at a "sentence-start" position for
+/// trigger eligibility. See spec §6.2.
+#[must_use]
+pub fn is_sentence_start(body: &[u8], pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    let mut i = pos;
+    while i > 0 && body[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return true;
+    }
+    let prev = body[i - 1];
+    match prev {
+        b'\n' | b';' | b'?' | b'!' | b',' => true,
+        b'.' => is_period_sentence_boundary(body, i - 1),
+        _ => preceded_by_conjunction(body, i),
+    }
+}
+
+fn preceded_by_conjunction(body: &[u8], end: usize) -> bool {
+    let mut j = end;
+    while j > 0 && !body[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    let word = &body[j..end];
+    ascii_eq_ignore_case(word, b"and")
+        || ascii_eq_ignore_case(word, b"but")
+        || ascii_eq_ignore_case(word, b"then")
+}
+
+fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+fn is_period_sentence_boundary(body: &[u8], period_pos: usize) -> bool {
+    let start = period_pos.saturating_sub(6);
+    let window = &body[start..period_pos];
+    !looks_like_abbreviation(window)
+}
+
+fn looks_like_abbreviation(window: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 1 < window.len() {
+        if window[i] == b'.' && window[i + 1].is_ascii_alphabetic() {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
+    let bytes = body.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if matches!(b, b'"' | b'\'' | b'`') {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b {
+                j += 1;
+            }
+            if j < bytes.len() {
+                spans.push((i, j + 1));
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(body: &str) -> Vec<&str> {
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        scan.hits
+            .iter()
+            .map(|s| &body[s.start as usize..s.end as usize])
+            .collect()
+    }
+
+    #[test]
+    fn finds_remember_at_start() {
+        let hits = scan("remember that I prefer dark mode");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn finds_remember_after_period_with_space() {
+        let hits = scan("FYI old. remember that I prefer cash");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn ignores_abbreviation_period() {
+        let hits = scan("remember that I live in the U.S. and prefer cash");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn skips_keyword_inside_quotes() {
+        let hits = scan(r#"the user said "remember that" by mistake"#);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn finds_after_conjunction_with_trigger() {
+        let hits = scan("forget X and remember Y");
+        assert_eq!(hits, vec!["forget", "remember"]);
+    }
+
+    #[test]
+    fn does_not_split_normal_and() {
+        let hits = scan("remember that Alice and Bob are on call");
+        assert_eq!(hits, vec!["remember"]);
+    }
+
+    #[test]
+    fn caps_at_max_phrase_windows() {
+        let body = "remember a; ".repeat(super::super::super::MAX_PHRASE_WINDOWS + 5);
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(&body);
+        assert!(scan.truncated);
+        assert_eq!(scan.hits.len(), super::super::super::MAX_PHRASE_WINDOWS);
+    }
+
+    #[test]
+    fn finds_trigger_in_oversized_body() {
+        let mut body = "lorem ipsum. ".repeat(20_000);
+        body.push_str("forget my old address");
+        let hits = scan(&body);
+        assert_eq!(hits, vec!["forget"]);
+    }
+
+    #[test]
+    fn quote_aware_finds_unquoted_after_quoted() {
+        let body = r#"the user said "remember that" then forget my password"#;
+        let hits = scan(body);
+        assert_eq!(hits, vec!["forget"]);
+    }
+}
