@@ -4,7 +4,7 @@
 //! `cairn-cli::verbs::*`. The SDK does no I/O of its own — it constructs
 //! the same request envelope the CLI would and dispatches into the verb
 //! layer. P0 verb handlers are stubs (#9) so each fn returns the canonical
-//! `store not wired` [`SdkError::Internal`] with a fresh operation ID.
+//! `store not wired` [`SdkError::Unimplemented`] with a fresh operation ID.
 //!
 //! When verb handlers move into `cairn-core::verbs::*`, replace each `Err(...)`
 //! arm with the dispatch into the shared handler.
@@ -232,7 +232,7 @@ fn invalid(reason: &'static str) -> SdkError {
     }
 }
 
-/// Validate a [`Ulid`] newtype against the same rules the generated
+/// Validate a [`cairn_core::generated::common::Ulid`] newtype against the same rules the generated
 /// `Deserialize` enforces (26 chars, Crockford base32 alphabet). Direct
 /// construction in Rust skips those checks; the SDK reapplies them so
 /// malformed IDs cannot cross the boundary.
@@ -252,7 +252,7 @@ fn validate_ulid(id: &cairn_core::generated::common::Ulid) -> Result<(), SdkErro
     Ok(())
 }
 
-/// Validate a [`Cursor`] against `Cursor::Deserialize` rules
+/// Validate a [`cairn_core::generated::common::Cursor`] against its `Deserialize` rules
 /// (non-empty, ≤ 512 chars).
 fn validate_cursor(cursor: &cairn_core::generated::common::Cursor) -> Result<(), SdkError> {
     if cursor.0.is_empty() {
@@ -264,7 +264,7 @@ fn validate_cursor(cursor: &cairn_core::generated::common::Cursor) -> Result<(),
     Ok(())
 }
 
-/// Validate a [`ScopeFilter`] against the generated `TryFrom<RawScopeFilter>`
+/// Validate a [`cairn_core::generated::common::ScopeFilter`] against the generated `TryFrom<RawScopeFilter>`
 /// rules (at least one predicate present, no empty strings or empty arrays).
 fn validate_scope_filter(
     scope: &cairn_core::generated::common::ScopeFilter,

@@ -21,7 +21,7 @@
 //! `forget`) reject with [`SdkError::CapabilityUnavailable`] when the
 //! requested mode/variant is not advertised in [`Sdk::status`] — fail-closed
 //! per CLAUDE.md §4.6. The remaining verbs return
-//! [`SdkError::Internal`] with the `store not wired in this P0 build`
+//! [`SdkError::Unimplemented`] with the `store not wired in this P0 build`
 //! message so failures are distinguishable from capability skew. The verb
 //! dispatch itself is tracked under parent epic #9. When verb handlers move
 //! into `cairn-core::verbs::*`, every SDK fn becomes a one-line dispatch
