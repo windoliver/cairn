@@ -101,6 +101,22 @@ pub struct PurgeAcknowledgement(
     pub(crate) (),
 );
 
+impl PurgeAcknowledgement {
+    /// Construct a [`PurgeAcknowledgement`] after the caller has verified the
+    /// purge acknowledgement file on the filesystem.
+    ///
+    /// This constructor is the only non-test path to building this type.
+    /// It should only be called from `cairn-cli` after confirming that
+    /// `.cairn/maintenance/purge-ack` exists and contains the target
+    /// identity's wire form.  The opaque unit inner field encodes the
+    /// invariant: you cannot accidentally construct this without the
+    /// surrounding filesystem check.
+    #[must_use]
+    pub fn confirmed() -> Self {
+        Self(())
+    }
+}
+
 #[cfg(any(test, feature = "test-helpers"))]
 impl PurgeAcknowledgement {
     /// Test-only constructor.
