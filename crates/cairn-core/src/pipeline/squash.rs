@@ -2195,9 +2195,35 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                             i = k;
                         }
                     }
-                    // Lone ESC or unrecognised: drop ESC byte only
+                    // Round-8 (newer loop) hardening: real terminals
+                    // emit two-byte ESC controls (ESC 7/8 = save/
+                    // restore cursor, ESC = / >, ESC c reset, ESC D
+                    // index, ESC E NEL, ESC M reverse-index, etc.).
+                    // Dropping only the ESC byte left the second
+                    // byte (`7`, `c`, `=`, ...) in the output as
+                    // printable text — lossy corruption that could
+                    // poison preserved diagnostic tails. Treat any
+                    // unrecognised ESC as ESC + one whole UTF-8
+                    // codepoint and consume both — never split a
+                    // multi-byte char (the input is a valid `&str`
+                    // so byte-stepping past ESC into a continuation
+                    // byte would otherwise produce invalid UTF-8 in
+                    // `result` and trip the `from_utf8` invariant).
                     _ => {
-                        i += 1;
+                        i += 1; // past ESC
+                        if i < bytes.len() {
+                            let lead = bytes[i];
+                            let cp_len = if lead < 0x80 {
+                                1
+                            } else if lead < 0xE0 {
+                                2
+                            } else if lead < 0xF0 {
+                                3
+                            } else {
+                                4
+                            };
+                            i += cp_len.min(bytes.len() - i);
+                        }
                     }
                 }
             } else {
@@ -2239,6 +2265,38 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
 #[cfg(test)]
 mod stage2_tests {
     use super::*;
+
+    /// Round-8 (newer loop) regression: real terminals emit
+    /// two-byte ESC controls (cursor save/restore, alt keypad,
+    /// reset, NEL, etc.). Pre-fix the fallback ESC arm only
+    /// dropped the introducer, leaving the second byte (`7`,
+    /// `c`, `=`, ...) in the output as printable text. The
+    /// sanitizer must consume both bytes so terminal control
+    /// traffic never leaks into the compacted artifact.
+    #[test]
+    fn two_byte_esc_controls_fully_stripped() {
+        // Each pair: ESC + control byte. Verify the byte after
+        // does NOT appear as a literal in the sanitized output.
+        for &c in b"7=>cDEMHN78" {
+            let mut input: Vec<u8> = Vec::new();
+            input.extend_from_slice(b"before-");
+            input.push(0x1B);
+            input.push(c);
+            input.extend_from_slice(b"-after");
+            let s = std::str::from_utf8(&input).expect("valid utf8");
+            let (out, stripped) = s2(s);
+            assert!(stripped, "ESC {c:#x}: stripped flag must fire");
+            // Surrounding text survives.
+            assert!(out.contains("before-"), "ESC {c:#x}: prefix lost");
+            assert!(out.contains("-after"), "ESC {c:#x}: suffix lost");
+            // The ESC and its trailing byte both gone: output is
+            // exactly "before--after".
+            assert_eq!(
+                out, "before--after",
+                "ESC {c:#x}: trailing byte leaked through"
+            );
+        }
+    }
 
     /// Round-4 (newer loop) regression: DCS / APC / PM / SOS string
     /// controls (ESC P / _ / ^ / X ... ESC \) must be quarantined
