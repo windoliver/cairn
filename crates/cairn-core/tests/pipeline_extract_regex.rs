@@ -190,6 +190,21 @@ async fn oversize_body_still_extracts_trigger() {
 }
 
 #[tokio::test]
+async fn single_period_abbreviation_does_not_fire_forget() {
+    // `Dr. Forget at the clinic` must not be treated as a sentence
+    // boundary that turns `forget` into a sentence-start trigger.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(&event, "Please contact Dr. Forget at the clinic");
+    let res = extractor.extract(&input).await.expect("ok");
+    assert!(
+        res.outputs.is_empty(),
+        "Dr. abbreviation must not fire forget; got {:?}",
+        res.outputs
+    );
+}
+
+#[tokio::test]
 async fn multi_sentence_trigger_after_period() {
     let extractor = RegexExtractor::builtin();
     let event = cli_event();

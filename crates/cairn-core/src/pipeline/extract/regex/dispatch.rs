@@ -45,18 +45,18 @@ pub(crate) async fn dispatch(
     run_hook_rules(&rules.builtin_hook, event, &mut outputs, None);
     run_tool_frame_rules(&rules.builtin_tool_frame, event, &mut outputs, None);
 
-    // User hook + tool-frame rules share the user-rule budget with
-    // Phase B text rules. Track the per-event user-output count so a
-    // misconfigured config cannot amplify a single hot event into
-    // unbounded writes. Cap is `outputs.len()` baseline + max_user_drafts.
+    // Single user-output budget shared across user hook, user tool-frame,
+    // and user text rules. Tracks user-rule emissions explicitly so it
+    // is robust against intervening built-in (Phase A) text outputs.
     let max_user_drafts = usize::from(budget.max_drafts);
-    let user_cap = outputs.len() + max_user_drafts;
-    let hook_capped = run_hook_rules(&rules.user_hook, event, &mut outputs, Some(user_cap));
-    let tool_capped =
-        run_tool_frame_rules(&rules.user_tool_frame, event, &mut outputs, Some(user_cap));
-    if hook_capped || tool_capped {
+    let baseline_pre_user_a = outputs.len();
+    let user_a_cap = baseline_pre_user_a + max_user_drafts;
+    if run_hook_rules(&rules.user_hook, event, &mut outputs, Some(user_a_cap))
+        || run_tool_frame_rules(&rules.user_tool_frame, event, &mut outputs, Some(user_a_cap))
+    {
         truncated = TruncationReason::MaxDrafts;
     }
+    let user_count_after_a = outputs.len() - baseline_pre_user_a;
 
     if let Some(text) = body_text {
         let scan = prefilter.scan(text);
@@ -102,18 +102,22 @@ pub(crate) async fn dispatch(
                 body_len: u32::try_from(text.len()).unwrap_or(u32::MAX),
             };
         } else {
-            // Built-in outputs are first-party and always preserved. Only
-            // user-rule additions face `budget.max_drafts`, so explicit
-            // built-in triggers like `remember`/`forget` are never lost
-            // to back-pressure.
-            let builtin_count = outputs.len();
+            // Built-in (Phase A) outputs are first-party and not counted
+            // against `max_user_drafts`. Phase B continues consuming the
+            // user-output budget that hook/tool-frame already partially
+            // drew from.
+            let phase_b_baseline = outputs.len();
+            let mut user_count = user_count_after_a;
             let wall_b = Instant::now();
-            let max_user_drafts = usize::from(budget.max_drafts);
             'phase_b: for window in &windows {
+                if user_count >= max_user_drafts {
+                    truncated = TruncationReason::MaxDrafts;
+                    break 'phase_b;
+                }
                 for rule in &rules.user_text {
                     let elapsed_ms = wall_b.elapsed().as_millis() as u32;
                     if elapsed_ms > budget.max_wall_ms {
-                        if outputs.len() == builtin_count {
+                        if outputs.len() == phase_b_baseline {
                             return Err(ExtractError::BudgetExceeded {
                                 worker: "regex",
                                 elapsed_ms,
@@ -131,17 +135,17 @@ pub(crate) async fn dispatch(
                     let before = outputs.len();
                     apply_text_rule(rule, event, text, window, &mut outputs, &mut covered);
                     let added = outputs.len() > before;
-                    let user_added = outputs.len() - builtin_count;
-                    if added && user_added >= max_user_drafts {
-                        tracing::warn!(
-                            worker = "regex",
-                            max_user_drafts,
-                            "reached max_drafts cap on user rules"
-                        );
-                        truncated = TruncationReason::MaxDrafts;
-                        break 'phase_b;
-                    }
                     if added {
+                        user_count += 1;
+                        if user_count >= max_user_drafts {
+                            tracing::warn!(
+                                worker = "regex",
+                                max_user_drafts,
+                                "reached max_drafts cap on user rules"
+                            );
+                            truncated = TruncationReason::MaxDrafts;
+                            break 'phase_b;
+                        }
                         break;
                     }
                 }
@@ -680,6 +684,64 @@ mod tests {
             result.outputs.len(),
             3,
             "user hook rules must respect max_drafts"
+        );
+        assert!(matches!(result.truncated, TruncationReason::MaxDrafts));
+    }
+
+    #[tokio::test]
+    async fn user_hook_and_text_rules_share_max_drafts_budget() {
+        // A mixed-family event: 2 matching user hook rules + a user text
+        // rule that fires once. With max_drafts=3 the total user output
+        // count must be capped at 3 across hook+tool+text.
+        use crate::domain::taxonomy::MemoryKind;
+        use crate::pipeline::extract::regex::rule::{RegexRule, RuleSet};
+        use crate::pipeline::extract::{Confidence, KindHint};
+
+        let confidence = Confidence::try_from(0.5_f32).expect("valid");
+        let kind_hint = KindHint::from(MemoryKind::Feedback);
+        let mut rules = Vec::new();
+        for i in 0..5u32 {
+            rules.push(RegexRule::HookEvent {
+                id: format!("user.hook.{i}"),
+                hook_name: "UserPromptSubmit".into(),
+                tool_name: None,
+                kind_hint: kind_hint.clone(),
+                confidence,
+            });
+        }
+        for i in 0..5u32 {
+            rules.push(RegexRule::TriggerPhrase {
+                id: format!("user.text.{i}"),
+                pattern: r"(?i)\bnoteworthy\b".into(),
+                kind_hint: kind_hint.clone(),
+                confidence,
+                capture_group: None,
+            });
+        }
+        let ruleset = RuleSet::from_config(&rules).expect("compile ok");
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 100,
+            max_drafts: 3,
+        };
+        let event = make_event(CapturePayload::Hook {
+            hook_name: "UserPromptSubmit".to_owned(),
+            tool_name: None,
+        });
+        let body_text = "this is noteworthy. also noteworthy. and noteworthy too.";
+        let resolved = ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
+            .expect("matching hook");
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+        };
+        let result = dispatch(&ruleset, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+        assert!(
+            result.outputs.len() <= 3,
+            "user rule outputs across hook+text must respect max_drafts; got {}",
+            result.outputs.len()
         );
         assert!(matches!(result.truncated, TruncationReason::MaxDrafts));
     }

@@ -142,9 +142,20 @@ fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn is_period_sentence_boundary(body: &[u8], period_pos: usize) -> bool {
+    // Multi-period abbreviations: U.S., e.g., i.e.
     let start = period_pos.saturating_sub(6);
     let window = &body[start..period_pos];
-    !looks_like_abbreviation(window)
+    if looks_like_abbreviation(window) {
+        return false;
+    }
+    // Single-period abbreviations like Dr., Mr., Mrs., Prof., St., vs.
+    // Take the immediately-preceding alphabetic run (up to 5 chars) and
+    // compare against an allowlist. Without this the built-in `forget`
+    // rule fires on prose like `Please contact Dr. Forget...`.
+    if is_single_period_abbreviation(body, period_pos) {
+        return false;
+    }
+    true
 }
 
 fn looks_like_abbreviation(window: &[u8]) -> bool {
@@ -156,6 +167,30 @@ fn looks_like_abbreviation(window: &[u8]) -> bool {
         i += 1;
     }
     false
+}
+
+/// Allowlist of common single-period abbreviations. ASCII only —
+/// multi-period forms (U.S., e.g., i.e.) are caught by
+/// `looks_like_abbreviation`.
+const SINGLE_PERIOD_ABBREVS: &[&[u8]] = &[
+    b"mr", b"mrs", b"ms", b"dr", b"prof", b"sr", b"jr", b"st", b"mt", b"vs", b"no", b"etc", b"inc",
+    b"ltd", b"co", b"corp", b"fig", b"vol", b"ch", b"ed", b"eds", b"pp",
+];
+
+/// True when the period at `period_pos` directly follows a known
+/// single-period abbreviation token (e.g. `Dr.`, `Mr.`, `Prof.`).
+fn is_single_period_abbreviation(body: &[u8], period_pos: usize) -> bool {
+    let mut j = period_pos;
+    while j > 0 && body[j - 1].is_ascii_alphabetic() {
+        j -= 1;
+    }
+    if j == period_pos {
+        return false;
+    }
+    let token = &body[j..period_pos];
+    SINGLE_PERIOD_ABBREVS
+        .iter()
+        .any(|abbr| ascii_eq_ignore_case(token, abbr))
 }
 
 fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
