@@ -25,6 +25,8 @@ In scope:
 - `RegexExtractor` struct implementing `ExtractorWorker`.
 - Built-in default rule set covering §11.6 + §18.a triggers and the most common hook / tool-frame events.
 - Schema-validated user-rule extension hook (`RuleSet::from_config`) without binding to `.cairn/config.yaml` yet.
+- Hard `max_drafts` enforcement in the dispatch loop with deterministic truncation semantics (§6).
+- Extension to `CapturePayload::Hook` adding an optional `body` field so primary-chat-path (Mode A) `remember` / `forget` / `skillify` triggers are extractable in this PR (§6.1).
 - Unit, integration, property, and a CI-friendly latency assertion test.
 
 Deferred:
@@ -212,15 +214,52 @@ impl RuleSet {
 
 | `CapturePayload` variant | Rule families consulted |
 |---|---|
-| `Hook` | `hook_rules` (always); `text_rules` only if a hook body is in scope (deferred — hook bodies are not yet on `CaptureEvent`; see §10.1) |
+| `Hook` | `hook_rules` (always); `text_rules` against `body` if present (see §6.1 for the schema extension) |
 | `Terminal` | `tool_frame_rules` filtered to `ToolFrameFamily::Terminal` |
 | `Ide` | `tool_frame_rules` filtered to `ToolFrameFamily::Ide` |
-| `Cli`, `Mcp`, `Proactive` | `text_rules` against the `kind_hint` / `rationale` strings (where a body is present) |
+| `Cli`, `Mcp` | `text_rules` against the `kind_hint` field (Mode B body is the user-supplied ingest payload) |
+| `Proactive` | `text_rules` against the `rationale` field |
 | `Voice`, `Screen`, `Clipboard`, `RecordingBatch` | none in this PR — extender lands with the relevant sensor issue |
 
 For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector. The first hit on a rule wins per event-rule pair — no multiple drafts per single rule per event.
 
-Budget check: a single `Instant::now()` snapshot before and after the dispatch loop. If elapsed exceeds `budget.max_wall_ms`, return `Err(BudgetExceeded)` *only if no drafts were produced yet*; otherwise return what we have plus a `tracing::warn!` with the elapsed time. Rationale: brief §5.2.a says "exceeding budget returns `ExtractBudgetExceeded`, falls through to next extractor." For regex we treat partial success as success (the only fallthrough beyond regex is no extraction at all, since regex *is* the fallback layer). This matches the brief's "RegexExtractor fallback chain still captures hook events + 'tell it directly' triggers" guarantee (§intro).
+**`max_drafts` enforcement (hard cap).** The dispatch loop checks `outputs.len() >= budget.max_drafts` after pushing each output. When the cap is reached the loop:
+
+1. Stops scanning further rules.
+2. Emits exactly one `tracing::warn!(worker = "regex", event_id, max_drafts, "regex extractor reached max_drafts cap")` — never the body.
+3. Returns `Ok(outputs)` with the truncated set; the cap itself is success, not error. Rationale: the cap exists to bound work, not to gate correctness. Returning a partial set keeps the contract simple for the chain (#74) and matches how `max_wall_ms` is handled below. A user-rule explosion that triggers the cap is loud (warn log + metrics counter) but cannot stall or error the extract path.
+
+Determinism: rules are dispatched in a stable order — built-in rules first (declaration order in `defaults.rs`), then user rules in `from_config` declaration order. Two identical events therefore produce identical truncated sets when the cap is hit.
+
+**`max_wall_ms` enforcement.** A single `Instant::now()` snapshot is taken before the dispatch loop, and the elapsed time is checked once per rule-family boundary (3 checks per event maximum). If elapsed exceeds `budget.max_wall_ms`:
+
+- if zero outputs have been produced, return `Err(BudgetExceeded)` so the chain (#74) can fall through to the next extractor;
+- otherwise stop scanning, `tracing::warn!` with the elapsed time, and return `Ok(outputs)`.
+
+Rationale: brief §5.2.a says "exceeding budget returns `ExtractBudgetExceeded`, falls through to next extractor." For regex we treat partial success as success (the only fallthrough beyond regex is no extraction at all, since regex *is* the fallback layer). This matches the brief's "RegexExtractor fallback chain still captures hook events + 'tell it directly' triggers" guarantee (§intro).
+
+### 6.1 `CapturePayload::Hook` body extension
+
+To make Mode A trigger phrases ("remember…", "forget…", "skillify…" typed in chat) extractable, this PR extends `CapturePayload::Hook` with an optional body field:
+
+```rust
+Hook {
+    hook_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_name: Option<String>,
+    /// Captured user-message body when the hook is `UserPromptSubmit` /
+    /// `SessionStart` / similar harness hooks that carry a literal user
+    /// utterance. Sensitive — never logged above `trace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
+},
+```
+
+Backwards-compatible: `#[serde(default)]` keeps existing wire payloads parsing. The `Debug` impl already redacts `Hook` fields (`crates/cairn-core/src/domain/capture.rs:475`); the new field follows the same redaction. Sensors that don't carry a body (e.g., `PostToolUse`) leave the field `None`; sensors that do (e.g., `UserPromptSubmit`) populate it.
+
+Test impact: existing `tests/capture_event.rs` round-trip tests must stay green; one new round-trip case covers the populated-body variant. No migration / WAL / store change — `CaptureEvent` is captured-time, not stored-form.
+
+This extension lands in **this PR**, not a follow-up: without it the high-priority acceptance criterion ("explicit remember/forget requests produce correct draft or forget intent") cannot be met for the primary chat path.
 
 ## 7. Default rule set (`defaults.rs`)
 
@@ -264,14 +303,7 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - Compile failure path: `RuleSet::from_config(<rule with bad pattern>)` → `InvalidRule`.
 - Duplicate ids rejected.
 - `RegexExtractor::name() == "regex"`, default budget = `{max_wall_ms: 2, max_drafts: 16}`.
-
-Open question / followup (§10.1 of design): the current `CaptureEvent` `Hook` payload variant carries only `hook_name` and `tool_name` — not the user message body. The text triggers (§7 rules `remember.*`, `correction`, `forget`, `success.recipe`, `skillify`) need a text body. Two options:
-
-  (a) **In this PR:** match text rules only on `CapturePayload::{Cli, Mcp, Proactive}` payloads where a body is at least gestureable via `kind_hint` / `rationale`. This is enough to satisfy the unit + acceptance tests for trigger phrases when the harness sends the user line as a `Cli`/`Mcp` ingest (Mode B), but does not cover the "user types in chat" Mode A path.
-
-  (b) **Defer Mode A coverage:** flag a follow-up issue to extend `CapturePayload::Hook` with an optional body field (or add a new `UserMessage` variant). Mode A trigger handling lands when that issue does.
-
-Recommendation: ship (a) now, file (b) as a follow-up. The acceptance criterion "explicit remember/forget requests produce correct draft or forget intent" is satisfied by Mode B coverage; Mode A is an interleaved capture-pipeline concern, not a regex-extractor concern.
+- `max_drafts` enforcement: synthesize a `RuleSet` whose user-rule list contains `max_drafts + 5` always-matching rules; assert `extract` returns exactly `max_drafts` outputs and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches rule declaration order.
 
 ### 10.2 Integration tests (`crates/cairn-core/tests/pipeline_extract_regex.rs`)
 
@@ -330,7 +362,6 @@ No `cairn-docgen` impact (no CLI flag, no MCP metadata change).
 
 ## 14. Open follow-ups (file as separate issues)
 
-1. Extend `CapturePayload` to carry user-message body for Mode A hook coverage (see §10.1).
-2. Add `criterion` benchmark for hot-path measurement; replace the `#[ignore]`-d test in §10.4.
-3. Add built-in rules for `Voice`, `Screen`, `Clipboard`, `Ide` payloads as those sensors land.
-4. Wire `RuleSet::from_config` into `.cairn/config.yaml` schema.
+1. Add `criterion` benchmark for hot-path measurement; replace the `#[ignore]`-d test in §10.4.
+2. Add built-in rules for `Voice`, `Screen`, `Clipboard`, `Ide` payloads as those sensors land.
+3. Wire `RuleSet::from_config` into `.cairn/config.yaml` schema.
