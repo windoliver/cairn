@@ -363,8 +363,7 @@ impl SqliteMemoryStore {
                     }
                     // Truncated exponential backoff with deterministic jitter
                     // (LCG over the elapsed nanoseconds — no rand dep needed).
-                    let elapsed_ns =
-                        u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    let elapsed_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     let jitter = (elapsed_ns.wrapping_mul(6_364_136_223_846_793_005))
                         .rotate_left(13)
                         & 0x3FF; // 0..1023 ≈ up to ~1 ms when divided by 1024
@@ -398,17 +397,28 @@ impl SqliteMemoryStore {
     pub async fn touch_session(&self, id: &SessionId) -> Result<bool, StoreError> {
         let conn = self.require_conn("touch_session")?.clone();
         let key = id.as_str().to_owned();
-        let now_ms = current_unix_ms();
         let n = conn
             .call(move |c| {
-                let n = c.execute(
-                    "UPDATE sessions SET last_activity_at = ?1 \
-                     WHERE session_id = ?2 AND ended_at IS NULL",
-                    params![now_ms, key],
-                )?;
-                Ok::<_, tokio_rusqlite::Error>(n)
+                let n = retry_busy(
+                    "touch_session",
+                    |c| {
+                        let now_ms = current_unix_ms();
+                        c.execute(
+                            "UPDATE sessions SET last_activity_at = ?1 \
+                         WHERE session_id = ?2 AND ended_at IS NULL",
+                            params![now_ms, key],
+                        )
+                        .map_err(BusyOr::Sql)
+                    },
+                    c,
+                );
+                match n {
+                    Ok(n) => Ok::<_, tokio_rusqlite::Error>(Ok(n)),
+                    Err(StoreError::Sqlite(e)) => Err(tokio_rusqlite::Error::Other(Box::new(e))),
+                    Err(other) => Ok::<_, tokio_rusqlite::Error>(Err(other)),
+                }
             })
-            .await?;
+            .await??;
         Ok(n > 0)
     }
 
@@ -428,17 +438,28 @@ impl SqliteMemoryStore {
     pub async fn end_session(&self, id: &SessionId) -> Result<bool, StoreError> {
         let conn = self.require_conn("end_session")?.clone();
         let key = id.as_str().to_owned();
-        let now_ms = current_unix_ms();
         let n = conn
             .call(move |c| {
-                let n = c.execute(
-                    "UPDATE sessions SET ended_at = ?1 \
-                     WHERE session_id = ?2 AND ended_at IS NULL",
-                    params![now_ms, key],
-                )?;
-                Ok::<_, tokio_rusqlite::Error>(n)
+                let n = retry_busy(
+                    "end_session",
+                    |c| {
+                        let now_ms = current_unix_ms();
+                        c.execute(
+                            "UPDATE sessions SET ended_at = ?1 \
+                         WHERE session_id = ?2 AND ended_at IS NULL",
+                            params![now_ms, key],
+                        )
+                        .map_err(BusyOr::Sql)
+                    },
+                    c,
+                );
+                match n {
+                    Ok(n) => Ok::<_, tokio_rusqlite::Error>(Ok(n)),
+                    Err(StoreError::Sqlite(e)) => Err(tokio_rusqlite::Error::Other(Box::new(e))),
+                    Err(other) => Ok::<_, tokio_rusqlite::Error>(Err(other)),
+                }
             })
-            .await?;
+            .await??;
         Ok(n > 0)
     }
 
@@ -548,6 +569,68 @@ impl SqliteMemoryStore {
             last_activity_at_unix_ms: last_activity,
             ended_at_unix_ms: ended,
         }))
+    }
+}
+
+/// Wrapper that distinguishes a retriable BUSY from any other error a
+/// caller's closure might return. Used by [`retry_busy`].
+enum BusyOr {
+    /// `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` — retry within the deadline.
+    Sql(rusqlite::Error),
+}
+
+/// Run a single-statement write closure under the same deadline-driven
+/// busy-retry policy [`SqliteMemoryStore::resolve_or_create_session`] uses.
+///
+/// `f` returns `Ok(T)` on success, `Err(BusyOr::Sql(e))` for any rusqlite
+/// error. The helper itself classifies `e` as transient
+/// (`SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT`) and retries with truncated
+/// exponential backoff + jitter, or surfaces it as
+/// `Err(StoreError::Sqlite(_))` on a non-busy failure. After the deadline
+/// it returns `Err(StoreError::Busy { operation, elapsed_ms })`.
+fn retry_busy<T, F>(
+    operation: &'static str,
+    mut f: F,
+    c: &mut rusqlite::Connection,
+) -> Result<T, StoreError>
+where
+    F: FnMut(&mut rusqlite::Connection) -> Result<T, BusyOr>,
+{
+    let start = std::time::Instant::now();
+    let deadline = start + RESOLVE_BUSY_DEADLINE;
+    let mut backoff_ms: u64 = INITIAL_BACKOFF_MS;
+    loop {
+        match f(c) {
+            Ok(v) => return Ok(v),
+            Err(BusyOr::Sql(e)) => {
+                let is_busy = if let rusqlite::Error::SqliteFailure(err, _) = &e {
+                    let code = err.code as i32;
+                    code == rusqlite::ffi::SQLITE_BUSY
+                        || err.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
+                } else {
+                    false
+                };
+                if !is_busy {
+                    return Err(StoreError::Sqlite(e));
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    let elapsed_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    return Err(StoreError::Busy {
+                        operation,
+                        elapsed_ms,
+                    });
+                }
+                let elapsed_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let jitter =
+                    (elapsed_ns.wrapping_mul(6_364_136_223_846_793_005)).rotate_left(13) & 0x3FF;
+                let raw_sleep_ms = backoff_ms.saturating_add(jitter / 1024);
+                let remaining_ms = u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
+                let sleep_ms = raw_sleep_ms.min(remaining_ms.max(1));
+                std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                backoff_ms = backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS);
+            }
+        }
     }
 }
 
