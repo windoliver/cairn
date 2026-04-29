@@ -118,6 +118,32 @@ impl SessionIdentity {
     }
 }
 
+/// A persisted session row (brief §8.1).
+///
+/// Stored in `.cairn/cairn.db` by the store adapter; the type itself is
+/// pure data so verbs can pass it across the trait boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    /// Stable identifier (typically a ULID minted by the store).
+    pub id: SessionId,
+    /// `(user, agent, project_root)` triple this session is keyed by.
+    pub identity: SessionIdentity,
+    /// Human-readable title. Empty by default; backfilled by `DreamWorkflow`.
+    pub title: String,
+    /// Optional `channel` metadata (`"chat"`, `"voice"`, …).
+    pub channel: Option<String>,
+    /// Optional `priority` hint (`"high"`, `"normal"`, …).
+    pub priority: Option<String>,
+    /// Free-form tags. Empty when unset.
+    pub tags: Vec<String>,
+    /// Unix epoch milliseconds when the row was inserted.
+    pub created_at_unix_ms: i64,
+    /// Unix epoch milliseconds of the most recent verb call on this session.
+    pub last_activity_at_unix_ms: i64,
+    /// `Some` once the session has been explicitly ended or aged out.
+    pub ended_at_unix_ms: Option<i64>,
+}
+
 /// The pre-resolved "last active session" the store passes to the resolver.
 ///
 /// Populated by `MemoryStore::find_active_session`. The adapter is
@@ -168,10 +194,7 @@ pub enum SessionSource {
 /// - `Some` with `idle_secs <= idle_window_secs` → [`SessionDecision::Reuse`]
 /// - `Some` with `idle_secs > idle_window_secs` → [`SessionDecision::CreateNew`]
 #[must_use]
-pub fn resolve_session(
-    last: Option<LastActiveSession>,
-    idle_window_secs: u64,
-) -> SessionDecision {
+pub fn resolve_session(last: Option<LastActiveSession>, idle_window_secs: u64) -> SessionDecision {
     match last {
         Some(l) if l.idle_secs <= idle_window_secs => SessionDecision::Reuse(l.id),
         _ => SessionDecision::CreateNew,
@@ -234,8 +257,8 @@ mod tests {
 
     #[test]
     fn identity_rejects_empty_project_root() {
-        let err = SessionIdentity::new(ident_user(), ident_agent(), Some(String::new()))
-            .unwrap_err();
+        let err =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(String::new())).unwrap_err();
         assert!(matches!(err, DomainError::EmptyField { .. }));
     }
 

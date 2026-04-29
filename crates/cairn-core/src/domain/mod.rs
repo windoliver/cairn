@@ -58,8 +58,8 @@ pub use provenance::Provenance;
 pub use record::{MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
 pub use session::{
-    DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, SessionDecision, SessionId, SessionIdentity,
-    SessionSource, resolve_session,
+    DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, Session, SessionDecision, SessionId,
+    SessionIdentity, SessionSource, resolve_session,
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
