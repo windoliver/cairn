@@ -45,6 +45,9 @@ sha2 = { workspace = true }
 regex = { workspace = true, features = ["unicode-perl", "unicode-case"] }
 unicode-normalization = { workspace = true }
 ulid = { workspace = true }
+zeroize = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
@@ -52,6 +55,7 @@ proptest = { workspace = true }
 insta = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
+rand_core = { workspace = true }
 
 [[bin]]
 name = "filter_smoke"

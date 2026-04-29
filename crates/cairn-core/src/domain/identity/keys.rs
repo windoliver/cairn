@@ -3,8 +3,10 @@
 use std::num::NonZeroU32;
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::domain::DomainError;
+use crate::domain::identity::Identity;
 
 /// Monotonically increasing version of a keystore-managed signing key.
 ///
@@ -191,5 +193,163 @@ mod tests {
         let h1 = WitnessHash::from_witness(b"hello");
         let h2 = WitnessHash::from_witness(b"hello");
         assert_eq!(h1, h2);
+    }
+}
+
+/// Wrapped Ed25519 signing key — zeroized on drop, no Clone, no public bytes.
+pub struct SigningKey(ed25519_dalek::SigningKey);
+
+impl SigningKey {
+    /// Generate a fresh Ed25519 keypair using the supplied CSPRNG.
+    #[must_use]
+    pub fn generate(rng: &mut impl rand_core::CryptoRngCore) -> Self {
+        Self(ed25519_dalek::SigningKey::generate(rng))
+    }
+    /// Reconstruct a signing key from raw secret bytes (e.g. loaded from the keystore).
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(ed25519_dalek::SigningKey::from_bytes(bytes))
+    }
+    /// The corresponding public verifying key.
+    #[must_use]
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.0.verifying_key()
+    }
+    /// Sign `msg` with the wrapped key.
+    #[must_use]
+    pub fn sign(&self, msg: &[u8]) -> ed25519_dalek::Signature {
+        use ed25519_dalek::Signer;
+        self.0.sign(msg)
+    }
+    /// Borrow the raw secret bytes for keystore persistence. Caller is
+    /// responsible for not retaining the slice.
+    #[must_use]
+    pub fn expose_secret_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+}
+
+impl Drop for SigningKey {
+    fn drop(&mut self) {
+        let mut bytes = self.0.to_bytes();
+        bytes.zeroize();
+    }
+}
+
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SigningKey(<redacted>)")
+    }
+}
+
+/// Witness/secret bytes — zeroized on drop, slice-borrow only.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    /// Wrap raw bytes (e.g. loaded from the keystore witness slot).
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+    /// Borrow as a slice. The slice is invalidated on drop.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SecretBytes({} bytes <redacted>)", self.0.len())
+    }
+}
+
+/// Discriminator for the per-handle account string. Either an identity
+/// keypair (`<wire>#k<version>`) or the per-vault witness slot.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HandleAccount {
+    /// Per-identity, per-version signing keypair.
+    Identity {
+        /// The identity that owns the keypair.
+        identity: Identity,
+        /// The key version slot.
+        version: KeyVersion,
+    },
+    /// Per-vault witness (binding tag).
+    Witness,
+}
+
+/// Typed handle into a `Keystore`. The vault id encodes namespace
+/// isolation at the type level so callers can't construct cross-vault handles.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SecretHandle {
+    /// Vault namespace this handle belongs to.
+    pub vault_id: VaultId,
+    /// Which slot inside the vault the handle points at.
+    pub account: HandleAccount,
+}
+
+impl SecretHandle {
+    /// Construct a handle for the per-version signing keypair of `identity`.
+    #[must_use]
+    pub fn for_identity(vault_id: VaultId, identity: Identity, version: KeyVersion) -> Self {
+        Self {
+            vault_id,
+            account: HandleAccount::Identity { identity, version },
+        }
+    }
+    /// Construct a handle for the vault's witness slot.
+    #[must_use]
+    pub fn for_witness(vault_id: VaultId) -> Self {
+        Self {
+            vault_id,
+            account: HandleAccount::Witness,
+        }
+    }
+    /// The keystore service string: `cairn:<vault_id>`.
+    #[must_use]
+    pub fn service(&self) -> String {
+        format!("cairn:{}", self.vault_id)
+    }
+    /// The keystore account string. `Identity { ... }` → `<wire>#k<version>`;
+    /// `Witness` → the literal `__vault_witness__`.
+    #[must_use]
+    pub fn account_string(&self) -> String {
+        match &self.account {
+            HandleAccount::Witness => "__vault_witness__".to_owned(),
+            HandleAccount::Identity { identity, version } => {
+                format!("{identity}#k{version}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+    use crate::domain::identity::Identity;
+
+    #[test]
+    fn identity_handle_format() {
+        let v = VaultId::mint();
+        let id = Identity::parse("hmn:alice:v1").unwrap();
+        let h = SecretHandle::for_identity(v.clone(), id.clone(), KeyVersion::FIRST);
+        assert_eq!(h.service(), format!("cairn:{v}"));
+        assert_eq!(h.account_string(), "hmn:alice:v1#k1");
+    }
+
+    #[test]
+    fn witness_handle_format() {
+        let v = VaultId::mint();
+        let h = SecretHandle::for_witness(v);
+        assert_eq!(h.account_string(), "__vault_witness__");
+    }
+
+    #[test]
+    fn signing_key_does_not_leak_in_debug() {
+        let mut rng = rand_core::OsRng;
+        let k = SigningKey::generate(&mut rng);
+        assert_eq!(format!("{k:?}"), "SigningKey(<redacted>)");
     }
 }
