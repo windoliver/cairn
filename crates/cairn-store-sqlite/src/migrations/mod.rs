@@ -18,6 +18,8 @@ const M0011_SESSIONS: &str = include_str!("sql/0011_sessions.sql");
 const M0012_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0012_sessions_unique_active.sql");
 const M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
     include_str!("sql/0013_sessions_unique_active_coalesce.sql");
+const M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
+    include_str!("sql/0014_sessions_close_relative_project_root.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -42,6 +44,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0013_sessions_unique_active_coalesce",
         M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE,
     ),
+    (
+        14,
+        "0014_sessions_close_relative_project_root",
+        M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -61,5 +68,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0011_SESSIONS),
         M::up(M0012_SESSIONS_UNIQUE_ACTIVE),
         M::up(M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE),
+        M::up(M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
     ])
 }

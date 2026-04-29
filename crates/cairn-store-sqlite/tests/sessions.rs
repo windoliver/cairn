@@ -716,6 +716,107 @@ async fn explicit_session_resolution_fails_closed_for_missing() {
 }
 
 #[tokio::test]
+async fn migration_ends_active_rows_with_relative_project_root() {
+    // Migration 0014 closes any active session whose `project_root` is a
+    // relative path. The current write path (SessionIdentity::new) rejects
+    // them, but read-path hydration (SessionIdentity::from_persisted)
+    // tolerates them so a vault upgraded from an older resolver does not
+    // fail to open. Such rows would otherwise be unreachable through
+    // discovery (`project_root IS ?3` against a canonical absolute caller
+    // string never matches a stored relative string), silently splitting
+    // history. Seed the legacy state at migration 13, run migrations to
+    // head, and assert: relative-path rows are ended; absolute-path rows
+    // (POSIX, Windows drive, UNC) survive.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 13");
+
+        // Seed: one relative-path row (legacy) plus three absolute-path
+        // rows (POSIX, Windows drive, Windows UNC) plus one NULL row.
+        // Each gets its own (user, agent, project_root) so the unique
+        // index doesn't reject the seed itself.
+        for (sid, user, agent, root) in [
+            ("S_REL", "usr:legacy", "agt:cli:x:y:v1", Some("subdir/repo")),
+            ("S_POSIX", "usr:abs1", "agt:cli:x:y:v1", Some("/abs/repo")),
+            ("S_WIN", "usr:abs2", "agt:cli:x:y:v1", Some(r"C:\repo")),
+            ("S_UNC", "usr:abs3", "agt:cli:x:y:v1", Some(r"\\srv\share")),
+            ("S_NULL", "usr:abs4", "agt:cli:x:y:v1", None),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, ?2, ?3, ?4, '', 100, 100, NULL)",
+                rusqlite::params![sid, user, agent, root],
+            )
+            .expect("insert");
+        }
+    }
+
+    // Run to head — 0014 should end S_REL and leave the others alone.
+    let store = open(&db_path).await.expect("open after 0014");
+
+    for (sid, user, root, expect_ended) in [
+        ("S_REL", "usr:legacy", Some("subdir/repo"), true),
+        ("S_POSIX", "usr:abs1", Some("/abs/repo"), false),
+        ("S_WIN", "usr:abs2", Some(r"C:\repo"), false),
+        ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
+        ("S_NULL", "usr:abs4", None, false),
+    ] {
+        let sess = store
+            .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
+            .await
+            .expect("get")
+            .unwrap_or_else(|| panic!("{sid} present"));
+        assert_eq!(sess.identity.user.as_str(), user);
+        assert_eq!(sess.identity.project_root.as_deref(), root);
+        assert_eq!(
+            sess.ended_at_unix_ms.is_some(),
+            expect_ended,
+            "{sid}: expected ended={expect_ended}, got ended_at={:?}",
+            sess.ended_at_unix_ms,
+        );
+    }
+}
+
+#[tokio::test]
 async fn touch_and_end_reject_cross_identity_session_ids() {
     // Brief §8.1: a leaked / guessed session id must not let a foreign
     // (user, agent, project_root) bump activity on or close another
