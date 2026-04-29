@@ -230,6 +230,72 @@ impl SqliteMemoryStore {
         })
     }
 
+    /// Resolve an explicit session id, verifying it belongs to `expected`.
+    ///
+    /// Companion to [`SqliteMemoryStore::resolve_or_create_session`] for the
+    /// `--session` / `CAIRN_SESSION_ID` / harness paths (brief §8.1). The
+    /// CLI / SDK should never call into [`SqliteMemoryStore::touch_session`]
+    /// or [`SqliteMemoryStore::end_session`] with a raw user-supplied id —
+    /// a leaked or copied id from a different `(user, agent, project_root)`
+    /// would otherwise let the caller hijack writes from another identity.
+    ///
+    /// Behaviour:
+    /// - Fetches the row by id; `Ok(None)` when no such row exists.
+    /// - When found, compares the persisted `(user, agent, project_root)`
+    ///   against `expected`; on mismatch returns
+    ///   [`StoreError::SessionIdentityMismatch`] (the caller should treat
+    ///   this as a hard authentication failure, not a missing row).
+    /// - When found and matching, bumps `last_activity_at` (under the same
+    ///   busy-retry policy) so liveness tracks the access — except when
+    ///   the row is already ended, in which case we return `Ok(None)`
+    ///   (the session is no longer usable; auto-discovery should fall
+    ///   through to create-new on the next call).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store was constructed
+    /// via `Default::default()`. Returns [`StoreError::Worker`] /
+    /// [`StoreError::Sqlite`] for SQL failures. Returns
+    /// [`StoreError::SessionIdentityMismatch`] when the session id exists
+    /// but is owned by a different identity. Returns [`StoreError::Busy`]
+    /// when sustained write contention exceeds the retry deadline on the
+    /// liveness bump.
+    #[instrument(
+        skip(self, expected),
+        err,
+        fields(
+            verb = "resolve_explicit_session",
+            session_id = %id.as_str(),
+            user = %expected.user,
+            agent = %expected.agent,
+        ),
+    )]
+    pub async fn resolve_explicit_session(
+        &self,
+        id: &SessionId,
+        expected: &SessionIdentity,
+    ) -> Result<Option<Session>, StoreError> {
+        let Some(stored) = self.get_session(id).await? else {
+            return Ok(None);
+        };
+        if stored.identity != *expected {
+            return Err(StoreError::SessionIdentityMismatch {
+                session_id: id.as_str().to_owned(),
+            });
+        }
+        if stored.ended_at_unix_ms.is_some() {
+            // Caller named a session that has already been closed. Surface
+            // as "no live session for this id" so dispatchers fall through
+            // to auto-discover / create instead of operating on a corpse.
+            return Ok(None);
+        }
+        // Bump last_activity_at — explicit reuse counts as activity.
+        // touch_session itself runs under the busy-retry helper.
+        let _bumped = self.touch_session(id).await?;
+        // Re-fetch so the returned struct reflects the bumped timestamp.
+        self.get_session(id).await
+    }
+
     /// Atomically resolve-or-create the active session for `identity`.
     ///
     /// Replaces the racy `find_active_session → resolve_session → create_session`

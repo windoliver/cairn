@@ -159,4 +159,14 @@ pub enum DomainError {
         /// Specific reason the session identifier was rejected.
         message: String,
     },
+
+    /// A session `project_root` failed normalization (§8.1) — most often
+    /// because it was a relative path. Two callers in different CWDs
+    /// passing the same relative string would otherwise collapse into one
+    /// session, breaking the `(user, agent, project_root)` isolation rule.
+    #[error("project_root: {message}")]
+    InvalidProjectRoot {
+        /// Specific reason the project root was rejected.
+        message: String,
+    },
 }

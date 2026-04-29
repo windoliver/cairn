@@ -66,6 +66,20 @@ pub enum StoreError {
         what: String,
     },
 
+    /// An explicit session id was supplied (via `--session`, env, or
+    /// harness) but the persisted row's `(user, agent, project_root)`
+    /// does not match the caller's identity. Treat this as a hard
+    /// authentication failure — the id is foreign and must not be used.
+    /// Brief §8.1.
+    #[error(
+        "session identity mismatch for session_id `{session_id}`: \
+         the persisted row belongs to a different (user, agent, project_root)"
+    )]
+    SessionIdentityMismatch {
+        /// The session id whose ownership check failed.
+        session_id: String,
+    },
+
     /// Sustained write contention exceeded the operation's deadline.
     /// Distinct from `Sqlite(SQLITE_BUSY)` so callers can classify this as
     /// retriable on the next user action without scraping error codes.

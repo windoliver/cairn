@@ -106,12 +106,21 @@ pub fn resolve(
         });
     }
 
+    // Helper to keep the three explicit branches aligned. The store-layer
+    // resolver compares `expected_identity` against the persisted row and
+    // rejects mismatches, closing the cross-session-mixing hole an
+    // unbound id would otherwise leave.
+    let into_explicit = |id: SessionId| SessionSource::Explicit {
+        id,
+        expected_identity: identity.clone(),
+    };
+
     if let Some(raw) = flag {
         let id = SessionId::parse(raw).map_err(|e| SessionSourceError::InvalidId {
             origin: "--session",
             message: e.to_string(),
         })?;
-        return Ok(SessionSource::Explicit(id));
+        return Ok(into_explicit(id));
     }
 
     if let Some(raw) = env_value {
@@ -119,7 +128,7 @@ pub fn resolve(
             origin: "CAIRN_SESSION_ID",
             message: e.to_string(),
         })?;
-        return Ok(SessionSource::Explicit(id));
+        return Ok(into_explicit(id));
     }
 
     if let Some(raw) = harness_supplied.filter(|s| !s.is_empty()) {
@@ -127,7 +136,7 @@ pub fn resolve(
             origin: "harness",
             message: e.to_string(),
         })?;
-        return Ok(SessionSource::Explicit(id));
+        return Ok(into_explicit(id));
     }
 
     Ok(SessionSource::AutoDiscover {
@@ -194,14 +203,14 @@ mod tests {
     #[test]
     fn flag_wins_when_only_flag_set() {
         let got = resolve_default(Some("S1"), &empty_env(), None, ident()).expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "S1"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "S1"));
     }
 
     #[test]
     fn env_used_when_flag_absent() {
         let got =
             resolve_default(None, &env_with("CAIRN_SESSION_ID", "S2"), None, ident()).expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "S2"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "S2"));
     }
 
     #[test]
@@ -213,7 +222,7 @@ mod tests {
             ident(),
         )
         .expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "S1"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "S1"));
     }
 
     #[test]
@@ -231,14 +240,14 @@ mod tests {
     #[test]
     fn harness_used_when_flag_and_env_absent() {
         let got = resolve_default(None, &empty_env(), Some("HARNESS-1"), ident()).expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "HARNESS-1"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "HARNESS-1"));
     }
 
     #[test]
     fn flag_overrides_harness() {
         let got =
             resolve_default(Some("S1"), &empty_env(), Some("HARNESS-1"), ident()).expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "S1"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "S1"));
     }
 
     #[test]
@@ -250,7 +259,7 @@ mod tests {
             ident(),
         )
         .expect("ok");
-        assert!(matches!(got, SessionSource::Explicit(id) if id.as_str() == "S2"));
+        assert!(matches!(got, SessionSource::Explicit { id, .. } if id.as_str() == "S2"));
     }
 
     #[test]

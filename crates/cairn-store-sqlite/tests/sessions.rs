@@ -633,3 +633,84 @@ async fn concurrent_resolve_or_create_yields_one_session() {
         "all concurrent resolvers must converge on one session id, got {session_ids:?}",
     );
 }
+
+#[tokio::test]
+async fn explicit_session_resolution_rejects_foreign_identity() {
+    // Alice creates a session under /repo. Bob (different usr:) hands over
+    // alice's session id — perhaps copied from the env, leaked through a
+    // hostile harness, or just a dangling CAIRN_SESSION_ID. The store
+    // must refuse to operate on alice's row under bob's identity.
+    let store = open_in_memory().await.expect("open");
+
+    let alice = SessionIdentity::new(
+        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("alice identity");
+    let bob = SessionIdentity::new(
+        Identity::parse("usr:bob").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("bob identity");
+
+    let session = store
+        .create_session(&alice, NewSessionMetadata::default())
+        .await
+        .expect("create");
+
+    // Alice resolving her own id succeeds and bumps activity.
+    let resolved = store
+        .resolve_explicit_session(&session.id, &alice)
+        .await
+        .expect("alice ok");
+    assert!(resolved.is_some());
+
+    // Bob using alice's id is rejected as identity mismatch — not a
+    // missing-row, not an internal error.
+    let err = store
+        .resolve_explicit_session(&session.id, &bob)
+        .await
+        .expect_err("bob's call must be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("identity mismatch"),
+        "expected SessionIdentityMismatch, got {msg}",
+    );
+}
+
+#[tokio::test]
+async fn explicit_session_resolution_returns_none_for_ended_or_missing() {
+    let store = open_in_memory().await.expect("open");
+
+    let alice = SessionIdentity::new(
+        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("identity");
+
+    // Missing id → Ok(None), not an error. Lets the dispatcher fall through
+    // to auto-discover.
+    let unknown = cairn_core::domain::session::SessionId::parse("01HXMISSING0000000000000001")
+        .expect("parse");
+    let got = store
+        .resolve_explicit_session(&unknown, &alice)
+        .await
+        .expect("ok");
+    assert!(got.is_none());
+
+    // Ended session also returns None — operating on a corpse would let
+    // the caller resurrect a closed session via touch.
+    let session = store
+        .create_session(&alice, NewSessionMetadata::default())
+        .await
+        .expect("create");
+    assert!(store.end_session(&session.id).await.expect("end"));
+    let got = store
+        .resolve_explicit_session(&session.id, &alice)
+        .await
+        .expect("ok");
+    assert!(got.is_none(), "ended session must surface as None");
+}

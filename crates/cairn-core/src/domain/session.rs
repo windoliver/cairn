@@ -86,8 +86,27 @@ pub struct SessionIdentity {
 }
 
 impl SessionIdentity {
-    /// Construct a [`SessionIdentity`], rejecting identity kinds that violate
-    /// §8.1 (`user` must be `usr:`, `agent` must be `agt:`).
+    /// Construct a [`SessionIdentity`].
+    ///
+    /// Validates and normalizes inputs so the persisted `(user, agent,
+    /// project_root)` tuple is canonical — semantically-equivalent paths
+    /// otherwise fragment auto-discovery into multiple active sessions
+    /// since the store compares the raw string in `project_root IS ?` and
+    /// the unique index over `COALESCE(project_root, '')`.
+    ///
+    /// Rules:
+    /// - `user` must be a `usr:` identity, `agent` must be `agt:` (§8.1).
+    /// - `project_root`, when supplied, must be a non-empty absolute path
+    ///   (`starts_with('/')` on POSIX; on Windows the typed-path call site
+    ///   is responsible for upstream canonicalization since `cairn-core`
+    ///   stays I/O-free). Trailing `/` characters are trimmed so `/repo`
+    ///   and `/repo/` resolve to the same session.
+    ///
+    /// Filesystem-level canonicalization (resolving symlinks, normalizing
+    /// `..` segments) lives in the call site that produces the path: it
+    /// requires I/O and `cairn-core` is pure. The CLI's vault resolver
+    /// passes a `std::path::Path::canonicalize()` result; the SDK
+    /// expects callers to canonicalize before constructing the identity.
     pub fn new(
         user: Identity,
         agent: Identity,
@@ -103,18 +122,57 @@ impl SessionIdentity {
                 message: format!("session agent must be `agt:` identity, got `{agent}`"),
             });
         }
-        if let Some(p) = &project_root
-            && p.is_empty()
-        {
-            return Err(DomainError::EmptyField {
-                field: "project_root",
-            });
-        }
+        let project_root = match project_root {
+            None => None,
+            Some(raw) => {
+                if raw.is_empty() {
+                    return Err(DomainError::EmptyField {
+                        field: "project_root",
+                    });
+                }
+                let normalized = normalize_project_root(&raw)?;
+                Some(normalized)
+            }
+        };
         Ok(Self {
             user,
             agent,
             project_root,
         })
+    }
+}
+
+/// Normalize a `project_root` string for the active-session uniqueness
+/// invariant.
+///
+/// - Requires the path to be absolute (`starts_with('/')`). Relative paths
+///   are rejected because two callers in different CWDs would otherwise
+///   share the same `relative/path` string and collapse into one session.
+/// - Trims trailing `/` so `/repo` and `/repo/` collapse to one identity.
+///   The leading `/` is preserved (a single `/` becomes empty otherwise).
+/// - Rejects whitespace-only paths.
+///
+/// Filesystem canonicalization (symlink resolution, `..` collapse) is the
+/// caller's responsibility — `cairn-core` is I/O-free. This function only
+/// performs string-level normalization that does not require touching disk.
+fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
+    if raw.trim().is_empty() {
+        return Err(DomainError::EmptyField {
+            field: "project_root",
+        });
+    }
+    if !raw.starts_with('/') {
+        return Err(DomainError::InvalidProjectRoot {
+            message: format!("project_root must be an absolute path, got `{raw}`"),
+        });
+    }
+    // Trim trailing slashes but keep the leading one so a literal "/" still
+    // resolves to "/" (not "").
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.is_empty() {
+        Ok("/".to_owned())
+    } else {
+        Ok(trimmed.to_owned())
     }
 }
 
@@ -174,7 +232,20 @@ pub enum SessionDecision {
 #[non_exhaustive]
 pub enum SessionSource {
     /// Caller explicitly named a session — never auto-discover.
-    Explicit(SessionId),
+    ///
+    /// Carries the caller's expected `SessionIdentity`. The store-layer
+    /// resolver checks the persisted row's `(user, agent, project_root)`
+    /// against this identity and rejects the call if they disagree —
+    /// otherwise a leaked / copied / harness-supplied session id could
+    /// hijack writes from a different identity (cross-session mixing).
+    Explicit {
+        /// The session id the caller named.
+        id: SessionId,
+        /// The identity the caller expects this session to belong to.
+        /// Sourced from the same `(user, agent, project_root)` resolution
+        /// the auto-discover branch uses.
+        expected_identity: SessionIdentity,
+    },
     /// Auto-discover from `(user, agent, project_root)` within the
     /// configured idle window.
     AutoDiscover {
@@ -260,6 +331,37 @@ mod tests {
         let err =
             SessionIdentity::new(ident_user(), ident_agent(), Some(String::new())).unwrap_err();
         assert!(matches!(err, DomainError::EmptyField { .. }));
+    }
+
+    #[test]
+    fn identity_normalizes_trailing_slash() {
+        let with_slash = SessionIdentity::new(ident_user(), ident_agent(), Some("/repo/".into()))
+            .expect("valid");
+        let without_slash =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("/repo".into())).expect("valid");
+        assert_eq!(with_slash.project_root, without_slash.project_root);
+        assert_eq!(with_slash.project_root.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn identity_normalizes_multiple_trailing_slashes() {
+        let id = SessionIdentity::new(ident_user(), ident_agent(), Some("/repo///".into()))
+            .expect("valid");
+        assert_eq!(id.project_root.as_deref(), Some("/repo"));
+    }
+
+    #[test]
+    fn identity_rejects_relative_path() {
+        let err = SessionIdentity::new(ident_user(), ident_agent(), Some("relative/path".into()))
+            .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidProjectRoot { .. }));
+    }
+
+    #[test]
+    fn identity_preserves_lone_root_slash() {
+        let id =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("/".into())).expect("valid");
+        assert_eq!(id.project_root.as_deref(), Some("/"));
     }
 
     #[test]
