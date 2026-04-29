@@ -1068,6 +1068,106 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
 }
 
 #[tokio::test]
+async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolve() {
+    // 0015's slash-collapse rewrite preserves `\\?\` rows verbatim
+    // (LIKE patterns don't match the `\\?\` shape). Without 0016
+    // stripping the prefix on ended rows too, an ended legacy row
+    // stored as `\\?\C:\Repo\` would surface SessionIdentityMismatch
+    // when a post-upgrade caller reopens by id under the runtime
+    // canonical (`c:\repo`) — the same §8.1 contract violation 0015
+    // fixed for plain-slash legacy rows. Cover both verbatim drive
+    // and verbatim UNC.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_canonicalize_windows_paths.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 15");
+
+        // Two ended verbatim rows: drive (with mixed case + trailing
+        // separator) and UNC. Both must surface SessionEnded after
+        // 0016 strips + lowercases ended rows too.
+        for (sid, user, root) in [
+            ("S_ENDED_VRB_DRV", "usr:vrb1", r"\\?\C:\Repo\"),
+            ("S_ENDED_VRB_UNC", "usr:vrb2", r"\\?\UNC\Srv\Share"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, ?2, 'agt:cli:x:y:v1', ?3, '', 100, 100, 200)",
+                rusqlite::params![sid, user, root],
+            )
+            .expect("insert ended verbatim");
+        }
+    }
+
+    let store = open(&db_path).await.expect("open after 0016");
+
+    for (sid, user, raw_caller_root) in [
+        ("S_ENDED_VRB_DRV", "usr:vrb1", r"C:\Repo"),
+        ("S_ENDED_VRB_UNC", "usr:vrb2", r"\\Srv\Share"),
+    ] {
+        let canonical = SessionIdentity::new(
+            Identity::parse(user).expect("user"),
+            Identity::parse("agt:cli:x:y:v1").expect("agent"),
+            Some(raw_caller_root.into()),
+        )
+        .expect("identity");
+        let id = cairn_core::domain::session::SessionId::parse(sid).expect("parse");
+        let err = store
+            .resolve_explicit_session(&id, &canonical)
+            .await
+            .expect_err("ended verbatim row must surface a typed error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("is ended"),
+            "{sid}: expected SessionEnded after 0016, got `{msg}`",
+        );
+    }
+}
+
+#[tokio::test]
 #[allow(
     clippy::too_many_lines,
     clippy::similar_names,
