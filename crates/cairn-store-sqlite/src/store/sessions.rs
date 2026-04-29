@@ -559,33 +559,49 @@ impl SqliteMemoryStore {
         id: &SessionId,
         expected: &SessionIdentity,
     ) -> Result<Option<Session>, StoreError> {
-        let row = self.get_session_unchecked(id).await?;
+        let row = self.fetch_session_row(id).await?;
         Ok(row.filter(|s| s.identity == *expected))
     }
 
-    /// Fetch a session by id without identity enforcement.
+    /// Test-only accessor that bypasses the identity guard
+    /// [`SqliteMemoryStore::get_session`] enforces.
     ///
-    /// **Internal use / migration tests only.** Public callers must go
-    /// through [`SqliteMemoryStore::get_session`], which enforces the
-    /// `(user, agent, project_root)` guard. This entrypoint exists for
-    /// integration tests that seed rows directly and need to assert on
-    /// the stored shape without reconstructing a `SessionIdentity`,
-    /// and for verb-layer paths that have already validated identity
-    /// (e.g. immediately after a successful
-    /// [`SqliteMemoryStore::resolve_explicit_session`] call).
+    /// Gated behind the `test-helpers` feature so production builds
+    /// cannot reach it. Integration tests in this crate enable the
+    /// feature in `dev-dependencies`; external consumers cannot turn
+    /// it on without explicitly opting in. Use only for migration
+    /// tests that seed rows by id and need to assert on the stored
+    /// shape without reconstructing a [`SessionIdentity`].
     ///
     /// # Errors
     ///
     /// Returns [`StoreError::NotInitialized`] when the store was constructed
     /// via `Default::default()`. Returns [`StoreError::Worker`] /
     /// [`StoreError::Sqlite`] for SQL failures.
-    #[doc(hidden)]
+    #[cfg(feature = "test-helpers")]
+    pub async fn get_session_unchecked(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<Session>, StoreError> {
+        self.fetch_session_row(id).await
+    }
+
+    /// Internal session-row reader used by [`SqliteMemoryStore::get_session`]
+    /// (after identity filtering) and the `test-helpers`-gated
+    /// [`SqliteMemoryStore::get_session_unchecked`]. Crate-private so the
+    /// raw lookup never crosses the public API surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store was constructed
+    /// via `Default::default()`. Returns [`StoreError::Worker`] /
+    /// [`StoreError::Sqlite`] for SQL failures.
     #[instrument(
         skip(self),
         err,
-        fields(verb = "get_session_unchecked", session_id = %id.as_str()),
+        fields(verb = "fetch_session_row", session_id = %id.as_str()),
     )]
-    pub async fn get_session_unchecked(
+    pub(crate) async fn fetch_session_row(
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, StoreError> {

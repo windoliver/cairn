@@ -214,20 +214,27 @@ enum AbsoluteShape {
 /// Returns `None` for relative or otherwise-unrecognized inputs.
 ///
 /// Recognized forms:
-/// - Windows UNC: starts with `\\` (two literal backslashes).
+/// - Windows UNC: starts with `\\` (two literal backslashes). The
+///   verbatim prefixes `\\?\` and `\\?\UNC\` are recognized as UNC
+///   here and stripped to their non-verbatim form by
+///   [`normalize_project_root`] so a caller passing
+///   `\\?\C:\repo` or `\\?\UNC\srv\share` keys the same identity as
+///   `C:\repo` / `\\srv\share`.
 /// - Windows drive: `X:\...` or `X:/...` where `X` is `[A-Za-z]`.
 /// - POSIX: starts with `/` (including `//foo`, which POSIX permits as
 ///   an implementation-defined absolute pathname). Treating `//...` as
 ///   POSIX rather than Windows-UNC-with-forward-slashes is the safer
 ///   choice: a POSIX path is only ever rewritten by user action, while
 ///   a UNC misclassification would have the migration silently rewrite
-///   `/` to `\` inside a legitimate POSIX identity.
+///   `/` to `\` inside a legitimate POSIX identity. Windows callers
+///   must pass the literal `\\srv\share` form.
 fn classify_absolute(raw: &str) -> Option<AbsoluteShape> {
     let bytes = raw.as_bytes();
-    // UNC: two literal leading backslashes. The forward-slash form
-    // `//srv/share` exists on Windows but is also a valid POSIX path
-    // shape, and we cannot disambiguate from a string alone — defer to
-    // POSIX classification below.
+    // UNC: two literal leading backslashes. Covers plain `\\srv\share`
+    // and Windows verbatim prefixes `\\?\` / `\\?\UNC\`. The forward-
+    // slash form `//srv/share` exists on Windows but is also a valid
+    // POSIX path shape, and we cannot disambiguate from a string alone
+    // — defer to POSIX classification below.
     if bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\' {
         return Some(AbsoluteShape::WindowsUnc);
     }
@@ -285,11 +292,40 @@ fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
     let shape = classify_absolute(raw).ok_or_else(|| DomainError::InvalidProjectRoot {
         message: format!("project_root must be an absolute path, got `{raw}`"),
     })?;
+    // Step 0: strip Windows verbatim-path prefixes so a caller passing
+    // `\\?\C:\repo` keys the same identity as `C:\repo`, and
+    // `\\?\UNC\srv\share` keys the same identity as `\\srv\share`. The
+    // `\\?\` prefix is a Win32 escape that disables path canonicalization
+    // — it represents the same filesystem object as the non-verbatim
+    // form, so persisting both spellings as distinct identities would
+    // silently fork sessions for one project. Re-classify after the
+    // strip in case the resulting form changed shape (verbatim UNC →
+    // plain UNC).
+    let (raw, shape) = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        // `\\?\UNC\srv\share` → `\\srv\share`
+        let normalized = format!(r"\\{rest}");
+        let s = classify_absolute(&normalized).ok_or_else(|| DomainError::InvalidProjectRoot {
+            message: format!("verbatim UNC stripped to non-absolute form: `{normalized}`"),
+        })?;
+        (normalized, s)
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        // `\\?\C:\repo` → `C:\repo`. Some verbatim spellings escape
+        // forms that aren't drive-absolute on their own (`\\?\GLOBALROOT\…`)
+        // — we don't try to interpret those; the post-strip classifier
+        // will reject them.
+        let normalized = rest.to_owned();
+        let s = classify_absolute(&normalized).ok_or_else(|| DomainError::InvalidProjectRoot {
+            message: format!("verbatim Windows path stripped to non-absolute form: `{normalized}`"),
+        })?;
+        (normalized, s)
+    } else {
+        (raw.to_owned(), shape)
+    };
     // Step 1: slash-canonicalize Windows-shaped paths so `C:\repo` and
     // `C:/repo` collapse to one identity. POSIX paths leave `\` alone
     // because it's a regular filename character there.
     let canonical: String = match shape {
-        AbsoluteShape::Posix => raw.to_owned(),
+        AbsoluteShape::Posix => raw.clone(),
         AbsoluteShape::WindowsDrive | AbsoluteShape::WindowsUnc => raw
             .chars()
             .map(|c| if c == '/' { '\\' } else { c })
@@ -536,6 +572,36 @@ mod tests {
             SessionIdentity::new(ident_user(), ident_agent(), Some("//srv/share".into()))
                 .expect("POSIX double-slash absolute is accepted");
         assert_eq!(posix_double.project_root.as_deref(), Some("//srv/share"));
+    }
+
+    #[test]
+    fn identity_strips_windows_verbatim_drive_prefix() {
+        // `\\?\C:\repo` is the verbatim escape for `C:\repo` — same
+        // filesystem object. Persisting both as distinct identities
+        // would fork one project's sessions, so the verbatim prefix
+        // is stripped before canonicalization.
+        let verbatim =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\?\C:\repo".into()))
+                .expect("verbatim drive path");
+        let plain = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\repo".into()))
+            .expect("plain drive path");
+        assert_eq!(verbatim.project_root, plain.project_root);
+        assert_eq!(verbatim.project_root.as_deref(), Some(r"C:\repo"));
+    }
+
+    #[test]
+    fn identity_strips_windows_verbatim_unc_prefix() {
+        // `\\?\UNC\srv\share` is the verbatim form of `\\srv\share`.
+        let verbatim = SessionIdentity::new(
+            ident_user(),
+            ident_agent(),
+            Some(r"\\?\UNC\srv\share".into()),
+        )
+        .expect("verbatim UNC");
+        let plain = SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\srv\share".into()))
+            .expect("plain UNC");
+        assert_eq!(verbatim.project_root, plain.project_root);
+        assert_eq!(verbatim.project_root.as_deref(), Some(r"\\srv\share"));
     }
 
     #[test]
