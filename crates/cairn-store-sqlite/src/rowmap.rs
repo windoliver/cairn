@@ -35,6 +35,18 @@ pub fn row_to_record(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {
     })
 }
 
+/// Causal precedence within a single wall-clock second:
+/// Update < Expire < Tombstone < Purge.
+fn kind_precedence(k: ChangeKind) -> u8 {
+    match k {
+        ChangeKind::Update => 0,
+        ChangeKind::Expire => 1,
+        ChangeKind::Tombstone => 2,
+        ChangeKind::Purge => 3,
+        _ => 4,
+    }
+}
+
 /// Build a `RecordVersion` from a row (for `version_history`).
 ///
 /// Does not read `record_json`; sources only the version-lifecycle columns.
@@ -105,14 +117,21 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
 
     // The `RecordVersion` contract documents events as ascending by
     // timestamp. Sort by the SQLite-derived unix epoch (a real instant)
-    // rather than the RFC3339 string, since lexical compare is wrong
-    // once offsets are involved. Events whose epoch could not be parsed
-    // (e.g. a corrupted column) sort last.
-    events.sort_by(|a, b| match (a.1, b.1) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
+    // rather than the RFC3339 string — lexical compare is unsafe once
+    // timezone offsets appear. Within a single second, fall back to a
+    // causal precedence order so same-second mutations reconstruct
+    // deterministically (Update happens before Expire happens before
+    // Tombstone happens before Purge — though Purge is surfaced via
+    // the separate `HistoryEntry::Purge` arm, never inside events).
+    // Events whose epoch could not be parsed sort last.
+    events.sort_by(|a, b| {
+        let epoch_cmp = match (a.1, b.1) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        epoch_cmp.then_with(|| kind_precedence(a.0.kind).cmp(&kind_precedence(b.0.kind)))
     });
     let events: Vec<RecordEvent> = events.into_iter().map(|(e, _)| e).collect();
 

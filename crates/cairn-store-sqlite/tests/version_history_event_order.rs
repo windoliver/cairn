@@ -187,3 +187,63 @@ async fn events_are_sorted_by_timestamp() {
         );
     }
 }
+
+/// Regression: when activate and tombstone land in the same second,
+/// `Rfc3339Timestamp::now()` produces equal epoch values, so a naive
+/// epoch sort is non-deterministic. The kind-precedence secondary sort
+/// must always reconstruct Update before Tombstone.
+#[tokio::test]
+async fn same_second_events_use_kind_precedence_for_stable_order() {
+    let dir = tempdir().expect("tempdir");
+    let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
+        .await
+        .expect("open");
+
+    let target = TargetId::new("vh-same-second");
+    let actor = ActorRef::from_string("usr:vhtest");
+
+    // Stage + activate + tombstone within a single apply_tx so all
+    // three events resolve to the same wall-clock second.
+    store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            let a = actor.clone();
+            move |tx| {
+                let r = make_record("01HQZX9F5N00000000000000C3", "body");
+                tx.stage_version(
+                    &t,
+                    &r,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.tombstone_target(&t, &a)?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("apply");
+
+    let history = store
+        .version_history(&Principal::system(&test_apply_token()), &target)
+        .await
+        .expect("version_history");
+    let HistoryEntry::Version(v) = &history[0] else {
+        panic!("expected Version entry");
+    };
+
+    // Update precedence (0) must come before Tombstone (2) regardless
+    // of equal timestamps.
+    let kinds: Vec<_> = v.events.iter().map(|e| e.kind).collect();
+    let update_idx = kinds.iter().position(|k| *k == ChangeKind::Update);
+    let tomb_idx = kinds.iter().position(|k| *k == ChangeKind::Tombstone);
+    assert!(
+        update_idx.is_some() && tomb_idx.is_some() && update_idx < tomb_idx,
+        "Update must precede Tombstone deterministically; got: {:?}",
+        v.events
+    );
+}
