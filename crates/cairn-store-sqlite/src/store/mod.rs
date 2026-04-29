@@ -3,6 +3,7 @@
 pub(crate) mod edges;
 pub(crate) mod projection;
 pub(crate) mod read;
+pub(crate) mod search;
 pub(crate) mod tombstone;
 pub(crate) mod trait_impl;
 pub(crate) mod tx;

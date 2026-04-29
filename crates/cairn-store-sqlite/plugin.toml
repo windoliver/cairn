@@ -12,7 +12,7 @@ minor = 3
 patch = 0
 
 [features]
-fts = false
+fts = true
 vector = false
 graph_edges = true
 transactions = true

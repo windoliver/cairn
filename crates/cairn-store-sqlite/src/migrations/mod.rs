@@ -14,6 +14,7 @@ const M0006_DRIFT_HARDENING: &str = include_str!("sql/0006_drift_hardening.sql")
 const M0007_TOMBSTONE_REASON: &str = include_str!("sql/0007_tombstone_reason.sql");
 const M0008_RECORD_EXTENSIONS: &str = include_str!("sql/0008_record_extensions.sql");
 const M0010_RANKING_INDEXES: &str = include_str!("sql/0010_ranking_indexes.sql");
+const M0011_FILTER_ALIGNMENT: &str = include_str!("sql/0011_filter_alignment.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -27,6 +28,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (7, "0007_tombstone_reason", M0007_TOMBSTONE_REASON),
     (8, "0008_record_extensions", M0008_RECORD_EXTENSIONS),
     (10, "0010_ranking_indexes", M0010_RANKING_INDEXES),
+    (11, "0011_filter_alignment", M0011_FILTER_ALIGNMENT),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -43,5 +45,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0007_TOMBSTONE_REASON),
         M::up(M0008_RECORD_EXTENSIONS),
         M::up(M0010_RANKING_INDEXES),
+        M::up(M0011_FILTER_ALIGNMENT),
     ])
 }
