@@ -1,9 +1,6 @@
 //! Phase 0/A/B dispatch + budget enforcement + `llm_eligible_spans`.
 //! Spec §6.
 
-// Helper fns are wired up in Task 12 (RegexExtractor); dead_code until then.
-#![allow(dead_code)]
-
 use std::time::Instant;
 
 use crate::domain::{CaptureEvent, CapturePayload};

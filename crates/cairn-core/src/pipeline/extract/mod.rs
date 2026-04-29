@@ -20,6 +20,7 @@ pub use body::{
 };
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};
+pub use regex::RegexExtractor;
 pub use regex::rule::{RegexRule, ToolFrameFamily};
 
 use crate::domain::CaptureEvent;
