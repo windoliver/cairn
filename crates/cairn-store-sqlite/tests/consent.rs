@@ -8,7 +8,7 @@ use cairn_store_sqlite::consent::{
     append, max_rowid, query_by_actor, query_by_op, query_by_scope, query_by_sensor,
     read_since_rowid,
 };
-use cairn_store_sqlite::open_in_memory;
+use cairn_store_sqlite::open_in_memory_sync as open_in_memory;
 
 /// Build a fixture hash of the form `hash:<32 lowercase hex>` from a
 /// numeric seed. Avoids hand-padding strings in every test.

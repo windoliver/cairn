@@ -1,23 +1,23 @@
--- Migration 0008: harden the 0007 consent_journal event log against
+-- Migration 0011: harden the 0009 consent_journal event log against
 -- direct-SQL writers that bypass `cairn_core::domain::ConsentEvent::validate`.
 -- Brief source: §14 (privacy / consent), §15 (forget receipts).
--- Issue source: #94, adversarial-review rounds 2..5.
+-- Issue source: #94, adversarial-review rounds 2..10.
 --
--- 0007 added the columns + the kind-domain / iso / forget-body-free
+-- 0009 added the columns + the kind-domain / iso / forget-body-free
 -- triggers. This migration ADDs the rest of the journal-side invariants
 -- so a direct INSERT cannot brick the async mirror by writing a row
 -- whose payload `serde_json::from_str::<ConsentPayload>` cannot decode
 -- (the consent_journal is append-only — a single bad row blocks the
 -- mirror cursor forever).
 --
--- WHY a separate migration: 0007 was applied in earlier branch states.
+-- WHY a separate migration: 0009 was applied in earlier branch states.
 -- Per CLAUDE.md §6.11, applied migrations are immutable; new schema
 -- belongs in a new migration file. The verifier in `verify.rs` hashes
 -- compiled migration text against `schema_migrations.sql_hash`, so
--- mutating 0007 would surface as `SchemaDrift` on every existing vault.
+-- mutating 0009 would surface as `SchemaDrift` on every existing vault.
 --
 -- Each `CREATE TRIGGER` is preceded by `DROP TRIGGER IF EXISTS` so
--- vaults that picked up an in-flight 0007 carrying the same trigger
+-- vaults that picked up an in-flight 0009 carrying the same trigger
 -- name with a weaker body will get the hardened version on upgrade.
 -- The verify-fingerprint pass after migration completes will reject
 -- any leftover divergent body.
@@ -50,7 +50,7 @@ END;
 -- `json_type(...)` returning the literal `'text'`.
 --
 -- Gated on `kind` being in the §14 domain so the kind-domain trigger
--- (0007) remains the canonical violation when both could fire (SQLite
+-- (0009) remains the canonical violation when both could fire (SQLite
 -- does not guarantee BEFORE INSERT trigger fire order).
 DROP TRIGGER IF EXISTS consent_journal_payload_shape_matches_kind;
 CREATE TRIGGER consent_journal_payload_shape_matches_kind
@@ -578,4 +578,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (8, '0008_consent_event_hardening', '', strftime('%s','now') * 1000);
+  VALUES (11, '0011_consent_event_hardening', '', strftime('%s','now') * 1000);

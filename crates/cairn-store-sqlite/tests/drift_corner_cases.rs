@@ -1,6 +1,6 @@
 //! Corner cases for schema-drift detection beyond the basic dropped-trigger.
 
-use cairn_store_sqlite::open;
+use cairn_store_sqlite::open_sync as open;
 use tempfile::tempdir;
 
 fn fresh_db() -> (tempfile::TempDir, std::path::PathBuf) {

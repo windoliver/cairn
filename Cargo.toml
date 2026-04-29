@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# fuzz/ is a separate (non-workspace) package: cargo-fuzz needs
+# nightly + sanitizer flags that are incompatible with the pinned
+# MSRV. See fuzz/README.md for usage.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"
@@ -24,6 +28,7 @@ async-trait = "0.1"
 rmcp = { version = "1.5.0", default-features = false, features = ["server", "transport-io"] }
 insta = { version = "1.40", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false }
+referencing = { version = "0.46", default-features = false }
 proptest = "1"
 rstest = "0.23"
 tempfile = "3"
@@ -39,7 +44,11 @@ clap = { version = "4.5", features = ["derive", "wrap_help"] }
 rusqlite_migration = "1"
 ulid = { version = "1.1", default-features = false, features = ["std"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+blake3 = { version = "1.5", default-features = false }
+bon = "3.7"
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
+tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
+walkdir = "2"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
@@ -51,6 +60,7 @@ cairn-sensors-local = { path = "crates/cairn-sensors-local", version = "0.0.1" }
 cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
 cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
+cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

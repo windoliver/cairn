@@ -1,5 +1,6 @@
 {
   "id": "01HQZX9F5N0000000000000001",
+  "target_id": "01HQZX9F5N0000000000000001",
   "kind": "trace",
   "class": "episodic",
   "visibility": "session",

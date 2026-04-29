@@ -419,6 +419,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Generated files: overwrite unless skip_generated.
     let gen_force = opts.force || !skip_generated;
     crate::vault::bootstrap::write_once(
+        target,
         &target.join("SKILL.md"),
         SKILL_MD,
         gen_force,
@@ -426,6 +427,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         &mut files_skipped,
     )?;
     crate::vault::bootstrap::write_once(
+        target,
         &target.join("conventions.md"),
         CONVENTIONS_MD,
         gen_force,
@@ -444,6 +446,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
         ("06-lint-memory.md", EXAMPLE_06),
     ] {
         crate::vault::bootstrap::write_once(
+            target,
             &examples_dir.join(name),
             content,
             false, // never force-overwrite examples
@@ -455,6 +458,7 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReceipt> {
     // Write .version last so a partial failure (e.g. in examples/) never
     // leaves a version-stamped incomplete install.
     crate::vault::bootstrap::write_once(
+        target,
         &target.join(".version"),
         VERSION_FILE,
         gen_force,

@@ -105,4 +105,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (7, '0007_consent_event', '', strftime('%s','now') * 1000);
+  VALUES (9, '0009_consent_event', '', strftime('%s','now') * 1000);

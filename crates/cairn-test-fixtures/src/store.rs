@@ -8,89 +8,40 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use cairn_core::contract::memory_store::{
-    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, StoreError, StoredRecord,
+    CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+    ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason,
+    UpsertOutcome,
 };
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::domain::record::MemoryRecord;
-pub use sample_helpers::{sample_record, sample_stored_record};
+use cairn_core::domain::{BodyHash, RecordId, TargetId};
 
-/// Helpers that build canonical test fixtures for `MemoryRecord` and
-/// `StoredRecord`. Exposed at crate level so downstream integration tests
-/// don't have to duplicate the construction.
-mod sample_helpers {
-    use std::collections::BTreeMap;
-
-    use cairn_core::contract::memory_store::StoredRecord;
-    use cairn_core::domain::EvidenceVector;
-    use cairn_core::domain::record::{Ed25519Signature, MemoryRecord, RecordId};
-    use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
-    use cairn_core::domain::{
-        ActorChainEntry, ChainRole, Identity, Provenance, Rfc3339Timestamp, ScopeTuple,
-    };
-
-    /// Returns a deterministic [`MemoryRecord`] for use in tests.
-    ///
-    /// Mirrors the `sample_record` helper in `cairn-core` (which is
-    /// `#[cfg(test)]` and therefore inaccessible from outside that crate).
-    #[must_use]
-    #[allow(clippy::expect_used)] // test fixture construction: panics are bugs, not runtime errors
-    pub fn sample_record() -> MemoryRecord {
-        let user_id = Identity::parse("usr:tafeng").expect("valid identity");
-        MemoryRecord {
-            id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid ULID"),
-            kind: MemoryKind::User,
-            class: MemoryClass::Semantic,
-            visibility: MemoryVisibility::Private,
-            scope: ScopeTuple {
-                user: Some("usr:tafeng".to_owned()),
-                ..ScopeTuple::default()
-            },
-            body: "user prefers dark mode".to_owned(),
-            provenance: Provenance {
-                source_sensor: Identity::parse("snr:local:hook:cc-session:v1")
-                    .expect("valid sensor identity"),
-                created_at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z")
-                    .expect("valid timestamp"),
-                originating_agent_id: user_id.clone(),
-                source_hash: format!("sha256:{}", "a".repeat(64)),
-                consent_ref: "consent:01HQZ".to_owned(),
-                llm_id_if_any: None,
-            },
-            updated_at: Rfc3339Timestamp::parse("2026-04-22T14:05:11Z").expect("valid timestamp"),
-            evidence: EvidenceVector::default(),
-            salience: 0.5,
-            confidence: 0.7,
-            actor_chain: vec![ActorChainEntry {
-                role: ChainRole::Author,
-                identity: user_id,
-                at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid timestamp"),
-            }],
-            signature: Ed25519Signature::parse(format!("ed25519:{}", "a".repeat(128)))
-                .expect("valid signature"),
-            tags: vec!["pref".to_owned()],
-            extra_frontmatter: BTreeMap::new(),
-        }
-    }
-
-    /// Returns a [`StoredRecord`] wrapping [`sample_record`] at the given version.
-    #[must_use]
-    pub fn sample_stored_record(version: u32) -> StoredRecord {
-        StoredRecord {
-            record: sample_record(),
-            version,
-        }
-    }
-}
+pub use cairn_core::domain::record::tests_export::{sample_record, sample_stored_record};
 
 /// In-memory `MemoryStore` test double backed by a `HashMap`.
 ///
-/// All three async methods acquire a `std::sync::Mutex`, perform their
-/// operation, and drop the lock before returning — the lock never spans an
-/// `.await` point, which keeps the implementation correct under
-/// `current_thread` and `multi_thread` runtimes alike.
+/// All async methods acquire a `std::sync::Mutex`, perform their operation,
+/// and drop the lock before returning — the lock never spans an `.await`
+/// point, which keeps the implementation correct under `current_thread` and
+/// `multi_thread` runtimes alike.
+///
+/// Implements the full 9-method `MemoryStore` trait surface but only the
+/// methods integration tests actually rely on are non-trivial: `upsert`,
+/// `get`, `list`, `tombstone`, `versions`, `get_active_by_target`. Edges
+/// and `search_keyword` return `Ok(empty)` / `Err("unimplemented")`.
 #[derive(Debug, Default)]
 pub struct FixtureStore {
-    inner: Mutex<HashMap<String, StoredRecord>>,
+    inner: Mutex<HashMap<String, RowEntry>>,
+}
+
+#[derive(Debug, Clone)]
+struct RowEntry {
+    record: MemoryRecord,
+    version: u32,
+    active: bool,
+    tombstoned: bool,
+    tombstone_reason: Option<TombstoneReason>,
+    body_hash: BodyHash,
 }
 
 impl FixtureStore {
@@ -101,6 +52,10 @@ impl FixtureStore {
     }
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "Mutex poisoning in tests means a prior test panicked; surfacing it via expect is fine"
+)]
 #[async_trait::async_trait]
 impl MemoryStore for FixtureStore {
     fn name(&self) -> &'static str {
@@ -118,44 +73,168 @@ impl MemoryStore for FixtureStore {
     }
 
     fn supported_contract_versions(&self) -> VersionRange {
-        // Accepts exactly the current contract version up to (but not
-        // including) the next minor bump, following the same pattern
-        // used by the StubStore in the trait definition tests.
         VersionRange::new(
             CONTRACT_VERSION,
             ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
         )
     }
 
-    async fn get(&self, target_id: &str) -> Result<Option<StoredRecord>, StoreError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        Ok(guard.get(target_id).cloned())
-    }
-
-    async fn upsert(&self, record: MemoryRecord) -> Result<StoredRecord, StoreError> {
+    async fn upsert(&self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
         record
             .validate()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        let id = record.id.as_str().to_owned();
-        let version = guard.get(&id).map_or(1, |s| s.version + 1);
-        let stored = StoredRecord { record, version };
-        guard.insert(id, stored.clone());
-        Ok(stored)
+            .map_err(|e| -> StoreError { e.to_string().into() })?;
+        let body_hash = BodyHash::compute(&record.body);
+
+        let mut guard = self.inner.lock().expect("fixture store mutex poisoned");
+
+        // Find the active row for this target.
+        let prior = guard
+            .iter()
+            .find(|(_, e)| e.record.target_id == record.target_id && e.active)
+            .map(|(k, e)| (k.clone(), e.clone()));
+
+        if let Some((_, ref entry)) = prior
+            && entry.body_hash == body_hash
+        {
+            return Ok(UpsertOutcome {
+                record_id: entry.record.id.clone(),
+                target_id: entry.record.target_id.clone(),
+                version: entry.version,
+                content_changed: false,
+                prior_hash: Some(entry.body_hash.clone()),
+            });
+        }
+
+        let (version, prior_hash) = match prior.as_ref() {
+            Some((prior_id, entry)) => {
+                let next = entry.version + 1;
+                let mut deactivated = entry.clone();
+                deactivated.active = false;
+                guard.insert(prior_id.clone(), deactivated);
+                (next, Some(entry.body_hash.clone()))
+            }
+            None => (1, None),
+        };
+
+        let mut row_record = record.clone();
+        if prior.is_some() {
+            // Mint a fresh record_id so the HashMap key stays unique per
+            // version (mirrors the SQLite store's `record_id` synthesis).
+            let new_id = format!(
+                "01HQZX9F5N0{}",
+                ulid::Ulid::new()
+                    .to_string()
+                    .chars()
+                    .take(15)
+                    .collect::<String>()
+            );
+            row_record.id =
+                RecordId::parse(new_id).map_err(|e| -> StoreError { e.to_string().into() })?;
+        }
+
+        let entry = RowEntry {
+            record: row_record.clone(),
+            version,
+            active: true,
+            tombstoned: false,
+            tombstone_reason: None,
+            body_hash: body_hash.clone(),
+        };
+        let outcome_id = entry.record.id.clone();
+        let target_id = entry.record.target_id.clone();
+        guard.insert(outcome_id.as_str().to_owned(), entry);
+
+        Ok(UpsertOutcome {
+            record_id: outcome_id,
+            target_id,
+            version,
+            content_changed: true,
+            prior_hash,
+        })
     }
 
-    async fn list_active(&self) -> Result<Vec<StoredRecord>, StoreError> {
-        let guard = self
-            .inner
-            .lock()
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
-        Ok(guard.values().cloned().collect())
+    async fn get(&self, id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+        let guard = self.inner.lock().expect("fixture store mutex poisoned");
+        Ok(guard
+            .get(id.as_str())
+            .filter(|e| !e.tombstoned)
+            .map(|e| e.record.clone()))
+    }
+
+    async fn list(&self, args: &ListArgs) -> Result<ListPage, StoreError> {
+        let guard = self.inner.lock().expect("fixture store mutex poisoned");
+        let mut records: Vec<_> = guard
+            .values()
+            .filter(|e| e.active && !e.tombstoned)
+            .filter(|e| args.kind.is_none_or(|k| e.record.kind == k))
+            .filter(|e| args.class.is_none_or(|c| e.record.class == c))
+            .filter(|e| {
+                args.visibility_allowlist.is_empty()
+                    || args.visibility_allowlist.contains(&e.record.visibility)
+            })
+            .map(|e| e.record.clone())
+            .collect();
+        // Stable order so tests are deterministic; mirror SQLite's
+        // `ORDER BY updated_at DESC, record_id DESC`.
+        records.sort_by(|a, b| b.updated_at.as_str().cmp(a.updated_at.as_str()));
+        // `limit == 0` is the sentinel for "use the adapter's own page
+        // size" — for the in-memory fixture, that means "everything".
+        if args.limit > 0 {
+            records.truncate(args.limit);
+        }
+        Ok(ListPage {
+            records,
+            next_cursor: None,
+        })
+    }
+
+    async fn tombstone(&self, id: &RecordId, reason: TombstoneReason) -> Result<(), StoreError> {
+        let mut guard = self.inner.lock().expect("fixture store mutex poisoned");
+        if let Some(entry) = guard.get_mut(id.as_str()) {
+            entry.tombstoned = true;
+            entry.tombstone_reason = Some(reason);
+        }
+        Ok(())
+    }
+
+    async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+        let guard = self.inner.lock().expect("fixture store mutex poisoned");
+        let mut out: Vec<_> = guard
+            .values()
+            .filter(|e| e.record.target_id == *target)
+            .map(|e| RecordVersion {
+                record_id: e.record.id.clone(),
+                target_id: e.record.target_id.clone(),
+                version: e.version,
+                created_at: 0,
+                updated_at: 0,
+                active: e.active,
+                tombstoned: e.tombstoned,
+                tombstone_reason: e.tombstone_reason,
+                body_hash: e.body_hash.clone(),
+            })
+            .collect();
+        out.sort_by_key(|v| v.version);
+        Ok(out)
+    }
+
+    async fn put_edge(&self, _edge: &Edge) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn remove_edge(&self, _key: &EdgeKey) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    async fn neighbours(&self, _id: &RecordId, _dir: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
+    }
+
+    async fn search_keyword(
+        &self,
+        _args: &KeywordSearchArgs<'_>,
+    ) -> Result<KeywordSearchPage, StoreError> {
+        Err("FixtureStore: search_keyword is not implemented (capability fts=false)".into())
     }
 }
 
@@ -167,58 +246,53 @@ mod tests {
     async fn fixture_store_get_upsert_round_trip() {
         let store = FixtureStore::default();
         let record = sample_record();
-        let id = record.id.as_str().to_owned();
+        let id = record.id.clone();
 
-        // upsert returns stored record with version 1
-        let stored = store.upsert(record.clone()).await.unwrap();
-        assert_eq!(stored.version, 1);
-        assert_eq!(stored.record.id, record.id);
+        let outcome = store.upsert(&record).await.unwrap();
+        assert_eq!(outcome.version, 1);
+        assert_eq!(outcome.record_id, id);
+        assert!(outcome.content_changed);
 
-        // get returns the same record
         let fetched = store.get(&id).await.unwrap().unwrap();
-        assert_eq!(fetched.record.id, record.id);
-        assert_eq!(fetched.version, 1);
+        assert_eq!(fetched.id, id);
     }
 
     #[tokio::test]
-    async fn fixture_store_upsert_increments_version() {
+    async fn fixture_store_upsert_increments_version_on_body_change() {
         let store = FixtureStore::default();
         let mut record = sample_record();
-        let id = record.id.as_str().to_owned();
-        store.upsert(record.clone()).await.unwrap();
+        store.upsert(&record).await.unwrap();
 
-        // second upsert with same id → version 2
         record.body = "updated body".to_owned();
-        let stored = store.upsert(record).await.unwrap();
-        assert_eq!(stored.version, 2);
+        let outcome = store.upsert(&record).await.unwrap();
+        assert_eq!(outcome.version, 2);
+        assert!(outcome.content_changed);
 
-        let fetched = store.get(&id).await.unwrap().unwrap();
-        assert_eq!(fetched.version, 2);
-        assert_eq!(fetched.record.body, "updated body");
+        let active = store
+            .get_active_by_target(&record.target_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.version, 2);
+        assert_eq!(active.record.body, "updated body");
+    }
+
+    #[tokio::test]
+    async fn fixture_store_idempotent_on_same_body() {
+        let store = FixtureStore::default();
+        let record = sample_record();
+        store.upsert(&record).await.unwrap();
+        let outcome = store.upsert(&record).await.unwrap();
+        assert_eq!(outcome.version, 1);
+        assert!(!outcome.content_changed);
     }
 
     #[tokio::test]
     async fn fixture_store_get_missing_returns_none() {
         let store = FixtureStore::default();
-        let result = store.get("nonexistent-id").await.unwrap();
+        let id = RecordId::parse("01HQZX9F5N0000000000000099".to_owned()).unwrap();
+        let result = store.get(&id).await.unwrap();
         assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn fixture_store_list_active_returns_all() {
-        let store = FixtureStore::default();
-        let r1 = sample_record();
-        let mut r2 = sample_record();
-        r2.id = cairn_core::domain::record::RecordId::parse("01HQZX9F5N0000000000000001")
-            .expect("valid ULID");
-        store.upsert(r1.clone()).await.unwrap();
-        store.upsert(r2.clone()).await.unwrap();
-        let active = store.list_active().await.unwrap();
-        assert_eq!(active.len(), 2);
-        let ids: std::collections::HashSet<_> =
-            active.iter().map(|s| s.record.id.as_str()).collect();
-        assert!(ids.contains(r1.id.as_str()));
-        assert!(ids.contains(r2.id.as_str()));
     }
 
     #[tokio::test]
@@ -239,7 +313,7 @@ mod tests {
     async fn fixture_store_is_dyn_compatible() {
         let store: Box<dyn MemoryStore> = Box::new(FixtureStore::default());
         assert_eq!(store.name(), "fixture");
-        let result = store.list_active().await.unwrap();
-        assert!(result.is_empty());
+        let result = store.list(&ListArgs::default()).await.unwrap();
+        assert!(result.records.is_empty());
     }
 }

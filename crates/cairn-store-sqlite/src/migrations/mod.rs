@@ -11,8 +11,11 @@ const M0003_REPLAY: &str = include_str!("sql/0003_replay.sql");
 const M0004_LOCKS: &str = include_str!("sql/0004_locks.sql");
 const M0005_CONSENT: &str = include_str!("sql/0005_consent.sql");
 const M0006_DRIFT_HARDENING: &str = include_str!("sql/0006_drift_hardening.sql");
-const M0007_CONSENT_EVENT: &str = include_str!("sql/0007_consent_event.sql");
-const M0008_CONSENT_EVENT_HARDENING: &str = include_str!("sql/0008_consent_event_hardening.sql");
+const M0007_TOMBSTONE_REASON: &str = include_str!("sql/0007_tombstone_reason.sql");
+const M0008_RECORD_EXTENSIONS: &str = include_str!("sql/0008_record_extensions.sql");
+const M0009_CONSENT_EVENT: &str = include_str!("sql/0009_consent_event.sql");
+const M0010_RANKING_INDEXES: &str = include_str!("sql/0010_ranking_indexes.sql");
+const M0011_CONSENT_EVENT_HARDENING: &str = include_str!("sql/0011_consent_event_hardening.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -23,11 +26,14 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (4, "0004_locks", M0004_LOCKS),
     (5, "0005_consent", M0005_CONSENT),
     (6, "0006_drift_hardening", M0006_DRIFT_HARDENING),
-    (7, "0007_consent_event", M0007_CONSENT_EVENT),
+    (7, "0007_tombstone_reason", M0007_TOMBSTONE_REASON),
+    (8, "0008_record_extensions", M0008_RECORD_EXTENSIONS),
+    (9, "0009_consent_event", M0009_CONSENT_EVENT),
+    (10, "0010_ranking_indexes", M0010_RANKING_INDEXES),
     (
-        8,
-        "0008_consent_event_hardening",
-        M0008_CONSENT_EVENT_HARDENING,
+        11,
+        "0011_consent_event_hardening",
+        M0011_CONSENT_EVENT_HARDENING,
     ),
 ];
 
@@ -42,7 +48,10 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0004_LOCKS),
         M::up(M0005_CONSENT),
         M::up(M0006_DRIFT_HARDENING),
-        M::up(M0007_CONSENT_EVENT),
-        M::up(M0008_CONSENT_EVENT_HARDENING),
+        M::up(M0007_TOMBSTONE_REASON),
+        M::up(M0008_RECORD_EXTENSIONS),
+        M::up(M0009_CONSENT_EVENT),
+        M::up(M0010_RANKING_INDEXES),
+        M::up(M0011_CONSENT_EVENT_HARDENING),
     ])
 }

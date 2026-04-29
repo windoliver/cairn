@@ -97,7 +97,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_subject_scope_idx"),
     ("trigger", "consent_journal_immutable"),
     ("trigger", "consent_journal_no_delete"),
-    // 0007_consent_event
+    // 0007_tombstone_reason
+    ("index", "records_tombstoned_reason_idx"),
+    // 0009_consent_event
     ("index", "consent_journal_op_idx"),
     ("index", "consent_journal_actor_idx"),
     ("index", "consent_journal_sensor_idx"),
@@ -105,7 +107,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "consent_journal_kind_domain"),
     ("trigger", "consent_journal_event_requires_iso"),
     ("trigger", "consent_journal_forget_receipt_body_free"),
-    // 0008_consent_event_hardening
+    // 0010_ranking_indexes
+    ("index", "records_confidence_idx"),
+    ("index", "records_updated_at_idx"),
+    // 0011_consent_event_hardening
     ("trigger", "consent_journal_event_requires_actor"),
     ("trigger", "consent_journal_event_requires_payload"),
     ("trigger", "consent_journal_payload_shape_matches_kind"),

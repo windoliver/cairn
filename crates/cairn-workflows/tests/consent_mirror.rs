@@ -4,7 +4,7 @@ use cairn_core::domain::{
     ConsentEvent, ConsentKind, ConsentPayload, Identity, MemoryVisibility, Rfc3339Timestamp,
 };
 use cairn_store_sqlite::consent::append;
-use cairn_store_sqlite::open_in_memory;
+use cairn_store_sqlite::open_in_memory_sync as open_in_memory;
 use cairn_workflows::{ConsentLogMaterializer, MirrorError};
 use tempfile::tempdir;
 

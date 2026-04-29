@@ -1,10 +1,14 @@
 //! `cairn lint` handler.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context as _;
 use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::folder::{
+    FolderPolicy, aggregate_folders, materialize_backlinks, parse_policy, project_index,
+};
 use cairn_core::domain::projection::MarkdownProjector;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
@@ -33,7 +37,11 @@ pub async fn fix_markdown_handler(
     vault_root: &Path,
 ) -> anyhow::Result<FixMarkdownResult> {
     let projector = MarkdownProjector;
-    let records = store.list_active().await.context("store: list_active")?;
+    let records = store
+        .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: list_active_stored")?;
     let mut written = Vec::new();
     let mut already_current: usize = 0;
 
@@ -89,16 +97,270 @@ pub async fn fix_markdown_handler(
     })
 }
 
+/// Result of a `lint --fix-folders` run.
+#[derive(Debug, serde::Serialize)]
+pub struct FixFoldersResult {
+    /// Folder index files written or updated (vault-relative).
+    pub written: Vec<PathBuf>,
+    /// Number of indexes that already matched their projection.
+    pub unchanged: usize,
+    /// Per-policy parse failures; subtree was skipped.
+    pub policy_errors: Vec<PolicyError>,
+}
+
+/// One `_policy.yaml` that failed to parse.
+#[derive(Debug, serde::Serialize)]
+pub struct PolicyError {
+    /// Vault-relative path of the offending file.
+    pub path: PathBuf,
+    /// Human-readable reason.
+    pub reason: String,
+}
+
+/// Walk the store, build folder states, project `_index.md` files, write
+/// atomically. A bad `_policy.yaml` does not abort — that subtree is
+/// skipped, the error is recorded.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be queried, or if any non-policy
+/// I/O fails.
+pub async fn fix_folders_handler(
+    store: &dyn MemoryStore,
+    vault_root: &Path,
+) -> anyhow::Result<FixFoldersResult> {
+    let projector = MarkdownProjector;
+    let records = store
+        .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: list_active_stored")?;
+
+    // 1. Build record_paths from MarkdownProjector — same shape used by
+    //    --fix-markdown, so callers get a coherent view.
+    let mut record_paths: BTreeMap<cairn_core::domain::record::RecordId, PathBuf> = BTreeMap::new();
+    for stored in &records {
+        let pf = projector.project(stored);
+        record_paths.insert(stored.record.id.clone(), pf.path);
+    }
+
+    // 2. Walk vault for files named `_policy.yaml`. Folders whose policy
+    //    failed to parse are returned as `tainted_dirs`; per brief invariant 6
+    //    (fail-closed) we drop every record under those subtrees so the
+    //    handler does not silently fall back to default policy below a
+    //    misconfigured folder.
+    let (policies_by_dir, policy_errors, tainted_dirs) = collect_policies(vault_root).await?;
+
+    if !tainted_dirs.is_empty() {
+        record_paths.retain(|_, path| !tainted_dirs.iter().any(|bad| path.starts_with(bad)));
+    }
+
+    // 3. Reverse-map backlinks.
+    let backlinks_by_target = materialize_backlinks(&records, &record_paths);
+
+    // 4. Aggregate. `aggregate_folders` looks up each record's path in
+    //    `record_paths` and silently skips records with no entry, so dropping
+    //    tainted entries from the map is sufficient — no parallel filter on
+    //    `records` is needed.
+    let states = aggregate_folders(
+        &records,
+        &record_paths,
+        &policies_by_dir,
+        &backlinks_by_target,
+    );
+
+    // 5. Write each `_index.md` atomically. We delegate the symlink-rejection
+    //    + atomic-persist sequence to `vault::bootstrap::write_once` (force=true)
+    //    so the same lstat-then-rename guarantees protect both bootstrap and
+    //    `lint --fix-folders`. The "unchanged" semantic (skip when content
+    //    already matches) lives here, because `write_once` does not compare
+    //    bytes — under `force=true` it always overwrites.
+    let mut written = Vec::new();
+    let mut unchanged = 0usize;
+    for state in states {
+        let projected = project_index(&state);
+        let abs = vault_root.join(&projected.path);
+        // No-follow validation BEFORE the read.  `read_to_string` follows
+        // symlinks; if `_index.md` is a symlink to an external file with
+        // matching content, the unchanged branch would silently bypass the
+        // symlink rejection that lives inside `write_once`.  Run the same
+        // lstat-based parent + target check up front, on every iteration.
+        {
+            let dest = abs.clone();
+            let vroot = vault_root.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                crate::vault::bootstrap::check_write_safe(&vroot, &dest)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking validate {}", abs.display()))??;
+        }
+        // Byte-compare, NOT `read_to_string`.  A pre-existing `_index.md`
+        // containing non-UTF-8 bytes (corruption, manual binary write,
+        // partially-written tempfile that survived a crash) would otherwise
+        // surface as `InvalidData` and abort the entire rebuild — exactly
+        // the recovery case `lint --fix-folders` should handle.
+        let needs_write = match tokio::fs::read(&abs).await {
+            Ok(existing) => existing != projected.content.as_bytes(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", abs.display())),
+        };
+        if !needs_write {
+            unchanged += 1;
+            continue;
+        }
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+        let content = projected.content.clone();
+        let dest = abs.clone();
+        let vroot = vault_root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            // `write_once` lstat-checks every ancestor + final target for
+            // symlinks, writes a randomly-named tempfile in the same
+            // directory, and atomically renames into place. The
+            // created/skipped vecs are populated for bootstrap's receipt;
+            // we discard them here because the surrounding read-and-compare
+            // loop already classifies writes as `written` or `unchanged`.
+            let mut created = Vec::new();
+            let mut skipped = Vec::new();
+            crate::vault::bootstrap::write_once(
+                &vroot,
+                &dest,
+                &content,
+                true,
+                &mut created,
+                &mut skipped,
+            )
+        })
+        .await
+        .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
+        written.push(projected.path);
+    }
+
+    Ok(FixFoldersResult {
+        written,
+        unchanged,
+        policy_errors,
+    })
+}
+
+/// Walk `vault_root` for `_policy.yaml` files and parse them.
+///
+/// Returns the parsed policies keyed by their containing directory, the list
+/// of [`PolicyError`] entries for files that failed to parse, and a list of
+/// tainted directories — folders whose `_policy.yaml` was unparseable. The
+/// caller must skip every record under a tainted directory (brief invariant 6,
+/// fail-closed): defaulting silently below a broken policy would let writes
+/// land outside the configured `allowed_kinds`/`visibility_default`.
+async fn collect_policies(
+    vault_root: &Path,
+) -> anyhow::Result<(
+    BTreeMap<PathBuf, FolderPolicy>,
+    Vec<PolicyError>,
+    Vec<PathBuf>,
+)> {
+    let mut policies_by_dir: BTreeMap<PathBuf, FolderPolicy> = BTreeMap::new();
+    let mut policy_errors: Vec<PolicyError> = Vec::new();
+    let mut tainted_dirs: Vec<PathBuf> = Vec::new();
+    // Skip hidden subdirectories (e.g. `.cairn/`, `.git/`) but never reject
+    // the vault root itself — `tempfile::tempdir()` and similar tools
+    // commonly produce dot-prefixed root paths.
+    let walker = walkdir::WalkDir::new(vault_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_hidden_dir(e));
+    for entry in walker {
+        let entry = entry.with_context(|| format!("walking {}", vault_root.display()))?;
+        // Match by name first.  `follow_links(false)` reports a symlinked
+        // `_policy.yaml` as a non-file; if we filtered on `is_file()` first
+        // we would silently skip it and fall back to inherited/default
+        // policy below — exactly the fail-open hole brief invariant 6
+        // forbids.  Treat any non-regular `_policy.yaml` (symlink, fifo,
+        // directory) as a policy error and taint its containing folder.
+        if entry.file_name() != "_policy.yaml" {
+            continue;
+        }
+        let abs = entry.path().to_path_buf();
+        let rel = abs
+            .strip_prefix(vault_root)
+            .with_context(|| format!("strip_prefix {}", abs.display()))?
+            .to_path_buf();
+        let dir = rel.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+        if !entry.file_type().is_file() {
+            let kind = if entry.file_type().is_symlink() {
+                "symlink"
+            } else if entry.file_type().is_dir() {
+                "directory"
+            } else {
+                "non-regular file"
+            };
+            policy_errors.push(PolicyError {
+                path: rel,
+                reason: format!("_policy.yaml is a {kind} — refusing to follow"),
+            });
+            tainted_dirs.push(dir);
+            continue;
+        }
+        // Read raw bytes — `read_to_string` would return InvalidData on
+        // non-UTF-8 and the `?` would abort the whole rebuild. Decode here
+        // so a non-UTF-8 file taints only its own subtree (brief invariant 6,
+        // fail-closed), exactly like a YAML parse failure.
+        let bytes = tokio::fs::read(&abs)
+            .await
+            .with_context(|| format!("read {}", abs.display()))?;
+        let text = match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                policy_errors.push(PolicyError {
+                    path: rel,
+                    reason: format!("_policy.yaml is not valid UTF-8: {e}"),
+                });
+                tainted_dirs.push(dir);
+                continue;
+            }
+        };
+        match parse_policy(&text) {
+            Ok(p) => {
+                policies_by_dir.insert(dir, p);
+            }
+            // `FolderError` is `#[non_exhaustive]`; treat any current or
+            // future variant as a non-fatal policy error so the run
+            // continues and the offending subtree is skipped.
+            Err(e) => {
+                policy_errors.push(PolicyError {
+                    path: rel,
+                    reason: e.to_string(),
+                });
+                tainted_dirs.push(dir);
+            }
+        }
+    }
+    Ok((policies_by_dir, policy_errors, tainted_dirs))
+}
+
+fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
+    entry.file_type().is_dir()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|s| s.starts_with('.') && s != ".")
+}
+
 /// Run `cairn lint`.
 #[must_use]
 pub fn run(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
     let fix_markdown = sub.get_flag("fix-markdown");
+    let fix_folders = sub.get_flag("fix-folders");
 
-    if fix_markdown {
-        // TODO(#9): wire the real SQLite store here once `cairn-store-sqlite` is done.
-        // The handler is fully implemented and accepts a `&dyn MemoryStore`, so only
-        // this dispatch site needs updating when the store is available.
+    if fix_markdown || fix_folders {
+        // TODO(#46): wire SQLite store. When live, dispatch should call:
+        //   - fix_markdown_handler(&store, &vault_root) when fix_markdown
+        //   - fix_folders_handler(&store, &vault_root) when fix_folders
+        // Both handlers are already implemented and exercised via FixtureStore in
+        // crates/cairn-cli/tests/{resync,lint_folders}.rs.
         let resp = unimplemented_response(ResponseVerb::Lint);
         if json {
             emit_json(&resp);
@@ -106,7 +368,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
             human_error(
                 "lint",
                 "Internal",
-                "store not wired in this P0 build — --fix-markdown requires #46",
+                "store not wired in this P0 build — --fix-folders requires #46",
                 &resp.operation_id,
             );
         }
@@ -158,7 +420,7 @@ mod tests {
 
         let store = FixtureStore::default();
         let record = sample_record();
-        store.upsert(record).await.unwrap();
+        store.upsert(&record).await.unwrap();
 
         let vault_root = tempfile::tempdir().unwrap();
         let result = fix_markdown_handler(&store, vault_root.path())

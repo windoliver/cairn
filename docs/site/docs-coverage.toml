@@ -1,0 +1,44 @@
+[packages.cairn-cli]
+audience = "user"
+page = "usage/cli.md"
+generated_reference = "reference/generated/cli.md"
+
+[packages.cairn-core]
+audience = "sdk-author"
+page = "reference/rust-api.md"
+generated_reference = ""
+
+[packages.cairn-idl]
+audience = "maintainer"
+page = "reference/idl.md"
+generated_reference = "reference/generated/contract-verbs.md"
+
+[packages.cairn-mcp]
+audience = "integration-author"
+page = "usage/mcp.md"
+generated_reference = "reference/generated/mcp-tools.md"
+
+[packages.cairn-sdk]
+audience = "sdk-author"
+page = "reference/rust-api.md"
+generated_reference = ""
+
+[packages.cairn-sensors-local]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-store-sqlite]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-test-fixtures]
+audience = "internal-test"
+page = ""
+generated_reference = ""
+
+[packages.cairn-workflows]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"

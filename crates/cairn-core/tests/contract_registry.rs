@@ -13,7 +13,9 @@ use cairn_core::contract::frontend_adapter::{
 use cairn_core::contract::llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 use cairn_core::contract::memory_store::{
-    CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin,
+    CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+    ListPage, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion, StoreError,
+    TombstoneReason, UpsertOutcome,
 };
 use cairn_core::contract::registry::{PluginError, PluginName, PluginRegistry};
 use cairn_core::contract::sensor_ingress::{
@@ -23,6 +25,7 @@ use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
 };
+use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 use cairn_core::register_plugin;
 use cairn_core::register_plugin_with;
 
@@ -47,40 +50,47 @@ mod compatible_plugin {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0))
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for FakeStore {
         const NAME: &'static str = "fake-compat";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-compat");
@@ -113,31 +123,38 @@ mod future_plugin {
                 ContractVersion::new(10, 0, 0),
             )
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
@@ -228,40 +245,47 @@ patch = 0
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0))
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for FakeStore {
         const NAME: &'static str = "fake-with-manifest";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     register_plugin!(MemoryStore, FakeStore, "fake-with-manifest", MANIFEST_TOML);
@@ -303,31 +327,38 @@ mod incompatible_factory_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
@@ -371,38 +402,45 @@ mod config_driven_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for PathStore {
         const NAME: &'static str = "path-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     register_plugin_with!(
@@ -436,38 +474,45 @@ mod name_mismatch_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for BadNameStore {
         const NAME: &'static str = "actual-name";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     // NAME const = "actual-name" but macro literal = "wrong-name"
@@ -765,38 +810,45 @@ mod factory_error_plugin {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
-        async fn get(
-            &self,
-            _: &str,
-        ) -> Result<
-            Option<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
         }
-        async fn upsert(
-            &self,
-            _: cairn_core::domain::record::MemoryRecord,
-        ) -> Result<
-            cairn_core::contract::memory_store::StoredRecord,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
         }
-        async fn list_active(
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
             &self,
-        ) -> Result<
-            Vec<cairn_core::contract::memory_store::StoredRecord>,
-            cairn_core::contract::memory_store::StoreError,
-        > {
-            Err(cairn_core::contract::memory_store::StoreError::Unimplemented)
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
         }
     }
 
     impl MemoryStorePlugin for FailingStore {
         const NAME: &'static str = "failing-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     register_plugin_with!(

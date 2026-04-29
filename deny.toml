@@ -5,6 +5,11 @@
 allow = [
     "Apache-2.0",
     "MIT",
+    # MIT-0 = MIT without the attribution clause (strictly more permissive).
+    # Pulled in transitively via referencing → fluent-uri → borrow-or-share
+    # (jsonschema 0.46 dependency for cross-file $ref resolution in
+    # cairn-idl skill-compat).
+    "MIT-0",
     "BSD-3-Clause",
     "BSD-2-Clause",
     "ISC",

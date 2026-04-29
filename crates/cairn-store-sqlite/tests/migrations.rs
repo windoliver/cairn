@@ -1,6 +1,8 @@
 //! Integration tests for the migration set.
 
-use cairn_store_sqlite::{migrations::migrations, open, open_in_memory};
+use cairn_store_sqlite::{
+    migrations::migrations, open_in_memory_sync as open_in_memory, open_sync as open,
+};
 use rusqlite::params;
 use tempfile::tempdir;
 
@@ -12,7 +14,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 8);
+    assert_eq!(head, 11);
 }
 
 #[test]
@@ -28,7 +30,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 8);
+    assert_eq!(head, 11);
 }
 
 #[test]

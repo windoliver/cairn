@@ -1,0 +1,50 @@
+[33mfdfc276[m test(squash): add E2E corner-case + invariant proptests
+[33m8e96864[m fix(squash): consume two-byte ESC controls fully without splitting UTF-8
+[33m16ae5cd[m ci(pages): auto-enable GitHub Pages in configure-pages
+[33m0a3da7b[m fix(squash): rewind giant-final-line cut to UTF-8 boundary
+[33mce06b18[m fix(squash): invert bypass window priority so tail wins on small inputs
+[33m1ec6199[m chore(sdk): silence too_many_lines on table-driven ingest test
+[33mc77f1a5[m feat(store-sqlite): MemoryStore CRUD, versioning, edges, tx (#46) (#225)
+[33m8231614[m fix(squash): clamp oversize bypass windows so head and tail are disjoint
+[33m07687d9[m chore(sdk,docs): rustfmt + register cairn-sdk in docs coverage
+[33m909e7e7[m fix(squash): quarantine DCS/APC/PM/SOS and prove tail cut is safe
+[33mb79e266[m chore(sdk): unblock docs + machete CI gates
+[33ma640148[m fix(squash): refine prefix safety check and clamp blank-tail expansion
+[33m84c58ea[m [codex] Add generated docs site and usage gates (#223)
+[33mf002f2b[m ci(supply-chain): work around taiki-e/install-action BASH_FUNC guard
+[33ma82bbc8[m chore(merge): fix doc link + allow MIT-0 license
+[33m5e22ba8[m test(sdk,cli): cross-surface parity for status + handshake
+[33mc0c2ca3[m test(sdk): add wire round-trip + property-based corner-case sweeps
+[33mf963bde[m fix(squash): bound final-line marker and exclude strips from drop count
+[33mef7b357[m fix(squash): require ESC-free dropped prefix before preserving suffix
+[33m271a550[m feat(folder): folder sidecars, backlinks, policy inheritance (brief §3.4, #44) (#226)
+[33mf2cf038[m fix(squash): close decode-expansion OOM hole and surface UTF-8 loss
+[33mbe7725f[m fix(squash): preserve final-line suffix and fix mode-A drop accounting
+[33m240c1a3[m test(idl): add drift-injection e2e + tokenizer/wrapper corner sweeps
+[33md08ca25[m fix(sdk): drop `exists` filter op — not in generated grammar
+[33mf5ddb94[m fix(squash): preserve truncated final line + accounting (#72)
+[33m5d10a3d[m fix(sdk): reject ResponseVerb::Unknown on committed envelopes
+[33m5601360[m fix(idl): emit bare invocation for all-optional verbs (round-10)
+[33m46e88b7[m fix(squash): broaden truncated semantics + bypass cr_bearing (#72)
+[33m6c21b42[m fix(squash): exact line count in bypass marker (#72)
+[33m77a3be0[m fix(idl): close 3 round-9 skill-compat bypasses
+[33m0a464dc[m feat(core): Filter-stage redact + fence + visibility defaults (#93) (#210)
+[33mef6d1a6[m fix(squash): reconcile boundary docs with >= guard semantics (#72)
+[33m61ec5ff[m fix(sdk): reject envelope-invalid retrieve/target combinations
+[33mb095ae9[m fix(squash): tighten oversize gate to >= boundaries (#72)
+[33m4551356[m fix(idl): fail closed on bash blocks with unparsed cairn forms (round-8)
+[33ma7d2e04[m fix(sdk): bypass status() in capability gating
+[33m5b3d3f5[m fix(squash): tighten line cap + observability for OSC drops (#72)
+[33mc3670f3[m fix(sdk): preserve retrieve.target and protocol.error.data
+[33m78434da[m fix(squash): bypass stats from raw boundaries + un-ignore CI test (#72)
+[33m1ddaa5c[m fix(idl): close inline-wrapper + unsupported-fence bypasses (round-7)
+[33m1ace6f2[m fix(sdk): match CLI status semantics + serialize VerbResponse as envelope
+[33m5bb5489[m fix(idl): close two skill-compat bypasses (round-6)
+[33md6eecae[m fix(squash): drop head prefix when no line boundary exists (#72)
+[33mc22718a[m fix(idl): parse wrapper option syntax instead of scanning for cairn
+[33m40c4c70[m fix(squash): bypass post-trim realign + accurate accounting + reason (#72)
+[33m1eca253[m fix(sdk): reject raw non-ASCII bytes in ingest URI
+[33m17a6cd3[m fix(idl): tighten ALL_CAPS placeholder bypass on constrained fields
+[33mdcfbe17[m fix(sdk): reject whitespace/control chars in ingest URI
+[33mcd9815b[m fix(squash): line-cardinality cap + drop degraded suffix (#72)
+[33m07a32f5[m fix(squash): line-align bypass tail slice + degraded suffix (#72)

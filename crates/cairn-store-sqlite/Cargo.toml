@@ -13,16 +13,29 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio_rusqlite = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+
+[features]
+default = []
+# Exposes sync `rusqlite::Connection` open helpers for integration tests.
+# Not part of the production API — keeps the test surface explicit.
+test-helpers = []
 
 [dev-dependencies]
+cairn-core = { workspace = true, features = ["test-fixtures"] }
+cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
-tempfile = { workspace = true }
 proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

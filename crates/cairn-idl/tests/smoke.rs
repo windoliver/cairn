@@ -29,6 +29,10 @@ fn codegen_binary_help_exits_zero() {
         stdout.contains("cairn-codegen"),
         "--help output should contain binary name: {stdout:?}",
     );
+    assert!(
+        stdout.contains("--check") && stdout.contains("--out"),
+        "--help output should contain maintainer flags: {stdout:?}",
+    );
 }
 
 #[test]

@@ -354,7 +354,7 @@ impl MarkdownProjector {
 mod tests {
     use super::*;
     use crate::contract::memory_store::StoredRecord;
-    use crate::domain::record::tests::sample_record;
+    use crate::domain::record::tests_export::sample_record;
 
     fn stored(version: u32) -> StoredRecord {
         StoredRecord {
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn parse_preserves_leading_blank_lines_in_body() {
         let proj = MarkdownProjector;
-        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        let mut stored = crate::domain::record::tests_export::sample_stored_record(1);
         stored.record.body = "\n\nLeading blank lines.".to_owned();
         let file = proj.project(&stored);
         let parsed = proj.parse(&file.content).unwrap();
@@ -478,7 +478,7 @@ mod tests {
     fn check_conflict_new_record_is_clean() {
         let proj = MarkdownProjector;
         // parsed.version = 1, current = None → Clean
-        let stored = crate::domain::record::tests::sample_stored_record(1);
+        let stored = crate::domain::record::tests_export::sample_stored_record(1);
         let file = proj.project(&stored);
         let parsed = proj.parse(&file.content).unwrap();
         let outcome = proj.check_conflict(&parsed, None);
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn check_conflict_version_match_is_clean() {
         let proj = MarkdownProjector;
-        let stored = crate::domain::record::tests::sample_stored_record(3);
+        let stored = crate::domain::record::tests_export::sample_stored_record(3);
         let file = proj.project(&stored);
         let parsed = proj.parse(&file.content).unwrap();
         // file version == store version → Clean
@@ -500,8 +500,8 @@ mod tests {
     fn check_conflict_stale_file_is_conflict() {
         let proj = MarkdownProjector;
         // store is at version 5, file is at version 3 → Conflict
-        let stored_v5 = crate::domain::record::tests::sample_stored_record(5);
-        let stored_v3 = crate::domain::record::tests::sample_stored_record(3);
+        let stored_v5 = crate::domain::record::tests_export::sample_stored_record(5);
+        let stored_v3 = crate::domain::record::tests_export::sample_stored_record(3);
         let file = proj.project(&stored_v3);
         let parsed = proj.parse(&file.content).unwrap();
         let outcome = proj.check_conflict(&parsed, Some(&stored_v5));
@@ -519,8 +519,8 @@ mod tests {
     fn check_conflict_future_file_version_is_conflict() {
         let proj = MarkdownProjector;
         // store is at version 2, file claims version 5 → frontend cannot increment versions → Conflict
-        let stored_v2 = crate::domain::record::tests::sample_stored_record(2);
-        let stored_v5 = crate::domain::record::tests::sample_stored_record(5);
+        let stored_v2 = crate::domain::record::tests_export::sample_stored_record(2);
+        let stored_v5 = crate::domain::record::tests_export::sample_stored_record(5);
         let file = proj.project(&stored_v5);
         let parsed = proj.parse(&file.content).unwrap();
         let outcome = proj.check_conflict(&parsed, Some(&stored_v2));
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn check_conflict_immutable_field_mutation_is_conflict() {
         let proj = MarkdownProjector;
-        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let stored = crate::domain::record::tests_export::sample_stored_record(2);
         let file = proj.project(&stored);
         // Tamper with kind in the content string (sample_record uses "user"; replace with valid "feedback")
         let tampered = file.content.replace(
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn check_conflict_class_mutation_is_conflict() {
         let proj = MarkdownProjector;
-        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let stored = crate::domain::record::tests_export::sample_stored_record(2);
         let file = proj.project(&stored);
         // sample_record uses class: semantic — replace with episodic
         let tampered = file.content.replace(
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn project_emits_extra_frontmatter_keys() {
-        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        let mut stored = crate::domain::record::tests_export::sample_stored_record(1);
         stored.record.extra_frontmatter.insert(
             "category".to_owned(),
             serde_json::Value::String("tool".to_owned()),
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn project_extra_frontmatter_round_trips_through_parse() {
         let proj = MarkdownProjector;
-        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        let mut stored = crate::domain::record::tests_export::sample_stored_record(1);
         stored.record.extra_frontmatter.insert(
             "category".to_owned(),
             serde_json::Value::String("tool".to_owned()),
@@ -611,7 +611,7 @@ mod tests {
     fn project_standard_fields_not_duplicated_by_extra_frontmatter() {
         // If extra_frontmatter contains a key that collides with a standard field
         // (e.g. "id"), project() must skip it so the output is well-formed.
-        let mut stored = crate::domain::record::tests::sample_stored_record(1);
+        let mut stored = crate::domain::record::tests_export::sample_stored_record(1);
         stored.record.extra_frontmatter.insert(
             "id".to_owned(),
             serde_json::Value::String("injected".to_owned()),
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn check_conflict_visibility_mutation_is_conflict() {
         let proj = MarkdownProjector;
-        let stored = crate::domain::record::tests::sample_stored_record(2);
+        let stored = crate::domain::record::tests_export::sample_stored_record(2);
         let file = proj.project(&stored);
         // sample_record uses visibility: private — replace with session
         let tampered = file.content.replace(

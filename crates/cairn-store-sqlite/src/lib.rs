@@ -1,28 +1,28 @@
 //! `SQLite` record store for Cairn.
 //!
-//! Ships the embedded migration set (records + FTS5, WAL ops, replay
-//! ledger, locks, consent journal). Verb-level method bodies on the
-//! `MemoryStore` impl land in follow-up issues; this crate currently
-//! exposes [`open()`], [`open_in_memory()`], the plugin manifest, and a
-//! P0 stub impl whose CRUD methods return
-//! [`cairn_core::contract::memory_store::StoreError::Unimplemented`].
+//! Async-fronted via `tokio_rusqlite`. Every `MemoryStore` trait method is
+//! one `conn.call(|c| { … })` round-trip on a dedicated DB thread. Records
+//! persist as a `record_json` blob plus denormalized hot columns; the WAL
+//! state machine (#8) lives at the verb layer.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
 pub mod error;
 pub mod migrations;
-mod open;
+pub mod open;
+pub mod store;
 mod verify;
 
 pub use error::StoreError;
 pub use open::{open, open_in_memory};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use open::{open_in_memory_sync, open_sync};
+pub use store::SqliteMemoryStore;
+pub use store::tx::StoreTx;
 
-use cairn_core::contract::memory_store::{
-    self as ms_contract, CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities,
-};
+use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
-use cairn_core::domain::record::MemoryRecord;
 use cairn_core::register_plugin;
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
@@ -36,53 +36,6 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// and the trait surface derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
-
-/// SQLite-backed [`MemoryStore`] implementation.
-///
-/// **P0 stub:** `get`, `upsert`, and `list_active` return
-/// [`ms_contract::StoreError::Unimplemented`]. Callers must treat those
-/// errors as `CapabilityUnavailable` until the full schema lands in #46.
-#[derive(Default)]
-pub struct SqliteMemoryStore;
-
-#[async_trait::async_trait]
-impl MemoryStore for SqliteMemoryStore {
-    fn name(&self) -> &str {
-        PLUGIN_NAME
-    }
-
-    fn capabilities(&self) -> &MemoryStoreCapabilities {
-        static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-            fts: false,
-            vector: false,
-            graph_edges: false,
-            transactions: false,
-        };
-        &CAPS
-    }
-
-    fn supported_contract_versions(&self) -> VersionRange {
-        ACCEPTED_RANGE
-    }
-
-    async fn get(
-        &self,
-        _target_id: &str,
-    ) -> Result<Option<ms_contract::StoredRecord>, ms_contract::StoreError> {
-        Err(ms_contract::StoreError::Unimplemented)
-    }
-
-    async fn upsert(
-        &self,
-        _record: MemoryRecord,
-    ) -> Result<ms_contract::StoredRecord, ms_contract::StoreError> {
-        Err(ms_contract::StoreError::Unimplemented)
-    }
-
-    async fn list_active(&self) -> Result<Vec<ms_contract::StoredRecord>, ms_contract::StoreError> {
-        Err(ms_contract::StoreError::Unimplemented)
-    }
-}
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the
