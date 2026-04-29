@@ -97,9 +97,22 @@ impl SqliteIdentityRegistry {
         })
     }
 
-    /// Apply [`MIGRATION_0002`] to `conn` in a single `execute_batch` call.
+    /// Apply [`MIGRATION_0002`] to `conn` if it has not already been applied.
+    ///
+    /// Uses the `SQLite` `user_version` pragma as a cheap schema-version guard
+    /// so that opening an already-migrated database is idempotent. The version
+    /// is set to `2` after the migration commits.
     fn run_migrations(conn: &Connection) -> Result<(), RegistryError> {
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        if version >= 2 {
+            // Migration already applied — skip to avoid "table already exists".
+            return Ok(());
+        }
         conn.execute_batch(MIGRATION_0002)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        conn.execute_batch("PRAGMA user_version = 2")
             .map_err(|e| RegistryError::Backend(Box::new(e)))
     }
 

@@ -55,12 +55,14 @@ whoami = { workspace = true }
 [dev-dependencies]
 cairn-sdk = { workspace = true }
 cairn-test-fixtures = { workspace = true }
+cairn-store-sqlite = { workspace = true }
 insta = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 
 [lints]
 workspace = true
