@@ -663,6 +663,65 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-4 (newer loop) regression: the oversize-bypass tail
+    /// cut must not land inside an open multi-byte escape sequence.
+    /// Construct a payload where an OSC body contains a `\n` and is
+    /// terminated PAST the natural `tail_window` start. Pre-fix, the
+    /// naive `position(b'\n')` cut sliced inside the OSC, omitting
+    /// the introducer from the sanitizer's view. With the safety
+    /// gate, the tail must either skip past the OSC terminator or
+    /// fall back to the giant-final-line / degraded path.
+    #[test]
+    fn oversize_bypass_tail_cut_skips_open_escape_continuing_past_lf() {
+        // Default cfg → tail_window ≈ 16292. Place an OSC introducer
+        // BEFORE tail_window start whose body contains `\n` bytes
+        // and whose ST terminator sits AFTER tail_window start. The
+        // first naive `\n` cut would land mid-OSC.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        // Open OSC with newlines in body. Body length chosen so the
+        // ST terminator lands past tail_window's natural start.
+        raw.push(0x1B);
+        raw.extend_from_slice(b"]8;;");
+        for _ in 0..50 {
+            raw.extend_from_slice(b"hidden-line-with-\n");
+        }
+        raw.push(0x1B);
+        raw.push(0x5C);
+        // Plenty of safe content after the OSC terminator so the
+        // tail has somewhere safe to start.
+        for i in 0..2000 {
+            raw.extend_from_slice(format!("safe-line-{i:04}\n").as_bytes());
+        }
+        raw.extend_from_slice(b"FINAL-DIAGNOSTIC-LINE\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // `hidden-line-with-` is the OSC payload — it must NOT
+        // surface through stage 2 as plain text.
+        assert!(
+            !body.contains("hidden-line-with-"),
+            "OSC continuation leaked through tail cut: ...{}",
+            &body[..body.len().min(400)]
+        );
+        // The actual diagnostic content past the OSC terminator
+        // should still be recoverable.
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-LINE") || body.contains("safe-line-"),
+            "expected post-OSC content to survive: {body:.400}"
+        );
+    }
+
     /// Round-3 (newer loop) regression: a fully-terminated escape
     /// sequence in the dropped prefix must NOT force the degraded
     /// sentinel — the escape parser is back to "outside" by the
@@ -1743,6 +1802,23 @@ fn ends_outside_escape_sequence(prefix: &[u8]) -> bool {
                     return false;
                 }
             }
+            0x50 | 0x5F | 0x5E | 0x58 => {
+                // DCS / APC / PM / SOS: strict-ST (ESC \) terminator.
+                let mut j = i + 2;
+                let mut terminated_at: Option<usize> = None;
+                while j < prefix.len() {
+                    if prefix[j] == 0x1B && j + 1 < prefix.len() && prefix[j + 1] == 0x5C {
+                        terminated_at = Some(j + 2);
+                        break;
+                    }
+                    j += 1;
+                }
+                if let Some(end) = terminated_at {
+                    i = end;
+                } else {
+                    return false;
+                }
+            }
             _ => {
                 // Two-byte / unrecognised ESC sequence: ESC + 1 byte.
                 i += 2;
@@ -1752,12 +1828,100 @@ fn ends_outside_escape_sequence(prefix: &[u8]) -> bool {
     true
 }
 
+/// Walk `raw` with the same CSI/OSC/DCS/APC/PM/SOS matcher used by
+/// [`stage2_ansi_strip`] and return the first byte position `p` such
+/// that `p >= threshold`, `raw[p - 1] == b'\n'`, and the parser is in
+/// "outside escape" state at byte `p`. Returns `None` if no such
+/// boundary exists. Used by the oversize bypass to choose a tail
+/// cut point that cannot land inside an open multi-byte control
+/// sequence.
+fn first_safe_line_start_at_or_after(raw: &[u8], threshold: usize) -> Option<usize> {
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
+        if b == 0x1B {
+            if i + 1 >= raw.len() {
+                return None;
+            }
+            match raw[i + 1] {
+                0x5B => {
+                    let mut j = i + 2;
+                    while j < raw.len() && (0x30..=0x3F).contains(&raw[j]) {
+                        j += 1;
+                    }
+                    while j < raw.len() && (0x20..=0x2F).contains(&raw[j]) {
+                        j += 1;
+                    }
+                    let final_present = matches!(
+                        raw.get(j).copied(),
+                        Some(b) if (0x40..=0x7E).contains(&b)
+                    );
+                    if final_present {
+                        i = j + 1;
+                    } else {
+                        return None;
+                    }
+                }
+                0x5D => {
+                    let mut j = i + 2;
+                    let mut term: Option<usize> = None;
+                    while j < raw.len() {
+                        if raw[j] == 0x07 {
+                            term = Some(j + 1);
+                            break;
+                        }
+                        if raw[j] == 0x1B && j + 1 < raw.len() && raw[j + 1] == 0x5C {
+                            term = Some(j + 2);
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if let Some(end) = term {
+                        i = end;
+                    } else {
+                        return None;
+                    }
+                }
+                0x50 | 0x5F | 0x5E | 0x58 => {
+                    let mut j = i + 2;
+                    let mut term: Option<usize> = None;
+                    while j < raw.len() {
+                        if raw[j] == 0x1B && j + 1 < raw.len() && raw[j + 1] == 0x5C {
+                            term = Some(j + 2);
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if let Some(end) = term {
+                        i = end;
+                    } else {
+                        return None;
+                    }
+                }
+                _ => {
+                    i += 2;
+                }
+            }
+        } else if b == b'\n' {
+            let p = i + 1;
+            if p >= threshold {
+                return Some(p);
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 // Stage 2 only emits whole UTF-8 codepoints from a valid `&str` input
 // (escape sequences and partial codepoints are never partially
 // surfaced). The closing `from_utf8` therefore cannot fail; allowing
 // `expect_used` here documents the invariant without weakening the
 // lib-wide deny.
 #[allow(clippy::expect_used)]
+#[allow(clippy::too_many_lines)] // single coherent escape parser
 fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mut usize) -> String {
     let bytes = input.as_bytes();
     let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -1848,6 +2012,49 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                             i = k;
                         }
                     }
+                    // Round-4 (newer loop) hardening: ESC P (DCS),
+                    // ESC _ (APC), ESC ^ (PM), ESC X (SOS) all open
+                    // multi-byte string controls terminated by ST
+                    // (ESC \) just like OSC. Treat them with the
+                    // same scan-or-quarantine logic so attacker-
+                    // controlled payload inside DCS/APC/PM/SOS bodies
+                    // can't smuggle bytes past the sanitizer as plain
+                    // text. Falls through to the OSC-style logic.
+                    0x50 | 0x5F | 0x5E | 0x58 => {
+                        let mut j = i + 2;
+                        let term = loop {
+                            if j >= bytes.len() {
+                                break None;
+                            }
+                            // Per spec: ST = ESC \. Some terminals
+                            // accept BEL (0x07) for OSC; do NOT
+                            // accept it here — DCS/APC/PM/SOS spec
+                            // is strict-ST, and accepting BEL would
+                            // weaken quarantine of legitimately
+                            // ST-terminated bodies that happen to
+                            // contain a 0x07.
+                            if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                                break Some(j + 2);
+                            }
+                            j += 1;
+                        };
+                        if let Some(end) = term {
+                            i = end;
+                        } else {
+                            // Unterminated string control: drop the
+                            // introducer + body up to the next LF;
+                            // surface dropped byte count through the
+                            // OSC recovery counter (these share the
+                            // same audit signal — both are control-
+                            // string sanitization losses).
+                            let mut k = i + 2;
+                            while k < bytes.len() && bytes[k] != b'\n' {
+                                k += 1;
+                            }
+                            *osc_recovery_dropped = osc_recovery_dropped.saturating_add(k - i);
+                            i = k;
+                        }
+                    }
                     // Lone ESC or unrecognised: drop ESC byte only
                     _ => {
                         i += 1;
@@ -1892,6 +2099,59 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
 #[cfg(test)]
 mod stage2_tests {
     use super::*;
+
+    /// Round-4 (newer loop) regression: DCS / APC / PM / SOS string
+    /// controls (ESC P / _ / ^ / X ... ESC \) must be quarantined
+    /// just like OSC. Pre-fix the default ESC arm dropped only the
+    /// introducer and let body bytes through as plain text.
+    #[test]
+    fn dcs_apc_pm_sos_bodies_are_quarantined() {
+        for &(intro, name) in &[(b'P', "DCS"), (b'_', "APC"), (b'^', "PM"), (b'X', "SOS")] {
+            // ESC <intro> + payload + ST. Surround with literal text
+            // so we can assert the body never bleeds through.
+            let payload = "SECRET-CONTROL-PAYLOAD";
+            let mut input: Vec<u8> = Vec::new();
+            input.extend_from_slice(b"safe-before");
+            input.push(0x1B);
+            input.push(intro);
+            input.extend_from_slice(payload.as_bytes());
+            input.push(0x1B);
+            input.push(0x5C);
+            input.extend_from_slice(b"safe-after");
+            let s = std::str::from_utf8(&input).expect("valid utf8");
+            let (out, stripped) = s2(s);
+            assert!(stripped, "{name}: stripped flag must fire");
+            assert!(
+                !out.contains(payload),
+                "{name}: body leaked through: out={out:?}"
+            );
+            assert!(
+                out.contains("safe-before") && out.contains("safe-after"),
+                "{name}: surrounding text must survive: {out:?}"
+            );
+        }
+    }
+
+    /// Round-4 (newer loop) regression: an UN-terminated DCS-family
+    /// control must be recovered up to the next `\n` (treated like
+    /// the OSC recovery boundary), with the dropped bytes counted in
+    /// `osc_recovery_dropped` so audit consumers see the loss.
+    #[test]
+    fn unterminated_dcs_recovers_at_lf() {
+        // DCS introducer + secret payload + LF + plain line. No ST.
+        let mut input: Vec<u8> = Vec::new();
+        input.push(0x1B);
+        input.push(b'P');
+        input.extend_from_slice(b"unterminated-dcs-secret");
+        input.push(b'\n');
+        input.extend_from_slice(b"plain-survivor");
+        let s = std::str::from_utf8(&input).expect("valid utf8");
+        let (out, stripped, dropped) = s2_with_osc(s);
+        assert!(stripped);
+        assert!(!out.contains("unterminated-dcs-secret"));
+        assert!(out.contains("plain-survivor"));
+        assert!(dropped > 0, "OSC-recovery counter must record drop");
+    }
 
     fn s2(input: &str) -> (String, bool) {
         let mut stripped = false;
@@ -2715,9 +2975,7 @@ mod stage6_tests {
         // tail_lines = 2 the preserved tail must be exactly 2 lines
         // ending at the last content line — NOT 200+ blanks.
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
-        let mut lines: Vec<String> = (0..8)
-            .map(|i| format!("content-{i:03}-{i:040}"))
-            .collect();
+        let mut lines: Vec<String> = (0..8).map(|i| format!("content-{i:03}-{i:040}")).collect();
         lines.extend(std::iter::repeat_n(String::new(), 200));
         let mut stats = SquashStats::default();
         let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
@@ -3005,12 +3263,22 @@ fn oversize_bypass(
     };
 
     let tail_window = (half * 2).min(raw_bytes.len());
-    let mut tail_raw_start = raw_bytes.len() - tail_window;
-    let mut tail_aligned_to_line = false;
-    if let Some(rel) = raw_bytes[tail_raw_start..].iter().position(|&b| b == b'\n') {
-        tail_raw_start += rel + 1;
-        tail_aligned_to_line = true;
-    }
+    let initial_tail_raw_start = raw_bytes.len() - tail_window;
+    // Round-4 (newer loop) hardening: the previous "first `\n` in
+    // tail window" cut could land inside an open escape sequence
+    // (e.g. an OSC body that contains a `\n` and is terminated past
+    // tail_raw_start). The introducer would be omitted from the
+    // sanitizer's view and continuation bytes would leak as plain
+    // text. Walk the raw payload with the same parser used by
+    // `ends_outside_escape_sequence` and pick the first `\n` whose
+    // BYTE-AFTER position is BOTH at-or-past `initial_tail_raw_start`
+    // AND in "outside escape" state. If no such cut exists, fall
+    // through to the giant-final-line / degraded-sentinel branch.
+    let safe_cut = first_safe_line_start_at_or_after(raw_bytes, initial_tail_raw_start);
+    let (tail_raw_start, tail_aligned_to_line) = match safe_cut {
+        Some(p) => (p, true),
+        None => (initial_tail_raw_start, false),
+    };
     let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
     compacted_bytes.extend_from_slice(head.as_bytes());
     compacted_bytes.push(b'\n');
