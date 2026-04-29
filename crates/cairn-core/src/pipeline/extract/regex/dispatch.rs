@@ -422,7 +422,13 @@ fn normalize_target(s: &str) -> String {
             prev_was_space = false;
         }
     }
-    out.trim().to_owned()
+    // Trim trailing clause separators (commas, semicolons) plus
+    // whitespace. Without this, windows like `forget my old address,`
+    // emit `my old address,` and miss the stored record on exact
+    // selectors.
+    let trimmed = out
+        .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
+    trimmed.to_owned()
 }
 
 fn compute_llm_eligible_spans(

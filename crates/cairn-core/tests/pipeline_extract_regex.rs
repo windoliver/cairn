@@ -190,6 +190,35 @@ async fn oversize_body_still_extracts_trigger() {
 }
 
 #[tokio::test]
+async fn comma_separated_forget_strips_trailing_separator() {
+    // `forget X, and remember Y` and `forget X, remember Y` must emit a
+    // forget target without the trailing comma — otherwise the resolver
+    // sees `my old address,` and misses the stored memory.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+
+    let input = body_input(
+        &event,
+        "forget my old address, and remember the new one is 1 Main St",
+    );
+    let res = extractor.extract(&input).await.expect("ok");
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    assert_eq!(intent.target_text_normalized, "my old address");
+
+    let input = body_input(
+        &event,
+        "forget my old address, remember the new one is 1 Main St",
+    );
+    let res = extractor.extract(&input).await.expect("ok");
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    assert_eq!(intent.target_text_normalized, "my old address");
+}
+
+#[tokio::test]
 async fn single_period_abbreviation_does_not_fire_forget() {
     // `Dr. Forget at the clinic` must not be treated as a sentence
     // boundary that turns `forget` into a sentence-start trigger.
