@@ -802,11 +802,13 @@ async fn migration_ends_active_rows_with_relative_project_root() {
     for (sid, user, root, expect_ended) in [
         ("S_REL", "usr:legacy", Some("subdir/repo"), true),
         ("S_POSIX", "usr:abs1", Some("/abs/repo"), false),
-        ("S_WIN", "usr:abs2", Some(r"C:\repo"), false),
+        // 0016 case-folds Windows-shape rows to match the runtime
+        // ASCII-lowercase canonical (`SessionIdentity::new`).
+        ("S_WIN", "usr:abs2", Some(r"c:\repo"), false),
         ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
-        // 0014 leaves C:/repo active; 0015 then canonicalizes it to
-        // backslash form so post-upgrade callers can resolve it.
-        ("S_WINFWD", "usr:abs5", Some(r"C:\repo"), false),
+        // 0014 leaves C:/repo active; 0015 canonicalizes slashes; 0016
+        // lowercases.
+        ("S_WINFWD", "usr:abs5", Some(r"c:\repo"), false),
         ("S_BS_REL", "usr:legacy2", Some(r"\repo"), true),
         ("S_NULL", "usr:abs4", None, false),
     ] {
@@ -929,15 +931,15 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
     let store = open(&db_path).await.expect("open after 0015");
 
     for (sid, expect_root) in [
-        ("S_DRV_FWD", r"C:\repo"),
+        ("S_DRV_FWD", r"c:\repo"),
         ("S_POSIX_DBL", "//srv/share"),
-        ("S_DRV_OK", r"D:\repo"),
+        ("S_DRV_OK", r"d:\repo"),
         ("S_POSIX_OK", "/abs/repo"),
-        ("S_DRV_MIX", r"E:\foo\bar"),
+        ("S_DRV_MIX", r"e:\foo\bar"),
         ("S_UNC_MIX", r"\\srv\share\sub"),
-        ("S_DRV_TRAIL", r"F:\repo"),
+        ("S_DRV_TRAIL", r"f:\repo"),
         ("S_UNC_TRAIL", r"\\srv\share"),
-        ("S_DRV_ROOT", r"G:\"),
+        ("S_DRV_ROOT", r"g:\"),
     ] {
         let sess = store
             .get_session_unchecked(
@@ -1063,6 +1065,213 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
         msg.contains("is ended"),
         "expected SessionEnded for canonicalized ended row, got `{msg}`",
     );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    clippy::similar_names,
+    reason = "exhaustive seed/expect tables document every verbatim/case-fold variant; pair_a_winner / pair_a_loser pairs read clearer than disjoint synonyms"
+)]
+async fn migration_strips_verbatim_prefixes_and_case_folds() {
+    // Migration 0016 covers two follow-on issues from 0015:
+    //   1. Windows verbatim prefixes (`\\?\C:\Repo`, `\\?\UNC\Srv\Share`)
+    //      were stored raw by pre-canonicalization callers but the
+    //      runtime now strips them — legacy rows would be unreachable.
+    //   2. Windows file systems are case-insensitive; the runtime
+    //      ASCII-lowercases Windows-shape paths but legacy rows kept
+    //      mixed case.
+    // Combined: rows like `\\?\C:\Repo` and `c:\repo` for the same
+    // (user, agent) collapse to one canonical key after stripping +
+    // case-fold, so dedup must keep only the newest per partition.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_canonicalize_windows_paths.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 15");
+
+        // Two pairs that collapse to the same canonical key under 0016.
+        // Per pair: one verbatim/mixed-case legacy row + one already
+        // canonical row for the same (user, agent). Newer last_activity
+        // wins per the dedup partition.
+        for (sid, user, root, last_act) in [
+            // Pair A: verbatim drive + plain canonical, same identity.
+            ("S_VRB_DRV", "usr:dup1", r"\\?\C:\Repo", 200_i64),
+            ("S_PLN_DRV", "usr:dup1", r"c:\repo", 100_i64),
+            // Pair B: verbatim UNC + plain UNC mixed-case, same identity.
+            ("S_VRB_UNC", "usr:dup2", r"\\?\UNC\Srv\Share", 100_i64),
+            ("S_PLN_UNC", "usr:dup2", r"\\Srv\Share", 200_i64),
+            // Standalone case-only legacy: must be lowercased in place.
+            ("S_MIX_DRV", "usr:solo1", r"H:\MixedCase\Path", 100_i64),
+            // Standalone verbatim drive: must be stripped + lowercased.
+            ("S_VRB_SOLO", "usr:solo2", r"\\?\K:\Solo", 100_i64),
+            // POSIX must remain untouched (case + slashes).
+            ("S_POSIX_KEEP", "usr:nix", "/Abs/Repo", 100_i64),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, ?2, 'agt:cli:x:y:v1', ?3, '', 100, ?4, NULL)",
+                rusqlite::params![sid, user, root, last_act],
+            )
+            .expect("insert");
+        }
+    }
+
+    let store = open(&db_path).await.expect("open after 0016");
+
+    // Pair A: verbatim row newer → wins; plain row ended.
+    let pair_a_winner = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_VRB_DRV").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_VRB_DRV present");
+    assert_eq!(
+        pair_a_winner.identity.project_root.as_deref(),
+        Some(r"c:\repo"),
+        "verbatim drive must be stripped and lowercased",
+    );
+    assert!(
+        pair_a_winner.ended_at_unix_ms.is_none(),
+        "newer (verbatim) row in pair A must remain active",
+    );
+    let pair_a_loser = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_PLN_DRV").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_PLN_DRV present");
+    assert!(
+        pair_a_loser.ended_at_unix_ms.is_some(),
+        "older row in pair A must be ended by dedup",
+    );
+
+    // Pair B: plain UNC mixed-case is newer → wins; verbatim UNC ended.
+    let pair_b_winner = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_PLN_UNC").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_PLN_UNC present");
+    assert_eq!(
+        pair_b_winner.identity.project_root.as_deref(),
+        Some(r"\\srv\share"),
+        "plain UNC must be lowercased",
+    );
+    assert!(
+        pair_b_winner.ended_at_unix_ms.is_none(),
+        "newer row in pair B must remain active",
+    );
+    let pair_b_loser = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_VRB_UNC").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_VRB_UNC present");
+    assert!(
+        pair_b_loser.ended_at_unix_ms.is_some(),
+        "older (verbatim UNC) row in pair B must be ended by dedup",
+    );
+
+    // Standalones: lowercased / stripped in place, still active.
+    let mix_drv = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_MIX_DRV").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_MIX_DRV present");
+    assert_eq!(
+        mix_drv.identity.project_root.as_deref(),
+        Some(r"h:\mixedcase\path"),
+    );
+    assert!(mix_drv.ended_at_unix_ms.is_none());
+
+    let vrb_solo = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_VRB_SOLO").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_VRB_SOLO present");
+    assert_eq!(
+        vrb_solo.identity.project_root.as_deref(),
+        Some(r"k:\solo"),
+        "standalone verbatim drive must be stripped and lowercased",
+    );
+    assert!(vrb_solo.ended_at_unix_ms.is_none());
+
+    // POSIX must be untouched: case preserved, no slash flipping.
+    let posix = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_POSIX_KEEP").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_POSIX_KEEP present");
+    assert_eq!(posix.identity.project_root.as_deref(), Some("/Abs/Repo"));
+
+    // Post-upgrade caller using the runtime canonical (lowercase) form
+    // resolves the migrated row.
+    let canonical = SessionIdentity::new(
+        Identity::parse("usr:dup1").expect("user"),
+        Identity::parse("agt:cli:x:y:v1").expect("agent"),
+        Some(r"C:\Repo".into()),
+    )
+    .expect("identity");
+    let found = store
+        .find_active_session(&canonical)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(found.id.as_str(), "S_VRB_DRV");
 }
 
 #[tokio::test]

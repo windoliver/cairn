@@ -22,6 +22,8 @@ const M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
     include_str!("sql/0014_sessions_close_relative_project_root.sql");
 const M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
     include_str!("sql/0015_sessions_canonicalize_windows_paths.sql");
+const M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
+    include_str!("sql/0016_sessions_strip_verbatim_and_case_fold.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -56,6 +58,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0015_sessions_canonicalize_windows_paths",
         M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS,
     ),
+    (
+        16,
+        "0016_sessions_strip_verbatim_and_case_fold",
+        M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -77,5 +84,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE),
         M::up(M0014_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
         M::up(M0015_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
+        M::up(M0016_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
     ])
 }

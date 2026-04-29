@@ -321,15 +321,28 @@ fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
     } else {
         (raw.to_owned(), shape)
     };
-    // Step 1: slash-canonicalize Windows-shaped paths so `C:\repo` and
-    // `C:/repo` collapse to one identity. POSIX paths leave `\` alone
-    // because it's a regular filename character there.
+    // Step 1: slash-canonicalize and lowercase Windows-shaped paths so
+    // `C:\Repo`, `c:\repo`, `C:/repo`, `\\Srv\Share`, and `\\srv\share`
+    // all collapse to one identity. NTFS and SMB share names are
+    // case-insensitive by convention, so persisting different cases as
+    // distinct identities would silently fork sessions for one project
+    // depending on which harness supplied the path. POSIX is
+    // case-sensitive, so its paths leave `\` and casing alone — `\` is
+    // a regular filename character there, and `/repo` and `/Repo` are
+    // genuinely different directories.
+    //
+    // Case-folding is `to_ascii_lowercase`: drive letters are ASCII by
+    // construction, and non-ASCII directory names get folded
+    // byte-by-byte without invoking Unicode case-mapping. Mirror this
+    // in migration SQL via `LOWER(...)` so stored rows match runtime
+    // output.
     let canonical: String = match shape {
         AbsoluteShape::Posix => raw.clone(),
         AbsoluteShape::WindowsDrive | AbsoluteShape::WindowsUnc => raw
             .chars()
             .map(|c| if c == '/' { '\\' } else { c })
-            .collect(),
+            .collect::<String>()
+            .to_ascii_lowercase(),
     };
     // Step 2: trim trailing separators that would otherwise fork
     // `/repo` from `/repo/`. POSIX trims `/` only; Windows-shaped paths
@@ -540,13 +553,16 @@ mod tests {
         let with_fwd = SessionIdentity::new(ident_user(), ident_agent(), Some("C:/repo".into()))
             .expect("valid forward-slash drive path");
         assert_eq!(with_back.project_root, with_fwd.project_root);
-        assert_eq!(with_back.project_root.as_deref(), Some(r"C:\repo"));
+        assert_eq!(with_back.project_root.as_deref(), Some(r"c:\repo"));
 
-        // Mixed slashes inside the path also collapse.
+        // Mixed slashes and case both collapse: `C:\Foo/Bar\baz` →
+        // `c:\foo\bar\baz`. Windows file systems are case-insensitive,
+        // so persisting different cases would fork sessions for one
+        // repo.
         let mixed =
-            SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\foo/bar\baz".into()))
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\Foo/Bar\baz".into()))
                 .expect("valid mixed-slash drive path");
-        assert_eq!(mixed.project_root.as_deref(), Some(r"C:\foo\bar\baz"));
+        assert_eq!(mixed.project_root.as_deref(), Some(r"c:\foo\bar\baz"));
     }
 
     #[test]
@@ -557,7 +573,7 @@ mod tests {
         // cross-OS vault keeps resolving its sessions.
         let win = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\repo".into()))
             .expect("Windows drive path must hydrate on any host");
-        assert_eq!(win.project_root.as_deref(), Some(r"C:\repo"));
+        assert_eq!(win.project_root.as_deref(), Some(r"c:\repo"));
 
         let unc = SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\srv\share".into()))
             .expect("Windows UNC must hydrate on any host");
@@ -586,7 +602,41 @@ mod tests {
         let plain = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\repo".into()))
             .expect("plain drive path");
         assert_eq!(verbatim.project_root, plain.project_root);
-        assert_eq!(verbatim.project_root.as_deref(), Some(r"C:\repo"));
+        assert_eq!(verbatim.project_root.as_deref(), Some(r"c:\repo"));
+    }
+
+    #[test]
+    fn identity_case_folds_windows_paths() {
+        // NTFS / SMB are case-insensitive; persisting `C:\Repo` and
+        // `c:\repo` as distinct identities forks sessions for one repo.
+        let upper = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\Repo".into()))
+            .expect("uppercase drive path");
+        let lower = SessionIdentity::new(ident_user(), ident_agent(), Some(r"c:\repo".into()))
+            .expect("lowercase drive path");
+        assert_eq!(upper.project_root, lower.project_root);
+        assert_eq!(upper.project_root.as_deref(), Some(r"c:\repo"));
+
+        // UNC also case-folds.
+        let upper_unc =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\Srv\Share".into()))
+                .expect("uppercase UNC");
+        let lower_unc =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\srv\share".into()))
+                .expect("lowercase UNC");
+        assert_eq!(upper_unc.project_root, lower_unc.project_root);
+        assert_eq!(upper_unc.project_root.as_deref(), Some(r"\\srv\share"));
+    }
+
+    #[test]
+    fn identity_preserves_posix_case() {
+        // POSIX is case-sensitive; `/Repo` and `/repo` are different
+        // directories and must keep distinct identities.
+        let upper =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("/Repo".into())).expect("valid");
+        let lower =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("/repo".into())).expect("valid");
+        assert_ne!(upper.project_root, lower.project_root);
+        assert_eq!(upper.project_root.as_deref(), Some("/Repo"));
     }
 
     #[test]
@@ -602,6 +652,15 @@ mod tests {
             .expect("plain UNC");
         assert_eq!(verbatim.project_root, plain.project_root);
         assert_eq!(verbatim.project_root.as_deref(), Some(r"\\srv\share"));
+    }
+
+    #[test]
+    fn identity_strips_windows_verbatim_drive_prefix_with_mixed_case() {
+        // Verbatim + uppercase: `\\?\C:\Repo` collapses to `c:\repo`.
+        let verbatim =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\?\C:\Repo".into()))
+                .expect("verbatim mixed-case drive path");
+        assert_eq!(verbatim.project_root.as_deref(), Some(r"c:\repo"));
     }
 
     #[test]
