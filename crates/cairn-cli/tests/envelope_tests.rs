@@ -104,7 +104,11 @@ fn search_default_response_omits_excluded_field() {
     // never populates it). Serialized JSON must not contain the
     // "excluded" key — the IDL marks it Option<...> with
     // skip_serializing_if = "Option::is_none".
-    let data = SearchData { excluded: None, hits: Vec::new(), next_cursor: None };
+    let data = SearchData {
+        excluded: None,
+        hits: Vec::new(),
+        next_cursor: None,
+    };
     let json = serde_json::to_string(&data).expect("serializable");
     assert!(
         !json.contains("\"excluded\""),

@@ -42,6 +42,10 @@ impl RecordExclusion {
             ),
             "RecordExclusion only accepts ReadFilter* gates; got {gate:?}"
         );
-        Self { target_id, gate, detail }
+        Self {
+            target_id,
+            gate,
+            detail,
+        }
     }
 }

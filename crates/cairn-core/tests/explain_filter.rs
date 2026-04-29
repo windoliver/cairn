@@ -18,7 +18,10 @@ fn id(suffix: char) -> TargetId {
 
 #[test]
 fn empty_candidates_yields_empty_kept_and_excluded() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+        dedup_window: 5,
+    };
     let (kept, excluded) = explain_filter(Vec::<Candidate>::new(), &cfg);
     assert!(kept.is_empty());
     assert!(excluded.is_empty());
@@ -26,7 +29,10 @@ fn empty_candidates_yields_empty_kept_and_excluded() {
 
 #[test]
 fn stale_candidate_is_excluded_with_staleness_gate() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+        dedup_window: 5,
+    };
     let candidates = vec![Candidate {
         target_id: id('A'),
         age_days: 90,
@@ -42,10 +48,23 @@ fn stale_candidate_is_excluded_with_staleness_gate() {
 
 #[test]
 fn duplicate_content_hash_excluded_by_dedup() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+        dedup_window: 5,
+    };
     let candidates = vec![
-        Candidate { target_id: id('A'), age_days: 1, relevance_score: 0.9, content_hash: "h".to_owned() },
-        Candidate { target_id: id('B'), age_days: 1, relevance_score: 0.8, content_hash: "h".to_owned() },
+        Candidate {
+            target_id: id('A'),
+            age_days: 1,
+            relevance_score: 0.9,
+            content_hash: "h".to_owned(),
+        },
+        Candidate {
+            target_id: id('B'),
+            age_days: 1,
+            relevance_score: 0.8,
+            content_hash: "h".to_owned(),
+        },
     ];
     let (kept, excluded) = explain_filter(candidates, &cfg);
     assert_eq!(kept.len(), 1);
@@ -57,10 +76,23 @@ fn duplicate_content_hash_excluded_by_dedup() {
 
 #[test]
 fn stale_takes_precedence_over_dedup() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+        dedup_window: 5,
+    };
     let candidates = vec![
-        Candidate { target_id: id('A'), age_days: 90, relevance_score: 0.9, content_hash: "h".to_owned() },
-        Candidate { target_id: id('B'), age_days: 1,  relevance_score: 0.5, content_hash: "h".to_owned() },
+        Candidate {
+            target_id: id('A'),
+            age_days: 90,
+            relevance_score: 0.9,
+            content_hash: "h".to_owned(),
+        },
+        Candidate {
+            target_id: id('B'),
+            age_days: 1,
+            relevance_score: 0.5,
+            content_hash: "h".to_owned(),
+        },
     ];
     let (kept, excluded) = explain_filter(candidates, &cfg);
     assert_eq!(kept.len(), 1);

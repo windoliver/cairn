@@ -27,7 +27,10 @@ reject_tier1_gate!(
     rejects_prompt_injection_fence,
     PolicyGate::PromptInjectionFence
 );
-reject_tier1_gate!(rejects_filter_should_memorize, PolicyGate::FilterShouldMemorize);
+reject_tier1_gate!(
+    rejects_filter_should_memorize,
+    PolicyGate::FilterShouldMemorize
+);
 reject_tier1_gate!(rejects_visibility_floor, PolicyGate::VisibilityFloor);
 reject_tier1_gate!(rejects_scope_check, PolicyGate::ScopeCheck);
 reject_tier1_gate!(rejects_forget_capability, PolicyGate::ForgetCapability);
@@ -39,7 +42,11 @@ reject_tier1_gate!(
 #[test]
 fn exclusion_holds_target_gate_detail() {
     let id = TargetId::parse(FIXTURE_ID).expect("valid ULID");
-    let e = RecordExclusion::new(id.clone(), PolicyGate::ReadFilterStaleness, PolicyDetail::None);
+    let e = RecordExclusion::new(
+        id.clone(),
+        PolicyGate::ReadFilterStaleness,
+        PolicyDetail::None,
+    );
     assert_eq!(e.target_id, id);
     assert_eq!(e.gate, PolicyGate::ReadFilterStaleness);
     assert_eq!(e.detail, PolicyDetail::None);
