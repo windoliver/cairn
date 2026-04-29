@@ -1,4 +1,4 @@
-//! Trigger-keyword prefilter. Spec §6.2.
+//! Trigger-keyword prefilter and phrase-window builder. Spec §6.2.
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 
@@ -167,6 +167,55 @@ fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// Phrase window: a slice of the body anchored at a prefilter hit, ending
+/// at the next stop (sentence boundary, semicolon, newline, next hit, or EOB).
+#[derive(Debug, PartialEq, Eq)]
+pub struct PhraseWindow {
+    /// Byte span of the window in the body.
+    pub span: TextSpan,
+}
+
+/// Build phrase windows from prefilter hits. Each window starts at a
+/// hit and runs to the next stop. Zero-length windows are dropped.
+#[must_use]
+pub fn build_phrase_windows(body: &str, hits: &[TextSpan]) -> Vec<PhraseWindow> {
+    let bytes = body.as_bytes();
+    let mut windows = Vec::with_capacity(hits.len());
+    for (i, hit) in hits.iter().enumerate() {
+        let start = hit.start as usize;
+        let next_hit_start = hits.get(i + 1).map_or(bytes.len(), |h| h.start as usize);
+        let stop = find_window_stop(bytes, start, next_hit_start);
+        if stop > start {
+            windows.push(PhraseWindow {
+                span: TextSpan::new(
+                    u32::try_from(start).unwrap_or(u32::MAX),
+                    u32::try_from(stop).unwrap_or(u32::MAX),
+                ),
+            });
+        }
+    }
+    windows
+}
+
+fn find_window_stop(bytes: &[u8], start: usize, hard_stop: usize) -> usize {
+    let mut i = start;
+    while i < hard_stop {
+        let b = bytes[i];
+        match b {
+            b';' | b'\n' => return i,
+            b'.' => {
+                let after_is_ws_or_eob = i + 1 == bytes.len() || bytes[i + 1].is_ascii_whitespace();
+                if after_is_ws_or_eob && is_period_sentence_boundary(bytes, i) {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    hard_stop.min(bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +287,42 @@ mod tests {
         let body = r#"the user said "remember that" then forget my password"#;
         let hits = scan(body);
         assert_eq!(hits, vec!["forget"]);
+    }
+
+    #[test]
+    fn build_windows_single_hit_runs_to_eob() {
+        let body = "remember that I prefer dark mode";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan.hits);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(
+            windows[0].span,
+            TextSpan::new(0, u32::try_from(body.len()).unwrap())
+        );
+    }
+
+    #[test]
+    fn build_windows_stops_at_semicolon() {
+        let body = "remember that thing; nothing else";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan.hits);
+        assert_eq!(windows.len(), 1);
+        let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        assert_eq!(s, "remember that thing");
+    }
+
+    #[test]
+    fn build_windows_two_triggers() {
+        let body = "forget X and remember Y";
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(body);
+        let windows = build_phrase_windows(body, &scan.hits);
+        assert_eq!(windows.len(), 2);
+        let w0 = &body[windows[0].span.start as usize..windows[0].span.end as usize];
+        let w1 = &body[windows[1].span.start as usize..windows[1].span.end as usize];
+        assert_eq!(w0, "forget X and ");
+        assert_eq!(w1, "remember Y");
     }
 }
