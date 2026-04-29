@@ -14,11 +14,13 @@
 //!   [`WorkflowOrchestrator`] / [`WorkflowOrchestratorCapabilities`],
 //!   [`SensorIngress`] / [`SensorIngressCapabilities`],
 //!   [`MCPServer`] / [`MCPServerCapabilities`].
+//! - Identity provisioning contract (§4.1): [`Keystore`] / [`KeystoreError`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
+pub mod keystore;
 pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
@@ -38,6 +40,7 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
+<<<<<<< HEAD
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
@@ -47,3 +50,13 @@ pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngress
 pub use workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
 };
+=======
+pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
+pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
+pub use keystore::{Keystore, KeystoreError};
+pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
+pub use mcp_server::{MCPServer, MCPServerCapabilities};
+pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
+pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities};
+pub use workflow_orchestrator::{WorkflowOrchestrator, WorkflowOrchestratorCapabilities};
+>>>>>>> 6d1a34b (feat(core): add Keystore contract trait (#50))
