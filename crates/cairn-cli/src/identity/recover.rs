@@ -279,7 +279,7 @@ pub(super) async fn reconcile(svc: &IdentityService) -> Result<(), IdentityServi
 pub async fn finalise_binding(
     vault_path: PathBuf,
     abandon: bool,
-    _vault_id_override: Option<VaultId>,
+    vault_id_override: Option<VaultId>,
 ) -> Result<(), IdentityServiceError> {
     let cairn_dir = vault_path.join(".cairn");
     let pending_path = cairn_dir.join("vault.binding.pending");
@@ -310,9 +310,36 @@ pub async fn finalise_binding(
         (true, _) => {
             // `.pending` exists — crash occurred during first-bind.
             if abandon {
-                // Drop the pending sentinel.  The keystore witness (if already
-                // stored) will be orphaned but is harmless — it only blocks a
-                // future `provision` for the same vault_id.
+                // Removing only the pending sentinel while a keystore witness
+                // remains under the same vault_id permanently claims the
+                // namespace: future `provision` attempts hit
+                // `VaultNamespaceClaimed` with no local recovery artifact.
+                // Require an explicit vault_id (from DB vault_meta or
+                // operator-supplied) so we can delete the keystore witness
+                // first; otherwise fail closed.
+                let db_path = cairn_dir.join("cairn.db");
+                let db_vault_id = match SqliteIdentityRegistry::open(&db_path).ok() {
+                    Some(r) => r.read_vault_meta().await.ok().flatten().map(|(id, _)| id),
+                    None => None,
+                };
+                let target_vault_id = vault_id_override.or(db_vault_id);
+                let Some(vault_id) = target_vault_id else {
+                    // No way to identify the keystore witness — refuse abandon
+                    // rather than orphan the namespace.
+                    return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+                };
+
+                // Best-effort delete the keystore witness for this vault_id.
+                // Any error other than NotFound/Unsupported aborts abandon so
+                // the operator can investigate.
+                let keystore = cairn_keychain::OsKeystore::new(vault_id.clone());
+                let witness_handle = SecretHandle::for_witness(vault_id);
+                match keystore.delete_secret(&witness_handle).await {
+                    Ok(()) | Err(KeystoreError::NotFound | KeystoreError::DiscoveryUnsupported) => {
+                    }
+                    Err(e) => return Err(IdentityServiceError::Keystore(e)),
+                }
+
                 fs::remove_file(&pending_path).map_err(|e| {
                     IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                 })?;
