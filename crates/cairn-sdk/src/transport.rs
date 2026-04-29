@@ -829,9 +829,10 @@ fn unimplemented(verb: &'static str) -> SdkError {
 }
 
 fn p0_capabilities() -> Vec<Capabilities> {
-    // P0 advertises no capabilities — the store adapter is not wired yet.
     // Mirrors `cairn-cli::verbs::status::p0_capabilities`.
-    vec![]
+    // P0 advertises the gate-vocabulary capability (#95); store-driven
+    // capabilities land with #9.
+    vec![Capabilities::CairnMcpV1PolicyTrace]
 }
 
 fn build_profile() -> String {

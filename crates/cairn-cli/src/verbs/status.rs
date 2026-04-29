@@ -3,7 +3,8 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! For P0 scaffold with no store wired, capabilities is empty.
+//! P0 advertises `cairn.mcp.v1.policy_trace` (#95); store-driven
+//! capabilities land with #9.
 
 use std::process::ExitCode;
 
@@ -38,7 +39,7 @@ pub fn run(json: bool) -> ExitCode {
         println!("started_at:  {started_at}");
         println!("incarnation: {}", incarnation.0);
         if resp.capabilities.is_empty() {
-            println!("capabilities: (none — store not wired in this P0 build)");
+            println!("capabilities: (none advertised)");
         } else {
             for cap in &resp.capabilities {
                 println!(
