@@ -16,3 +16,4 @@
 //!   per-sensor opt-in, append-only audit)
 
 pub mod filter;
+pub mod extract;
