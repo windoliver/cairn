@@ -463,9 +463,15 @@ pub async fn vault_id_recover(
     }
 
     // ── Step 2a: probe keychain if requested ───────────────────────────────────
+    //
+    // SAFETY: a discovered namespace must NOT be auto-adopted on local
+    // evidence alone — running recovery in a sibling directory could
+    // otherwise silently bind this vault to an unrelated vault's keychain
+    // namespace. Require either:
+    //   (a) `.cairn/vault.binding` exists locally AND its bytes match the
+    //       witness stored in the keystore for the discovered namespace, OR
+    //   (b) operator passes `--vault-id <id>` explicitly.
     if probe_keychain {
-        // We need any `VaultId` as a constructor argument; the probe itself
-        // is independent of which vault we're bound to.
         let probe_vault_id = VaultId::parse("00000000-0000-0000-0000-000000000000")
             .map_err(|e| IdentityServiceError::Registry(RegistryError::Backend(Box::new(e))))?;
         let probe_keystore = cairn_keychain::OsKeystore::new(probe_vault_id);
@@ -475,18 +481,56 @@ pub async fn vault_id_recover(
                     // No namespaces found; fall through to override.
                 }
                 1 => {
-                    let recovered = namespaces
+                    let candidate = namespaces
                         .into_iter()
                         .next()
                         .expect("invariant: len == 1 ⇒ first() is Some");
+                    let local_binding = cairn_dir.join("vault.binding");
+                    let local_witness_hash = match fs::read(&local_binding) {
+                        Ok(b) if b.len() == 32 => {
+                            let arr: [u8; 32] = b
+                                .as_slice()
+                                .try_into()
+                                .map_err(|_| IdentityServiceError::PartialBindNeedsProvision)?;
+                            Some(arr)
+                        }
+                        _ => None,
+                    };
+                    let Some(local_hash) = local_witness_hash else {
+                        // No local proof — refuse to adopt. Operator must pass --vault-id.
+                        return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+                    };
+                    // Cross-check: load the witness for `candidate` from the
+                    // keystore and verify its sha256 == local_hash.
+                    let bound_keystore = cairn_keychain::OsKeystore::new(candidate.clone());
+                    let witness_handle =
+                        cairn_core::domain::identity::keys::SecretHandle::for_witness(
+                            candidate.clone(),
+                        );
+                    let witness_bytes = match bound_keystore.load_secret(&witness_handle).await {
+                        Ok(b) => b,
+                        Err(KeystoreError::NotFound) => {
+                            return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+                        }
+                        Err(e) => return Err(IdentityServiceError::Keystore(e)),
+                    };
+                    let computed = cairn_core::domain::identity::keys::WitnessHash::from_witness(
+                        witness_bytes.as_slice(),
+                    );
+                    if computed.as_bytes() != &local_hash {
+                        // Witness mismatch — discovered namespace is for a
+                        // different vault. Refuse adoption.
+                        return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+                    }
+                    // Proven: this namespace IS our vault.
                     fs::create_dir_all(&cairn_dir).map_err(|e| {
                         IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                     })?;
                     let vault_id_path = cairn_dir.join("vault.id");
-                    fs::write(&vault_id_path, recovered.as_str()).map_err(|e| {
+                    fs::write(&vault_id_path, candidate.as_str()).map_err(|e| {
                         IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                     })?;
-                    return Ok(recovered);
+                    return Ok(candidate);
                 }
                 _ => {
                     return Err(IdentityServiceError::AmbiguousVaultNamespaces);
