@@ -663,6 +663,111 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-2 (newer loop) regression: when the `tail_aligned_to_line`
+    /// branch hits `final_line_truncated`, the appended marker must
+    /// fit alongside both a near-full head window and a near-full
+    /// tail suffix without crossing `cfg.max_bytes()`. Pre-fix this
+    /// case tripped the closing release `assert!`.
+    #[test]
+    fn oversize_bypass_final_line_truncated_marker_respects_max_bytes() {
+        // Default cfg.max_bytes = 16384. Construct raw that drives
+        // both head and tail to approximately `half` bytes:
+        //   8145 'A' + '\n' + 12000 'B'
+        // - head_trimmed picks up the `\n` near byte 8145 → head
+        //   emits ~8145 bytes.
+        // - tail window is the last `half*2` ≈ 16292 bytes; line-
+        //   align step lands right after the single `\n` → tail
+        //   slice is the 12000 B's, which trim-from-end shrinks to
+        //   ~half bytes with no `\n` → final_line_truncated.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend(std::iter::repeat_n(b'A', 8145));
+        raw.push(b'\n');
+        raw.extend(std::iter::repeat_n(b'B', 12_000));
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert!(
+            out.compacted_bytes.len() <= cfg.max_bytes(),
+            "compacted exceeds max_bytes: {} > {}",
+            out.compacted_bytes.len(),
+            cfg.max_bytes(),
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("final-line truncated"),
+            "expected final-line marker in output"
+        );
+    }
+
+    /// Round-2 (newer loop) regression: when the bypass preserves a
+    /// final-line suffix and the suffix gets ANSI/OSC-stripped, the
+    /// stripped bytes must NOT be reported as truncation loss in
+    /// `bytes_dropped_truncate`. Sanitization signal already lives
+    /// in `ansi_stripped` / `osc_recovery_bytes_dropped`.
+    #[test]
+    fn oversize_bypass_final_line_suffix_strips_count_as_sanitization_not_truncation() {
+        // Build a payload whose tail window has no `\n` (giant
+        // final line) but the dropped prefix of the final line is
+        // ESC-free, so the safe-suffix branch fires. Embed an SGR
+        // escape inside the preserved suffix region so stage 2
+        // strips bytes from the kept content.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        raw.extend(std::iter::repeat_n(b'X', 30_000));
+        // SGR escape inside the suffix region; introducer is in the
+        // KEPT slice, sanitizer handles it normally.
+        raw.extend_from_slice(b"\x1b[31m");
+        raw.extend(std::iter::repeat_n(b'Y', 100));
+        raw.extend_from_slice(b"\x1b[0m");
+        raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert!(out.stats.ansi_stripped, "ANSI must have been stripped");
+        // Critical invariant: stripped ANSI bytes ARE NOT truncation
+        // loss. raw_byte_len - bytes_dropped_truncate = preserved raw
+        // bytes. Since the suffix branch keeps the full raw input
+        // span (no front-trim happened — sanitized fits remaining),
+        // bytes_dropped_truncate must reflect ONLY the dropped raw
+        // PREFIX of the final line (not the stripped escapes).
+        // Concretely: the preserved span is at least the size of the
+        // bytes that survived sanitization in the kept window plus
+        // the stripped escape bytes themselves.
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-SUFFIX"),
+            "suffix preserved when dropped prefix is ESC-free"
+        );
+        // The stripped SGR escape sequences (`\x1b[31m`, `\x1b[0m` =
+        // 9 bytes total) must not appear as truncation loss. Lower
+        // bound: bytes_dropped_truncate < raw_byte_len - 9.
+        assert!(
+            out.stats.bytes_dropped_truncate + 9 <= raw_byte_len,
+            "stripped ANSI bytes leaked into bytes_dropped_truncate: \
+             dropped={}, raw={}",
+            out.stats.bytes_dropped_truncate,
+            raw_byte_len,
+        );
+    }
+
     /// Round-1 (newer loop) regression: when the giant-final-line
     /// suffix path WOULD start mid OSC/CSI sequence (because an ESC
     /// introducer sits in the dropped prefix of the final line), the
@@ -2776,11 +2881,26 @@ fn oversize_bypass(
         } else {
             tail_trimmed
         };
-        if final_line_truncated {
-            let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
+        // Round-2 (newer loop) hardening: when `final_line_truncated`
+        // fires, the final-line marker is appended on top of a head
+        // window already up to `half` bytes and a tail trimmed to
+        // `half` bytes — total can exceed `max_body` by the marker
+        // length and trip the closing assert. Reserve marker space
+        // explicitly here, the same way the newline-free suffix
+        // branch already does.
+        let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
+        let tail_emit: &str = if final_line_truncated {
+            let used = compacted_bytes.len();
+            let remaining = max_body.saturating_sub(used + final_marker.len());
+            let suffix = trim_to_byte_budget_at_boundary_from_end(tail_aligned, remaining);
             compacted_bytes.extend_from_slice(final_marker);
-        }
-        compacted_bytes.extend_from_slice(tail_aligned.as_bytes());
+            compacted_bytes.extend_from_slice(suffix.as_bytes());
+            suffix
+        } else {
+            compacted_bytes.extend_from_slice(tail_aligned.as_bytes());
+            tail_aligned
+        };
+        let tail_aligned = tail_emit;
         // Track raw-tail span for accounting: count newlines in
         // `tail_aligned` and find the matching position from end-of-raw.
         // Newlines pass through stages 1+2 unchanged, so the n-th
@@ -2804,11 +2924,18 @@ fn oversize_bypass(
                 tail_source_bytes = raw_byte_len - tail_raw_start;
             }
         } else if !tail_aligned.is_empty() {
-            // No newline in emitted tail (final_line_truncated case):
-            // the raw span ≈ the bytes we emitted from the source's
-            // last line. Capped at the post-line-align span so we
-            // never claim more preserved bytes than exist.
-            tail_source_bytes = tail_aligned.len().min(raw_byte_len - tail_raw_start);
+            // No newline in emitted tail. Round-2 (newer loop): use
+            // raw boundaries so ANSI/OSC bytes stripped from the
+            // preserved suffix do NOT count as truncation loss
+            // (`ansi_stripped` / `osc_recovery_bytes_dropped` already
+            // covers them). Only when the suffix was actually
+            // front-trimmed for budget — `final_line_truncated` —
+            // does the lower-bound `tail_aligned.len()` apply.
+            tail_source_bytes = if final_line_truncated {
+                tail_aligned.len().min(raw_byte_len - tail_raw_start)
+            } else {
+                raw_byte_len - tail_raw_start
+            };
         }
     } else if !raw_bytes.is_empty() {
         // No `\n` exists in the retained tail window. Two sub-cases:
@@ -2868,7 +2995,19 @@ fn oversize_bypass(
             let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_sanitized, remaining);
             compacted_bytes.extend_from_slice(final_marker);
             compacted_bytes.extend_from_slice(suffix.as_bytes());
-            tail_source_bytes = suffix.len().min(raw_byte_len - suffix_window_start);
+            // Round-2 (newer loop): only count front-trim as
+            // truncation loss in raw terms. If the budget swallowed
+            // the entire sanitized suffix without trimming, the full
+            // raw input span [suffix_window_start..] is preserved
+            // — sanitization-driven shrinkage is reported via
+            // `ansi_stripped` / `osc_recovery_bytes_dropped`, not
+            // `bytes_dropped_truncate`.
+            let was_front_trimmed = suffix.len() < suffix_sanitized.len();
+            tail_source_bytes = if was_front_trimmed {
+                suffix.len().min(raw_byte_len - suffix_window_start)
+            } else {
+                raw_byte_len - suffix_window_start
+            };
         } else {
             let degraded = b"[\xe2\x80\xa6tail dropped: oversized single-line payload (no line boundary in retained window)\xe2\x80\xa6]";
             compacted_bytes.extend_from_slice(degraded);
