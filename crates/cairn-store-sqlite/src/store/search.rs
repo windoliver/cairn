@@ -459,33 +459,39 @@ mod tests {
     //! Index-coupling tests for the supersession predicate.
     //!
     //! These guards live next to the SQL builder so they reference the
-    //! exact constant production uses — rather than a hand-written copy
+    //! actual SQL production emits — rather than a hand-written copy
     //! that could silently drift. They cover both the index *shape*
-    //! (key column, partial predicate, name) and the *use* of the index
-    //! by the production predicate string under EXPLAIN QUERY PLAN.
+    //! (key column, partial predicate, name) and the *use* of the
+    //! `edges_updates_dst_idx` partial index by the *built* search SQL
+    //! under EXPLAIN QUERY PLAN.
     //!
-    //! The motivating concern (round-7 review): equivalent rewrites such
-    //! as `e.kind IN ('updates')` or a parameterised `e.kind = ?` defeat
-    //! `SQLite`'s partial-index proof rule even though they look correct
-    //! to a human reader. Driving EXPLAIN from
-    //! [`SUPERSESSION_NOT_EXISTS_CLAUSE`] means any such rewrite to the
-    //! production string will surface here as a `SCAN edges` plan.
-    use super::SUPERSESSION_NOT_EXISTS_CLAUSE;
+    //! The motivating concern (round-7/8 review): equivalent rewrites
+    //! such as `e.kind IN ('updates')` or a parameterised `e.kind = ?`
+    //! defeat `SQLite`'s partial-index proof rule even though they look
+    //! correct to a human reader. The test drives EXPLAIN from
+    //! [`build_search_query`] output so any such rewrite — whether in
+    //! [`SUPERSESSION_NOT_EXISTS_CLAUSE`] or inlined directly into the
+    //! builder — surfaces here as a `SCAN edges` plan.
+    use rusqlite::params_from_iter;
+
+    use super::{SUPERSESSION_NOT_EXISTS_CLAUSE, build_search_query};
     use crate::open_in_memory_sync;
 
     /// Asserts the partial index is shaped correctly *and* used by the
-    /// production supersession clause.
+    /// production search SQL.
     ///
-    /// Three independent checks together close the loopholes round-5,
-    /// round-6 and round-7 reviewers identified:
+    /// Three independent checks together close the loopholes round-5
+    /// through round-8 reviewers identified:
     /// 1. `pragma_index_xinfo` confirms the leading key column is `dst`.
     /// 2. `sqlite_schema.sql` matches the canonical partial-index DDL
     ///    exactly, so any broadened predicate (e.g. adding `OR kind =
     ///    'mentions'`) fails the test.
-    /// 3. EXPLAIN QUERY PLAN of the *production* predicate string
-    ///    reports `SEARCH ... USING INDEX edges_updates_dst_idx`. This
-    ///    catches both predicate rewrites that lose proof equivalence
-    ///    and accidental removal of the partial index.
+    /// 3. EXPLAIN QUERY PLAN of the *built* search SQL — produced by
+    ///    [`build_search_query`] — reports
+    ///    `SEARCH ... USING INDEX edges_updates_dst_idx` for the inner
+    ///    `edges` reference. This catches predicate rewrites both
+    ///    inside the constant and inlined into the builder, plus
+    ///    accidental removal of the partial index.
     #[test]
     fn supersession_clause_uses_partial_index() {
         let conn = open_in_memory_sync().expect("open");
@@ -525,25 +531,59 @@ mod tests {
             "broadened or rewritten DDL would re-introduce edges-table bloat. Got: {ddl}",
         );
 
-        // (3) EXPLAIN the *production* clause. We wrap it in a minimal
-        // outer query that supplies the `r.record_id` referent the
-        // clause closes over, then assert SQLite picks the partial index.
-        let explain_sql = format!(
-            "EXPLAIN QUERY PLAN \
-             SELECT 1 FROM records r WHERE {SUPERSESSION_NOT_EXISTS_CLAUSE}"
+        // Sanity: the production builder must keep using the constant.
+        // If a future edit inlines a different predicate string, this
+        // fails before the more expensive EXPLAIN check below.
+        let (sql, params) =
+            build_search_query("anything", &[], None, None, 10).expect("build search SQL");
+        assert!(
+            sql.contains(SUPERSESSION_NOT_EXISTS_CLAUSE),
+            "build_search_query must continue to emit SUPERSESSION_NOT_EXISTS_CLAUSE \
+             verbatim; inlining or rewriting it bypasses the partial-index \
+             coupling. Got SQL:\n{sql}",
         );
+
+        // (3) EXPLAIN the *built* SQL with the *built* params and assert
+        // the inner `edges` reference plans as a partial-index search.
+        // Driving EXPLAIN from `build_search_query` rather than the
+        // constant directly means a future builder edit that diverges
+        // from the constant — say, inlining `kind IN ('updates')` —
+        // surfaces here as a `SCAN edges` plan even if the constant
+        // itself is left untouched.
+        let explain_sql = format!("EXPLAIN QUERY PLAN {sql}");
         let mut stmt = conn.prepare(&explain_sql).expect("prepare EXPLAIN");
-        let plan: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(3))
+        let plan_rows: Vec<String> = stmt
+            .query_map(params_from_iter(params.iter()), |r| r.get::<_, String>(3))
             .expect("query plan")
             .filter_map(Result::ok)
             .collect();
-        let joined = plan.join("\n");
+        let joined = plan_rows.join("\n");
+
+        // Locate the plan row referencing the partial index (the alias
+        // SQLite prints is `e` from the constant, so we anchor on the
+        // index name itself, which is unambiguous). Requiring the
+        // `SEARCH` and `dst=?` tokens on *that* row rules out:
+        //   - unrelated SEARCH rows (records, records_fts) accidentally
+        //     satisfying a `joined.contains` assertion;
+        //   - the index being chosen as a covering scan rather than a
+        //     keyed lookup (`dst=?` is only emitted when SQLite uses
+        //     `dst` as the search key).
+        let edges_row = plan_rows
+            .iter()
+            .find(|r| r.contains("edges_updates_dst_idx"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no plan row uses edges_updates_dst_idx — \
+                     supersession check must hit the partial index. \
+                     Full plan:\n{joined}"
+                )
+            });
         assert!(
-            joined.contains("SEARCH") && joined.contains("edges_updates_dst_idx"),
-            "production supersession clause must SEARCH the partial index. \
-             A regression to e.g. `kind IN ('updates')` would surface here. \
-             Got plan:\n{joined}",
+            edges_row.contains("SEARCH") && edges_row.contains("dst=?"),
+            "supersession sub-select must SEARCH the partial index by dst — \
+             a rewrite to e.g. `kind IN ('updates')` or parameterised \
+             `kind = ?` would lose proof equivalence and surface here. \
+             edges row: {edges_row}\nfull plan:\n{joined}",
         );
     }
 }
