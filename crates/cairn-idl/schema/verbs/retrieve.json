@@ -132,7 +132,7 @@
       "x-cairn-cli": {
         "command": "retrieve",
         "flags": [
-          { "name": "scope",  "long": "scope",  "value_source": "json" },
+          { "name": "scope",  "long": "scope",  "value_source": "json", "cli_exemplar": "{\"user\":\"u\"}" },
           { "name": "cursor", "long": "cursor", "value_source": "string" }
         ]
       },

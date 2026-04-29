@@ -246,6 +246,8 @@ dependencies = [
  "insta",
  "jsonschema",
  "proptest",
+ "referencing",
+ "regex",
  "rstest",
  "serde",
  "serde_json",
