@@ -45,13 +45,15 @@ pub fn open_blocking(path: &Path) -> Result<SharedConn, SqliteStoreError> {
     // silently report the row as missing. Fail closed at open() so
     // operators must run a repair/repopulate workflow before the
     // database is reachable from a running binary.
-    let legacy_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM records WHERE record_json IS NULL",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    // Propagate any error: a missing `records` table, missing
+    // `record_json` column, or schema drift while `schema_migrations`
+    // claims success must abort open() loudly. Treating these as zero
+    // would let the caller proceed against a corrupted schema.
+    let legacy_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM records WHERE record_json IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
     if legacy_count > 0 {
         return Err(SqliteStoreError::LegacyRowsPresent {
             count: u64::try_from(legacy_count).unwrap_or(u64::MAX),

@@ -70,7 +70,18 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
 
             match outcome {
                 Ok(Ok(v)) => {
-                    guard.execute_batch("COMMIT").map_err(store_err)?;
+                    if let Err(commit_err) = guard.execute_batch("COMMIT") {
+                        // SQLite can leave the transaction open after a
+                        // failed COMMIT (busy, full disk, I/O error).
+                        // Issue ROLLBACK so the next caller does not
+                        // inherit an in-progress transaction on this
+                        // shared connection. The rollback may also
+                        // fail (e.g. connection genuinely broken); we
+                        // best-effort ignore that failure but propagate
+                        // the original commit error.
+                        let _ = guard.execute_batch("ROLLBACK");
+                        return Err(store_err(commit_err));
+                    }
                     Ok(v)
                     // `guard` drops here — mutex released after COMMIT.
                 }

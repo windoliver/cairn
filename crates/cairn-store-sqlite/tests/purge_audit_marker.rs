@@ -243,11 +243,12 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
     );
 }
 
-/// Purge markers fail closed: only the system principal sees them.
-/// Per-version visibility persistence is a follow-up; until then,
-/// non-system callers cannot probe purge metadata.
+/// Purge markers are rebac-filtered using the scope/taxonomy
+/// snapshot captured at purge time (migration 0010): the owner who
+/// could read the row sees the audit marker; an unrelated principal
+/// does not. System principals always see every marker.
 #[tokio::test]
-async fn purge_marker_only_visible_to_system_principal() {
+async fn purge_marker_visibility_uses_purge_time_snapshot() {
     let dir = tempdir().expect("tempdir");
     let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
         .await
@@ -288,16 +289,29 @@ async fn purge_marker_only_visible_to_system_principal() {
     assert_eq!(sys_history.len(), 1, "system must observe the purge marker");
     assert!(matches!(sys_history[0], HistoryEntry::Purge(_)));
 
-    // The owner of the purged record must NOT see the marker until
-    // per-version visibility is persisted (failing closed).
+    // The owner who could read the original row sees the purge marker
+    // via the captured scope/taxonomy snapshot.
     let owner = Principal::from_identity(Identity::parse("usr:purgetest").expect("valid"));
     let owner_history = store
         .version_history(&owner, &target)
         .await
         .expect("version_history (owner)");
+    assert_eq!(
+        owner_history.len(),
+        1,
+        "owner must observe the rebac-gated purge marker; got: {owner_history:?}"
+    );
+    assert!(matches!(owner_history[0], HistoryEntry::Purge(_)));
+
+    // An unrelated principal must NOT see the marker.
+    let outsider = Principal::from_identity(Identity::parse("usr:outsider").expect("valid"));
+    let outsider_history = store
+        .version_history(&outsider, &target)
+        .await
+        .expect("version_history (outsider)");
     assert!(
-        owner_history.is_empty(),
-        "non-system callers must not observe purge metadata yet; got: {owner_history:?}"
+        outsider_history.is_empty(),
+        "non-owner must not observe the purge marker; got: {outsider_history:?}"
     );
 }
 

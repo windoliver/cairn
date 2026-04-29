@@ -273,28 +273,49 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .map(|(rv, _, _)| rv)
                 .collect();
 
-            // Purge markers fail closed to system principals only. A
-            // single snapshot of scope/taxonomy taken at purge time
-            // cannot prove the caller could read every historical
-            // version — visibility may have changed across versions.
-            // Per-version visibility persistence is a follow-up; until
-            // then, expose purge audit only to system/audit callers.
-            // The 0010 snapshot columns remain populated for that
-            // future work but are not consulted on read.
-            let purges: Vec<PurgeMarker> = if principal.is_system() {
-                let mut p = conn
-                    .prepare(
-                        "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt \
-                         FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
-                    )
-                    .map_err(store_err)?;
-                p.query_map(params![target_id.as_str()], row_to_purge_marker)
-                    .map_err(store_err)?
-                    .collect::<Result<_, _>>()
-                    .map_err(store_err)?
-            } else {
-                Vec::new()
-            };
+            // Purge markers are visibility-filtered using the snapshot
+            // captured at purge time (`scope_snapshot` /
+            // `taxonomy_snapshot`, migration 0010). The snapshot
+            // reflects the row's visibility at the moment it was
+            // purged; a caller who could read the row then may see the
+            // audit marker now. System principals always see every
+            // marker. Markers without snapshots (pre-0010 purges, or
+            // purge of a target with no records) fall back to system-
+            // only visibility — fail closed.
+            let mut p = conn
+                .prepare(
+                    "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt, \
+                            scope_snapshot, taxonomy_snapshot \
+                     FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
+                )
+                .map_err(store_err)?;
+            let purge_rows: Vec<(PurgeMarker, Option<String>, Option<String>)> = p
+                .query_map(params![target_id.as_str()], |row| {
+                    let marker = row_to_purge_marker(row)?;
+                    let scope_snapshot: Option<String> = row.get("scope_snapshot")?;
+                    let taxonomy_snapshot: Option<String> = row.get("taxonomy_snapshot")?;
+                    Ok((marker, scope_snapshot, taxonomy_snapshot))
+                })
+                .map_err(store_err)?
+                .collect::<Result<_, _>>()
+                .map_err(store_err)?;
+
+            let purges: Vec<PurgeMarker> = purge_rows
+                .into_iter()
+                .filter_map(|(marker, scope_snap, tax_snap)| {
+                    if principal.is_system() {
+                        return Some(marker);
+                    }
+                    match (scope_snap, tax_snap) {
+                        (Some(scope), Some(tax))
+                            if principal_can_read(&principal, &scope, &tax) =>
+                        {
+                            Some(marker)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
 
             Ok(into_history(visible, purges))
         })
