@@ -266,7 +266,7 @@ fn set_is_renderable(cmd: &CliCommand, required: &BTreeSet<String>) -> bool {
     positional_in_required || any_required_flag
 }
 
-/// Per-command [`VariantSpec`] — for tagged-union verbs this defers to
+/// Per-command `VariantSpec` — for tagged-union verbs this defers to
 /// `variant_required_specs`; for single-shape verbs it lifts `required` plus
 /// every `anyOf`/`oneOf` branch off `$defs/Args`. Unlike the prior
 /// `required_args_per_command`, this preserves the full branch list so the
