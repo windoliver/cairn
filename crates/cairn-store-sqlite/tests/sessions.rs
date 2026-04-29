@@ -289,6 +289,69 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
 }
 
 #[tokio::test]
+async fn end_after_reuse_select_does_not_return_dead_session() {
+    // The dangerous interleaving: resolve_or_create reads an active row,
+    // decides reuse (within window), then a concurrent end_session closes
+    // it before the bump UPDATE lands. Without a CAS on the reuse update,
+    // resolve_or_create would return a session id whose row is already
+    // ended. With CAS, the UPDATE matches zero rows, the tx restarts, and
+    // the next iteration sees ended_at IS NOT NULL → CreateNew.
+    //
+    // Race many resolves against many ends; assert no resolver returns an
+    // already-ended id.
+    let store = std::sync::Arc::new(open_in_memory().await.expect("open"));
+    let id = identity(Some("/repo"));
+    // Seed an active row the enders can target.
+    let seed = store
+        .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+        .await
+        .expect("seed");
+
+    let mut handles: Vec<tokio::task::JoinHandle<Option<cairn_core::domain::Session>>> = Vec::new();
+    for _ in 0..16 {
+        let store = std::sync::Arc::clone(&store);
+        let id = id.clone();
+        handles.push(tokio::spawn(async move {
+            Some(
+                store
+                    .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+                    .await
+                    .expect("resolve")
+                    .into_session(),
+            )
+        }));
+    }
+    let seed_id = seed.into_session().id;
+    for _ in 0..16 {
+        let store = std::sync::Arc::clone(&store);
+        let seed_id = seed_id.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = store.end_session(&seed_id).await;
+            None
+        }));
+    }
+
+    // Collect resolver-returned sessions; the ender tasks return None.
+    let mut resolver_sessions = Vec::new();
+    for h in handles {
+        if let Some(s) = h.await.expect("join") {
+            resolver_sessions.push(s);
+        }
+    }
+    // The atomic resolve tx selects under `ended_at IS NULL` and only
+    // bumps under that same predicate (CAS). The Session returned by
+    // resolve therefore reflects the in-tx snapshot — its
+    // `ended_at_unix_ms` must be None even if a concurrent end_session
+    // closed the row immediately after our tx committed.
+    for session in resolver_sessions {
+        assert!(
+            session.ended_at_unix_ms.is_none(),
+            "resolver returned a session with ended_at set: {session:?}",
+        );
+    }
+}
+
+#[tokio::test]
 async fn touch_after_stale_select_keeps_session_alive_under_race() {
     // The dangerous interleaving is: resolve_or_create snapshots a stale
     // last_activity_at, then a concurrent caller touch_session()s the same

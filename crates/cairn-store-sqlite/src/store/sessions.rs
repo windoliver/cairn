@@ -265,7 +265,16 @@ impl SqliteMemoryStore {
         let outcome = conn
             .call(move |c| {
                 for _attempt in 0..MAX_RACE_RETRIES {
-                    let tx = c.transaction()?;
+                    // BEGIN IMMEDIATE acquires a RESERVED lock up front so
+                    // a concurrent writer can't sneak in between our SELECT
+                    // and our UPDATE — under WAL this avoids the
+                    // SQLITE_BUSY_SNAPSHOT class of failures that DEFERRED
+                    // hits when a reader tries to upgrade after another
+                    // connection commits. Cross-process bursts therefore
+                    // deterministically converge through the retry loop
+                    // instead of escaping as terminal store errors.
+                    let tx =
+                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                     let res = resolve_or_create_in_tx(
                         &tx,
                         &user,
@@ -509,11 +518,23 @@ enum InTxError {
 
 impl From<rusqlite::Error> for InTxError {
     fn from(e: rusqlite::Error) -> Self {
-        // SQLITE_CONSTRAINT_UNIQUE = 2067 — partial unique index conflict.
-        if let rusqlite::Error::SqliteFailure(err, _) = &e
-            && err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-        {
-            return Self::UniqueViolation;
+        if let rusqlite::Error::SqliteFailure(err, _) = &e {
+            // SQLITE_CONSTRAINT_UNIQUE = 2067 — partial unique index conflict.
+            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE {
+                return Self::UniqueViolation;
+            }
+            // SQLITE_BUSY (5) and its WAL variant SQLITE_BUSY_SNAPSHOT
+            // (517) surface when a reader-turned-writer loses the
+            // upgrade race or the busy_timeout window is exhausted by
+            // sustained cross-process contention. Treat as transient
+            // and retry — the same pattern an external caller would
+            // implement around any SQLite write.
+            let code = err.code as i32;
+            if code == rusqlite::ffi::SQLITE_BUSY
+                || err.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
+            {
+                return Self::StaleSnapshot;
+            }
         }
         Self::Sqlite(e)
     }
@@ -558,12 +579,23 @@ fn resolve_or_create_in_tx(
         let idle_ms = (now_ms - last_activity_ms).max(0);
         let idle_secs = u64::try_from(idle_ms / 1000).unwrap_or(u64::MAX);
         if idle_secs <= idle_window_secs {
-            // Step 2: reuse — bump last_activity_at, then re-read for the
-            // canonical row to return.
-            tx.execute(
-                "UPDATE sessions SET last_activity_at = ?1 WHERE session_id = ?2",
-                params![now_ms, existing_id],
+            // Step 2: reuse — bump last_activity_at with the same CAS guard
+            // the stale-close branch uses below. If `end_session` raced in
+            // between our SELECT and this UPDATE, the row's `ended_at` is no
+            // longer NULL or `last_activity_at` no longer matches the
+            // snapshot; in either case zero rows are affected and we
+            // restart the whole transaction so we don't return a session id
+            // whose row has just been closed.
+            let updated = tx.execute(
+                "UPDATE sessions SET last_activity_at = ?1 \
+                 WHERE session_id = ?2 \
+                   AND ended_at IS NULL \
+                   AND last_activity_at = ?3",
+                params![now_ms, existing_id, last_activity_ms],
             )?;
+            if updated == 0 {
+                return Err(InTxError::StaleSnapshot);
+            }
             let session = read_session_by_id(tx, &existing_id)?.ok_or_else(|| {
                 InTxError::Invariant(
                     "resolve_or_create: row vanished between SELECT and UPDATE".into(),
