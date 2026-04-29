@@ -663,6 +663,37 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-6 (newer loop) regression: when bypass triggers via
+    /// `LineCardinality` / `DecodeExpansion` on a payload smaller
+    /// than `2 * half`, the tail (containing the actual final
+    /// diagnostic lines) MUST survive. Pre-fix the disjoint-windows
+    /// clamp dropped the tail entirely once head subsumed raw.
+    #[test]
+    fn oversize_bypass_small_input_preserves_final_lines() {
+        let cfg = SquashConfig::new(64 * 1024, 4, 4, 2, MIN_MAX_LINE_BYTES).unwrap();
+        // Line-dense payload that is smaller than 2 * half but
+        // dense enough to credibly route through LineCardinality.
+        let lines: Vec<String> = (0..100).map(|i| format!("line-{i:03}")).collect();
+        let raw: Vec<u8> = lines.join("\n").into_bytes();
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::LineCardinality,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("line-099"),
+            "final diagnostic line dropped on small bypass payload: {body:.400}"
+        );
+        assert!(out.compacted_bytes.len() <= cfg.max_bytes());
+    }
+
     /// Round-5 (newer loop) regression: with a large `max_bytes`
     /// config, an input smaller than `4 * half` (reachable via the
     /// `MAX_INPUT_LINES` / `DecodeExpansion` bypass paths) used to
@@ -3281,7 +3312,19 @@ fn oversize_bypass(
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
     let half = budget / 2;
-    let head_raw_end = (half * 2).min(raw_bytes.len());
+    // Round-6 (newer loop) inversion: previously head and tail
+    // windows were both sized to `half * 2` and the tail was clamped
+    // away when they overlapped. That dropped final diagnostic lines
+    // for any payload smaller than `2 * half` reaching the bypass
+    // (line-cardinality / decode-expansion paths on large configs).
+    // Spec preserves the TAIL first — set the tail window from the
+    // end of raw, then cap the head so it cannot overlap. When raw
+    // is small enough that the tail consumes the whole payload, the
+    // head shrinks to zero and the entire raw content is preserved
+    // through the tail.
+    let tail_window_max = (half * 2).min(raw_bytes.len());
+    let provisional_tail_start = raw_bytes.len() - tail_window_max;
+    let head_raw_end = (half * 2).min(provisional_tail_start);
     let head_decoded = stage1_lossy_utf8(&raw_bytes[..head_raw_end]);
     let mut head_stripped = false;
     let head_sanitized = stage2_ansi_strip(
@@ -3310,19 +3353,10 @@ fn oversize_bypass(
         None => "",
     };
 
-    let tail_window = (half * 2).min(raw_bytes.len());
-    // Round-5 (newer loop) hardening: head and tail windows are sized
-    // independently from `half * 2`, so for any payload smaller than
-    // `4 * half` (which is reachable via the `MAX_INPUT_LINES` /
-    // `DecodeExpansion` bypass paths on a large `max_bytes` config),
-    // they overlap. The bypass would then duplicate raw content into
-    // both windows, double-count `preserved_raw_bytes`, and on the
-    // upper edge could trip the closing release `assert!`. Clamp
-    // `initial_tail_raw_start` to `head_raw_end` so the head and
-    // tail spans are always disjoint. When the entire raw payload
-    // already fits inside the head window, the clamped start lands
-    // at `raw.len()` and the tail is empty.
-    let initial_tail_raw_start = (raw_bytes.len() - tail_window).max(head_raw_end);
+    // Tail is anchored from the end of raw (Round-6: tail-first
+    // priority); `provisional_tail_start` is already disjoint from
+    // `head_raw_end` by construction.
+    let initial_tail_raw_start = provisional_tail_start;
     // Round-4 (newer loop) hardening: the previous "first `\n` in
     // tail window" cut could land inside an open escape sequence
     // (e.g. an OSC body that contains a `\n` and is terminated past
@@ -3345,15 +3379,7 @@ fn oversize_bypass(
     compacted_bytes.push(b'\n');
 
     let mut tail_source_bytes: usize = 0;
-    // When the head window already covers the entire raw payload
-    // (Round-5 disjoint-windows fix), there is no tail to emit and
-    // the giant-final-line / degraded-sentinel paths below MUST NOT
-    // run — they would re-introduce the duplication this clamp is
-    // preventing.
-    let head_subsumes_raw = initial_tail_raw_start >= raw_bytes.len();
-    if head_subsumes_raw {
-        // No tail; head + marker already suffice.
-    } else if tail_aligned_to_line {
+    if tail_aligned_to_line {
         let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
         let mut tail_stripped = false;
         let tail_sanitized = stage2_ansi_strip(
