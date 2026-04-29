@@ -102,6 +102,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // 0010_ranking_indexes
     ("index", "records_confidence_idx"),
     ("index", "records_updated_at_idx"),
+    // 0012_edges_updates_dst_idx
+    ("index", "edges_updates_dst_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {

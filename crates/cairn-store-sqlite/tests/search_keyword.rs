@@ -446,3 +446,35 @@ async fn unmatched_query_returns_empty_page() {
     assert!(page.candidates.is_empty());
     assert!(page.next_cursor.is_none());
 }
+
+// ── Index regression ──────────────────────────────────────────────────────────
+
+/// Guards against accidental removal of the partial index added in
+/// migration 0012. The keyword-search read path applies a correlated
+/// supersession check `NOT EXISTS (SELECT 1 FROM edges WHERE kind='updates'
+/// AND dst = r.record_id)` against every FTS hit; without
+/// `edges_updates_dst_idx`, that predicate is forced to scan `edges`
+/// because the base PK `(src, dst, kind)` cannot serve a `dst`-leading
+/// lookup. EXPLAIN QUERY PLAN must continue to name the index.
+#[test]
+fn supersession_predicate_uses_partial_index() {
+    use cairn_store_sqlite::open_in_memory_sync;
+    let conn = open_in_memory_sync().expect("open");
+    let mut stmt = conn
+        .prepare(
+            "EXPLAIN QUERY PLAN \
+             SELECT 1 FROM edges e \
+              WHERE e.kind = 'updates' AND e.dst = ?",
+        )
+        .expect("prepare EXPLAIN");
+    let plan: Vec<String> = stmt
+        .query_map(["dummy"], |r| r.get::<_, String>(3))
+        .expect("query plan")
+        .filter_map(Result::ok)
+        .collect();
+    let joined = plan.join("\n");
+    assert!(
+        joined.contains("edges_updates_dst_idx"),
+        "supersession lookup must use partial index, got plan:\n{joined}",
+    );
+}
