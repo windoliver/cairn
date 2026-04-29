@@ -36,14 +36,18 @@ impl ApplyToken {
 /// **Tests only — never call from production code.**
 ///
 /// Constructs an [`ApplyToken`] without involving the WAL executor.
-/// Gated behind `#[cfg(any(test, feature = "_test_util_unsafe"))]`; the
-/// feature name is intentionally ugly to discourage opt-in by
-/// production crates. Enabling it bypasses both the WAL-only write
-/// gate and the rebac read gate (via [`Principal::system`]).
+/// Gated behind `#[cfg(any(test, all(debug_assertions, feature =
+/// "_test_util_unsafe")))]`. The feature name is intentionally ugly,
+/// and the additional `debug_assertions` gate makes the helper
+/// **unreachable in release builds** even when a downstream crate
+/// enables the feature: enabling it for a `--release` build is a
+/// no-op rather than an escape hatch into the WAL-only write gate
+/// and rebac read gate. `cargo test` always sets `debug_assertions`,
+/// so cross-crate test usage continues to work.
 ///
 /// `#[doc(hidden)]` keeps the function out of generated docs to avoid
 /// signposting it as part of the public API.
-#[cfg(any(test, feature = "_test_util_unsafe"))]
+#[cfg(any(test, all(debug_assertions, feature = "_test_util_unsafe")))]
 #[doc(hidden)]
 #[must_use]
 pub fn test_apply_token() -> ApplyToken {

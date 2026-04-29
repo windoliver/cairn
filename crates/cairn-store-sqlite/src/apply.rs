@@ -506,6 +506,25 @@ fn expire_active_impl(
     target_id: &TargetId,
     at: &Rfc3339Timestamp,
 ) -> Result<(), StoreError> {
+    // Tombstone retirement: stage_version and activate_version both
+    // reject tombstoned targets to keep retired data frozen. expire
+    // must enforce the same invariant — without it, a delayed retry
+    // can append an Expire event after Phase A forget started, and
+    // version_history would then surface an expire-after-tombstone
+    // ordering on a target that should be frozen.
+    let tombstoned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND tombstoned = 1",
+            params![target_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    if tombstoned > 0 {
+        return Err(StoreError::Conflict {
+            kind: ConflictKind::UniqueViolation,
+        });
+    }
+
     let rows = conn
         .execute(
             "UPDATE records \
