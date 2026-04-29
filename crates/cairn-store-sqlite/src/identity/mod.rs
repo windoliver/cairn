@@ -1335,10 +1335,15 @@ impl IdentityRegistry for SqliteIdentityRegistry {
     }
 
     async fn list_pending_evictions(&self) -> Result<Vec<PendingEvictionEntry>, RegistryError> {
+        // Per spec §3.6: a pending_eviction receipt records that the OLD key
+        // version (the predecessor that was just superseded) still needs to be
+        // deleted from the keystore. Returning `new_key_version` here would
+        // make repair/reconcile delete the freshly active key — a data-loss
+        // bug. Always source `evict_version` from `old_key_version`.
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT rowid, target_identity, new_key_version, issued_at \
+                "SELECT rowid, target_identity, old_key_version, issued_at \
                  FROM identity_receipts \
                  WHERE pending_eviction = 1",
             )
@@ -1348,22 +1353,22 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .query_map([], |row| {
                 let rowid: i64 = row.get(0)?;
                 let target_str: String = row.get(1)?;
-                let new_kv_u32: Option<u32> = row.get(2)?;
+                let old_kv_u32: Option<u32> = row.get(2)?;
                 let issued_str: String = row.get(3)?;
-                Ok((rowid, target_str, new_kv_u32, issued_str))
+                Ok((rowid, target_str, old_kv_u32, issued_str))
             })
             .map_err(|e| RegistryError::Backend(Box::new(e)))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         let mut result = Vec::with_capacity(rows.len());
-        for (rowid, target_str, new_kv_u32, issued_str) in rows {
+        for (rowid, target_str, old_kv_u32, issued_str) in rows {
             let identity = Identity::parse(target_str).map_err(domain_err)?;
-            let evict_version_raw = new_kv_u32.ok_or_else(|| {
-                RegistryError::Backend("pending_eviction receipt has NULL new_key_version".into())
+            let evict_version_raw = old_kv_u32.ok_or_else(|| {
+                RegistryError::Backend("pending_eviction receipt has NULL old_key_version".into())
             })?;
             let nz = std::num::NonZeroU32::new(evict_version_raw).ok_or_else(|| {
-                RegistryError::Backend("new_key_version is 0 in eviction receipt".into())
+                RegistryError::Backend("old_key_version is 0 in eviction receipt".into())
             })?;
             let evict_version = KeyVersion::new(nz);
             let rotated_at = chrono::DateTime::parse_from_rfc3339(&issued_str)

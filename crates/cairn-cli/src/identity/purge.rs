@@ -50,6 +50,7 @@ pub(super) async fn purge(
     svc: &IdentityService,
     target: &Identity,
     reason: PurgeReason,
+    resume: bool,
 ) -> Result<(), IdentityServiceError> {
     // ── Step 1: acquire per-identity lock ─────────────────────────────────────
     let cairn_dir = svc.vault_path.join(".cairn");
@@ -85,7 +86,13 @@ pub(super) async fn purge(
 
     match current_state {
         Some(ProvisioningState::PurgePending) => {
-            // Already in purge_pending — crash-resume path; skip step 4.
+            // Already in purge_pending — crash-resume path. Refuse to silently
+            // resume a destructive operation without an explicit operator
+            // opt-in: the CLI's `--resume` flag must be set.
+            if !resume {
+                return Err(IdentityServiceError::PurgeResumeRequired { id: target.clone() });
+            }
+            // Resume confirmed; skip step 4.
         }
         Some(ProvisioningState::Purged) => {
             // Already purged — idempotent success.
@@ -153,19 +160,25 @@ impl IdentityService {
     /// [`IdentityServiceError::PurgeAckMissing`].
     ///
     /// Runs the two-phase WAL tombstone: `mark_purge_pending` → key eviction
-    /// → `finalise_purge`.  The function is re-entrant: if it is called after
-    /// a crash that left the identity in `PurgePending` state it resumes from
-    /// step 5 without re-writing the WAL row.
+    /// → `finalise_purge`.
+    ///
+    /// `resume` must be `true` when continuing a previously crashed purge
+    /// (target already in `PurgePending`); otherwise the call returns
+    /// [`IdentityServiceError::PurgeResumeRequired`] to force an explicit
+    /// operator decision. This guard prevents accidental destructive
+    /// resumption of a partial purge.
     ///
     /// # Errors
     ///
-    /// Returns [`IdentityServiceError`] on missing ack, lock contention,
-    /// keystore failures, or registry failures.
+    /// Returns [`IdentityServiceError`] on missing ack, missing `--resume`
+    /// when one is required, lock contention, keystore failures, or registry
+    /// failures.
     pub async fn purge(
         &self,
         target: &Identity,
         reason: PurgeReason,
+        resume: bool,
     ) -> Result<(), IdentityServiceError> {
-        purge(self, target, reason).await
+        purge(self, target, reason, resume).await
     }
 }

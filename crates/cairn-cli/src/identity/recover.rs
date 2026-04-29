@@ -162,8 +162,23 @@ pub(super) async fn repair(
     }
 
     // ── Step 4: sweep pending eviction rows for this identity ─────────────────
+    //
+    // Defense-in-depth: never delete the current_key_version even if a stale
+    // receipt somehow points at it. The adapter-level fix (sourcing
+    // evict_version from old_key_version) is the primary safeguard; this
+    // guard catches future regressions.
+    let current_active = svc
+        .registry
+        .get_identity(id, IdentityVisibility::Operational)
+        .await?
+        .map(|r| r.current_key_version);
     let evictions = svc.registry.list_pending_evictions().await?;
     for entry in evictions.iter().filter(|e| &e.identity == id) {
+        if Some(entry.evict_version) == current_active {
+            // Refuse to delete the active key. Leave the receipt's flag set
+            // so a follow-up audit can investigate. Skip silently here.
+            continue;
+        }
         let handle =
             SecretHandle::for_identity(svc.vault_id.clone(), id.clone(), entry.evict_version);
         match svc.keystore.delete_keypair(&handle).await {

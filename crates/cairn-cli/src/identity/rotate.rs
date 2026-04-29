@@ -147,13 +147,23 @@ pub(super) async fn rotate(
         .sign(&old_signing_key)
         .map_err(|e| IdentityServiceError::Registry(RegistryError::Backend(Box::new(e))))?;
 
+    // Set `pending_eviction` only when this rotation will push the retained
+    // key count over MAX_KEY_HISTORY. Setting it unconditionally turns every
+    // rotation into a follow-up keystore delete, which combined with the
+    // adapter-side fix that maps eviction → old_key_version means repair
+    // would correctly delete the predecessor — but on the first rotation the
+    // total count is still ≤ MAX_KEY_HISTORY so no eviction is wanted.
+    let existing_keys = svc.registry.list_keys(id).await?;
+    let post_rotation_count = existing_keys.len() + 1; // current keys + the new row
+    let needs_eviction = post_rotation_count > MAX_KEY_HISTORY;
+
     let receipt = RotationReceipt {
         // Placeholder rowid — `apply_rotation` inserts the actual row and
         // returns via `list_pending_evictions` after the fact.
         id: ReceiptId(0),
         payload,
         signature: sig.to_bytes().to_vec(),
-        pending_eviction: true,
+        pending_eviction: needs_eviction,
     };
 
     // ── Step 5: build signed_predecessor attestation ──────────────────────────

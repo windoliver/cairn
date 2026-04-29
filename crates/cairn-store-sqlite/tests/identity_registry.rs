@@ -928,7 +928,11 @@ async fn clear_pending_eviction_clears_flag() {
     assert_eq!(evictions.len(), 1, "one eviction pending after rotation");
     let entry = &evictions[0];
     assert_eq!(entry.identity, alice);
-    assert_eq!(entry.evict_version, v2);
+    // `evict_version` is the OLD key version that needs to be deleted from
+    // the keystore — never the freshly active new version. (Regression guard
+    // for the data-loss bug where evict_version was sourced from
+    // new_key_version.)
+    assert_eq!(entry.evict_version, v1);
 
     // Clear the flag.
     r.clear_pending_eviction(&entry.receipt_id)
