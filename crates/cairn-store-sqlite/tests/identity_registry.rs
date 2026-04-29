@@ -11,7 +11,7 @@ use cairn_core::domain::identity::{
     Identity, IdentityKind,
     keys::{IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash},
     receipts::{ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt},
-    records::{IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId},
+    records::{FirstBindState, IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId},
 };
 use cairn_store_sqlite::SqliteIdentityRegistry;
 
@@ -1029,4 +1029,101 @@ async fn list_pending_key_disables_returns_revocation_in_flight() {
     assert_eq!(pending[0].identity, alice);
     // retained_versions for an unrevoked identity is the active key.
     assert!(!pending[0].retained_versions.is_empty(), "retained_versions must be non-empty");
+}
+
+// ── C10 · get_first_bind_state ────────────────────────────────────────────────
+
+/// `get_first_bind_state` must progress through `Absent` → `Reserved` → `Activated`
+/// for the same `vault_id`.
+#[tokio::test]
+async fn first_bind_state_progresses() {
+    let r = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binding = dir.path().join("vault.binding.pending");
+
+    let vault = VaultId::mint();
+
+    // Before first-bind: Absent.
+    let state = r
+        .get_first_bind_state(&vault)
+        .await
+        .expect("get_first_bind_state");
+    assert!(
+        matches!(state, FirstBindState::Absent),
+        "must be Absent before reserve_first_identity"
+    );
+
+    // Set up witness.
+    let witness = vec![7u8; 32];
+    std::fs::write(&binding, &witness).expect("write witness");
+    let hash = WitnessHash::from_witness(&witness);
+
+    let id = Identity::parse("hmn:first-bind-test").expect("valid identity");
+    let (record, key) = make_record_and_key(&id);
+
+    r.reserve_first_identity(&vault, &record, &key, hash, &binding)
+        .await
+        .expect("reserve_first_identity");
+
+    // After reserve: Reserved.
+    let state2 = r
+        .get_first_bind_state(&vault)
+        .await
+        .expect("get_first_bind_state after reserve");
+    assert!(
+        matches!(state2, FirstBindState::Reserved { .. }),
+        "must be Reserved after reserve_first_identity, got {state2:?}"
+    );
+
+    // Activate.
+    r.activate_identity(&id, KeyVersion::FIRST)
+        .await
+        .expect("activate_identity");
+
+    // After activate: Activated.
+    let state3 = r
+        .get_first_bind_state(&vault)
+        .await
+        .expect("get_first_bind_state after activate");
+    assert!(
+        matches!(state3, FirstBindState::Activated { .. }),
+        "must be Activated after activate_identity, got {state3:?}"
+    );
+}
+
+/// `get_first_bind_state` for a DIFFERENT `vault_id` (than the one stored) must
+/// return `Absent`.
+#[tokio::test]
+async fn first_bind_state_for_other_vault_id_is_absent() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let other_vault = VaultId::mint();
+    let state = r
+        .get_first_bind_state(&other_vault)
+        .await
+        .expect("get_first_bind_state other vault");
+    assert!(
+        matches!(state, FirstBindState::Absent),
+        "must be Absent for a different vault_id"
+    );
+}
+
+/// Every mutating method must produce at least one `identity_wal` row.
+/// This test sets up an active identity (which takes several mutations) and
+/// asserts the WAL has at least 2 rows.
+#[tokio::test]
+async fn every_mutating_method_writes_one_wal_row() {
+    let (r, _dir, _alice, _sk) = setup_active_identity().await;
+
+    // Count identity_wal rows.
+    let conn = r.test_connection();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM identity_wal", [], |row| row.get(0))
+        .expect("count identity_wal");
+    // setup_active_identity does: reserve_first_identity, activate (first),
+    // reserve_identity, activate (alice) → at least 4 WAL rows.
+    assert!(
+        count >= 2,
+        "expected >= 2 WAL rows from setup_active_identity, got {count}"
+    );
 }

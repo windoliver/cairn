@@ -27,7 +27,7 @@ use cairn_core::contract::identity_registry::{
 use cairn_core::domain::DomainError;
 use cairn_core::domain::identity::{
     Identity, IdentityKind,
-    keys::{KeyVersion, VaultId, WitnessHash},
+    keys::{IdentityRevision, KeyVersion, VaultId, WitnessHash},
     receipts::{RevocationReceipt, RotationReceipt},
     records::{
         FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
@@ -39,7 +39,7 @@ use cairn_core::domain::identity::{
 use rusqlite::OptionalExtension as _;
 
 use queries::{
-    in_placeholders, kind_str, parse_state, row_to_identity_key_entry,
+    in_placeholders, kind_str, parse_kind, parse_state, row_to_identity_key_entry,
     row_to_pending_identity_entry, row_to_public_identity_record, visibility_states,
 };
 
@@ -102,6 +102,89 @@ impl SqliteIdentityRegistry {
         conn.execute_batch(MIGRATION_0002)
             .map_err(|e| RegistryError::Backend(Box::new(e)))
     }
+
+    /// Return a locked [`Connection`] guard for use in integration tests that
+    /// need to execute raw SQL to verify schema-level constraints.
+    ///
+    /// This method is intentionally `pub` so that tests in the `tests/`
+    /// directory can call it, but it is `#[doc(hidden)]` to signal that it
+    /// is not part of the stable public API.
+    #[doc(hidden)]
+    pub fn test_connection(&self) -> parking_lot::MutexGuard<'_, Connection> {
+        self.conn.lock()
+    }
+}
+
+// ── Private helpers for get_first_bind_state ─────────────────────────────────
+
+/// Build a [`PublicIdentityRecord`] from raw column values read from the
+/// `identities` table.  Called only from [`IdentityRegistry::get_first_bind_state`].
+fn first_bind_record(
+    id_str: String,
+    kind_str_val: &str,
+    kv_u32: u32,
+    state_str_val: &str,
+    created_str: &str,
+) -> Result<(Identity, ProvisioningState, PublicIdentityRecord), RegistryError> {
+    let identity = Identity::parse(id_str).map_err(domain_err)?;
+    let kind = parse_kind(kind_str_val)
+        .map_err(|_| RegistryError::Backend("unknown identity kind".into()))?;
+    let nz = std::num::NonZeroU32::new(kv_u32)
+        .ok_or_else(|| RegistryError::Backend("current_key_version is 0".into()))?;
+    let current_key_version = KeyVersion::new(nz);
+    let provisioning_state = parse_state(state_str_val)?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(created_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    let record = PublicIdentityRecord {
+        id: identity.clone(),
+        kind,
+        current_key_version,
+        revision: IdentityRevision::FIRST,
+        provisioning_state,
+        created_at,
+        activated_at: None,
+        revoked_at: None,
+        purge_requested_at: None,
+        purged_at: None,
+    };
+    Ok((identity, provisioning_state, record))
+}
+
+/// Build an [`IdentityKeyEntry`] from raw column values read from the
+/// `identity_keys` table.  Called only from [`IdentityRegistry::get_first_bind_state`].
+fn first_bind_key(
+    identity: Identity,
+    kv_u32_k: u32,
+    pk_bytes: &[u8],
+    signed_pred: Option<Vec<u8>>,
+    key_created_str: &str,
+    key_superseded_str: Option<&str>,
+) -> Result<IdentityKeyEntry, RegistryError> {
+    let nz_k = std::num::NonZeroU32::new(kv_u32_k)
+        .ok_or_else(|| RegistryError::Backend("key_version is 0 in key row".into()))?;
+    let key_version = KeyVersion::new(nz_k);
+    let public_key: [u8; 32] = pk_bytes
+        .try_into()
+        .map_err(|_| RegistryError::Backend("public_key must be 32 bytes".into()))?;
+    let created_at = chrono::DateTime::parse_from_rfc3339(key_created_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    let superseded_at = key_superseded_str
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| RegistryError::Backend(Box::new(e)))
+        })
+        .transpose()?;
+    Ok(IdentityKeyEntry {
+        identity_id: identity,
+        key_version,
+        public_key,
+        signed_predecessor: signed_pred,
+        created_at,
+        superseded_at,
+    })
 }
 
 // ── Helper functions placed alongside the impl ────────────────────────────────
@@ -262,9 +345,89 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
     async fn get_first_bind_state(
         &self,
-        _vault_id: &VaultId,
+        vault_id: &VaultId,
     ) -> Result<FirstBindState, RegistryError> {
-        unimplemented!("Task C10")
+        let conn = self.conn.lock();
+
+        // Read vault_meta. If absent (or different vault), this vault is Absent.
+        let meta: Option<(String, Vec<u8>)> = conn
+            .query_row(
+                "SELECT vault_id, witness_sha256 FROM vault_meta WHERE rowid = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let Some((stored_id_str, witness_bytes)) = meta else {
+            return Ok(FirstBindState::Absent);
+        };
+        if stored_id_str != vault_id.as_str() {
+            return Ok(FirstBindState::Absent);
+        }
+
+        let witness_arr: [u8; 32] = witness_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| RegistryError::Backend("vault_meta witness_sha256 wrong length".into()))?;
+        let witness_hash = WitnessHash::from_bytes(witness_arr);
+
+        // Read the earliest identity row (the first-bind identity).
+        let first_row: Option<(String, String, u32, String, String)> = conn
+            .query_row(
+                "SELECT id, kind, current_key_version, provisioning_state, created_at \
+                 FROM identities ORDER BY created_at ASC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let Some((id_str, kind_str_val, kv_u32, state_str_val, created_str)) = first_row else {
+            return Ok(FirstBindState::Absent);
+        };
+
+        let (identity, provisioning_state, record) =
+            first_bind_record(id_str, &kind_str_val, kv_u32, &state_str_val, &created_str)?;
+
+        // Fetch the identity's earliest key entry.
+        let key_row: Option<(u32, Vec<u8>, Option<Vec<u8>>, String, Option<String>)> = conn
+            .query_row(
+                "SELECT key_version, public_key, signed_predecessor, created_at, superseded_at \
+                 FROM identity_keys WHERE identity_id = ?1 ORDER BY key_version ASC LIMIT 1",
+                rusqlite::params![identity.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let (kv_u32_k, pk_bytes, signed_pred, key_created_str, key_superseded_str) =
+            key_row.ok_or_else(|| {
+                RegistryError::Backend("first-bind identity has no key row".into())
+            })?;
+
+        let key = first_bind_key(
+            identity,
+            kv_u32_k,
+            &pk_bytes,
+            signed_pred,
+            &key_created_str,
+            key_superseded_str.as_deref(),
+        )?;
+
+        match provisioning_state {
+            ProvisioningState::Pending => Ok(FirstBindState::Reserved {
+                record,
+                key,
+                witness_hash,
+            }),
+            ProvisioningState::Active | ProvisioningState::Revoked => {
+                Ok(FirstBindState::Activated { record, key })
+            }
+            // Any other state (revoke_pending, purge_pending, purged) is
+            // unexpected for the first-bind identity — treat as Absent for safety.
+            _ => Ok(FirstBindState::Absent),
+        }
     }
 
     // ── vault_meta read (C4) ──────────────────────────────────────────────────
