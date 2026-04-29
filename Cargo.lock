@@ -258,11 +258,15 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
 <<<<<<< HEAD
+<<<<<<< HEAD
  "blake3",
  "insta",
  "proptest",
  "regex",
 =======
+=======
+ "chrono",
+>>>>>>> 83ba464 (feat(core): add PublicIdentityRecord and pending-row entry types (#50))
  "ed25519-dalek",
  "insta",
  "proptest",
