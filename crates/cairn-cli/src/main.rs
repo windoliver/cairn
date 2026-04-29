@@ -8,10 +8,158 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, plugins, verbs};
+use cairn_cli::{command, identity, plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 
+fn build_command() -> clap::Command {
+    clap::Command::new("cairn")
+        .about("Cairn — agent memory framework (cairn.mcp.v1)")
+        .version(env!("CARGO_PKG_VERSION"))
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .arg(
+            clap::Arg::new("vault")
+                .long("vault")
+                .value_name("NAME_OR_PATH")
+                .global(true)
+                .help(
+                    "Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)",
+                ),
+        )
+        // Eight core verbs, each with --json added.
+        .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::summarize_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::assemble_hot_subcommand()))
+        .subcommand(verbs::with_json(
+            generated::verbs::capture_trace_subcommand(),
+        ))
+        .subcommand(verbs::with_json(generated::verbs::lint_subcommand()))
+        .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
+        // Protocol preludes.
+        .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
+        .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
+        // Management subcommands (plugins already has --json per sub-subcommand).
+        .subcommand(plugins_subcommand())
+        .subcommand(bootstrap_subcommand())
+        .subcommand(mcp_subcommand())
+        .subcommand(vault_subcommand())
+        .subcommand(identity::cli::identity_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp").about(
+        "Start an MCP stdio server. Reads MCP frames from stdin, \
+             dispatches to the eight cairn verbs, writes responses to \
+             stdout. Blocks until stdin closes.",
+    )
+}
+
+fn bootstrap_subcommand() -> clap::Command {
+    clap::Command::new("bootstrap")
+        .about("Initialize a vault directory tree with the §3 layout")
+        .arg(
+            clap::Arg::new("vault-path")
+                .long("vault-path")
+                .default_value(".")
+                .value_name("PATH")
+                .help("Vault root directory (default: current directory)"),
+        )
+        .arg(
+            clap::Arg::new("json")
+                .long("json")
+                .action(clap::ArgAction::SetTrue)
+                .help("Emit JSON receipt instead of human-readable output"),
+        )
+        .arg(
+            clap::Arg::new("force")
+                .long("force")
+                .action(clap::ArgAction::SetTrue)
+                .help("Overwrite existing placeholder files"),
+        )
+}
+
+fn vault_subcommand() -> clap::Command {
+    clap::Command::new("vault")
+        .about("Manage the vault registry (brief §3.3)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("add")
+                .about("Register a vault in the registry")
+                .arg(
+                    clap::Arg::new("path")
+                        .value_name("PATH")
+                        .required(true)
+                        .help("Filesystem path to the vault root"),
+                )
+                .arg(
+                    clap::Arg::new("name")
+                        .long("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Short identifier for the vault"),
+                )
+                .arg(
+                    clap::Arg::new("label")
+                        .long("label")
+                        .value_name("LABEL")
+                        .help("Human-readable description"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("list")
+                .about("List registered vaults")
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("switch")
+                .about("Set the default vault")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to make default"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("remove")
+                .about("Remove a vault from the registry (does not delete files)")
+                .arg(
+                    clap::Arg::new("name")
+                        .value_name("NAME")
+                        .required(true)
+                        .help("Name of the vault to remove"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+}
+
+>>>>>>> 303bc95 (feat(cli): clap surface for cairn identity subcommands (#50))
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
         std::path::PathBuf::from(p)
@@ -44,7 +192,12 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
+    // `identity` manages vault-path internally for each subcommand; exclude
+    // from the top-level vault registry guard (which requires a named vault).
+    let needs_vault_guard = !matches!(
+        active_subcommand,
+        "vault" | "bootstrap" | "plugins" | "mcp" | "identity"
+    );
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -98,6 +251,7 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("identity", sub)) => identity::cli::run_identity(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
