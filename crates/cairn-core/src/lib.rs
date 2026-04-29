@@ -11,5 +11,6 @@
 pub mod config;
 pub mod contract;
 pub mod domain;
+pub mod error;
 pub mod generated;
 pub mod verifier;
