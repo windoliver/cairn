@@ -17,6 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
@@ -33,6 +34,13 @@ use cairn_core::domain::identity::{
         PendingKeyDisableEntry, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
         RevokePendingEntry,
     },
+};
+
+use rusqlite::OptionalExtension as _;
+
+use queries::{
+    in_placeholders, kind_str, row_to_identity_key_entry, row_to_pending_identity_entry,
+    row_to_public_identity_record, visibility_states,
 };
 
 /// Compiled-in `0002_identity.sql` migration DDL.
@@ -296,67 +304,323 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
     async fn reserve_identity(
         &self,
-        _record: &PublicIdentityRecord,
-        _key: &IdentityKeyEntry,
+        record: &PublicIdentityRecord,
+        key: &IdentityKeyEntry,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C5")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Require vault_meta to exist (first-bind must have committed).
+        let meta_exists: bool = tx
+            .query_row("SELECT 1 FROM vault_meta WHERE rowid = 1", [], |_| Ok(true))
+            .unwrap_or(false);
+        if !meta_exists {
+            return Err(RegistryError::VaultMetaMissing);
+        }
+
+        // Check whether the identity is already known.
+        let existing_state: Option<String> = tx
+            .query_row(
+                "SELECT provisioning_state FROM identities WHERE id = ?1",
+                rusqlite::params![record.id.as_str()],
+                |r| r.get(0),
+            )
+            .ok();
+
+        if let Some(state_str) = existing_state {
+            return if state_str == "pending" {
+                Err(RegistryError::ProvisioningInFlight {
+                    id: record.id.clone(),
+                })
+            } else {
+                Err(RegistryError::IdentityExists {
+                    id: record.id.clone(),
+                })
+            };
+        }
+
+        // Insert the pending identity row + key row.
+        insert_identity_row(&tx, record)?;
+        insert_identity_key_row(&tx, key)?;
+
+        let payload =
+            serde_json::to_vec(record).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "reserve_identity", record.id.as_str(), &payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn activate_identity(
         &self,
-        _id: &Identity,
-        _key_version: KeyVersion,
+        id: &Identity,
+        key_version: KeyVersion,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C5")
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows_changed = tx
+            .execute(
+                "UPDATE identities \
+                 SET provisioning_state = 'active', activated_at = ?1 \
+                 WHERE id = ?2 \
+                   AND current_key_version = ?3 \
+                   AND provisioning_state = 'pending'",
+                rusqlite::params![now, id.as_str(), key_version.as_u32()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            // Distinguish: does the row exist at all?
+            let existing: Option<(String, u32)> = tx
+                .query_row(
+                    "SELECT provisioning_state, current_key_version \
+                     FROM identities WHERE id = ?1",
+                    rusqlite::params![id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+
+            return match existing {
+                None => Err(RegistryError::NotFound),
+                Some((state, _)) if state != "pending" => {
+                    Err(RegistryError::Backend("invalid state transition".into()))
+                }
+                Some((_, stored_kv)) => {
+                    use std::num::NonZeroU32;
+                    let nz = NonZeroU32::new(stored_kv)
+                        .ok_or_else(|| RegistryError::Backend("stored key_version is 0".into()))?;
+                    Err(RegistryError::KeyVersionConflict {
+                        existing: KeyVersion::new(nz),
+                        attempted: key_version,
+                    })
+                }
+            };
+        }
+
+        let payload = id.as_str().as_bytes();
+        wal::wal_insert(&tx, "activate_identity", id.as_str(), payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn delete_pending(
         &self,
-        _id: &Identity,
-        _key_version: KeyVersion,
+        id: &Identity,
+        key_version: KeyVersion,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C5")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Delete the identity row when it is pending; ON DELETE CASCADE removes
+        // the identity_keys row automatically.  We key on id + provisioning_state
+        // so we never accidentally delete an active/revoked identity.
+        let rows_changed = tx
+            .execute(
+                "DELETE FROM identities WHERE id = ?1 AND provisioning_state = 'pending'",
+                rusqlite::params![id.as_str()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            // The row either doesn't exist or isn't pending — treat as NotFound.
+            return Err(RegistryError::NotFound);
+        }
+
+        let payload = serde_json::to_vec(&key_version.as_u32())
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "delete_pending", id.as_str(), &payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_pending(&self) -> Result<Vec<PendingIdentityEntry>, RegistryError> {
-        unimplemented!("Task C5")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ik.identity_id, ik.key_version, ik.public_key, ik.created_at \
+                 FROM identity_keys ik \
+                 WHERE ik.identity_id IN \
+                       (SELECT id FROM identities WHERE provisioning_state = 'pending')",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let entries = stmt
+            .query_map([], row_to_pending_identity_entry)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(entries)
     }
 
     async fn list_pending_by_identity(
         &self,
-        _id: &Identity,
+        id: &Identity,
     ) -> Result<Vec<PendingIdentityEntry>, RegistryError> {
-        unimplemented!("Task C5")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ik.identity_id, ik.key_version, ik.public_key, ik.created_at \
+                 FROM identity_keys ik \
+                 WHERE ik.identity_id IN \
+                       (SELECT id FROM identities WHERE provisioning_state = 'pending') \
+                   AND ik.identity_id = ?1",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let entries = stmt
+            .query_map(
+                rusqlite::params![id.as_str()],
+                row_to_pending_identity_entry,
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(entries)
     }
 
-    // ── Read paths / visibility stubs (C9) ───────────────────────────────────
+    // ── Read paths / visibility (C5) ─────────────────────────────────────────
 
     async fn get_identity(
         &self,
-        _id: &Identity,
-        _visibility: IdentityVisibility,
+        id: &Identity,
+        visibility: IdentityVisibility,
     ) -> Result<Option<PublicIdentityRecord>, RegistryError> {
-        unimplemented!("Task C9")
+        let states = visibility_states(visibility);
+        let placeholders = in_placeholders(states.len(), 2); // ?2, ?3, …
+        let sql = format!(
+            "SELECT id, kind, current_key_version, provisioning_state, \
+                    created_at, activated_at, revoked_at, purge_requested_at, purged_at \
+             FROM identities \
+             WHERE id = ?1 AND provisioning_state IN ({placeholders})"
+        );
+
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Bind id as first param, then each state string.
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(states.len() + 1);
+        params.push(Box::new(id.as_str().to_owned()));
+        for s in states {
+            params.push(Box::new(*s));
+        }
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+
+        let result = stmt
+            .query_row(params_refs.as_slice(), row_to_public_identity_record)
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(result)
     }
 
     async fn list_identities(
         &self,
-        _kind: Option<IdentityKind>,
-        _visibility: IdentityVisibility,
+        kind: Option<IdentityKind>,
+        visibility: IdentityVisibility,
     ) -> Result<Vec<PublicIdentityRecord>, RegistryError> {
-        unimplemented!("Task C9")
+        let states = visibility_states(visibility);
+
+        // Build the kind filter dynamically.
+        let kind_clause = if kind.is_some() {
+            format!(" AND kind = ?{}", states.len() + 2)
+        } else {
+            String::new()
+        };
+
+        let placeholders = in_placeholders(states.len(), 1);
+        let sql = format!(
+            "SELECT id, kind, current_key_version, provisioning_state, \
+                    created_at, activated_at, revoked_at, purge_requested_at, purged_at \
+             FROM identities \
+             WHERE provisioning_state IN ({placeholders}){kind_clause}"
+        );
+
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(states.len() + 1);
+        for s in states {
+            params.push(Box::new(*s));
+        }
+        if let Some(k) = kind {
+            params.push(Box::new(kind_str(k)));
+        }
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+
+        let rows = stmt
+            .query_map(params_refs.as_slice(), row_to_public_identity_record)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(rows)
     }
 
-    async fn list_keys(&self, _id: &Identity) -> Result<Vec<IdentityKeyEntry>, RegistryError> {
-        unimplemented!("Task C9")
+    async fn list_keys(&self, id: &Identity) -> Result<Vec<IdentityKeyEntry>, RegistryError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT identity_id, key_version, public_key, signed_predecessor, \
+                        created_at, superseded_at \
+                 FROM identity_keys WHERE identity_id = ?1",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![id.as_str()], row_to_identity_key_entry)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(rows)
     }
 
     async fn count_keys(&self) -> Result<u64, RegistryError> {
-        unimplemented!("Task C9")
+        let conn = self.conn.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM identity_keys", [], |r| r.get(0))
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(count.unsigned_abs())
     }
 
     async fn list_all_keys(&self) -> Result<Vec<IdentityKeyEntry>, RegistryError> {
-        unimplemented!("Task C9")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT identity_id, key_version, public_key, signed_predecessor, \
+                        created_at, superseded_at \
+                 FROM identity_keys",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map([], row_to_identity_key_entry)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        Ok(rows)
     }
 
     // ── Rotation stubs (C6) ───────────────────────────────────────────────────
