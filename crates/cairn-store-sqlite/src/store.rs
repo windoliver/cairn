@@ -34,6 +34,13 @@ static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
     transactions: true,
 };
 
+/// Error returned by every storage-touching trait method when the receiver
+/// is a [`Default`]-constructed probe (see [`crate::SqliteMemoryStore`]).
+pub(crate) const PROBE_REJECT: StoreError = StoreError::Invariant(
+    "probe instance: registry-resolved SqliteMemoryStore has no persistent connection — \
+     wire SqliteMemoryStore::open(path) into the registry before issuing reads or writes",
+);
+
 #[async_trait]
 impl MemoryStore for crate::SqliteMemoryStore {
     fn name(&self) -> &str {
@@ -55,6 +62,9 @@ impl MemoryStore for crate::SqliteMemoryStore {
         principal: &Principal,
         target_id: &TargetId,
     ) -> Result<Option<MemoryRecord>, StoreError> {
+        if self.is_probe {
+            return Err(PROBE_REJECT);
+        }
         let conn = self.conn.clone();
         let principal = principal.clone();
         let target_id = target_id.clone();
@@ -98,6 +108,9 @@ impl MemoryStore for crate::SqliteMemoryStore {
     }
 
     async fn list(&self, query: &ListQuery) -> Result<ListResult, StoreError> {
+        if self.is_probe {
+            return Err(PROBE_REJECT);
+        }
         let conn = self.conn.clone();
         let q = query.clone();
 
@@ -222,6 +235,9 @@ impl MemoryStore for crate::SqliteMemoryStore {
         principal: &Principal,
         target_id: &TargetId,
     ) -> Result<Vec<HistoryEntry>, StoreError> {
+        if self.is_probe {
+            return Err(PROBE_REJECT);
+        }
         let conn = self.conn.clone();
         let principal = principal.clone();
         let target_id = target_id.clone();

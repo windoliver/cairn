@@ -55,6 +55,15 @@ const _: () = assert!(
 ///   effects.
 pub struct SqliteMemoryStore {
     pub(crate) conn: conn::SharedConn,
+    /// `true` when constructed via [`Default::default()`] for a registry
+    /// capability probe. Probe instances back an ephemeral `:memory:`
+    /// database and **must not** service real reads or writes — every
+    /// trait method that touches storage rejects with
+    /// [`StoreError::Invariant`] when this is set.
+    ///
+    /// The host wires the real on-disk store via
+    /// [`SqliteMemoryStore::open`], which sets this to `false`.
+    pub(crate) is_probe: bool,
 }
 
 impl SqliteMemoryStore {
@@ -72,19 +81,32 @@ impl SqliteMemoryStore {
         let shared = tokio::task::spawn_blocking(move || conn::open_blocking(&path))
             .await
             .map_err(|e| error::SqliteStoreError::Io(std::io::Error::other(e.to_string())))??;
-        Ok(Self { conn: shared })
+        Ok(Self {
+            conn: shared,
+            is_probe: false,
+        })
     }
 }
 
 /// `Default` impl for use by `register_plugin!`. Opens an in-memory
 /// database so capability probes work without touching the filesystem.
+///
+/// **The resulting instance is a probe**: it advertises capabilities and
+/// the contract version range but rejects every read and apply-tx call
+/// with [`cairn_core::contract::memory_store::error::StoreError::Invariant`].
+/// Production callers must wire a real on-disk store via
+/// [`SqliteMemoryStore::open`] and register it through
+/// [`cairn_core::contract::registry::PluginRegistry::register_memory_store_with_manifest`].
 impl Default for SqliteMemoryStore {
     fn default() -> Self {
         // in-memory open must succeed; any failure here is a build-time bug.
         #[allow(clippy::expect_used)]
         let conn = conn::open_blocking(std::path::Path::new(":memory:"))
             .expect("invariant: in-memory SQLite open must not fail for registry probes");
-        Self { conn }
+        Self {
+            conn,
+            is_probe: true,
+        }
     }
 }
 

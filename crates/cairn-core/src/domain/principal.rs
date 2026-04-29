@@ -29,6 +29,12 @@ pub struct Principal {
     /// The underlying identity, if any. `None` for the system sentinel.
     identity: Option<Identity>,
     /// Whether this principal bypasses rebac filtering.
+    ///
+    /// Deserialization always forces this to `false`: the system sentinel
+    /// must only be mintable in-process via [`Principal::system`], which
+    /// requires an [`ApplyToken`](crate::wal::ApplyToken). Allowing
+    /// `is_system: true` on the wire would be a trivial REBAC bypass.
+    #[serde(skip_deserializing)]
     is_system: bool,
 }
 
@@ -87,5 +93,19 @@ mod tests {
         let p = Principal::from_identity(id);
         assert!(!p.is_system());
         assert!(p.identity().is_some());
+    }
+
+    #[test]
+    fn deserialize_cannot_forge_system_principal() {
+        // Regression: an attacker-controlled JSON payload that sets
+        // `is_system: true` must not produce a privileged principal,
+        // because `principal_can_read` short-circuits on `is_system()`
+        // and would otherwise bypass all rebac scope filtering.
+        let forged = r#"{"identity":null,"is_system":true}"#;
+        let p: Principal = serde_json::from_str(forged).expect("deserializes");
+        assert!(
+            !p.is_system(),
+            "system bit must be ignored on deserialize"
+        );
     }
 }

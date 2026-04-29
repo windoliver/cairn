@@ -36,6 +36,9 @@ impl MemoryStoreApply for crate::SqliteMemoryStore {
         F: FnOnce(&mut dyn MemoryStoreApplyTx) -> Result<T, StoreError> + Send + 'static,
         T: Send + 'static,
     {
+        if self.is_probe {
+            return Err(crate::store::PROBE_REJECT);
+        }
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             // Acquire the connection mutex for the ENTIRE closure execution.
