@@ -38,6 +38,7 @@ use cairn_store_sqlite::SqliteIdentityRegistry;
 use chrono::Utc;
 
 pub use first_bind::commit_first_identity;
+pub use recover::{finalise_binding, vault_id_recover};
 pub use status::ReconciliationReport;
 
 /// Orchestrator for the identity subsystem (spec §3.5 / §4.1).
