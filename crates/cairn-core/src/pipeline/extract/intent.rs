@@ -61,8 +61,8 @@ pub struct ForgetIntent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::taxonomy::MemoryKind;
     use crate::domain::CaptureEventId;
+    use crate::domain::taxonomy::MemoryKind;
 
     fn fixture_event_id() -> CaptureEventId {
         CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid")

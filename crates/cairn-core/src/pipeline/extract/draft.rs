@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::domain::{taxonomy::MemoryKind, CaptureEventId};
+use crate::domain::{CaptureEventId, taxonomy::MemoryKind};
 
 /// Confidence score in `[0.0, 1.0]`. Constructed via `try_from`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -189,8 +189,7 @@ mod tests {
             kind_hint: KindHint::from(MemoryKind::User),
             body: "I prefer dark mode".to_owned(),
             confidence: Confidence::try_from(0.95).unwrap(),
-            source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-                .expect("valid ulid"),
+            source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid"),
             source_span: Some(TextSpan::new(0, 18)),
             trigger_id: Some("remember.preference".to_owned()),
         };

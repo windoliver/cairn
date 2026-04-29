@@ -70,7 +70,9 @@ pub enum BodyResolutionError {
     /// `from_proactive_message` was called with text equal to the
     /// `rationale` field — refusing to extract internal reasoning as
     /// user memory.
-    #[error("ResolvedBody::from_proactive_message called with text equal to rationale — refusing to extract internal reasoning as user memory")]
+    #[error(
+        "ResolvedBody::from_proactive_message called with text equal to rationale — refusing to extract internal reasoning as user memory"
+    )]
     ProactiveRationaleMislabel,
 }
 
@@ -88,14 +90,20 @@ impl<'a> ResolvedBody<'a> {
     #[must_use]
     pub fn from_user_ingest(text: &'a str, payload_kind: UserIngestPayloadKind) -> Self {
         let _ = payload_kind;
-        Self { text, source: BodySource::UserIngest }
+        Self {
+            text,
+            source: BodySource::UserIngest,
+        }
     }
 
     /// Construct from a `CapturePayload::Hook` envelope.
     #[must_use]
     pub fn from_hook_utterance(text: &'a str, hook_name: &'a str) -> Self {
         let _ = hook_name;
-        Self { text, source: BodySource::HookUtterance }
+        Self {
+            text,
+            source: BodySource::HookUtterance,
+        }
     }
 
     /// Construct from a `CapturePayload::Proactive` envelope's
@@ -112,16 +120,23 @@ impl<'a> ResolvedBody<'a> {
         if text == payload.rationale {
             return Err(BodyResolutionError::ProactiveRationaleMislabel);
         }
-        Ok(Self { text, source: BodySource::ProactiveMessage })
+        Ok(Self {
+            text,
+            source: BodySource::ProactiveMessage,
+        })
     }
 
     /// The resolved body text.
     #[must_use]
-    pub fn text(&self) -> &str { self.text }
+    pub fn text(&self) -> &str {
+        self.text
+    }
 
     /// The source the body came from.
     #[must_use]
-    pub fn source(&self) -> BodySource { self.source }
+    pub fn source(&self) -> BodySource {
+        self.source
+    }
 }
 
 /// Body-resolution result, threaded through the extractor chain.
@@ -162,15 +177,19 @@ mod tests {
 
     #[test]
     fn from_proactive_message_accepts_distinct_text() {
-        let ctx = ProactiveBodyContext { rationale: "internal-reasoning" };
-        let body = ResolvedBody::from_proactive_message("user-visible message", &ctx)
-            .expect("distinct");
+        let ctx = ProactiveBodyContext {
+            rationale: "internal-reasoning",
+        };
+        let body =
+            ResolvedBody::from_proactive_message("user-visible message", &ctx).expect("distinct");
         assert_eq!(body.source(), BodySource::ProactiveMessage);
     }
 
     #[test]
     fn from_proactive_message_rejects_rationale_mislabel() {
-        let ctx = ProactiveBodyContext { rationale: "secret rationale" };
+        let ctx = ProactiveBodyContext {
+            rationale: "secret rationale",
+        };
         let err = ResolvedBody::from_proactive_message("secret rationale", &ctx).unwrap_err();
         assert_eq!(err, BodyResolutionError::ProactiveRationaleMislabel);
     }

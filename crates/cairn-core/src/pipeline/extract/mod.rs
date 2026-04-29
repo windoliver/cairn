@@ -12,6 +12,7 @@
 pub mod body;
 pub mod draft;
 pub mod intent;
+pub mod regex;
 
 pub use body::{
     BodyResolution, BodyResolutionError, BodySource, ProactiveBodyContext, ResolvedBody,
@@ -19,6 +20,7 @@ pub use body::{
 };
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};
+pub use regex::rule::{RegexRule, ToolFrameFamily};
 
 use crate::domain::CaptureEvent;
 use serde::{Deserialize, Serialize};
@@ -178,10 +180,7 @@ pub trait ExtractorWorker: Send + Sync {
     /// Per-extractor budget.
     fn budget(&self) -> ExtractBudget;
     /// Run the extractor.
-    async fn extract(
-        &self,
-        input: &ExtractInput<'_>,
-    ) -> Result<ExtractResult, ExtractError>;
+    async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError>;
 }
 
 #[cfg(test)]
