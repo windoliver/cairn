@@ -1,9 +1,16 @@
-//! Cairn background workflows host (P0 scaffold).
+//! Cairn background workflows host.
 //!
-//! P0: no runner yet — stub `WorkflowOrchestrator` with all capability
-//! flags `false`. Tokio + SQLite-backed job table lands in #89.
+//! Brief §10 (v0.1 row) + §19.a item 5: durable `tokio` orchestrator
+//! backed by a `SQLite` job table. Persistence lives in
+//! [`SqliteJobStore`] which satisfies
+//! [`cairn_core::contract::JobStore`]; the scheduler that consumes it
+//! lands alongside the first concrete workflow types.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod sqlite_store;
+
+pub use sqlite_store::SqliteJobStore;
 
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
@@ -22,7 +29,10 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 pub const ACCEPTED_RANGE: VersionRange =
     VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
 
-/// P0 stub `WorkflowOrchestrator`. All capability flags are `false`.
+/// In-process `WorkflowOrchestrator` advertising the durable +
+/// crash-safe capabilities backed by [`SqliteJobStore`]. The scheduler
+/// loop (worker pool, reaper, heartbeat) lands in the follow-up that
+/// wires it into `cairn-cli` startup.
 #[derive(Default)]
 pub struct InProcessOrchestrator;
 
@@ -34,8 +44,8 @@ impl WorkflowOrchestrator for InProcessOrchestrator {
 
     fn capabilities(&self) -> &WorkflowOrchestratorCapabilities {
         static CAPS: WorkflowOrchestratorCapabilities = WorkflowOrchestratorCapabilities {
-            durable: false,
-            crash_safe: false,
+            durable: true,
+            crash_safe: true,
             cron_schedules: false,
         };
         &CAPS

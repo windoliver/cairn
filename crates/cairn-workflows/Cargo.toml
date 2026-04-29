@@ -13,15 +13,16 @@ description = "Background workflows host (consolidate, promote, expire, evaluate
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true
-
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
-[package.metadata.cargo-machete]
-ignored = ["tokio", "tracing"]

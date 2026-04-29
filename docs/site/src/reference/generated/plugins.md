@@ -9,4 +9,4 @@ Generated from the bundled plugin registry.
 | `cairn-mcp` | `MCPServer` | `[0.1.0, 0.2.0)` | `bundled:cairn-mcp` | `{"extensions":false,"http_streamable":false,"sse":false,"stdio":true}` |
 | `cairn-sensors-local` | `SensorIngress` | `[0.1.0, 0.2.0)` | `bundled:cairn-sensors-local` | `{"batches":false,"consent_aware":false,"streaming":false}` |
 | `cairn-store-sqlite` | `MemoryStore` | `[0.2.0, 0.3.0)` | `bundled:cairn-store-sqlite` | `{"fts":false,"graph_edges":true,"transactions":true,"vector":false}` |
-| `cairn-workflows` | `WorkflowOrchestrator` | `[0.1.0, 0.2.0)` | `bundled:cairn-workflows` | `{"crash_safe":false,"cron_schedules":false,"durable":false}` |
+| `cairn-workflows` | `WorkflowOrchestrator` | `[0.1.0, 0.2.0)` | `bundled:cairn-workflows` | `{"crash_safe":true,"cron_schedules":false,"durable":true}` |

@@ -102,6 +102,15 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // 0010_ranking_indexes
     ("index", "records_confidence_idx"),
     ("index", "records_updated_at_idx"),
+    // 0011_workflow_jobs
+    ("table", "workflow_jobs"),
+    ("index", "workflow_jobs_ready_idx"),
+    ("index", "workflow_jobs_lease_expiry_idx"),
+    ("index", "workflow_jobs_queue_key_active_uniq"),
+    ("index", "workflow_jobs_dedupe_uniq"),
+    ("trigger", "workflow_jobs_identity_immutable"),
+    ("trigger", "workflow_jobs_terminal_absorbing"),
+    ("trigger", "workflow_jobs_state_transition"),
 ];
 
 fn hash_hex(content: &str) -> String {

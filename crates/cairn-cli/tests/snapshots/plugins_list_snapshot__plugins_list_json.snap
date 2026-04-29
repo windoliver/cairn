@@ -50,9 +50,9 @@ expression: json
     },
     {
       "capabilities": {
-        "crash_safe": false,
+        "crash_safe": true,
         "cron_schedules": false,
-        "durable": false
+        "durable": true
       },
       "contract": "WorkflowOrchestrator",
       "contract_version_range": {
