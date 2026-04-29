@@ -213,6 +213,26 @@ fn stage_version_impl(
         });
     }
 
+    // Tombstone retirement: design brief Phase A says a tombstoned
+    // target must stay hidden until an explicit restore flow exists.
+    // Without this gate, a caller could tombstone a target, stage a
+    // fresh version under the same target_id, activate it, and surface
+    // forgotten data again — bypassing the forget pipeline. Reject
+    // stage_version against any target that has at least one tombstoned
+    // row; restoration is a separate (not-yet-implemented) verb.
+    let tombstoned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND tombstoned = 1",
+            params![target_id_str],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    if tombstoned > 0 {
+        return Err(StoreError::Conflict {
+            kind: ConflictKind::UniqueViolation,
+        });
+    }
+
     let next: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM records WHERE target_id = ?1",
@@ -310,13 +330,19 @@ fn activate_version_impl(
         return Err(StoreError::NotFound(target_id.clone()));
     }
 
-    let current: Option<i64> = conn
-        .query_row(
-            "SELECT version FROM records WHERE target_id = ?1 AND active = 1",
-            params![target_id.as_str()],
-            |r| r.get(0),
-        )
-        .ok();
+    // Distinguish 'no active row' (legitimate first activation) from
+    // backend errors (schema drift, corruption, lock failure). Mapping
+    // every error to None would silently rewrite `active` flags on top
+    // of a damaged database.
+    let current: Option<i64> = match conn.query_row(
+        "SELECT version FROM records WHERE target_id = ?1 AND active = 1",
+        params![target_id.as_str()],
+        |r| r.get(0),
+    ) {
+        Ok(v) => Some(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(store_err(e)),
+    };
 
     if let Some(cur) = current {
         let cur_u64 = u64::try_from(cur).unwrap_or(0);
