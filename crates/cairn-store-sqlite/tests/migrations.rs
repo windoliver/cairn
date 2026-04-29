@@ -12,7 +12,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 7);
+    assert_eq!(head, 8);
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 7);
+    assert_eq!(head, 8);
 }
 
 #[test]
@@ -212,10 +212,21 @@ fn consent_journal_accepts_known_kinds() {
     let hash = "hash:11111111111111111111111111111111";
     let label = "local:hook:host:v1";
     let snr_subject = format!("snr:{label}");
-    let sensor_payload = format!("{{\"shape\":\"sensor_toggle\",\"sensor_label\":\"{label}\"}}");
-    let intent_payload = format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\"}}");
-    let promote_payload =
-        format!("{{\"shape\":\"promote_receipt\",\"target_id_hash\":\"{hash}\"}}");
+    let sensor_payload = format!(
+        "{{\"shape\":\"sensor_toggle\",\"sensor_label\":\"{label}\",\
+          \"reason_code\":\"first_run_prompt\"}}"
+    );
+    let intent_payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}}"
+    );
+    let promote_payload = format!(
+        "{{\"shape\":\"promote_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"from_tier\":\"private\",\"to_tier\":\"team\",\"receipt_id\":\"rcpt-1\"}}"
+    );
+    let policy_payload =
+        r#"{"shape":"policy_delta","key":"sensors.x","from_code":"a","to_code":"b"}"#.to_owned();
+    let decision_payload = r#"{"shape":"decision","subject_code":"share_link:abcd"}"#.to_owned();
     // (kind, subject, sensor_id, payload)
     let cases: &[(&str, &str, Option<&str>, String)] = &[
         (
@@ -225,16 +236,11 @@ fn consent_journal_accepts_known_kinds() {
             sensor_payload.clone(),
         ),
         ("sensor_disable", &snr_subject, Some(label), sensor_payload),
-        (
-            "policy_change",
-            "s",
-            None,
-            r#"{"shape":"policy_delta"}"#.to_owned(),
-        ),
+        ("policy_change", "s", None, policy_payload),
         ("remember_intent", hash, None, intent_payload.clone()),
         ("forget_intent", hash, None, intent_payload),
-        ("grant", "s", None, r#"{"shape":"decision"}"#.to_owned()),
-        ("revoke", "s", None, r#"{"shape":"decision"}"#.to_owned()),
+        ("grant", "s", None, decision_payload.clone()),
+        ("revoke", "s", None, decision_payload),
         ("promote_receipt", hash, None, promote_payload),
     ];
     for (kind, subject, sensor_id, payload) in cases {
@@ -294,7 +300,9 @@ fn forget_intent_payload_must_be_body_free() {
              VALUES ('c2', 'hash:11111111111111111111111111111111', \
                      'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                      'usr:t', '2026-04-28T12:00:00Z', \
-                     '{\"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                     '{\"shape\":\"intent_receipt\",\
+                       \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                       \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
                        \"body\":\"leak\"}')",
             [],
         )
@@ -313,7 +321,9 @@ fn forget_intent_payload_rejects_extended_banned_keys() {
     for banned in ["message", "payload_text", "user_input"] {
         let hash = "hash:11111111111111111111111111111111";
         let payload = format!(
-            "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\"{banned}\":\"leak\"}}"
+            "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+              \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
+              \"{banned}\":\"leak\"}}"
         );
         let err = conn
             .execute(
@@ -367,6 +377,8 @@ fn non_forget_payload_also_body_free() {
                      'promote_receipt', 'usr:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"promote_receipt\",\
                        \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                       \"from_tier\":\"private\",\"to_tier\":\"team\",\
+                       \"receipt_id\":\"rcpt-1\",\
                        \"body\":\"x\"}')",
             [],
         )
@@ -386,7 +398,7 @@ fn forget_intent_payload_accepts_hash_only() {
                  'usr:t', '2026-04-28T12:00:00Z', \
                  '{\"shape\":\"intent_receipt\",\
                    \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
-                   \"reason_code\":\"user_command\"}')",
+                   \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
         [],
     )
     .expect("hash-only payload should be accepted");
@@ -469,9 +481,12 @@ fn consent_journal_payload_missing_shape_is_rejected() {
             [],
         )
         .unwrap_err();
+    let msg = format!("{err}");
+    // SQLite trigger fire order is undefined; either the shape or the
+    // required-fields trigger wins. Both are valid violations.
     assert!(
-        format!("{err}").contains("payload shape must match kind"),
-        "missing-shape payload must be rejected, got: {err}"
+        msg.contains("payload shape must match kind") || msg.contains("required field"),
+        "missing-shape payload must be rejected, got: {msg}"
     );
 }
 
@@ -485,7 +500,7 @@ fn consent_journal_sensor_kind_requires_sensor_id() {
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-sensor-no-id', 'snr:local:hook:host:v1', 'global', 'GRANT', \
                      'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
-                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\"}')",
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\",\"reason_code\":\"first_run_prompt\"}')",
             [],
         )
         .unwrap_err();
@@ -506,7 +521,8 @@ fn consent_journal_sensor_id_must_match_payload_label() {
              VALUES ('c-sensor-mismatch', 'snr:local:a:host:v1', 'global', 'GRANT', \
                      'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
                      'local:a:host:v1', \
-                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:b:host:v1\"}')",
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:b:host:v1\",\
+                       \"reason_code\":\"first_run_prompt\"}')",
             [],
         )
         .unwrap_err();
@@ -526,7 +542,9 @@ fn consent_journal_non_sensor_kind_forbids_sensor_id() {
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-policy-with-sensor', 'sensors.x', 'global', 'GRANT', \
                      'usr:t', 0, 'policy_change', 'usr:t', '2026-04-28T12:00:00Z', \
-                     'local:hook:host:v1', '{\"shape\":\"policy_delta\"}')",
+                     'local:hook:host:v1', \
+                     '{\"shape\":\"policy_delta\",\"key\":\"sensors.x\",\
+                       \"from_code\":\"a\",\"to_code\":\"b\"}')",
             [],
         )
         .unwrap_err();
@@ -547,7 +565,7 @@ fn consent_journal_sensor_subject_must_match_sensor_id() {
              VALUES ('c-sensor-bad-subject', 'snr:local:WRONG:host:v1', 'global', 'GRANT', \
                      'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
                      'local:hook:host:v1', \
-                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\"}')",
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\",\"reason_code\":\"first_run_prompt\"}')",
             [],
         )
         .unwrap_err();
@@ -569,7 +587,8 @@ fn consent_journal_hash_kind_subject_shape_enforced() {
              VALUES ('c-bad-subject', 'TOPSECRETBODY', 'private', 'GRANT', \
                      'usr:t', 0, 'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"intent_receipt\",\
-                       \"target_id_hash\":\"hash:11111111111111111111111111111111\"}')",
+                       \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                       \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
             [],
         )
         .unwrap_err();
@@ -590,7 +609,8 @@ fn consent_journal_hash_kind_target_id_hash_shape_enforced() {
              VALUES ('c-bad-target', 'hash:11111111111111111111111111111111', \
                      'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                      'usr:t', '2026-04-28T12:00:00Z', \
-                     '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"plainstring\"}')",
+                     '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"plainstring\",\
+                       \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
             [],
         )
         .unwrap_err();
@@ -615,7 +635,8 @@ fn consent_journal_sensor_payload_requires_sensor_label() {
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-no-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
                      'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
-                     'local:hook:host:v1', '{\"shape\":\"sensor_toggle\"}')",
+                     'local:hook:host:v1', \
+                     '{\"shape\":\"sensor_toggle\",\"reason_code\":\"first_run_prompt\"}')",
             [],
         )
         .unwrap_err();
@@ -632,7 +653,9 @@ fn consent_journal_sensor_payload_requires_sensor_label() {
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-num-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
                      'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
-                     'local:hook:host:v1', '{\"shape\":\"sensor_toggle\",\"sensor_label\":42}')",
+                     'local:hook:host:v1', \
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":42,\
+                       \"reason_code\":\"first_run_prompt\"}')",
             [],
         )
         .unwrap_err();
@@ -649,15 +672,19 @@ fn consent_journal_hash_kind_requires_target_id_hash_text() {
     // `json_type = 'text'`. Now missing / null / numeric all fail.
     let conn = open_in_memory().expect("open");
     let hash = "hash:11111111111111111111111111111111";
+    let suffix = "\"scope_tier\":\"private\",\"reason_code\":\"user_command\"}";
     for (label, payload) in &[
-        ("missing", "{\"shape\":\"intent_receipt\"}".to_owned()),
+        (
+            "missing",
+            format!("{{\"shape\":\"intent_receipt\",{suffix}"),
+        ),
         (
             "null",
-            "{\"shape\":\"intent_receipt\",\"target_id_hash\":null}".to_owned(),
+            format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":null,{suffix}"),
         ),
         (
             "number",
-            "{\"shape\":\"intent_receipt\",\"target_id_hash\":7}".to_owned(),
+            format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":7,{suffix}"),
         ),
     ] {
         let err = conn
@@ -673,6 +700,91 @@ fn consent_journal_hash_kind_requires_target_id_hash_text() {
         assert!(
             format!("{err}").contains("target_id_hash"),
             "{label} target_id_hash must be rejected, got: {err}"
+        );
+    }
+}
+
+type RequiredFieldCase = (
+    &'static str,         // description
+    &'static str,         // kind
+    String,               // subject
+    Option<&'static str>, // sensor_id
+    String,               // payload
+    &'static str,         // expected fragment
+);
+
+#[test]
+fn consent_journal_payload_required_fields_enforced() {
+    // Round 6 hardening: every serde-required payload field per shape
+    // must be present and JSON-text. Without these guards, a direct-SQL
+    // writer could pass earlier triggers but produce an undecodable
+    // append-only row that bricks the mirror.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let label = "local:hook:host:v1";
+    let snr = format!("snr:{label}");
+    let cases: &[RequiredFieldCase] = &[
+        (
+            "sensor_toggle missing reason_code",
+            "sensor_enable",
+            snr,
+            Some(label),
+            format!("{{\"shape\":\"sensor_toggle\",\"sensor_label\":\"{label}\"}}"),
+            "required field",
+        ),
+        (
+            "policy_delta missing from_code",
+            "policy_change",
+            "sensors.x".to_owned(),
+            None,
+            r#"{"shape":"policy_delta","key":"sensors.x","to_code":"b"}"#.to_owned(),
+            "required field",
+        ),
+        (
+            "intent_receipt missing scope_tier",
+            "forget_intent",
+            hash.to_owned(),
+            None,
+            format!(
+                "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+                  \"reason_code\":\"user_command\"}}"
+            ),
+            "required field",
+        ),
+        (
+            "decision missing subject_code",
+            "grant",
+            "share_link:a".to_owned(),
+            None,
+            r#"{"shape":"decision"}"#.to_owned(),
+            "required field",
+        ),
+        (
+            "promote_receipt missing receipt_id",
+            "promote_receipt",
+            hash.to_owned(),
+            None,
+            format!(
+                "{{\"shape\":\"promote_receipt\",\"target_id_hash\":\"{hash}\",\
+                  \"from_tier\":\"private\",\"to_tier\":\"team\"}}"
+            ),
+            "required field",
+        ),
+    ];
+    for (desc, kind, subject, sensor_id, payload, frag) in cases {
+        let err = conn
+            .execute(
+                "INSERT INTO consent_journal \
+                  (consent_id, subject, scope, decision, granted_by, decided_at, \
+                   kind, actor, decided_at_iso, sensor_id, payload_json) \
+                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, ?, 'usr:t', \
+                         '2026-04-28T12:00:00Z', ?, ?)",
+                params![format!("c-{desc}"), subject, kind, sensor_id, payload],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains(frag),
+            "{desc} must be rejected with `{frag}`, got: {err}"
         );
     }
 }

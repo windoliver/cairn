@@ -200,13 +200,22 @@ impl ConsentLogMaterializer {
         let _guard = LockGuard::acquire(&self.lock_path)?;
         // Re-read the authoritative cursor under the lock — a peer
         // process may have advanced past us since `open`. Fail closed
-        // on the same condition `open()` does: the log is non-empty
-        // and the bounded recovery scan found nothing parseable. A
-        // long-lived materializer with a stale in-memory cursor would
-        // otherwise append after garbage or skip already-mirrored rows.
+        // on the same conditions `open()` does:
+        //
+        // * Non-empty log with no parseable envelope → `LogCorrupt`.
+        //   A stale in-memory cursor would otherwise append after
+        //   garbage or skip already-mirrored rows.
+        //
+        // * Recovered cursor lower than the in-memory cursor →
+        //   `LogCorrupt`. The disk regressed (truncation to a valid
+        //   prefix, restoration from backup, …); honoring the lower
+        //   value would skip rows between the new tail and our
+        //   cursor, and honoring the higher in-memory value would
+        //   append past the gap. The vault must rebuild.
         match recover_cursor_from_log(&self.log_path)?.cursor {
             Some(rowid) if rowid > self.cursor => self.cursor = rowid,
-            Some(_) => {}
+            Some(rowid) if rowid == self.cursor => {}
+            Some(_) => return Err(MirrorError::LogCorrupt),
             None => {
                 if log_is_empty(&self.log_path)? {
                     // Log went empty (e.g., truncate-by-operator) —

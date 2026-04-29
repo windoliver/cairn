@@ -183,6 +183,34 @@ fn tick_fails_closed_when_log_corrupted_after_open() {
 }
 
 #[test]
+fn tick_fails_closed_when_log_regresses_to_valid_prefix() {
+    // Round 6 hardening: if the log on disk is truncated/restored to a
+    // valid prefix that ends BEFORE the in-memory cursor, honoring the
+    // disk value would skip rows between the new tail and the cursor;
+    // honoring the in-memory value would append past the gap. Either
+    // way is a no-gaps violation, so `tick` must fail closed.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    mirror.tick(&conn).expect("tick");
+    let lines = mirror.read_lines().expect("read");
+
+    // Operator (or backup restore) overwrites the log with only the
+    // first envelope — the disk cursor is now lower than memory.
+    let first_line = format!("{}\n", lines[0]);
+    std::fs::write(dir.path().join("consent.log"), first_line).expect("regress");
+
+    let err = mirror
+        .tick(&conn)
+        .expect_err("tick must fail closed on disk regression");
+    assert!(matches!(err, MirrorError::LogCorrupt));
+}
+
+#[test]
 fn tick_resets_cursor_when_log_truncated_to_empty() {
     // Truncation-to-empty is recoverable in-place: there are no
     // unparseable bytes to honor, so the materializer resets its

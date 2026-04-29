@@ -104,6 +104,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_kind_idx"),
     ("trigger", "consent_journal_kind_domain"),
     ("trigger", "consent_journal_event_requires_iso"),
+    ("trigger", "consent_journal_forget_receipt_body_free"),
+    // 0008_consent_event_hardening
     ("trigger", "consent_journal_event_requires_actor"),
     ("trigger", "consent_journal_event_requires_payload"),
     ("trigger", "consent_journal_payload_shape_matches_kind"),
@@ -120,7 +122,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ),
     ("trigger", "consent_journal_hash_kind_subject_shape"),
     ("trigger", "consent_journal_hash_kind_target_id_hash_shape"),
-    ("trigger", "consent_journal_forget_receipt_body_free"),
+    ("trigger", "consent_journal_payload_required_fields"),
 ];
 
 fn hash_hex(content: &str) -> String {

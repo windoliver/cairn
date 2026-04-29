@@ -179,8 +179,11 @@ fn append_rejects_body_bearing_payload_via_serializer() {
     // when something bypasses the type system (e.g., a future variant).
     let conn = open_in_memory().expect("open");
     let hash = "hash:11111111111111111111111111111111";
-    let payload =
-        format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\"body\":\"x\"}}");
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
+          \"body\":\"x\"}}"
+    );
     let err = conn
         .execute(
             "INSERT INTO consent_journal \
