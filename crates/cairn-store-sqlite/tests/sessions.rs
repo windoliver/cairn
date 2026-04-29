@@ -10,7 +10,7 @@ use cairn_core::domain::Identity;
 use cairn_core::domain::session::{
     DEFAULT_IDLE_WINDOW_SECS, SessionDecision, SessionIdentity, resolve_session,
 };
-use cairn_store_sqlite::{NewSessionMetadata, ResolveOutcome, open_in_memory};
+use cairn_store_sqlite::{NewSessionMetadata, ResolveOutcome, open, open_in_memory};
 
 fn user() -> Identity {
     Identity::parse("usr:alice").expect("valid")
@@ -286,6 +286,55 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
         .expect("find")
         .expect("present");
     assert_eq!(found.id, new.id);
+}
+
+#[tokio::test]
+async fn cross_connection_resolvers_converge_on_one_session() {
+    // Use two independently-opened stores against the same on-disk DB to
+    // exercise real cross-connection contention. BEGIN IMMEDIATE on one
+    // connection while the other holds the write lock raises SQLITE_BUSY
+    // before the in-tx body ever runs; the resolver must retry that
+    // acquisition failure rather than surface it as a terminal Worker
+    // error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("cairn.db");
+
+    // Open once first to apply migrations + pragmas.
+    {
+        let _seed = open(&db).await.expect("first open");
+    }
+
+    let store_a = std::sync::Arc::new(open(&db).await.expect("open a"));
+    let store_b = std::sync::Arc::new(open(&db).await.expect("open b"));
+    let id = identity(Some("/repo"));
+
+    let mut handles = Vec::new();
+    for i in 0..32 {
+        let store = if i % 2 == 0 {
+            std::sync::Arc::clone(&store_a)
+        } else {
+            std::sync::Arc::clone(&store_b)
+        };
+        let id = id.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+                .await
+                .expect("resolve must converge through retries, not surface BUSY")
+                .into_session()
+                .id
+        }));
+    }
+
+    let mut session_ids = std::collections::HashSet::new();
+    for h in handles {
+        session_ids.insert(h.await.expect("join"));
+    }
+    assert_eq!(
+        session_ids.len(),
+        1,
+        "cross-connection resolvers must converge on one session id, got {session_ids:?}",
+    );
 }
 
 #[tokio::test]

@@ -273,8 +273,32 @@ impl SqliteMemoryStore {
                     // connection commits. Cross-process bursts therefore
                     // deterministically converge through the retry loop
                     // instead of escaping as terminal store errors.
-                    let tx =
-                        c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                    // BEGIN IMMEDIATE itself can return SQLITE_BUSY when
+                    // another connection already holds the write lock and
+                    // the busy_timeout expires. Treat that as a transient
+                    // conflict — the same loop handles in-transaction
+                    // BUSY/UniqueViolation/StaleSnapshot — instead of
+                    // escaping as a terminal Worker error to the caller.
+                    let tx = match c
+                        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    {
+                        Ok(tx) => tx,
+                        Err(e) => {
+                            if let rusqlite::Error::SqliteFailure(err, _) = &e {
+                                let code = err.code as i32;
+                                if code == rusqlite::ffi::SQLITE_BUSY
+                                    || err.extended_code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT
+                                {
+                                    // Bounded backoff so we don't pin the
+                                    // worker thread spinning on a hot
+                                    // contended lock.
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                    continue;
+                                }
+                            }
+                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                        }
+                    };
                     let res = resolve_or_create_in_tx(
                         &tx,
                         &user,
