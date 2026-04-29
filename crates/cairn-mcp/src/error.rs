@@ -1,23 +1,22 @@
-//! Transport-level errors for the MCP stdio adapter.
+//! Transport-level error type for the cairn-mcp stdio server.
+//!
+//! Distinct from cairn domain errors, which surface as
+//! `CallToolResult { is_error: true }` inside the MCP protocol.
 
-use thiserror::Error;
+use std::io;
 
-/// Transport-level errors for the Cairn MCP stdio adapter.
+/// Errors owned by the stdio transport layer.
 ///
-/// Separates wire/IO failures (this type) from Cairn typed operation
-/// errors, which stay inside the `cairn.mcp.v1` response envelope.
-#[derive(Debug, Error)]
+/// These are failures in the MCP framing / lifecycle, not cairn verb failures.
+/// Verb errors surface as `CallToolResult { is_error: true }`.
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum McpTransportError {
-    /// MCP server failed to complete the `initialize` handshake.
-    #[error("MCP stdio server failed to initialize: {0}")]
-    Initialize(String),
+pub enum TransportError {
+    /// stdio I/O failure (read EOF, broken pipe, etc.).
+    #[error("stdio I/O error: {0}")]
+    Io(#[from] io::Error),
 
-    /// MCP service failed after initialization.
-    #[error("MCP stdio service failed: {0}")]
+    /// rmcp service failed to start or was shut down abnormally.
+    #[error("MCP service error: {0}")]
     Service(String),
-
-    /// IO error on the underlying stdio transport.
-    #[error("stdio IO error: {0}")]
-    Io(#[from] std::io::Error),
 }

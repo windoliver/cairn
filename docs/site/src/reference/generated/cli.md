@@ -9,7 +9,7 @@ Generated from the runtime `clap::Command` tree used by `cairn`.
 ```text
 Cairn — agent memory framework (cairn.mcp.v1)
 
-Usage: cairn <COMMAND>
+Usage: cairn [OPTIONS] <COMMAND>
 
 Commands:
   ingest         cairn.mcp.v1 verb: ingest
@@ -23,10 +23,17 @@ Commands:
   handshake      cairn.mcp.v1 prelude: handshake
   status         cairn.mcp.v1 prelude: status
   plugins        Manage and inspect bundled plugins
-  bootstrap      Write a default .cairn/config.yaml to a vault directory
+  bootstrap      Initialize a vault directory tree with the §3 layout
+  mcp            Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight
+                 cairn verbs, writes responses to stdout. Blocks until stdin closes.
+  vault          Manage the vault registry (brief §3.3)
+  skill          Manage the Cairn skill bundle
   help           Print this message or the help of the given subcommand(s)
 
 Options:
+      --vault <NAME_OR_PATH>
+          Active vault: name from registry or filesystem path (overrides CAIRN_VAULT)
+
   -h, --help
           Print help
 
@@ -47,4 +54,7 @@ Options:
 - [`cairn handshake`](commands/handshake.md) - cairn.mcp.v1 prelude: handshake
 - [`cairn status`](commands/status.md) - cairn.mcp.v1 prelude: status
 - [`cairn plugins`](commands/plugins.md) - Manage and inspect bundled plugins
-- [`cairn bootstrap`](commands/bootstrap.md) - Write a default .cairn/config.yaml to a vault directory
+- [`cairn bootstrap`](commands/bootstrap.md) - Initialize a vault directory tree with the §3 layout
+- [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
+- [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
+- [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle

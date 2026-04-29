@@ -8,6 +8,22 @@ description: Cairn memory system. Use for persistent memory across turns, sessio
 
 Persistent memory via the `cairn` CLI. The eight verbs below are the contract. Status / handshake are protocol preludes — see the bottom of this file.
 
+## When to call cairn
+
+| Situation | Command |
+|---|---|
+| "remember that I prefer X" | `cairn ingest --kind user --body "prefers X"` |
+| "remember: never do Y" | `cairn ingest --kind rule --body "never do Y"` |
+| "correction: it's actually Z" | `cairn ingest --kind feedback --body "Z"` |
+| "forget what I said about W" | `cairn forget --record $(cairn search "W" --limit 1 --json \| jq -r '.hits[0].id')` |
+| "what do you know about K?" | `cairn search "K" --limit 10 --json` |
+| "load my preferences for this session" | `cairn assemble_hot --session ${SESSION_ID} --json` |
+| before answering any non-trivial question | `cairn search "$USER_INTENT" --limit 5 --json` |
+| after completing an ad-hoc procedure | `cairn ingest --kind strategy_success --body "..."` |
+| before ending the session | `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` |
+
+---
+
 ## `cairn ingest`
 
 **Use when:**
@@ -95,6 +111,35 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use on a draft the user wants to edit — that belongs to ingest with version bump
 
 **Exclusivity:** this is the single delete surface — there is no other delete path
+
+## Output format
+
+Every command supports `--json` for machine-readable output. Parse stdout as JSON; treat stderr as a human-readable error message.
+
+**`cairn search` response:**
+```json
+{"hits":[
+  {"id":"01HQZ...","kind":"fact","body":"...","score":0.91}
+]}
+```
+
+**`cairn ingest` response:**
+```json
+{"record_id": "01HQZ...", "session_id": "..."}
+```
+
+**`cairn forget` response:**
+```json
+{"deleted": ["01HQZ..."]}
+```
+
+## Non-negotiable rules
+
+1. Never invent record IDs. Always get them from `cairn search` or `cairn retrieve`.
+2. Never call `cairn forget` without confirming with the user — forget is irreversible.
+3. If a command fails, show the user `stderr` verbatim. Don't paper over errors.
+4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.
+5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.
 
 ---
 

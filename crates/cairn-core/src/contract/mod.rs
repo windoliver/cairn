@@ -38,10 +38,12 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
-pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
-pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
-pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
-pub use mcp_server::{MCPServer, MCPServerCapabilities};
-pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
-pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities};
-pub use workflow_orchestrator::{WorkflowOrchestrator, WorkflowOrchestratorCapabilities};
+pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
+pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
+pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
+pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
+pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};
+pub use workflow_orchestrator::{
+    WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
+};

@@ -34,6 +34,9 @@ Options:
       --tags <STRING>
 
 
+      --resync <PATH>
+          Re-ingest an out-of-band edited markdown projection (brief §3.0, #43)
+
       --json
           Emit machine-readable JSON response envelope to stdout
 

@@ -7,9 +7,13 @@ Implemented today:
 
 - `status` reports contract and runtime status.
 - `handshake` returns the contract prelude handshake.
-- `bootstrap` writes `.cairn/config.yaml`.
+- `bootstrap` writes the vault `.cairn/` layout.
+- `vault add`, `vault list`, `vault switch`, and `vault remove` manage the
+  local vault registry.
 - `plugins list` shows bundled plugin registrations.
 - `plugins verify` runs conformance checks.
+- `mcp` starts the stdio MCP server.
+- `skill install` writes the Cairn skill bundle for a supported agent harness.
 
 Present but P0-stubbed:
 

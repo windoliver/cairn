@@ -2,12 +2,12 @@
 
 # cairn bootstrap
 
-Write a default .cairn/config.yaml to a vault directory
+Initialize a vault directory tree with the §3 layout
 
 ## Help
 
 ```text
-Write a default .cairn/config.yaml to a vault directory
+Initialize a vault directory tree with the §3 layout
 
 Usage: bootstrap [OPTIONS]
 
@@ -16,6 +16,12 @@ Options:
           Vault root directory (default: current directory)
 
           [default: .]
+
+      --json
+          Emit JSON receipt instead of human-readable output
+
+      --force
+          Overwrite existing placeholder files
 
   -h, --help
           Print help

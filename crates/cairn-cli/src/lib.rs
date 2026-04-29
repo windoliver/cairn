@@ -9,5 +9,8 @@ pub mod command;
 pub mod config;
 pub mod docgen;
 pub(crate) mod generated;
+pub mod mcp;
 pub mod plugins;
+pub mod skill;
+pub mod vault;
 pub mod verbs;

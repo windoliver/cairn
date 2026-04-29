@@ -19,6 +19,13 @@ Create a default vault config:
 cargo run -p cairn-cli --locked -- bootstrap --vault-path .
 ```
 
+Register and select the vault:
+
+```bash
+cargo run -p cairn-cli --locked -- vault add . --name default
+cargo run -p cairn-cli --locked -- vault switch default
+```
+
 Inspect bundled plugins:
 
 ```bash
@@ -38,3 +45,10 @@ cargo run -p cairn-cli --locked -- search --json
 
 Today those verbs return an `Internal`/aborted response rather than silently
 pretending memory work succeeded.
+
+Install the agent skill bundle when you want a shell-oriented harness to learn
+the Cairn contract and conventions:
+
+```bash
+cargo run -p cairn-cli --locked -- skill install --harness codex
+```

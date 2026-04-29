@@ -4,6 +4,7 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 /.claude/
+/.worktrees/
 
 # Stray rustc artifact occasionally emitted at repo root by certain build
 # flows (e.g. some IDE-driven `rustc --emit=metadata` runs).

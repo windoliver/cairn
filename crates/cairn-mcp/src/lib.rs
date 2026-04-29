@@ -14,7 +14,7 @@ pub mod error;
 pub mod generated;
 pub mod handler;
 
-pub use error::McpTransportError;
+pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
@@ -83,7 +83,7 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 ///
 /// # Errors
 ///
-/// Returns [`McpTransportError::Service`] if the rmcp service fails to initialize
+/// Returns [`TransportError::Service`] if the rmcp service fails to initialize
 /// (e.g. the client sends a malformed `initialize` request) or terminates
 /// abnormally. Normal stdin-EOF shutdown is not an error and returns `Ok(())`.
 ///
@@ -91,16 +91,16 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 /// errors: those surface inside the MCP protocol as
 /// `CallToolResult { is_error: true }` and do not reach this function's return
 /// value.
-pub async fn serve_stdio() -> Result<(), McpTransportError> {
+pub async fn serve_stdio() -> Result<(), TransportError> {
     let handler = CairnMcpHandler::new();
     let transport = rmcp::transport::io::stdio();
     let service = handler
         .serve(transport)
         .await
-        .map_err(|e| McpTransportError::Service(e.to_string()))?;
+        .map_err(|e| TransportError::Service(e.to_string()))?;
     service
         .waiting()
         .await
-        .map_err(|e| McpTransportError::Service(e.to_string()))?;
+        .map_err(|e| TransportError::Service(e.to_string()))?;
     Ok(())
 }

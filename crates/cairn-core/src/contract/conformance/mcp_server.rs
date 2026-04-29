@@ -45,7 +45,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
                 ("extensions", caps.extensions),
             ],
         ),
-        // Tier 2
+        // Tier 2: stdio advertised → tool set available per §4.1 capability contract.
         tier2_tool_availability(registry, name),
     ]
 }
@@ -119,9 +119,8 @@ fn tier1_capability_self_consistency_floor(
 }
 
 fn tier2_tool_availability(registry: &PluginRegistry, name: &PluginName) -> CaseOutcome {
-    // cairn-core cannot depend on cairn-mcp (wrong dependency direction),
-    // so this tier-2 case checks the capability advertisement rather than
-    // calling list_tools() directly. If stdio=true is advertised, the
+    // cairn-core cannot depend on cairn-mcp (wrong dependency direction), so
+    // this case checks the capability advertisement: stdio=true means the
     // transport and tool set are available per §4.1 capability contract.
     let Some(plugin) = registry.mcp_server(name) else {
         return CaseOutcome {

@@ -15,6 +15,13 @@ Options:
       --write-report
 
 
+      --fix-folders
+          Regenerate folder _index.md sidecars and backlinks for every non-empty folder (brief §3.4,
+          #44)
+
+      --fix-markdown
+          Regenerate missing or stale markdown projections for all active records
+
       --json
           Emit machine-readable JSON response envelope to stdout
 
