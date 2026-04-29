@@ -620,6 +620,11 @@ fn every_typed_field_asserts_bounds_or_is_allowlisted() {
         ),
         ("verbs/ingest.json", "/$defs/Args/properties/kind"),
         // kind has minLength:1 — guarded by parent fallback; skip
+        // RecordExclusion.detail is a stable code emitted by
+        // PolicyDetail::to_wire_string; the empty-string variant
+        // (PolicyDetail::None) is intentional and meaningful, so a
+        // minLength assertion would be wrong here.
+        ("common/record_exclusion.json", "/properties/detail"),
     ]
     .iter()
     .map(|(f, p)| (f.to_string(), p.to_string()))

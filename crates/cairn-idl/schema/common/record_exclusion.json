@@ -13,6 +13,6 @@
       "type": "string",
       "enum": ["read_filter_relevance", "read_filter_staleness", "read_filter_dedup"]
     },
-    "detail": { "type": "string", "minLength": 1 }
+    "detail": { "type": "string" }
   }
 }
