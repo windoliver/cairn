@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-keychain = { workspace = true }
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
@@ -32,6 +33,10 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+ed25519-dalek = { workspace = true }
+unicode-normalization = { workspace = true }
+fs2 = { workspace = true }
+whoami = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
@@ -40,6 +45,7 @@ async-trait = { workspace = true }
 proptest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true
