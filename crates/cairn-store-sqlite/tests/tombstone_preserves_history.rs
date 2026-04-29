@@ -84,8 +84,17 @@ async fn tombstone_appends_to_both_versions_without_rewriting_update() {
             let rec = v1.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -98,8 +107,17 @@ async fn tombstone_appends_to_both_versions_without_rewriting_update() {
             let rec = v2.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 2, Some(1), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    2,
+                    Some(1),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -206,8 +224,17 @@ async fn tombstone_is_idempotent() {
             let rec = v1.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })

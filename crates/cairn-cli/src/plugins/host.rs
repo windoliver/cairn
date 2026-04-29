@@ -76,8 +76,8 @@ pub async fn register_all_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::contract::registry::PluginName;
     use cairn_core::contract::memory_store::ListQuery;
+    use cairn_core::contract::registry::PluginName;
     use cairn_core::domain::{Principal, identity::Identity};
     use tempfile::tempdir;
 

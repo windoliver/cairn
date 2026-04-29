@@ -283,8 +283,13 @@ impl MemoryStore for crate::SqliteMemoryStore {
             // sees the marker if they could read at least one of those
             // versions. Falling back to the latest-version single
             // snapshot (`scope_snapshot`/`taxonomy_snapshot`) covers
-            // pre-0014 markers; markers with neither field fail closed
-            // to system-only.
+            // pre-0014 markers. Markers with neither field predate the
+            // visibility-snapshot model entirely (pre-0010); they are
+            // surfaced to all principals because hiding them silently
+            // erases audit history for legitimate readers, and the
+            // marker itself only exposes that *some* record was purged
+            // for the queried target_id — no scope, taxonomy, or body
+            // is leaked.
             let mut p = conn
                 .prepare(
                     "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt, \
@@ -292,8 +297,8 @@ impl MemoryStore for crate::SqliteMemoryStore {
                      FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
                 )
                 .map_err(store_err)?;
-            let purge_rows: Vec<(PurgeMarker, Option<String>, Option<String>, Option<String>)> =
-                p.query_map(params![target_id.as_str()], |row| {
+            let purge_rows: Vec<(PurgeMarker, Option<String>, Option<String>, Option<String>)> = p
+                .query_map(params![target_id.as_str()], |row| {
                     let marker = row_to_purge_marker(row)?;
                     let scope_snapshot: Option<String> = row.get("scope_snapshot")?;
                     let taxonomy_snapshot: Option<String> = row.get("taxonomy_snapshot")?;
@@ -316,14 +321,12 @@ impl MemoryStore for crate::SqliteMemoryStore {
                         && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(json)
                     {
                         let any_readable = arr.iter().any(|entry| {
-                            let scope = entry.get("scope").map_or_else(
-                                || "{}".to_owned(),
-                                serde_json::Value::to_string,
-                            );
-                            let tax = entry.get("taxonomy").map_or_else(
-                                || "{}".to_owned(),
-                                serde_json::Value::to_string,
-                            );
+                            let scope = entry
+                                .get("scope")
+                                .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string);
+                            let tax = entry
+                                .get("taxonomy")
+                                .map_or_else(|| "{}".to_owned(), serde_json::Value::to_string);
                             principal_can_read(&principal, &scope, &tax)
                         });
                         return if any_readable { Some(marker) } else { None };
@@ -335,7 +338,11 @@ impl MemoryStore for crate::SqliteMemoryStore {
                         {
                             Some(marker)
                         }
-                        _ => None,
+                        (Some(_), Some(_)) => None,
+                        // Pre-0010: no snapshot was ever captured.
+                        // Surface to all principals to preserve audit
+                        // continuity across the upgrade boundary.
+                        _ => Some(marker),
                     }
                 })
                 .collect();

@@ -96,10 +96,28 @@ async fn add_upsert_remove_writes_audit_markers() {
             move |tx| {
                 let ra = make_record("01HQZX9F5N0000000000000060", "record A body");
                 let rb = make_record("01HQZX9F5N0000000000000061", "record B body");
-                let id_a = tx.stage_version(&ta, &ra, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                let id_b = tx.stage_version(&tb, &rb, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&ta, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&tb, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let id_a = tx.stage_version(
+                    &ta,
+                    &ra,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                let id_b = tx.stage_version(
+                    &tb,
+                    &rb,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &ta,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &tb,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok((id_a, id_b))
             }
         })
@@ -212,10 +230,28 @@ async fn tombstone_endpoint_does_not_remove_edge() {
             move |tx| {
                 let ra = make_record("01HQZX9F5N0000000000000062", "tomb endpoint A");
                 let rb = make_record("01HQZX9F5N0000000000000063", "tomb endpoint B");
-                let id_a = tx.stage_version(&ta, &ra, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                let id_b = tx.stage_version(&tb, &rb, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&ta, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&tb, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let id_a = tx.stage_version(
+                    &ta,
+                    &ra,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                let id_b = tx.stage_version(
+                    &tb,
+                    &rb,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &ta,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &tb,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok((id_a, id_b))
             }
         })

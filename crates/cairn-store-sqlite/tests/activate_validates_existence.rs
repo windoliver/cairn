@@ -27,7 +27,12 @@ async fn activate_nonexistent_version_returns_not_found() {
             let t = target.clone();
             move |tx| {
                 // Version 999 was never staged.
-                tx.activate_version(&t, 999, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+                tx.activate_version(
+                    &t,
+                    999,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
             }
         })
         .await;

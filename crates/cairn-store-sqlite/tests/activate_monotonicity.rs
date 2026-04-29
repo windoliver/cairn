@@ -82,9 +82,21 @@ async fn downgrade_activation_returns_activation_raced() {
             let (r1, r2, r3) = (v1.clone(), v2.clone(), v3.clone());
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &r1, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.stage_version(&t, &r2, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.stage_version(&t, &r3, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &r1,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.stage_version(
+                    &t,
+                    &r2,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.stage_version(
+                    &t,
+                    &r3,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -95,7 +107,14 @@ async fn downgrade_activation_returns_activation_raced() {
     store
         .with_apply_tx(test_apply_token(), {
             let t = target.clone();
-            move |tx| tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+            move |tx| {
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
+            }
         })
         .await
         .expect("activate v1");
@@ -104,7 +123,14 @@ async fn downgrade_activation_returns_activation_raced() {
     store
         .with_apply_tx(test_apply_token(), {
             let t = target.clone();
-            move |tx| tx.activate_version(&t, 2, Some(1), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+            move |tx| {
+                tx.activate_version(
+                    &t,
+                    2,
+                    Some(1),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
+            }
         })
         .await
         .expect("activate v2");
@@ -113,7 +139,14 @@ async fn downgrade_activation_returns_activation_raced() {
     store
         .with_apply_tx(test_apply_token(), {
             let t = target.clone();
-            move |tx| tx.activate_version(&t, 3, Some(2), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+            move |tx| {
+                tx.activate_version(
+                    &t,
+                    3,
+                    Some(2),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
+            }
         })
         .await
         .expect("activate v3");
@@ -122,7 +155,14 @@ async fn downgrade_activation_returns_activation_raced() {
     let result = store
         .with_apply_tx(test_apply_token(), {
             let t = target.clone();
-            move |tx| tx.activate_version(&t, 2, Some(3), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+            move |tx| {
+                tx.activate_version(
+                    &t,
+                    2,
+                    Some(3),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
+            }
         })
         .await;
 

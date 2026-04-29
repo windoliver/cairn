@@ -77,8 +77,17 @@ async fn get_returns_none_after_past_expiry() {
             let r = rec.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &r,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -151,8 +160,17 @@ async fn expire_active_is_idempotent() {
             let r = rec.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &r,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })

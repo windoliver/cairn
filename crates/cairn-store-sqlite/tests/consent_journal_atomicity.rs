@@ -83,8 +83,17 @@ async fn ok_commits_record_and_all_consent_entries() {
             let op = op_id.clone();
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000080", "committed body");
-                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 // Two consent rows under the same op_id (stage + activate).
                 tx.append_consent_journal(&ConsentJournalEntry {
                     op_id: op.clone(),

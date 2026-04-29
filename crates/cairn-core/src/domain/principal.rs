@@ -103,9 +103,6 @@ mod tests {
         // and would otherwise bypass all rebac scope filtering.
         let forged = r#"{"identity":null,"is_system":true}"#;
         let p: Principal = serde_json::from_str(forged).expect("deserializes");
-        assert!(
-            !p.is_system(),
-            "system bit must be ignored on deserialize"
-        );
+        assert!(!p.is_system(), "system bit must be ignored on deserialize");
     }
 }

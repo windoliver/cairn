@@ -87,13 +87,40 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
                 let r1 = make_record("01HQZX9F5N0000000000000050", "purge v1");
                 let r2 = make_record("01HQZX9F5N0000000000000051", "purge v2");
                 let r3 = make_record("01HQZX9F5N0000000000000052", "purge v3");
-                let id1 = tx.stage_version(&t, &r1, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                let id2 = tx.stage_version(&t, &r2, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                let id3 = tx.stage_version(&t, &r3, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let id1 = tx.stage_version(
+                    &t,
+                    &r1,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                let id2 = tx.stage_version(
+                    &t,
+                    &r2,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                let id3 = tx.stage_version(
+                    &t,
+                    &r3,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 // Activate sequentially.
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 2, Some(1), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 3, Some(2), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    2,
+                    Some(1),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    3,
+                    Some(2),
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok((id1, id2, id3))
             }
         })
@@ -106,8 +133,17 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
             let t = other_target.clone();
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000053", "other record");
-                let rid = tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let rid = tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(rid)
             }
         })
@@ -260,8 +296,17 @@ async fn purge_marker_visibility_uses_purge_time_snapshot() {
             let t = target.clone();
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000054", "to be purged");
-                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -337,8 +382,17 @@ async fn purged_target_id_cannot_be_restaged() {
             let t = target.clone();
             move |tx| {
                 let r = make_record("01HQZX9F5N0000000000000077", "first life");
-                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &t,
+                    &r,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &t,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             }
         })
@@ -360,7 +414,11 @@ async fn purged_target_id_cannot_be_restaged() {
             let t = target.clone();
             move |tx| {
                 let r = make_record("01HQZX9F5N0000000000000088", "second life");
-                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+                tx.stage_version(
+                    &t,
+                    &r,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )
             }
         })
         .await;

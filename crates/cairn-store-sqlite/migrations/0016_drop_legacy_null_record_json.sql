@@ -1,0 +1,20 @@
+-- Migration 0016: drop unrecoverable pre-0009 rows from `records`.
+--
+-- Migration 0009 added the `record_json` column without a backfill —
+-- there is no source of truth for the original `MemoryRecord` payload
+-- of rows written before 0009. The post-migration legacy-row gate in
+-- `open_blocking()` refused to open any database that still contained
+-- such rows, which makes the normal upgrade path an operational
+-- outage rather than a graceful upgrade.
+--
+-- The data in those rows is unrecoverable: every read path would
+-- already report them as missing, so deleting them is the only honest
+-- option. We do not write purge markers because the row's `scope` and
+-- `taxonomy` may also be missing or incoherent for pre-0009 schemas,
+-- and a marker without provenance creates the same audit-corruption
+-- risk that motivated migration 0015's redesign.
+--
+-- The open-time legacy-row gate is retained as defense-in-depth for
+-- direct schema tampering. The normal upgrade path no longer trips
+-- it.
+DELETE FROM records WHERE record_json IS NULL;

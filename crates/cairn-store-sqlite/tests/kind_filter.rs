@@ -89,8 +89,17 @@ async fn list_with_kind_filter_returns_only_matching_kind() {
         let rec = make_record(ulid, body, kind);
         store
             .with_apply_tx(test_apply_token(), move |tx| {
-                tx.stage_version(&target, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&target, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(
+                    &target,
+                    &rec,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
+                tx.activate_version(
+                    &target,
+                    1,
+                    None,
+                    &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"),
+                )?;
                 Ok(())
             })
             .await
