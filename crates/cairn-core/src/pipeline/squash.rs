@@ -2253,7 +2253,13 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
     let mut j = 0;
     while j < normalized.len() {
         if normalized[j] == b'\r' && j + 1 < normalized.len() && normalized[j + 1] == b'\n' {
-            // CRLF → LF
+            // CRLF → LF. Also pop a preceding bare CR so that \r\r\n → \n
+            // rather than \r\n; without this, the output contains a fresh
+            // CRLF pair that a second squash run would collapse differently,
+            // breaking the idempotency invariant.
+            if result.last() == Some(&b'\r') {
+                result.pop();
+            }
             result.push(b'\n');
             *stripped = true;
             j += 2;
@@ -2428,6 +2434,20 @@ mod stage2_tests {
         let (out, stripped) = s2("download 1%\rdownload 2%\n");
         assert_eq!(out, "download 1%\rdownload 2%\n");
         assert!(!stripped);
+    }
+
+    #[test]
+    fn crcrlf_normalized_idempotently() {
+        // \r\r\n (CRCRLF) must collapse to \n on the first pass so that a
+        // second squash run is a no-op. Without the fix the first pass yields
+        // \r\n, and the second pass then yields \n, violating idempotency.
+        let (out, stripped) = s2("\r\r\n");
+        assert_eq!(out, "\n");
+        assert!(stripped);
+        // Verify idempotency: a second pass on the output must be identity.
+        let (out2, stripped2) = s2(&out);
+        assert_eq!(out2, out);
+        assert!(!stripped2);
     }
 
     /// Round-4 (new loop) regression: a well-formed SGR sequence must
