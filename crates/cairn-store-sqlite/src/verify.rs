@@ -106,6 +106,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "sessions"),
     ("index", "sessions_active_lookup_idx"),
     ("index", "sessions_last_activity_idx"),
+    // 0012_sessions_unique_active
+    ("index", "sessions_one_active_per_identity_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {

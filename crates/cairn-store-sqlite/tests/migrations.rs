@@ -14,7 +14,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 11);
+    assert_eq!(head, 12);
 }
 
 #[test]
@@ -30,7 +30,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 11);
+    assert_eq!(head, 12);
 }
 
 #[test]

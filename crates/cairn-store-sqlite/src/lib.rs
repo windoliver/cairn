@@ -18,7 +18,7 @@ pub use open::{open, open_in_memory};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
-pub use store::sessions::NewSessionMetadata;
+pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;

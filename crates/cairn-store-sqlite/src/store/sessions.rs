@@ -20,6 +20,39 @@ use ulid::Ulid;
 use crate::error::StoreError;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
+/// Outcome of [`SqliteMemoryStore::resolve_or_create_session`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResolveOutcome {
+    /// An existing active session within the idle window was reused.
+    /// `last_activity_at` has been bumped to "now".
+    Reused(Session),
+    /// No active session within the idle window existed; a fresh row was
+    /// inserted and is returned. If a stale active row was found past the
+    /// idle window, it has been marked `ended_at = now` in the same
+    /// transaction so it cannot be revived by [`SqliteMemoryStore::touch_session`].
+    Created(Session),
+}
+
+impl ResolveOutcome {
+    /// Borrow the underlying session, regardless of whether it was reused
+    /// or freshly created.
+    #[must_use]
+    pub fn session(&self) -> &Session {
+        match self {
+            Self::Reused(s) | Self::Created(s) => s,
+        }
+    }
+
+    /// Consume the outcome and return the underlying session.
+    #[must_use]
+    pub fn into_session(self) -> Session {
+        match self {
+            Self::Reused(s) | Self::Created(s) => s,
+        }
+    }
+}
+
 /// Subset of session metadata accepted at create time. All fields default
 /// to "unset" — the resolver / verb layer fills only what it has.
 #[derive(Debug, Default, Clone)]
@@ -178,6 +211,104 @@ impl SqliteMemoryStore {
             last_activity_at_unix_ms: now_ms,
             ended_at_unix_ms: None,
         })
+    }
+
+    /// Atomically resolve-or-create the active session for `identity`.
+    ///
+    /// Replaces the racy `find_active_session → resolve_session → create_session`
+    /// dance with a single transaction:
+    ///
+    /// 1. `SELECT` the most recent `ended_at IS NULL` row for the identity.
+    /// 2. If one exists and is within `idle_window_secs`, bump
+    ///    `last_activity_at` and return [`ResolveOutcome::Reused`].
+    /// 3. If one exists but is past the window, set `ended_at = now` on it
+    ///    so [`SqliteMemoryStore::touch_session`] can never revive it,
+    ///    then fall through to step 4.
+    /// 4. `INSERT` a fresh row. The partial unique index
+    ///    `sessions_one_active_per_identity_idx` makes this fail when a
+    ///    concurrent caller won the race; on conflict the whole tx is
+    ///    rolled back and retried (bounded), at which point step 1
+    ///    observes the winner and we return [`ResolveOutcome::Reused`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotInitialized`] when the store was constructed
+    /// via `Default::default()`. Returns [`StoreError::Worker`] /
+    /// [`StoreError::Sqlite`] for SQL failures, or [`StoreError::Invariant`]
+    /// when the conflict-retry budget is exhausted (a higher-than-expected
+    /// concurrency level — surfaced rather than silently looping).
+    #[instrument(
+        skip(self, identity, metadata),
+        err,
+        fields(
+            verb = "resolve_or_create_session",
+            user = %identity.user,
+            agent = %identity.agent,
+            idle_window_secs,
+        ),
+    )]
+    pub async fn resolve_or_create_session(
+        &self,
+        identity: &SessionIdentity,
+        idle_window_secs: u64,
+        metadata: NewSessionMetadata,
+    ) -> Result<ResolveOutcome, StoreError> {
+        const MAX_RACE_RETRIES: u32 = 8;
+
+        let conn = self.require_conn("resolve_or_create_session")?.clone();
+        let user = identity.user.as_str().to_owned();
+        let agent = identity.agent.as_str().to_owned();
+        let project_root = identity.project_root.clone();
+        let identity_clone = identity.clone();
+        let metadata_clone = metadata.clone();
+
+        let outcome = conn
+            .call(move |c| {
+                for _attempt in 0..MAX_RACE_RETRIES {
+                    let tx = c.transaction()?;
+                    let res = resolve_or_create_in_tx(
+                        &tx,
+                        &user,
+                        &agent,
+                        project_root.as_deref(),
+                        idle_window_secs,
+                        &identity_clone,
+                        &metadata_clone,
+                    );
+                    match res {
+                        Ok(outcome) => {
+                            tx.commit()?;
+                            return Ok::<_, tokio_rusqlite::Error>(Ok(outcome));
+                        }
+                        Err(InTxError::UniqueViolation) => {
+                            // Drop tx → ROLLBACK; loop falls through to retry.
+                            drop(tx);
+                        }
+                        Err(InTxError::Sqlite(e)) => {
+                            drop(tx);
+                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                        }
+                        Err(InTxError::Codec(e)) => {
+                            drop(tx);
+                            return Err(tokio_rusqlite::Error::Other(Box::new(e)));
+                        }
+                        Err(InTxError::Invariant(s)) => {
+                            drop(tx);
+                            return Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
+                                what: s,
+                            }));
+                        }
+                    }
+                }
+                Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
+                    what: format!(
+                        "resolve_or_create_session: {MAX_RACE_RETRIES} unique-conflict retries exhausted"
+                    ),
+                }))
+            })
+            .await??;
+
+        Ok(outcome)
     }
 
     /// Bump `last_activity_at` on the named session to "now". Returns
@@ -348,4 +479,223 @@ impl SqliteMemoryStore {
             ended_at_unix_ms: ended,
         }))
     }
+}
+
+/// Internal error type for the in-tx body of
+/// [`SqliteMemoryStore::resolve_or_create_session`]. Distinguishes the
+/// retryable unique-index violation from terminal failures so the outer
+/// loop can choose to spin or surface the error.
+#[derive(Debug)]
+enum InTxError {
+    /// Partial unique index `sessions_one_active_per_identity_idx` rejected
+    /// the INSERT — a concurrent caller won the race. Caller should
+    /// rollback and retry.
+    UniqueViolation,
+    /// Other `SQLite` error.
+    Sqlite(rusqlite::Error),
+    /// Tag JSON serialization failed.
+    Codec(serde_json::Error),
+    /// Stored row violated a structural invariant (corrupt id, bad identity).
+    Invariant(String),
+}
+
+impl From<rusqlite::Error> for InTxError {
+    fn from(e: rusqlite::Error) -> Self {
+        // SQLITE_CONSTRAINT_UNIQUE = 2067 — partial unique index conflict.
+        if let rusqlite::Error::SqliteFailure(err, _) = &e
+            && err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        {
+            return Self::UniqueViolation;
+        }
+        Self::Sqlite(e)
+    }
+}
+
+impl From<serde_json::Error> for InTxError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Codec(e)
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "in-tx helper threads identity + metadata + lookup keys; collapsing into a struct adds indirection without benefit"
+)]
+fn resolve_or_create_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    user: &str,
+    agent: &str,
+    project_root: Option<&str>,
+    idle_window_secs: u64,
+    identity: &SessionIdentity,
+    metadata: &NewSessionMetadata,
+) -> Result<ResolveOutcome, InTxError> {
+    let now_ms = current_unix_ms();
+
+    // Step 1: locate the most recent active row for this identity.
+    let existing: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT session_id, last_activity_at FROM sessions \
+             WHERE user_id = ?1 AND agent_id = ?2 \
+               AND project_root IS ?3 \
+               AND ended_at IS NULL \
+             ORDER BY last_activity_at DESC \
+             LIMIT 1",
+            params![user, agent, project_root],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+
+    if let Some((existing_id, last_activity_ms)) = existing {
+        let idle_ms = (now_ms - last_activity_ms).max(0);
+        let idle_secs = u64::try_from(idle_ms / 1000).unwrap_or(u64::MAX);
+        if idle_secs <= idle_window_secs {
+            // Step 2: reuse — bump last_activity_at, then re-read for the
+            // canonical row to return.
+            tx.execute(
+                "UPDATE sessions SET last_activity_at = ?1 WHERE session_id = ?2",
+                params![now_ms, existing_id],
+            )?;
+            let session = read_session_by_id(tx, &existing_id)?.ok_or_else(|| {
+                InTxError::Invariant(
+                    "resolve_or_create: row vanished between SELECT and UPDATE".into(),
+                )
+            })?;
+            return Ok(ResolveOutcome::Reused(session));
+        }
+        // Step 3: stale — close it so touch_session can no longer revive
+        // this id, then fall through to the INSERT.
+        tx.execute(
+            "UPDATE sessions SET ended_at = ?1 \
+             WHERE session_id = ?2 AND ended_at IS NULL",
+            params![now_ms, existing_id],
+        )?;
+    }
+
+    // Step 4: INSERT a fresh row. Partial unique index may reject if a
+    // concurrent caller raced ahead — surfaced as `UniqueViolation` so the
+    // outer loop retries.
+    let id_str = Ulid::new().to_string();
+    let session_id = SessionId::parse(&id_str)
+        .map_err(|e| InTxError::Invariant(format!("freshly-minted ULID rejected: {e}")))?;
+    let tags_json = if metadata.tags.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&metadata.tags)?)
+    };
+    tx.execute(
+        "INSERT INTO sessions \
+           (session_id, user_id, agent_id, project_root, title, \
+            channel, priority, tags, metadata_json, \
+            created_at, last_activity_at, ended_at) \
+         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?7, NULL, ?8, ?8, NULL)",
+        params![
+            id_str,
+            user,
+            agent,
+            project_root,
+            metadata.channel,
+            metadata.priority,
+            tags_json,
+            now_ms,
+        ],
+    )?;
+
+    Ok(ResolveOutcome::Created(Session {
+        id: session_id,
+        identity: identity.clone(),
+        title: String::new(),
+        channel: metadata.channel.clone(),
+        priority: metadata.priority.clone(),
+        tags: metadata.tags.clone(),
+        created_at_unix_ms: now_ms,
+        last_activity_at_unix_ms: now_ms,
+        ended_at_unix_ms: None,
+    }))
+}
+
+/// Row shape for `SELECT * FROM sessions WHERE session_id = ?` — broken
+/// out so [`read_session_by_id`] doesn't trip clippy's `type_complexity`.
+type SessionRow = (
+    String,         // session_id
+    String,         // user_id
+    String,         // agent_id
+    Option<String>, // project_root
+    String,         // title
+    Option<String>, // channel
+    Option<String>, // priority
+    Option<String>, // tags JSON
+    i64,            // created_at
+    i64,            // last_activity_at
+    Option<i64>,    // ended_at
+);
+
+fn read_session_by_id(
+    tx: &rusqlite::Transaction<'_>,
+    id_str: &str,
+) -> Result<Option<Session>, InTxError> {
+    let row: Option<SessionRow> = tx
+        .query_row(
+            "SELECT session_id, user_id, agent_id, project_root, \
+                    title, channel, priority, tags, \
+                    created_at, last_activity_at, ended_at \
+             FROM sessions WHERE session_id = ?1",
+            params![id_str],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        sid,
+        user,
+        agent,
+        project_root,
+        title,
+        channel,
+        priority,
+        tags_json,
+        created_at,
+        last_activity,
+        ended,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let id = SessionId::parse(&sid)
+        .map_err(|e| InTxError::Invariant(format!("session_id round-trip failed: {e}")))?;
+    let user = cairn_core::domain::Identity::parse(&user)
+        .map_err(|e| InTxError::Invariant(format!("session.user_id round-trip failed: {e}")))?;
+    let agent = cairn_core::domain::Identity::parse(&agent)
+        .map_err(|e| InTxError::Invariant(format!("session.agent_id round-trip failed: {e}")))?;
+    let identity = SessionIdentity::new(user, agent, project_root)
+        .map_err(|e| InTxError::Invariant(format!("session identity round-trip failed: {e}")))?;
+    let tags: Vec<String> = tags_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(Some(Session {
+        id,
+        identity,
+        title,
+        channel,
+        priority,
+        tags,
+        created_at_unix_ms: created_at,
+        last_activity_at_unix_ms: last_activity,
+        ended_at_unix_ms: ended,
+    }))
 }

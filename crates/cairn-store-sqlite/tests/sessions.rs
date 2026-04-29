@@ -10,7 +10,7 @@ use cairn_core::domain::Identity;
 use cairn_core::domain::session::{
     DEFAULT_IDLE_WINDOW_SECS, SessionDecision, SessionIdentity, resolve_session,
 };
-use cairn_store_sqlite::{NewSessionMetadata, open_in_memory};
+use cairn_store_sqlite::{NewSessionMetadata, ResolveOutcome, open_in_memory};
 
 fn user() -> Identity {
     Identity::parse("usr:alice").expect("valid")
@@ -197,24 +197,126 @@ async fn metadata_round_trips() {
 }
 
 #[tokio::test]
-async fn most_recent_session_wins_when_multiple_active() {
-    // Older active sessions can hang around if a previous run forgot to end
-    // them; discovery must still pick the newest one.
+async fn second_create_session_for_same_identity_violates_unique_index() {
+    // The partial unique index `sessions_one_active_per_identity_idx`
+    // enforces the §8.1 invariant that a single (user, agent, project_root)
+    // resolves to one active session. Direct create after end is fine;
+    // direct create over an active row is rejected. Callers should use
+    // resolve_or_create_session to get the atomic resolve-or-create path.
     let store = open_in_memory().await.expect("open");
     let id = identity(Some("/repo"));
-    let _older = store
+    let _first = store
         .create_session(&id, NewSessionMetadata::default())
         .await
-        .expect("older");
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    let newer = store
+        .expect("first");
+    let err = store
         .create_session(&id, NewSessionMetadata::default())
         .await
-        .expect("newer");
+        .expect_err("second create must hit the unique index");
+    // Walk the error chain to find the underlying SQLite constraint error;
+    // top-level Display is the wrapper variant.
+    let dbg = format!("{err:?}");
+    assert!(
+        dbg.contains("UNIQUE") || dbg.contains("constraint"),
+        "expected unique-constraint violation in error chain, got {dbg}",
+    );
+}
+
+#[tokio::test]
+async fn resolve_or_create_returns_created_for_first_call() {
+    let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
+    let outcome = store
+        .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+        .await
+        .expect("resolve");
+    assert!(matches!(outcome, ResolveOutcome::Created(_)));
+}
+
+#[tokio::test]
+async fn resolve_or_create_reuses_within_window() {
+    let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
+    let first = store
+        .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+        .await
+        .expect("first");
+    let second = store
+        .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+        .await
+        .expect("second");
+    assert!(matches!(second, ResolveOutcome::Reused(_)));
+    assert_eq!(first.session().id, second.session().id);
+}
+
+#[tokio::test]
+async fn resolve_or_create_closes_stale_row_before_creating_new() {
+    // With idle_window_secs = 0 and elapsed time > 1 s, the prior row is
+    // strictly past the window: resolve must end it and mint a new one. The
+    // returned session must be different from the prior, and the prior id
+    // must reject touch_session afterwards (cannot be revived).
+    let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
+    let prior = store
+        .create_session(&id, NewSessionMetadata::default())
+        .await
+        .expect("prior");
+
+    // idle_secs is computed in whole seconds; sleep just over 1 s so the
+    // floor-divided idle_secs strictly exceeds idle_window_secs = 0.
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+
+    let outcome = store
+        .resolve_or_create_session(&id, 0, NewSessionMetadata::default())
+        .await
+        .expect("resolve");
+    let ResolveOutcome::Created(new) = outcome else {
+        panic!("expected Created when prior was past window, got {outcome:?}");
+    };
+    assert_ne!(new.id, prior.id);
+
+    // Touch on the now-ended prior must fail — the §8.1 expiry invariant.
+    let touched = store.touch_session(&prior.id).await.expect("touch");
+    assert!(!touched, "expired session must not be revivable via touch");
+
+    // Discovery returns the new id, not the closed prior.
     let found = store
         .find_active_session(&id)
         .await
         .expect("find")
         .expect("present");
-    assert_eq!(found.id, newer.id);
+    assert_eq!(found.id, new.id);
+}
+
+#[tokio::test]
+async fn concurrent_resolve_or_create_yields_one_session() {
+    // Race many resolve_or_create_session calls in parallel. The partial
+    // unique index forces all but one INSERT to fail; the loser tx
+    // rollbacks and retries, observing the winner. Net result: one session.
+    let store = std::sync::Arc::new(open_in_memory().await.expect("open"));
+    let id = identity(Some("/repo"));
+
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            let id = id.clone();
+            tokio::spawn(async move {
+                store
+                    .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+                    .await
+                    .expect("resolve")
+            })
+        })
+        .collect();
+
+    let mut session_ids = std::collections::HashSet::new();
+    for h in handles {
+        let outcome = h.await.expect("join");
+        session_ids.insert(outcome.into_session().id);
+    }
+    assert_eq!(
+        session_ids.len(),
+        1,
+        "all concurrent resolvers must converge on one session id, got {session_ids:?}",
+    );
 }
