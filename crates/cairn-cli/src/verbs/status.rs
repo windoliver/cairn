@@ -51,10 +51,12 @@ pub fn run(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// P0 advertises no capabilities — the store adapter is not wired yet.
-/// Update this list when store adapters land (issue #9).
+/// Advertised P0 capabilities. Currently emits the gate-vocabulary
+/// capability that signals every mutating verb populates `policy_trace`
+/// per `docs/site/src/reference/policy-gates.md` (#95). Other store-driven
+/// capabilities land with #9.
 fn p0_capabilities() -> Vec<Capabilities> {
-    vec![]
+    vec![Capabilities::CairnMcpV1PolicyTrace]
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
@@ -207,8 +209,11 @@ mod tests {
     }
 
     #[test]
-    fn p0_capabilities_returns_empty() {
+    fn p0_capabilities_includes_policy_trace() {
         let caps = p0_capabilities();
-        assert!(caps.is_empty(), "P0 must advertise no capabilities");
+        assert!(
+            caps.contains(&Capabilities::CairnMcpV1PolicyTrace),
+            "P0 must advertise cairn.mcp.v1.policy_trace; got {caps:?}"
+        );
     }
 }

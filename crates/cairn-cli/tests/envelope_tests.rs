@@ -71,3 +71,27 @@ fn lint_returns_aborted_internal() {
 fn forget_record_returns_aborted_internal() {
     assert_aborted_internal(&["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
 }
+
+#[test]
+fn status_advertises_policy_trace_capability() {
+    let out = {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+        cmd.args(["status", "--json"]);
+        cmd.output().expect("status --json should run")
+    };
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "status should exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("status JSON parse failed: {e}\nstdout: {stdout:?}"));
+    let caps = v["capabilities"].as_array().expect("capabilities array");
+    let strs: Vec<&str> = caps.iter().filter_map(serde_json::Value::as_str).collect();
+    assert!(
+        strs.contains(&"cairn.mcp.v1.policy_trace"),
+        "status must advertise cairn.mcp.v1.policy_trace; got {strs:?}"
+    );
+}
