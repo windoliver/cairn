@@ -234,6 +234,7 @@ fn ingest_valid_args_returns_internal_stub() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // table-driven sweep — each case is a single-line builder, not real fn growth
 fn ingest_rejects_schema_minlength_violations() {
     // The IDL `validate()` only enforces the body/file/url XOR, but the
     // schema additionally requires non-empty body, file, url, kind,
