@@ -9,7 +9,7 @@ use cairn_core::domain::{
 };
 use cairn_core::pipeline::extract::{
     BodyResolution, BodyResolutionError, ExtractInput, ExtractOutput, ExtractorWorker,
-    ForgetMatchStrategy, ProactiveBodyContext, RegexExtractor, ResolvedBody, TruncationReason,
+    ForgetMatchStrategy, ProactiveMessageRef, RegexExtractor, ResolvedBody, TruncationReason,
     UserIngestPayloadKind,
 };
 
@@ -159,14 +159,35 @@ async fn body_resolution_failure_surfaces_typed_error() {
 
 #[tokio::test]
 async fn proactive_rationale_mislabel_rejected_by_constructor() {
-    let ctx = ProactiveBodyContext {
-        rationale: "internal",
+    let payload = CapturePayload::Proactive {
+        kind: "feedback".into(),
+        rationale: "internal".into(),
     };
-    let err = ResolvedBody::from_proactive_message("internal", &ctx).unwrap_err();
+    let err = ProactiveMessageRef::from_payload("internal", &payload).unwrap_err();
     assert!(matches!(
         err,
         BodyResolutionError::ProactiveRationaleMislabel
     ));
+}
+
+#[tokio::test]
+async fn proactive_message_ref_rejects_non_proactive_payload() {
+    let payload = CapturePayload::Cli {
+        kind_hint: "user".into(),
+    };
+    let err = ProactiveMessageRef::from_payload("anything", &payload).unwrap_err();
+    assert!(matches!(err, BodyResolutionError::ProactivePayloadMismatch));
+}
+
+#[tokio::test]
+async fn resolved_body_constructed_from_verified_proactive_message() {
+    let payload = CapturePayload::Proactive {
+        kind: "feedback".into(),
+        rationale: "internal".into(),
+    };
+    let msg = ProactiveMessageRef::from_payload("user message", &payload).expect("distinct");
+    let body = ResolvedBody::from_proactive_message(msg);
+    assert_eq!(body.text(), "user message");
 }
 
 #[tokio::test]

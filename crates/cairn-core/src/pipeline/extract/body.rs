@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::CapturePayload;
+
 /// The trust boundary a resolved body came from.
 ///
 /// **There is deliberately no `Rationale` variant.** Combined with the
@@ -39,11 +41,47 @@ pub enum UserIngestPayloadKind {
     Mcp,
 }
 
-/// Reference into `CapturePayload::Proactive` for the runtime
-/// rationale-mislabel check.
-pub struct ProactiveBodyContext<'a> {
-    /// The agent's internal reasoning string (NOT user-visible).
-    pub rationale: &'a str,
+/// Verified reference to the user-visible message body of a
+/// `CapturePayload::Proactive` envelope.
+///
+/// Constructed only via [`ProactiveMessageRef::from_payload`], which
+/// requires an actual `&CapturePayload::Proactive` and rejects text
+/// equal to the payload's `rationale`. Binding the type to the payload
+/// envelope means callers cannot synthesise a free-floating "proactive
+/// message" from arbitrary bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct ProactiveMessageRef<'a> {
+    text: &'a str,
+}
+
+impl<'a> ProactiveMessageRef<'a> {
+    /// Construct from an already-resolved user-visible message body and
+    /// the originating `CapturePayload::Proactive` envelope.
+    ///
+    /// # Errors
+    ///
+    /// - [`BodyResolutionError::ProactivePayloadMismatch`] if `payload`
+    ///   is not the `Proactive` variant.
+    /// - [`BodyResolutionError::ProactiveRationaleMislabel`] if `text`
+    ///   is byte-equal to the payload's `rationale`.
+    pub fn from_payload(
+        text: &'a str,
+        payload: &'a CapturePayload,
+    ) -> Result<Self, BodyResolutionError> {
+        let CapturePayload::Proactive { rationale, .. } = payload else {
+            return Err(BodyResolutionError::ProactivePayloadMismatch);
+        };
+        if text == rationale {
+            return Err(BodyResolutionError::ProactiveRationaleMislabel);
+        }
+        Ok(Self { text })
+    }
+
+    /// The verified user-visible message text.
+    #[must_use]
+    pub fn text(&self) -> &'a str {
+        self.text
+    }
 }
 
 /// Reasons body resolution may fail.
@@ -67,13 +105,17 @@ pub enum BodyResolutionError {
     /// Transient I/O error reading `payload_ref`.
     #[error("transient I/O error reading payload_ref: {0}")]
     Io(String),
-    /// `from_proactive_message` was called with text equal to the
-    /// `rationale` field — refusing to extract internal reasoning as
-    /// user memory.
+    /// `ProactiveMessageRef::from_payload` was called with text equal to
+    /// the `rationale` field — refusing to extract internal reasoning
+    /// as user memory.
     #[error(
-        "ResolvedBody::from_proactive_message called with text equal to rationale — refusing to extract internal reasoning as user memory"
+        "ProactiveMessageRef::from_payload called with text equal to rationale — refusing to extract internal reasoning as user memory"
     )]
     ProactiveRationaleMislabel,
+    /// `ProactiveMessageRef::from_payload` was called with a payload
+    /// variant other than `CapturePayload::Proactive`.
+    #[error("ProactiveMessageRef::from_payload requires CapturePayload::Proactive")]
+    ProactivePayloadMismatch,
 }
 
 /// Resolved body bytes plus their trust-boundary source.
@@ -106,24 +148,16 @@ impl<'a> ResolvedBody<'a> {
         }
     }
 
-    /// Construct from a `CapturePayload::Proactive` envelope's
-    /// **message body**. Refuses to construct if `text == rationale`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BodyResolutionError::ProactiveRationaleMislabel`] if
-    /// `text == payload.rationale`.
-    pub fn from_proactive_message(
-        text: &'a str,
-        payload: &ProactiveBodyContext<'a>,
-    ) -> Result<Self, BodyResolutionError> {
-        if text == payload.rationale {
-            return Err(BodyResolutionError::ProactiveRationaleMislabel);
-        }
-        Ok(Self {
-            text,
+    /// Construct from a verified `ProactiveMessageRef`. The reference
+    /// itself encodes the trust boundary: it can only be produced via
+    /// [`ProactiveMessageRef::from_payload`], which requires an actual
+    /// `&CapturePayload::Proactive` envelope.
+    #[must_use]
+    pub fn from_proactive_message(msg: ProactiveMessageRef<'a>) -> Self {
+        Self {
+            text: msg.text,
             source: BodySource::ProactiveMessage,
-        })
+        }
     }
 
     /// The resolved body text.
@@ -175,23 +209,36 @@ mod tests {
         assert_eq!(body.source(), BodySource::HookUtterance);
     }
 
+    fn proactive_payload(rationale: &str) -> CapturePayload {
+        CapturePayload::Proactive {
+            kind: "feedback".into(),
+            rationale: rationale.into(),
+        }
+    }
+
     #[test]
     fn from_proactive_message_accepts_distinct_text() {
-        let ctx = ProactiveBodyContext {
-            rationale: "internal-reasoning",
-        };
-        let body =
-            ResolvedBody::from_proactive_message("user-visible message", &ctx).expect("distinct");
+        let payload = proactive_payload("internal-reasoning");
+        let msg =
+            ProactiveMessageRef::from_payload("user-visible message", &payload).expect("distinct");
+        let body = ResolvedBody::from_proactive_message(msg);
         assert_eq!(body.source(), BodySource::ProactiveMessage);
     }
 
     #[test]
     fn from_proactive_message_rejects_rationale_mislabel() {
-        let ctx = ProactiveBodyContext {
-            rationale: "secret rationale",
-        };
-        let err = ResolvedBody::from_proactive_message("secret rationale", &ctx).unwrap_err();
+        let payload = proactive_payload("secret rationale");
+        let err = ProactiveMessageRef::from_payload("secret rationale", &payload).unwrap_err();
         assert_eq!(err, BodyResolutionError::ProactiveRationaleMislabel);
+    }
+
+    #[test]
+    fn from_proactive_message_rejects_non_proactive_payload() {
+        let payload = CapturePayload::Cli {
+            kind_hint: "user".into(),
+        };
+        let err = ProactiveMessageRef::from_payload("anything", &payload).unwrap_err();
+        assert_eq!(err, BodyResolutionError::ProactivePayloadMismatch);
     }
 
     #[test]

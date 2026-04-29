@@ -47,7 +47,7 @@ impl TriggerPrefilter {
     pub fn scan(&self, body: &str) -> PrefilterScan {
         let quote_spans = collect_quote_spans(body);
         let mut hits: Vec<TextSpan> = Vec::new();
-        let mut truncated = false;
+        let mut first_omitted: Option<u32> = None;
         let bytes = body.as_bytes();
         for m in self.ac.find_iter(body) {
             let start = m.start();
@@ -62,7 +62,7 @@ impl TriggerPrefilter {
                 continue;
             }
             if hits.len() >= super::super::MAX_PHRASE_WINDOWS {
-                truncated = true;
+                first_omitted = Some(u32::try_from(start).unwrap_or(u32::MAX));
                 tracing::warn!(
                     body_len = body.len(),
                     cap = super::super::MAX_PHRASE_WINDOWS,
@@ -75,7 +75,10 @@ impl TriggerPrefilter {
                 u32::try_from(end).unwrap_or(u32::MAX),
             ));
         }
-        PrefilterScan { hits, truncated }
+        PrefilterScan {
+            hits,
+            first_omitted_start: first_omitted,
+        }
     }
 }
 
@@ -84,8 +87,18 @@ impl TriggerPrefilter {
 pub struct PrefilterScan {
     /// Byte spans of accepted trigger hits in the body.
     pub hits: Vec<TextSpan>,
+    /// Byte offset where the first omitted hit began, when the scan
+    /// stopped at `MAX_PHRASE_WINDOWS`. `None` when no truncation
+    /// occurred.
+    pub first_omitted_start: Option<u32>,
+}
+
+impl PrefilterScan {
     /// True when the scan stopped at `MAX_PHRASE_WINDOWS`.
-    pub truncated: bool,
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        self.first_omitted_start.is_some()
+    }
 }
 
 /// Whether the byte offset `pos` is at a "sentence-start" position for
@@ -175,15 +188,26 @@ pub struct PhraseWindow {
     pub span: TextSpan,
 }
 
-/// Build phrase windows from prefilter hits. Each window starts at a
+/// Build phrase windows from a prefilter scan. Each window starts at a
 /// hit and runs to the next stop. Zero-length windows are dropped.
+///
+/// When `scan.first_omitted_start` is `Some`, the last materialised
+/// window's hard stop is bounded at the first-omitted hit so the window
+/// never absorbs trigger occurrences past the cap (those occurrences are
+/// represented in the LLM eligible-span tail by the dispatcher instead).
 #[must_use]
-pub fn build_phrase_windows(body: &str, hits: &[TextSpan]) -> Vec<PhraseWindow> {
+pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindow> {
     let bytes = body.as_bytes();
+    let hits = &scan.hits;
+    let truncation_hard_stop = scan.first_omitted_start.map(|s| s as usize);
     let mut windows = Vec::with_capacity(hits.len());
     for (i, hit) in hits.iter().enumerate() {
         let start = hit.start as usize;
-        let next_hit_start = hits.get(i + 1).map_or(bytes.len(), |h| h.start as usize);
+        let next_hit_start = hits
+            .get(i + 1)
+            .map(|h| h.start as usize)
+            .or(truncation_hard_stop)
+            .unwrap_or(bytes.len());
         let stop = find_window_stop(bytes, start, next_hit_start);
         if stop > start {
             windows.push(PhraseWindow {
@@ -270,7 +294,8 @@ mod tests {
         let body = "remember a; ".repeat(super::super::super::MAX_PHRASE_WINDOWS + 5);
         let pre = TriggerPrefilter::new();
         let scan = pre.scan(&body);
-        assert!(scan.truncated);
+        assert!(scan.truncated());
+        assert!(scan.first_omitted_start.is_some());
         assert_eq!(scan.hits.len(), super::super::super::MAX_PHRASE_WINDOWS);
     }
 
@@ -290,11 +315,37 @@ mod tests {
     }
 
     #[test]
+    fn truncated_scan_caps_last_window_at_first_omitted_hit() {
+        // Single sentence, no semicolons/newlines/periods, with many
+        // `remember X` clauses joined by `and` (sentence-start eligible
+        // when followed by a trigger). The cap at MAX_PHRASE_WINDOWS
+        // means hit #(MAX+1) and beyond must NOT bleed into the last
+        // window; the last window must stop before them.
+        let cap = super::super::super::MAX_PHRASE_WINDOWS;
+        let mut body = String::from("remember a");
+        for _ in 1..(cap + 5) {
+            body.push_str(" and remember b");
+        }
+        let pre = TriggerPrefilter::new();
+        let scan = pre.scan(&body);
+        assert!(scan.truncated());
+        let first_omitted = scan.first_omitted_start.expect("truncated") as usize;
+        let windows = build_phrase_windows(&body, &scan);
+        let last = windows.last().expect("at least one window");
+        assert!(
+            (last.span.end as usize) <= first_omitted,
+            "last window end {} must not extend past first-omitted hit start {}",
+            last.span.end,
+            first_omitted,
+        );
+    }
+
+    #[test]
     fn build_windows_single_hit_runs_to_eob() {
         let body = "remember that I prefer dark mode";
         let pre = TriggerPrefilter::new();
         let scan = pre.scan(body);
-        let windows = build_phrase_windows(body, &scan.hits);
+        let windows = build_phrase_windows(body, &scan);
         assert_eq!(windows.len(), 1);
         assert_eq!(
             windows[0].span,
@@ -307,7 +358,7 @@ mod tests {
         let body = "remember that thing; nothing else";
         let pre = TriggerPrefilter::new();
         let scan = pre.scan(body);
-        let windows = build_phrase_windows(body, &scan.hits);
+        let windows = build_phrase_windows(body, &scan);
         assert_eq!(windows.len(), 1);
         let s = &body[windows[0].span.start as usize..windows[0].span.end as usize];
         assert_eq!(s, "remember that thing");
@@ -318,7 +369,7 @@ mod tests {
         let body = "forget X and remember Y";
         let pre = TriggerPrefilter::new();
         let scan = pre.scan(body);
-        let windows = build_phrase_windows(body, &scan.hits);
+        let windows = build_phrase_windows(body, &scan);
         assert_eq!(windows.len(), 2);
         let w0 = &body[windows[0].span.start as usize..windows[0].span.end as usize];
         let w1 = &body[windows[1].span.start as usize..windows[1].span.end as usize];

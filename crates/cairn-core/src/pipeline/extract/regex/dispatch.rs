@@ -48,7 +48,7 @@ pub(crate) async fn dispatch(
 
     if let Some(text) = body_text {
         let scan = prefilter.scan(text);
-        let windows = build_phrase_windows(text, &scan.hits);
+        let windows = build_phrase_windows(text, &scan);
 
         let body_too_large = text.len() > MAX_BODY_LEN_FOR_REGEX;
         if body_too_large {
@@ -126,13 +126,12 @@ pub(crate) async fn dispatch(
             }
         }
 
-        if scan.truncated {
-            if let Some(last) = windows.last() {
-                let remaining_start = last.span.end;
-                let body_end = u32::try_from(text.len()).unwrap_or(u32::MAX);
-                if (remaining_start as usize) < text.len() {
-                    llm_spans.push(TextSpan::new(remaining_start, body_end));
-                }
+        if let Some(omitted_start) = scan.first_omitted_start {
+            // Tail starts at the first omitted hit so triggers past the
+            // window cap are always represented in `llm_eligible_spans`.
+            let body_end = u32::try_from(text.len()).unwrap_or(u32::MAX);
+            if omitted_start < body_end {
+                llm_spans.push(TextSpan::new(omitted_start, body_end));
             }
             if matches!(truncated, TruncationReason::None) {
                 truncated = TruncationReason::ClauseCapExceeded {

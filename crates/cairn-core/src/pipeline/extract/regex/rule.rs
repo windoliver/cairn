@@ -253,6 +253,7 @@ fn compile_user_rule(
 }
 
 /// Compile a single rule. Public so `defaults.rs` can build built-ins.
+#[allow(clippy::too_many_lines)] // straight-line per-variant arms; splitting hurts readability
 pub(crate) fn compile_rule(
     rule: &RegexRule,
     origin: RuleOrigin,
@@ -266,6 +267,18 @@ pub(crate) fn compile_rule(
             capture_group,
         } => {
             let re = compile_pattern(id, pattern)?;
+            let group = capture_group.unwrap_or(0);
+            // captures_len() includes group 0 (the whole match), so
+            // valid indices are 0..captures_len().
+            if usize::from(group) >= re.captures_len() {
+                return Err(super::super::ExtractError::InvalidRule {
+                    rule_id: id.clone(),
+                    reason: format!(
+                        "capture_group {group} out of range; pattern has {} capture group(s)",
+                        re.captures_len().saturating_sub(1),
+                    ),
+                });
+            }
             Ok(CompiledRule {
                 id: id.clone(),
                 origin,
@@ -273,7 +286,7 @@ pub(crate) fn compile_rule(
                     re,
                     kind_hint: kind_hint.clone(),
                     confidence: *confidence,
-                    capture_group: capture_group.unwrap_or(0),
+                    capture_group: group,
                 },
             })
         }
@@ -299,6 +312,26 @@ pub(crate) fn compile_rule(
                 });
             }
             let re = compile_pattern(id, pattern)?;
+            // ForgetPhrase target_group must reference an actual capture
+            // group (not group 0, which is the whole match — using that
+            // would yield a too-broad selector).
+            if *target_group == 0 {
+                return Err(super::super::ExtractError::InvalidRule {
+                    rule_id: id.clone(),
+                    reason: "target_group 0 is the whole match; specify a real capture group"
+                        .to_owned(),
+                });
+            }
+            if usize::from(*target_group) >= re.captures_len() {
+                return Err(super::super::ExtractError::InvalidRule {
+                    rule_id: id.clone(),
+                    reason: format!(
+                        "target_group {} out of range; pattern has {} capture group(s)",
+                        target_group,
+                        re.captures_len().saturating_sub(1),
+                    ),
+                });
+            }
             Ok(CompiledRule {
                 id: id.clone(),
                 origin,
@@ -489,6 +522,56 @@ mod tests {
         match err {
             super::super::super::ExtractError::InvalidRule { reason, .. } => {
                 assert!(reason.contains("quoted_capture"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn from_config_rejects_trigger_capture_group_out_of_range() {
+        // Pattern has 1 capture group (group 1); capture_group=2 is invalid.
+        let json = r#"[{
+            "type":"trigger_phrase","id":"u.cg","pattern":"^remember (.+)$",
+            "kind_hint":"user","confidence":0.5,"capture_group":2
+        }]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        let err = RuleSet::from_config(&rules).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { rule_id, reason } => {
+                assert_eq!(rule_id, "u.cg");
+                assert!(reason.contains("capture_group 2 out of range"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn from_config_rejects_forget_target_group_zero() {
+        let json = r#"[{
+            "type":"forget_phrase","id":"u.tg0","pattern":"^forget (.+)$",
+            "target_group":0,"confidence":0.5
+        }]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        let err = RuleSet::from_config(&rules).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { reason, .. } => {
+                assert!(reason.contains("whole match"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn from_config_rejects_forget_target_group_out_of_range() {
+        let json = r#"[{
+            "type":"forget_phrase","id":"u.tgoor","pattern":"^forget (.+)$",
+            "target_group":2,"confidence":0.5
+        }]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        let err = RuleSet::from_config(&rules).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { reason, .. } => {
+                assert!(reason.contains("target_group 2 out of range"));
             }
             _ => panic!("wrong error"),
         }

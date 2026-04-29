@@ -15,7 +15,7 @@ pub mod intent;
 pub mod regex;
 
 pub use body::{
-    BodyResolution, BodyResolutionError, BodySource, ProactiveBodyContext, ResolvedBody,
+    BodyResolution, BodyResolutionError, BodySource, ProactiveMessageRef, ResolvedBody,
     UserIngestPayloadKind,
 };
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
