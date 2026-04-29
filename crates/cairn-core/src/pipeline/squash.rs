@@ -663,6 +663,48 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-3 (newer loop) regression: a fully-terminated escape
+    /// sequence in the dropped prefix must NOT force the degraded
+    /// sentinel — the escape parser is back to "outside" by the
+    /// time the suffix begins, so the suffix is provably safe.
+    #[test]
+    fn oversize_bypass_terminated_escape_in_prefix_preserves_suffix() {
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        // Fully-terminated OSC 8 hyperlink (ESC \ terminator).
+        raw.push(0x1B);
+        raw.extend_from_slice(b"]8;;https://example.org/log\x1b\\");
+        raw.extend(std::iter::repeat_n(b'X', 30_000));
+        raw.extend(std::iter::repeat_n(b'Y', 30_000));
+        raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("final-line truncated"),
+            "expected final-line marker (terminated escape is safe): ...{}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        assert!(
+            body.contains("FINAL-DIAGNOSTIC-SUFFIX"),
+            "suffix preserved when prefix's escape is terminated"
+        );
+        assert!(
+            !body.contains("oversized single-line payload"),
+            "must not degrade when prefix's escape is fully terminated"
+        );
+    }
+
     /// Round-2 (newer loop) regression: when the `tail_aligned_to_line`
     /// branch hits `final_line_truncated`, the appended marker must
     /// fit alongside both a near-full head window and a near-full
@@ -768,27 +810,24 @@ mod wrapper_tests {
         );
     }
 
-    /// Round-1 (newer loop) regression: when the giant-final-line
-    /// suffix path WOULD start mid OSC/CSI sequence (because an ESC
-    /// introducer sits in the dropped prefix of the final line), the
-    /// bypass must fall back to the degraded sentinel rather than
-    /// leaking dangling URL/params bytes via a sanitizer that no
-    /// longer sees the introducer.
+    /// Round-1 (newer loop) regression, refined by Round-3: when the
+    /// kept suffix would begin INSIDE an unterminated CSI/OSC
+    /// sequence, the bypass must fall back to the degraded sentinel.
+    /// Uses an UN-terminated OSC introducer in the dropped prefix
+    /// so the escape parser is still mid-OSC at `suffix_window_start`.
+    /// (A terminated escape in the dropped prefix is now correctly
+    /// allowed to preserve the suffix — see
+    /// `oversize_bypass_terminated_escape_in_prefix_preserves_suffix`.)
     #[test]
     fn oversize_bypass_unsafe_suffix_falls_back_to_degraded_sentinel() {
-        // "head\n" + filler + OSC introducer + URL + filler so the
-        // tail window starts AFTER the introducer (window has no \n
-        // and no ESC, sanitizer would otherwise treat URL bytes as
-        // plain text). Default cfg → tail_window ≈ 16254.
         let mut raw: Vec<u8> = Vec::new();
         raw.extend_from_slice(b"head\n");
-        // 30K bytes of filler that starts with an OSC 8 hyperlink whose
-        // introducer (ESC ]) we want to be inside the DROPPED prefix.
+        // UN-terminated OSC: introducer + URL with no BEL/ST. The
+        // escape parser stays mid-OSC for the rest of the prefix,
+        // so the suffix would begin inside the open sequence.
         raw.push(0x1B);
-        raw.extend_from_slice(b"]8;;https://evil.example/payload\x1b\\");
+        raw.extend_from_slice(b"]8;;https://evil.example/payload");
         raw.extend(std::iter::repeat_n(b'X', 30_000));
-        // Then put more filler so tail window's start sits well after
-        // the introducer position.
         raw.extend(std::iter::repeat_n(b'Y', 30_000));
         raw.extend_from_slice(b"-FINAL-DIAGNOSTIC-SUFFIX");
         let raw_byte_len = raw.len();
@@ -1642,6 +1681,83 @@ mod stage1_tests {
 /// `*osc_recovery_dropped`. Audit consumers can use that counter to
 /// detect silent tail loss on truncated captures.
 #[allow(clippy::expect_used)] // invariant: only ASCII control bytes/ESC sequences removed; UTF-8 preserved
+/// Walk `prefix` with the same CSI/OSC matcher used by
+/// [`stage2_ansi_strip`] and report whether the parser is OUTSIDE any
+/// open escape sequence at the end of the slice. Used by the oversize
+/// bypass to decide whether a raw byte position is safe to begin a
+/// preserved suffix at — i.e., the suffix can't start mid CSI/OSC and
+/// thus can't leak dangling URL/params bytes if the introducer was
+/// sliced off.
+fn ends_outside_escape_sequence(prefix: &[u8]) -> bool {
+    let mut i = 0;
+    while i < prefix.len() {
+        if prefix[i] != 0x1B {
+            i += 1;
+            continue;
+        }
+        // ESC: look ahead for CSI/OSC/other.
+        if i + 1 >= prefix.len() {
+            // Lone ESC at end of prefix: parser still consuming.
+            return false;
+        }
+        match prefix[i + 1] {
+            0x5B => {
+                // CSI: params (0x30..=0x3F), intermediates (0x20..=0x2F),
+                // then a final byte (0x40..=0x7E). Must terminate
+                // INSIDE prefix for it to count as "closed before end".
+                let mut j = i + 2;
+                while j < prefix.len() && (0x30..=0x3F).contains(&prefix[j]) {
+                    j += 1;
+                }
+                while j < prefix.len() && (0x20..=0x2F).contains(&prefix[j]) {
+                    j += 1;
+                }
+                let final_present = matches!(
+                    prefix.get(j).copied(),
+                    Some(b) if (0x40..=0x7E).contains(&b)
+                );
+                if final_present {
+                    i = j + 1;
+                } else {
+                    return false;
+                }
+            }
+            0x5D => {
+                // OSC: terminate on BEL (0x07) or ST (ESC \).
+                let mut j = i + 2;
+                let mut terminated_at: Option<usize> = None;
+                while j < prefix.len() {
+                    if prefix[j] == 0x07 {
+                        terminated_at = Some(j + 1);
+                        break;
+                    }
+                    if prefix[j] == 0x1B && j + 1 < prefix.len() && prefix[j + 1] == 0x5C {
+                        terminated_at = Some(j + 2);
+                        break;
+                    }
+                    j += 1;
+                }
+                if let Some(end) = terminated_at {
+                    i = end;
+                } else {
+                    return false;
+                }
+            }
+            _ => {
+                // Two-byte / unrecognised ESC sequence: ESC + 1 byte.
+                i += 2;
+            }
+        }
+    }
+    true
+}
+
+// Stage 2 only emits whole UTF-8 codepoints from a valid `&str` input
+// (escape sequences and partial codepoints are never partially
+// surfaced). The closing `from_utf8` therefore cannot fail; allowing
+// `expect_used` here documents the invariant without weakening the
+// lib-wide deny.
+#[allow(clippy::expect_used)]
 fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mut usize) -> String {
     let bytes = input.as_bytes();
     let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -2304,6 +2420,7 @@ mod stage5_tests {
 /// head or both in tail). `reserve_trailing` reduces the effective budget
 /// by 1 byte so the entrypoint can re-append `\n` without breaching
 /// `cfg.max_bytes()`.
+#[allow(clippy::too_many_lines)] // pipeline stage; splitting hides dataflow
 fn stage6_layout(
     lines: &[String],
     pair_companion_idx: Option<usize>,
@@ -2331,8 +2448,21 @@ fn stage6_layout(
         .rposition(|l| !l.is_empty())
         .unwrap_or(lines.len() - 1);
     let mut tail_start = lines.len() - cfg.tail_lines().min(lines.len());
+    // Round-3 (newer loop) fix: when the trailing blank suffix runs
+    // longer than `tail_lines`, the previous reset to `tail_start =
+    // last_content_idx` expanded the preserved tail to span
+    // [last_content_idx, lines.len()) — i.e., the configured
+    // `tail_lines` cap was effectively bypassed and the budget got
+    // burned on a giant trailing-blank suffix, starving head
+    // preservation. Instead, SHIFT the window left just enough to
+    // anchor on `last_content_idx` while keeping its length at
+    // `tail_lines`; lines past `tail_end` are dropped (counted in
+    // accounting below).
+    let mut tail_end = lines.len();
     if tail_start > last_content_idx {
-        tail_start = last_content_idx;
+        let shift = tail_start - last_content_idx;
+        tail_start -= shift;
+        tail_end -= shift;
     }
     // If a split-form dedup pair would straddle the head/tail boundary
     // (count-companion just before tail_start, verbatim partner inside
@@ -2343,8 +2473,8 @@ fn stage6_layout(
     {
         tail_start = idx;
     }
-    let tail_take = lines.len() - tail_start;
-    let tail_slice = &lines[tail_start..];
+    let tail_take = tail_end - tail_start;
+    let tail_slice = &lines[tail_start..tail_end];
     let tail_byte_len: usize =
         tail_slice.iter().map(String::len).sum::<usize>() + tail_slice.len().saturating_sub(1);
 
@@ -2358,7 +2488,13 @@ fn stage6_layout(
     let mut dropped_bytes: usize = 0;
     let mut head_take: usize;
     let mut current_tail_start = tail_start;
-    let mut current_tail_end = lines.len();
+    let mut current_tail_end = tail_end;
+    // Trailing blank suffix past `tail_end` is excluded from the
+    // preserved output; account for it as dropped (lines + LFs).
+    for line in &lines[tail_end..] {
+        dropped_lines += 1;
+        dropped_bytes += line.len() + 1;
+    }
 
     if let Some(head_budget) = signed_head_budget {
         head_take = cfg.head_lines().min(tail_start);
@@ -2564,6 +2700,45 @@ mod stage6_tests {
         assert_eq!(
             stats.bytes_dropped_truncate, 605,
             "expected 4*150 + 4 LFs between dropped lines + 1 boundary LF = 605",
+        );
+    }
+
+    /// Round-3 (newer loop) regression: a long trailing blank-only
+    /// suffix must not expand the preserved tail past `tail_lines()`.
+    /// Pre-fix the `tail_start = last_content_idx` reset effectively
+    /// inflated the tail to span `[last_content_idx, lines.len())`,
+    /// which evicts head context and burns budget on whitespace.
+    #[test]
+    fn trailing_blank_suffix_does_not_expand_tail_past_tail_lines() {
+        // 8 content lines × 50 bytes + 200 trailing blanks force
+        // total_bytes > max_bytes so the truncation path runs. With
+        // tail_lines = 2 the preserved tail must be exactly 2 lines
+        // ending at the last content line — NOT 200+ blanks.
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let mut lines: Vec<String> = (0..8)
+            .map(|i| format!("content-{i:03}-{i:040}"))
+            .collect();
+        lines.extend(std::iter::repeat_n(String::new(), 200));
+        let mut stats = SquashStats::default();
+        let out = stage6_layout(&lines, None, false, &cfg, &mut stats);
+        // The output must contain the last content line.
+        assert!(
+            out.contains("content-007"),
+            "last content line preserved: {out:.200}"
+        );
+        // And it must NOT preserve the whole trailing-blank suffix:
+        // a 200-blank tail would mean 200 LFs after the last content
+        // line. Cap at `tail_lines + a small slack`.
+        let trailing_lfs = out.bytes().rev().take_while(|&b| b == b'\n').count();
+        assert!(
+            trailing_lfs <= cfg.tail_lines() + 1,
+            "preserved tail expanded past tail_lines: {trailing_lfs} trailing LFs"
+        );
+        // Drop accounting must include the trimmed trailing blanks.
+        assert!(
+            stats.lines_dropped_truncate >= 200 - cfg.tail_lines(),
+            "trailing blanks should count as dropped: lines_dropped={}",
+            stats.lines_dropped_truncate,
         );
     }
 
@@ -2958,12 +3133,20 @@ fn oversize_bypass(
         // can't begin mid-escape, require the dropped prefix of the
         // final line to be ESC-free; otherwise fall back to the
         // degraded sentinel.
+        // Round-3 (newer loop) refinement: previously this gate
+        // rejected ANY ESC byte in the dropped prefix, which loses
+        // recoverable diagnostics when the prefix only contains
+        // fully-terminated SGR colors. Walk the prefix with the same
+        // CSI/OSC matcher used by `stage2_ansi_strip` and only fall
+        // back to the degraded sentinel when the prefix ends INSIDE
+        // an unterminated escape sequence (so the kept suffix would
+        // begin mid-CSI / mid-OSC and leak control-plane bytes).
         let safe_to_preserve_suffix = match last_raw_nl {
             Some(nl_pos) => {
                 let final_line_start = nl_pos + 1;
                 let suffix_window_start =
                     final_line_start.max(raw_byte_len.saturating_sub(half * 2));
-                !raw_bytes[final_line_start..suffix_window_start].contains(&0x1B)
+                ends_outside_escape_sequence(&raw_bytes[final_line_start..suffix_window_start])
             }
             None => false,
         };
