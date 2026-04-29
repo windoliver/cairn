@@ -9,6 +9,7 @@ pub mod keys;
 pub mod provision;
 pub mod receipts;
 pub mod records;
+pub mod status;
 
 pub use provision::{
     ProvisionInput, ProvisioningPlan, build_provisioning_plan, mint_agent_id, mint_human_id,
@@ -21,6 +22,10 @@ pub use records::{
     FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
     PendingKeyDisableEntry, ProvisioningState, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
     RevokePendingEntry,
+};
+pub use status::{
+    BindingState, DefaultsState, IdentityStatusReport, MismatchCheckOutcome, MismatchOutcome,
+    ReconciliationReport,
 };
 
 use serde::{Deserialize, Serialize};
