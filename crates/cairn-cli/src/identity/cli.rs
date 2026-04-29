@@ -593,7 +593,13 @@ fn run_revoke(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
             Err(e) => return identity_err("revoke", &e),
         };
 
-        // Resolve signer: explicit arg, else first active agent, else self.
+        // Resolve signer: explicit arg, else first independent active agent.
+        // We deliberately do NOT fall back to self-revocation: a destructive
+        // trust-state mutation must be authorized by an independent signer
+        // (or be an explicit operator opt-in via `--signer <target>`).
+        // Self-revocation by a compromised identity would otherwise produce a
+        // valid-looking receipt and weaken the trust boundary on exactly the
+        // failure path we care about.
         let signer = if let Some(s) = signer_str {
             match Identity::parse(s.clone()) {
                 Ok(i) => i,
@@ -603,12 +609,13 @@ fn run_revoke(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
                 }
             }
         } else {
-            // Default: first active agent from registry.
             match resolve_first_active_agent(&svc).await {
-                Ok(Some(id)) => id,
-                Ok(None) => {
-                    // Fall back to self-revocation.
-                    target.clone()
+                Ok(Some(id)) if id != target => id,
+                Ok(_) => {
+                    // No independent signer available. Fail closed; operator
+                    // must pass `--signer <id>` explicitly (including the
+                    // self-revocation case `--signer <target>`).
+                    return identity_err("revoke", &IdentityServiceError::NoLiveAttributableSigner);
                 }
                 Err(e) => return identity_err("revoke", &e),
             }

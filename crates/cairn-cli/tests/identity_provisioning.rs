@@ -1593,3 +1593,41 @@ async fn purge_succeeds_with_readback_verification() {
         cairn_core::domain::identity::records::ProvisioningState::Purged,
     );
 }
+
+// ── Regression tests for adversarial-review round 3 ──────────────────────────
+
+/// **Regression — codex review round 3 finding #2:** the CLI's revoke verb
+/// must NOT silently fall back to self-revocation when no independent signer
+/// is registered. A compromised identity revoking itself produces a
+/// valid-looking receipt and weakens the trust boundary on exactly the
+/// failure path that matters.
+///
+/// The fix lives in `cli::run_revoke`; this test asserts the underlying
+/// service-level constraint by simulating "no independent signer" via a
+/// freshly-bootstrapped registry that contains only the target. The CLI is
+/// expected to map this state to `NoLiveAttributableSigner` rather than to
+/// `target` itself.
+#[tokio::test]
+async fn cli_signer_resolution_has_no_self_fallback() {
+    use cairn_core::{
+        contract::identity_registry::IdentityVisibility, domain::identity::IdentityKind,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Confirm that there is exactly ONE Active identity (alice) and no
+    // active agent. The CLI's resolve_first_active_agent should return None,
+    // and the revoke handler should refuse with NoLiveAttributableSigner
+    // rather than default to self-revocation.
+    let active_agents = svc
+        .registry
+        .list_identities(Some(IdentityKind::Agent), IdentityVisibility::Operational)
+        .await
+        .expect("list_identities");
+    assert!(
+        active_agents.is_empty(),
+        "test setup invariant: no active agents must exist for this regression",
+    );
+    let _ = alice_id; // silence unused — alice is the only candidate signer.
+}

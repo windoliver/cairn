@@ -1312,6 +1312,9 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
         let target = target.ok_or(RegistryError::NotFound)?;
 
+        // Idempotent: clearing an already-cleared flag is a successful no-op.
+        // Reserve `NotFound` for missing receipt rows; recovery code re-runs
+        // `clear_pending_*` on retry and must converge cleanly.
         let rows_changed = tx
             .execute(
                 "UPDATE identity_receipts SET pending_eviction = 0 \
@@ -1321,7 +1324,11 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         if rows_changed == 0 {
-            return Err(RegistryError::NotFound);
+            // Receipt row exists (target was Some above) but flag is already
+            // clear → idempotent success; skip the WAL write.
+            tx.commit()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            return Ok(());
         }
 
         let payload = serde_json::json!({ "receipt_id": receipt_id.0 });
@@ -1402,6 +1409,8 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
         let target = target.ok_or(RegistryError::NotFound)?;
 
+        // Idempotent: clearing an already-cleared flag is a successful no-op.
+        // See `clear_pending_eviction` for rationale.
         let rows_changed = tx
             .execute(
                 "UPDATE identity_receipts SET pending_key_disable = 0 \
@@ -1411,7 +1420,9 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         if rows_changed == 0 {
-            return Err(RegistryError::NotFound);
+            tx.commit()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            return Ok(());
         }
 
         let payload = serde_json::json!({ "receipt_id": receipt_id.0 });
