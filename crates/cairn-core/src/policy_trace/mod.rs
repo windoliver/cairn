@@ -12,6 +12,7 @@
 
 mod detail;
 mod entry;
+mod from_pipeline;
 mod gate;
 mod outcome;
 
