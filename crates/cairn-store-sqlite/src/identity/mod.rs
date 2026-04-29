@@ -96,6 +96,61 @@ impl SqliteIdentityRegistry {
     }
 }
 
+// ── Helper functions placed alongside the impl ────────────────────────────────
+
+/// Insert a row into `identities` inside an open transaction.
+///
+/// # Errors
+/// Returns [`RegistryError::Backend`] on SQL failure.
+pub(super) fn insert_identity_row(
+    tx: &rusqlite::Transaction<'_>,
+    record: &PublicIdentityRecord,
+) -> Result<(), RegistryError> {
+    let kind_str = match record.kind {
+        IdentityKind::Human => "human",
+        IdentityKind::Agent => "agent",
+        IdentityKind::Sensor => "sensor",
+    };
+    tx.execute(
+        "INSERT INTO identities \
+         (id, kind, current_key_version, provisioning_state, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            record.id.as_str(),
+            kind_str,
+            record.current_key_version.as_u32(),
+            "pending",
+            record.created_at.to_rfc3339(),
+        ],
+    )
+    .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    Ok(())
+}
+
+/// Insert a row into `identity_keys` inside an open transaction.
+///
+/// # Errors
+/// Returns [`RegistryError::Backend`] on SQL failure.
+pub(super) fn insert_identity_key_row(
+    tx: &rusqlite::Transaction<'_>,
+    key: &IdentityKeyEntry,
+) -> Result<(), RegistryError> {
+    tx.execute(
+        "INSERT INTO identity_keys \
+         (identity_id, key_version, public_key, signed_predecessor, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![
+            key.identity_id.as_str(),
+            key.key_version.as_u32(),
+            &key.public_key[..],
+            key.signed_predecessor.as_deref(),
+            key.created_at.to_rfc3339(),
+        ],
+    )
+    .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+    Ok(())
+}
+
 // ── IdentityRegistry trait implementation ────────────────────────────────────
 
 /// `#[allow(clippy::unimplemented)]` is intentional: methods marked
@@ -112,13 +167,89 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
     async fn reserve_first_identity(
         &self,
-        _vault_id: &VaultId,
-        _record: &PublicIdentityRecord,
-        _key: &IdentityKeyEntry,
-        _witness_hash: WitnessHash,
-        _binding_path: &Path,
+        vault_id: &VaultId,
+        record: &PublicIdentityRecord,
+        key: &IdentityKeyEntry,
+        witness_hash: WitnessHash,
+        binding_path: &Path,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C4")
+        use sha2::{Digest, Sha256};
+
+        // 1. Verify the binding file contents match the supplied witness hash.
+        let bytes = std::fs::read(binding_path).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        let actual_hash: [u8; 32] = Sha256::digest(&bytes).into();
+        if &actual_hash != witness_hash.as_bytes() {
+            return Err(RegistryError::WitnessMismatch);
+        }
+
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // 2. Idempotent resume: if vault_meta already exists, check for mismatch.
+        let existing: Option<(String, Vec<u8>)> = tx
+            .query_row(
+                "SELECT vault_id, witness_sha256 FROM vault_meta WHERE rowid = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+
+        if let Some((stored_id, stored_hash)) = existing {
+            let stored_arr: [u8; 32] = stored_hash
+                .as_slice()
+                .try_into()
+                .map_err(|_| RegistryError::Backend("vault_meta hash has wrong length".into()))?;
+            // If the vault_id or hash differ, this is a mismatch.
+            if stored_id != vault_id.as_str() || stored_arr != *witness_hash.as_bytes() {
+                return Err(RegistryError::FirstBindMismatch {
+                    stored: VaultId::parse(stored_id).map_err(domain_err)?,
+                    attempted: vault_id.clone(),
+                });
+            }
+            // Same vault_id — idempotent resume path.
+            // If the identity row is already present, we're done.
+            let exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM identities WHERE id = ?1",
+                    rusqlite::params![record.id.as_str()],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if exists {
+                return Ok(());
+            }
+            // vault_meta committed but identity row absent — treat as
+            // FirstBindAlreadyCommitted (rare crash window after vault_meta
+            // insert but before identity insert; caller should start fresh).
+            return Err(RegistryError::FirstBindAlreadyCommitted);
+        }
+
+        // 3. Fresh first-bind: insert vault_meta + identity + key + WAL row atomically.
+        tx.execute(
+            "INSERT INTO vault_meta \
+             (rowid, vault_id, witness_sha256, binding_path, witness_created_at) \
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                vault_id.as_str(),
+                &witness_hash.as_bytes()[..],
+                binding_path.display().to_string(),
+                record.created_at.to_rfc3339(),
+            ],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        insert_identity_row(&tx, record)?;
+        insert_identity_key_row(&tx, key)?;
+
+        let payload =
+            serde_json::to_vec(record).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "reserve_first_identity", record.id.as_str(), &payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn get_first_bind_state(
