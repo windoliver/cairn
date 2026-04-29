@@ -237,7 +237,10 @@ impl RuleSet {
     }
 }
 
-fn compile_user_rule(set: &mut RuleSet, rule: &RegexRule) -> Result<(), super::super::ExtractError> {
+fn compile_user_rule(
+    set: &mut RuleSet,
+    rule: &RegexRule,
+) -> Result<(), super::super::ExtractError> {
     let compiled = compile_rule(rule, RuleOrigin::User)?;
     match &compiled.kind {
         CompiledRuleKind::TriggerPhrase { .. } | CompiledRuleKind::ForgetPhrase { .. } => {
@@ -492,7 +495,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "enabled in Task 8"]
     fn with_user_rules_rejects_duplicate_id_against_builtin() {
         let builtin = RuleSet::builtin();
         let json = r#"[{
