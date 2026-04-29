@@ -211,6 +211,35 @@ fn tick_fails_closed_when_log_regresses_to_valid_prefix() {
 }
 
 #[test]
+fn tick_fails_closed_when_log_cursor_exceeds_db() {
+    // Round 7 hardening: a recovered envelope rowid greater than the
+    // current journal high-water mark cannot be trusted (log restored
+    // from another vault, or tampered). Honoring it would cause the
+    // next `read_since_rowid` call to skip every real DB row up to the
+    // bogus value. The materializer must fail closed.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    mirror.tick(&conn).expect("tick");
+
+    // Replace the log with a single envelope claiming rowid 999. The
+    // DB only holds rowid 1, so 999 cannot be a peer-advanced cursor.
+    let raw = mirror.read_lines().expect("read");
+    let real = serde_json::from_str::<serde_json::Value>(&raw[0]).expect("json");
+    let real_event = real.get("event").cloned().expect("event field");
+    let bogus = serde_json::json!({"rowid": 999, "event": real_event});
+    let line = format!("{bogus}\n");
+    std::fs::write(dir.path().join("consent.log"), line).expect("tamper");
+
+    let err = mirror
+        .tick(&conn)
+        .expect_err("tick must fail closed on rowid > db_high");
+    assert!(matches!(err, MirrorError::LogCorrupt));
+}
+
+#[test]
 fn tick_resets_cursor_when_log_truncated_to_empty() {
     // Truncation-to-empty is recoverable in-place: there are no
     // unparseable bytes to honor, so the materializer resets its

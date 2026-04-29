@@ -44,7 +44,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cairn_core::domain::ConsentEvent;
-use cairn_store_sqlite::consent::read_since_rowid;
+use cairn_store_sqlite::consent::{max_rowid, read_since_rowid};
 use cairn_store_sqlite::error::StoreError;
 use fs4::fs_std::FileExt;
 use rusqlite::Connection;
@@ -212,7 +212,15 @@ impl ConsentLogMaterializer {
         //   value would skip rows between the new tail and our
         //   cursor, and honoring the higher in-memory value would
         //   append past the gap. The vault must rebuild.
+        // Cap any recovered cursor at the journal's current high-water
+        // mark. A log restored from another vault (or tampered) could
+        // contain an envelope whose rowid is greater than any row in
+        // *this* DB; honoring that cursor would skip every real row up
+        // to the bogus one. We treat any rowid > max_rowid(conn) as
+        // corruption.
+        let db_high = max_rowid(conn)?;
         match recover_cursor_from_log(&self.log_path)?.cursor {
+            Some(rowid) if rowid > db_high => return Err(MirrorError::LogCorrupt),
             Some(rowid) if rowid > self.cursor => self.cursor = rowid,
             Some(rowid) if rowid == self.cursor => {}
             Some(_) => return Err(MirrorError::LogCorrupt),

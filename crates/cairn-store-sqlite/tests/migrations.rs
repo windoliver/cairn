@@ -790,6 +790,86 @@ fn consent_journal_payload_required_fields_enforced() {
 }
 
 #[test]
+fn consent_journal_payload_rejects_invalid_visibility_tier() {
+    // Round 7 hardening: scope_tier / from_tier / to_tier are
+    // `MemoryVisibility` in serde — not just any text. A direct insert
+    // with a valid shape but a bogus tier value passes the earlier
+    // text-type guards and would brick `serde_json::from_str` at
+    // mirror time.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"bogus\",\"reason_code\":\"user_command\"}}"
+    );
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-tier', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![hash, payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("required field"),
+        "bogus scope_tier must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_payload_rejects_unknown_top_level_key() {
+    // Round 7 hardening: `ConsentPayload` is `deny_unknown_fields` in
+    // serde. A direct insert with a valid shape but an unknown extra
+    // key would brick the mirror decoder.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
+          \"sneaky_extra\":\"x\"}}"
+    );
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-unknown-key', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![hash, payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("unknown top-level key"),
+        "unknown payload key must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_decision_policy_code_must_be_text_or_null() {
+    // Round 7 hardening: `policy_code` is `Option<String>` in serde —
+    // null and absent are both fine, but any other JSON type fails to
+    // decode.
+    let conn = open_in_memory().expect("open");
+    let payload = r#"{"shape":"decision","subject_code":"share_link:abcd","policy_code":7}"#;
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-pol-num', 'share_link:abcd', 'private', 'GRANT', \
+                     'usr:t', 0, 'grant', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("required field"),
+        "non-text policy_code must be rejected, got: {err}"
+    );
+}
+
+#[test]
 fn consent_journal_remains_append_only_under_0007() {
     let conn = open_in_memory().expect("open");
     conn.execute(

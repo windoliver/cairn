@@ -123,6 +123,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "consent_journal_hash_kind_subject_shape"),
     ("trigger", "consent_journal_hash_kind_target_id_hash_shape"),
     ("trigger", "consent_journal_payload_required_fields"),
+    ("trigger", "consent_journal_payload_unknown_top_level_keys"),
 ];
 
 fn hash_hex(content: &str) -> String {

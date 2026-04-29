@@ -15,7 +15,14 @@
 -- belongs in a new migration file. The verifier in `verify.rs` hashes
 -- compiled migration text against `schema_migrations.sql_hash`, so
 -- mutating 0007 would surface as `SchemaDrift` on every existing vault.
+--
+-- Each `CREATE TRIGGER` is preceded by `DROP TRIGGER IF EXISTS` so
+-- vaults that picked up an in-flight 0007 carrying the same trigger
+-- name with a weaker body will get the hardened version on upgrade.
+-- The verify-fingerprint pass after migration completes will reject
+-- any leftover divergent body.
 
+DROP TRIGGER IF EXISTS consent_journal_event_requires_actor;
 -- Event-kind rows must carry actor + payload_json. Without the actor,
 -- the mirror's `decode_event_inner` raises SchemaDrift; without a valid
 -- payload, the mirror cannot decode the row at all.
@@ -27,6 +34,7 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal event rows require actor');
 END;
 
+DROP TRIGGER IF EXISTS consent_journal_event_requires_payload;
 CREATE TRIGGER consent_journal_event_requires_payload
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -44,6 +52,7 @@ END;
 -- Gated on `kind` being in the §14 domain so the kind-domain trigger
 -- (0007) remains the canonical violation when both could fire (SQLite
 -- does not guarantee BEFORE INSERT trigger fire order).
+DROP TRIGGER IF EXISTS consent_journal_payload_shape_matches_kind;
 CREATE TRIGGER consent_journal_payload_shape_matches_kind
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -82,6 +91,7 @@ END;
 -- General body-free: every event-kind row's payload must be free of
 -- body-bearing keys at any depth (json_tree walks the decoded keys, so
 -- JSON-escaped key names like `"body"` cannot bypass the check).
+DROP TRIGGER IF EXISTS consent_journal_payload_body_free;
 CREATE TRIGGER consent_journal_payload_body_free
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -104,6 +114,7 @@ END;
 -- SQL writer could insert a `sensor_enable` row with `sensor_id IS
 -- NULL`, which `query_by_sensor` (a `sensor_id IS NOT NULL` index
 -- predicate) would silently miss.
+DROP TRIGGER IF EXISTS consent_journal_sensor_kind_requires_sensor_id;
 CREATE TRIGGER consent_journal_sensor_kind_requires_sensor_id
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -116,6 +127,7 @@ END;
 -- Sensor kinds must carry `payload.sensor_label` as a JSON text value
 -- equal to `sensor_id`. Fires on missing / non-text values too — without
 -- that branch, serde would fail to decode the row at mirror time.
+DROP TRIGGER IF EXISTS consent_journal_sensor_id_matches_payload;
 CREATE TRIGGER consent_journal_sensor_id_matches_payload
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -135,6 +147,7 @@ END;
 -- Subject body must equal the sensor identity (`snr:` + label) for
 -- sensor kinds. Together with the trigger above, the journal cannot
 -- carry a sensor row whose subject points at a different sensor.
+DROP TRIGGER IF EXISTS consent_journal_sensor_subject_matches_sensor_id;
 CREATE TRIGGER consent_journal_sensor_subject_matches_sensor_id
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -148,6 +161,7 @@ END;
 -- Non-sensor kinds must NOT carry a sensor_id. Without this, a
 -- direct-SQL writer could pin a non-sensor event to a sensor index,
 -- polluting `query_by_sensor` results.
+DROP TRIGGER IF EXISTS consent_journal_non_sensor_kind_forbids_sensor_id;
 CREATE TRIGGER consent_journal_non_sensor_kind_forbids_sensor_id
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -163,6 +177,7 @@ END;
 -- `cairn-core::domain::consent`). Accepts `sha256:` + 64 lowercase hex
 -- or `hash:` + 32..=128 lowercase hex. Note: SQLite GLOB uses `^` for
 -- negated character classes, not `!`.
+DROP TRIGGER IF EXISTS consent_journal_hash_kind_subject_shape;
 CREATE TRIGGER consent_journal_hash_kind_subject_shape
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -182,6 +197,7 @@ END;
 
 -- Hash-kind payloads MUST carry `target_id_hash` as a JSON text value
 -- of the canonical hash shape. Fires on missing or non-text values too.
+DROP TRIGGER IF EXISTS consent_journal_hash_kind_target_id_hash_shape;
 CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -208,15 +224,25 @@ END;
 
 -- Required-field invariants for every payload variant. Without these,
 -- a direct-SQL writer could ship a row whose JSON `shape` matches the
--- kind but whose required serde fields are missing — `read_since_rowid`
--- would then fail to decode the append-only row, blocking the mirror.
+-- kind but whose required serde fields are missing or malformed —
+-- `read_since_rowid` would then fail to decode the append-only row,
+-- blocking the mirror cursor permanently.
 --
 -- Required fields per shape (mirrors `cairn-core::domain::consent`):
 --   sensor_toggle    : sensor_label (covered above), reason_code
 --   policy_delta     : key, from_code, to_code
---   intent_receipt   : target_id_hash (covered above), scope_tier, reason_code
---   decision         : subject_code  (policy_code is optional)
---   promote_receipt  : target_id_hash (covered above), from_tier, to_tier, receipt_id
+--   intent_receipt   : target_id_hash (covered above),
+--                      scope_tier ∈ MemoryVisibility, reason_code
+--   decision         : subject_code,
+--                      policy_code (optional; if present must be text)
+--   promote_receipt  : target_id_hash (covered above),
+--                      from_tier ∈ MemoryVisibility,
+--                      to_tier   ∈ MemoryVisibility,
+--                      receipt_id
+--
+-- `MemoryVisibility` wire form (taxonomy.rs): private | session |
+-- project | team | org | public.
+DROP TRIGGER IF EXISTS consent_journal_payload_required_fields;
 CREATE TRIGGER consent_journal_payload_required_fields
   BEFORE INSERT ON consent_journal
   FOR EACH ROW
@@ -235,19 +261,72 @@ CREATE TRIGGER consent_journal_payload_required_fields
      OR (NEW.kind IN ('remember_intent', 'forget_intent')
            AND (
                 json_type(NEW.payload_json, '$.scope_tier') IS NOT 'text'
+             OR json_extract(NEW.payload_json, '$.scope_tier') NOT IN
+                  ('private', 'session', 'project', 'team', 'org', 'public')
              OR json_type(NEW.payload_json, '$.reason_code') IS NOT 'text'
            ))
      OR (NEW.kind IN ('grant', 'revoke')
-           AND json_type(NEW.payload_json, '$.subject_code') IS NOT 'text')
+           AND (
+                json_type(NEW.payload_json, '$.subject_code') IS NOT 'text'
+             OR (json_type(NEW.payload_json, '$.policy_code') IS NOT 'text'
+                  AND json_type(NEW.payload_json, '$.policy_code') IS NOT 'null'
+                  AND json_type(NEW.payload_json, '$.policy_code') IS NOT NULL)
+           ))
      OR (NEW.kind = 'promote_receipt'
            AND (
                 json_type(NEW.payload_json, '$.from_tier') IS NOT 'text'
+             OR json_extract(NEW.payload_json, '$.from_tier') NOT IN
+                  ('private', 'session', 'project', 'team', 'org', 'public')
              OR json_type(NEW.payload_json, '$.to_tier') IS NOT 'text'
+             OR json_extract(NEW.payload_json, '$.to_tier') NOT IN
+                  ('private', 'session', 'project', 'team', 'org', 'public')
              OR json_type(NEW.payload_json, '$.receipt_id') IS NOT 'text'
            ))
    )
 BEGIN
-  SELECT RAISE(ABORT, 'consent_journal payload missing a required field for its shape');
+  SELECT RAISE(ABORT,
+    'consent_journal payload missing or malformed required field for its shape');
+END;
+
+-- Top-level payload key allowlist. `ConsentPayload` is `deny_unknown_fields`
+-- in serde, so any extra top-level key would brick decoding. The trigger
+-- walks the immediate children of the payload object via `json_each` and
+-- rejects any key outside the union of permitted top-level field names.
+--
+-- Banned body-bearing keys (`body`, `text`, …) are deliberately excluded
+-- from this check — they are caught by `consent_journal_payload_body_free`
+-- with a more specific error message. Nested keys are out of scope here
+-- (the body-free trigger walks json_tree to catch nested banned keys;
+-- no current variant uses nested objects).
+DROP TRIGGER IF EXISTS consent_journal_payload_unknown_top_level_keys;
+CREATE TRIGGER consent_journal_payload_unknown_top_level_keys
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND json_type(NEW.payload_json) = 'object'
+   AND EXISTS (
+     SELECT 1 FROM json_each(NEW.payload_json)
+      WHERE key NOT IN (
+        'shape',
+        'sensor_label', 'reason_code',
+        'key', 'from_code', 'to_code',
+        'target_id_hash', 'scope_tier',
+        'subject_code', 'policy_code',
+        'from_tier', 'to_tier', 'receipt_id'
+      )
+        AND key NOT IN (
+        -- Caught by `consent_journal_payload_body_free` with a clearer
+        -- message; skipping here avoids ambiguous "unknown top-level
+        -- key" errors when the real issue is a body leak.
+        'body', 'text', 'content', 'raw', 'snippet', 'command',
+        'url', 'title', 'file_path', 'input',
+        'payload_text', 'user_input', 'message'
+      )
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal payload has unknown top-level key');
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
