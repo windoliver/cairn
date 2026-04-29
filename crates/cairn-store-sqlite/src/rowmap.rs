@@ -44,18 +44,25 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
     let version: i64 = row.get("version")?;
     let active: i64 = row.get("active")?;
     let tombstoned: i64 = row.get("tombstoned")?;
-    let created_at: String = row.get("created_at")?;
-    let created_by: String = row.get("created_by")?;
     let tombstoned_at: Option<String> = row.get("tombstoned_at")?;
     let tombstoned_by: Option<String> = row.get("tombstoned_by")?;
     let expired_at: Option<String> = row.get("expired_at")?;
+    let activated_at: Option<String> = row.get("activated_at")?;
+    let activated_by: Option<String> = row.get("activated_by")?;
 
-    let ts_created = Rfc3339Timestamp::parse(&created_at).ok();
-    let mut events = vec![RecordEvent {
-        kind: ChangeKind::Update,
-        at: ts_created,
-        actor: Some(ActorRef::from_string(&created_by)),
-    }];
+    // Emit an `Update` lifecycle event ONLY for versions that were
+    // actually activated. A row that was staged but never activated has
+    // `activated_at IS NULL` and contributes no Update event — staging
+    // alone is not a lifecycle change worth surfacing through
+    // `version_history`.
+    let mut events: Vec<RecordEvent> = Vec::new();
+    if let (Some(at_str), Some(by_str)) = (activated_at, activated_by) {
+        events.push(RecordEvent {
+            kind: ChangeKind::Update,
+            at: Rfc3339Timestamp::parse(&at_str).ok(),
+            actor: Some(ActorRef::from_string(&by_str)),
+        });
+    }
 
     // Emit a `Tombstone` event whenever the column is set, regardless of
     // current `active` state — historical events must not vanish when a

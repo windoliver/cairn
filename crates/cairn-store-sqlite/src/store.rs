@@ -87,18 +87,17 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 if !principal_can_read(&principal, &scope_json, &taxonomy_json) {
                     return Ok(None);
                 }
-                // Treat legacy rows whose `record_json` is NULL or
-                // unparseable as effectively missing rather than
-                // surfacing a hard error. The migration runner logs
-                // legacy rows; this keeps reads alive after upgrade.
-                if let Ok(rec) = row_to_record(row) {
-                    Ok(Some(rec))
-                } else {
-                    tracing::warn!(
-                        "get: legacy row with unreadable record_json; treating as missing"
-                    );
-                    Ok(None)
-                }
+                // `open_blocking` rejects databases with NULL
+                // `record_json` (legacy-row gate), so any failure here
+                // means a stored row's JSON is corrupt — manual edit,
+                // disk error, or schema skew. Surface it loudly rather
+                // than dropping the row, so callers can distinguish
+                // "not found" from "stored row became unreadable".
+                let rec = row_to_record(row).map_err(|e| {
+                    tracing::error!("get: corrupt record_json — failing closed: {e:?}");
+                    StoreError::Invariant("corrupt record_json: stored row is unreadable")
+                })?;
+                Ok(Some(rec))
             } else {
                 Ok(None)
             }
@@ -208,19 +207,20 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 {
                     continue;
                 }
-                // Skip rows with missing or unparseable `record_json`
-                // (e.g. legacy rows that 0009's best-effort backfill
-                // could not reconstruct into a valid `MemoryRecord`).
-                // Treat them as not-yet-migrated rather than poisoning
-                // the entire result with `StoreError::Invariant`.
+                // `open_blocking` rejects databases with NULL
+                // `record_json`. Any None or parse failure here means
+                // post-open corruption — fail closed so the caller
+                // knows the store is degraded, rather than silently
+                // dropping rows from the result.
                 let Some(json) = record_json_opt else {
-                    tracing::warn!("list: skipping row with NULL record_json (legacy/pre-0009)");
-                    continue;
+                    return Err(StoreError::Invariant(
+                        "corrupt record_json: NULL after open-time gate (corruption)",
+                    ));
                 };
-                let Ok(rec) = serde_json::from_str::<MemoryRecord>(&json) else {
-                    tracing::warn!("list: skipping row with unparseable record_json");
-                    continue;
-                };
+                let rec = serde_json::from_str::<MemoryRecord>(&json).map_err(|e| {
+                    tracing::error!("list: corrupt record_json — failing closed: {e:?}");
+                    StoreError::Invariant("corrupt record_json: stored row is unreadable")
+                })?;
                 out.push(rec);
             }
 
@@ -250,7 +250,7 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .prepare(
                     "SELECT record_id, target_id, version, active, tombstoned, \
                      created_at, created_by, tombstoned_at, tombstoned_by, expired_at, \
-                     scope, taxonomy \
+                     activated_at, activated_by, scope, taxonomy \
                      FROM records WHERE target_id = ?1 ORDER BY version ASC",
                 )
                 .map_err(store_err)?;

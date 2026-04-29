@@ -306,9 +306,26 @@ fn activate_version_impl(
         });
     }
 
+    // Mark the chosen version active and stamp the activation audit
+    // columns. `created_by` of the activated row is the trusted actor
+    // who staged the version (round-8 trust-boundary fix); we reuse it
+    // here as `activated_by` since `activate_version` does not yet
+    // carry a separate actor parameter through the trait. Future
+    // expansion can pass a distinct activation actor; for now the
+    // contract semantics ("who promoted this version to active") map
+    // cleanly to the stager.
+    let now = Rfc3339Timestamp::now();
     conn.execute(
-        "UPDATE records SET active = (CAST(version AS INTEGER) = ?2) WHERE target_id = ?1",
-        params![target_id.as_str(), version_i64],
+        "UPDATE records SET \
+             active = (CAST(version AS INTEGER) = ?2), \
+             activated_at = CASE WHEN CAST(version AS INTEGER) = ?2 THEN ?3 ELSE activated_at END, \
+             activated_by = CASE \
+                 WHEN CAST(version AS INTEGER) = ?2 \
+                 THEN COALESCE(activated_by, created_by) \
+                 ELSE activated_by \
+             END \
+         WHERE target_id = ?1",
+        params![target_id.as_str(), version_i64, now.as_str()],
     )
     .map_err(store_err)?;
 
