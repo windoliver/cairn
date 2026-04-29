@@ -116,3 +116,45 @@ register_plugin!(
     "cairn-store-sqlite",
     MANIFEST_TOML
 );
+
+/// Errors returned by [`register_runtime`].
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterRuntimeError {
+    /// Failed to open or migrate the database at `path`.
+    #[error("open store: {0}")]
+    Open(#[from] error::SqliteStoreError),
+    /// Failed to register the opened store with the plugin registry
+    /// (invalid name, manifest parse failure, version mismatch, or
+    /// duplicate registration).
+    #[error("register: {0}")]
+    Register(#[from] cairn_core::contract::registry::PluginError),
+}
+
+/// Open the `SQLite` store at `path` and register it with the host
+/// `PluginRegistry` as a live, on-disk-backed `MemoryStore`.
+///
+/// This is the **production** wiring path. The macro-generated
+/// [`register`] entry point only publishes a probe (in-memory,
+/// rejects every storage call); hosts that actually need to read or
+/// write must call this function instead, before any verb resolves
+/// the registry-bound store.
+///
+/// The plugin name is unique per registry, so callers must ensure the
+/// macro-generated [`register`] has not already run for this registry —
+/// otherwise registration fails with
+/// [`PluginError::DuplicateName`](cairn_core::contract::registry::PluginError::DuplicateName).
+///
+/// # Errors
+///
+/// Returns [`RegisterRuntimeError`] if the database cannot be opened,
+/// migrations fail, or the registry rejects the registration.
+pub async fn register_runtime(
+    reg: &mut cairn_core::contract::registry::PluginRegistry,
+    path: &std::path::Path,
+) -> Result<(), RegisterRuntimeError> {
+    let name = cairn_core::contract::registry::PluginName::new(PLUGIN_NAME)?;
+    let manifest = cairn_core::contract::manifest::PluginManifest::parse_toml(MANIFEST_TOML)?;
+    let store = SqliteMemoryStore::open(path).await?;
+    reg.register_memory_store_with_manifest(name, manifest, std::sync::Arc::new(store))?;
+    Ok(())
+}
