@@ -23,14 +23,16 @@ use cairn_core::{
         keystore::{Keystore, KeystoreError},
     },
     domain::identity::{
-        ProvisioningState,
+        Identity, IdentityKind, ProvisioningState,
         keys::{SecretHandle, VaultId},
+        provision::{ProvisionInput, build_provisioning_plan},
         records::IdentityKeyEntry,
     },
     error::identity::IdentityServiceError,
 };
 use cairn_keychain::OsKeystore;
 use cairn_store_sqlite::SqliteIdentityRegistry;
+use chrono::Utc;
 
 pub use first_bind::commit_first_identity;
 pub use status::ReconciliationReport;
@@ -161,6 +163,142 @@ impl IdentityService {
             },
             report,
         ))
+    }
+
+    /// Construct an `IdentityService` directly from its parts.
+    ///
+    /// This constructor is intentionally not part of the public production API —
+    /// it exists so that integration tests in `cairn-cli/tests/` can inject a
+    /// [`MemoryKeystore`](cairn_test_fixtures::MemoryKeystore) and an
+    /// in-memory [`SqliteIdentityRegistry`] without touching the OS keychain
+    /// or writing files.
+    ///
+    /// Prefer [`IdentityService::open`] or [`IdentityService::open_for_maintenance`]
+    /// in all non-test call sites.
+    #[doc(hidden)]
+    pub fn new_for_test(
+        vault_path: std::path::PathBuf,
+        vault_id: VaultId,
+        registry: Arc<dyn IdentityRegistry>,
+        keystore: Arc<dyn Keystore>,
+    ) -> Self {
+        Self {
+            vault_path,
+            vault_id,
+            registry,
+            keystore,
+        }
+    }
+
+    /// Provision an identity, with self-healing reconciliation (spec §3.5).
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If `vault_meta` is absent this is the **first identity**.  Build a
+    ///    [`ProvisioningPlan`](cairn_core::domain::identity::provision::ProvisioningPlan)
+    ///    and delegate to [`commit_first_identity`] which runs the full §3.7
+    ///    six-step sequence.
+    /// 2. Otherwise, for a non-first identity, sweep pending rows for
+    ///    `input.id`:
+    ///    - Key found in keystore and pubkey matches → pending was stalled
+    ///      at the activate step; call `activate_identity` and return.
+    ///    - Key absent in keystore (`NotFound`) → orphan; delete the pending
+    ///      row and continue.
+    ///    - Key found but pubkey mismatches → corrupt entry; delete pending
+    ///      row and keystore entry, continue.
+    /// 3. Check whether the identity is already `Active` (idempotent guard).
+    /// 4. Fresh provision: reserve → store keypair → activate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityServiceError`] for registry failures, keystore
+    /// failures, or vault-consistency violations.
+    pub async fn provision(
+        &self,
+        // `_kind` is accepted for API symmetry with other identity verbs, but
+        // the kind is already encoded in `input.id` / `input.kind`.
+        _kind: IdentityKind,
+        input: ProvisionInput,
+        rng: &mut impl rand_core::CryptoRngCore,
+    ) -> Result<Identity, IdentityServiceError> {
+        let target_id = input.id.clone();
+
+        // ── Step 1: check whether first-bind has happened ────────────────────
+        if self.registry.read_vault_meta().await?.is_none() {
+            // This is THE first identity; delegate to the full §3.7 sequence.
+            let plan = build_provisioning_plan(input, rng, Utc::now());
+            commit_first_identity(
+                &self.vault_path,
+                self.vault_id.clone(),
+                plan,
+                &*self.registry,
+                &*self.keystore,
+            )
+            .await?;
+            return Ok(target_id);
+        }
+
+        // ── Step 2: self-healing sweep of pending rows ────────────────────────
+        let pending_rows = self.registry.list_pending_by_identity(&target_id).await?;
+
+        for pending in pending_rows {
+            let handle = SecretHandle::for_identity(
+                self.vault_id.clone(),
+                pending.identity.clone(),
+                pending.key_version,
+            );
+            match self.keystore.load_signing_key(&handle).await {
+                Ok(sk) => {
+                    let actual_pub = sk.verifying_key().to_bytes();
+                    if actual_pub == pending.public_key {
+                        // Key is valid and matches — the activate step was the
+                        // only missing piece.  Activate now and return.
+                        self.registry
+                            .activate_identity(&pending.identity, pending.key_version)
+                            .await?;
+                        return Ok(target_id);
+                    }
+                    // Pubkey mismatch — corrupt entry; evict both sides.
+                    self.registry
+                        .delete_pending(&pending.identity, pending.key_version)
+                        .await?;
+                    // `delete_keypair` is a no-op if the handle is absent.
+                    self.keystore.delete_keypair(&handle).await?;
+                }
+                Err(KeystoreError::NotFound) => {
+                    // Orphan pending row — no key material.  Delete and continue.
+                    self.registry
+                        .delete_pending(&pending.identity, pending.key_version)
+                        .await?;
+                }
+                Err(e) => return Err(IdentityServiceError::Keystore(e)),
+            }
+        }
+
+        // ── Step 3: idempotency guard — already active? ──────────────────────
+        if let Some(row) = self
+            .registry
+            .get_identity(&target_id, IdentityVisibility::Operational)
+            .await?
+            && row.provisioning_state == ProvisioningState::Active
+        {
+            return Ok(target_id);
+        }
+
+        // ── Step 4: fresh provision ───────────────────────────────────────────
+        let plan = build_provisioning_plan(input, rng, Utc::now());
+        let plan_id = plan.identity.id.clone();
+        let plan_key_version = plan.key_entry.key_version;
+        self.registry
+            .reserve_identity(&plan.identity, &plan.key_entry)
+            .await?;
+        self.keystore
+            .store_keypair(&plan.secret_handle, &plan.signing_key)
+            .await?;
+        self.registry
+            .activate_identity(&plan_id, plan_key_version)
+            .await?;
+        Ok(target_id)
     }
 
     /// Open in maintenance mode.

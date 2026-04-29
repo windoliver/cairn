@@ -320,3 +320,177 @@ async fn first_bind_full_path_lands_active_identity() {
 // Note: a "lock-busy" test is omitted intentionally — it would block for up to
 // 30 seconds waiting for VaultBindingLock::acquire to time out, making the test
 // suite unacceptably slow. The lock machinery is unit-tested in lock.rs instead.
+
+// ── D4 helpers ────────────────────────────────────────────────────────────────
+
+/// Seed a vault with first-bind already committed, then return an
+/// `IdentityService` wired to the same registry + a fresh `MemoryKeystore`.
+///
+/// The first-bind identity is `hmn:system:v1` so it does not collide with
+/// the target identity under test.  The `vault_id` is written to
+/// `<dir>/.cairn/vault.id` so that `commit_first_identity` can write the
+/// binding sentinel file if needed by any code path.
+async fn setup_service_after_first_bind(
+    dir: &tempfile::TempDir,
+) -> (cairn_cli::identity::IdentityService, VaultId) {
+    use cairn_test_fixtures::MemoryKeystore;
+    use std::sync::Arc;
+
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+
+    // Run first-bind for a "system" seed identity so vault_meta is present.
+    let vault_id = VaultId::mint();
+    let sys_id = Identity::parse("hmn:system:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let keystore = MemoryKeystore::new();
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind for system identity");
+
+    // Write vault.id so any file-based checks pass.
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id.clone(),
+        Arc::new(registry),
+        Arc::new(keystore),
+    );
+    (svc, vault_id)
+}
+
+// ── D4 tests ──────────────────────────────────────────────────────────────────
+
+/// `provision` must self-heal an orphan pending row (pending row exists but
+/// the keypair was never stored in the keystore) and land the identity in
+/// `Active` state.
+///
+/// Simulates a crash between `reserve_identity` and `store_keypair`.
+#[tokio::test]
+async fn provision_self_heals_pending_orphan() {
+    use cairn_test_fixtures::MemoryKeystore;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+    let vault_id = VaultId::mint();
+    let keystore = MemoryKeystore::new();
+
+    // Seed vault_meta with first-bind for a system identity.
+    let sys_id = Identity::parse("hmn:system:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind for system identity");
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    // Manually insert an orphan pending row for the target identity — no
+    // keypair is stored in the keystore, simulating a mid-provisioning crash.
+    let target_id = Identity::parse("hmn:bob:v1").expect("valid");
+    let (orphan_record, orphan_key) = make_record_and_key(&target_id);
+    registry
+        .reserve_identity(&orphan_record, &orphan_key)
+        .await
+        .expect("reserve orphan pending row");
+    // Deliberately do NOT store the keypair → keystore has no entry for
+    // `hmn:bob:v1`, so the pending row is an orphan.
+
+    // Now call provision — it must detect the orphan, delete it, and
+    // provision fresh, leaving the identity in Active state.
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id,
+        Arc::new(registry),
+        Arc::new(keystore),
+    );
+    let bob_input = ProvisionInput {
+        vault_id: svc.vault_id.clone(),
+        id: target_id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, bob_input, &mut rand_core::OsRng)
+        .await
+        .expect("provision must succeed after self-healing the orphan");
+
+    let row = svc
+        .registry
+        .get_identity(
+            &target_id,
+            cairn_core::contract::identity_registry::IdentityVisibility::Operational,
+        )
+        .await
+        .expect("get_identity")
+        .expect("identity must be visible after provision");
+    assert_eq!(
+        row.provisioning_state,
+        ProvisioningState::Active,
+        "identity must be Active after self-healing provision",
+    );
+}
+
+/// `provision` on a fully clean vault (first-bind already done) must land a
+/// fresh human identity in `Active` state.
+#[tokio::test]
+async fn provision_fresh_human_identity_lands_active() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, vault_id) = setup_service_after_first_bind(&dir).await;
+
+    let alice_id = Identity::parse("hmn:alice:v1").expect("valid");
+    let alice_input = ProvisionInput {
+        vault_id,
+        id: alice_id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+
+    svc.provision(IdentityKind::Human, alice_input, &mut rand_core::OsRng)
+        .await
+        .expect("provision must succeed for a fresh human identity");
+
+    let row = svc
+        .registry
+        .get_identity(
+            &alice_id,
+            cairn_core::contract::identity_registry::IdentityVisibility::Operational,
+        )
+        .await
+        .expect("get_identity")
+        .expect("alice must be visible after provision");
+    assert_eq!(
+        row.provisioning_state,
+        ProvisioningState::Active,
+        "fresh provisioned identity must be Active",
+    );
+}
