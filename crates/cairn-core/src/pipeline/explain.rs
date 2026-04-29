@@ -16,7 +16,10 @@ pub struct Candidate {
     pub target_id: TargetId,
     /// How many days old the record is.
     pub age_days: u32,
-    /// Relevance score from the ranking stage.
+    /// Relevance score from the ranker; higher wins dedup.
+    /// NaN scores never win — the implementation uses `>` so any
+    /// non-NaN candidate beats a NaN one, and the first non-NaN
+    /// candidate per `content_hash` is preferred.
     pub relevance_score: f32,
     /// Content hash used for deduplication.
     pub content_hash: String,
@@ -28,8 +31,12 @@ pub struct ExplainConfig {
     /// Candidates older than this are excluded as `ReadFilterStaleness`.
     pub staleness_threshold_days: u32,
     /// Number of recent records to consult for dedup-window comparison.
-    /// Reserved for future windowing semantics; dedup is currently global
-    /// across the post-staleness candidate set.
+    ///
+    /// **Reserved.** The current implementation deduplicates globally
+    /// across the post-staleness candidate set and ignores this value.
+    /// A future windowing-aware implementation will respect it. Pass
+    /// any value (e.g. `usize::MAX`) until then; the field exists so
+    /// the wire shape is stable when windowing lands.
     pub dedup_window: usize,
 }
 
