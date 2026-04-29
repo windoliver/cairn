@@ -11,7 +11,9 @@ use cairn_core::domain::identity::{
     Identity, IdentityKind,
     keys::{IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash},
     receipts::{ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt},
-    records::{FirstBindState, IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId},
+    records::{
+        FirstBindState, IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId,
+    },
 };
 use cairn_store_sqlite::SqliteIdentityRegistry;
 
@@ -1028,7 +1030,10 @@ async fn list_pending_key_disables_returns_revocation_in_flight() {
     assert_eq!(pending.len(), 1, "one pending_key_disable in-flight");
     assert_eq!(pending[0].identity, alice);
     // retained_versions for an unrevoked identity is the active key.
-    assert!(!pending[0].retained_versions.is_empty(), "retained_versions must be non-empty");
+    assert!(
+        !pending[0].retained_versions.is_empty(),
+        "retained_versions must be non-empty"
+    );
 }
 
 // ── C10 · get_first_bind_state ────────────────────────────────────────────────
@@ -1252,7 +1257,10 @@ async fn receipt_fk_phantom_key_version_rejected() {
             || matches!(
                 err,
                 rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error { code: rusqlite::ErrorCode::ConstraintViolation, .. },
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ErrorCode::ConstraintViolation,
+                        ..
+                    },
                     _
                 )
             ),

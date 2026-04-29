@@ -401,10 +401,8 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .optional()
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
-        let (kv_u32_k, pk_bytes, signed_pred, key_created_str, key_superseded_str) =
-            key_row.ok_or_else(|| {
-                RegistryError::Backend("first-bind identity has no key row".into())
-            })?;
+        let (kv_u32_k, pk_bytes, signed_pred, key_created_str, key_superseded_str) = key_row
+            .ok_or_else(|| RegistryError::Backend("first-bind identity has no key row".into()))?;
 
         let key = first_bind_key(
             identity,
@@ -1366,10 +1364,7 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         Ok(result)
     }
 
-    async fn clear_pending_key_disable(
-        &self,
-        receipt_id: &ReceiptId,
-    ) -> Result<(), RegistryError> {
+    async fn clear_pending_key_disable(&self, receipt_id: &ReceiptId) -> Result<(), RegistryError> {
         let mut conn = self.conn.lock();
         let tx = conn
             .transaction()
@@ -1459,9 +1454,8 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
             let mut retained_versions = Vec::with_capacity(kv_rows.len());
             for v in kv_rows {
-                let nz = std::num::NonZeroU32::new(v).ok_or_else(|| {
-                    RegistryError::Backend("key_version is 0".into())
-                })?;
+                let nz = std::num::NonZeroU32::new(v)
+                    .ok_or_else(|| RegistryError::Backend("key_version is 0".into()))?;
                 retained_versions.push(KeyVersion::new(nz));
             }
 
