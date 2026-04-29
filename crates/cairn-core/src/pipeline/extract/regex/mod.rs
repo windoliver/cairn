@@ -2,6 +2,7 @@
 //! `ExtractorWorker`. See spec §6.
 
 pub mod defaults;
+pub(crate) mod dispatch;
 pub mod prefilter;
 pub mod rule;
 

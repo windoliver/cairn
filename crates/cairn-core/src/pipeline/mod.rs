@@ -15,5 +15,5 @@
 //! - §14 Privacy and Consent (pre-persist redaction, deny-by-default,
 //!   per-sensor opt-in, append-only audit)
 
-pub mod filter;
 pub mod extract;
+pub mod filter;

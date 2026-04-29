@@ -121,6 +121,13 @@ pub enum TruncationReason {
         /// Body length in bytes.
         body_len: u32,
     },
+    /// Hit the per-body phrase-window cap (`MAX_PHRASE_WINDOWS`).
+    ClauseCapExceeded {
+        /// How many windows were processed before the cap.
+        processed: u8,
+        /// Total body length in bytes.
+        body_len: u32,
+    },
 }
 
 /// Result envelope returned by `ExtractorWorker::extract`.
@@ -223,6 +230,10 @@ mod mod_tests {
             TruncationReason::MaxDrafts,
             TruncationReason::MaxWallMs { elapsed_ms: 5 },
             TruncationReason::BodyTooLarge { body_len: 65_537 },
+            TruncationReason::ClauseCapExceeded {
+                processed: 64,
+                body_len: 1024,
+            },
         ];
         for reason in cases {
             let json = serde_json::to_string(&reason).unwrap();

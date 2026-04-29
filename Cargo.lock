@@ -264,6 +264,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "tracing",
  "tracing-test",
  "unicode-normalization",
 ]
