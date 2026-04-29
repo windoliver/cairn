@@ -95,3 +95,43 @@ fn status_advertises_policy_trace_capability() {
         "status must advertise cairn.mcp.v1.policy_trace; got {strs:?}"
     );
 }
+
+#[test]
+fn search_default_response_omits_excluded_field() {
+    use cairn_core::generated::verbs::search::SearchData;
+
+    // Construct a SearchData without `excluded` (the explain=false path
+    // never populates it). Serialized JSON must not contain the
+    // "excluded" key — the IDL marks it Option<...> with
+    // skip_serializing_if = "Option::is_none".
+    let data = SearchData { excluded: None, hits: Vec::new(), next_cursor: None };
+    let json = serde_json::to_string(&data).expect("serializable");
+    assert!(
+        !json.contains("\"excluded\""),
+        "default SearchData must not emit excluded field; got {json}"
+    );
+}
+
+#[test]
+fn search_with_excluded_emits_field() {
+    use cairn_core::generated::common::{RecordExclusion, RecordExclusionGate, Ulid};
+    use cairn_core::generated::verbs::search::SearchData;
+
+    // Sanity check the inverse: when explain=true populates excluded,
+    // the JSON does carry the field. This guards against a future
+    // serde annotation accidentally hiding the field permanently.
+    let data = SearchData {
+        excluded: Some(vec![RecordExclusion {
+            target_id: Ulid("01HQZX9F5N0000000000000000".to_owned()),
+            gate: RecordExclusionGate::ReadFilterStaleness,
+            detail: String::new(),
+        }]),
+        hits: Vec::new(),
+        next_cursor: None,
+    };
+    let json = serde_json::to_string(&data).expect("serializable");
+    assert!(
+        json.contains("\"excluded\""),
+        "excluded must appear when set; got {json}"
+    );
+}
