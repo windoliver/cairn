@@ -55,6 +55,7 @@ cairn-sensors-local = { path = "crates/cairn-sensors-local", version = "0.0.1" }
 cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
 cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
+cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -224,6 +224,7 @@ dependencies = [
  "cairn-core",
  "cairn-idl",
  "cairn-mcp",
+ "cairn-sdk",
  "cairn-sensors-local",
  "cairn-store-sqlite",
  "cairn-test-fixtures",
@@ -295,6 +296,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "cairn-sdk"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "cairn-core",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ulid",
 ]
 
 [[package]]

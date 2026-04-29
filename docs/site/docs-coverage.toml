@@ -18,6 +18,11 @@ audience = "integration-author"
 page = "usage/mcp.md"
 generated_reference = "reference/generated/mcp-tools.md"
 
+[packages.cairn-sdk]
+audience = "sdk-author"
+page = "reference/rust-api.md"
+generated_reference = ""
+
 [packages.cairn-sensors-local]
 audience = "operator"
 page = "usage/plugins.md"
