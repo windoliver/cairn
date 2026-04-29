@@ -66,7 +66,10 @@ use super::{
 /// Returns [`IdentityServiceError::IdentityLockBusy`] if another operation
 /// holds the per-identity lock, or [`IdentityServiceError::Registry`] /
 /// [`IdentityServiceError::Keystore`] on backend failures.
-#[allow(clippy::too_many_lines, reason = "sequential steps of the §3.10 spec algorithm")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "sequential steps of the §3.10 spec algorithm"
+)]
 pub(super) async fn repair(
     svc: &IdentityService,
     id: &Identity,

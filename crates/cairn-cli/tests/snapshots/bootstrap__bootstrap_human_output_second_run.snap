@@ -3,6 +3,7 @@ source: crates/cairn-cli/tests/bootstrap.rs
 expression: normalized
 ---
 cairn bootstrap: vault already initialized at <vault>
+  vault.id  <vault-id>
   config    <vault>/.cairn/config.yaml  [existing]
   db        <vault>/.cairn/cairn.db  (created on first ingest)
   dirs      0 created, 19 existing
