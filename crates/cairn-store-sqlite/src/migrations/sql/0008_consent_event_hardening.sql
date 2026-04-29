@@ -329,6 +329,63 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload has unknown top-level key');
 END;
 
+-- Reject duplicate top-level payload keys. SQLite's `json_each`
+-- enumerates duplicates separately and `json_extract` returns the first
+-- value, so a payload like `{"shape":"intent_receipt","shape":"x"}`
+-- previously passed the shape and allowlist triggers. Serde rejects
+-- duplicate fields at decode time, so the row would brick the mirror
+-- on replay.
+DROP TRIGGER IF EXISTS consent_journal_payload_no_duplicate_keys;
+CREATE TRIGGER consent_journal_payload_no_duplicate_keys
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND json_type(NEW.payload_json) = 'object'
+   AND EXISTS (
+     SELECT 1 FROM json_each(NEW.payload_json)
+      GROUP BY key
+     HAVING count(*) > 1
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal payload has duplicate top-level keys');
+END;
+
+-- Top-level `subject` domain checks for non-hash, non-sensor kinds.
+-- Hash-kind subjects are checked by `consent_journal_hash_kind_subject_shape`;
+-- sensor-kind subjects by `consent_journal_sensor_subject_matches_sensor_id`.
+-- This trigger covers `policy_change` (dotted-key shape) and grant/revoke
+-- (subject_code shape), mirroring the Rust validators.
+--
+-- Patterns:
+--   policy_change: length 1..=128, chars in [a-z0-9_.-]
+--   grant/revoke : length 1..=128, first char [a-z], chars in [a-z0-9._:-]
+DROP TRIGGER IF EXISTS consent_journal_subject_domain_for_non_hash_kinds;
+CREATE TRIGGER consent_journal_subject_domain_for_non_hash_kinds
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.subject IS NOT NULL
+   AND (
+        (NEW.kind = 'policy_change'
+           AND (
+                length(NEW.subject) < 1
+             OR length(NEW.subject) > 128
+             OR NEW.subject GLOB '*[^a-z0-9._-]*'
+           ))
+     OR (NEW.kind IN ('grant', 'revoke')
+           AND (
+                length(NEW.subject) < 1
+             OR length(NEW.subject) > 128
+             OR NEW.subject GLOB '*[^a-z0-9._:-]*'
+             OR substr(NEW.subject, 1, 1) NOT GLOB '[a-z]'
+           ))
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal subject out of domain class for its kind');
+END;
+
 -- Reject `rowid <= 0` for event rows. The mirror cursor model reads
 -- `rowid > cursor` starting at 0; a row at rowid 0 or negative would
 -- never be replayed. SQLite normally auto-assigns positive rowids, but
@@ -418,9 +475,10 @@ CREATE TRIGGER consent_journal_payload_scalar_domains
      OR (NEW.kind = 'policy_change'
            AND (
                 (json_type(NEW.payload_json, '$.key') = 'text'
-                  AND (length(json_extract(NEW.payload_json, '$.key')) > 128
+                  AND (length(json_extract(NEW.payload_json, '$.key')) < 1
+                       OR length(json_extract(NEW.payload_json, '$.key')) > 128
                        OR json_extract(NEW.payload_json, '$.key')
-                            GLOB '*[^a-z0-9_.\-]*'))
+                            GLOB '*[^a-z0-9_.-]*'))
              OR (json_type(NEW.payload_json, '$.from_code') = 'text'
                   AND (length(json_extract(NEW.payload_json, '$.from_code')) > 64
                        OR json_extract(NEW.payload_json, '$.from_code')
@@ -439,13 +497,13 @@ CREATE TRIGGER consent_journal_payload_scalar_domains
                 (json_type(NEW.payload_json, '$.subject_code') = 'text'
                   AND (length(json_extract(NEW.payload_json, '$.subject_code')) > 128
                        OR json_extract(NEW.payload_json, '$.subject_code')
-                            GLOB '*[^a-z0-9._:\-]*'
+                            GLOB '*[^a-z0-9._:-]*'
                        OR substr(json_extract(NEW.payload_json, '$.subject_code'), 1, 1)
                             NOT GLOB '[a-z]'))
              OR (json_type(NEW.payload_json, '$.policy_code') = 'text'
                   AND (length(json_extract(NEW.payload_json, '$.policy_code')) > 128
                        OR json_extract(NEW.payload_json, '$.policy_code')
-                            GLOB '*[^a-z0-9._:\-]*'
+                            GLOB '*[^a-z0-9._:-]*'
                        OR substr(json_extract(NEW.payload_json, '$.policy_code'), 1, 1)
                             NOT GLOB '[a-z]'))
            ))
@@ -455,7 +513,7 @@ CREATE TRIGGER consent_journal_payload_scalar_domains
                 length(json_extract(NEW.payload_json, '$.receipt_id')) > 128
              OR length(json_extract(NEW.payload_json, '$.receipt_id')) < 1
              OR json_extract(NEW.payload_json, '$.receipt_id')
-                  GLOB '*[^A-Za-z0-9._:\-]*'
+                  GLOB '*[^A-Za-z0-9._:-]*'
            ))
    )
 BEGIN

@@ -127,6 +127,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "consent_journal_event_requires_positive_rowid"),
     ("trigger", "consent_journal_payload_keys_match_shape"),
     ("trigger", "consent_journal_payload_scalar_domains"),
+    ("trigger", "consent_journal_payload_no_duplicate_keys"),
+    (
+        "trigger",
+        "consent_journal_subject_domain_for_non_hash_kinds",
+    ),
 ];
 
 fn hash_hex(content: &str) -> String {

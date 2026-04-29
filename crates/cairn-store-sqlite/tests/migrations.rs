@@ -959,6 +959,78 @@ fn consent_journal_payload_rejects_smuggled_reason_code() {
 }
 
 #[test]
+fn consent_journal_payload_rejects_duplicate_top_level_keys() {
+    // Round 9 hardening: SQLite `json_extract` returns the first
+    // matching value, but serde rejects duplicate fields. A direct-SQL
+    // payload with duplicate `reason_code` would brick the mirror.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
+          \"reason_code\":\"another_one\"}}"
+    );
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-dup', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![hash, payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("duplicate top-level keys"),
+        "duplicate keys must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_subject_domain_enforced_for_non_hash_kinds() {
+    // Round 9 hardening: top-level subject for policy_change / grant /
+    // revoke must match the same closed character class the Rust
+    // validator enforces. Without this, raw user text could ride
+    // through `subject` into consent.log.
+    let conn = open_in_memory().expect("open");
+    // grant subject with spaces / uppercase / leak.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-grant-leak', 'please share secret token ABC123', \
+                     'private', 'GRANT', 'usr:t', 0, 'grant', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"decision\",\"subject_code\":\"share_link:abcd\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("subject out of domain class"),
+        "free-text grant subject must be rejected, got: {err}"
+    );
+    // policy_change subject empty.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-policy-empty', '', \
+                     'global', 'GRANT', 'usr:t', 0, 'policy_change', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"policy_delta\",\"key\":\"sensors.x\",\
+                       \"from_code\":\"a\",\"to_code\":\"b\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("subject out of domain class"),
+        "empty policy_change subject must be rejected, got: {err}"
+    );
+}
+
+#[test]
 fn consent_journal_remains_append_only_under_0007() {
     let conn = open_in_memory().expect("open");
     conn.execute(
