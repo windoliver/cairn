@@ -840,9 +840,12 @@ fn consent_journal_payload_rejects_unknown_top_level_key() {
             params![hash, payload],
         )
         .unwrap_err();
+    let msg = format!("{err}");
+    // Either unknown_top_level_keys or keys_match_shape trigger fires
+    // first (SQLite trigger order is undefined). Both reject the row.
     assert!(
-        format!("{err}").contains("unknown top-level key"),
-        "unknown payload key must be rejected, got: {err}"
+        msg.contains("unknown top-level key") || msg.contains("not allowed for its shape"),
+        "unknown payload key must be rejected, got: {msg}"
     );
 }
 
@@ -866,6 +869,92 @@ fn consent_journal_decision_policy_code_must_be_text_or_null() {
     assert!(
         format!("{err}").contains("required field"),
         "non-text policy_code must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_event_rejects_nonpositive_rowid() {
+    // Round 8 hardening: SQLite normally auto-assigns positive rowids,
+    // but a direct-SQL writer can set them explicitly. The mirror cursor
+    // model reads `rowid > cursor` starting at 0, so rowid 0 or negative
+    // would be a permanent audit gap.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}}"
+    );
+    for bad in [0i64, -1] {
+        let err = conn
+            .execute(
+                "INSERT INTO consent_journal \
+                  (rowid, consent_id, subject, scope, decision, granted_by, decided_at, \
+                   kind, actor, decided_at_iso, payload_json) \
+                 VALUES (?, ?, ?, 'private', 'GRANT', 'usr:t', 0, \
+                         'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+                params![bad, format!("c-rowid-{bad}"), hash, payload],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("require positive rowid"),
+            "rowid={bad} must be rejected, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn consent_journal_payload_rejects_cross_variant_key() {
+    // Round 8 hardening: even though `receipt_id` is allowed for
+    // promote_receipt, it is NOT allowed for intent_receipt. The earlier
+    // union allowlist let it through; the per-shape trigger rejects it.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
+          \"receipt_id\":\"rcpt-xx\"}}"
+    );
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-cross-key', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![hash, payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("not allowed for its shape"),
+        "cross-variant key must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_payload_rejects_smuggled_reason_code() {
+    // Round 8 hardening: reason_code must be a closed lower-snake class,
+    // not arbitrary user text. `please forget secret token` would slip
+    // through into consent.log otherwise.
+    let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload = format!(
+        "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\
+          \"scope_tier\":\"private\",\
+          \"reason_code\":\"please forget secret token ABC123\"}}"
+    );
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-reason', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            params![hash, payload],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("scalar out of domain class"),
+        "free-text reason_code must be rejected, got: {err}"
     );
 }
 

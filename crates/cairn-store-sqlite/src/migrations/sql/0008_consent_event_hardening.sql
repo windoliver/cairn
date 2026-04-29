@@ -329,5 +329,138 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload has unknown top-level key');
 END;
 
+-- Reject `rowid <= 0` for event rows. The mirror cursor model reads
+-- `rowid > cursor` starting at 0; a row at rowid 0 or negative would
+-- never be replayed. SQLite normally auto-assigns positive rowids, but
+-- a direct-SQL writer can set them explicitly. We use AFTER INSERT so
+-- `NEW.rowid` is the post-assignment value (BEFORE INSERT may see the
+-- pre-resolution placeholder for auto-rowid inserts).
+DROP TRIGGER IF EXISTS consent_journal_event_requires_positive_rowid;
+CREATE TRIGGER consent_journal_event_requires_positive_rowid
+  AFTER INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL AND NEW.rowid <= 0
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal event rows require positive rowid');
+END;
+
+-- Per-shape allowed-key enforcement. The earlier `unknown_top_level_keys`
+-- trigger uses the union of all variant fields, so an `intent_receipt`
+-- with an extra `receipt_id` (allowed for `promote_receipt`) sneaks past.
+-- This trigger rejects every key not in the *exact* allowlist for the
+-- active shape, mirroring serde `deny_unknown_fields` per variant.
+DROP TRIGGER IF EXISTS consent_journal_payload_keys_match_shape;
+CREATE TRIGGER consent_journal_payload_keys_match_shape
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND json_type(NEW.payload_json) = 'object'
+   AND json_type(NEW.payload_json, '$.shape') = 'text'
+   AND EXISTS (
+     SELECT 1 FROM json_each(NEW.payload_json) AS j
+      WHERE j.key NOT IN (
+        'body', 'text', 'content', 'raw', 'snippet', 'command',
+        'url', 'title', 'file_path', 'input',
+        'payload_text', 'user_input', 'message'
+      )
+        AND NOT (
+          (json_extract(NEW.payload_json, '$.shape') = 'sensor_toggle'
+             AND j.key IN ('shape', 'sensor_label', 'reason_code'))
+       OR (json_extract(NEW.payload_json, '$.shape') = 'policy_delta'
+             AND j.key IN ('shape', 'key', 'from_code', 'to_code'))
+       OR (json_extract(NEW.payload_json, '$.shape') = 'intent_receipt'
+             AND j.key IN ('shape', 'target_id_hash', 'scope_tier', 'reason_code'))
+       OR (json_extract(NEW.payload_json, '$.shape') = 'decision'
+             AND j.key IN ('shape', 'subject_code', 'policy_code'))
+       OR (json_extract(NEW.payload_json, '$.shape') = 'promote_receipt'
+             AND j.key IN ('shape', 'target_id_hash', 'from_tier', 'to_tier', 'receipt_id'))
+        )
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal payload key not allowed for its shape');
+END;
+
+-- Scalar domain checks for reason_code / key / from_code / to_code /
+-- subject_code / policy_code / receipt_id. Mirrors the closed-class +
+-- length-bounded validators in `cairn-core::domain::consent`. Without
+-- these, a direct-SQL writer can smuggle long, mixed-case, or whitespace
+-- text into an allowed key.
+--
+-- Patterns enforced (matches the Rust validators):
+--   reason_code  : length 1..=64, first char [a-z], chars in [a-z0-9_-]
+--   from_code/to_code: same shape as reason_code
+--   key          : length 1..=128, chars in [a-z0-9_.-]
+--   subject_code : length 1..=128, first char [a-z], chars in [a-z0-9._:-]
+--   policy_code  : same shape as subject_code (when present + text)
+--   receipt_id   : length 1..=128, chars in [A-Za-z0-9._:-]
+DROP TRIGGER IF EXISTS consent_journal_payload_scalar_domains;
+CREATE TRIGGER consent_journal_payload_scalar_domains
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND (
+        -- reason_code (sensor + intent kinds): closed lower-snake class.
+        (NEW.kind IN ('sensor_enable', 'sensor_disable',
+                      'remember_intent', 'forget_intent')
+           AND json_type(NEW.payload_json, '$.reason_code') = 'text'
+           AND (
+                length(json_extract(NEW.payload_json, '$.reason_code')) > 64
+             OR length(json_extract(NEW.payload_json, '$.reason_code')) < 1
+             OR json_extract(NEW.payload_json, '$.reason_code')
+                  GLOB '*[^a-z0-9_-]*'
+             OR substr(json_extract(NEW.payload_json, '$.reason_code'), 1, 1)
+                  NOT GLOB '[a-z]'
+           ))
+     OR (NEW.kind = 'policy_change'
+           AND (
+                (json_type(NEW.payload_json, '$.key') = 'text'
+                  AND (length(json_extract(NEW.payload_json, '$.key')) > 128
+                       OR json_extract(NEW.payload_json, '$.key')
+                            GLOB '*[^a-z0-9_.\-]*'))
+             OR (json_type(NEW.payload_json, '$.from_code') = 'text'
+                  AND (length(json_extract(NEW.payload_json, '$.from_code')) > 64
+                       OR json_extract(NEW.payload_json, '$.from_code')
+                            GLOB '*[^a-z0-9_-]*'
+                       OR substr(json_extract(NEW.payload_json, '$.from_code'), 1, 1)
+                            NOT GLOB '[a-z]'))
+             OR (json_type(NEW.payload_json, '$.to_code') = 'text'
+                  AND (length(json_extract(NEW.payload_json, '$.to_code')) > 64
+                       OR json_extract(NEW.payload_json, '$.to_code')
+                            GLOB '*[^a-z0-9_-]*'
+                       OR substr(json_extract(NEW.payload_json, '$.to_code'), 1, 1)
+                            NOT GLOB '[a-z]'))
+           ))
+     OR (NEW.kind IN ('grant', 'revoke')
+           AND (
+                (json_type(NEW.payload_json, '$.subject_code') = 'text'
+                  AND (length(json_extract(NEW.payload_json, '$.subject_code')) > 128
+                       OR json_extract(NEW.payload_json, '$.subject_code')
+                            GLOB '*[^a-z0-9._:\-]*'
+                       OR substr(json_extract(NEW.payload_json, '$.subject_code'), 1, 1)
+                            NOT GLOB '[a-z]'))
+             OR (json_type(NEW.payload_json, '$.policy_code') = 'text'
+                  AND (length(json_extract(NEW.payload_json, '$.policy_code')) > 128
+                       OR json_extract(NEW.payload_json, '$.policy_code')
+                            GLOB '*[^a-z0-9._:\-]*'
+                       OR substr(json_extract(NEW.payload_json, '$.policy_code'), 1, 1)
+                            NOT GLOB '[a-z]'))
+           ))
+     OR (NEW.kind = 'promote_receipt'
+           AND json_type(NEW.payload_json, '$.receipt_id') = 'text'
+           AND (
+                length(json_extract(NEW.payload_json, '$.receipt_id')) > 128
+             OR length(json_extract(NEW.payload_json, '$.receipt_id')) < 1
+             OR json_extract(NEW.payload_json, '$.receipt_id')
+                  GLOB '*[^A-Za-z0-9._:\-]*'
+           ))
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal payload scalar out of domain class');
+END;
+
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (8, '0008_consent_event_hardening', '', strftime('%s','now') * 1000);
