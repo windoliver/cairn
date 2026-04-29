@@ -289,6 +289,41 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
 }
 
 #[tokio::test]
+async fn concurrent_resolve_or_create_with_null_project_yields_one_session() {
+    // SQLite unique indexes treat NULL as distinct, which would let two
+    // racing inserts both succeed for vault-only (project_root = NULL)
+    // identities. Migration 0013 closes that hole by coercing NULL to ''
+    // inside the unique index. Without that fix, this test fragments into
+    // multiple sessions; with it, all racers converge on one id.
+    let store = std::sync::Arc::new(open_in_memory().await.expect("open"));
+    let id = identity(None);
+
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            let id = id.clone();
+            tokio::spawn(async move {
+                store
+                    .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+                    .await
+                    .expect("resolve")
+            })
+        })
+        .collect();
+
+    let mut session_ids = std::collections::HashSet::new();
+    for h in handles {
+        let outcome = h.await.expect("join");
+        session_ids.insert(outcome.into_session().id);
+    }
+    assert_eq!(
+        session_ids.len(),
+        1,
+        "vault-only concurrent resolvers must converge on one session id, got {session_ids:?}",
+    );
+}
+
+#[tokio::test]
 async fn concurrent_resolve_or_create_yields_one_session() {
     // Race many resolve_or_create_session calls in parallel. The partial
     // unique index forces all but one INSERT to fail; the loser tx

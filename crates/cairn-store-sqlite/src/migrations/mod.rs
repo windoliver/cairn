@@ -16,6 +16,8 @@ const M0008_RECORD_EXTENSIONS: &str = include_str!("sql/0008_record_extensions.s
 const M0010_RANKING_INDEXES: &str = include_str!("sql/0010_ranking_indexes.sql");
 const M0011_SESSIONS: &str = include_str!("sql/0011_sessions.sql");
 const M0012_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0012_sessions_unique_active.sql");
+const M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
+    include_str!("sql/0013_sessions_unique_active_coalesce.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -35,6 +37,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0012_sessions_unique_active",
         M0012_SESSIONS_UNIQUE_ACTIVE,
     ),
+    (
+        13,
+        "0013_sessions_unique_active_coalesce",
+        M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -53,5 +60,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0010_RANKING_INDEXES),
         M::up(M0011_SESSIONS),
         M::up(M0012_SESSIONS_UNIQUE_ACTIVE),
+        M::up(M0013_SESSIONS_UNIQUE_ACTIVE_COALESCE),
     ])
 }
