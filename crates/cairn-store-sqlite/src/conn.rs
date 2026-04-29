@@ -37,6 +37,26 @@ pub fn open_blocking(path: &Path) -> Result<SharedConn, SqliteStoreError> {
     let mut conn = Connection::open(path)?;
     conn.execute_batch(PRAGMAS)?;
     apply_pending(&mut conn, &MIGRATIONS)?;
+    // Legacy-row gate: migration 0009 added `record_json` without a
+    // deterministic backfill. Rows written before 0009 have
+    // `record_json IS NULL`. The read path cannot reconstruct a valid
+    // `MemoryRecord` from such a row, so opening a database that still
+    // contains legacy rows is a data-loss hazard — every read would
+    // silently report the row as missing. Fail closed at open() so
+    // operators must run a repair/repopulate workflow before the
+    // database is reachable from a running binary.
+    let legacy_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE record_json IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if legacy_count > 0 {
+        return Err(SqliteStoreError::LegacyRowsPresent {
+            count: u64::try_from(legacy_count).unwrap_or(u64::MAX),
+        });
+    }
     Ok(Arc::new(Mutex::new(conn)))
 }
 

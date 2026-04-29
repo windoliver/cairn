@@ -38,6 +38,20 @@ pub enum SqliteStoreError {
     /// JSON serialization error.
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// One or more rows in the `records` table predate migration 0009
+    /// and have `record_json IS NULL`. The read path cannot reconstruct
+    /// a `MemoryRecord` from those rows, so opening would silently
+    /// drop them on every `get` and `list`. Fail closed: the operator
+    /// must run a repair workflow before the database is usable.
+    #[error(
+        "legacy rows present (count = {count}): records.record_json is NULL for pre-0009 rows; \
+         repopulate or drop those rows before opening"
+    )]
+    LegacyRowsPresent {
+        /// Number of rows whose `record_json` is `NULL` after migrations.
+        count: u64,
+    },
 }
 
 impl From<SqliteStoreError> for StoreError {

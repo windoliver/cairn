@@ -15,7 +15,10 @@ use serde_json::Value;
 ///
 /// P0 rules:
 /// - `"private"` visibility  → owner match: `scope.user` == principal's
-///   identity string, OR `scope.agent` == principal's identity string.
+///   identity string. `scope.agent` is **not** an authorization grant —
+///   it names the lifecycle-owning agent runtime, which can be shared
+///   across users, so allowing agent-equality reads would leak rows
+///   between tenants on the same agent identity.
 /// - `"session"` visibility  → owner match (collapses to `private`
 ///   semantics until `Principal` carries a session id; granting access
 ///   by row-tag alone would leak across users).
@@ -49,30 +52,17 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
         .and_then(Value::as_str)
         .unwrap_or("private");
 
+    // For every non-public tier, P0 reduces to "row.scope.user matches
+    // the calling principal's identity string". `scope.agent` is the
+    // lifecycle-owning runtime id and is shared across users (e.g. a
+    // single Claude Code instance writing on behalf of many people), so
+    // it cannot stand alone as an authorization grant. Tier semantics
+    // expand once `Principal` carries verified session and membership
+    // context (separate issue).
     match visibility {
-        "private" => {
-            // Row is readable if the principal's identity matches the scope
-            // user OR scope agent dimension.
+        "private" | "session" | "team" | "org" => {
             let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
-            let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
-            id_str == scope_user || id_str == scope_agent
-        }
-        "session" => {
-            // P0 `Principal` carries no session id, so session tier
-            // collapses to owner-match (private semantics) to fail closed.
-            // Promoting back to per-session rules waits on a follow-up
-            // that adds a session field to `Principal`; until then,
-            // granting access by mere row-tagging would leak one user's
-            // session data to any other identified principal.
-            let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
-            let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
-            id_str == scope_user || id_str == scope_agent
-        }
-        "team" | "org" => {
-            // Until `Principal` carries membership context, treat as owner-match.
-            let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
-            let scope_agent = scope.get("agent").and_then(Value::as_str).unwrap_or("");
-            id_str == scope_user || id_str == scope_agent
+            !scope_user.is_empty() && id_str == scope_user
         }
         "public" => true,
         _ => false,
@@ -138,5 +128,24 @@ mod tests {
     fn unknown_visibility_denied() {
         let p = principal_for("usr:alice");
         assert!(!principal_can_read(&p, "{}", r#"{"visibility":"secret"}"#));
+    }
+
+    #[test]
+    fn shared_agent_identity_cannot_read_other_users_private_rows() {
+        // Regression: an agent identity (e.g. a shared `agt:claude-code`
+        // runtime) writes records on behalf of multiple users. The
+        // agent's principal must NOT be granted read access to a private
+        // row owned by a different user just because `scope.agent`
+        // matches the agent identity. Authorization is owner-match on
+        // `scope.user` only.
+        let agent = principal_for("agt:claude-code:opus-4-7:main:v1");
+        let scope = r#"{"user":"usr:alice","agent":"agt:claude-code:opus-4-7:main:v1"}"#;
+        for tier in ["private", "session", "team", "org"] {
+            let tax = format!(r#"{{"visibility":"{tier}"}}"#);
+            assert!(
+                !principal_can_read(&agent, scope, &tax),
+                "agent identity must not authorize {tier} reads on usr:alice's row"
+            );
+        }
     }
 }
