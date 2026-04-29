@@ -151,4 +151,12 @@ pub enum DomainError {
         /// Specific reason the hash string was rejected.
         message: String,
     },
+
+    /// A `SessionId` (§8.1) was empty or contained characters outside
+    /// `[A-Za-z0-9._:-]`.
+    #[error("session_id: {message}")]
+    InvalidSessionId {
+        /// Specific reason the session identifier was rejected.
+        message: String,
+    },
 }

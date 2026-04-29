@@ -33,6 +33,7 @@ pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
+pub mod session;
 pub mod target_id;
 pub mod taxonomy;
 pub mod timestamp;
@@ -56,6 +57,10 @@ pub use projection::{
 pub use provenance::Provenance;
 pub use record::{MemoryRecord, RecordId};
 pub use scope::ScopeTuple;
+pub use session::{
+    DEFAULT_IDLE_WINDOW_SECS, LastActiveSession, SessionDecision, SessionId, SessionIdentity,
+    SessionSource, resolve_session,
+};
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use timestamp::Rfc3339Timestamp;
