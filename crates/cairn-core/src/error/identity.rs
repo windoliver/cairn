@@ -133,6 +133,15 @@ pub enum IdentityServiceError {
         /// The identity whose lock is currently held.
         id: Identity,
     },
+
+    /// The purge acknowledgement file is missing or does not contain the
+    /// expected identity wire form.
+    ///
+    /// Before calling `purge`, the operator must write the target identity's
+    /// wire form (e.g. `hmn:alice:v1`) to
+    /// `.cairn/maintenance/purge-ack` to confirm intentional data erasure.
+    #[error("purge acknowledgement file missing or does not match identity")]
+    PurgeAckMissing,
 }
 
 #[cfg(test)]

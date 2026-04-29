@@ -837,3 +837,189 @@ async fn init_defaults_mints_v2_after_v1_purged() {
         "v2 human id must be hmn:{slug}:v2",
     );
 }
+
+// ── D7 helpers ────────────────────────────────────────────────────────────────
+
+/// Provision a fresh identity and return the `(service, identity)` pair.
+///
+/// Reuses `setup_service_after_first_bind` so `vault_meta` is already present.
+async fn setup_service_with_active_identity(
+    dir: &tempfile::TempDir,
+    id_str: &str,
+) -> (cairn_cli::identity::IdentityService, Identity) {
+    let (svc, vault_id) = setup_service_after_first_bind(dir).await;
+    let id = Identity::parse(id_str).expect("valid identity string");
+    let input = ProvisionInput {
+        vault_id,
+        id: id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, input, &mut rand_core::OsRng)
+        .await
+        .expect("provision must succeed");
+    (svc, id)
+}
+
+// ── D7 tests ──────────────────────────────────────────────────────────────────
+
+/// `revoke` must leave the target identity in `Revoked` state and evict the
+/// signing key from the keystore (spec §3.10 two-phase tombstone).
+///
+/// Self-revocation path: `signer == target`.
+#[tokio::test]
+async fn revoke_disables_signing_at_begin_revocation() {
+    use cairn_core::{
+        contract::{identity_registry::IdentityVisibility, keystore::KeystoreError},
+        domain::identity::keys::SecretHandle,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Retrieve the key version before revocation so we can check keystore eviction.
+    let row_before = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity before revoke")
+        .expect("alice must exist");
+    let key_version_before = row_before.current_key_version;
+
+    // Self-revocation.
+    svc.revoke(&alice_id, &alice_id)
+        .await
+        .expect("revoke must succeed for active identity");
+
+    // Registry must show `Revoked`.
+    let row_after = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity after revoke")
+        .expect("alice must still be visible at Operational after revocation");
+    assert_eq!(
+        row_after.provisioning_state,
+        ProvisioningState::Revoked,
+        "identity must be Revoked after revoke()",
+    );
+
+    // Keystore must no longer hold the signing key.
+    let handle = SecretHandle::for_identity(svc.vault_id.clone(), alice_id, key_version_before);
+    let result = svc.keystore.load_signing_key(&handle).await;
+    assert!(
+        matches!(result, Err(KeystoreError::NotFound)),
+        "signing key must be evicted after revoke; got: {result:?}",
+    );
+}
+
+/// `revoke` must return `Registry(AlreadyRevoked)` when the target is already
+/// in a non-active state (spec §3.10).
+#[tokio::test]
+async fn revoke_returns_already_revoked_for_non_active() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // First revocation succeeds.
+    svc.revoke(&alice_id, &alice_id)
+        .await
+        .expect("first revoke must succeed");
+
+    // Second revocation must fail.
+    let err = svc
+        .revoke(&alice_id, &alice_id)
+        .await
+        .expect_err("second revoke must fail");
+
+    assert!(
+        matches!(
+            err,
+            IdentityServiceError::Registry(
+                cairn_core::contract::identity_registry::RegistryError::AlreadyRevoked { .. }
+            )
+        ),
+        "expected Registry(AlreadyRevoked), got: {err:?}",
+    );
+}
+
+/// `purge` must fail with [`IdentityServiceError::PurgeAckMissing`] when
+/// `.cairn/maintenance/purge-ack` has not been written (spec §3.10).
+#[tokio::test]
+async fn purge_refuses_without_ack_file() {
+    use cairn_core::contract::identity_registry::PurgeReason;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    let err = svc
+        .purge(&alice_id, PurgeReason("test".to_owned()))
+        .await
+        .expect_err("purge must fail without ack file");
+
+    assert!(
+        matches!(err, IdentityServiceError::PurgeAckMissing),
+        "expected PurgeAckMissing, got: {err:?}",
+    );
+}
+
+/// Full purge path: write ack file, call `purge`, verify state = `Purged`,
+/// ack file removed, and keystore entries gone (spec §3.10).
+#[tokio::test]
+async fn purge_full_path_lands_purged() {
+    use cairn_core::{
+        contract::{
+            identity_registry::{IdentityVisibility, PurgeReason},
+            keystore::KeystoreError,
+        },
+        domain::identity::keys::SecretHandle,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Capture the key version before purge.
+    let row_before = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity before purge")
+        .expect("alice must exist");
+    let kv = row_before.current_key_version;
+
+    // Write purge-ack file.
+    let maintenance_dir = dir.path().join(".cairn/maintenance");
+    fs::create_dir_all(&maintenance_dir).expect("create maintenance dir");
+    let ack_path = maintenance_dir.join("purge-ack");
+    fs::write(&ack_path, alice_id.as_str()).expect("write purge-ack");
+
+    svc.purge(&alice_id, PurgeReason("GDPR erasure".to_owned()))
+        .await
+        .expect("purge must succeed");
+
+    // State must be Purged.
+    let row_after = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity after purge")
+        .expect("purged identity must still be visible at Audit level");
+    assert_eq!(
+        row_after.provisioning_state,
+        ProvisioningState::Purged,
+        "identity must be Purged after purge()",
+    );
+
+    // Ack file must have been removed.
+    assert!(
+        !ack_path.exists(),
+        "purge-ack file must be removed after successful purge",
+    );
+
+    // Keystore must no longer hold the signing key.
+    let handle = SecretHandle::for_identity(svc.vault_id.clone(), alice_id, kv);
+    let result = svc.keystore.load_signing_key(&handle).await;
+    assert!(
+        matches!(result, Err(KeystoreError::NotFound)),
+        "signing key must be evicted after purge; got: {result:?}",
+    );
+}
