@@ -192,22 +192,82 @@ impl SessionIdentity {
     }
 }
 
+/// What kind of absolute path the input string looks like.
+///
+/// Classification is purely string-shape; `cairn-core` stays I/O-free.
+/// This is host-OS-independent so a vault written on Windows can still
+/// be opened on macOS / Linux (and vice versa) without
+/// `Path::is_absolute()` rejecting the foreign form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsoluteShape {
+    /// POSIX-style absolute path: starts with a single `/`.
+    Posix,
+    /// Windows drive-absolute: `[A-Za-z]:` followed by `\` or `/`.
+    /// Both slash forms collapse to one canonical identity.
+    WindowsDrive,
+    /// Windows UNC-style: starts with `\\` or `//` (two leading
+    /// separators of any spelling).
+    WindowsUnc,
+}
+
+/// Classify an absolute path by its leading shape, host-OS-independent.
+/// Returns `None` for relative or otherwise-unrecognized inputs.
+///
+/// Recognized forms:
+/// - POSIX: `/...` (but not `//...`, which is UNC).
+/// - Windows drive: `X:\...` or `X:/...` where `X` is `[A-Za-z]`.
+/// - Windows UNC: starts with `\\` or `//` (server-share follows).
+fn classify_absolute(raw: &str) -> Option<AbsoluteShape> {
+    let bytes = raw.as_bytes();
+    // UNC: two leading separators, in either spelling. Has to come
+    // before the POSIX check, otherwise `//srv/share` would classify as
+    // POSIX and collapse to a different identity.
+    if bytes.len() >= 2
+        && (bytes[0] == b'\\' || bytes[0] == b'/')
+        && (bytes[1] == b'\\' || bytes[1] == b'/')
+    {
+        return Some(AbsoluteShape::WindowsUnc);
+    }
+    // Windows drive: `X:\` or `X:/`.
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return Some(AbsoluteShape::WindowsDrive);
+    }
+    // Bare drive letter `X:` (no separator) is not recognized as
+    // absolute — it's drive-relative on Windows and meaningless on
+    // POSIX.
+    if !bytes.is_empty() && bytes[0] == b'/' {
+        return Some(AbsoluteShape::Posix);
+    }
+    None
+}
+
 /// Normalize a `project_root` string for the active-session uniqueness
 /// invariant.
 ///
-/// - Requires the path to be absolute via [`std::path::Path::is_absolute`],
-///   which accepts both POSIX (`/repo`) and Windows (`C:\repo`, `\\?\…`,
-///   UNC `\\server\share`) absolute forms. Relative paths are rejected
-///   because two callers in different CWDs would otherwise share the same
-///   `relative/path` string and collapse into one session.
-/// - Trims only trailing separators that are valid on the current
-///   platform (via [`std::path::is_separator`]). On POSIX that is `/`
-///   alone — `\` is a regular filename character there, so `/repo\`
-///   and `/repo` are distinct directories and must remain distinct
-///   sessions. On Windows both `/` and `\` count as separators, so
-///   `C:\repo`, `C:\repo\`, `C:/repo`, and `C:/repo/` all collapse to
-///   one identity. A lone `/` (POSIX root) or `C:\` (Windows drive
-///   root) is preserved.
+/// - Requires the path to look absolute by string shape — host-OS
+///   independent. Accepts POSIX (`/repo`), Windows drive (`C:\repo`,
+///   `C:/repo`), and Windows UNC (`\\server\share`, `//server/share`).
+///   Relative paths are rejected because two callers in different CWDs
+///   would otherwise share the same relative string and collapse into
+///   one session. Using string-shape classification rather than
+///   [`std::path::Path::is_absolute`] means a vault created on Windows
+///   stays openable on macOS / Linux without losing its rows behind a
+///   host-platform validator.
+/// - For Windows-shaped paths (drive or UNC), all forward slashes are
+///   normalized to backslashes so `C:\repo`, `C:/repo`, `C:\repo\`,
+///   and `C:/repo/` collapse to one identity. The lookup query and
+///   unique index key on the raw string, so storing two slash spellings
+///   would otherwise fork one repo into two active sessions.
+/// - Trims trailing separators after slash-canonicalization. On POSIX
+///   only `/` is a separator — `\` is a regular filename character, so
+///   `/repo\` and `/repo` are distinct directories and must keep
+///   distinct identities. On Windows-shaped paths both spellings get
+///   trimmed (already collapsed to `\`). A lone `/` (POSIX root) or
+///   `C:\` (Windows drive root) is preserved.
 /// - Rejects whitespace-only paths.
 ///
 /// Filesystem canonicalization (symlink resolution, `..` collapse) is the
@@ -219,24 +279,31 @@ fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
             field: "project_root",
         });
     }
-    if !std::path::Path::new(raw).is_absolute() {
-        return Err(DomainError::InvalidProjectRoot {
-            message: format!("project_root must be an absolute path, got `{raw}`"),
-        });
-    }
-    // Trim trailing separators but keep enough that the path remains
-    // absolute. POSIX `/repo/` → `/repo`, `/` stays `/`. Windows
-    // `C:\repo\` → `C:\repo`, `C:\` stays `C:\`. Use
-    // `std::path::is_separator` so `\` is *not* trimmed on POSIX
-    // (where it's a regular filename character) — otherwise `/repo\`
-    // and `/repo` would collapse to the same identity and break the
-    // `(user, agent, project_root)` isolation rule.
-    let trimmed = raw.trim_end_matches(std::path::is_separator);
-    if trimmed.is_empty() || !std::path::Path::new(trimmed).is_absolute() {
-        // Trimming removed the trailing separator that made the path
-        // absolute (e.g. `/` → `` or `C:\` → `C:`). Keep the original
-        // canonical root form.
-        Ok(raw.to_owned())
+    let shape = classify_absolute(raw).ok_or_else(|| DomainError::InvalidProjectRoot {
+        message: format!("project_root must be an absolute path, got `{raw}`"),
+    })?;
+    // Step 1: slash-canonicalize Windows-shaped paths so `C:\repo` and
+    // `C:/repo` collapse to one identity. POSIX paths leave `\` alone
+    // because it's a regular filename character there.
+    let canonical: String = match shape {
+        AbsoluteShape::Posix => raw.to_owned(),
+        AbsoluteShape::WindowsDrive | AbsoluteShape::WindowsUnc => raw
+            .chars()
+            .map(|c| if c == '/' { '\\' } else { c })
+            .collect(),
+    };
+    // Step 2: trim trailing separators that would otherwise fork
+    // `/repo` from `/repo/`. POSIX trims `/` only; Windows-shaped paths
+    // trim `\` (the canonical form after step 1).
+    let trim_chars: &[char] = match shape {
+        AbsoluteShape::Posix => &['/'],
+        AbsoluteShape::WindowsDrive | AbsoluteShape::WindowsUnc => &['\\'],
+    };
+    let trimmed = canonical.trim_end_matches(trim_chars);
+    // Re-classify so trimming a canonical root (`/` → `` or `C:\` →
+    // `C:`) doesn't accidentally make the path non-absolute.
+    if trimmed.is_empty() || classify_absolute(trimmed).is_none() {
+        Ok(canonical)
     } else {
         Ok(trimmed.to_owned())
     }
@@ -420,6 +487,55 @@ mod tests {
     fn identity_rejects_relative_path() {
         let err = SessionIdentity::new(ident_user(), ident_agent(), Some("relative/path".into()))
             .unwrap_err();
+        assert!(matches!(err, DomainError::InvalidProjectRoot { .. }));
+    }
+
+    #[test]
+    fn identity_canonicalizes_windows_slash_variants_to_backslash() {
+        // `C:\repo` and `C:/repo` are the same directory on Windows but
+        // would key on different raw strings — forking one repo into two
+        // active sessions. Canonicalize both to `C:\repo` regardless of
+        // host OS, so a vault stays consistent across machines.
+        let with_back = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\repo".into()))
+            .expect("valid backslash drive path");
+        let with_fwd = SessionIdentity::new(ident_user(), ident_agent(), Some("C:/repo".into()))
+            .expect("valid forward-slash drive path");
+        assert_eq!(with_back.project_root, with_fwd.project_root);
+        assert_eq!(with_back.project_root.as_deref(), Some(r"C:\repo"));
+
+        // Mixed slashes inside the path also collapse.
+        let mixed =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\foo/bar\baz".into()))
+                .expect("valid mixed-slash drive path");
+        assert_eq!(mixed.project_root.as_deref(), Some(r"C:\foo\bar\baz"));
+    }
+
+    #[test]
+    fn identity_accepts_windows_paths_on_any_host() {
+        // `Path::is_absolute()` is host-OS-aware, which would reject
+        // `C:\repo` when the same vault is opened from macOS / Linux.
+        // Our string-shape classifier accepts it everywhere so a
+        // cross-OS vault keeps resolving its sessions.
+        let win = SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:\repo".into()))
+            .expect("Windows drive path must hydrate on any host");
+        assert_eq!(win.project_root.as_deref(), Some(r"C:\repo"));
+
+        let unc = SessionIdentity::new(ident_user(), ident_agent(), Some(r"\\srv\share".into()))
+            .expect("Windows UNC must hydrate on any host");
+        assert_eq!(unc.project_root.as_deref(), Some(r"\\srv\share"));
+
+        // Forward-slash UNC also classifies as UNC and canonicalizes.
+        let unc_fwd = SessionIdentity::new(ident_user(), ident_agent(), Some("//srv/share".into()))
+            .expect("forward-slash UNC must hydrate on any host");
+        assert_eq!(unc_fwd.project_root.as_deref(), Some(r"\\srv\share"));
+    }
+
+    #[test]
+    fn identity_rejects_drive_relative_path() {
+        // Bare `C:` (no separator) is drive-relative on Windows and
+        // meaningless elsewhere — must not be accepted as absolute.
+        let err =
+            SessionIdentity::new(ident_user(), ident_agent(), Some(r"C:repo".into())).unwrap_err();
         assert!(matches!(err, DomainError::InvalidProjectRoot { .. }));
     }
 
