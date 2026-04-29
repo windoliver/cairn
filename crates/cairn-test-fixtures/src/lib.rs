@@ -6,8 +6,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-pub mod store;
 pub mod keystore;
+pub mod store;
 pub use keystore::MemoryKeystore;
 
 use std::path::{Path, PathBuf};
