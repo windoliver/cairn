@@ -1,4 +1,4 @@
-//! `MemoryStore` trait impl — stub bodies until Tasks 14-18 wire real ones.
+//! `MemoryStore` trait impl.
 //!
 //! Every method first checks `self.conn`: `None` means the store was
 //! constructed via `Default::default()` (registry stub) and is not
@@ -19,10 +19,6 @@ use crate::{ACCEPTED_RANGE, PLUGIN_NAME};
 
 fn not_initialized<T>(method: &'static str) -> Result<T, StoreError> {
     Err(ConcreteError::NotInitialized { method }.into())
-}
-
-fn not_implemented<T>(method: &'static str, issue: u32) -> Result<T, StoreError> {
-    Err(format!("cairn-store-sqlite: {method} not yet implemented (#{issue})").into())
 }
 
 #[async_trait]
@@ -97,11 +93,11 @@ impl MemoryStore for SqliteMemoryStore {
 
     async fn search_keyword(
         &self,
-        _a: &KeywordSearchArgs<'_>,
+        args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError> {
         if self.conn.is_none() {
             return not_initialized("search_keyword");
         }
-        not_implemented("search_keyword", 47)
+        self.do_search_keyword(args).await.map_err(Into::into)
     }
 }
