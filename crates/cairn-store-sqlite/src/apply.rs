@@ -194,6 +194,25 @@ fn stage_version_impl(
 ) -> Result<RecordId, StoreError> {
     let target_id_str = target_id.as_str();
 
+    // Once a target_id has been purged, the namespace is permanently
+    // retired. Re-staging would start at version 1 again and produce
+    // the same deterministic `record_id = BLAKE3(target_id#1)` as the
+    // purged record, splicing a new logical record into old audit
+    // history. Reject stage_version against any target with an extant
+    // purge marker — callers must use a fresh target_id.
+    let purged: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM record_purges WHERE target_id = ?1",
+            params![target_id_str],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    if purged > 0 {
+        return Err(StoreError::Conflict {
+            kind: ConflictKind::UniqueViolation,
+        });
+    }
+
     let next: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(version), 0) + 1 FROM records WHERE target_id = ?1",

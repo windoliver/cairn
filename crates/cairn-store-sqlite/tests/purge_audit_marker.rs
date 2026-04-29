@@ -315,6 +315,66 @@ async fn purge_marker_visibility_uses_purge_time_snapshot() {
     );
 }
 
+/// Regression: once a `target_id` has been purged, it must not be
+/// re-stageable. Re-staging would start at version 1 again and produce
+/// the same deterministic `record_id` as the purged record, splicing
+/// a new logical row into the old purge audit history.
+#[tokio::test]
+async fn purged_target_id_cannot_be_restaged() {
+    use cairn_core::contract::memory_store::error::{ConflictKind, StoreError};
+
+    let dir = tempdir().expect("tempdir");
+    let store = SqliteMemoryStore::open(&dir.path().join("cairn.db"))
+        .await
+        .expect("open");
+
+    let target = TargetId::new("retired-after-purge");
+    let actor = ActorRef::from_string("usr:purgetest");
+
+    // Stage + activate + purge.
+    store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            move |tx| {
+                let r = make_record("01HQZX9F5N0000000000000077", "first life");
+                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                Ok(())
+            }
+        })
+        .await
+        .expect("stage+activate");
+
+    store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            let a = actor.clone();
+            move |tx| tx.purge_target(&t, &OpId::new("op-retire"), &a)
+        })
+        .await
+        .expect("purge");
+
+    // Re-staging the same target_id must now fail.
+    let result = store
+        .with_apply_tx(test_apply_token(), {
+            let t = target.clone();
+            move |tx| {
+                let r = make_record("01HQZX9F5N0000000000000088", "second life");
+                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))
+            }
+        })
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::Conflict {
+                kind: ConflictKind::UniqueViolation
+            })
+        ),
+        "re-stage of purged target must return Conflict; got: {result:?}"
+    );
+}
+
 /// Purging a target that has no records and no prior marker must
 /// return `NotFound` rather than fabricate audit history.
 #[tokio::test]

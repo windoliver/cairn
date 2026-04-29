@@ -123,6 +123,12 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0014_purge_per_version_snapshots.sql"),
             checksum: checksum_for("0014_purge_per_version_snapshots.sql"),
         },
+        Migration {
+            id: 15,
+            name: "0015_backfill_activation_audit.sql",
+            sql: include_str!("../../migrations/0015_backfill_activation_audit.sql"),
+            checksum: checksum_for("0015_backfill_activation_audit.sql"),
+        },
     ]
 });
 
