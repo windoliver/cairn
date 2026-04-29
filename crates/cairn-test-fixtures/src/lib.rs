@@ -6,6 +6,8 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod store;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 

@@ -719,11 +719,23 @@ pub mod tests_export {
     use std::collections::BTreeMap;
 
     use super::{Ed25519Signature, MemoryRecord, RecordId};
+    use crate::contract::memory_store::StoredRecord;
     use crate::domain::{
         ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
         ScopeTuple, TargetId,
         taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
     };
+
+    /// Wrap [`sample_record`] in a [`StoredRecord`] at the given store version.
+    /// Used by `MarkdownProjector` tests and other downstream code that needs
+    /// a `StoredRecord` rather than a bare `MemoryRecord`.
+    #[must_use]
+    pub fn sample_stored_record(version: u32) -> StoredRecord {
+        StoredRecord {
+            record: sample_record(),
+            version,
+        }
+    }
 
     /// Construct a canonical valid [`MemoryRecord`] for tests and adapter
     /// fixtures. Single human author at P0: `scope.user`,

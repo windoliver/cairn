@@ -107,7 +107,7 @@
 ///
 /// [contract_version_range.min]
 /// major = 0
-/// minor = 1
+/// minor = 2
 /// patch = 0
 ///
 /// [contract_version_range.max_exclusive]

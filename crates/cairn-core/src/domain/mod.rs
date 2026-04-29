@@ -26,8 +26,10 @@ pub mod capture_manifest;
 pub mod error;
 pub mod evidence;
 pub mod filter;
+pub mod folder;
 pub mod identity;
 pub mod intent;
+pub mod projection;
 pub mod provenance;
 pub mod record;
 pub mod scope;
@@ -48,6 +50,9 @@ pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
+pub use projection::{
+    ConflictOutcome, MarkdownProjector, ParsedProjection, ProjectedFile, ResyncError,
+};
 pub use provenance::Provenance;
 pub use record::{MemoryRecord, RecordId};
 pub use scope::ScopeTuple;

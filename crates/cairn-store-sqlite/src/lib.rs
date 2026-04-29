@@ -30,11 +30,11 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts. Shared by the trait impl and
-/// the compile-time guard below so the manifest range and the trait surface
-/// derive from one binding.
+/// Contract-version range this crate accepts (`[0.2.0, 0.3.0)`). Shared by
+/// the trait impl and the compile-time guard below so the manifest range
+/// and the trait surface derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
+    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

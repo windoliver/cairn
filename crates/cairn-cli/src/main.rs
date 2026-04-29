@@ -30,7 +30,9 @@ fn build_command() -> clap::Command {
                 ),
         )
         // Eight core verbs, each with --json added.
-        .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
+        .subcommand(verbs::with_json(verbs::with_resync(
+            generated::verbs::ingest_subcommand(),
+        )))
         .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::summarize_subcommand()))
@@ -38,7 +40,9 @@ fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(
             generated::verbs::capture_trace_subcommand(),
         ))
-        .subcommand(verbs::with_json(generated::verbs::lint_subcommand()))
+        .subcommand(verbs::with_json(verbs::with_fix_markdown(
+            verbs::with_fix_folders(generated::verbs::lint_subcommand()),
+        )))
         .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
         // Protocol preludes.
         .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))

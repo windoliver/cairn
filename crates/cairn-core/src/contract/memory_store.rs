@@ -1,9 +1,7 @@
 //! `MemoryStore` contract (brief §4 row 1).
-//!
-//! P0 scaffold: surface only — `name`, `capabilities`,
-//! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
+use crate::domain::record::MemoryRecord;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
@@ -36,20 +34,30 @@ pub struct MemoryStoreCapabilities {
     pub transactions: bool,
 }
 
-/// Storage contract — typed CRUD + ANN + FTS + graph over `MemoryRecord`.
+/// A `MemoryRecord` at a specific store version.
 ///
-/// Brief §4 row 1: P0 default is pure `SQLite` + FTS5; P1 default is the
-/// Nexus sandbox profile. Method bodies arrive in #46 once `MemoryRecord`
-/// (sub-issue #37) lands.
+/// `version` is the monotonic per-`target_id` counter from the DB COW model
+/// (brief §3.0). Projection and resync use it for optimistic concurrency
+/// checks without touching the DB row directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredRecord {
+    /// The stored memory record.
+    pub record: MemoryRecord,
+    /// Monotonic version counter. `1` for a record's first write.
+    pub version: u32,
+}
+
+/// Storage contract — typed CRUD over `MemoryRecord`.
+///
+/// Brief §4 row 1. Method bodies arrive in #46 (`SQLite` impl);
+/// `FixtureStore` in `cairn-test-fixtures` serves tests.
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
-    /// Stable identifier of the registered plugin instance.
+    /// Returns the store's human-readable name (e.g., `"sqlite"`, `"fixture"`).
     fn name(&self) -> &str;
-
-    /// Static capability advertisement (brief §4.1).
+    /// Returns the static capability advertisement for this store instance.
     fn capabilities(&self) -> &MemoryStoreCapabilities;
-
-    /// Range of `MemoryStore::CONTRACT_VERSION` values this impl accepts.
+    /// Returns the range of contract versions this store implementation accepts.
     fn supported_contract_versions(&self) -> VersionRange;
 
     // ── CRUD (#46) ────────────────────────────────────────────────────────
@@ -74,6 +82,67 @@ pub trait MemoryStore: Send + Sync {
     /// Full version history for a target, oldest → newest. Includes
     /// active and inactive rows.
     async fn versions(&self, target: &TargetId) -> Result<Vec<RecordVersion>, StoreError>;
+
+    /// Convenience: fetch the active row for `target` as a [`StoredRecord`].
+    /// The default impl walks `versions(target)` for the newest active row,
+    /// then `get(record_id)` for its body. Adapters that can answer with one
+    /// query (e.g. via the `records_active_target_idx` partial unique index
+    /// in `cairn-store-sqlite`) should override.
+    ///
+    /// Returns `Ok(None)` when no active row exists for the target.
+    async fn get_active_by_target(
+        &self,
+        target: &TargetId,
+    ) -> Result<Option<StoredRecord>, StoreError> {
+        let history = self.versions(target).await?;
+        let Some(v) = history.iter().rev().find(|v| v.active && !v.tombstoned) else {
+            return Ok(None);
+        };
+        let Some(record) = self.get(&v.record_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(StoredRecord {
+            record,
+            version: v.version,
+        }))
+    }
+
+    /// Convenience: page through every active record and pair each with its
+    /// store version. Used by callers that need a `Vec<StoredRecord>` (e.g.
+    /// `cairn lint --fix-markdown`, which feeds the markdown projector).
+    /// Default impl follows `next_cursor` until exhausted, then resolves
+    /// each record's active version via one `versions()` round-trip;
+    /// adapters with a one-shot active+version query should override.
+    /// `args.cursor` is overwritten on every iteration; `args.limit` of
+    /// `0` means "use the adapter's own page size".
+    async fn list_active_stored(&self, args: &ListArgs) -> Result<Vec<StoredRecord>, StoreError> {
+        let mut records: Vec<MemoryRecord> = Vec::new();
+        let mut cursor = args.cursor.clone();
+        loop {
+            let page_args = ListArgs {
+                cursor: cursor.clone(),
+                ..args.clone()
+            };
+            let page = self.list(&page_args).await?;
+            records.extend(page.records);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        let mut out = Vec::with_capacity(records.len());
+        for record in records {
+            let history = self.versions(&record.target_id).await?;
+            let version = history
+                .iter()
+                .rev()
+                .find(|v| v.active)
+                .map_or(1, |v| v.version);
+            out.push(StoredRecord { record, version });
+        }
+        Ok(out)
+    }
 
     // ── Edges (#46) ───────────────────────────────────────────────────────
 
@@ -137,7 +206,7 @@ pub trait MemoryStorePlugin: MemoryStore + Sized {
 // ── Verb-method support types (#46, #47) ──────────────────────────────────────
 
 use crate::domain::{
-    BodyHash, MemoryRecord, RecordId, ScopeTuple, TargetId,
+    BodyHash, RecordId, ScopeTuple, TargetId,
     filter::ValidatedFilter,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -469,15 +538,24 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
     }
 
-    #[test]
-    fn dyn_compatible() {
+    #[tokio::test]
+    async fn dyn_compatible() {
         let s: Box<dyn MemoryStore> = Box::new(StubStore);
         assert_eq!(s.name(), "stub");
         assert!(s.capabilities().fts);
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
+        let id = RecordId::parse("01HQZX9F5N0000000000000000".to_owned()).expect("valid id");
+        assert!(s.get(&id).await.unwrap().is_none());
+        assert!(
+            s.list(&ListArgs::default())
+                .await
+                .unwrap()
+                .records
+                .is_empty()
+        );
     }
 
     #[test]
