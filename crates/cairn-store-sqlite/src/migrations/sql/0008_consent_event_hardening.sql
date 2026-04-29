@@ -520,5 +520,62 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload scalar out of domain class');
 END;
 
+-- Top-level event metadata domain checks. The Rust `ConsentEvent::validate`
+-- constrains `consent_id`, `scope`, and `op_id` to closed character
+-- classes; the mirror's `decode_event_inner` does NOT re-run validate
+-- before serializing into consent.log. A direct-SQL writer can therefore
+-- smuggle raw user text through these columns into the audit log.
+--
+-- Patterns (mirroring `cairn-core::domain::consent`):
+--   consent_id : length 1..=64,  chars in [A-Za-z0-9._:-]
+--   scope      : length 1..=256, chars in [a-z0-9._:=,-]
+--   op_id      : length 1..=128, chars in [A-Za-z0-9._:-] (optional)
+DROP TRIGGER IF EXISTS consent_journal_event_metadata_domains;
+CREATE TRIGGER consent_journal_event_metadata_domains
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND (
+        (NEW.consent_id IS NULL
+           OR length(NEW.consent_id) < 1
+           OR length(NEW.consent_id) > 64
+           OR NEW.consent_id GLOB '*[^A-Za-z0-9._:-]*')
+     OR (NEW.scope IS NULL
+           OR length(NEW.scope) < 1
+           OR length(NEW.scope) > 256
+           OR NEW.scope GLOB '*[^a-z0-9._:=,-]*')
+     OR (NEW.op_id IS NOT NULL
+           AND (length(NEW.op_id) < 1
+                OR length(NEW.op_id) > 128
+                OR NEW.op_id GLOB '*[^A-Za-z0-9._:-]*'))
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal event metadata out of domain class');
+END;
+
+-- Sensor identity domain. The earlier sensor triggers only enforce
+-- equality between `sensor_id`, `payload.sensor_label`, and
+-- `subject` body — none of them check the `SensorLabel` character
+-- class. A direct-SQL writer with `sensor_id = 'local hook host v1'`
+-- and matching subject/payload would slip through the equality checks
+-- and brick the mirror when serde tries to parse the SensorLabel.
+--
+-- Pattern (mirroring `SensorLabel::parse`):
+--   sensor_id : length 1..=128, chars in [A-Za-z0-9._:-]
+DROP TRIGGER IF EXISTS consent_journal_sensor_id_domain;
+CREATE TRIGGER consent_journal_sensor_id_domain
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
+   AND NEW.sensor_id IS NOT NULL
+   AND (
+        length(NEW.sensor_id) < 1
+     OR length(NEW.sensor_id) > 128
+     OR NEW.sensor_id GLOB '*[^A-Za-z0-9._:-]*'
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal sensor_id out of domain class');
+END;
+
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (8, '0008_consent_event_hardening', '', strftime('%s','now') * 1000);

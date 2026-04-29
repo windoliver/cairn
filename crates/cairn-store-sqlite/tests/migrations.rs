@@ -772,6 +772,10 @@ fn consent_journal_payload_required_fields_enforced() {
         ),
     ];
     for (desc, kind, subject, sensor_id, payload, frag) in cases {
+        let cid: String = desc
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
         let err = conn
             .execute(
                 "INSERT INTO consent_journal \
@@ -779,7 +783,7 @@ fn consent_journal_payload_required_fields_enforced() {
                    kind, actor, decided_at_iso, sensor_id, payload_json) \
                  VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, ?, 'usr:t', \
                          '2026-04-28T12:00:00Z', ?, ?)",
-                params![format!("c-{desc}"), subject, kind, sensor_id, payload],
+                params![format!("c-{cid}"), subject, kind, sensor_id, payload],
             )
             .unwrap_err();
         assert!(
@@ -1027,6 +1031,124 @@ fn consent_journal_subject_domain_enforced_for_non_hash_kinds() {
     assert!(
         format!("{err}").contains("subject out of domain class"),
         "empty policy_change subject must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_event_metadata_domain_enforced() {
+    // Round 10 hardening: top-level `consent_id`, `scope`, and optional
+    // `op_id` must match the closed character classes the Rust
+    // `ConsentEvent::validate` enforces. Without this, raw user text
+    // could ride through these audit columns into consent.log.
+    let conn = open_in_memory().expect("open");
+
+    // consent_id with spaces and free text — must be rejected.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('please share secret token ABC123', 'sensor.x', \
+                     'private', 'GRANT', 'usr:t', 0, 'policy_change', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
+                       \"from_code\":\"a\",\"to_code\":\"b\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("event metadata out of domain class"),
+        "free-text consent_id must be rejected, got: {err}"
+    );
+
+    // scope with uppercase / spaces — must be rejected.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-scope-bad', 'sensor.x', \
+                     'Private Project Scope', 'GRANT', 'usr:t', 0, \
+                     'policy_change', 'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
+                       \"from_code\":\"a\",\"to_code\":\"b\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("event metadata out of domain class"),
+        "free-text scope must be rejected, got: {err}"
+    );
+
+    // op_id with spaces — must be rejected.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json, op_id) \
+             VALUES ('c-op-bad', 'sensor.x', \
+                     'private', 'GRANT', 'usr:t', 0, 'policy_change', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
+                       \"from_code\":\"a\",\"to_code\":\"b\"}', \
+                     'op id with spaces')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("event metadata out of domain class"),
+        "free-text op_id must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_sensor_id_domain_enforced() {
+    // Round 10 hardening: `sensor_id` must match the `SensorLabel`
+    // character class. The earlier sensor triggers only enforced
+    // equality between sensor_id, payload.sensor_label, and subject —
+    // a direct-SQL writer with consistent free text in all three would
+    // pass equality but brick the mirror at SensorLabel::parse.
+    let conn = open_in_memory().expect("open");
+
+    // sensor_id with spaces — equality holds across columns but the
+    // domain trigger must reject the row.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, sensor_id, actor, decided_at_iso, payload_json) \
+             VALUES ('c-sensor-spaces', 'snr:local hook host v1', \
+                     'private', 'GRANT', 'usr:t', 0, 'sensor_enable', \
+                     'local hook host v1', 'usr:t', \
+                     '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"sensor_toggle\",\
+                       \"sensor_label\":\"local hook host v1\",\
+                       \"reason_code\":\"user_grant\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor_id out of domain class"),
+        "sensor_id with spaces must be rejected, got: {err}"
+    );
+
+    // sensor_id overlong (> 128 chars).
+    let long = "a".repeat(129);
+    let stmt = format!(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, sensor_id, actor, decided_at_iso, payload_json) \
+         VALUES ('c-sensor-long', 'snr:{long}', \
+                 'private', 'GRANT', 'usr:t', 0, 'sensor_enable', \
+                 '{long}', 'usr:t', '2026-04-28T12:00:00Z', \
+                 '{{\"shape\":\"sensor_toggle\",\
+                    \"sensor_label\":\"{long}\",\
+                    \"reason_code\":\"user_grant\"}}')",
+    );
+    let err = conn.execute(&stmt, []).unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor_id out of domain class"),
+        "overlong sensor_id must be rejected, got: {err}"
     );
 }
 
