@@ -101,6 +101,19 @@ pub struct PurgeAcknowledgement(
     pub(crate) (),
 );
 
+#[cfg(any(test, feature = "test-helpers"))]
+impl PurgeAcknowledgement {
+    /// Test-only constructor.
+    ///
+    /// Creates a `PurgeAcknowledgement` without going through the filesystem
+    /// verifier.  Available under `cfg(test)` and the `test-helpers` feature
+    /// so integration tests in adapter crates can build values of this type.
+    #[must_use]
+    pub fn for_test() -> Self {
+        Self(())
+    }
+}
+
 /// A human-readable reason for a purge request (e.g., GDPR erasure).
 ///
 /// Stored verbatim in the `purge_pending` WAL row and surfaced in audit logs.

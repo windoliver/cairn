@@ -4,7 +4,9 @@
 //! In-memory databases (C4 step 1/2) and `tempfile` on-disk databases
 //! (C4 step 2) are both used as appropriate.
 
-use cairn_core::contract::identity_registry::{IdentityRegistry, IdentityVisibility, RegistryError};
+use cairn_core::contract::identity_registry::{
+    IdentityRegistry, IdentityVisibility, PurgeAcknowledgement, PurgeReason, RegistryError,
+};
 use cairn_core::domain::identity::{
     Identity, IdentityKind,
     keys::{IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash},
@@ -723,3 +725,172 @@ async fn begin_revocation_rejects_non_active() {
     );
 }
 
+// ── C8 · mark_purge_pending admits pending start state ───────────────────────
+
+/// `mark_purge_pending` must succeed when the identity is in `pending` state
+/// and transition it to `purge_pending`.
+#[tokio::test]
+async fn mark_purge_pending_admits_pending_start_state() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let id = Identity::parse("hmn:purge-pending-test").expect("valid identity");
+    let (record, key) = make_record_and_key(&id);
+    r.reserve_identity(&record, &key)
+        .await
+        .expect("reserve_identity");
+
+    // Confirm state is Pending.
+    let rec = r
+        .get_identity(&id, IdentityVisibility::IncludingPending)
+        .await
+        .expect("get_identity")
+        .expect("must exist");
+    assert_eq!(rec.provisioning_state, ProvisioningState::Pending);
+
+    let ack = PurgeAcknowledgement::for_test();
+    let reason = PurgeReason("GDPR erasure test".to_owned());
+    r.mark_purge_pending(&id, &ack, reason)
+        .await
+        .expect("mark_purge_pending from pending state must succeed");
+
+    // State must now be PurgePending.
+    let rec_after = r
+        .get_identity(&id, IdentityVisibility::IncludingPurgePending)
+        .await
+        .expect("get_identity after mark_purge_pending")
+        .expect("identity must still be visible");
+    assert_eq!(
+        rec_after.provisioning_state,
+        ProvisioningState::PurgePending,
+        "state must be PurgePending"
+    );
+    assert!(
+        rec_after.purge_requested_at.is_some(),
+        "purge_requested_at must be set"
+    );
+
+    // list_purge_pending must include this identity.
+    let purge_list = r.list_purge_pending().await.expect("list_purge_pending");
+    assert!(
+        purge_list.iter().any(|e| e.identity == id),
+        "identity must appear in purge_pending list"
+    );
+    let entry = purge_list
+        .iter()
+        .find(|e| e.identity == id)
+        .expect("entry must exist");
+    assert_eq!(entry.purge_reason, "GDPR erasure test");
+}
+
+// ── C8 · mark_purge_pending rejects revoke_pending state ─────────────────────
+
+/// `mark_purge_pending` on an identity in `revoke_pending` state must return
+/// `InvalidPurgeStartState`.
+#[tokio::test]
+async fn mark_purge_pending_rejects_revoke_pending() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    // Begin revocation to put alice in revoke_pending.
+    let receipt = make_revocation_receipt(&alice, &alice, KeyVersion::FIRST, &sk);
+    r.begin_revocation(&receipt)
+        .await
+        .expect("begin_revocation");
+
+    let ack = PurgeAcknowledgement::for_test();
+    let reason = PurgeReason("test".to_owned());
+    let err = r
+        .mark_purge_pending(&alice, &ack, reason)
+        .await
+        .expect_err("must reject revoke_pending state");
+    assert!(
+        matches!(err, RegistryError::InvalidPurgeStartState { .. }),
+        "expected InvalidPurgeStartState, got {err:?}"
+    );
+}
+
+// ── C8 · finalise_purge sets purged ──────────────────────────────────────────
+
+/// `finalise_purge` after `mark_purge_pending` must transition the identity to
+/// `Purged` state.
+#[tokio::test]
+async fn finalise_purge_sets_purged() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let id = Identity::parse("hmn:finalise-purge-test").expect("valid identity");
+    let (record, key) = make_record_and_key(&id);
+    r.reserve_identity(&record, &key)
+        .await
+        .expect("reserve_identity");
+
+    let ack = PurgeAcknowledgement::for_test();
+    let reason = PurgeReason("test finalise".to_owned());
+    r.mark_purge_pending(&id, &ack, reason)
+        .await
+        .expect("mark_purge_pending");
+
+    r.finalise_purge(&id).await.expect("finalise_purge");
+
+    // Audit visibility must show Purged.
+    let rec = r
+        .get_identity(&id, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity")
+        .expect("identity must be visible under Audit after purge");
+    assert_eq!(
+        rec.provisioning_state,
+        ProvisioningState::Purged,
+        "state must be Purged after finalise_purge"
+    );
+    assert!(rec.purged_at.is_some(), "purged_at must be set");
+}
+
+// ── C8 · list_purge_pending returns pending rows ──────────────────────────────
+
+/// `list_purge_pending` must return all identities in `purge_pending` state
+/// and exclude those that have been finalised.
+#[tokio::test]
+async fn list_purge_pending_returns_pending_rows() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let id1 = Identity::parse("hmn:purge-list-1").expect("valid identity");
+    let id2 = Identity::parse("hmn:purge-list-2").expect("valid identity");
+
+    for id in [&id1, &id2] {
+        let (record, key) = make_record_and_key(id);
+        r.reserve_identity(&record, &key)
+            .await
+            .expect("reserve_identity");
+        let ack = PurgeAcknowledgement::for_test();
+        let reason = PurgeReason(format!("reason for {}", id.as_str()));
+        r.mark_purge_pending(id, &ack, reason)
+            .await
+            .expect("mark_purge_pending");
+    }
+
+    // Both must appear.
+    let list = r.list_purge_pending().await.expect("list_purge_pending");
+    assert!(
+        list.iter().any(|e| e.identity == id1),
+        "id1 must appear in purge_pending list"
+    );
+    assert!(
+        list.iter().any(|e| e.identity == id2),
+        "id2 must appear in purge_pending list"
+    );
+
+    // Finalise id1 — it must be removed from the list.
+    r.finalise_purge(&id1).await.expect("finalise_purge id1");
+
+    let list_after = r
+        .list_purge_pending()
+        .await
+        .expect("list_purge_pending after finalise");
+    assert!(
+        !list_after.iter().any(|e| e.identity == id1),
+        "id1 must not appear after finalise_purge"
+    );
+    assert!(
+        list_after.iter().any(|e| e.identity == id2),
+        "id2 must still appear"
+    );
+}
