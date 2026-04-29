@@ -184,6 +184,59 @@ async fn filter_value_with_sql_metacharacters_is_parameterized() {
     assert_eq!(probe.candidates.len(), 2);
 }
 
+#[tokio::test]
+async fn filter_is_static_false_matches_default_records() {
+    let store = seed().await;
+    // The projection writes is_static = 0 for every record, so this
+    // filter must match every keyword hit. Pre-fix this regressed
+    // because field_col routed `is_static` through extra_frontmatter,
+    // which the projection never populates.
+    let raw = serde_json::json!({"field": "is_static", "op": "eq", "value": false});
+    let parsed: SearchArgsFilters = serde_json::from_value(raw).expect("filter parse");
+    let validated = validate_filter(&parsed).expect("filter valid");
+    let mut a = args("postgres", 10);
+    a.filter = Some(validated);
+    let page = store.search_keyword(&a).await.expect("search");
+    assert_eq!(page.candidates.len(), 2);
+}
+
+#[tokio::test]
+async fn filter_active_true_matches_live_rows() {
+    let store = seed().await;
+    // `active=1` is the floor for search; an explicit `active=true`
+    // filter should match every keyword hit. Regression guard for the
+    // physical-column routing in `field_col`.
+    let raw = serde_json::json!({"field": "active", "op": "eq", "value": true});
+    let parsed: SearchArgsFilters = serde_json::from_value(raw).expect("filter parse");
+    let validated = validate_filter(&parsed).expect("filter valid");
+    let mut a = args("postgres", 10);
+    a.filter = Some(validated);
+    let page = store.search_keyword(&a).await.expect("search");
+    assert_eq!(page.candidates.len(), 2);
+}
+
+#[tokio::test]
+async fn filter_path_string_contains_narrows_by_projected_path() {
+    let store = seed().await;
+    // `path` is set by `projection::derive_path` to
+    // `vault/<scope>/<id>.md` — every test record carries one.
+    let raw = serde_json::json!({
+        "field": "path",
+        "op": "string_contains",
+        "value": "vault/",
+    });
+    let parsed: SearchArgsFilters = serde_json::from_value(raw).expect("filter parse");
+    let validated = validate_filter(&parsed).expect("filter valid");
+    let mut a = args("postgres", 10);
+    a.filter = Some(validated);
+    let page = store.search_keyword(&a).await.expect("search");
+    assert_eq!(
+        page.candidates.len(),
+        2,
+        "all projected paths share `vault/`"
+    );
+}
+
 // ── Acceptance: deterministic ranking inputs ──────────────────────────────────
 
 #[tokio::test]

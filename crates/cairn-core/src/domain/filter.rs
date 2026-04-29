@@ -639,42 +639,60 @@ fn compile_node(filter: &SearchArgsFilters, params: &mut Vec<serde_json::Value>)
 
 /// Map a validated field name to its SQL column/expression in the `records` table.
 ///
-/// Fields that are direct scalar columns on `MemoryRecord` map 1-to-1.
-/// Fields nested inside JSON blobs or stored in `extra_frontmatter` emit the
-/// appropriate `json_extract(...)` expression so the SQL is immediately correct
-/// when `cairn-store-sqlite` (#46) creates the schema. The store may additionally
-/// create indexed computed columns or partial indexes over these expressions
-/// for query performance — the filter SQL works with both approaches.
+/// Three categories:
+/// 1. Physical scalar columns on `records` (`kind`, `class`, `visibility`,
+///    `confidence`, `path`, `version`, `is_static`, `tombstoned`, `active`)
+///    map 1-to-1. These are written by
+///    `cairn-store-sqlite::store::projection::ProjectedRow` and indexed for
+///    cheap predicates.
+/// 2. JSON-array columns on `records` (`tags`, `actor_chain`) emit the bare
+///    column name; the array ops in `compile_array_op` open them via
+///    `json_each`.
+/// 3. Sub-objects of the canonical `record_json` blob — `provenance.created_at`,
+///    and the free-form `extra_frontmatter` map (`title`, `category`,
+///    `priority`, `backlinks`) — emit `json_extract(...)` expressions. The
+///    store side surfaces these via VIRTUAL generated columns in
+///    `crates/cairn-store-sqlite/src/migrations/sql/0011_filter_alignment.sql`
+///    so the same SQL evaluates correctly against the live schema.
+///
+/// Routing store-owned fields (`path`, `is_static`, `tombstoned`, `active`,
+/// `version`) through `extra_frontmatter` would silently miss every record
+/// the projection wrote — those values live on the physical columns, not
+/// in the user-supplied frontmatter map.
+//
+// `clippy::doc_markdown` triggers on bare identifiers in prose; the field
+// names above are wrapped in backticks already, so the lint is satisfied.
 fn field_col(name: &str) -> &'static str {
     match name {
-        // ── Direct MemoryRecord scalar columns ────────────────────────────
+        // ── Physical scalar columns on records ────────────────────────────
         "kind" => "kind",
         "class" => "class",
         "visibility" => "visibility",
         "confidence" => "confidence",
+        "path" => "path",
+        "version" => "version",
+        "is_static" => "is_static",
+        "tombstoned" => "tombstoned",
+        "active" => "active",
 
-        // ── Nested inside the `provenance` JSON column ────────────────────
-        // `provenance.created_at` is the RFC3339 creation timestamp.
+        // ── Sub-object inside record_json (surfaced via the `provenance`
+        //    VIRTUAL generated column in migration 0011) ───────────────────
         "created_at" => "json_extract(provenance, '$.created_at')",
 
-        // ── Direct JSON-array columns on MemoryRecord ─────────────────────
+        // ── JSON-array columns on records ─────────────────────────────────
         // `tags` is Vec<String> — flat string array; standard json_each works.
         // `actor_chain` is Vec<ActorChainEntry> — struct array; see compile_array_op.
         "tags" => "tags",
         "actor_chain" => "actor_chain",
 
-        // ── Fields stored in the `extra_frontmatter` JSON column ──────────
-        // These fields come from the ingest call's frontmatter (§ schema
-        // verbs/ingest.json). The store (#46) might project frequently-queried
-        // ones as indexed computed columns; json_extract works regardless.
+        // ── Fields the ingest caller put into `extra_frontmatter` ─────────
+        // These never have a physical column — they are user-supplied
+        // frontmatter that round-trips through `record_json`. The store
+        // exposes the wrapping object via the `extra_frontmatter` VIRTUAL
+        // column in migration 0011.
         "title" => "json_extract(extra_frontmatter, '$.title')",
         "category" => "json_extract(extra_frontmatter, '$.category')",
-        "path" => "json_extract(extra_frontmatter, '$.path')",
         "priority" => "json_extract(extra_frontmatter, '$.priority')",
-        "version" => "json_extract(extra_frontmatter, '$.version')",
-        "is_static" => "json_extract(extra_frontmatter, '$.is_static')",
-        "tombstoned" => "json_extract(extra_frontmatter, '$.tombstoned')",
-        "active" => "json_extract(extra_frontmatter, '$.active')",
         // `backlinks` is a JSON array inside extra_frontmatter.
         "backlinks" => "json_extract(extra_frontmatter, '$.backlinks')",
 

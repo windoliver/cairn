@@ -2,7 +2,9 @@
 //!
 //! Pipeline:
 //!
-//! 1. The FTS5 virtual table `records_fts` indexes `body` (migration 0001).
+//! 1. The FTS5 virtual table `records_fts` indexes `body` (migration 0001,
+//!    pinned in brief §3 lines 380-385). Path/title narrowing happens via
+//!    the metadata filter, not by widening the FTS index.
 //!    A subquery `MATCH ?` produces `(rowid, bm25, snippet)` for hits.
 //! 2. The outer query joins back to `records r`, drops tombstoned and
 //!    inactive rows, narrows by the visibility allowlist, and AND-combines
@@ -19,6 +21,15 @@
 //! [`rusqlite::Error::SqliteFailure`] whose message starts with `"fts5:"`.
 //! The store rewraps these as [`StoreError::FtsQuery`] so the verb layer
 //! can return a user-actionable error instead of a generic SQL failure.
+//!
+//! ## Scope is the caller's responsibility
+//!
+//! This module does NOT enforce scope-tuple narrowing — see the trait
+//! docstring on [`cairn_core::contract::memory_store::MemoryStore::search_keyword`].
+//! Callers running against a shared multi-tenant DB MUST fold scope
+//! resolution into either the `visibility_allowlist` or the validated
+//! `filter` before invoking; otherwise rows from another scope can match
+//! the keyword query and leak through.
 //!
 //! [`compile_filter`]: cairn_core::domain::filter::compile_filter
 

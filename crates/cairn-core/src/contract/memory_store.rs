@@ -164,11 +164,22 @@ pub trait MemoryStore: Send + Sync {
 
     // ── Search (#47, stubbed in PR-A) ─────────────────────────────────────
 
-    /// Keyword search over `body` + `path` returning ranking-input
-    /// candidates. The shared ranker (brief §5.1) is a separate pure
-    /// function in `cairn-core`; this method does not produce a final
-    /// score. Returns a capability-unavailable error when the `fts`
-    /// capability is off.
+    /// Keyword search over the indexed `body` column returning
+    /// ranking-input candidates. The shared ranker (brief §5.1) is a
+    /// separate pure function in `cairn-core`; this method does not
+    /// produce a final score. Returns a capability-unavailable error
+    /// when the `fts` capability is off.
+    ///
+    /// **Scope is the caller's responsibility.** This method does NOT
+    /// derive a scope tuple from its arguments. Callers (the verb-layer
+    /// dispatch in `cairn-cli`) MUST resolve the authorized scope (brief
+    /// §5.1 Scope Resolve stage) and either narrow to a `visibility_allowlist`
+    /// or compose a [`crate::domain::filter::ValidatedFilter`] over the
+    /// `kind` / `class` / `visibility` predicates plus any record-side
+    /// scope dimension exposed by the filter DSL. Calling
+    /// `search_keyword` against a shared multi-tenant DB without first
+    /// running scope resolution will leak rows that match the keyword
+    /// query but belong to a different scope.
     async fn search_keyword(
         &self,
         args: &KeywordSearchArgs<'_>,
@@ -409,6 +420,12 @@ pub enum EdgeDir {
 /// validate once and pass the proof-token down to the store without
 /// allocation. `PartialEq` is intentionally omitted: `ValidatedFilter`
 /// holds a borrowed reference whose equality semantics are caller-defined.
+///
+/// Scope tuple narrowing — tenant / workspace / entity / user / agent /
+/// session — is NOT a field on this struct. Callers must compose scope
+/// constraints into the `filter` tree or the `visibility_allowlist` before
+/// invoking the store. See the docstring on
+/// [`MemoryStore::search_keyword`] for the rationale.
 #[derive(Debug, Clone)]
 pub struct KeywordSearchArgs<'a> {
     /// Raw FTS5 expression. Store does not validate FTS5 syntax; `SQLite`
@@ -416,7 +433,9 @@ pub struct KeywordSearchArgs<'a> {
     /// FTS error variant on `StoreError`.
     pub query: String,
     /// Pre-validated filter tree from
-    /// [`crate::domain::filter::validate_filter`].
+    /// [`crate::domain::filter::validate_filter`]. Callers fold scope-tuple
+    /// narrowing into this tree (or rely on the `visibility_allowlist`)
+    /// before invoking the store — see [`MemoryStore::search_keyword`].
     pub filter: Option<ValidatedFilter<'a>>,
     /// Visibility values the caller is allowed to see; empty = no filter.
     pub visibility_allowlist: Vec<MemoryVisibility>,
