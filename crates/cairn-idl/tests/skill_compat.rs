@@ -733,7 +733,11 @@ fn extract_inline_span_catches_wrapped_cairn_punctuation() {
     // cairn token (`(cairn …)`, `{ cairn …; }`) used to be skipped by the
     // first-token == "cairn" prefilter. They must now be extracted so
     // validate_cli_block's fail-closed catch-all can reject them.
-    let md = "Try `(cairn ingest --bogus)` or `{ cairn search foo; }` here.";
+    // Both wrapped spans must contain at least one flag-shaped token after
+    // `cairn` so the inline heuristic recognizes them as invocations
+    // (round-merge-update: bare-verb mentions like `cairn search` in prose
+    // shouldn't trigger the gate).
+    let md = "Try `(cairn ingest --bogus)` or `{ cairn search --bogus foo; }` here.";
     let blocks = extract_code_blocks(md).expect("inline-only markdown must parse");
     let inline: Vec<_> = blocks.iter().filter(|b| b.lang == "inline").collect();
     assert_eq!(

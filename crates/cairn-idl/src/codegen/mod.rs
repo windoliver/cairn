@@ -209,17 +209,15 @@ fn check_skill_compat(doc: &ir::Document, files: &[GeneratedFile]) -> Result<(),
                     .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
             }
             "json" => {
-                // JSON examples must declare a verb context via the enclosing
-                // `## ` heading. A block sitting outside any verb section
-                // can't be unambiguously matched to a schema, so reject.
-                let Some(verb) = verb_ctx else {
-                    return Err(CodegenError::Emit(format!(
-                        "skill compat: json block at line {} is not inside a verb section",
-                        block.line
-                    )));
-                };
-                skill_compat::validate_json_block(&block, doc, &verb)
-                    .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+                // JSON examples are validated *only* when they sit under a
+                // `## cairn <verb>` heading — that's the contract surface.
+                // Blocks under documentation headings like
+                // `## Output format` (response-shape examples) are
+                // illustrative prose, not args payloads, so skip them.
+                if let Some(verb) = verb_ctx {
+                    skill_compat::validate_json_block(&block, doc, &verb)
+                        .map_err(|e| CodegenError::Emit(format!("skill compat: {e}")))?;
+                }
             }
             other => {
                 // Round-7 finding: any non-bash, non-json fence (e.g. `zsh`,

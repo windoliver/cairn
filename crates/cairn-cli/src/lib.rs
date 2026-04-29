@@ -8,5 +8,6 @@
 pub mod config;
 pub mod mcp;
 pub mod plugins;
+pub mod skill;
 pub mod vault;
 pub mod verbs;

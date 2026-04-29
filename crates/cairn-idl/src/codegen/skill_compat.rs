@@ -197,7 +197,16 @@ fn span_looks_like_cairn_invocation(span: &str) -> bool {
     let Some(idx) = toks.iter().position(|t| strip(t) == "cairn") else {
         return false;
     };
-    toks.len() > idx + 1
+    // Inline spans are noisy — `**`cairn search` response:**` shows up in
+    // prose as a verb name reference, not an invocation. Require either
+    // a flag-shaped token (`-x`, `--long`) somewhere after `cairn`, or a
+    // *concrete* argument (placeholder/value) AND the verb word — the
+    // bar is "at least one flag after cairn" since real invocations on
+    // this CLI all use `--mode`/`--kind`/`--json`/etc. A bare verb-only
+    // mention is treated as prose.
+    toks.iter()
+        .skip(idx + 1)
+        .any(|t| t.starts_with('-') && *t != "-")
 }
 
 /// Extract the verb file's top-level `$id` so JSON-typed flag values can
@@ -1170,6 +1179,20 @@ struct FlagOccurrence {
 /// letter so a digit-only string (`"999"`) doesn't accidentally bypass
 /// integer-bounds validation.
 fn is_placeholder(value: &str) -> bool {
+    // Shell command substitution / variable expansion is also a runtime-
+    // resolved placeholder — `$(cairn search …)`, `${SESSION_ID}`,
+    // `$VAR`. The literal value can't satisfy a Ulid pattern (or any
+    // other concrete schema) but the documented invocation is correct.
+    if (value.starts_with("$(") && value.ends_with(')'))
+        || (value.starts_with("${") && value.ends_with('}'))
+        || (value.starts_with('$')
+            && value.len() > 1
+            && value[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return true;
+    }
     let mut has_upper = false;
     for c in value.chars() {
         if c.is_ascii_uppercase() {
@@ -1190,6 +1213,19 @@ fn is_placeholder(value: &str) -> bool {
 fn is_placeholder_for_schema(value: &str, prop_schema: Option<&serde_json::Value>) -> bool {
     if !is_placeholder(value) {
         return false;
+    }
+    // Shell command substitution / variable expansion is *always* safe
+    // to bypass — the literal text can't satisfy a Ulid pattern, but the
+    // runtime value will. Constrained schema fields don't change that.
+    if (value.starts_with("$(") && value.ends_with(')'))
+        || (value.starts_with("${") && value.ends_with('}'))
+        || (value.starts_with('$')
+            && value.len() > 1
+            && value[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return true;
     }
     let Some(prop) = prop_schema else {
         return true;
@@ -1546,6 +1582,42 @@ fn shell_split(line: &str, source_line: usize) -> Result<Vec<Token>, CompatError
                     });
                 };
                 buf.push(next);
+            }
+            // Command substitution `$(...)` — consume through the matching
+            // `)` with depth tracking and emit the entire substitution as
+            // one `quoted=true` token (so downstream parsing treats it as
+            // argument data, not as a flag or operator). Without this,
+            // `cairn forget --record $(cairn search …)` would reparse the
+            // inner cairn invocation's flags as if they belonged to the
+            // outer verb.
+            '$' if !in_single && chars.peek() == Some(&'(') => {
+                buf.push('$');
+                buf.push('(');
+                let _ = chars.next();
+                let mut depth: usize = 1;
+                while let Some(inner) = chars.next() {
+                    buf.push(inner);
+                    if inner == '(' {
+                        depth += 1;
+                    } else if inner == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if inner == '\\'
+                        && let Some(esc) = chars.next()
+                    {
+                        buf.push(esc);
+                    }
+                }
+                if depth != 0 {
+                    return Err(CompatError::Malformed {
+                        kind: "cli",
+                        detail: "unterminated `$(...)` command substitution".to_string(),
+                        line: source_line,
+                    });
+                }
+                buf_quoted = true;
             }
             '\'' if !in_double => {
                 in_single = !in_single;
