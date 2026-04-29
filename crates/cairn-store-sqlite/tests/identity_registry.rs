@@ -1127,3 +1127,135 @@ async fn every_mutating_method_writes_one_wal_row() {
         "expected >= 2 WAL rows from setup_active_identity, got {count}"
     );
 }
+
+// ── C11 · schema-enforcement tests ───────────────────────────────────────────
+
+/// A direct `UPDATE` on `vault_meta` must be rejected by the
+/// `vault_meta_no_update` trigger.
+#[tokio::test]
+async fn vault_meta_update_rejected_by_trigger() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let conn = r.test_connection();
+    let err = conn
+        .execute(
+            "UPDATE vault_meta SET vault_id = 'evil' WHERE rowid = 1",
+            [],
+        )
+        .expect_err("UPDATE on vault_meta must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vault_meta is immutable"),
+        "expected 'vault_meta is immutable' in error message, got: {msg}"
+    );
+}
+
+/// A direct `DELETE` on `vault_meta` must be rejected by the
+/// `vault_meta_no_delete` trigger.
+#[tokio::test]
+async fn vault_meta_delete_rejected_by_trigger() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    let conn = r.test_connection();
+    let err = conn
+        .execute("DELETE FROM vault_meta WHERE rowid = 1", [])
+        .expect_err("DELETE on vault_meta must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("vault_meta is immutable"),
+        "expected 'vault_meta is immutable' in error message, got: {msg}"
+    );
+}
+
+/// `reserve_identity` on a fresh registry (no `vault_meta`) must return
+/// `VaultMetaMissing`.
+#[tokio::test]
+async fn reserve_identity_against_empty_vault_meta_returns_missing() {
+    let r = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+    let id = Identity::parse("hmn:no-vault-meta").expect("valid identity");
+    let (record, key) = make_record_and_key(&id);
+
+    let err = r
+        .reserve_identity(&record, &key)
+        .await
+        .expect_err("must fail with VaultMetaMissing");
+    assert!(
+        matches!(err, RegistryError::VaultMetaMissing),
+        "expected VaultMetaMissing, got {err:?}"
+    );
+}
+
+/// Calling `reserve_first_identity` twice with DIFFERENT identities:
+/// - First call succeeds (inserts `vault_meta` + first identity).
+/// - Second call with a DIFFERENT identity (but same vault/hash) should detect
+///   the existing `vault_meta` and find that the different identity doesn't
+///   exist → return `FirstBindAlreadyCommitted`.
+#[tokio::test]
+async fn second_reserve_first_identity_against_existing_returns_already_committed() {
+    let r = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let binding = dir.path().join("vault.binding.pending");
+
+    let witness = vec![9u8; 32];
+    std::fs::write(&binding, &witness).expect("write witness");
+    let hash = WitnessHash::from_witness(&witness);
+
+    let vault = VaultId::mint();
+    let id1 = Identity::parse("hmn:first-binding").expect("valid identity");
+    let (record1, key1) = make_record_and_key(&id1);
+
+    // First call: succeeds, commits vault_meta + identity row.
+    r.reserve_first_identity(&vault, &record1, &key1, hash, &binding)
+        .await
+        .expect("first reserve_first_identity must succeed");
+
+    // Second call with a DIFFERENT identity but same vault and hash.
+    // The existing vault_meta matches, but the identity row for id2 is absent
+    // → FirstBindAlreadyCommitted.
+    let id2 = Identity::parse("hmn:different-identity").expect("valid identity");
+    let (record2, key2) = make_record_and_key(&id2);
+    let err = r
+        .reserve_first_identity(&vault, &record2, &key2, hash, &binding)
+        .await
+        .expect_err("must fail with FirstBindAlreadyCommitted");
+    assert!(
+        matches!(err, RegistryError::FirstBindAlreadyCommitted),
+        "expected FirstBindAlreadyCommitted, got {err:?}"
+    );
+}
+
+/// Manually inserting a row into `identity_receipts` with a `new_key_version`
+/// that does not exist in `identity_keys` must be rejected by the FK constraint.
+#[tokio::test]
+async fn receipt_fk_phantom_key_version_rejected() {
+    let (r, _dir, alice, _sk) = setup_active_identity().await;
+
+    let conn = r.test_connection();
+    // Enable FK enforcement (rusqlite disables it by default).
+    conn.execute_batch("PRAGMA foreign_keys = ON")
+        .expect("enable foreign_keys");
+
+    // Try to insert a receipt referencing key_version=99, which does not exist.
+    let err = conn
+        .execute(
+            "INSERT INTO identity_receipts \
+             (op_kind, target_identity, signer_identity, signer_key_version, \
+              old_key_version, new_key_version, issued_at, signed_payload, signature) \
+             VALUES ('rotation', ?1, ?1, 1, 1, 99, datetime('now'), X'deadbeef', X'deadbeef')",
+            rusqlite::params![alice.as_str()],
+        )
+        .expect_err("must be rejected by FK constraint");
+    // rusqlite surfaces FK violations as SqliteFailure with SQLITE_CONSTRAINT.
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("constraint")
+            || matches!(
+                err,
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error { code: rusqlite::ErrorCode::ConstraintViolation, .. },
+                    _
+                )
+            ),
+        "expected FK constraint violation, got: {err:?}"
+    );
+}
