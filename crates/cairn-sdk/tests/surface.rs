@@ -159,12 +159,16 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 }
 
 #[test]
-fn status_advertises_no_capabilities_in_p0() {
+fn status_advertises_policy_trace_in_p0() {
+    use cairn_core::generated::common::Capabilities;
     let resp = sdk().status();
-    // Mirrors `cairn status` — store not wired, so no capabilities.
+    // Mirrors `cairn status` — advertises the policy_trace gate
+    // vocabulary (#95). Store-driven capabilities land with #9.
     assert!(
-        resp.capabilities.is_empty(),
-        "P0 must advertise no capabilities until store wires up"
+        resp.capabilities
+            .contains(&Capabilities::CairnMcpV1PolicyTrace),
+        "P0 must advertise cairn.mcp.v1.policy_trace; got {:?}",
+        resp.capabilities
     );
     assert!(resp.extensions.is_empty());
 }
