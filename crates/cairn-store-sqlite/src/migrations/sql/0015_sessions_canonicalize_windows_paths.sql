@@ -53,14 +53,22 @@ UPDATE sessions
    SET ended_at = strftime('%s','now') * 1000
  WHERE session_id IN (SELECT session_id FROM ranked WHERE rn > 1);
 
--- Step 2: rewrite survivors. Limit to active rows so already-ended
--- legacy rows keep their original audit trail.
+-- Step 2: rewrite survivors. Cover every Windows-shape row — drive in
+-- either spelling (`_:/%`, `_:\%`) and UNC in either spelling (`//%`,
+-- `\\%`) — so mixed-slash legacy values like `C:\foo/bar` and
+-- `\\srv/share/sub` also collapse to the canonical backslash form
+-- `SessionIdentity::new` produces. REPLACE on a string with no `/` is
+-- a no-op, so listing already-canonical shapes here is harmless. Limit
+-- to active rows so already-ended legacy rows keep their original
+-- audit trail.
 UPDATE sessions
    SET project_root = REPLACE(project_root, '/', '\')
  WHERE ended_at IS NULL
    AND project_root IS NOT NULL
    AND ( project_root LIKE '_:/%'
-      OR project_root LIKE '//%' );
+      OR project_root LIKE '_:\%'
+      OR project_root LIKE '//%'
+      OR project_root LIKE '\\%' );
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (15, '0015_sessions_canonicalize_windows_paths', '', strftime('%s','now') * 1000);

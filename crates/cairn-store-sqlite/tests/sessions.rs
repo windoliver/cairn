@@ -888,6 +888,13 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
             ("S_UNC_FWD", "usr:win2", "//srv/share"),
             ("S_DRV_OK", "usr:win3", r"D:\repo"),
             ("S_POSIX_OK", "usr:nix1", "/abs/repo"),
+            // Mixed-slash variants — a drive path that starts canonical
+            // (`E:\`) but has internal `/`, and a UNC that starts
+            // canonical (`\\srv\`) but has `/` deeper in the path.
+            // These survive dedup and must still be rewritten to fully
+            // canonical backslash form by the rewrite step.
+            ("S_DRV_MIX", "usr:win4", r"E:\foo/bar"),
+            ("S_UNC_MIX", "usr:win5", r"\\srv\share/sub"),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -907,6 +914,8 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         ("S_UNC_FWD", r"\\srv\share"),
         ("S_DRV_OK", r"D:\repo"),
         ("S_POSIX_OK", "/abs/repo"),
+        ("S_DRV_MIX", r"E:\foo\bar"),
+        ("S_UNC_MIX", r"\\srv\share\sub"),
     ] {
         let sess = store
             .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
