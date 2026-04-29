@@ -17,12 +17,6 @@ use cairn_core::contract::identity_registry::RegistryError;
 ///
 /// # Errors
 /// Returns [`RegistryError::Backend`] if the `INSERT` fails.
-// Called from `reserve_first_identity` (C4) and later mutation helpers
-// (C5-C9).  Dead-code lint fires until C4 lands; suppress here.
-#[allow(
-    dead_code,
-    reason = "called from reserve_first_identity which lands in C4 commit 2"
-)]
 pub(super) fn wal_insert(
     tx: &Transaction<'_>,
     op_kind: &str,
