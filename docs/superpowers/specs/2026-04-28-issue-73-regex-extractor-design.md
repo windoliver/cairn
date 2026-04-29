@@ -27,10 +27,10 @@ In scope:
 - Built-in default rule set covering §11.6 + §18.a triggers and the most common hook / tool-frame events.
 - Schema-validated user-rule extension hook (`RuleSet::from_config`) without binding to `.cairn/config.yaml` yet.
 - Two-phase dispatch with **untruncatable built-in rules** (Phase A) and budget-bounded user rules (Phase B). Built-ins cover all §11.6 / §18.a explicit triggers, so truncation cannot silently lose `remember` / `forget` / `skillify` intents.
-- Clause-aware text-rule dispatch: bodies are split on a small fixed separator set so compound utterances like `"forget X, remember Y"` produce both outputs (first-match-wins applies *per clause*, not per body). Bounded clause cap to keep adversarial inputs cheap.
+- Trigger-prefilter + phrase-window dispatch (aho-corasick): finds explicit-trigger keyword occurrences anywhere in the body — including across sentence boundaries and inside very large bodies — extracts a window per eligible occurrence, and runs text rules against the windows. First-match-wins applies *per window*. Quote-aware and abbreviation-aware. Built-in trigger detection runs unconditionally regardless of body size.
 - Hardened `forget` resolver contract: regex-originated substring matches **never** auto-authorize delete; resolver routes them to an interactive `forget_ambiguous` outcome. Auto-proceed is gated on `match_strategy == Exact` (quoted-string capture) plus a unique candidate, or on a stable `record_id` passed by an out-of-band caller.
 - **Runtime-enforced** body source via `BodyResolution::Resolved { text, source: BodySource }`. The `BodySource` enum has no variant for agent rationale, so internal reasoning literally cannot be passed in as a user utterance — the privacy invariant is encoded in the type, not in caller discipline.
-- 64 KiB hard cap on body length before regex text-rule dispatch. Bodies above the cap skip Phase A and Phase B and route to LLM via `llm_eligible_spans`. Closes the latency-DoS path on always-on Phase A.
+- 64 KiB body cap on Phase B (user rules) only — Phase A always runs the prefilter so explicit triggers are detected on bodies of any size. Bodies above the cap still appear in `llm_eligible_spans` for additive LLM enrichment. Closes the latency-DoS path without sacrificing the always-on guarantee.
 - Per-rule wall-clock budget enforcement and hard `max_drafts` cap on Phase B; typed `TruncationReason` returned to the caller (§6).
 - Documented chain handoff contract for #74: regex emits typed `llm_eligible_spans` derived from clause spans minus high-confidence (≥0.9) regex coverage, plus any `ClauseCapExceeded` tail. Suppression is **span-scoped, not event-scoped**, and **confidence-gated** even under truncation: low-confidence regex spans remain LLM-eligible so weak matches cannot block LLM recovery.
 - Unit, integration, property, and a CI-friendly latency assertion test.
@@ -437,30 +437,47 @@ This separation means a hash mismatch or I/O error on `payload_ref` cannot be mi
 
 Dispatch runs in two phases per event:
 
-**Phase 0 — body-size guard.** Before either phase, the extractor checks `body.len() > MAX_BODY_LEN_FOR_REGEX` (default 64 KiB; constant exposed for #74's tuning). If exceeded:
+1. **Prefilter (always runs, body-size-independent).** Run the aho-corasick trigger scan and build the phrase-window list (§6.2). Cost: O(body_len) at ~GB/s; well under 1 ms even on 1 MiB bodies. **There is no body-size escape from the prefilter** — built-in trigger detection is unconditionally reachable. The earlier-spec behaviour ("skip Phase A entirely on bodies > 64 KiB") is rejected because it silently dropped explicit `forget` / `remember` intents in long pasted transcripts when the LLM was unavailable.
 
-1. Skip Phase A and Phase B entirely for text rules. Hook and tool-frame rules still run.
-2. Set `truncated = TruncationReason::BodyTooLarge { body_len }`.
-3. Append the entire body span as a single range to `llm_eligible_spans` so the LLM extractor (which can chunk-process) handles it.
-4. Emit `tracing::warn!(worker = "regex", body_len, "body exceeds MAX_BODY_LEN_FOR_REGEX, deferring to LLM")`.
+2. **Phase A — built-ins on phrase windows.** Run every built-in text rule against every phrase window in declaration order. **`max_drafts` is not enforced** in Phase A. A Phase-A wall-clock observability rail (`MAX_PHASE_A_WALL_MS`, default 2 ms; `MAX_PHASE_A_WALL_MS_LARGE`, default 10 ms when `body_len > 64 KiB`) is checked once after Phase A completes; if exceeded, the extractor emits `tracing::warn!` and the deployment self-check (follow-up issue) flags the configuration. The hit count from the prefilter bounds work: phrase windows are ≤ 64 occurrences in any practical input (the prefilter caps them at 64 with a `tracing::warn!` on overflow; remaining keyword occurrences after the 64th become a single span in `llm_eligible_spans`).
 
-This is the round-8 fix for the latency-DoS path: an adversarial multi-megabyte `remember <body>` cannot force every built-in to scan the whole input. 64 KiB is generous (≈ 16 dense paragraphs) and well below the latency floor; tunable per deployment but pinned for this PR.
+3. **Phase B — user rules on phrase windows.** Run user rules against the same phrase windows. **Phase B is the only general-truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule. If user rules declare custom keyword vocabularies (a future extension), a separate prefilter is built for them; in this PR Phase B reuses the same windows.
 
-1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. Within Phase A, **`max_drafts` is not enforced**, but a Phase-A wall-clock guard (`MAX_PHASE_A_WALL_MS`, default 2 ms) is checked once after Phase A completes; if exceeded, the extractor emits `tracing::warn!` and the deployment self-check (follow-up issue) flags the configuration. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex on bodies ≤ 64 KiB), so this is an observability rail, not a fall-through.
-2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only general-truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
+4. **Hook and tool-frame rules.** Run independently of body and prefilter; bounded by rule count.
 
-**Clause-aware first-match-wins for text rules.** Bodies are split into clauses on a deliberately conservative separator set:
+The `MAX_BODY_LEN_FOR_REGEX = 64 KiB` constant **still exists** but it now only governs Phase B, not Phase A. On bodies above the cap, Phase B is skipped (user rules don't run) and `truncated = BodyTooLarge { body_len }` is set so the chain still routes those bodies through LLM enrichment via `llm_eligible_spans`. Phase A always runs; `tracing::warn!(worker = "regex", body_len, "body exceeds MAX_BODY_LEN_FOR_REGEX, skipping Phase B user rules")` fires once.
 
-- `;` (semicolon) — always a clause boundary.
-- `,` followed by whitespace and a **trigger-prefix lookahead** — only splits when the next clause starts with one of `remember`, `forget`, `correction`, `skillify`, or `this is how` (case-insensitive, word-anchored). This means `"forget X, remember Y"` splits but `"alice, bob, and carol are on call"` does not.
-- conjunction (`\band\b`, `\bbut\b`, `\bthen\b`) followed by whitespace and the **same trigger-prefix lookahead**. `"forget X and remember Y"` splits; `"remember that Alice and Bob are on call"` stays intact (the `and` is not followed by a trigger prefix).
-- Quote-aware: separators inside `"…"`, `'…'`, or backticks do not split. Implemented with a tiny one-pass scanner; the regex crate doesn't need to support balanced groups.
+**Trigger-prefilter + phrase-window dispatch.** Text rules do not run against the whole body and do not depend on splitting prose into clauses. Instead, the extractor:
 
-**Periods are not separators.** An earlier draft split on `.` followed by whitespace, with the claim that abbreviations like `U.S.` would not split because they are followed by a non-whitespace character — but in ordinary prose like `"remember that I live in the U.S. and prefer cash"`, `U.S.` is followed by a space, so the splitter would have split mid-sentence and produced a high-confidence partial draft (`"I live in the U.S"`) that suppressed LLM repair on the rest. To preserve common abbreviations and initialisms unconditionally, we drop period splitting entirely. Sentence-spanning compound utterances are still handled by trigger-prefix-gated conjunctions and explicit `;`. If a deployment ships data where multi-sentence trigger compounds are common (rare in practice), they can add a user rule for the specific construction; the built-in splitter stays conservative.
+1. **Prefilters** the body for occurrences of the small set of trigger keywords using `aho-corasick` (linear-time, ~GB/s, prefix-set is fixed and tiny):
+   - `remember`
+   - `forget`
+   - `correction`
+   - `skillify`
+   - `this is how`
 
-Each resulting clause is dispatched independently, with first-match-wins **per clause** (not per body). Empty clauses (after trimming) are skipped. Hook and tool-frame rules ignore clause splitting and continue to run at most once per event.
+2. For each keyword hit, checks **sentence-start eligibility**. A hit is at a sentence start if any of these hold:
+   - hit position is `0` (start of body);
+   - preceding byte (after stripping whitespace) is `\n`, `;`, `?`, or `!`;
+   - preceding byte (after stripping whitespace) is `.` AND the byte before that period is **not** an abbreviation-marker (uppercase letter inside ≤ 4 chars of an earlier `.`, the standard `U.S.`-style guard) — implemented with a tiny one-pass scanner over the previous 6 bytes;
+   - preceded by a comma or one of `and`/`but`/`then` followed by whitespace (the round-7 trigger-prefixed conjunction case);
+   - inside-quote check: hits inside `"…"`, `'…'`, or backtick spans are not eligible.
 
-Trigger-prefix gating is the round-7 fix: ordinary remembered facts like `"remember that Alice and Bob are on call"` must stay as one clause, otherwise the built-in `remember.preference` (confidence 0.95) would capture only `"Alice"` and gate the LLM out of recovering the rest. The lookahead makes splitting *meaningful* — only when both sides plausibly carry their own intent — and harmless on plain English.
+3. **Phrase windows.** For each eligible hit, the extractor extracts a window from `hit_pos` forward to the next "stop": whichever of `;`, `\n`, `.`-followed-by-uppercase-or-EOF, end-of-body, or another eligible trigger keyword comes first. The window is the substring rules match against, anchored at position 0.
+
+4. **Rules dispatch.** Built-in text rules (Phase A) and user text rules (Phase B) run against each phrase window in order, with first-match-wins **per window** (the round-5/6 invariants).
+
+This makes both round-9 failure modes structurally impossible:
+
+- `"FYI, old address is stale. forget my old address"` — the prefilter finds `forget` at the start of the second sentence; the abbreviation-aware sentence-start check accepts because the preceding `.` is followed by uppercase-equivalent (any keyword start). Window is `"forget my old address"`. The built-in `forget` rule fires.
+- `"remember that I live in the U.S. and prefer cash"` — the prefilter finds one `remember` at position 0. No second hit at `U.S.` because none of the keywords appears there. The window runs from position 0 to end-of-body (no intermediate stop), so the captured body is the whole sentence.
+- A 1 MiB pasted transcript ending in `"forget my old address"` — the prefilter scans the whole body in roughly 1 ms (RE2-style scan); the only eligible hit is the trailing trigger; the window is `"forget my old address"`. Phase A still fires, no fallback dependency on the LLM. (See §6.3 for how Phase B and the body-size cap interact with this; Phase A's prefilter has no body-size cap.)
+
+**Quote-awareness:** the inside-quote check above means `"the user said \"remember that\" by mistake"` does not produce an extraction — the trigger inside quotes is not eligible. Implemented in the same one-pass scanner.
+
+Hook and tool-frame rules ignore the prefilter entirely and continue to run at most once per event.
+
+**Output spans.** Each rule fire records `source_span` as the byte range of its phrase window in the original body, used for the dedup contract in §6.5.
 
 This handles compound utterances correctly:
 
@@ -643,8 +660,11 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - **Forget contract — Fuzzy rejected:** `RuleSet::from_config(<rule with match_strategy: Fuzzy>)` returns `Err(InvalidRule)`. (This guards the resolver contract: even if a future user-config tries to declare `Fuzzy`, the extractor refuses to compile it until #75 is wired up.)
 - **Forget contract — user `Exact` requires `quoted_capture: true`:** user rule with `match_strategy: Exact` and `quoted_capture: false` (or absent) → `InvalidRule`.
 - **Proactive runtime enforcement:** `BodySource` has no `Rationale` variant — confirmed by an exhaustive-match test. A test fixture for a `Proactive` event constructs `BodyResolution::Resolved { text: message_body, source: BodySource::ProactiveMessage }`. There is no compilable path that lets a test pass `rationale` text in: it would need a `BodySource` variant that does not exist.
-- **Body-size cap:** synthesize an `ExtractInput` with a 65 KiB body containing the substring `"remember that …"`; assert (a) `outputs` is empty (text rules skipped), (b) `truncated == BodyTooLarge { body_len: 66560 }` (or whatever exact length is used), (c) `llm_eligible_spans` contains exactly one range covering the whole body, (d) one `body exceeds MAX_BODY_LEN_FOR_REGEX` warn fires.
-- **Period non-splitting (round-8 regression):** body `"remember that I live in the U.S. and prefer cash"`; assert `outputs.len() == 1` and the captured body is `"I live in the U.S. and prefer cash"` (whole sentence). Mirror with `"remember that prices have rounded to $9.99 today"` (decimal point), `"the rule applies to dr. smith and dr. jones equally"` (lowercase abbreviation case where the rule does not fire — should produce no output, not a partial one).
+- **Oversize body still extracts triggers (round-9 regression):** synthesize a 1 MiB body whose last line is `"forget my old address"`; assert (a) `outputs.len() == 1` containing the `Forget` intent (Phase A prefilter found the trigger), (b) `truncated == BodyTooLarge { body_len: 1048576 + … }`, (c) `llm_eligible_spans` covers the body (LLM still gets enrichment), (d) Phase B was skipped (no user-rule output), (e) one `body exceeds MAX_BODY_LEN_FOR_REGEX, skipping Phase B user rules` warn fires. The earlier-spec failure mode ("oversize body skips text rules entirely") is forbidden.
+- **Multi-sentence trigger (round-9 regression):** body `"FYI, old address is stale. forget my old address"`; assert `outputs.len() == 1`, the single output is `Forget(target_text_normalized = "my old address")`, `source_span` covers only the second sentence. The first sentence (no trigger keyword) does not appear in `outputs` and is in `llm_eligible_spans`. Mirror tests: `"One more thing. remember that I prefer cash"`, `"Got it; remember that meetings move to 3 PM"`.
+- **Abbreviation safety:** body `"remember that I live in the U.S. and prefer cash"`; assert `outputs.len() == 1` and the captured body is `"I live in the U.S. and prefer cash"` (whole sentence). The prefilter finds one `remember` at position 0; no second hit at `U.S.`; the window runs to end-of-body. Mirror with decimal points (`"remember that prices have rounded to $9.99 today"`) and `"e.g."`.
+- **Quote-aware:** body `'the user said "remember that" by mistake'`; assert `outputs` is empty (the trigger is inside quotes and is therefore not eligible).
+- **Phrase-window cap:** body containing 70 occurrences of `remember`; assert `outputs.len() <= 64` and a `phrase-window cap reached` warn fires; `llm_eligible_spans` includes the tail beyond hit 64.
 - **Span discipline:** every text-rule output has `source_span = Some(_)`; every Hook / ToolFrame output has `source_span = None`. Property test asserts the invariant across `extract` outputs.
 - `max_drafts` enforcement: build a `RuleSet` whose **user**-rule list contains `max_drafts + 5` always-matching rules and an empty built-in set; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches user-rule declaration order.
 - `max_wall_ms` zero-output path: empty built-ins, set `budget.max_wall_ms = 0`, one user rule that does work; assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
@@ -692,9 +712,10 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 ## 12. Workspace impact
 
 - Add `regex = { version = "1", default-features = false, features = ["std", "perf"] }` to `[workspace.dependencies]`. Disabling the `unicode` features keeps the binary slim; add Unicode-aware features only when a built-in rule needs them. CLAUDE.md §6.7 — workspace dep, justified in PR.
+- Add `aho-corasick = { version = "1", default-features = false, features = ["std", "perf-literal"] }` to `[workspace.dependencies]`. Powers the trigger prefilter (§6.2). Already a transitive dep of `regex`, so this is effectively a re-export with our chosen features; no new crate added to the build graph.
 - Add `async-trait = "0.1"` to `[workspace.dependencies]`. Required because `ExtractorWorker` is held as `Box<dyn ExtractorWorker>` at the chain boundary in #74, and a trait with native `async fn` is not object-safe in Rust 1.95. CLAUDE.md §6.3 explicitly carves this out.
-- `cairn-core` opts in to `regex = { workspace = true }` and `async-trait = { workspace = true }`.
-- `cargo deny` allowlist already covers MIT/Apache-2.0; both crates are dual-licensed as such. No `deny.toml` change.
+- `cairn-core` opts in to `regex = { workspace = true }`, `aho-corasick = { workspace = true }`, and `async-trait = { workspace = true }`.
+- `cargo deny` allowlist already covers MIT/Apache-2.0; all three crates are dual-licensed as such. No `deny.toml` change.
 - Workspace-lint compliance: no new `#[allow]`s; no `unsafe`; `#![forbid(unsafe_code)]` already applies.
 - Core boundary check (`scripts/check-core-boundary.sh`): unaffected — `regex` is an external crate, not a workspace crate.
 
