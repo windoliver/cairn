@@ -44,7 +44,10 @@ UPDATE sessions
    SET ended_at = strftime('%s','now') * 1000
  WHERE session_id IN (SELECT session_id FROM duplicates WHERE rn > 1);
 
-DROP INDEX sessions_one_active_per_identity_idx;
+-- 0012 was reduced to a no-op (see its header), so the original index it
+-- created may not exist on fresh installs. Use IF EXISTS to keep this
+-- migration idempotent across upgrade paths.
+DROP INDEX IF EXISTS sessions_one_active_per_identity_idx;
 
 CREATE UNIQUE INDEX sessions_one_active_per_identity_idx
   ON sessions(user_id, agent_id, COALESCE(project_root, ''))

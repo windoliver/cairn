@@ -523,8 +523,15 @@ impl SqliteMemoryStore {
     }
 
     /// Bump `last_activity_at` on the named session to "now". Returns
-    /// `Ok(false)` if the session id does not exist or has already ended;
-    /// `Ok(true)` when a row was updated.
+    /// `Ok(false)` if the session id does not exist, has already ended,
+    /// or belongs to a different `(user, agent, project_root)` than
+    /// `expected`; `Ok(true)` when a row was updated.
+    ///
+    /// `expected` enforces the cross-identity tampering guard at the
+    /// store layer rather than relying on call-site discipline. A leaked
+    /// or guessed session id cannot be used to bump activity on a row
+    /// belonging to another identity, even if a higher layer's
+    /// authorization check is bypassed.
     ///
     /// # Errors
     ///
@@ -532,13 +539,25 @@ impl SqliteMemoryStore {
     /// via `Default::default()`. Returns [`StoreError::Worker`] /
     /// [`StoreError::Sqlite`] for SQL failures.
     #[instrument(
-        skip(self),
+        skip(self, expected),
         err,
-        fields(verb = "touch_session", session_id = %id.as_str()),
+        fields(
+            verb = "touch_session",
+            session_id = %id.as_str(),
+            user = %expected.user,
+            agent = %expected.agent,
+        ),
     )]
-    pub async fn touch_session(&self, id: &SessionId) -> Result<bool, StoreError> {
+    pub async fn touch_session(
+        &self,
+        id: &SessionId,
+        expected: &SessionIdentity,
+    ) -> Result<bool, StoreError> {
         let conn = self.require_conn("touch_session")?.clone();
         let key = id.as_str().to_owned();
+        let user = expected.user.as_str().to_owned();
+        let agent = expected.agent.as_str().to_owned();
+        let project_root = expected.project_root.clone();
         let n = conn
             .call(move |c| {
                 let n = retry_busy(
@@ -547,8 +566,12 @@ impl SqliteMemoryStore {
                         let now_ms = current_unix_ms();
                         c.execute(
                             "UPDATE sessions SET last_activity_at = ?1 \
-                         WHERE session_id = ?2 AND ended_at IS NULL",
-                            params![now_ms, key],
+                             WHERE session_id = ?2 \
+                               AND user_id = ?3 \
+                               AND agent_id = ?4 \
+                               AND project_root IS ?5 \
+                               AND ended_at IS NULL",
+                            params![now_ms, key, user, agent, project_root],
                         )
                         .map_err(BusyOr::Sql)
                     },
@@ -565,7 +588,11 @@ impl SqliteMemoryStore {
     }
 
     /// Mark the session `ended_at = now`. Idempotent: ending an
-    /// already-ended session is a no-op (`Ok(false)`).
+    /// already-ended session is a no-op (`Ok(false)`). Also returns
+    /// `Ok(false)` when the row exists but belongs to a different
+    /// `(user, agent, project_root)` than `expected` — see
+    /// [`SqliteMemoryStore::touch_session`] for why the identity guard
+    /// lives at the store layer.
     ///
     /// # Errors
     ///
@@ -573,13 +600,25 @@ impl SqliteMemoryStore {
     /// via `Default::default()`. Returns [`StoreError::Worker`] /
     /// [`StoreError::Sqlite`] for SQL failures.
     #[instrument(
-        skip(self),
+        skip(self, expected),
         err,
-        fields(verb = "end_session", session_id = %id.as_str()),
+        fields(
+            verb = "end_session",
+            session_id = %id.as_str(),
+            user = %expected.user,
+            agent = %expected.agent,
+        ),
     )]
-    pub async fn end_session(&self, id: &SessionId) -> Result<bool, StoreError> {
+    pub async fn end_session(
+        &self,
+        id: &SessionId,
+        expected: &SessionIdentity,
+    ) -> Result<bool, StoreError> {
         let conn = self.require_conn("end_session")?.clone();
         let key = id.as_str().to_owned();
+        let user = expected.user.as_str().to_owned();
+        let agent = expected.agent.as_str().to_owned();
+        let project_root = expected.project_root.clone();
         let n = conn
             .call(move |c| {
                 let n = retry_busy(
@@ -588,8 +627,12 @@ impl SqliteMemoryStore {
                         let now_ms = current_unix_ms();
                         c.execute(
                             "UPDATE sessions SET ended_at = ?1 \
-                         WHERE session_id = ?2 AND ended_at IS NULL",
-                            params![now_ms, key],
+                             WHERE session_id = ?2 \
+                               AND user_id = ?3 \
+                               AND agent_id = ?4 \
+                               AND project_root IS ?5 \
+                               AND ended_at IS NULL",
+                            params![now_ms, key, user, agent, project_root],
                         )
                         .map_err(BusyOr::Sql)
                     },
@@ -690,10 +733,11 @@ impl SqliteMemoryStore {
             cairn_core::domain::Identity::parse(&agent).map_err(|e| StoreError::Invariant {
                 what: format!("session.agent_id round-trip failed: {e}"),
             })?;
-        let identity =
-            SessionIdentity::new(user, agent, project_root).map_err(|e| StoreError::Invariant {
+        let identity = SessionIdentity::from_persisted(user, agent, project_root).map_err(|e| {
+            StoreError::Invariant {
                 what: format!("session identity round-trip failed: {e}"),
-            })?;
+            }
+        })?;
         let tags: Vec<String> = tags_json
             .as_deref()
             .map(serde_json::from_str)
@@ -859,7 +903,7 @@ fn session_from_row(row: SessionRow) -> Result<Session, InTxError> {
         .map_err(|e| InTxError::Invariant(format!("session.user_id round-trip failed: {e}")))?;
     let agent = cairn_core::domain::Identity::parse(&agent)
         .map_err(|e| InTxError::Invariant(format!("session.agent_id round-trip failed: {e}")))?;
-    let identity = SessionIdentity::new(user, agent, project_root)
+    let identity = SessionIdentity::from_persisted(user, agent, project_root)
         .map_err(|e| InTxError::Invariant(format!("session identity round-trip failed: {e}")))?;
     let tags: Vec<String> = tags_json
         .as_deref()
@@ -1168,7 +1212,7 @@ fn read_session_by_id(
         .map_err(|e| InTxError::Invariant(format!("session.user_id round-trip failed: {e}")))?;
     let agent = cairn_core::domain::Identity::parse(&agent)
         .map_err(|e| InTxError::Invariant(format!("session.agent_id round-trip failed: {e}")))?;
-    let identity = SessionIdentity::new(user, agent, project_root)
+    let identity = SessionIdentity::from_persisted(user, agent, project_root)
         .map_err(|e| InTxError::Invariant(format!("session identity round-trip failed: {e}")))?;
     let tags: Vec<String> = tags_json
         .as_deref()

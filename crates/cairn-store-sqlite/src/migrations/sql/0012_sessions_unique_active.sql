@@ -1,20 +1,20 @@
--- Migration 0012: enforce one active session per (user, agent, project_root).
+-- Migration 0012: placeholder for the partial unique index on
+-- (user_id, agent_id, project_root) WHERE ended_at IS NULL.
 -- Brief source: §8.1 Session Lifecycle (single active session invariant).
 --
--- The auto-discover/auto-create path is racy without a database constraint:
--- two concurrent callers can both observe "no active session" and both
--- insert fresh rows, splitting later writes across diverging session IDs.
--- A partial unique index forces one INSERT in any racing pair to fail; the
--- store retries by going back to find_active_session, which now succeeds.
+-- An earlier draft of this migration created the partial unique index here
+-- on plain `(user_id, agent_id, project_root)`. Migration 0013 supersedes
+-- that index entirely (recreates it under `COALESCE(project_root, '')` so
+-- NULL values participate in uniqueness, plus a dedup pass for any
+-- pre-existing duplicate active rows). Creating the original index here
+-- would have aborted upgrade on any vault holding such duplicates BEFORE
+-- 0013's repair pass had a chance to run, since `rusqlite_migration`
+-- applies migrations in a single transaction and any error rolls the
+-- upgrade back. Leaving 0012 as a no-op marker keeps the migration
+-- numbering append-only while letting 0013 own the index lifecycle.
 --
--- SQLite treats two NULLs as distinct in unique indexes, which is exactly
--- what we want for the project-root-less context: a session pinned to a
--- concrete /repo and a session with no project_root must coexist for the
--- same (user, agent).
-
-CREATE UNIQUE INDEX sessions_one_active_per_identity_idx
-  ON sessions(user_id, agent_id, project_root)
-  WHERE ended_at IS NULL;
+-- See `crates/cairn-store-sqlite/src/migrations/sql/0013_sessions_unique_active_coalesce.sql`
+-- for the actual index definition and dedup pass.
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (12, '0012_sessions_unique_active', '', strftime('%s','now') * 1000);

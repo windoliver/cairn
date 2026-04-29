@@ -117,8 +117,9 @@ async fn null_and_set_project_root_are_distinct() {
 #[tokio::test]
 async fn touch_advances_last_activity() {
     let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
     let session = store
-        .create_session(&identity(Some("/repo")), NewSessionMetadata::default())
+        .create_session(&id, NewSessionMetadata::default())
         .await
         .expect("create");
     let before = store
@@ -132,7 +133,7 @@ async fn touch_advances_last_activity() {
     std::thread::sleep(std::time::Duration::from_millis(5));
 
     assert!(
-        store.touch_session(&session.id).await.expect("touch"),
+        store.touch_session(&session.id, &id).await.expect("touch"),
         "active session should bump",
     );
     let after = store
@@ -151,22 +152,23 @@ async fn end_session_excludes_from_discovery() {
         .create_session(&id, NewSessionMetadata::default())
         .await
         .expect("create");
-    assert!(store.end_session(&session.id).await.expect("end"));
+    assert!(store.end_session(&session.id, &id).await.expect("end"));
     let found = store.find_active_session(&id).await.expect("find");
     assert!(found.is_none(), "ended session must not be returned");
     // Idempotent re-end is a no-op.
-    assert!(!store.end_session(&session.id).await.expect("re-end"));
+    assert!(!store.end_session(&session.id, &id).await.expect("re-end"));
 }
 
 #[tokio::test]
 async fn touch_on_ended_session_is_noop() {
     let store = open_in_memory().await.expect("open");
+    let id = identity(Some("/repo"));
     let session = store
-        .create_session(&identity(Some("/repo")), NewSessionMetadata::default())
+        .create_session(&id, NewSessionMetadata::default())
         .await
         .expect("create");
-    assert!(store.end_session(&session.id).await.expect("end"));
-    assert!(!store.touch_session(&session.id).await.expect("touch"));
+    assert!(store.end_session(&session.id, &id).await.expect("end"));
+    assert!(!store.touch_session(&session.id, &id).await.expect("touch"));
 }
 
 #[tokio::test]
@@ -276,7 +278,7 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
     assert_ne!(new.id, prior.id);
 
     // Touch on the now-ended prior must fail — the §8.1 expiry invariant.
-    let touched = store.touch_session(&prior.id).await.expect("touch");
+    let touched = store.touch_session(&prior.id, &id).await.expect("touch");
     assert!(!touched, "expired session must not be revivable via touch");
 
     // Discovery returns the new id, not the closed prior.
@@ -372,7 +374,7 @@ async fn migration_dedupes_preexisting_active_null_project_duplicates() {
 
     // Sanity: the older row is no longer touchable (ended_at set).
     let old_id = cairn_core::domain::session::SessionId::parse("S_OLD").expect("parse");
-    assert!(!store.touch_session(&old_id).await.expect("touch"));
+    assert!(!store.touch_session(&old_id, &id).await.expect("touch"));
 }
 
 #[tokio::test]
@@ -461,8 +463,9 @@ async fn end_after_reuse_select_does_not_return_dead_session() {
     for _ in 0..16 {
         let store = std::sync::Arc::clone(&store);
         let seed_id = seed_id.clone();
+        let id = id.clone();
         handles.push(tokio::spawn(async move {
-            let _ = store.end_session(&seed_id).await;
+            let _ = store.end_session(&seed_id, &id).await;
             None
         }));
     }
@@ -524,9 +527,10 @@ async fn touch_after_stale_select_keeps_session_alive_under_race() {
     for _ in 0..16 {
         let store = std::sync::Arc::clone(&store);
         let seed_id = seed_id.clone();
+        let id = id.clone();
         handles.push(tokio::spawn(async move {
             // Touch is best-effort — return the seed id either way.
-            let _ = store.touch_session(&seed_id).await;
+            let _ = store.touch_session(&seed_id, &id).await;
             seed_id
         }));
     }
@@ -712,6 +716,65 @@ async fn explicit_session_resolution_fails_closed_for_missing() {
 }
 
 #[tokio::test]
+async fn touch_and_end_reject_cross_identity_session_ids() {
+    // Brief §8.1: a leaked / guessed session id must not let a foreign
+    // (user, agent, project_root) bump activity on or close another
+    // identity's row. The identity guard lives at the store layer so
+    // higher layers can't accidentally drop it.
+    let store = open_in_memory().await.expect("open");
+
+    let alice = SessionIdentity::new(
+        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("alice identity");
+    let bob = SessionIdentity::new(
+        Identity::parse("usr:bob").expect("user"),
+        Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
+        Some("/repo".into()),
+    )
+    .expect("bob identity");
+
+    let session = store
+        .create_session(&alice, NewSessionMetadata::default())
+        .await
+        .expect("create");
+
+    // Bob holding alice's id — touch is a no-op, not a successful bump.
+    assert!(
+        !store.touch_session(&session.id, &bob).await.expect("touch"),
+        "cross-identity touch must report no row updated",
+    );
+    assert!(
+        !store.end_session(&session.id, &bob).await.expect("end"),
+        "cross-identity end must report no row updated",
+    );
+
+    // The row is still active under alice's identity.
+    let still_active = store
+        .find_active_session(&alice)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(still_active.id, session.id);
+
+    // Alice's own touch / end still succeed.
+    assert!(
+        store
+            .touch_session(&session.id, &alice)
+            .await
+            .expect("alice touch"),
+    );
+    assert!(
+        store
+            .end_session(&session.id, &alice)
+            .await
+            .expect("alice end"),
+    );
+}
+
+#[tokio::test]
 async fn explicit_session_resolution_fails_closed_for_ended() {
     // An already-closed session is also authoritative: the caller asked
     // for *that* session, and silently moving them to a new one would
@@ -729,7 +792,7 @@ async fn explicit_session_resolution_fails_closed_for_ended() {
         .create_session(&alice, NewSessionMetadata::default())
         .await
         .expect("create");
-    assert!(store.end_session(&session.id).await.expect("end"));
+    assert!(store.end_session(&session.id, &alice).await.expect("end"));
 
     let err = store
         .resolve_explicit_session(&session.id, &alice)

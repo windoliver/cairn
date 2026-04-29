@@ -140,6 +140,56 @@ impl SessionIdentity {
             project_root,
         })
     }
+
+    /// Hydrate a [`SessionIdentity`] from values already persisted by the
+    /// store, bypassing the absolute-path check that
+    /// [`SessionIdentity::new`] enforces on write.
+    ///
+    /// Read paths use this constructor so a vault upgraded from an older
+    /// version of the resolver (which permitted relative `project_root`
+    /// values) can still hydrate its existing rows. The write path keeps
+    /// the strict validator: every newly persisted identity is canonical.
+    /// Identity-kind checks (`usr:` / `agt:`) are still applied because
+    /// they reflect a structural invariant of the row, not a string-shape
+    /// guard.
+    ///
+    /// Empty-string `project_root` is rejected with [`DomainError::EmptyField`]
+    /// to match the database trigger that prevents the empty form from
+    /// being written.
+    ///
+    /// # Errors
+    ///
+    /// - [`DomainError::InvalidIdentity`] when `user`/`agent` aren't the
+    ///   expected identity kinds.
+    /// - [`DomainError::EmptyField`] when `project_root` is `Some("")`.
+    pub fn from_persisted(
+        user: Identity,
+        agent: Identity,
+        project_root: Option<String>,
+    ) -> Result<Self, DomainError> {
+        if user.kind() != IdentityKind::Human {
+            return Err(DomainError::InvalidIdentity {
+                message: format!("session user must be `usr:` identity, got `{user}`"),
+            });
+        }
+        if agent.kind() != IdentityKind::Agent {
+            return Err(DomainError::InvalidIdentity {
+                message: format!("session agent must be `agt:` identity, got `{agent}`"),
+            });
+        }
+        if let Some(raw) = project_root.as_deref()
+            && raw.is_empty()
+        {
+            return Err(DomainError::EmptyField {
+                field: "project_root",
+            });
+        }
+        Ok(Self {
+            user,
+            agent,
+            project_root,
+        })
+    }
 }
 
 /// Normalize a `project_root` string for the active-session uniqueness
@@ -369,6 +419,30 @@ mod tests {
         let id =
             SessionIdentity::new(ident_user(), ident_agent(), Some("/".into())).expect("valid");
         assert_eq!(id.project_root.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn from_persisted_accepts_relative_path_for_legacy_rows() {
+        let id = SessionIdentity::from_persisted(
+            ident_user(),
+            ident_agent(),
+            Some("relative/path".into()),
+        )
+        .expect("legacy hydration should not enforce is_absolute");
+        assert_eq!(id.project_root.as_deref(), Some("relative/path"));
+    }
+
+    #[test]
+    fn from_persisted_still_rejects_empty_project_root() {
+        let err = SessionIdentity::from_persisted(ident_user(), ident_agent(), Some(String::new()))
+            .unwrap_err();
+        assert!(matches!(err, DomainError::EmptyField { .. }));
+    }
+
+    #[test]
+    fn from_persisted_still_validates_identity_kinds() {
+        let err = SessionIdentity::from_persisted(ident_agent(), ident_user(), None).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
     }
 
     #[test]
