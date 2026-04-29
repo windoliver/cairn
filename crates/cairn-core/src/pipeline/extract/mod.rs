@@ -8,3 +8,7 @@
 //! for the contract this module implements.
 
 // Submodules land in subsequent tasks.
+
+pub mod draft;
+
+pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
