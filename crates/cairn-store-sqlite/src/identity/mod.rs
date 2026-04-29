@@ -31,16 +31,16 @@ use cairn_core::domain::identity::{
     receipts::{RevocationReceipt, RotationReceipt},
     records::{
         FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
-        PendingKeyDisableEntry, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
-        RevokePendingEntry,
+        PendingKeyDisableEntry, ProvisioningState, PublicIdentityRecord, PurgePendingEntry,
+        ReceiptId, RevokePendingEntry,
     },
 };
 
 use rusqlite::OptionalExtension as _;
 
 use queries::{
-    in_placeholders, kind_str, row_to_identity_key_entry, row_to_pending_identity_entry,
-    row_to_public_identity_record, visibility_states,
+    in_placeholders, kind_str, parse_state, row_to_identity_key_entry,
+    row_to_pending_identity_entry, row_to_public_identity_record, visibility_states,
 };
 
 /// Compiled-in `0002_identity.sql` migration DDL.
@@ -989,23 +989,131 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         Ok(result)
     }
 
-    // ── Two-phase purge tombstone stubs (C8) ──────────────────────────────────
+    // ── Two-phase purge tombstone (C8) ────────────────────────────────────────
 
     async fn mark_purge_pending(
         &self,
-        _id: &Identity,
+        id: &Identity,
         _ack: &PurgeAcknowledgement,
-        _reason: PurgeReason,
+        reason: PurgeReason,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C8")
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Validate the current state before transitioning.
+        let existing_state: Option<String> = tx
+            .query_row(
+                "SELECT provisioning_state FROM identities WHERE id = ?1",
+                rusqlite::params![id.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let state_str_val = existing_state.ok_or(RegistryError::NotFound)?;
+        let current_state = parse_state(&state_str_val)?;
+
+        // Purge is allowed from: pending, active, revoked — not from
+        // revoke_pending, purge_pending, or purged.
+        match current_state {
+            ProvisioningState::Pending | ProvisioningState::Active | ProvisioningState::Revoked => {
+            }
+            invalid => {
+                return Err(RegistryError::InvalidPurgeStartState {
+                    id: id.clone(),
+                    state: invalid,
+                });
+            }
+        }
+
+        tx.execute(
+            "UPDATE identities \
+             SET provisioning_state = 'purge_pending', \
+                 purge_requested_at = ?1, \
+                 purge_reason = ?2 \
+             WHERE id = ?3",
+            rusqlite::params![now, &reason.0, id.as_str()],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let payload = serde_json::json!({
+            "identity": id.as_str(),
+            "reason": reason.0,
+        });
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "mark_purge_pending", id.as_str(), &payload_bytes)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
-    async fn finalise_purge(&self, _id: &Identity) -> Result<(), RegistryError> {
-        unimplemented!("Task C8")
+    async fn finalise_purge(&self, id: &Identity) -> Result<(), RegistryError> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows_changed = tx
+            .execute(
+                "UPDATE identities \
+                 SET provisioning_state = 'purged', purged_at = ?1 \
+                 WHERE id = ?2 AND provisioning_state = 'purge_pending'",
+                rusqlite::params![now, id.as_str()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+
+        let payload = id.as_str().as_bytes();
+        wal::wal_insert(&tx, "finalise_purge", id.as_str(), payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_purge_pending(&self) -> Result<Vec<PurgePendingEntry>, RegistryError> {
-        unimplemented!("Task C8")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, purge_requested_at, purge_reason \
+                 FROM identities \
+                 WHERE provisioning_state = 'purge_pending'",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let purge_req_str: String = row.get(1)?;
+                let purge_reason: String = row.get(2)?;
+                Ok((id_str, purge_req_str, purge_reason))
+            })
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for (id_str, purge_req_str, purge_reason) in rows {
+            let identity = Identity::parse(id_str).map_err(domain_err)?;
+            let purge_requested_at = chrono::DateTime::parse_from_rfc3339(&purge_req_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            result.push(PurgePendingEntry {
+                identity,
+                purge_requested_at,
+                purge_reason,
+            });
+        }
+        Ok(result)
     }
 
     // ── Receipt reconciliation flag-clear stubs (C9) ──────────────────────────

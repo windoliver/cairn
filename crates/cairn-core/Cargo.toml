@@ -17,6 +17,10 @@ default = []
 # same canonical fixture from `[dev-dependencies]`. Never enable in
 # production builds.
 test-fixtures = []
+# Off-by-default. Exposes test-only constructors for types that are
+# otherwise opaque (e.g. `PurgeAcknowledgement::for_test`). Enable in
+# `[dev-dependencies]` of integration tests, never in production builds.
+test-helpers = []
 # Off-by-default smoke target. Used only by the `filter-smoke` CI job
 # to compile and run the §5.2 Filter pipeline against the *normal*
 # (non-dev) dependency graph — feature unification through dev-deps
@@ -63,6 +67,7 @@ rand = { workspace = true }
 name = "filter_smoke"
 path = "src/bin/filter_smoke.rs"
 required-features = ["smoke"]
+
 
 [lints]
 workspace = true

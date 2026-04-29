@@ -33,7 +33,7 @@ default = []
 test-helpers = []
 
 [dev-dependencies]
-cairn-core = { workspace = true, features = ["test-fixtures"] }
+cairn-core = { workspace = true, features = ["test-fixtures", "test-helpers"] }
 cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 proptest = { workspace = true }
