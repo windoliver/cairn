@@ -21,7 +21,11 @@ path = "src/bin/cairn-docgen.rs"
 
 [dependencies]
 cairn-core = { workspace = true }
+<<<<<<< HEAD
 cairn-idl = { workspace = true }
+=======
+cairn-keychain = { workspace = true }
+>>>>>>> dcfeba5 (feat(cli): IdentityService skeleton + VaultBindingLock (#50))
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
@@ -39,7 +43,14 @@ serde_yaml = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+<<<<<<< HEAD
 walkdir = { workspace = true }
+=======
+ed25519-dalek = { workspace = true }
+unicode-normalization = { workspace = true }
+fs2 = { workspace = true }
+whoami = { workspace = true }
+>>>>>>> dcfeba5 (feat(cli): IdentityService skeleton + VaultBindingLock (#50))
 
 [dev-dependencies]
 cairn-sdk = { workspace = true }
@@ -49,6 +60,7 @@ async-trait = { workspace = true }
 proptest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true
