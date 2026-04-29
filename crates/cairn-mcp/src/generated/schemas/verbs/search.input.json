@@ -15,6 +15,11 @@
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
         },
+        "explain": {
+          "default": false,
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.",
+          "type": "boolean"
+        },
         "filters": {
           "$ref": "#/$defs/filter"
         },
@@ -57,6 +62,13 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "excluded": {
+          "description": "Per-record exclusions; present only when args.explain is true.",
+          "items": {
+            "$ref": "../common/record_exclusion.json"
+          },
+          "type": "array"
+        },
         "hits": {
           "items": {
             "$ref": "#/$defs/Hit"

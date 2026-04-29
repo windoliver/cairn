@@ -429,6 +429,7 @@ fn search_rejects_empty_query_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: String::new(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -448,6 +449,7 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hello".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -474,6 +476,7 @@ fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             mode,
             query: "hello".to_owned(),
             scope: None,
+            explain: None,
         };
         let err = sdk().search(&args).expect_err("must fail closed in P0");
         match err {
@@ -538,6 +541,7 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -566,6 +570,7 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -589,6 +594,7 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -621,6 +627,7 @@ fn search_accepts_extended_filter_operators() {
             mode: SearchArgsMode::Keyword,
             query: "hi".to_owned(),
             scope: None,
+            explain: None,
         };
         match sdk().search(&args).expect_err("P0 has no capability") {
             SdkError::CapabilityUnavailable { .. } => {}
@@ -656,6 +663,7 @@ fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
             mode: SearchArgsMode::Keyword,
             query: "hi".to_owned(),
             scope: None,
+            explain: None,
         };
         match sdk().search(&args).expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
@@ -676,6 +684,7 @@ fn search_rejects_malformed_cursor_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
@@ -695,6 +704,7 @@ fn search_rejects_empty_scope_filter_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: Some(empty_scope_filter()),
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {

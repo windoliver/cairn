@@ -226,6 +226,9 @@ pub struct SearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<crate::generated::common::Cursor>,
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filters: Option<SearchArgsFilters>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,6 +248,9 @@ struct RawSearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default)]
     cursor: Option<crate::generated::common::Cursor>,
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.
+    #[serde(default)]
+    explain: Option<bool>,
     #[serde(default)]
     filters: Option<SearchArgsFilters>,
     #[serde(default)]
@@ -266,6 +272,7 @@ impl ::core::convert::TryFrom<RawSearchArgs> for SearchArgs {
         Ok(Self {
             citations: raw.citations,
             cursor: raw.cursor,
+            explain: raw.explain,
             filters: raw.filters,
             limit: raw.limit,
             mode: raw.mode,
@@ -286,6 +293,9 @@ impl<'de> ::serde::Deserialize<'de> for SearchArgs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchData {
+    /// Per-record exclusions; present only when args.explain is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded: Option<Vec<crate::generated::common::RecordExclusion>>,
     pub hits: Vec<Hit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<crate::generated::common::Cursor>,

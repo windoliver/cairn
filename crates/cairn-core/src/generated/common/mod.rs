@@ -140,6 +140,24 @@ impl<'de> ::serde::Deserialize<'de> for Nonce16Base64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+pub enum RecordExclusionGate {
+    ReadFilterRelevance,
+    ReadFilterStaleness,
+    ReadFilterDedup,
+}
+
+/// Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordExclusion {
+    pub detail: String,
+    pub gate: RecordExclusionGate,
+    pub target_id: crate::generated::common::Ulid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ScopeFilterTier {
     Private,
     Session,

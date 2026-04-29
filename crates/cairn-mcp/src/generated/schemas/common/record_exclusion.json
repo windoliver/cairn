@@ -1,0 +1,31 @@
+{
+  "$id": "https://cairn.dev/schema/cairn.mcp.v1/common/record_exclusion.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.",
+  "properties": {
+    "detail": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "gate": {
+      "enum": [
+        "read_filter_relevance",
+        "read_filter_staleness",
+        "read_filter_dedup"
+      ],
+      "type": "string"
+    },
+    "target_id": {
+      "$ref": "./primitives.json#/$defs/Ulid"
+    }
+  },
+  "required": [
+    "target_id",
+    "gate",
+    "detail"
+  ],
+  "title": "RecordExclusion",
+  "type": "object",
+  "x-cairn-contract": "cairn.mcp.v1"
+}

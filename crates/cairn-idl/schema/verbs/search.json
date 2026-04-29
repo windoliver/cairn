@@ -105,6 +105,11 @@
         "cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor",
           "description": "Opaque continuation token from a prior search Data.next_cursor."
+        },
+        "explain": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see."
         }
       }
     },
@@ -123,6 +128,11 @@
         },
         "next_cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "excluded": {
+          "type": "array",
+          "items": { "$ref": "../common/record_exclusion.json" },
+          "description": "Per-record exclusions; present only when args.explain is true."
         }
       }
     },
