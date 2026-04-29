@@ -44,6 +44,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 unicode-normalization = { version = "0.1", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
+parking_lot = "0.12"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
