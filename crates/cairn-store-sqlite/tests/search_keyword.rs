@@ -449,17 +449,64 @@ async fn unmatched_query_returns_empty_page() {
 
 // ── Index regression ──────────────────────────────────────────────────────────
 
-/// Guards against accidental removal of the partial index added in
-/// migration 0012. The keyword-search read path applies a correlated
-/// supersession check `NOT EXISTS (SELECT 1 FROM edges WHERE kind='updates'
-/// AND dst = r.record_id)` against every FTS hit; without
-/// `edges_updates_dst_idx`, that predicate is forced to scan `edges`
-/// because the base PK `(src, dst, kind)` cannot serve a `dst`-leading
-/// lookup. EXPLAIN QUERY PLAN must continue to name the index.
+/// Guards against accidental removal or weakening of the partial index
+/// added in migration 0012. The keyword-search read path applies a
+/// correlated supersession check
+/// `NOT EXISTS (SELECT 1 FROM edges WHERE kind='updates' AND dst = r.record_id)`
+/// against every FTS hit; without an index keyed on `dst`, that predicate
+/// is forced to scan `edges` because the base PK `(src, dst, kind)`
+/// cannot serve a `dst`-leading lookup.
+///
+/// We assert *both* shape and use:
+///   1. `PRAGMA index_xinfo` confirms the indexed key column is `dst`,
+///      so a same-named index keyed on a different column would fail.
+///   2. The `sqlite_schema` row carries the partial predicate
+///      `WHERE kind = 'updates'`.
+///   3. EXPLAIN QUERY PLAN reports `SEARCH` (not `SCAN`) and names the
+///      index, so a regression that bypasses the index — or uses it as
+///      a covering scan without a search key — is caught.
 #[test]
 fn supersession_predicate_uses_partial_index() {
     use cairn_store_sqlite::open_in_memory_sync;
     let conn = open_in_memory_sync().expect("open");
+
+    // (1) The leading indexed column must be `dst`.
+    let mut xinfo = conn
+        .prepare("SELECT name, key FROM pragma_index_xinfo('edges_updates_dst_idx')")
+        .expect("prepare index_xinfo");
+    let key_cols: Vec<(String, i64)> = xinfo
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .expect("query index_xinfo")
+        .filter_map(Result::ok)
+        .collect();
+    let leading_key: Vec<&str> = key_cols
+        .iter()
+        .filter(|(_, key)| *key == 1)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        leading_key,
+        vec!["dst"],
+        "edges_updates_dst_idx must key on dst (got {key_cols:?})",
+    );
+
+    // (2) The index must remain partial with the supersession predicate.
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'edges_updates_dst_idx'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read index DDL");
+    let normalized: String = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalized.contains("WHERE kind = 'updates'"),
+        "edges_updates_dst_idx must remain partial on kind = 'updates', got: {ddl}",
+    );
+
+    // (3) EQP must report a SEARCH on the index, not just a SCAN that
+    // happens to mention it.
     let mut stmt = conn
         .prepare(
             "EXPLAIN QUERY PLAN \
@@ -474,7 +521,7 @@ fn supersession_predicate_uses_partial_index() {
         .collect();
     let joined = plan.join("\n");
     assert!(
-        joined.contains("edges_updates_dst_idx"),
-        "supersession lookup must use partial index, got plan:\n{joined}",
+        joined.contains("SEARCH") && joined.contains("edges_updates_dst_idx"),
+        "supersession lookup must SEARCH the partial index by dst, got plan:\n{joined}",
     );
 }
