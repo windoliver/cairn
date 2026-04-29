@@ -21,7 +21,10 @@ async fn memory_keystore_round_trip() {
     let key = SigningKey::generate(&mut rng);
     ks.store_keypair(&h, &key).await.unwrap();
     let loaded = ks.load_signing_key(&h).await.unwrap();
-    assert_eq!(loaded.verifying_key().to_bytes(), key.verifying_key().to_bytes());
+    assert_eq!(
+        loaded.verifying_key().to_bytes(),
+        key.verifying_key().to_bytes()
+    );
 }
 
 #[tokio::test]

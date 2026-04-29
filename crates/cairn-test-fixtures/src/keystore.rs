@@ -136,9 +136,7 @@ impl Keystore for MemoryKeystore {
         if *self.locked.read() {
             return Err(KeystoreError::Locked);
         }
-        self.inner
-            .write()
-            .insert(key_of(handle), bytes.to_vec());
+        self.inner.write().insert(key_of(handle), bytes.to_vec());
         Ok(())
     }
 
