@@ -1,12 +1,17 @@
 //! `SQLite` record store for Cairn (P0 scaffold).
 //!
 //! Schema, migrations, FTS5 and sqlite-vec integration arrive in
-//! follow-up issues (#46 and later). For now this crate ships only the
+//! follow-up issues (#46 and later). For now this crate ships the
 //! plugin manifest, a stub `MemoryStore` impl with all capability flags
-//! `false`, and a `register()` entry point so the host can include it
-//! in `cairn plugins list/verify`.
+//! `false`, a `register()` entry point so the host can include it in
+//! `cairn plugins list/verify`, and the [`SqliteIdentityRegistry`] adapter
+//! introduced in issue #50.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+
+mod identity;
+
+pub use identity::SqliteIdentityRegistry;
 
 use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
