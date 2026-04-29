@@ -14,11 +14,13 @@
 //!   [`WorkflowOrchestrator`] / [`WorkflowOrchestratorCapabilities`],
 //!   [`SensorIngress`] / [`SensorIngressCapabilities`],
 //!   [`MCPServer`] / [`MCPServerCapabilities`].
+//! - Identity provisioning contract (§4.1): [`Keystore`] / [`KeystoreError`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
+pub mod keystore;
 pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
@@ -40,6 +42,7 @@ pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
+pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
 pub use mcp_server::{MCPServer, MCPServerCapabilities};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
