@@ -2,6 +2,11 @@ name: pages
 
 # Auto-deploy the committed mdBook source to GitHub Pages after `main`
 # advances. Pull requests build the book in docs.yml but never deploy.
+#
+# One-time setup: enable GitHub Pages manually via Settings → Pages →
+# Source: "GitHub Actions". The workflow's GITHUB_TOKEN cannot create the
+# Pages site itself (admin-only API), so `enablement: true` on
+# actions/configure-pages fails with "Resource not accessible by integration".
 
 on:
   push:
@@ -43,8 +48,6 @@ jobs:
         run: mdbook build docs/site --dest-dir target/site
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-        with:
-          enablement: true
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
