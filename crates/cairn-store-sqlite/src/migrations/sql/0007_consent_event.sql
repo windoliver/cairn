@@ -97,10 +97,17 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal event rows require valid JSON payload');
 END;
 
--- Payload `shape` discriminator must be present and match the kind.
--- Without this, a direct-SQL writer could insert a row with an empty
--- object `{}` or a wrong shape; serde would reject it at decode time
--- and the append-only row would permanently block the mirror cursor.
+-- Payload `shape` discriminator must be present, of JSON text type, and
+-- match the kind. Without this, a direct-SQL writer could insert a row
+-- with an empty object `{}` or a missing/wrong shape; serde would reject
+-- it at decode time and the append-only row would permanently block the
+-- mirror cursor.
+--
+-- Note: a missing JSON path makes `json_extract` return NULL. In SQLite
+-- `NULL = 'sensor_toggle'` is NULL, `NOT NULL` is NULL, and a `WHEN`
+-- clause that evaluates to NULL does NOT fire. We therefore guard
+-- explicitly on `json_type(...)` returning the literal `'text'`, which
+-- is non-NULL boolean-friendly.
 --
 -- This trigger is gated on `kind` being in the §14 domain so the kind
 -- domain trigger remains the canonical violation when both could fire
@@ -121,7 +128,9 @@ CREATE TRIGGER consent_journal_payload_shape_matches_kind
    )
    AND NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
-   AND NOT (
+   AND (
+        json_type(NEW.payload_json, '$.shape') IS NOT 'text'
+     OR NOT (
         (NEW.kind IN ('sensor_enable', 'sensor_disable')
            AND json_extract(NEW.payload_json, '$.shape') = 'sensor_toggle')
      OR (NEW.kind = 'policy_change'
@@ -132,6 +141,7 @@ CREATE TRIGGER consent_journal_payload_shape_matches_kind
            AND json_extract(NEW.payload_json, '$.shape') = 'decision')
      OR (NEW.kind = 'promote_receipt'
            AND json_extract(NEW.payload_json, '$.shape') = 'promote_receipt')
+        )
    )
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload shape must match kind');
@@ -159,6 +169,105 @@ CREATE TRIGGER consent_journal_payload_body_free
    )
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload must be body-free (§14)');
+END;
+
+-- Sensor kinds require a non-NULL `sensor_id` and the payload's
+-- `sensor_label` must equal that `sensor_id`. Without this, a direct-SQL
+-- writer could insert a `sensor_enable` row with `sensor_id IS NULL`,
+-- which `query_by_sensor` (a `sensor_id IS NOT NULL` index predicate)
+-- would silently miss.
+CREATE TRIGGER consent_journal_sensor_kind_requires_sensor_id
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
+   AND NEW.sensor_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal sensor kinds require sensor_id');
+END;
+
+CREATE TRIGGER consent_journal_sensor_id_matches_payload
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
+   AND NEW.sensor_id IS NOT NULL
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND json_type(NEW.payload_json, '$.sensor_label') = 'text'
+   AND json_extract(NEW.payload_json, '$.sensor_label') IS NOT NEW.sensor_id
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal sensor_id must equal payload.sensor_label');
+END;
+
+-- Subject body must equal the sensor identity (`snr:` + label) for
+-- sensor kinds. Together with the trigger above, the journal cannot
+-- carry a sensor row whose subject points at a different sensor.
+CREATE TRIGGER consent_journal_sensor_subject_matches_sensor_id
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
+   AND NEW.sensor_id IS NOT NULL
+   AND (NEW.subject IS NULL OR NEW.subject IS NOT ('snr:' || NEW.sensor_id))
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal sensor subject must be `snr:` + sensor_id');
+END;
+
+-- Non-sensor kinds must NOT carry a sensor_id. Without this, a
+-- direct-SQL writer could pin a non-sensor event to a sensor index,
+-- polluting `query_by_sensor` results.
+CREATE TRIGGER consent_journal_non_sensor_kind_forbids_sensor_id
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IS NOT NULL
+   AND NEW.kind NOT IN ('sensor_enable', 'sensor_disable')
+   AND NEW.sensor_id IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal non-sensor kinds must not carry sensor_id');
+END;
+
+-- Hash-shape invariant for kinds whose subject (and payload's
+-- `target_id_hash`) MUST be a salted/cryptographic digest. The Rust
+-- validator enforces this on the `append()` path; this trigger is the
+-- last-line defense against a direct-SQL writer who bypasses the type
+-- system. We accept either `sha256:` + 64 lowercase hex or `hash:` +
+-- 32..=128 lowercase hex, mirroring `validate_hash` in
+-- `cairn-core::domain::consent`.
+CREATE TRIGGER consent_journal_hash_kind_subject_shape
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
+   AND NEW.subject IS NOT NULL
+   AND NOT (
+        (substr(NEW.subject, 1, 7) = 'sha256:'
+           AND length(NEW.subject) = 71
+           AND substr(NEW.subject, 8) NOT GLOB '*[^0-9a-f]*')
+     OR (substr(NEW.subject, 1, 5) = 'hash:'
+           AND length(NEW.subject) BETWEEN 37 AND 133
+           AND substr(NEW.subject, 6) NOT GLOB '*[^0-9a-f]*')
+   )
+BEGIN
+  SELECT RAISE(ABORT, 'consent_journal hash-kind subject must be sha256:64hex or hash:32..128hex');
+END;
+
+CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
+  BEFORE INSERT ON consent_journal
+  FOR EACH ROW
+  WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
+   AND NEW.payload_json IS NOT NULL
+   AND json_valid(NEW.payload_json) = 1
+   AND json_type(NEW.payload_json, '$.target_id_hash') = 'text'
+   AND NOT (
+        (substr(json_extract(NEW.payload_json, '$.target_id_hash'), 1, 7) = 'sha256:'
+           AND length(json_extract(NEW.payload_json, '$.target_id_hash')) = 71
+           AND substr(json_extract(NEW.payload_json, '$.target_id_hash'), 8)
+                 NOT GLOB '*[^0-9a-f]*')
+     OR (substr(json_extract(NEW.payload_json, '$.target_id_hash'), 1, 5) = 'hash:'
+           AND length(json_extract(NEW.payload_json, '$.target_id_hash')) BETWEEN 37 AND 133
+           AND substr(json_extract(NEW.payload_json, '$.target_id_hash'), 6)
+                 NOT GLOB '*[^0-9a-f]*')
+   )
+BEGIN
+  SELECT RAISE(ABORT,
+    'consent_journal hash-kind payload.target_id_hash must be sha256:64hex or hash:32..128hex');
 END;
 
 -- Forget-intent rows get a kind-specific error message so operators can

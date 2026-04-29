@@ -209,24 +209,42 @@ fn consent_journal_kind_domain_enforced() {
 #[test]
 fn consent_journal_accepts_known_kinds() {
     let conn = open_in_memory().expect("open");
-    let cases: &[(&str, &str)] = &[
-        ("sensor_enable", r#"{"shape":"sensor_toggle"}"#),
-        ("sensor_disable", r#"{"shape":"sensor_toggle"}"#),
-        ("policy_change", r#"{"shape":"policy_delta"}"#),
-        ("remember_intent", r#"{"shape":"intent_receipt"}"#),
-        ("forget_intent", r#"{"shape":"intent_receipt"}"#),
-        ("grant", r#"{"shape":"decision"}"#),
-        ("revoke", r#"{"shape":"decision"}"#),
-        ("promote_receipt", r#"{"shape":"promote_receipt"}"#),
+    let hash = "hash:11111111111111111111111111111111";
+    let label = "local:hook:host:v1";
+    let snr_subject = format!("snr:{label}");
+    let sensor_payload = format!("{{\"shape\":\"sensor_toggle\",\"sensor_label\":\"{label}\"}}");
+    let intent_payload = format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\"}}");
+    let promote_payload =
+        format!("{{\"shape\":\"promote_receipt\",\"target_id_hash\":\"{hash}\"}}");
+    // (kind, subject, sensor_id, payload)
+    let cases: &[(&str, &str, Option<&str>, String)] = &[
+        (
+            "sensor_enable",
+            &snr_subject,
+            Some(label),
+            sensor_payload.clone(),
+        ),
+        ("sensor_disable", &snr_subject, Some(label), sensor_payload),
+        (
+            "policy_change",
+            "s",
+            None,
+            r#"{"shape":"policy_delta"}"#.to_owned(),
+        ),
+        ("remember_intent", hash, None, intent_payload.clone()),
+        ("forget_intent", hash, None, intent_payload),
+        ("grant", "s", None, r#"{"shape":"decision"}"#.to_owned()),
+        ("revoke", "s", None, r#"{"shape":"decision"}"#.to_owned()),
+        ("promote_receipt", hash, None, promote_payload),
     ];
-    for (kind, payload) in cases {
+    for (kind, subject, sensor_id, payload) in cases {
         conn.execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
-               kind, decided_at_iso, actor, payload_json) \
-             VALUES (?, 's', 'private', 'GRANT', 'usr:t', 0, ?, '2026-04-28T12:00:00Z', \
-                     'usr:t', ?)",
-            params![format!("c-{kind}"), kind, payload],
+               kind, decided_at_iso, actor, sensor_id, payload_json) \
+             VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, ?, '2026-04-28T12:00:00Z', \
+                     'usr:t', ?, ?)",
+            params![format!("c-{kind}"), subject, kind, sensor_id, payload],
         )
         .unwrap_or_else(|e| panic!("kind {kind} should be accepted: {e}"));
     }
@@ -273,9 +291,11 @@ fn forget_intent_payload_must_be_body_free() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c2', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+             VALUES ('c2', 'hash:11111111111111111111111111111111', \
+                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                      'usr:t', '2026-04-28T12:00:00Z', \
-                     '{\"target_id_hash\":\"h\",\"body\":\"leak\"}')",
+                     '{\"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                       \"body\":\"leak\"}')",
             [],
         )
         .unwrap_err();
@@ -291,17 +311,18 @@ fn forget_intent_payload_rejects_extended_banned_keys() {
     // these three, leaving a direct-SQL leak path. Test each individually.
     let conn = open_in_memory().expect("open");
     for banned in ["message", "payload_text", "user_input"] {
+        let hash = "hash:11111111111111111111111111111111";
         let payload = format!(
-            "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"hash:abc\",\"{banned}\":\"leak\"}}"
+            "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\"{banned}\":\"leak\"}}"
         );
         let err = conn
             .execute(
                 "INSERT INTO consent_journal \
                   (consent_id, subject, scope, decision, granted_by, decided_at, \
                    kind, actor, decided_at_iso, payload_json) \
-                 VALUES (?, 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                          'usr:t', '2026-04-28T12:00:00Z', ?)",
-                params![format!("c-leak-{banned}"), payload],
+                params![format!("c-leak-{banned}"), hash, payload],
             )
             .unwrap_err();
         assert!(
@@ -319,7 +340,8 @@ fn forget_intent_payload_rejects_malformed_json() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-bad-json', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+             VALUES ('c-bad-json', 'hash:11111111111111111111111111111111', \
+                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                      'usr:t', \
                      '2026-04-28T12:00:00Z', 'not json at all')",
             [],
@@ -340,9 +362,12 @@ fn non_forget_payload_also_body_free() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-promote-leak', 'h', 'team:p', 'GRANT', 'usr:t', 0, \
+             VALUES ('c-promote-leak', 'hash:11111111111111111111111111111111', \
+                     'team:p', 'GRANT', 'usr:t', 0, \
                      'promote_receipt', 'usr:t', '2026-04-28T12:00:00Z', \
-                     '{\"shape\":\"promote_receipt\",\"target_id_hash\":\"hash:abc\",\"body\":\"x\"}')",
+                     '{\"shape\":\"promote_receipt\",\
+                       \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                       \"body\":\"x\"}')",
             [],
         )
         .unwrap_err();
@@ -356,9 +381,12 @@ fn forget_intent_payload_accepts_hash_only() {
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, actor, decided_at_iso, payload_json) \
-         VALUES ('c3', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+         VALUES ('c3', 'hash:11111111111111111111111111111111', \
+                 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
                  'usr:t', '2026-04-28T12:00:00Z', \
-                 '{\"target_id_hash\":\"hash:abc\",\"reason_code\":\"user_command\"}')",
+                 '{\"shape\":\"intent_receipt\",\
+                   \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
+                   \"reason_code\":\"user_command\"}')",
         [],
     )
     .expect("hash-only payload should be accepted");
@@ -373,8 +401,9 @@ fn consent_journal_queryable_by_op_actor_sensor_scope() {
            kind, decided_at_iso, op_id, actor, sensor_id, payload_json) \
          VALUES ('c4', 'snr:local:screen:host:v1', 'global', 'GRANT', 'usr:t', 0, \
                  'sensor_enable', '2026-04-28T12:00:00Z', \
-                 'op-1', 'usr:tafeng', 'snr:local:screen:host:v1', \
-                 '{\"shape\":\"sensor_toggle\",\"reason_code\":\"first_run_prompt\"}')",
+                 'op-1', 'usr:tafeng', 'local:screen:host:v1', \
+                 '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:screen:host:v1\",\
+                   \"reason_code\":\"first_run_prompt\"}')",
         [],
     )
     .expect("seed sensor_enable row");
@@ -402,7 +431,7 @@ fn consent_journal_queryable_by_op_actor_sensor_scope() {
     // queryable by sensor
     let by_sensor: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM consent_journal WHERE sensor_id = 'snr:local:screen:host:v1'",
+            "SELECT COUNT(*) FROM consent_journal WHERE sensor_id = 'local:screen:host:v1'",
             [],
             |r| r.get(0),
         )
@@ -419,6 +448,155 @@ fn consent_journal_queryable_by_op_actor_sensor_scope() {
         )
         .expect("by scope");
     assert_eq!(by_scope, 1);
+}
+
+#[test]
+fn consent_journal_payload_missing_shape_is_rejected() {
+    // Round 4 hardening: an empty object `{}` with no `shape` key bypassed
+    // the original trigger because `json_extract` returned NULL and a NULL
+    // WHEN clause never fires. Now the trigger guards on `json_type` of
+    // `$.shape` returning the literal `'text'`.
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-noshape', 'hash:11111111111111111111111111111111', \
+                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                     'usr:t', '2026-04-28T12:00:00Z', '{}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("payload shape must match kind"),
+        "missing-shape payload must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_sensor_kind_requires_sensor_id() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-sensor-no-id', 'snr:local:hook:host:v1', 'global', 'GRANT', \
+                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor kinds require sensor_id"),
+        "sensor row without sensor_id must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_sensor_id_must_match_payload_label() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, sensor_id, payload_json) \
+             VALUES ('c-sensor-mismatch', 'snr:local:a:host:v1', 'global', 'GRANT', \
+                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'local:a:host:v1', \
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:b:host:v1\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("sensor_id must equal payload.sensor_label"),
+        "sensor_id != payload.sensor_label must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_non_sensor_kind_forbids_sensor_id() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, sensor_id, payload_json) \
+             VALUES ('c-policy-with-sensor', 'sensors.x', 'global', 'GRANT', \
+                     'usr:t', 0, 'policy_change', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'local:hook:host:v1', '{\"shape\":\"policy_delta\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("non-sensor kinds must not carry sensor_id"),
+        "non-sensor kind with sensor_id must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_sensor_subject_must_match_sensor_id() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, sensor_id, payload_json) \
+             VALUES ('c-sensor-bad-subject', 'snr:local:WRONG:host:v1', 'global', 'GRANT', \
+                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'local:hook:host:v1', \
+                     '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("subject must be `snr:` + sensor_id"),
+        "sensor row with subject != snr:+sensor_id must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_hash_kind_subject_shape_enforced() {
+    let conn = open_in_memory().expect("open");
+    // Raw text, no `hash:` / `sha256:` prefix.
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-subject', 'TOPSECRETBODY', 'private', 'GRANT', \
+                     'usr:t', 0, 'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"intent_receipt\",\
+                       \"target_id_hash\":\"hash:11111111111111111111111111111111\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("subject must be sha256:64hex or hash:32..128hex"),
+        "raw subject on forget_intent must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_hash_kind_target_id_hash_shape_enforced() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-target', 'hash:11111111111111111111111111111111', \
+                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"plainstring\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("target_id_hash must be sha256:64hex or hash:32..128hex"),
+        "raw target_id_hash must be rejected, got: {err}"
+    );
 }
 
 #[test]

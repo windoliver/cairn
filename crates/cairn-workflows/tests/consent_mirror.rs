@@ -5,7 +5,7 @@ use cairn_core::domain::{
 };
 use cairn_store_sqlite::consent::append;
 use cairn_store_sqlite::open_in_memory;
-use cairn_workflows::ConsentLogMaterializer;
+use cairn_workflows::{ConsentLogMaterializer, MirrorError};
 use tempfile::tempdir;
 
 /// Build a fixture hash of the form `hash:<32 lowercase hex>` from a
@@ -107,13 +107,17 @@ fn rebuild_from_db_replays_every_event() {
     mirror.tick(&conn).expect("first tick");
     let original = mirror.read_lines().expect("read");
 
-    // Corrupt the on-disk log + cursor, then rebuild.
+    // Corrupt the on-disk log + cursor.
     std::fs::write(mirror.log_path(), "garbage that cannot deserialize\n").expect("corrupt");
     std::fs::write(mirror.cursor_path(), "999999\n").expect("corrupt cursor");
-    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen corrupt");
 
-    let n = mirror.rebuild_from_db(&conn).expect("rebuild");
-    assert_eq!(n, 3);
+    // Open must fail closed because the log is non-empty but has no
+    // parseable envelope. The caller has to opt into a rebuild.
+    let err = ConsentLogMaterializer::open(dir.path())
+        .expect_err("open should fail closed on corrupt log");
+    assert!(matches!(err, MirrorError::LogCorrupt));
+
+    let mirror = ConsentLogMaterializer::rebuild_at(dir.path(), &conn).expect("rebuild_at");
     let rebuilt = mirror.read_lines().expect("lines");
     assert_eq!(rebuilt, original, "rebuild should be byte-identical");
 }

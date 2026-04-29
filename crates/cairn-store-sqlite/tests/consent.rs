@@ -178,15 +178,17 @@ fn append_rejects_body_bearing_payload_via_serializer() {
     // is the last line of defense. This test asserts the trigger fires
     // when something bypasses the type system (e.g., a future variant).
     let conn = open_in_memory().expect("open");
+    let hash = "hash:11111111111111111111111111111111";
+    let payload =
+        format!("{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"{hash}\",\"body\":\"x\"}}");
     let err = conn
         .execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
-               kind, decided_at_iso, payload_json) \
-             VALUES ('c-bypass', 'h', 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', '2026-04-28T12:00:00Z', \
-                     '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"h\",\"body\":\"x\"}')",
-            [],
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bypass', ?, 'private', 'GRANT', 'usr:t', 0, \
+                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+            rusqlite::params![hash, payload],
         )
         .unwrap_err();
     assert!(format!("{err}").contains("body-free"));

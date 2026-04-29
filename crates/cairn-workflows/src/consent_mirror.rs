@@ -64,6 +64,15 @@ pub enum MirrorError {
     /// Underlying store query failure.
     #[error("consent store: {0}")]
     Store(#[from] StoreError),
+    /// The log is non-empty but the bounded recovery scan could not find
+    /// a single well-formed envelope. Continuing to append would either
+    /// duplicate rows (cursor 0) or skip rows (stale sidecar). The caller
+    /// must repair the vault via [`ConsentLogMaterializer::rebuild_from_db`].
+    #[error(
+        "consent.log corrupt: non-empty file has no parseable envelope in the recovery window — \
+         repair via rebuild_from_db"
+    )]
+    LogCorrupt,
 }
 
 /// On-disk envelope wrapping each `ConsentEvent`. The `rowid` field is
@@ -76,6 +85,7 @@ struct LogLine {
 }
 
 /// Stateful tail-and-append materializer for a single vault's consent log.
+#[derive(Debug)]
 pub struct ConsentLogMaterializer {
     log_path: PathBuf,
     cursor_path: PathBuf,
@@ -114,21 +124,21 @@ impl ConsentLogMaterializer {
 
         // Authoritative cursor: scan the log's tail. If the tail is
         // torn, truncate to the last clean envelope before continuing.
+        // Fail closed if the log is non-empty but has no parseable
+        // envelope in the recovery window — appending past unparseable
+        // bytes (cursor 0 or stale sidecar) would either duplicate or
+        // skip rows. Caller must repair via `rebuild_at`.
         let recovery = recover_cursor_from_log(&log_path)?;
         let cursor = match recovery.cursor {
             Some(rowid) => rowid,
             None => {
-                // Empty log — never trust a stale sidecar; force 0 so a
-                // subsequent `rebuild_from_db` (or normal tick) replays
-                // every row. A high sidecar value over an empty log is
-                // the canonical "log was deleted" inconsistency.
                 if log_is_empty(&log_path)? {
+                    // Empty log — never trust a stale sidecar; force 0
+                    // so a subsequent `rebuild_from_db` (or normal tick)
+                    // replays every row.
                     0
                 } else {
-                    // Log has bytes but they're all unparseable. Give
-                    // the sidecar one last chance — if it doesn't parse
-                    // either, fall back to 0 and let rebuild fix it.
-                    read_cursor_hint(&cursor_path)?.unwrap_or(0)
+                    return Err(MirrorError::LogCorrupt);
                 }
             }
         };
@@ -220,6 +230,47 @@ impl ConsentLogMaterializer {
         Ok(written)
     }
 
+    /// Repair a vault whose log is corrupt by rebuilding from the
+    /// database, then return a fresh materializer. Use this when
+    /// [`open`](Self::open) returns [`MirrorError::LogCorrupt`]: the
+    /// regular `open` path fails closed so the caller must opt in.
+    ///
+    /// This bypasses the open-time recovery scan, atomically replaces
+    /// the live log with a freshly-replayed one, and then opens the
+    /// materializer pointing at the rebuilt log.
+    ///
+    /// # Errors
+    /// Returns [`MirrorError`] on store, I/O, or encoding failure.
+    pub fn rebuild_at(vault_dir: impl AsRef<Path>, conn: &Connection) -> Result<Self, MirrorError> {
+        let dir = vault_dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir)?;
+        let log_path = dir.join("consent.log");
+        let cursor_path = dir.join("consent.cursor");
+        let lock_path = dir.join("consent.lock");
+
+        // Make sure the lock file exists so we can hold it during the
+        // rebuild — without an existing file `LockGuard::acquire` would
+        // create one but the order matters for clarity.
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?
+            .sync_all()?;
+        let _guard = LockGuard::acquire(&lock_path)?;
+
+        rebuild_log_to(&log_path, conn)?;
+        let cursor = max_rowid(conn)?;
+        let _ = write_cursor_hint(&cursor_path, cursor);
+
+        Ok(Self {
+            log_path,
+            cursor_path,
+            lock_path,
+            cursor,
+        })
+    }
+
     /// Truncate the log, reset the cursor to `0`, and replay every event
     /// in the journal. Returns the number of rows written. Holds the
     /// vault lock for the entire call so concurrent ticks block until
@@ -233,39 +284,9 @@ impl ConsentLogMaterializer {
     /// Returns [`MirrorError`] on store, I/O, or encoding failure.
     pub fn rebuild_from_db(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
-        // Build the rebuilt log in a temp file *first*, then atomically
-        // rename it over the live log. This way a crash or store error
-        // between truncate and replay-complete never leaves the vault
-        // with a half-empty audit mirror — readers see either the old
-        // log or the fully-replayed new one, nothing in between.
-        let tmp = self.log_path.with_extension("log.tmp");
-        let mut written = 0usize;
-        let mut high_water = 0i64;
-        {
-            let mut f = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&tmp)?;
-            // Replay every row in rowid order from a single store query.
-            // We deliberately do NOT call `tick` here — it would race
-            // for the lock we already hold and would also prematurely
-            // append to the live log.
-            let pending = read_since_rowid(conn, 0)?;
-            for (rowid, event) in pending {
-                let line = serde_json::to_string(&LogLine { rowid, event })?;
-                writeln!(f, "{line}")?;
-                high_water = rowid;
-                written += 1;
-            }
-            f.flush()?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, &self.log_path)?;
-        fsync_parent(&self.log_path)?;
-        self.cursor = high_water;
+        let written = rebuild_log_to(&self.log_path, conn)?;
+        self.cursor = max_rowid(conn).unwrap_or(0);
         let _ = write_cursor_hint(&self.cursor_path, self.cursor);
-        debug_assert_eq!(self.cursor, max_rowid(conn).unwrap_or(0));
         Ok(written)
     }
 
@@ -357,16 +378,32 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
     Ok(())
 }
 
-fn read_cursor_hint(path: &Path) -> Result<Option<i64>, MirrorError> {
-    if !path.exists() {
-        return Ok(None);
+/// Build the rebuilt log in a temp file, then atomically rename it over
+/// the live log. A crash or store error between truncate and replay-
+/// complete never leaves the vault with a half-empty audit mirror —
+/// readers see either the old log or the fully-replayed new one,
+/// nothing in between. Caller must hold the vault lock.
+fn rebuild_log_to(log_path: &Path, conn: &Connection) -> Result<usize, MirrorError> {
+    let tmp = log_path.with_extension("log.tmp");
+    let mut written = 0usize;
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)?;
+        let pending = read_since_rowid(conn, 0)?;
+        for (rowid, event) in pending {
+            let line = serde_json::to_string(&LogLine { rowid, event })?;
+            writeln!(f, "{line}")?;
+            written += 1;
+        }
+        f.flush()?;
+        f.sync_all()?;
     }
-    let raw = std::fs::read_to_string(path)?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    Ok(trimmed.parse::<i64>().ok())
+    std::fs::rename(&tmp, log_path)?;
+    fsync_parent(log_path)?;
+    Ok(written)
 }
 
 /// Result of a tail scan: the recovered cursor (if any) and the byte
