@@ -114,7 +114,7 @@ async fn panic_in_closure_rolls_back_and_connection_survives() {
             let record = record.clone();
             move |tx| {
                 tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&target, 1, None)?;
+                tx.activate_version(&target, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })

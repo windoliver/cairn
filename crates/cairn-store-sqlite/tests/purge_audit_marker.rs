@@ -91,9 +91,9 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
                 let id2 = tx.stage_version(&t, &r2, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 let id3 = tx.stage_version(&t, &r3, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 // Activate sequentially.
-                tx.activate_version(&t, 1, None)?;
-                tx.activate_version(&t, 2, Some(1))?;
-                tx.activate_version(&t, 3, Some(2))?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.activate_version(&t, 2, Some(1), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.activate_version(&t, 3, Some(2), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok((id1, id2, id3))
             }
         })
@@ -107,7 +107,7 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000053", "other record");
                 let rid = tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(rid)
             }
         })
@@ -260,7 +260,7 @@ async fn purge_marker_only_visible_to_system_principal() {
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000054", "to be purged");
                 tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })

@@ -84,7 +84,7 @@ async fn ok_commits_record_and_all_consent_entries() {
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000080", "committed body");
                 tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 // Two consent rows under the same op_id (stage + activate).
                 tx.append_consent_journal(&ConsentJournalEntry {
                     op_id: op.clone(),
@@ -132,8 +132,9 @@ async fn ok_commits_record_and_all_consent_entries() {
     );
 }
 
-/// Retrying the same `(op_id, kind, target_id)` MUST be a no-op rather
-/// than accumulating duplicate audit rows. Returns the same row id.
+/// Retrying the same `(op_id, kind, target_id)` with byte-identical
+/// audit fields MUST be a no-op rather than accumulating duplicate
+/// rows. Returns the same row id.
 #[tokio::test]
 async fn append_consent_journal_idempotent_under_retry() {
     let dir = tempdir().expect("tempdir");
@@ -161,21 +162,18 @@ async fn append_consent_journal_idempotent_under_retry() {
         .await
         .expect("first append");
 
-    // Retry with the same idempotency tuple — payload changed to prove
-    // the second insert was a no-op.
-    let mut retry = entry.clone();
-    retry.payload = serde_json::json!({"phase": "retry-should-be-ignored"});
+    // Identical retry must surface the same row id.
     let id_second = store
         .with_apply_tx(test_apply_token(), {
-            let e = retry.clone();
+            let e = entry.clone();
             move |tx| tx.append_consent_journal(&e)
         })
         .await
-        .expect("retry append");
+        .expect("identical retry append");
 
     assert_eq!(
         id_first, id_second,
-        "retry must surface the same row id as the first call"
+        "byte-identical retry must surface the same row id"
     );
 
     // Exactly one row in consent_journal under the shared op_id.
@@ -187,5 +185,54 @@ async fn append_consent_journal_idempotent_under_retry() {
             |r| r.get(0),
         )
         .expect("count");
-    assert_eq!(count, 1, "retry must not duplicate consent_journal rows");
+    assert_eq!(
+        count, 1,
+        "identical retry must not duplicate consent_journal rows"
+    );
+}
+
+/// Retrying the same `(op_id, kind, target_id)` with a divergent
+/// `payload`, `actor`, or `at` is split-brain or tampering — must NOT
+/// silently succeed. Failing closed with `Conflict { UniqueViolation }`
+/// preserves audit integrity.
+#[tokio::test]
+async fn append_consent_journal_rejects_divergent_retry() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+    let store = SqliteMemoryStore::open(&db_path).await.expect("open");
+
+    let entry = ConsentJournalEntry {
+        op_id: OpId::new("op-cj-divergent"),
+        kind: "activate".to_owned(),
+        target_id: Some(TargetId::new("cj-divergent-target")),
+        actor: ActorRef::from_string("usr:original"),
+        payload: serde_json::json!({"phase": "first"}),
+        at: Rfc3339Timestamp::now(),
+    };
+
+    store
+        .with_apply_tx(test_apply_token(), {
+            let e = entry.clone();
+            move |tx| tx.append_consent_journal(&e)
+        })
+        .await
+        .expect("first append");
+
+    // Same idempotency key but divergent payload.
+    let mut tampered = entry.clone();
+    tampered.payload = serde_json::json!({"phase": "tampered"});
+    let err = store
+        .with_apply_tx(test_apply_token(), {
+            let e = tampered;
+            move |tx| tx.append_consent_journal(&e)
+        })
+        .await
+        .expect_err("divergent retry must fail");
+    assert!(
+        matches!(
+            err,
+            cairn_core::contract::memory_store::error::StoreError::Conflict { .. }
+        ),
+        "expected Conflict, got {err:?}"
+    );
 }

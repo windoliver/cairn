@@ -106,11 +106,19 @@ pub trait MemoryStoreApplyTx: private::Sealed {
     /// `v`; if `None`, the target must currently have no active row
     /// (first activation). Violations return
     /// `StoreError::Conflict { kind: ActivationRaced }`.
+    ///
+    /// `activated_by` is the **trusted** actor performing the
+    /// activation, supplied by the WAL executor. Stage and activate are
+    /// independent writes that may be issued by different actors; the
+    /// audit trail must record who promoted the version, not who staged
+    /// it. Treat `record.actor_chain` as opaque payload — never derive
+    /// the activator from it.
     fn activate_version(
         &mut self,
         target_id: &TargetId,
         version: u64,
         expected_prior: Option<u64>,
+        activated_by: &ActorRef,
     ) -> Result<(), StoreError>;
 
     /// Set `tombstoned = 1` on **every** version of `target_id`.

@@ -22,6 +22,8 @@ use serde_json::Value;
 /// - `"session"` visibility  → owner match (collapses to `private`
 ///   semantics until `Principal` carries a session id; granting access
 ///   by row-tag alone would leak across users).
+/// - `"project"` visibility  → owner match (collapses to `private`
+///   semantics until `Principal` carries a verified project context).
 /// - `"team"`, `"org"` → owner match (fail closed until `Principal`
 ///   carries verifiable membership context — granting access by row
 ///   tag alone would expose data across tenants).
@@ -60,7 +62,7 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
     // expand once `Principal` carries verified session and membership
     // context (separate issue).
     match visibility {
-        "private" | "session" | "team" | "org" => {
+        "private" | "session" | "project" | "team" | "org" => {
             let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
             !scope_user.is_empty() && id_str == scope_user
         }
@@ -128,6 +130,24 @@ mod tests {
     fn unknown_visibility_denied() {
         let p = principal_for("usr:alice");
         assert!(!principal_can_read(&p, "{}", r#"{"visibility":"secret"}"#));
+    }
+
+    #[test]
+    fn project_visibility_owner_match() {
+        // Regression: `project` is one of the 6 documented visibility
+        // tiers and must not fall into the default deny path.
+        let p = principal_for("usr:alice");
+        let scope = r#"{"user":"usr:alice"}"#;
+        let tax = r#"{"visibility":"project"}"#;
+        assert!(principal_can_read(&p, scope, tax));
+    }
+
+    #[test]
+    fn project_visibility_non_owner_denied() {
+        let p = principal_for("usr:bob");
+        let scope = r#"{"user":"usr:alice"}"#;
+        let tax = r#"{"visibility":"project"}"#;
+        assert!(!principal_can_read(&p, scope, tax));
     }
 
     #[test]

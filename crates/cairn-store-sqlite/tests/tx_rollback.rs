@@ -86,7 +86,7 @@ async fn err_in_closure_rolls_back_record_and_consent_journal_atomically() {
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000070", "rolled back body");
                 tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.append_consent_journal(&ConsentJournalEntry {
                     op_id: op,
                     kind: "activate".to_owned(),
@@ -153,7 +153,7 @@ async fn connection_survives_err_rollback() {
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000072", "kept body");
                 tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })

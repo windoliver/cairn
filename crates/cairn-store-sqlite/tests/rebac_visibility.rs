@@ -113,7 +113,7 @@ async fn list_drops_private_rows_owned_by_other_principals_and_reports_hidden() 
         store
             .with_apply_tx(test_apply_token(), move |tx| {
                 tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&t, 1, None)?;
+                tx.activate_version(&t, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             })
             .await

@@ -80,7 +80,7 @@ async fn stage_activate_get_roundtrip() {
             let target = target.clone();
             move |tx| {
                 let _rid = tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&target, 1, None)?;
+                tx.activate_version(&target, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })
@@ -143,7 +143,7 @@ async fn non_owner_cannot_read_private_record() {
             let target = target.clone();
             move |tx| {
                 tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
-                tx.activate_version(&target, 1, None)?;
+                tx.activate_version(&target, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })
@@ -188,7 +188,7 @@ async fn multi_version_cow_same_target() {
                     !rid.as_str().is_empty(),
                     "stage_version returned a record_id"
                 );
-                tx.activate_version(&target, 1, None)?;
+                tx.activate_version(&target, 1, None, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })
@@ -219,7 +219,7 @@ async fn multi_version_cow_same_target() {
                     !rid.as_str().is_empty(),
                     "stage_version v2 returned a record_id"
                 );
-                tx.activate_version(&target, 2, Some(1))?;
+                tx.activate_version(&target, 2, Some(1), &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })

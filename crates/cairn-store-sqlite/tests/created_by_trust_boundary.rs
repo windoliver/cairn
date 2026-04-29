@@ -82,7 +82,7 @@ async fn forged_actor_chain_cannot_override_trusted_created_by() {
             let trusted = trusted_actor.clone();
             move |tx| {
                 tx.stage_version(&target, &record, &trusted)?;
-                tx.activate_version(&target, 1, None)?;
+                tx.activate_version(&target, 1, None, &trusted)?;
                 Ok(())
             }
         })

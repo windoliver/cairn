@@ -120,8 +120,9 @@ impl MemoryStoreApplyTx for SqliteMemoryStoreApplyTx<'_> {
         target_id: &TargetId,
         version: u64,
         expected_prior: Option<u64>,
+        activated_by: &ActorRef,
     ) -> Result<(), StoreError> {
-        activate_version_impl(self.conn, target_id, version, expected_prior)
+        activate_version_impl(self.conn, target_id, version, expected_prior, activated_by)
     }
 
     fn tombstone_target(
@@ -263,6 +264,7 @@ fn activate_version_impl(
     target_id: &TargetId,
     version: u64,
     expected_prior: Option<u64>,
+    activated_by: &ActorRef,
 ) -> Result<(), StoreError> {
     let version_i64 =
         i64::try_from(version).map_err(|_| StoreError::Invariant("version overflows i64"))?;
@@ -307,25 +309,32 @@ fn activate_version_impl(
     }
 
     // Mark the chosen version active and stamp the activation audit
-    // columns. `created_by` of the activated row is the trusted actor
-    // who staged the version (round-8 trust-boundary fix); we reuse it
-    // here as `activated_by` since `activate_version` does not yet
-    // carry a separate actor parameter through the trait. Future
-    // expansion can pass a distinct activation actor; for now the
-    // contract semantics ("who promoted this version to active") map
-    // cleanly to the stager.
+    // columns. The trusted activator is supplied by the WAL executor
+    // (separate from the stager — round-3 review found that conflating
+    // the two hides who actually promoted the version). For idempotent
+    // re-activations of the same version, keep the original
+    // activated_at/by via COALESCE.
     let now = Rfc3339Timestamp::now();
     conn.execute(
         "UPDATE records SET \
              active = (CAST(version AS INTEGER) = ?2), \
-             activated_at = CASE WHEN CAST(version AS INTEGER) = ?2 THEN ?3 ELSE activated_at END, \
+             activated_at = CASE \
+                 WHEN CAST(version AS INTEGER) = ?2 \
+                 THEN COALESCE(activated_at, ?3) \
+                 ELSE activated_at \
+             END, \
              activated_by = CASE \
                  WHEN CAST(version AS INTEGER) = ?2 \
-                 THEN COALESCE(activated_by, created_by) \
+                 THEN COALESCE(activated_by, ?4) \
                  ELSE activated_by \
              END \
          WHERE target_id = ?1",
-        params![target_id.as_str(), version_i64, now.as_str()],
+        params![
+            target_id.as_str(),
+            version_i64,
+            now.as_str(),
+            activated_by.as_str()
+        ],
     )
     .map_err(store_err)?;
 
@@ -634,17 +643,31 @@ fn append_consent_journal_impl(
         .map_err(store_err)?;
 
     if inserted == 0 {
-        // Idempotent retry: surface the existing row's id so callers
-        // observe the same identity across attempts.
-        let id: i64 = conn
-            .query_row(
-                "SELECT id FROM consent_journal \
+        // Idempotent retry: fetch the existing row and require an
+        // exact byte-equivalent match on every immutable audit field
+        // (`actor`, `payload`, `at`). A retry whose payload diverges
+        // from the original is NOT a replay — it is split-brain or
+        // tampering, and accepting it would let the store quietly keep
+        // the older audit content while telling the caller everything
+        // succeeded. Fail closed with `Conflict { UniqueViolation }`.
+        let (id, existing_actor, existing_payload, existing_at): (i64, String, String, String) =
+            conn.query_row(
+                "SELECT id, actor, payload, at FROM consent_journal \
                  WHERE op_id = ?1 AND kind = ?2 \
                    AND COALESCE(target_id, '__NULL__') = COALESCE(?3, '__NULL__')",
                 params![entry.op_id.as_str(), entry.kind, target_id_str],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(store_err)?;
+
+        if existing_actor != entry.actor.as_str()
+            || existing_payload != payload
+            || existing_at != entry.at.as_str()
+        {
+            return Err(StoreError::Conflict {
+                kind: ConflictKind::UniqueViolation,
+            });
+        }
         return Ok(ConsentJournalRowId(id));
     }
 
