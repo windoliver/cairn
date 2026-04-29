@@ -10,5 +10,7 @@
 // Submodules land in subsequent tasks.
 
 pub mod draft;
+pub mod intent;
 
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
+pub use intent::{ForgetIntent, ForgetMatchStrategy};
