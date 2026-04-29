@@ -9,6 +9,7 @@
 
 pub mod cli;
 mod first_bind;
+pub mod guard;
 mod lock;
 mod purge;
 mod recover;
