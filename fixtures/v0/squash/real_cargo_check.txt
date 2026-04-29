@@ -1,0 +1,6 @@
+[1m[92m    Checking[0m regex-syntax v0.8.10
+[1m[92m    Checking[0m serde_yaml v0.9.34+deprecated
+[1m[92m    Checking[0m regex-automata v0.4.14
+[1m[92m    Checking[0m regex v1.12.3
+[1m[92m    Checking[0m cairn-core v0.0.1 (/Users/sophiawj/private/cairn/.worktrees/issue-72-tool-squash/crates/cairn-core)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`dev` profile [unoptimized + debuginfo]]8;;\ target(s) in 1m 48s

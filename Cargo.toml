@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# fuzz/ is a separate (non-workspace) package: cargo-fuzz needs
+# nightly + sanitizer flags that are incompatible with the pinned
+# MSRV. See fuzz/README.md for usage.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"
