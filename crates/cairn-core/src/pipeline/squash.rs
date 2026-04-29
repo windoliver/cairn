@@ -663,6 +663,54 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-5 (newer loop) regression: with a large `max_bytes`
+    /// config, an input smaller than `4 * half` (reachable via the
+    /// `MAX_INPUT_LINES` / `DecodeExpansion` bypass paths) used to
+    /// produce overlapping head and tail windows that duplicated
+    /// raw content, double-counted preserved bytes, and on the
+    /// upper edge could trip the closing release `assert!`.
+    #[test]
+    fn oversize_bypass_disjoint_windows_no_duplication() {
+        // Larger-than-default config so half is comfortably big.
+        // Then a payload way smaller than 4 * half but with enough
+        // \n's to exercise the line-aligned tail path.
+        let cfg = SquashConfig::new(
+            64 * 1024, // 64 KiB max_bytes
+            4,
+            4,
+            2,
+            MIN_MAX_LINE_BYTES,
+        )
+        .unwrap();
+        // 200 short unique lines: total bytes ≈ 3.4 KiB, well under
+        // 2 * half (~64 KiB).
+        let lines: Vec<String> = (0..200).map(|i| format!("unique-line-{i:04}")).collect();
+        let raw: Vec<u8> = lines.join("\n").into_bytes();
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::LineCardinality,
+        );
+        // No panic, fits the budget.
+        assert!(out.compacted_bytes.len() <= cfg.max_bytes());
+        // No line content appears more than once: head/tail windows
+        // must be disjoint.
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        for line in &lines {
+            let occurrences = body.matches(line.as_str()).count();
+            assert!(
+                occurrences <= 1,
+                "line {line:?} appears {occurrences}x — head/tail overlap"
+            );
+        }
+    }
+
     /// Round-4 (newer loop) regression: the oversize-bypass tail
     /// cut must not land inside an open multi-byte escape sequence.
     /// Construct a payload where an OSC body contains a `\n` and is
@@ -3263,7 +3311,18 @@ fn oversize_bypass(
     };
 
     let tail_window = (half * 2).min(raw_bytes.len());
-    let initial_tail_raw_start = raw_bytes.len() - tail_window;
+    // Round-5 (newer loop) hardening: head and tail windows are sized
+    // independently from `half * 2`, so for any payload smaller than
+    // `4 * half` (which is reachable via the `MAX_INPUT_LINES` /
+    // `DecodeExpansion` bypass paths on a large `max_bytes` config),
+    // they overlap. The bypass would then duplicate raw content into
+    // both windows, double-count `preserved_raw_bytes`, and on the
+    // upper edge could trip the closing release `assert!`. Clamp
+    // `initial_tail_raw_start` to `head_raw_end` so the head and
+    // tail spans are always disjoint. When the entire raw payload
+    // already fits inside the head window, the clamped start lands
+    // at `raw.len()` and the tail is empty.
+    let initial_tail_raw_start = (raw_bytes.len() - tail_window).max(head_raw_end);
     // Round-4 (newer loop) hardening: the previous "first `\n` in
     // tail window" cut could land inside an open escape sequence
     // (e.g. an OSC body that contains a `\n` and is terminated past
@@ -3276,8 +3335,8 @@ fn oversize_bypass(
     // through to the giant-final-line / degraded-sentinel branch.
     let safe_cut = first_safe_line_start_at_or_after(raw_bytes, initial_tail_raw_start);
     let (tail_raw_start, tail_aligned_to_line) = match safe_cut {
-        Some(p) => (p, true),
-        None => (initial_tail_raw_start, false),
+        Some(p) if p < raw_bytes.len() => (p, true),
+        _ => (initial_tail_raw_start, false),
     };
     let mut compacted_bytes: Vec<u8> = Vec::with_capacity(max_body);
     compacted_bytes.extend_from_slice(head.as_bytes());
@@ -3286,7 +3345,15 @@ fn oversize_bypass(
     compacted_bytes.push(b'\n');
 
     let mut tail_source_bytes: usize = 0;
-    if tail_aligned_to_line {
+    // When the head window already covers the entire raw payload
+    // (Round-5 disjoint-windows fix), there is no tail to emit and
+    // the giant-final-line / degraded-sentinel paths below MUST NOT
+    // run — they would re-introduce the duplication this clamp is
+    // preventing.
+    let head_subsumes_raw = initial_tail_raw_start >= raw_bytes.len();
+    if head_subsumes_raw {
+        // No tail; head + marker already suffice.
+    } else if tail_aligned_to_line {
         let tail_decoded = stage1_lossy_utf8(&raw_bytes[tail_raw_start..]);
         let mut tail_stripped = false;
         let tail_sanitized = stage2_ansi_strip(
