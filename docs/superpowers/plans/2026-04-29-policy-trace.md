@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land the typed `policy_trace` infrastructure in `cairn-core` (closed `PolicyGate` enum, body-free `PolicyDetail`, `PolicyTraceEntry`, `From` impls from existing pipeline outcomes, `to_wire` mapping), advertise the `cairn.mcp.v1.policy_trace.v1` capability, and document the gate vocabulary. PR2 adds the `explain_filter` pure function and `RecordExclusion` type for read-path explainability.
+**Goal:** Land the typed `policy_trace` infrastructure in `cairn-core` (closed `PolicyGate` enum, body-free `PolicyDetail`, `PolicyTraceEntry`, `From` impls from existing pipeline outcomes, `to_wire` mapping), advertise the `cairn.mcp.v1.policy_trace` capability, and document the gate vocabulary. PR2 adds the `explain_filter` pure function and `RecordExclusion` type for read-path explainability.
 
 **Architecture:** All gate logic stays in pure `cairn-core` modules. Verbs already exist as stubs (issue #9 / #46 wires runtime); this issue delivers the **infrastructure** verbs will consume, plus the IDL and docs that make `policy_trace: v1` a stable contract surface today. No CLI verb-runtime threading is in scope — that lands with each verb's implementation.
 
@@ -40,11 +40,11 @@ Acceptance criteria are met by typed contract + tests proving the body-free inva
 
 **Modify:**
 - `crates/cairn-core/src/lib.rs` — add `pub mod policy_trace;`.
-- `crates/cairn-idl/schema/capabilities/capabilities.json` — append `cairn.mcp.v1.policy_trace.v1`.
+- `crates/cairn-idl/schema/capabilities/capabilities.json` — append `cairn.mcp.v1.policy_trace`.
 - `crates/cairn-core/src/generated/common/mod.rs` — regenerated (new variant).
 - `crates/cairn-cli/src/docgen.rs` — register the new reference page.
 - `crates/cairn-cli/src/verbs/status.rs` — advertise the new capability.
-- `crates/cairn-cli/tests/envelope_tests.rs` — assert `status` advertises `policy_trace.v1`.
+- `crates/cairn-cli/tests/envelope_tests.rs` — assert `status` advertises `policy_trace`.
 - `crates/cairn-cli/tests/docgen.rs` — snapshot the new page.
 
 ### PR2 — explain machinery, RecordExclusion, IDL
@@ -65,7 +65,7 @@ Acceptance criteria are met by typed contract + tests proving the body-free inva
 
 # PR1 — core types, IDL capability, docs
 
-### Task 1: Add `cairn.mcp.v1.policy_trace.v1` to the Capabilities IDL
+### Task 1: Add `cairn.mcp.v1.policy_trace` to the Capabilities IDL
 
 **Files:**
 - Modify: `crates/cairn-idl/schema/capabilities/capabilities.json`
@@ -76,14 +76,14 @@ Acceptance criteria are met by typed contract + tests proving the body-free inva
 Open `crates/cairn-idl/schema/capabilities/capabilities.json`. Inside the `oneOf` array, add a new entry directly after the `cairn.mcp.v1.extension.sessiontree` line (so it sits at the end of the existing `extension.*` block):
 
 ```json
-{ "const": "cairn.mcp.v1.policy_trace.v1",   "x-cairn-since": "v0.1" }
+{ "const": "cairn.mcp.v1.policy_trace",   "x-cairn-since": "v0.1" }
 ```
 
 Make sure the preceding entry's trailing comma is added. Final shape of the new line region:
 
 ```json
     { "const": "cairn.mcp.v1.extension.sessiontree", "x-cairn-since": "v0.3" },
-    { "const": "cairn.mcp.v1.policy_trace.v1",       "x-cairn-since": "v0.1" }
+    { "const": "cairn.mcp.v1.policy_trace",       "x-cairn-since": "v0.1" }
   ],
 ```
 
@@ -95,15 +95,15 @@ Expected: FAIL with a diff against `crates/cairn-core/src/generated/common/mod.r
 - [ ] **Step 3: Regenerate**
 
 Run: `cargo run -p cairn-idl --bin cairn-codegen --locked`
-Expected: writes the new `CairnMcpV1PolicyTraceV1` variant into `crates/cairn-core/src/generated/common/mod.rs`.
+Expected: writes the new `CairnMcpV1PolicyTrace` variant into `crates/cairn-core/src/generated/common/mod.rs`.
 
 - [ ] **Step 4: Verify the regenerated file**
 
 Open `crates/cairn-core/src/generated/common/mod.rs`. Confirm the new variant is appended to the `Capabilities` enum:
 
 ```rust
-    #[serde(rename = "cairn.mcp.v1.policy_trace.v1")]
-    CairnMcpV1PolicyTraceV1,
+    #[serde(rename = "cairn.mcp.v1.policy_trace")]
+    CairnMcpV1PolicyTrace,
 ```
 
 - [ ] **Step 5: Run the codegen check again (expect pass)**
@@ -121,7 +121,7 @@ Expected: PASS.
 ```bash
 git add crates/cairn-idl/schema/capabilities/capabilities.json \
         crates/cairn-core/src/generated/common/mod.rs
-git commit -m "feat(idl): add cairn.mcp.v1.policy_trace.v1 capability (#95)"
+git commit -m "feat(idl): add cairn.mcp.v1.policy_trace capability (#95)"
 ```
 
 ---
@@ -218,8 +218,8 @@ use std::fmt;
 
 /// Every gate that can fire across all eight verbs (brief §5.2, §6.3,
 /// §4.2, §14, §8). Adding a variant is a `#[non_exhaustive]` minor
-/// change but requires a `policy_trace.v2` capability bump per the
-/// design doc §8.
+/// change. A vocabulary *break* (rename, semantic shift) travels with
+/// the MCP contract version per the design doc §8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PolicyGate {
@@ -1125,12 +1125,14 @@ vocabulary is enumerated below.
 
 ## Negotiation
 
-Servers advertise `cairn.mcp.v1.policy_trace.v1` on `status.capabilities`
-when they emit traces with this vocabulary. Future vocabulary changes ship
-as a sibling capability `cairn.mcp.v1.policy_trace.v2`; clients that
-require a specific version should match exactly.
+Servers advertise `cairn.mcp.v1.policy_trace` on `status.capabilities`
+when they emit traces with this vocabulary. Vocabulary breaks (renames,
+semantic shifts) travel with the MCP contract version
+(`cairn.mcp.v2.*`) — a fresh closed `Capabilities` enum at that point —
+rather than as a `.v2` suffix on this capability, matching the existing
+sibling pattern.
 
-## Gate vocabulary (`v1`)
+## Gate vocabulary
 
 | Gate string                  | Brief         | Fires on         | Typical `result` | Typical `detail`                                |
 |------------------------------|---------------|------------------|------------------|--------------------------------------------------|
@@ -1213,7 +1215,7 @@ Edit `crates/cairn-cli/tests/envelope_tests.rs`. After the existing capability a
 
 ```rust
 #[test]
-fn status_advertises_policy_trace_v1() {
+fn status_advertises_policy_trace() {
     use assert_cmd::prelude::*;
     use std::process::Command;
 
@@ -1227,17 +1229,17 @@ fn status_advertises_policy_trace_v1() {
     let caps = v["capabilities"].as_array().expect("capabilities array");
     let strs: Vec<&str> = caps.iter().filter_map(serde_json::Value::as_str).collect();
     assert!(
-        strs.contains(&"cairn.mcp.v1.policy_trace.v1"),
-        "expected policy_trace.v1; got {strs:?}"
+        strs.contains(&"cairn.mcp.v1.policy_trace"),
+        "expected cairn.mcp.v1.policy_trace; got {strs:?}"
     );
 }
 ```
 
-> Verify the test harness already uses `assert_cmd`. If not (look for it in other tests in the file), use whatever existing pattern envelope_tests.rs uses — e.g. constructing a Response via `cairn_cli::verbs::status::run()` directly. The assertion shape is the same: `policy_trace.v1` must be in the capabilities array.
+> Verify the test harness already uses `assert_cmd`. If not (look for it in other tests in the file), use whatever existing pattern envelope_tests.rs uses — e.g. constructing a Response via `cairn_cli::verbs::status::run()` directly. The assertion shape is the same: `cairn.mcp.v1.policy_trace` must be in the capabilities array.
 
 - [ ] **Step 3: Run the failing test**
 
-Run: `cargo nextest run -p cairn-cli --test envelope_tests status_advertises_policy_trace_v1`
+Run: `cargo nextest run -p cairn-cli --test envelope_tests status_advertises_policy_trace`
 Expected: FAIL — capability not in the array.
 
 - [ ] **Step 4: Add the capability to status.rs**
@@ -1245,12 +1247,12 @@ Expected: FAIL — capability not in the array.
 Edit `crates/cairn-cli/src/verbs/status.rs`. In the function that builds the `Vec<Capabilities>` (or wherever the capabilities array is composed), append:
 
 ```rust
-Capabilities::CairnMcpV1PolicyTraceV1,
+Capabilities::CairnMcpV1PolicyTrace,
 ```
 
 - [ ] **Step 5: Run the test (expect pass)**
 
-Run: `cargo nextest run -p cairn-cli --test envelope_tests status_advertises_policy_trace_v1`
+Run: `cargo nextest run -p cairn-cli --test envelope_tests status_advertises_policy_trace`
 Expected: PASS.
 
 - [ ] **Step 6: Run the full envelope test suite**
@@ -1263,7 +1265,7 @@ Expected: PASS — no regressions.
 ```bash
 git add crates/cairn-cli/src/verbs/status.rs \
         crates/cairn-cli/tests/envelope_tests.rs
-git commit -m "feat(cli): advertise cairn.mcp.v1.policy_trace.v1 on status (#95)"
+git commit -m "feat(cli): advertise cairn.mcp.v1.policy_trace on status (#95)"
 ```
 
 ---
@@ -1341,8 +1343,8 @@ Lands the typed `policy_trace` infrastructure for issue #95 (brief §14 / §5.2 
 
 - `cairn-core::policy_trace` — `PolicyGate` (closed enum, 10 variants), `PolicyOutcome`, `PolicyDetail` (body-free), `PolicyTraceEntry`, `to_wire`.
 - `From<&Decision>`, `From<&RedactedPayload>`, `From<&FencedPayload>` impls.
-- `Capabilities::CairnMcpV1PolicyTraceV1` IDL variant + regenerated.
-- `cairn status` advertises `cairn.mcp.v1.policy_trace.v1`.
+- `Capabilities::CairnMcpV1PolicyTrace` IDL variant + regenerated.
+- `cairn status` advertises `cairn.mcp.v1.policy_trace`.
 - `docs/site/src/reference/policy-gates.md` — gate vocabulary.
 
 ## Out of scope (verb runtime)

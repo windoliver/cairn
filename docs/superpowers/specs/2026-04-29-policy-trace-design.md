@@ -45,7 +45,7 @@ just removed.
 | `summarize`    | —   | out of scope (future)                                   |
 | `assemble_hot` | —   | out of scope (future)                                   |
 | `handshake`    | —   | not applicable                                          |
-| `status`       | —   | not applicable; advertises `policy_trace: v1` capability|
+| `status`       | —   | not applicable; advertises `cairn.mcp.v1.policy_trace` capability|
 
 ## 4. Architecture
 
@@ -232,7 +232,7 @@ The only IDL change in PR1 is appending one variant to the closed
 `Capabilities` enum (`schemas/common/capabilities.json`):
 
 ```json
-"cairn.mcp.v1.policy_trace.v1"
+"cairn.mcp.v1.policy_trace"
 ```
 
 PR1 re-runs `cargo run -p cairn-idl --bin cairn-codegen` and commits the
@@ -282,11 +282,15 @@ CI gates already enforce no-diff.
 
 ## 8. Capability advertisement
 
-`status` advertises the new `cairn.mcp.v1.policy_trace.v1` capability via
-the closed `Capabilities` IDL enum (see §7.1 — added in PR1). Future gate
-vocabulary changes ship as a sibling variant `cairn.mcp.v1.policy_trace.v2`
-so callers can negotiate. The capability is included in every `status`
-response on builds that wire the trace producers.
+`status` advertises the new `cairn.mcp.v1.policy_trace` capability via
+the closed `Capabilities` IDL enum (see §7.1 — added in PR1). The
+capability is included in every `status` response on builds that wire
+the trace producers. Future gate-vocabulary breaks travel with the MCP
+contract version (`cairn.mcp.v2.*`) — a fresh closed `Capabilities`
+enum at that point — rather than as a `.v2` suffix on this capability,
+matching the existing sibling pattern (`cairn.mcp.v1.search.keyword`,
+`cairn.mcp.v1.extension.sessiontree`, etc., none of which carry an
+embedded vocabulary version).
 
 ## 9. Logging & observability
 
@@ -337,7 +341,7 @@ into application logs.
   `BODY-MARKER-AAAA` / fake SSN / fake email; assert serialized response
   contains zero of those bytes anywhere.
 - `policy_trace_capability.rs` — `cairn status` advertises
-  `policy_trace: v1`.
+  `cairn.mcp.v1.policy_trace`.
 
 ### 11.3 Integration — PR2 (`crates/cairn-cli/tests/explain_*.rs`)
 
@@ -418,6 +422,9 @@ cargo machete
 - **`detail` field growth.** `PolicyDetail` is `#[non_exhaustive]`; new
   variants are a minor change. Each new variant must be reviewed for
   body-freeness and added to the JSON-walker allowlist.
-- **`v1` capability.** Once we ship, the gate vocabulary is locked at `v1`.
-  Adding a new `PolicyGate` variant that producers actually emit requires a
-  bump to `v2` and capability negotiation in `status`.
+- **Capability lock-in.** Once `cairn.mcp.v1.policy_trace` ships, the
+  closed `PolicyGate` vocabulary is part of the v1 wire contract. Adding
+  a new gate variant is a `#[non_exhaustive]` minor change, but a
+  vocabulary *break* (rename, semantic shift) travels with the MCP
+  contract version — `cairn.mcp.v2.*` carries a fresh closed
+  `Capabilities` enum.
