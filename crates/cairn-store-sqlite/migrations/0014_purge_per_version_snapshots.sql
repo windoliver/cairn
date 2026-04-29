@@ -1,0 +1,12 @@
+-- Migration 0014: per-version snapshots for purge-marker visibility.
+--
+-- The single (scope_snapshot, taxonomy_snapshot) pair from 0010 only
+-- captured the latest version's visibility. A target whose visibility
+-- changed across versions could leave a principal who could read an
+-- earlier version (but not the latest) without any record of the
+-- purge — hiding deletion history from previously authorized readers.
+--
+-- This column stores a JSON array `[{"scope":..,"taxonomy":..}, ...]`,
+-- one element per pre-purge version. version_history grants the purge
+-- marker to a principal who could read at least one of those versions.
+ALTER TABLE record_purges ADD COLUMN version_snapshots TEXT;

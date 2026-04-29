@@ -111,6 +111,18 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0012_activation_audit.sql"),
             checksum: checksum_for("0012_activation_audit.sql"),
         },
+        Migration {
+            id: 13,
+            name: "0013_consent_journal_partial_idx.sql",
+            sql: include_str!("../../migrations/0013_consent_journal_partial_idx.sql"),
+            checksum: checksum_for("0013_consent_journal_partial_idx.sql"),
+        },
+        Migration {
+            id: 14,
+            name: "0014_purge_per_version_snapshots.sql",
+            sql: include_str!("../../migrations/0014_purge_per_version_snapshots.sql"),
+            checksum: checksum_for("0014_purge_per_version_snapshots.sql"),
+        },
     ]
 });
 

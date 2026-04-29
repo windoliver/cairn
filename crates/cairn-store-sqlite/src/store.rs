@@ -250,7 +250,10 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .prepare(
                     "SELECT record_id, target_id, version, active, tombstoned, \
                      created_at, created_by, tombstoned_at, tombstoned_by, expired_at, \
-                     activated_at, activated_by, scope, taxonomy \
+                     activated_at, activated_by, scope, taxonomy, \
+                     unixepoch(activated_at) AS activated_at_epoch, \
+                     unixepoch(tombstoned_at) AS tombstoned_at_epoch, \
+                     unixepoch(expired_at) AS expired_at_epoch \
                      FROM records WHERE target_id = ?1 ORDER BY version ASC",
                 )
                 .map_err(store_err)?;
@@ -273,28 +276,29 @@ impl MemoryStore for crate::SqliteMemoryStore {
                 .map(|(rv, _, _)| rv)
                 .collect();
 
-            // Purge markers are visibility-filtered using the snapshot
-            // captured at purge time (`scope_snapshot` /
-            // `taxonomy_snapshot`, migration 0010). The snapshot
-            // reflects the row's visibility at the moment it was
-            // purged; a caller who could read the row then may see the
-            // audit marker now. System principals always see every
-            // marker. Markers without snapshots (pre-0010 purges, or
-            // purge of a target with no records) fall back to system-
-            // only visibility — fail closed.
+            // Purge markers are visibility-filtered using snapshots
+            // captured at purge time. `version_snapshots` (migration
+            // 0014) is a JSON array `[{"scope":..,"taxonomy":..}, ...]`
+            // — one element per pre-purge version. A non-system caller
+            // sees the marker if they could read at least one of those
+            // versions. Falling back to the latest-version single
+            // snapshot (`scope_snapshot`/`taxonomy_snapshot`) covers
+            // pre-0014 markers; markers with neither field fail closed
+            // to system-only.
             let mut p = conn
                 .prepare(
                     "SELECT target_id, op_id, purged_at, purged_by, body_hash_salt, \
-                            scope_snapshot, taxonomy_snapshot \
+                            scope_snapshot, taxonomy_snapshot, version_snapshots \
                      FROM record_purges WHERE target_id = ?1 ORDER BY purged_at",
                 )
                 .map_err(store_err)?;
-            let purge_rows: Vec<(PurgeMarker, Option<String>, Option<String>)> = p
-                .query_map(params![target_id.as_str()], |row| {
+            let purge_rows: Vec<(PurgeMarker, Option<String>, Option<String>, Option<String>)> =
+                p.query_map(params![target_id.as_str()], |row| {
                     let marker = row_to_purge_marker(row)?;
                     let scope_snapshot: Option<String> = row.get("scope_snapshot")?;
                     let taxonomy_snapshot: Option<String> = row.get("taxonomy_snapshot")?;
-                    Ok((marker, scope_snapshot, taxonomy_snapshot))
+                    let version_snapshots: Option<String> = row.get("version_snapshots")?;
+                    Ok((marker, scope_snapshot, taxonomy_snapshot, version_snapshots))
                 })
                 .map_err(store_err)?
                 .collect::<Result<_, _>>()
@@ -302,10 +306,29 @@ impl MemoryStore for crate::SqliteMemoryStore {
 
             let purges: Vec<PurgeMarker> = purge_rows
                 .into_iter()
-                .filter_map(|(marker, scope_snap, tax_snap)| {
+                .filter_map(|(marker, scope_snap, tax_snap, version_snaps)| {
                     if principal.is_system() {
                         return Some(marker);
                     }
+                    // Prefer per-version snapshots: visible if at least
+                    // one pre-purge version was readable.
+                    if let Some(json) = version_snaps.as_deref()
+                        && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(json)
+                    {
+                        let any_readable = arr.iter().any(|entry| {
+                            let scope = entry.get("scope").map_or_else(
+                                || "{}".to_owned(),
+                                serde_json::Value::to_string,
+                            );
+                            let tax = entry.get("taxonomy").map_or_else(
+                                || "{}".to_owned(),
+                                serde_json::Value::to_string,
+                            );
+                            principal_can_read(&principal, &scope, &tax)
+                        });
+                        return if any_readable { Some(marker) } else { None };
+                    }
+                    // Fallback for pre-0014 markers.
                     match (scope_snap, tax_snap) {
                         (Some(scope), Some(tax))
                             if principal_can_read(&principal, &scope, &tax) =>

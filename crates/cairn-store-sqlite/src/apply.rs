@@ -452,10 +452,32 @@ fn purge_target_impl(
     drop(stmt);
 
     let record_ids: Vec<String> = rows.iter().map(|(rid, _, _)| rid.clone()).collect();
-    let (scope_snapshot, taxonomy_snapshot) = match rows.first() {
-        Some((_, scope, taxonomy)) => (Some(scope.clone()), Some(taxonomy.clone())),
-        None => return Err(StoreError::NotFound(target_id.clone())),
-    };
+    if rows.is_empty() {
+        return Err(StoreError::NotFound(target_id.clone()));
+    }
+    // Latest-version snapshot (kept for the legacy `scope_snapshot` /
+    // `taxonomy_snapshot` columns; reads prefer `version_snapshots`).
+    let (scope_snapshot, taxonomy_snapshot) = rows
+        .first()
+        .map(|(_, s, t)| (Some(s.clone()), Some(t.clone())))
+        .unwrap_or_default();
+    // Per-version snapshots (JSON array). version_history grants the
+    // purge marker to a principal who could read at least one of these
+    // pre-purge versions, so visibility-changing targets do not lose
+    // deletion history for previously authorized readers.
+    let version_snapshots = serde_json::to_string(
+        &rows
+            .iter()
+            .map(|(_, scope, taxonomy)| {
+                serde_json::json!({
+                    "scope": serde_json::from_str::<serde_json::Value>(scope)
+                        .unwrap_or(serde_json::Value::Null),
+                    "taxonomy": serde_json::from_str::<serde_json::Value>(taxonomy)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )?;
 
     let now = Rfc3339Timestamp::now();
     let salt_input = format!("{}{}{}", now.as_str(), target_id.as_str(), op_id.as_str());
@@ -464,8 +486,8 @@ fn purge_target_impl(
     conn.execute(
         "INSERT INTO record_purges \
          (target_id, op_id, purged_at, purged_by, body_hash_salt, \
-          scope_snapshot, taxonomy_snapshot) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          scope_snapshot, taxonomy_snapshot, version_snapshots) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             target_id.as_str(),
             op_id.as_str(),
@@ -474,6 +496,7 @@ fn purge_target_impl(
             salt,
             scope_snapshot,
             taxonomy_snapshot,
+            version_snapshots,
         ],
     )
     .map_err(store_err)?;
@@ -633,25 +656,37 @@ fn append_consent_journal_impl(
     let payload = serde_json::to_string(&entry.payload)?;
     let target_id_str = entry.target_id.as_ref().map(TargetId::as_str);
 
-    // ON CONFLICT DO NOTHING + the unique idempotency index on
-    // (op_id, kind, COALESCE(target_id, '__NULL__')) means a retried
-    // logical operation cannot accumulate duplicate audit rows.
-    let inserted = conn
-        .execute(
-            "INSERT INTO consent_journal \
-             (op_id, kind, target_id, actor, payload, at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-             ON CONFLICT(op_id, kind, COALESCE(target_id, '__NULL__')) DO NOTHING",
-            params![
-                entry.op_id.as_str(),
-                entry.kind,
-                target_id_str,
-                entry.actor.as_str(),
-                payload,
-                entry.at.as_str(),
-            ],
-        )
-        .map_err(store_err)?;
+    // Two partial unique indexes (migration 0013) give idempotency
+    // without an in-band sentinel: one over `(op_id, kind, target_id)`
+    // when target_id IS NOT NULL, and one over `(op_id, kind)` when
+    // target_id IS NULL. Use the bare INSERT and let
+    // `SqliteFailure(ConstraintViolation)` mean "row already exists" —
+    // ON CONFLICT cannot reference partial indexes by predicate.
+    let exec_result = conn.execute(
+        "INSERT INTO consent_journal \
+         (op_id, kind, target_id, actor, payload, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            entry.op_id.as_str(),
+            entry.kind,
+            target_id_str,
+            entry.actor.as_str(),
+            payload,
+            entry.at.as_str(),
+        ],
+    );
+
+    let inserted = match exec_result {
+        Ok(rows) => rows,
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                ..
+            },
+            _,
+        )) => 0,
+        Err(other) => return Err(store_err(other)),
+    };
 
     if inserted == 0 {
         // Idempotent retry: fetch the existing row and require an
@@ -661,11 +696,21 @@ fn append_consent_journal_impl(
         // tampering, and accepting it would let the store quietly keep
         // the older audit content while telling the caller everything
         // succeeded. Fail closed with `Conflict { UniqueViolation }`.
+        // Mirror the partial-index split: target_id IS NULL must look
+        // up rows with NULL target_id (and reject rows whose target_id
+        // happens to match the literal string), while NOT NULL must
+        // match exactly. A naive `target_id = ?3` with a NULL bind
+        // value would never match (NULL <> NULL in SQL).
+        let lookup_sql = if target_id_str.is_some() {
+            "SELECT id, actor, payload, at FROM consent_journal \
+             WHERE op_id = ?1 AND kind = ?2 AND target_id = ?3"
+        } else {
+            "SELECT id, actor, payload, at FROM consent_journal \
+             WHERE op_id = ?1 AND kind = ?2 AND target_id IS NULL"
+        };
         let (id, existing_actor, existing_payload, existing_at): (i64, String, String, String) =
             conn.query_row(
-                "SELECT id, actor, payload, at FROM consent_journal \
-                 WHERE op_id = ?1 AND kind = ?2 \
-                   AND COALESCE(target_id, '__NULL__') = COALESCE(?3, '__NULL__')",
+                lookup_sql,
                 params![entry.op_id.as_str(), entry.kind, target_id_str],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )

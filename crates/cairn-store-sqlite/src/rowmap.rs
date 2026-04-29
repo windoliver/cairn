@@ -49,19 +49,29 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
     let expired_at: Option<String> = row.get("expired_at")?;
     let activated_at: Option<String> = row.get("activated_at")?;
     let activated_by: Option<String> = row.get("activated_by")?;
+    // Sort keys (seconds since epoch) computed by SQLite's `unixepoch`
+    // to avoid lexical comparison of RFC3339 strings — the latter is
+    // unsafe once timezone offsets are involved (a `+02:00` instant
+    // sorts after a `Z` instant earlier in real time).
+    let activated_at_epoch: Option<i64> = row.get("activated_at_epoch").unwrap_or(None);
+    let tombstoned_at_epoch: Option<i64> = row.get("tombstoned_at_epoch").unwrap_or(None);
+    let expired_at_epoch: Option<i64> = row.get("expired_at_epoch").unwrap_or(None);
 
     // Emit an `Update` lifecycle event ONLY for versions that were
     // actually activated. A row that was staged but never activated has
     // `activated_at IS NULL` and contributes no Update event — staging
     // alone is not a lifecycle change worth surfacing through
     // `version_history`.
-    let mut events: Vec<RecordEvent> = Vec::new();
+    let mut events: Vec<(RecordEvent, Option<i64>)> = Vec::new();
     if let (Some(at_str), Some(by_str)) = (activated_at, activated_by) {
-        events.push(RecordEvent {
-            kind: ChangeKind::Update,
-            at: Rfc3339Timestamp::parse(&at_str).ok(),
-            actor: Some(ActorRef::from_string(&by_str)),
-        });
+        events.push((
+            RecordEvent {
+                kind: ChangeKind::Update,
+                at: Rfc3339Timestamp::parse(&at_str).ok(),
+                actor: Some(ActorRef::from_string(&by_str)),
+            },
+            activated_at_epoch,
+        ));
     }
 
     // Emit a `Tombstone` event whenever the column is set, regardless of
@@ -70,32 +80,41 @@ pub fn row_to_record_version(row: &Row<'_>) -> rusqlite::Result<RecordVersion> {
     if tombstoned == 1
         && let (Some(at_str), Some(by_str)) = (tombstoned_at, tombstoned_by)
     {
-        events.push(RecordEvent {
-            kind: ChangeKind::Tombstone,
-            at: Rfc3339Timestamp::parse(&at_str).ok(),
-            actor: Some(ActorRef::from_string(&by_str)),
-        });
+        events.push((
+            RecordEvent {
+                kind: ChangeKind::Tombstone,
+                at: Rfc3339Timestamp::parse(&at_str).ok(),
+                actor: Some(ActorRef::from_string(&by_str)),
+            },
+            tombstoned_at_epoch,
+        ));
     }
 
     // Same for `Expire`: persist if the column is set, even when the row
     // has since been superseded.
     if let Some(at_str) = expired_at {
-        events.push(RecordEvent {
-            kind: ChangeKind::Expire,
-            at: Rfc3339Timestamp::parse(&at_str).ok(),
-            actor: None,
-        });
+        events.push((
+            RecordEvent {
+                kind: ChangeKind::Expire,
+                at: Rfc3339Timestamp::parse(&at_str).ok(),
+                actor: None,
+            },
+            expired_at_epoch,
+        ));
     }
 
     // The `RecordVersion` contract documents events as ascending by
-    // timestamp. Sort by parsed `at` (None last; equal timestamps keep
-    // insertion order via `sort_by`'s stability).
-    events.sort_by(|a, b| match (a.at.as_ref(), b.at.as_ref()) {
-        (Some(x), Some(y)) => x.as_str().cmp(y.as_str()),
+    // timestamp. Sort by the SQLite-derived unix epoch (a real instant)
+    // rather than the RFC3339 string, since lexical compare is wrong
+    // once offsets are involved. Events whose epoch could not be parsed
+    // (e.g. a corrupted column) sort last.
+    events.sort_by(|a, b| match (a.1, b.1) {
+        (Some(x), Some(y)) => x.cmp(&y),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
+    let events: Vec<RecordEvent> = events.into_iter().map(|(e, _)| e).collect();
 
     Ok(RecordVersion {
         record_id: RecordId(record_id),
