@@ -559,31 +559,56 @@ mod tests {
             .collect();
         let joined = plan_rows.join("\n");
 
-        // Locate the plan row referencing the partial index (the alias
-        // SQLite prints is `e` from the constant, so we anchor on the
-        // index name itself, which is unambiguous). Requiring the
-        // `SEARCH` and `dst=?` tokens on *that* row rules out:
-        //   - unrelated SEARCH rows (records, records_fts) accidentally
-        //     satisfying a `joined.contains` assertion;
-        //   - the index being chosen as a covering scan rather than a
-        //     keyed lookup (`dst=?` is only emitted when SQLite uses
-        //     `dst` as the search key).
-        let edges_row = plan_rows
-            .iter()
-            .find(|r| r.contains("edges_updates_dst_idx"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "no plan row uses edges_updates_dst_idx — \
-                     supersession check must hit the partial index. \
-                     Full plan:\n{joined}"
-                )
-            });
+        // Plan-row analysis. We need *both* of these to hold for every
+        // EXPLAIN:
+        //
+        //   (a) No plan row may scan `edges` — neither a full-table
+        //       `SCAN edges` nor a `SCAN e` (the supersession alias)
+        //       nor a covering `SCAN e USING INDEX <other>`. Any of
+        //       those means the supersession lookup regressed to a
+        //       per-FTS-hit edges scan even if the partial index is
+        //       still used elsewhere.
+        //
+        //   (b) Some plan row must `SEARCH` the partial index keyed
+        //       on `dst` — proving SQLite chose the index as a keyed
+        //       lookup, not as a covering scan.
+        //
+        // Together (a) and (b) close round-9's loophole: a future
+        // builder change that introduces a second `edges` access point
+        // (one indexed, one scanned) cannot satisfy both at once.
+        let mut edges_scan_rows: Vec<&String> = Vec::new();
+        let mut indexed_search_row: Option<&String> = None;
+        for row in &plan_rows {
+            // `SCAN <alias>` and `SCAN <alias> USING ...`. Split the
+            // first whitespace-token after "SCAN " — if it's exactly
+            // `e` (the supersession alias) or `edges` (table name),
+            // this row is forbidden.
+            if let Some(rest) = row.trim_start().strip_prefix("SCAN ") {
+                let alias = rest.split_whitespace().next().unwrap_or("");
+                if alias == "e" || alias == "edges" {
+                    edges_scan_rows.push(row);
+                }
+            }
+            if row.contains("edges_updates_dst_idx")
+                && row.contains("SEARCH")
+                && row.contains("dst=?")
+            {
+                indexed_search_row = Some(row);
+            }
+        }
+
         assert!(
-            edges_row.contains("SEARCH") && edges_row.contains("dst=?"),
-            "supersession sub-select must SEARCH the partial index by dst — \
+            edges_scan_rows.is_empty(),
+            "plan contains a forbidden SCAN of edges — supersession check \
+             must always go through edges_updates_dst_idx. Offending row(s): \
+             {edges_scan_rows:?}\nfull plan:\n{joined}",
+        );
+        assert!(
+            indexed_search_row.is_some(),
+            "plan must SEARCH edges_updates_dst_idx with dst=? — \
              a rewrite to e.g. `kind IN ('updates')` or parameterised \
              `kind = ?` would lose proof equivalence and surface here. \
-             edges row: {edges_row}\nfull plan:\n{joined}",
+             Full plan:\n{joined}",
         );
     }
 }
