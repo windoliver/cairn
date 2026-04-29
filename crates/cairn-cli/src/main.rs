@@ -319,7 +319,13 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cairn bootstrap: {e:#}");
-            ExitCode::from(74) // EX_IOERR
+            // EX_DATAERR (65) — vault.id is lost; DB or binding sentinel
+            // proves the vault was already bound. The user must recover.
+            if format!("{e:#}").contains("vault.id lost") {
+                ExitCode::from(65)
+            } else {
+                ExitCode::from(74) // EX_IOERR
+            }
         }
     }
 }

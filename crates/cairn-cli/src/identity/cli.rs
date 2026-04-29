@@ -52,7 +52,10 @@ const EX_CONFIG: u8 = 78;
 /// Returns a fully constructed [`Command`] whose subcommands mirror the
 /// 12 identity verbs defined in the issue #50 plan.
 #[must_use]
-#[allow(clippy::too_many_lines, reason = "12 subcommands; splitting adds indirection for no gain")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "12 subcommands; splitting adds indirection for no gain"
+)]
 pub fn identity_subcommand() -> Command {
     Command::new("identity")
         .about("Manage vault identities (§3.5 / §4.1)")

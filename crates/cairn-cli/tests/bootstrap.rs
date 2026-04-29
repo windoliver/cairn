@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use cairn_cli::vault::{BootstrapOpts, bootstrap};
+use cairn_core::domain::identity::keys::VaultId;
 
 fn opts(dir: &Path) -> BootstrapOpts {
     BootstrapOpts {
@@ -220,17 +221,151 @@ fn bootstrap_human_output_first_run() {
     let dir = tempfile::tempdir().unwrap();
     let receipt = cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
     let output = cairn_cli::vault::render_human(&receipt);
-    // normalize absolute path so the snapshot is stable across machines
-    let normalized = output.replace(dir.path().to_str().unwrap(), "<vault>");
+    // normalize absolute path and vault_id (ULID) so the snapshot is stable
+    // across machines and test runs.
+    let normalized = output
+        .replace(dir.path().to_str().unwrap(), "<vault>")
+        .replace(receipt.vault_id.as_str(), "<vault-id>");
     insta::assert_snapshot!(normalized);
 }
 
 #[test]
 fn bootstrap_human_output_second_run() {
     let dir = tempfile::tempdir().unwrap();
-    cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
+    let first = cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
     let receipt = cairn_cli::vault::bootstrap(&opts(dir.path())).unwrap();
     let output = cairn_cli::vault::render_human(&receipt);
-    let normalized = output.replace(dir.path().to_str().unwrap(), "<vault>");
+    // normalize absolute path and vault_id (ULID) so the snapshot is stable
+    // across machines and test runs.
+    let normalized = output
+        .replace(dir.path().to_str().unwrap(), "<vault>")
+        .replace(first.vault_id.as_str(), "<vault-id>");
     insta::assert_snapshot!(normalized);
+}
+
+// ── vault.id lifecycle tests (bootstrap amendment 2026-04-27) ─────────────
+
+/// First run must create `.cairn/vault.id` containing a valid ULID.
+#[test]
+fn bootstrap_mints_vault_id_first_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let receipt = bootstrap(&opts(dir.path())).unwrap();
+
+    let vault_id_path = dir.path().join(".cairn/vault.id");
+    assert!(
+        vault_id_path.is_file(),
+        ".cairn/vault.id must exist after first bootstrap"
+    );
+
+    let raw = std::fs::read_to_string(&vault_id_path).unwrap();
+    let parsed = VaultId::parse(raw.trim()).expect("vault.id must contain a valid ULID");
+    assert_eq!(
+        parsed.as_str(),
+        receipt.vault_id.as_str(),
+        "receipt.vault_id must match file"
+    );
+}
+
+/// Second run must leave `.cairn/vault.id` unchanged (idempotent).
+#[test]
+fn bootstrap_preserves_vault_id_on_second_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = bootstrap(&opts(dir.path())).unwrap();
+    let first_id = first.vault_id.as_str().to_owned();
+
+    let second = bootstrap(&opts(dir.path())).unwrap();
+
+    assert_eq!(
+        first_id,
+        second.vault_id.as_str(),
+        "second bootstrap must not change vault.id"
+    );
+    let file_content = std::fs::read_to_string(dir.path().join(".cairn/vault.id")).unwrap();
+    assert_eq!(
+        first_id,
+        file_content.trim(),
+        "vault.id file must not change on second run"
+    );
+}
+
+/// If `.cairn/vault.id` is deleted but the DB contains a `vault_meta` row,
+/// bootstrap must fail closed (the vault has been bound).
+///
+/// This test creates a DB row by hand to simulate a vault that has completed
+/// first-bind without relying on the full identity-provisioning stack.
+#[test]
+fn bootstrap_fails_closed_when_vault_id_lost_with_db_row() {
+    use rusqlite::Connection;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Bootstrap once to create the directory tree and vault.id.
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // Simulate a completed first-bind by creating a minimal vault_meta table.
+    let db_path = dir.path().join(".cairn/cairn.db");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS vault_meta (vault_id TEXT NOT NULL, witness_sha256 BLOB NOT NULL);
+             INSERT INTO vault_meta (vault_id, witness_sha256) VALUES ('01TESTULID000000000000000A', zeroblob(32));",
+        )
+        .unwrap();
+    }
+
+    // Delete vault.id — simulates accidental deletion after binding.
+    std::fs::remove_file(dir.path().join(".cairn/vault.id")).unwrap();
+
+    let err = bootstrap(&opts(dir.path())).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("vault.id lost"),
+        "error must mention vault.id lost; got: {msg}"
+    );
+}
+
+/// If `.cairn/vault.id` is deleted but a `.cairn/vault.binding` sentinel exists,
+/// bootstrap must fail closed.
+#[test]
+fn bootstrap_fails_closed_when_vault_id_lost_with_sentinel_only() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Bootstrap once to create the directory tree.
+    bootstrap(&opts(dir.path())).unwrap();
+
+    // Place a binding sentinel (no DB needed).
+    std::fs::write(dir.path().join(".cairn/vault.binding"), b"").unwrap();
+
+    // Delete vault.id.
+    std::fs::remove_file(dir.path().join(".cairn/vault.id")).unwrap();
+
+    let err = bootstrap(&opts(dir.path())).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("vault.id lost"),
+        "error must mention vault.id lost; got: {msg}"
+    );
+}
+
+/// `--force` must not rewrite `.cairn/vault.id`.
+#[test]
+fn bootstrap_force_does_not_rewrite_vault_id() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let first = bootstrap(&opts(dir.path())).unwrap();
+    let first_id = first.vault_id.as_str().to_owned();
+
+    let forced = bootstrap(&forced(dir.path())).unwrap();
+
+    assert_eq!(
+        first_id,
+        forced.vault_id.as_str(),
+        "--force must not change vault.id"
+    );
+    let file_content = std::fs::read_to_string(dir.path().join(".cairn/vault.id")).unwrap();
+    assert_eq!(
+        first_id,
+        file_content.trim(),
+        "vault.id file must survive --force"
+    );
 }
