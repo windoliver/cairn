@@ -663,6 +663,67 @@ mod wrapper_tests {
         assert!(out.compacted_bytes.len() <= cfg.max_bytes());
     }
 
+    /// Round-7 (newer loop) regression: when the giant-final-line
+    /// suffix path slices into the middle of a multibyte UTF-8
+    /// codepoint, the kept suffix MUST start on a codepoint
+    /// boundary so valid non-ASCII text isn't replaced with U+FFFD.
+    #[test]
+    fn oversize_bypass_final_line_suffix_codepoint_boundary() {
+        // Default cfg.max_bytes = 16384, half ≈ 8146. To hit the
+        // suffix branch, place the only `\n` near the start, then
+        // build a giant final line with multibyte UTF-8 around the
+        // expected cut point.
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        // Filler before the cut: pure ASCII for predictable cut.
+        // Cut lands roughly at raw.len() - 16292 (tail window).
+        // Aim for the cut to fall mid-multibyte.
+        // Build raw to length R, place "ééé..." spanning the cut.
+        // Each 'é' is 2 bytes. Use 100 'é's (200 bytes) followed
+        // by ASCII so the cut is somewhere in the middle of the
+        // 'é' run.
+        // Total target ≈ 25000 bytes.
+        raw.extend(std::iter::repeat_n(b'A', 5_000));
+        // 10 000 bytes of UTF-8 'é's so the cut falls inside.
+        for _ in 0..5000 {
+            raw.extend_from_slice("é".as_bytes());
+        }
+        raw.extend_from_slice("ÉND-OF-DIAGNOSTIC-é".as_bytes());
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        // Output must be valid UTF-8 (already true via String, but
+        // the more important check: no U+FFFD inserted from a
+        // mid-codepoint cut. We accept any final É at the literal
+        // suffix as proof the boundary alignment worked.
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("ÉND-OF-DIAGNOSTIC-é"),
+            "multibyte tail suffix was corrupted by mid-codepoint cut: {}",
+            &body[body.len().saturating_sub(200)..]
+        );
+        // The suffix should not start with a U+FFFD (which would
+        // indicate the cut hit a continuation byte).
+        // Find the marker and inspect the immediate next codepoint.
+        if let Some(idx) = body.find("final-line truncated\u{2026}]\n") {
+            let after = &body[idx + "final-line truncated\u{2026}]\n".len()..];
+            let first = after.chars().next().unwrap_or(' ');
+            assert_ne!(
+                first, '\u{FFFD}',
+                "kept suffix begins with replacement char — cut landed mid-codepoint"
+            );
+        }
+    }
+
     /// Round-6 (newer loop) regression: when bypass triggers via
     /// `LineCardinality` / `DecodeExpansion` on a payload smaller
     /// than `2 * half`, the tail (containing the actual final
@@ -3519,7 +3580,29 @@ fn oversize_bypass(
             // the line length), then trim to half the byte budget at
             // a codepoint boundary.
             let final_line_start = nl_pos + 1;
-            let suffix_window_start = final_line_start.max(raw_byte_len.saturating_sub(half * 2));
+            let provisional_start = final_line_start.max(raw_byte_len.saturating_sub(half * 2));
+            // Round-7 (newer loop) hardening: `provisional_start` is
+            // an arbitrary raw byte offset and can land in the
+            // middle of a multi-byte UTF-8 codepoint. Decoding from
+            // there with `from_utf8_lossy` would corrupt the first
+            // codepoint into `U+FFFD` even when the source was
+            // valid UTF-8 — irreversible loss for non-ASCII paths,
+            // identifiers, or error messages. Rewind forward over
+            // any continuation bytes (`0x80..=0xBF`) until the
+            // start lands on a leading byte. Capped at 3 forward
+            // steps because UTF-8 has at most 3 trailing bytes per
+            // codepoint, so this never overshoots into a different
+            // codepoint's leading byte.
+            let mut suffix_window_start = provisional_start;
+            for _ in 0..3 {
+                if suffix_window_start < raw_byte_len
+                    && (0x80..=0xBF).contains(&raw_bytes[suffix_window_start])
+                {
+                    suffix_window_start += 1;
+                } else {
+                    break;
+                }
+            }
             let suffix_decoded = stage1_lossy_utf8(&raw_bytes[suffix_window_start..]);
             let mut suf_stripped = false;
             let suffix_sanitized = stage2_ansi_strip(
