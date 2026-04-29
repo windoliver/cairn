@@ -83,7 +83,7 @@ jobs:
           shared-key: test-${{ matrix.os }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@787505cde8a44ea468a00478fe52baf23b15bccd # v2.75.21
+        uses: taiki-e/install-action@1329c298aa20c3257846c9b2e0e55967df3e3c37 # v2.75.25
         with:
           tool: cargo-nextest
       - name: cargo nextest run --workspace
