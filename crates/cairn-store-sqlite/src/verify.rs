@@ -99,9 +99,46 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "consent_journal_no_delete"),
     // 0007_tombstone_reason
     ("index", "records_tombstoned_reason_idx"),
+    // 0009_consent_event
+    ("index", "consent_journal_op_idx"),
+    ("index", "consent_journal_actor_idx"),
+    ("index", "consent_journal_sensor_idx"),
+    ("index", "consent_journal_kind_idx"),
+    ("trigger", "consent_journal_kind_domain"),
+    ("trigger", "consent_journal_event_requires_iso"),
+    ("trigger", "consent_journal_forget_receipt_body_free"),
     // 0010_ranking_indexes
     ("index", "records_confidence_idx"),
     ("index", "records_updated_at_idx"),
+    // 0011_consent_event_hardening
+    ("trigger", "consent_journal_event_requires_actor"),
+    ("trigger", "consent_journal_event_requires_payload"),
+    ("trigger", "consent_journal_payload_shape_matches_kind"),
+    ("trigger", "consent_journal_payload_body_free"),
+    ("trigger", "consent_journal_sensor_kind_requires_sensor_id"),
+    ("trigger", "consent_journal_sensor_id_matches_payload"),
+    (
+        "trigger",
+        "consent_journal_sensor_subject_matches_sensor_id",
+    ),
+    (
+        "trigger",
+        "consent_journal_non_sensor_kind_forbids_sensor_id",
+    ),
+    ("trigger", "consent_journal_hash_kind_subject_shape"),
+    ("trigger", "consent_journal_hash_kind_target_id_hash_shape"),
+    ("trigger", "consent_journal_payload_required_fields"),
+    ("trigger", "consent_journal_payload_unknown_top_level_keys"),
+    ("trigger", "consent_journal_event_requires_positive_rowid"),
+    ("trigger", "consent_journal_payload_keys_match_shape"),
+    ("trigger", "consent_journal_payload_scalar_domains"),
+    ("trigger", "consent_journal_payload_no_duplicate_keys"),
+    (
+        "trigger",
+        "consent_journal_subject_domain_for_non_hash_kinds",
+    ),
+    ("trigger", "consent_journal_event_metadata_domains"),
+    ("trigger", "consent_journal_sensor_id_domain"),
 ];
 
 fn hash_hex(content: &str) -> String {
