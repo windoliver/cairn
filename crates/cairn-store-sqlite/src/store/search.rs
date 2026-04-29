@@ -559,34 +559,32 @@ mod tests {
             .collect();
         let joined = plan_rows.join("\n");
 
-        // Plan-row analysis. We need *both* of these to hold for every
-        // EXPLAIN:
+        // Plan-row analysis. We need *both* of these to hold:
         //
-        //   (a) No plan row may scan `edges` — neither a full-table
-        //       `SCAN edges` nor a `SCAN e` (the supersession alias)
-        //       nor a covering `SCAN e USING INDEX <other>`. Any of
-        //       those means the supersession lookup regressed to a
-        //       per-FTS-hit edges scan even if the partial index is
-        //       still used elsewhere.
+        //   (a) The plan must contain no `SCAN` row other than the FTS
+        //       virtual table — `SCAN records_fts` is the only legal
+        //       scan in this query. Any other `SCAN <alias>` (the
+        //       supersession `e`, an aliased second edges access like
+        //       `SCAN u`, or even `SCAN edges` if someone re-aliased)
+        //       proves a per-FTS-hit table scan was reintroduced.
         //
-        //   (b) Some plan row must `SEARCH` the partial index keyed
-        //       on `dst` — proving SQLite chose the index as a keyed
-        //       lookup, not as a covering scan.
+        //   (b) Some plan row must `SEARCH edges_updates_dst_idx` with
+        //       `dst=?` — proving SQLite chose the partial index as a
+        //       keyed lookup, not as a covering scan or a different
+        //       index entirely.
         //
-        // Together (a) and (b) close round-9's loophole: a future
-        // builder change that introduces a second `edges` access point
-        // (one indexed, one scanned) cannot satisfy both at once.
-        let mut edges_scan_rows: Vec<&String> = Vec::new();
+        // Anchoring (a) on a known-good allowlist (just `records_fts`)
+        // rather than a denylist of edges aliases closes round-10's
+        // loophole: a future builder edit that adds a second aliased
+        // `FROM edges u ...` cannot satisfy the test no matter what
+        // alias it picks.
+        let mut illegal_scan_rows: Vec<&String> = Vec::new();
         let mut indexed_search_row: Option<&String> = None;
         for row in &plan_rows {
-            // `SCAN <alias>` and `SCAN <alias> USING ...`. Split the
-            // first whitespace-token after "SCAN " — if it's exactly
-            // `e` (the supersession alias) or `edges` (table name),
-            // this row is forbidden.
             if let Some(rest) = row.trim_start().strip_prefix("SCAN ") {
                 let alias = rest.split_whitespace().next().unwrap_or("");
-                if alias == "e" || alias == "edges" {
-                    edges_scan_rows.push(row);
+                if alias != "records_fts" {
+                    illegal_scan_rows.push(row);
                 }
             }
             if row.contains("edges_updates_dst_idx")
@@ -598,10 +596,13 @@ mod tests {
         }
 
         assert!(
-            edges_scan_rows.is_empty(),
-            "plan contains a forbidden SCAN of edges — supersession check \
-             must always go through edges_updates_dst_idx. Offending row(s): \
-             {edges_scan_rows:?}\nfull plan:\n{joined}",
+            illegal_scan_rows.is_empty(),
+            "plan contains a forbidden SCAN — the only legal scan in \
+             keyword search is the FTS virtual table `records_fts`. Any \
+             other SCAN means a per-FTS-hit table scan was reintroduced \
+             (e.g. a second aliased edges access bypassing the partial \
+             index). Offending row(s): {illegal_scan_rows:?}\n\
+             full plan:\n{joined}",
         );
         assert!(
             indexed_search_row.is_some(),
