@@ -17,10 +17,7 @@
 use std::{fs, sync::Arc};
 
 use cairn_core::{
-    contract::{
-        identity_registry::IdentityVisibility,
-        keystore::KeystoreError,
-    },
+    contract::{identity_registry::IdentityVisibility, keystore::KeystoreError},
     domain::identity::{
         Identity, IdentityKind,
         keys::{IdentityRevision, KeyVersion, SecretHandle, VaultId},
@@ -239,11 +236,7 @@ async fn rotation_predecessor_key_superseded_at_is_set() {
         .await
         .expect("rotate must succeed for active identity");
 
-    let keys = svc
-        .registry
-        .list_keys(&alice_id)
-        .await
-        .expect("list_keys");
+    let keys = svc.registry.list_keys(&alice_id).await.expect("list_keys");
 
     assert_eq!(
         keys.len(),
@@ -295,9 +288,7 @@ async fn rotation_both_key_versions_accessible_in_keystore() {
     assert_eq!(row_before.current_key_version, KeyVersion::FIRST);
 
     // Rotate.
-    svc.rotate(&bob_id)
-        .await
-        .expect("rotate must succeed");
+    svc.rotate(&bob_id).await.expect("rotate must succeed");
 
     // After rotation current key version is 2.
     let row_after = svc
@@ -307,14 +298,17 @@ async fn rotation_both_key_versions_accessible_in_keystore() {
         .expect("get after")
         .expect("bob must exist after rotation");
     let v2 = row_after.current_key_version;
-    assert_eq!(v2.as_u32(), 2, "current key version must be 2 after rotation");
+    assert_eq!(
+        v2.as_u32(),
+        2,
+        "current key version must be 2 after rotation"
+    );
 
     // v1 is still accessible.
     let v1_handle = SecretHandle::for_identity(vault_id.clone(), bob_id.clone(), KeyVersion::FIRST);
-    svc.keystore
-        .load_signing_key(&v1_handle)
-        .await
-        .expect("v1 signing key must still be in keystore after first rotation (below eviction threshold)");
+    svc.keystore.load_signing_key(&v1_handle).await.expect(
+        "v1 signing key must still be in keystore after first rotation (below eviction threshold)",
+    );
 
     // v2 is accessible.
     let v2_handle = SecretHandle::for_identity(vault_id, bob_id, v2);
@@ -341,9 +335,7 @@ async fn purge_after_rotation_evicts_all_key_versions() {
     let carol_id = provision(&svc, "hmn:carol:v1", IdentityKind::Human, vault_id.clone()).await;
 
     // Rotate once so carol has two key versions.
-    svc.rotate(&carol_id)
-        .await
-        .expect("rotate");
+    svc.rotate(&carol_id).await.expect("rotate");
 
     let row = svc
         .registry
@@ -356,8 +348,7 @@ async fn purge_after_rotation_evicts_all_key_versions() {
     // Write the purge-ack file (required by spec §3.10).
     let maintenance_dir = dir.path().join(".cairn/maintenance");
     fs::create_dir_all(&maintenance_dir).expect("create maintenance dir");
-    fs::write(maintenance_dir.join("purge-ack"), carol_id.as_str())
-        .expect("write purge-ack");
+    fs::write(maintenance_dir.join("purge-ack"), carol_id.as_str()).expect("write purge-ack");
 
     // Purge carol.
     svc.purge(&carol_id, PurgeReason("GDPR erasure".to_owned()))
@@ -378,7 +369,8 @@ async fn purge_after_rotation_evicts_all_key_versions() {
     );
 
     // v1 key must be gone from keystore.
-    let v1_handle = SecretHandle::for_identity(vault_id.clone(), carol_id.clone(), KeyVersion::FIRST);
+    let v1_handle =
+        SecretHandle::for_identity(vault_id.clone(), carol_id.clone(), KeyVersion::FIRST);
     assert!(
         matches!(
             svc.keystore.load_signing_key(&v1_handle).await,
@@ -413,8 +405,7 @@ async fn revoke_by_third_party_signer() {
 
     // Provision both identities.
     let alice_id = provision(&svc, "hmn:alice:v1", IdentityKind::Human, vault_id.clone()).await;
-    let moderator_id =
-        provision(&svc, "hmn:moderator:v1", IdentityKind::Human, vault_id).await;
+    let moderator_id = provision(&svc, "hmn:moderator:v1", IdentityKind::Human, vault_id).await;
 
     // Third-party revocation: moderator revokes alice.
     svc.revoke(&alice_id, &moderator_id)
@@ -460,7 +451,13 @@ async fn key_material_desynchronized_raised_on_active_without_keystore_entry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (svc, vault_id) = bootstrap_service(&dir).await;
 
-    let target_id = provision(&svc, "hmn:desynced:v1", IdentityKind::Human, vault_id.clone()).await;
+    let target_id = provision(
+        &svc,
+        "hmn:desynced:v1",
+        IdentityKind::Human,
+        vault_id.clone(),
+    )
+    .await;
 
     // Verify the identity is active.
     let row = svc

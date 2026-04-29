@@ -88,12 +88,7 @@ fn no_usr_colon_in_workspace_rust_sources() {
         };
         for (i, line) in src.lines().enumerate() {
             if line.contains("usr:") && !is_allowed(line, f) {
-                offenders.push(format!(
-                    "{}:{}: {}",
-                    f.display(),
-                    i + 1,
-                    line.trim()
-                ));
+                offenders.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
             }
         }
     }
