@@ -24,3 +24,14 @@
 
 pub mod filter;
 pub(crate) mod squash;
+
+/// Fuzz-only re-export of the squash module's public surface. Gated
+/// behind the `fuzz` crate feature so production builds keep the
+/// `pub(crate)` boundary on `pipeline::squash` (the squash gate's
+/// eligibility must be derivable from persisted capture metadata,
+/// not a caller-supplied side input — see issues #217/#218). Used
+/// only by `fuzz/fuzz_targets/squash.rs`.
+#[cfg(feature = "fuzz")]
+pub mod squash_fuzz {
+    pub use super::squash::{SquashConfig, SquashOutput, fuzz_entrypoint};
+}

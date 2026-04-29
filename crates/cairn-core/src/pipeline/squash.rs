@@ -3756,6 +3756,64 @@ fn oversize_bypass(
     }
 }
 
+/// Fuzz-only entrypoint: feeds raw bytes through the full squash
+/// pipeline (staged + bypass paths) without requiring callers to
+/// construct a `CaptureEvent` themselves. Built behind the `fuzz`
+/// crate feature so it never reaches a production binary.
+///
+/// Returns `None` when an internally-synthesised wrapper fails
+/// validation (rare — only on inputs that would fail an invariant
+/// independent of the squash logic, e.g. impossible hash). For
+/// fuzz purposes a `None` is a discard, not a finding.
+///
+/// # Panics
+/// Panics propagate. The fuzz harness's libFuzzer driver treats
+/// panics as findings, which is the desired behaviour for
+/// `assert!`s embedded in the pipeline.
+#[cfg(feature = "fuzz")]
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_entrypoint(raw: &[u8], cfg: &SquashConfig) -> Option<SquashOutput> {
+    use crate::domain::actor_chain::{ActorChainEntry, ChainRole};
+    use crate::domain::capture::{CaptureEventId, CaptureMode, CaptureRefs, SourceFamily};
+    use crate::domain::identity::Identity;
+    use crate::domain::timestamp::Rfc3339Timestamp;
+
+    let payload_hash = sha256_payload_hash(raw);
+    let id = Identity::parse("snr:local:terminal:cli:v1").ok()?;
+    let ts = Rfc3339Timestamp::parse("2026-04-27T00:00:00Z").ok()?;
+    let event = CaptureEvent {
+        event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").ok()?,
+        sensor_id: id.clone(),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: id,
+            at: ts.clone(),
+        }],
+        refs: Some(CaptureRefs {
+            session_id: Some("fuzz".into()),
+            turn_id: Some("fuzz".into()),
+            tool_id: None,
+        }),
+        payload_hash,
+        payload_ref: "sources/terminal/01ARZ3NDEKTSV4RRFFQ69G5FAV.txt".into(),
+        captured_at: ts,
+        payload: CapturePayload::Terminal {
+            command: "fuzz".into(),
+            exit_code: Some(0),
+        },
+        source_family: SourceFamily::Terminal,
+    };
+    let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+        &event,
+        raw,
+        TerminalContext::InteractiveTty,
+    )
+    .ok()?;
+    Some(squash(wrapper, cfg))
+}
+
 // Invariant: Sha256::digest produces a fixed 32-byte output that always
 // formats as a valid sha256 PayloadHash. The expect is therefore unreachable.
 #[allow(clippy::expect_used)]
@@ -4080,6 +4138,36 @@ mod squash_fixtures_tests {
     fn snapshot_binary_junk() {
         insta::assert_snapshot!(run_fixture("binary_junk.bin", &SquashConfig::default()));
     }
+
+    /// Real `git log --oneline --color=always` capture: dense SGR
+    /// (CSI) sequences around commit hashes and refs.
+    #[test]
+    fn snapshot_real_git_log() {
+        insta::assert_snapshot!(run_fixture("real_git_log.txt", &SquashConfig::default()));
+    }
+
+    /// Real `cargo check` capture: SGR + multi-line warnings,
+    /// representative of build-tool output the squash module is
+    /// designed to compact.
+    #[test]
+    fn snapshot_real_cargo_check() {
+        insta::assert_snapshot!(run_fixture(
+            "real_cargo_check.txt",
+            &SquashConfig::default()
+        ));
+    }
+
+    /// Hand-crafted progress-bar + OSC-8 hyperlink + SGR error
+    /// payload: exercises CR carriage returns, CSI K (erase line),
+    /// SGR colors, and an OSC-8 link with a real URL — the kind of
+    /// adversarial mix the round-by-round review surfaced.
+    #[test]
+    fn snapshot_real_progress_with_hyperlink() {
+        insta::assert_snapshot!(run_fixture(
+            "real_progress_with_hyperlink.txt",
+            &SquashConfig::default()
+        ));
+    }
 }
 
 // Internal perf smoke test, replacing the (deleted) criterion bench so we
@@ -4330,7 +4418,9 @@ mod corner_case_tests {
     #[test]
     fn min_max_bytes_boundary_config_runs() {
         let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
-        let raw: Vec<u8> = (0..1000u32).map(|i| b'a' + u8::try_from(i % 26).unwrap_or(0)).collect();
+        let raw: Vec<u8> = (0..1000u32)
+            .map(|i| b'a' + u8::try_from(i % 26).unwrap_or(0))
+            .collect();
         let mut payload: Vec<u8> = Vec::new();
         for chunk in raw.chunks(20) {
             payload.extend_from_slice(chunk);

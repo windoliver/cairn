@@ -1,0 +1,11 @@
+---
+source: crates/cairn-core/src/pipeline/squash.rs
+assertion_line: 4096
+expression: "run_fixture(\"real_cargo_check.txt\", &SquashConfig::default())"
+---
+    Checking regex-syntax v0.8.10
+    Checking serde_yaml v0.9.34+deprecated
+    Checking regex-automata v0.4.14
+    Checking regex v1.12.3
+    Checking cairn-core v0.0.1 (/Users/sophiawj/private/cairn/.worktrees/issue-72-tool-squash/crates/cairn-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 48s

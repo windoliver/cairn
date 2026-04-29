@@ -1,0 +1,6 @@
+progress [Kdone step 1
+progress [Kdone step 2
+progress [Kdone step 3
+[31merror:[0m [1mfailed[0m at [4mfile.rs:42[0m
+]8;;https://example.com/log/123\see log]8;;\
+finished

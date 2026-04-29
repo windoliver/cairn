@@ -24,6 +24,14 @@ test-fixtures = []
 # `unicode-case` feature that panicked downstream binaries on first
 # call. Enabling this feature does not change library behavior.
 smoke = []
+# Off-by-default. Exposes a stable byte-in / output-out fuzz
+# entrypoint (`pipeline::squash::fuzz_entrypoint`) for cargo-fuzz
+# targets. Bypasses the (still `pub(crate)`) `try_from_terminal_event`
+# constructor by building a synthetic terminal event internally — the
+# squash gate's eligibility is independent of capture metadata for
+# fuzz purposes. Never enable in production: the `try_from_*` gate
+# exists for a reason (see `pipeline/mod.rs`).
+fuzz = []
 
 [dependencies]
 serde = { workspace = true }
