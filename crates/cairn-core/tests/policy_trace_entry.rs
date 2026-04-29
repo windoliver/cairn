@@ -56,3 +56,20 @@ fn to_wire_preserves_order() {
     let gates: Vec<&str> = wire.iter().map(|e| e.gate.as_str()).collect();
     assert_eq!(gates, vec!["presidio_redaction", "prompt_injection_fence", "filter_should_memorize"]);
 }
+
+#[test]
+fn deny_constructor_uses_provided_detail() {
+    let detail = PolicyDetail::ScopeMismatch { required_tier: MemoryVisibility::Project };
+    let e = PolicyTraceEntry::deny(PolicyGate::ScopeCheck, detail.clone());
+    assert_eq!(e.gate, PolicyGate::ScopeCheck);
+    assert_eq!(e.outcome, PolicyOutcome::Deny);
+    assert_eq!(e.detail, detail);
+}
+
+#[test]
+fn error_constructor_wraps_static_code() {
+    let e = PolicyTraceEntry::error(PolicyGate::ConsentJournalAppend, "wal_failure");
+    assert_eq!(e.gate, PolicyGate::ConsentJournalAppend);
+    assert_eq!(e.outcome, PolicyOutcome::Error);
+    assert_eq!(e.detail, PolicyDetail::ErrorCode("wal_failure"));
+}
