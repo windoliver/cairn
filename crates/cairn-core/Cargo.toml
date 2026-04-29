@@ -49,6 +49,7 @@ zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
 chrono = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
@@ -57,6 +58,7 @@ insta = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 rand_core = { workspace = true }
+rand = { workspace = true }
 
 [[bin]]
 name = "filter_smoke"

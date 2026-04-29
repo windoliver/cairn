@@ -6,9 +6,14 @@
 //! `Identity` schema in `crates/cairn-idl/schema/common/primitives.json`.
 
 pub mod keys;
+pub mod provision;
 pub mod receipts;
 pub mod records;
 
+pub use provision::{
+    ProvisionInput, ProvisioningPlan, build_provisioning_plan, mint_agent_id, mint_human_id,
+    mint_sensor_id, normalize_human_slug,
+};
 pub use receipts::{
     ReceiptError, ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt,
 };
