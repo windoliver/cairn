@@ -76,7 +76,7 @@ async fn expire_event_persists_after_supersession() {
             let t = target.clone();
             move |tx| {
                 let r = make_record("01HQZX9F5N00000000000000C0", "v1 body");
-                tx.stage_version(&t, &r)?;
+                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 1, None)?;
                 Ok(())
             }
@@ -104,7 +104,7 @@ async fn expire_event_persists_after_supersession() {
             let t = target.clone();
             move |tx| {
                 let r = make_record("01HQZX9F5N00000000000000C1", "v2 body");
-                tx.stage_version(&t, &r)?;
+                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 2, None)?;
                 Ok(())
             }
@@ -148,7 +148,7 @@ async fn events_are_sorted_by_timestamp() {
             let t = target.clone();
             move |tx| {
                 let r = make_record("01HQZX9F5N00000000000000C2", "body");
-                tx.stage_version(&t, &r)?;
+                tx.stage_version(&t, &r, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 1, None)?;
                 Ok(())
             }

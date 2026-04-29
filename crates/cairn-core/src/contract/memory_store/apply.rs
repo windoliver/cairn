@@ -79,6 +79,13 @@ pub trait MemoryStoreApplyTx: private::Sealed {
     /// carry a `target_id` field, so deriving it from `record.id` would assign
     /// each call a fresh logical identity and break copy-on-write versioning.
     ///
+    /// `created_by` is the **trusted** actor performing the write, captured
+    /// by the WAL executor before the apply transaction starts. It is
+    /// persisted into the audit columns and surfaced through
+    /// [`HistoryEntry::Update`]. It must NOT be derived from
+    /// caller-controlled record fields (e.g. `record.actor_chain`), which
+    /// are payload data and forgeable.
+    ///
     /// The store computes `version = max(existing) + 1` internally. The
     /// deterministic per-version `record_id = BLAKE3(target_id || '#' || version)`
     /// is computed inside this method. Returns the generated `RecordId`.
@@ -89,6 +96,7 @@ pub trait MemoryStoreApplyTx: private::Sealed {
         &mut self,
         target_id: &TargetId,
         record: &MemoryRecord,
+        created_by: &ActorRef,
     ) -> Result<RecordId, StoreError>;
 
     /// Atomically flip `active` so exactly one version of `target_id` is

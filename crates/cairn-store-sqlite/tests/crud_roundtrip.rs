@@ -79,7 +79,7 @@ async fn stage_activate_get_roundtrip() {
             let record = record.clone();
             let target = target.clone();
             move |tx| {
-                let _rid = tx.stage_version(&target, &record)?;
+                let _rid = tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&target, 1, None)?;
                 Ok(())
             }
@@ -142,7 +142,7 @@ async fn non_owner_cannot_read_private_record() {
             let record = record.clone();
             let target = target.clone();
             move |tx| {
-                tx.stage_version(&target, &record)?;
+                tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&target, 1, None)?;
                 Ok(())
             }
@@ -183,7 +183,7 @@ async fn multi_version_cow_same_target() {
             let record = record_v1.clone();
             let target = target.clone();
             move |tx| {
-                let rid = tx.stage_version(&target, &record)?;
+                let rid = tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 assert!(
                     !rid.as_str().is_empty(),
                     "stage_version returned a record_id"
@@ -214,7 +214,7 @@ async fn multi_version_cow_same_target() {
             let record = record_v2.clone();
             let target = target.clone();
             move |tx| {
-                let rid = tx.stage_version(&target, &record)?;
+                let rid = tx.stage_version(&target, &record, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 assert!(
                     !rid.as_str().is_empty(),
                     "stage_version v2 returned a record_id"

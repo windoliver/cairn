@@ -108,7 +108,7 @@ async fn reader_does_not_see_uncommitted_staged_row() {
     let writer = tokio::spawn(async move {
         store_w
             .with_apply_tx(test_apply_token(), move |tx| {
-                tx.stage_version(&target_w, &record_w)?;
+                tx.stage_version(&target_w, &record_w, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&target_w, 1, None)?;
 
                 // Signal the reader that stage+activate are done; then sleep

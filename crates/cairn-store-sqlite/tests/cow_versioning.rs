@@ -80,7 +80,7 @@ async fn version_history_returns_two_entries_after_two_activations() {
             let rec = v1.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &rec)?;
+                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 1, None)?;
                 Ok(())
             }
@@ -94,7 +94,7 @@ async fn version_history_returns_two_entries_after_two_activations() {
             let rec = v2.clone();
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &rec)?;
+                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 2, Some(1))?;
                 Ok(())
             }

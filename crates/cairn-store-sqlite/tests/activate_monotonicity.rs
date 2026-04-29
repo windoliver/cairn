@@ -82,9 +82,9 @@ async fn downgrade_activation_returns_activation_raced() {
             let (r1, r2, r3) = (v1.clone(), v2.clone(), v3.clone());
             let t = target.clone();
             move |tx| {
-                tx.stage_version(&t, &r1)?;
-                tx.stage_version(&t, &r2)?;
-                tx.stage_version(&t, &r3)?;
+                tx.stage_version(&t, &r1, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(&t, &r2, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                tx.stage_version(&t, &r3, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 Ok(())
             }
         })

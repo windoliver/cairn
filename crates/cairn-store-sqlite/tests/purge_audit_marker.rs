@@ -87,9 +87,9 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
                 let r1 = make_record("01HQZX9F5N0000000000000050", "purge v1");
                 let r2 = make_record("01HQZX9F5N0000000000000051", "purge v2");
                 let r3 = make_record("01HQZX9F5N0000000000000052", "purge v3");
-                let id1 = tx.stage_version(&t, &r1)?;
-                let id2 = tx.stage_version(&t, &r2)?;
-                let id3 = tx.stage_version(&t, &r3)?;
+                let id1 = tx.stage_version(&t, &r1, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let id2 = tx.stage_version(&t, &r2, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
+                let id3 = tx.stage_version(&t, &r3, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 // Activate sequentially.
                 tx.activate_version(&t, 1, None)?;
                 tx.activate_version(&t, 2, Some(1))?;
@@ -106,7 +106,7 @@ async fn purge_removes_records_edges_and_writes_audit_marker() {
             let t = other_target.clone();
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000053", "other record");
-                let rid = tx.stage_version(&t, &rec)?;
+                let rid = tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 1, None)?;
                 Ok(rid)
             }
@@ -259,7 +259,7 @@ async fn purge_marker_only_visible_to_system_principal() {
             let t = target.clone();
             move |tx| {
                 let rec = make_record("01HQZX9F5N0000000000000054", "to be purged");
-                tx.stage_version(&t, &rec)?;
+                tx.stage_version(&t, &rec, &cairn_core::domain::actor_ref::ActorRef::from("agt:test:integration:m:v1"))?;
                 tx.activate_version(&t, 1, None)?;
                 Ok(())
             }

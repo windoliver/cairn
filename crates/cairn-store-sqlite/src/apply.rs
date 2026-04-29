@@ -110,8 +110,9 @@ impl MemoryStoreApplyTx for SqliteMemoryStoreApplyTx<'_> {
         &mut self,
         target_id: &TargetId,
         record: &MemoryRecord,
+        created_by: &ActorRef,
     ) -> Result<RecordId, StoreError> {
-        stage_version_impl(self.conn, target_id, record)
+        stage_version_impl(self.conn, target_id, record, created_by)
     }
 
     fn activate_version(
@@ -177,6 +178,7 @@ fn stage_version_impl(
     conn: &Connection,
     target_id: &TargetId,
     record: &MemoryRecord,
+    created_by: &ActorRef,
 ) -> Result<RecordId, StoreError> {
     let target_id_str = target_id.as_str();
 
@@ -205,11 +207,11 @@ fn stage_version_impl(
     let record_json = serde_json::to_string(record)?;
 
     let created_at = Rfc3339Timestamp::now();
-    let created_by = record
-        .actor_chain
-        .iter()
-        .find(|e| matches!(e.role, cairn_core::domain::actor_chain::ChainRole::Author))
-        .map_or("system", |e| e.identity.as_str());
+    // Trusted actor: passed in by the WAL executor. Do NOT derive
+    // `created_by` from caller-controlled record fields like
+    // `record.actor_chain` — those are payload data and forgeable, and
+    // would let any caller with an `ApplyToken` misattribute writes.
+    let created_by = created_by.as_str();
 
     let version_i64 =
         i64::try_from(version).map_err(|_| StoreError::Invariant("version overflows i64"))?;
