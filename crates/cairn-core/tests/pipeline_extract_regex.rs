@@ -114,8 +114,15 @@ async fn compound_utterance_emits_two_outputs() {
     );
     let res = extractor.extract(&input).await.expect("ok");
     assert_eq!(res.outputs.len(), 2);
-    assert!(matches!(res.outputs[0], ExtractOutput::Forget(_)));
-    assert!(matches!(res.outputs[1], ExtractOutput::Draft(_)));
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    // Trailing conjunction must be trimmed from the captured target.
+    assert_eq!(intent.target_text_normalized, "my old address");
+    let ExtractOutput::Draft(draft) = &res.outputs[1] else {
+        panic!("expected draft");
+    };
+    assert_eq!(draft.body, "the new one is 1 Main St");
 }
 
 #[tokio::test]

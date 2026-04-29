@@ -208,7 +208,18 @@ pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindo
             .map(|h| h.start as usize)
             .or(truncation_hard_stop)
             .unwrap_or(bytes.len());
-        let stop = find_window_stop(bytes, start, next_hit_start);
+        let raw_stop = find_window_stop(bytes, start, next_hit_start);
+        // When the window butts up against the next trigger hit (i.e.,
+        // `next_hit_start` and not a sentence boundary), trim the
+        // trailing conjunction word (`and`/`but`/`then`) plus surrounding
+        // whitespace so the matched slice does not bleed conjunction
+        // text into the rule's capture group.
+        let butts_against_next_hit = raw_stop == next_hit_start && raw_stop < bytes.len();
+        let stop = if butts_against_next_hit {
+            trim_trailing_conjunction(bytes, start, raw_stop)
+        } else {
+            raw_stop
+        };
         if stop > start {
             windows.push(PhraseWindow {
                 span: TextSpan::new(
@@ -219,6 +230,38 @@ pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindo
         }
     }
     windows
+}
+
+/// Walk back from `end` over trailing whitespace, then over a single
+/// conjunction word (`and` / `but` / `then`, case-insensitive ASCII), then
+/// over whitespace again. Returns the new end offset. If the trailing
+/// content is not a conjunction-with-leading-space, returns `end`
+/// unchanged. Never returns less than `start`.
+fn trim_trailing_conjunction(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut i = end;
+    while i > start && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let word_end = i;
+    while i > start && !bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let word = &bytes[i..word_end];
+    let is_conj = ascii_eq_ignore_case(word, b"and")
+        || ascii_eq_ignore_case(word, b"but")
+        || ascii_eq_ignore_case(word, b"then");
+    if !is_conj {
+        return end;
+    }
+    // Require leading whitespace before the conjunction so we never
+    // truncate mid-token (e.g., `command` ending in `and`).
+    if i == start || !bytes[i - 1].is_ascii_whitespace() {
+        return end;
+    }
+    while i > start && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    i.max(start)
 }
 
 fn find_window_stop(bytes: &[u8], start: usize, hard_stop: usize) -> usize {
@@ -373,7 +416,7 @@ mod tests {
         assert_eq!(windows.len(), 2);
         let w0 = &body[windows[0].span.start as usize..windows[0].span.end as usize];
         let w1 = &body[windows[1].span.start as usize..windows[1].span.end as usize];
-        assert_eq!(w0, "forget X and ");
+        assert_eq!(w0, "forget X");
         assert_eq!(w1, "remember Y");
     }
 }

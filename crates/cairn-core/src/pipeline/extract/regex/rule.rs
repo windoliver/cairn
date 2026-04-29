@@ -305,11 +305,27 @@ pub(crate) fn compile_rule(
                     reason: "Fuzzy match strategy is reserved for #75".to_owned(),
                 });
             }
-            if matches!(strategy, ForgetMatchStrategy::Exact) && !*quoted_capture {
-                return Err(super::super::ExtractError::InvalidRule {
-                    rule_id: id.clone(),
-                    reason: "Exact match strategy requires quoted_capture: true".to_owned(),
-                });
+            if matches!(strategy, ForgetMatchStrategy::Exact) {
+                if !*quoted_capture {
+                    return Err(super::super::ExtractError::InvalidRule {
+                        rule_id: id.clone(),
+                        reason: "Exact match strategy requires quoted_capture: true".to_owned(),
+                    });
+                }
+                // Structurally verify the target capture group is wrapped
+                // in matching quote characters in the pattern source. This
+                // makes `quoted_capture: true` a load-bearing claim about
+                // the regex itself, not just an unchecked boolean.
+                if !pattern_target_group_is_quote_wrapped(pattern, *target_group) {
+                    return Err(super::super::ExtractError::InvalidRule {
+                        rule_id: id.clone(),
+                        reason: format!(
+                            "Exact match strategy with quoted_capture: true requires \
+                             target_group {target_group} to be immediately wrapped \
+                             by matching quote characters (\", ', or `) in the pattern",
+                        ),
+                    });
+                }
             }
             let re = compile_pattern(id, pattern)?;
             // ForgetPhrase target_group must reference an actual capture
@@ -374,6 +390,77 @@ pub(crate) fn compile_rule(
             },
         }),
     }
+}
+
+/// Walk `pattern` and locate the `target`-th capture group's opening
+/// `(` and matching `)`. Returns `true` iff that group is immediately
+/// preceded and followed by a matching quote character (`"`, `'`, or `` ` ``).
+///
+/// Counts only capturing groups (`(...)`), skipping non-capturing
+/// `(?...)` constructs. Honors backslash escapes.
+fn pattern_target_group_is_quote_wrapped(pattern: &str, target: u8) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    let mut group_no: u8 = 0;
+    let mut depth: u32 = 0;
+    let mut group_open: Option<usize> = None;
+    let mut want_target_close_at_depth: Option<u32> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' {
+            i += 2;
+            continue;
+        }
+        if b == b'[' {
+            // Skip character class.
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b']' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'(' {
+            depth += 1;
+            let is_non_capturing = i + 1 < bytes.len() && bytes[i + 1] == b'?';
+            if !is_non_capturing {
+                group_no = group_no.saturating_add(1);
+                if group_no == target {
+                    group_open = Some(i);
+                    want_target_close_at_depth = Some(depth);
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            if Some(depth) == want_target_close_at_depth {
+                let Some(open_at) = group_open else {
+                    return false;
+                };
+                let close_at = i;
+                if open_at == 0 || close_at + 1 >= bytes.len() {
+                    return false;
+                }
+                let before = bytes[open_at - 1];
+                let after = bytes[close_at + 1];
+                let is_quote = matches!(before, b'"' | b'\'' | b'`');
+                return is_quote && before == after;
+            }
+            depth = depth.saturating_sub(1);
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn compile_pattern(id: &str, pattern: &str) -> Result<Regex, super::super::ExtractError> {
@@ -525,6 +612,38 @@ mod tests {
             }
             _ => panic!("wrong error"),
         }
+    }
+
+    #[test]
+    fn from_config_rejects_exact_with_quoted_capture_but_unquoted_pattern() {
+        // quoted_capture: true is structurally false here — the target
+        // group is `(.+)`, not `"([^"]*)"`. Compile must reject so the
+        // unchecked-boolean trust hole is closed.
+        let json = r#"[{
+            "type":"forget_phrase","id":"u.exact-bad","pattern":"^forget (.+)$",
+            "target_group":1,"confidence":0.9,
+            "match_strategy":"exact","quoted_capture":true
+        }]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        let err = RuleSet::from_config(&rules).unwrap_err();
+        match err {
+            super::super::super::ExtractError::InvalidRule { reason, .. } => {
+                assert!(reason.contains("immediately wrapped"));
+            }
+            _ => panic!("wrong error"),
+        }
+    }
+
+    #[test]
+    fn from_config_accepts_exact_with_truly_quoted_capture() {
+        let json = r#"[{
+            "type":"forget_phrase","id":"u.exact-ok",
+            "pattern":"^\\s*forget\\s+\"([^\"]+)\"\\s*$",
+            "target_group":1,"confidence":0.9,
+            "match_strategy":"exact","quoted_capture":true
+        }]"#;
+        let rules: Vec<RegexRule> = serde_json::from_str(json).unwrap();
+        RuleSet::from_config(&rules).expect("structurally quoted capture is accepted");
     }
 
     #[test]
