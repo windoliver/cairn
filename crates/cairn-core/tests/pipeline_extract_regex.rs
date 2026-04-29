@@ -53,12 +53,12 @@ fn cli_event() -> CaptureEvent {
 }
 
 fn body_input<'a>(event: &'a CaptureEvent, body: &'a str) -> ExtractInput<'a> {
+    let resolved =
+        ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+            .expect("matching variant");
     ExtractInput {
         event,
-        body: BodyResolution::Resolved(ResolvedBody::from_user_ingest(
-            body,
-            UserIngestPayloadKind::Cli,
-        )),
+        body: BodyResolution::Resolved(resolved),
     }
 }
 

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::CapturePayload;
+
 /// The trust boundary a resolved body came from.
 ///
 /// **There is deliberately no `Rationale` variant.** The
@@ -70,6 +72,15 @@ pub enum BodyResolutionError {
     /// Transient I/O error reading `payload_ref`.
     #[error("transient I/O error reading payload_ref: {0}")]
     Io(String),
+    /// A `ResolvedBody::from_*` constructor was called with a payload
+    /// variant that does not match the declared body source.
+    #[error("payload variant {got} does not match expected {expected}")]
+    PayloadVariantMismatch {
+        /// The expected payload variant family.
+        expected: &'static str,
+        /// The actual payload variant the caller passed.
+        got: &'static str,
+    },
 }
 
 /// Resolved body bytes plus their trust-boundary source.
@@ -82,24 +93,72 @@ pub struct ResolvedBody<'a> {
 }
 
 impl<'a> ResolvedBody<'a> {
-    /// Construct from a `CapturePayload::Cli` or `::Mcp` envelope.
-    #[must_use]
-    pub fn from_user_ingest(text: &'a str, payload_kind: UserIngestPayloadKind) -> Self {
-        let _ = payload_kind;
-        Self {
+    /// Construct from a `CapturePayload::Cli` or `::Mcp` envelope. The
+    /// caller must pass the actual payload so the variant family can be
+    /// verified at runtime — without this the body source label is
+    /// nothing more than caller-asserted metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BodyResolutionError::PayloadVariantMismatch`] if `payload`
+    /// is not the `Cli` or `Mcp` variant.
+    pub fn from_user_ingest(
+        text: &'a str,
+        payload: &CapturePayload,
+        payload_kind: UserIngestPayloadKind,
+    ) -> Result<Self, BodyResolutionError> {
+        let matches = matches!(
+            (payload_kind, payload),
+            (UserIngestPayloadKind::Cli, CapturePayload::Cli { .. })
+                | (UserIngestPayloadKind::Mcp, CapturePayload::Mcp { .. })
+        );
+        if !matches {
+            return Err(BodyResolutionError::PayloadVariantMismatch {
+                expected: match payload_kind {
+                    UserIngestPayloadKind::Cli => "CapturePayload::Cli",
+                    UserIngestPayloadKind::Mcp => "CapturePayload::Mcp",
+                },
+                got: payload_variant_name(payload),
+            });
+        }
+        Ok(Self {
             text,
             source: BodySource::UserIngest,
-        }
+        })
     }
 
     /// Construct from a `CapturePayload::Hook` envelope.
-    #[must_use]
-    pub fn from_hook_utterance(text: &'a str, hook_name: &'a str) -> Self {
-        let _ = hook_name;
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BodyResolutionError::PayloadVariantMismatch`] if `payload`
+    /// is not the `Hook` variant or its `hook_name` differs from the
+    /// caller-supplied `hook_name`.
+    pub fn from_hook_utterance(
+        text: &'a str,
+        payload: &CapturePayload,
+        hook_name: &str,
+    ) -> Result<Self, BodyResolutionError> {
+        let CapturePayload::Hook {
+            hook_name: payload_hook,
+            ..
+        } = payload
+        else {
+            return Err(BodyResolutionError::PayloadVariantMismatch {
+                expected: "CapturePayload::Hook",
+                got: payload_variant_name(payload),
+            });
+        };
+        if payload_hook != hook_name {
+            return Err(BodyResolutionError::PayloadVariantMismatch {
+                expected: "CapturePayload::Hook",
+                got: "CapturePayload::Hook (hook_name mismatch)",
+            });
+        }
+        Ok(Self {
             text,
             source: BodySource::HookUtterance,
-        }
+        })
     }
 
     /// The resolved body text.
@@ -112,6 +171,21 @@ impl<'a> ResolvedBody<'a> {
     #[must_use]
     pub fn source(&self) -> BodySource {
         self.source
+    }
+}
+
+fn payload_variant_name(p: &CapturePayload) -> &'static str {
+    match p {
+        CapturePayload::Cli { .. } => "CapturePayload::Cli",
+        CapturePayload::Mcp { .. } => "CapturePayload::Mcp",
+        CapturePayload::Hook { .. } => "CapturePayload::Hook",
+        CapturePayload::Terminal { .. } => "CapturePayload::Terminal",
+        CapturePayload::Ide { .. } => "CapturePayload::Ide",
+        CapturePayload::Voice { .. } => "CapturePayload::Voice",
+        CapturePayload::Screen { .. } => "CapturePayload::Screen",
+        CapturePayload::Clipboard { .. } => "CapturePayload::Clipboard",
+        CapturePayload::Proactive { .. } => "CapturePayload::Proactive",
+        CapturePayload::RecordingBatch { .. } => "CapturePayload::RecordingBatch",
     }
 }
 
@@ -140,15 +214,46 @@ mod tests {
 
     #[test]
     fn from_user_ingest_tags_correctly() {
-        let body = ResolvedBody::from_user_ingest("hello", UserIngestPayloadKind::Cli);
+        let payload = CapturePayload::Cli {
+            kind_hint: "user".into(),
+        };
+        let body = ResolvedBody::from_user_ingest("hello", &payload, UserIngestPayloadKind::Cli)
+            .expect("matching variant");
         assert_eq!(body.text(), "hello");
         assert_eq!(body.source(), BodySource::UserIngest);
     }
 
     #[test]
+    fn from_user_ingest_rejects_variant_mismatch() {
+        let payload = CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: None,
+        };
+        let err = ResolvedBody::from_user_ingest("hello", &payload, UserIngestPayloadKind::Cli)
+            .unwrap_err();
+        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
+    }
+
+    #[test]
     fn from_hook_utterance_tags_correctly() {
-        let body = ResolvedBody::from_hook_utterance("hi", "UserPromptSubmit");
+        let payload = CapturePayload::Hook {
+            hook_name: "UserPromptSubmit".into(),
+            tool_name: None,
+        };
+        let body = ResolvedBody::from_hook_utterance("hi", &payload, "UserPromptSubmit")
+            .expect("matching hook");
         assert_eq!(body.source(), BodySource::HookUtterance);
+    }
+
+    #[test]
+    fn from_hook_utterance_rejects_hook_name_mismatch() {
+        let payload = CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: None,
+        };
+        let err = ResolvedBody::from_hook_utterance("hi", &payload, "UserPromptSubmit")
+            .unwrap_err();
+        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
     }
 
     #[test]
@@ -173,10 +278,13 @@ mod tests {
 
     #[test]
     fn body_resolution_allows_text_rules_only_when_resolved() {
-        let resolved = BodyResolution::Resolved(ResolvedBody::from_user_ingest(
-            "hi",
-            UserIngestPayloadKind::Cli,
-        ));
+        let payload = CapturePayload::Cli {
+            kind_hint: "user".into(),
+        };
+        let resolved = BodyResolution::Resolved(
+            ResolvedBody::from_user_ingest("hi", &payload, UserIngestPayloadKind::Cli)
+                .expect("matching variant"),
+        );
         assert!(resolved.allows_text_rules());
 
         let na: BodyResolution<'_> = BodyResolution::NotApplicable;

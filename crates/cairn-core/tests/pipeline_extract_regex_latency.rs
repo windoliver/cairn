@@ -61,7 +61,8 @@ async fn p99_under_2ms_on_mixed_fixture() {
         .collect();
 
     for body in bodies.iter().take(100) {
-        let rb = ResolvedBody::from_user_ingest(body, UserIngestPayloadKind::Cli);
+        let rb = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+            .expect("matching variant");
         let _ = extractor
             .extract(&ExtractInput {
                 event: &event,
@@ -72,7 +73,8 @@ async fn p99_under_2ms_on_mixed_fixture() {
 
     let mut samples = Vec::with_capacity(bodies.len());
     for body in &bodies {
-        let rb = ResolvedBody::from_user_ingest(body, UserIngestPayloadKind::Cli);
+        let rb = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+            .expect("matching variant");
         let start = Instant::now();
         let _ = extractor
             .extract(&ExtractInput {

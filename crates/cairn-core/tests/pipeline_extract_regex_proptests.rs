@@ -54,7 +54,8 @@ proptest! {
             .unwrap();
         rt.block_on(async {
             let event = fixture_event();
-            let body = ResolvedBody::from_user_ingest(&s, UserIngestPayloadKind::Cli);
+            let body = ResolvedBody::from_user_ingest(&s, &event.payload, UserIngestPayloadKind::Cli)
+                .expect("matching variant");
             let input = ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(body),
@@ -79,7 +80,8 @@ proptest! {
             .unwrap();
         rt.block_on(async {
             let event = fixture_event();
-            let rb = ResolvedBody::from_user_ingest(&body, UserIngestPayloadKind::Cli);
+            let rb = ResolvedBody::from_user_ingest(&body, &event.payload, UserIngestPayloadKind::Cli)
+                .expect("matching variant");
             let input = ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(rb),

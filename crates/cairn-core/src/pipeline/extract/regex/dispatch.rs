@@ -41,10 +41,22 @@ pub(crate) async fn dispatch(
     let mut llm_spans: Vec<TextSpan> = Vec::new();
     let mut truncated = TruncationReason::None;
 
-    run_hook_rules(&rules.builtin_hook, event, &mut outputs);
-    run_hook_rules(&rules.user_hook, event, &mut outputs);
-    run_tool_frame_rules(&rules.builtin_tool_frame, event, &mut outputs);
-    run_tool_frame_rules(&rules.user_tool_frame, event, &mut outputs);
+    // Built-in hook + tool-frame rules are uncapped (first-party).
+    run_hook_rules(&rules.builtin_hook, event, &mut outputs, None);
+    run_tool_frame_rules(&rules.builtin_tool_frame, event, &mut outputs, None);
+
+    // User hook + tool-frame rules share the user-rule budget with
+    // Phase B text rules. Track the per-event user-output count so a
+    // misconfigured config cannot amplify a single hot event into
+    // unbounded writes. Cap is `outputs.len()` baseline + max_user_drafts.
+    let max_user_drafts = usize::from(budget.max_drafts);
+    let user_cap = outputs.len() + max_user_drafts;
+    let hook_capped = run_hook_rules(&rules.user_hook, event, &mut outputs, Some(user_cap));
+    let tool_capped =
+        run_tool_frame_rules(&rules.user_tool_frame, event, &mut outputs, Some(user_cap));
+    if hook_capped || tool_capped {
+        truncated = TruncationReason::MaxDrafts;
+    }
 
     if let Some(text) = body_text {
         let scan = prefilter.scan(text);
@@ -198,14 +210,22 @@ fn normalise_spans(spans: &mut Vec<TextSpan>) {
     *spans = merged;
 }
 
-fn run_hook_rules(rules: &[CompiledRule], event: &CaptureEvent, outputs: &mut Vec<ExtractOutput>) {
+/// Apply hook rules. If `cap` is `Some(n)`, stops pushing once
+/// `outputs.len() >= n` and returns `true` (cap hit); otherwise returns
+/// `false`.
+fn run_hook_rules(
+    rules: &[CompiledRule],
+    event: &CaptureEvent,
+    outputs: &mut Vec<ExtractOutput>,
+    cap: Option<usize>,
+) -> bool {
     let CapturePayload::Hook {
         hook_name,
         tool_name,
         ..
     } = &event.payload
     else {
-        return;
+        return false;
     };
     for rule in rules {
         let CompiledRuleKind::HookEvent {
@@ -226,6 +246,11 @@ fn run_hook_rules(rules: &[CompiledRule], event: &CaptureEvent, outputs: &mut Ve
         {
             continue;
         }
+        if let Some(limit) = cap
+            && outputs.len() >= limit
+        {
+            return true;
+        }
         outputs.push(ExtractOutput::Draft(MemoryDraft {
             kind_hint: kind_hint.clone(),
             body: format!("hook:{hook_name}"),
@@ -235,13 +260,18 @@ fn run_hook_rules(rules: &[CompiledRule], event: &CaptureEvent, outputs: &mut Ve
             trigger_id: Some(rule.id.clone()),
         }));
     }
+    false
 }
 
+/// Apply tool-frame rules. If `cap` is `Some(n)`, stops pushing once
+/// `outputs.len() >= n` and returns `true` (cap hit); otherwise returns
+/// `false`.
 fn run_tool_frame_rules(
     rules: &[CompiledRule],
     event: &CaptureEvent,
     outputs: &mut Vec<ExtractOutput>,
-) {
+    cap: Option<usize>,
+) -> bool {
     for rule in rules {
         let CompiledRuleKind::ToolFrame {
             family,
@@ -273,6 +303,11 @@ fn run_tool_frame_rules(
             _ => false,
         };
         if fired {
+            if let Some(limit) = cap
+                && outputs.len() >= limit
+            {
+                return true;
+            }
             outputs.push(ExtractOutput::Draft(MemoryDraft {
                 kind_hint: kind_hint.clone(),
                 body: format!("tool-frame:{}", rule.id),
@@ -283,6 +318,7 @@ fn run_tool_frame_rules(
             }));
         }
     }
+    false
 }
 
 fn run_text_rules_first_match_wins(
@@ -533,7 +569,8 @@ mod tests {
             tool_name: None,
         });
         let body_text = "remember that I prefer dark mode";
-        let resolved = ResolvedBody::from_hook_utterance(body_text, "UserPromptSubmit");
+        let resolved = ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
+            .expect("matching hook");
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
@@ -586,8 +623,10 @@ mod tests {
         });
         let resolved = ResolvedBody::from_user_ingest(
             &body_text,
+            &event.payload,
             crate::pipeline::extract::UserIngestPayloadKind::Cli,
-        );
+        )
+        .expect("matching variant");
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
@@ -598,6 +637,51 @@ mod tests {
         // All 20 built-in matches survive even though max_drafts=3.
         assert_eq!(result.outputs.len(), 20);
         assert_eq!(result.truncated, TruncationReason::None);
+    }
+
+    #[tokio::test]
+    async fn user_hook_rules_respect_max_drafts_cap() {
+        use crate::domain::taxonomy::MemoryKind;
+        use crate::pipeline::extract::regex::rule::{RegexRule, RuleSet};
+        use crate::pipeline::extract::{Confidence, KindHint};
+
+        // 20 user hook rules all matching the same hook; max_drafts=3 ⇒
+        // only 3 user outputs emitted, truncation flagged MaxDrafts.
+        let confidence = Confidence::try_from(0.5_f32).expect("valid");
+        let kind_hint = KindHint::from(MemoryKind::Feedback);
+        let mut rules = Vec::new();
+        for i in 0..20u32 {
+            rules.push(RegexRule::HookEvent {
+                id: format!("user.hook.{i}"),
+                hook_name: "PostToolUse".into(),
+                tool_name: None,
+                kind_hint: kind_hint.clone(),
+                confidence,
+            });
+        }
+        let ruleset = RuleSet::from_config(&rules).expect("compile ok");
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 100,
+            max_drafts: 3,
+        };
+        let event = make_event(CapturePayload::Hook {
+            hook_name: "PostToolUse".to_owned(),
+            tool_name: None,
+        });
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+        };
+        let result = dispatch(&ruleset, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+        assert_eq!(
+            result.outputs.len(),
+            3,
+            "user hook rules must respect max_drafts"
+        );
+        assert!(matches!(result.truncated, TruncationReason::MaxDrafts));
     }
 
     #[test]
