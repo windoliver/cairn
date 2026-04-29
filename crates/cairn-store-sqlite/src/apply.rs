@@ -186,6 +186,10 @@ impl MemoryStoreApplyTx for SqliteMemoryStoreApplyTx<'_> {
 // Implementation functions (take &Connection directly)
 // ---------------------------------------------------------------------------
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear admission/INSERT scenario; splitting would obscure the audit invariants"
+)]
 fn stage_version_impl(
     conn: &Connection,
     target_id: &TargetId,
@@ -231,6 +235,24 @@ fn stage_version_impl(
         return Err(StoreError::Conflict {
             kind: ConflictKind::UniqueViolation,
         });
+    }
+
+    // Visibility-tier admission. Read-side rebac (see `rebac.rs`)
+    // fails closed on session/project/team/org for non-system
+    // principals because Principal does not yet carry verified
+    // session id or membership context. Persisting those tiers
+    // anyway would create records that no normal caller can ever
+    // read again. Reject at write time so the store does not accept
+    // unreachable data.
+    match record.visibility {
+        cairn_core::domain::MemoryVisibility::Private
+        | cairn_core::domain::MemoryVisibility::Public => {}
+        _ => {
+            return Err(StoreError::Invariant(
+                "visibility tier not yet supported: only `private` and `public` are admitted \
+                 until Principal carries verified session/membership context",
+            ));
+        }
     }
 
     let next: i64 = conn
@@ -744,11 +766,34 @@ fn remove_edge_impl(
     Ok(())
 }
 
+/// Canonicalize a `serde_json::Value` for stable equality comparison:
+/// recursively sort object keys so the same logical document always
+/// serializes to the same byte sequence regardless of input key order.
+/// Used by the consent-journal idempotency path so that retries with
+/// equivalent-but-reordered JSON do not get rejected as divergent.
+fn canonicalize_json(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut sorted: Vec<(String, serde_json::Value)> = map
+                .iter()
+                .map(|(k, val)| (k.clone(), canonicalize_json(val)))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize_json).collect())
+        }
+        _ => v.clone(),
+    }
+}
+
 fn append_consent_journal_impl(
     conn: &Connection,
     entry: &ConsentJournalEntry,
 ) -> Result<ConsentJournalRowId, StoreError> {
     let payload = serde_json::to_string(&entry.payload)?;
+    let canonical_payload = serde_json::to_string(&canonicalize_json(&entry.payload))?;
     let target_id_str = entry.target_id.as_ref().map(TargetId::as_str);
 
     // Two partial unique indexes (migration 0013) give idempotency
@@ -784,37 +829,48 @@ fn append_consent_journal_impl(
     };
 
     if inserted == 0 {
-        // Idempotent retry: fetch the existing row and require an
-        // exact byte-equivalent match on every immutable audit field
-        // (`actor`, `payload`, `at`). A retry whose payload diverges
-        // from the original is NOT a replay — it is split-brain or
-        // tampering, and accepting it would let the store quietly keep
-        // the older audit content while telling the caller everything
-        // succeeded. Fail closed with `Conflict { UniqueViolation }`.
+        // Idempotent retry: fetch the existing row and check that the
+        // logical content matches. We compare:
+        //   - actor: exact string match
+        //   - payload: canonicalized JSON equality (key order and
+        //     whitespace ignored, so a retry whose JSON was rebuilt
+        //     from a hashmap with different ordering still matches)
+        //   - at: NOT compared. The `at` field is regenerated on
+        //     replay/recovery; requiring byte-identical timestamps
+        //     would turn legitimate retries into hard transaction
+        //     failures. The original timestamp wins; the retry
+        //     simply reuses the existing row id.
+        // A retry whose canonical payload diverges from the original
+        // is split-brain or tampering, and accepting it would let the
+        // store quietly keep the older audit content while telling
+        // the caller everything succeeded. Fail closed with
+        // `Conflict { UniqueViolation }`.
         // Mirror the partial-index split: target_id IS NULL must look
-        // up rows with NULL target_id (and reject rows whose target_id
-        // happens to match the literal string), while NOT NULL must
-        // match exactly. A naive `target_id = ?3` with a NULL bind
-        // value would never match (NULL <> NULL in SQL).
+        // up rows with NULL target_id, while NOT NULL must match
+        // exactly. A naive `target_id = ?3` with a NULL bind value
+        // would never match (NULL <> NULL in SQL).
         let lookup_sql = if target_id_str.is_some() {
-            "SELECT id, actor, payload, at FROM consent_journal \
+            "SELECT id, actor, payload FROM consent_journal \
              WHERE op_id = ?1 AND kind = ?2 AND target_id = ?3"
         } else {
-            "SELECT id, actor, payload, at FROM consent_journal \
+            "SELECT id, actor, payload FROM consent_journal \
              WHERE op_id = ?1 AND kind = ?2 AND target_id IS NULL"
         };
-        let (id, existing_actor, existing_payload, existing_at): (i64, String, String, String) =
-            conn.query_row(
+        let (id, existing_actor, existing_payload): (i64, String, String) = conn
+            .query_row(
                 lookup_sql,
                 params![entry.op_id.as_str(), entry.kind, target_id_str],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .map_err(store_err)?;
 
-        if existing_actor != entry.actor.as_str()
-            || existing_payload != payload
-            || existing_at != entry.at.as_str()
-        {
+        let existing_canonical = serde_json::from_str::<serde_json::Value>(&existing_payload)
+            .map(|v| {
+                serde_json::to_string(&canonicalize_json(&v)).unwrap_or(existing_payload.clone())
+            })
+            .unwrap_or(existing_payload);
+
+        if existing_actor != entry.actor.as_str() || existing_canonical != canonical_payload {
             return Err(StoreError::Conflict {
                 kind: ConflictKind::UniqueViolation,
             });
