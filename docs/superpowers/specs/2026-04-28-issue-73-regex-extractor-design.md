@@ -20,14 +20,18 @@ In scope:
 
 - `MemoryDraft` domain type with provenance + audit fields.
 - `ForgetIntent` domain type for forget-trigger output.
-- `ExtractorWorker` trait + `ExtractBudget`, `ExtractOutput`, `ExtractError`.
+- `ExtractInput<'a>` (envelope reference + caller-resolved body slice; preserves the existing `payload_ref` / `payload_hash` privacy boundary).
+- `ExtractorWorker` trait + `ExtractBudget`, `ExtractOutput`, `ExtractResult`, `TruncationReason`, `ExtractError`.
 - `RegexRule` enum with four variants: `TriggerPhrase`, `ForgetPhrase`, `HookEvent`, `ToolFrame`.
 - `RegexExtractor` struct implementing `ExtractorWorker`.
 - Built-in default rule set covering §11.6 + §18.a triggers and the most common hook / tool-frame events.
 - Schema-validated user-rule extension hook (`RuleSet::from_config`) without binding to `.cairn/config.yaml` yet.
-- Hard `max_drafts` enforcement in the dispatch loop with deterministic truncation semantics (§6).
-- Extension to `CapturePayload::Hook` adding an optional `body` field so primary-chat-path (Mode A) `remember` / `forget` / `skillify` triggers are extractable in this PR (§6.1).
+- Per-rule wall-clock budget enforcement and hard `max_drafts` cap with a typed `TruncationReason` returned to the caller (§6).
 - Unit, integration, property, and a CI-friendly latency assertion test.
+
+Explicitly **not** modified by this PR:
+
+- `CapturePayload`, `CaptureEvent`, `payload_ref`, `payload_hash` — the capture envelope shape is untouched. Raw user text continues to live behind `payload_ref` and is read by the caller, not duplicated into the envelope. The earlier round of this design proposed inlining a `Hook.body` field; review found that that widened the sensitive-envelope shape and created a second copy of raw prompt bytes outside the existing storage boundary, so it has been withdrawn in favor of `ExtractInput.body`.
 
 Deferred:
 
@@ -52,7 +56,7 @@ pipeline/
 ├── mod.rs              # add `pub mod extract;`
 ├── filter/             # unchanged
 └── extract/
-    ├── mod.rs          # ExtractorWorker, ExtractBudget, ExtractError, ExtractOutput
+    ├── mod.rs          # ExtractorWorker, ExtractInput, ExtractBudget, ExtractError, ExtractOutput, ExtractResult, TruncationReason
     ├── draft.rs        # MemoryDraft + Confidence + KindHint + TextSpan
     ├── intent.rs       # ForgetIntent
     ├── regex/
@@ -71,12 +75,30 @@ pipeline/
 // pipeline/extract/mod.rs
 use crate::domain::CaptureEvent;
 
+/// Resolved input for extraction.
+///
+/// The caller (the chain dispatcher in #74, ultimately the verb layer) is
+/// responsible for materializing `body` from the envelope's `payload_ref`
+/// after verifying `payload_hash`. This keeps raw user text outside
+/// `CaptureEvent` itself — the envelope remains metadata-only and the
+/// privacy/replay boundary documented in `domain/capture.rs:362-377` is
+/// preserved (no inline raw prompts in serialized fixtures).
+///
+/// `body` is `None` for events whose source family does not carry an
+/// extractable text body (e.g., `Voice`, `Screen`, `Clipboard` — handled
+/// by sensor-specific extractors in later issues) or whose payload is
+/// non-textual.
+pub struct ExtractInput<'a> {
+    pub event: &'a CaptureEvent,
+    pub body: Option<&'a str>,
+}
+
 pub trait ExtractorWorker: Send + Sync {
     fn name(&self) -> &'static str;
     fn budget(&self) -> ExtractBudget;
     async fn extract(
         &self,
-        event: &CaptureEvent,
+        input: &ExtractInput<'_>,
     ) -> Result<Vec<ExtractOutput>, ExtractError>;
 }
 
@@ -210,56 +232,53 @@ impl RuleSet {
 
 ## 6. Dispatch
 
-`RegexExtractor::extract` matches on `event.payload`:
+`RegexExtractor::extract` reads `input.event.payload` for the variant discriminator and `input.body` for any user text. **`CapturePayload` is not modified.** Raw text remains behind `payload_ref` + `payload_hash`; the caller materializes it (verifying the hash) and passes it as `ExtractInput.body`. This keeps the privacy boundary documented in `crates/cairn-core/src/domain/capture.rs:362-377` intact and avoids duplicating raw prompt text into a second serialized location.
 
-| `CapturePayload` variant | Rule families consulted |
-|---|---|
-| `Hook` | `hook_rules` (always); `text_rules` against `body` if present (see §6.1 for the schema extension) |
-| `Terminal` | `tool_frame_rules` filtered to `ToolFrameFamily::Terminal` |
-| `Ide` | `tool_frame_rules` filtered to `ToolFrameFamily::Ide` |
-| `Cli`, `Mcp` | `text_rules` against the `kind_hint` field (Mode B body is the user-supplied ingest payload) |
-| `Proactive` | `text_rules` against the `rationale` field |
-| `Voice`, `Screen`, `Clipboard`, `RecordingBatch` | none in this PR — extender lands with the relevant sensor issue |
+| `CapturePayload` variant | Rule families consulted | Source of body for `text_rules` |
+|---|---|---|
+| `Hook` | `hook_rules` (always); `text_rules` if `input.body.is_some()` | `input.body` (caller resolves from `payload_ref` for hooks that carry a user utterance, e.g. `UserPromptSubmit`; `None` otherwise) |
+| `Terminal` | `tool_frame_rules` filtered to `Terminal` | n/a |
+| `Ide` | `tool_frame_rules` filtered to `Ide` | n/a |
+| `Cli`, `Mcp` | `text_rules` if `input.body.is_some()` | `input.body` (caller resolves the user-supplied ingest payload from `payload_ref`) |
+| `Proactive` | `text_rules` if `input.body.is_some()` | `input.body` (caller may pass either the agent's message body or `rationale` extract; both are textual) |
+| `Voice`, `Screen`, `Clipboard`, `RecordingBatch` | none in this PR — extender lands with the relevant sensor issue | n/a |
 
 For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector. The first hit on a rule wins per event-rule pair — no multiple drafts per single rule per event.
 
-**`max_drafts` enforcement (hard cap).** The dispatch loop checks `outputs.len() >= budget.max_drafts` after pushing each output. When the cap is reached the loop:
+**`max_drafts` enforcement (hard cap).** Checked inside the per-rule loop, after pushing each output. When `outputs.len() >= budget.max_drafts`:
 
-1. Stops scanning further rules.
-2. Emits exactly one `tracing::warn!(worker = "regex", event_id, max_drafts, "regex extractor reached max_drafts cap")` — never the body.
-3. Returns `Ok(outputs)` with the truncated set; the cap itself is success, not error. Rationale: the cap exists to bound work, not to gate correctness. Returning a partial set keeps the contract simple for the chain (#74) and matches how `max_wall_ms` is handled below. A user-rule explosion that triggers the cap is loud (warn log + metrics counter) but cannot stall or error the extract path.
+1. Stop scanning further rules immediately (do not finish the current family).
+2. Emit exactly one `tracing::warn!(worker = "regex", event_id, max_drafts, "regex extractor reached max_drafts cap")` — never the body.
+3. Set `truncated = true` on the returned envelope (see below) and return `Ok(...)`.
+
+**`max_wall_ms` enforcement (per-rule check).** `Instant::now()` is captured at extract entry. Elapsed time is checked **inside the per-rule loop**, immediately after each rule evaluation completes — *not* only at family boundaries. When elapsed exceeds `budget.max_wall_ms`:
+
+- if zero outputs have been produced, return `Err(BudgetExceeded { worker, elapsed_ms })` so the chain (#74) falls through to the next extractor;
+- otherwise stop scanning, `tracing::warn!` with elapsed time, set `truncated = true`, and return `Ok(...)`.
+
+The per-rule check ensures a large user-rule list (which all lands in a single `text_rules` bucket) cannot blow the budget unchecked. Cost of the check: a single `Instant::now()` per rule, ~10 ns on x86_64 — negligible against any non-trivial regex match.
+
+**Truncation envelope.** To make budget-driven truncation visible to downstream stages (so the chain dispatcher in #74 can decide whether to invoke the LLM extractor for the remainder), `extract` returns a small struct, not a bare `Vec`:
+
+```rust
+pub struct ExtractResult {
+    pub outputs: Vec<ExtractOutput>,
+    pub truncated: TruncationReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TruncationReason {
+    None,
+    MaxDrafts,
+    MaxWallMs { elapsed_ms: u32 },
+}
+```
+
+The trait signature becomes `async fn extract(...) -> Result<ExtractResult, ExtractError>`. Downstream stages can branch on `result.truncated` without re-running budget arithmetic. `ExtractError::BudgetExceeded` is reserved for the **zero-output** wall-clock case (chain falls through); over-cap or wall-clock-with-partial cases are `Ok` with `truncated` set.
 
 Determinism: rules are dispatched in a stable order — built-in rules first (declaration order in `defaults.rs`), then user rules in `from_config` declaration order. Two identical events therefore produce identical truncated sets when the cap is hit.
 
-**`max_wall_ms` enforcement.** A single `Instant::now()` snapshot is taken before the dispatch loop, and the elapsed time is checked once per rule-family boundary (3 checks per event maximum). If elapsed exceeds `budget.max_wall_ms`:
-
-- if zero outputs have been produced, return `Err(BudgetExceeded)` so the chain (#74) can fall through to the next extractor;
-- otherwise stop scanning, `tracing::warn!` with the elapsed time, and return `Ok(outputs)`.
-
-Rationale: brief §5.2.a says "exceeding budget returns `ExtractBudgetExceeded`, falls through to next extractor." For regex we treat partial success as success (the only fallthrough beyond regex is no extraction at all, since regex *is* the fallback layer). This matches the brief's "RegexExtractor fallback chain still captures hook events + 'tell it directly' triggers" guarantee (§intro).
-
-### 6.1 `CapturePayload::Hook` body extension
-
-To make Mode A trigger phrases ("remember…", "forget…", "skillify…" typed in chat) extractable, this PR extends `CapturePayload::Hook` with an optional body field:
-
-```rust
-Hook {
-    hook_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool_name: Option<String>,
-    /// Captured user-message body when the hook is `UserPromptSubmit` /
-    /// `SessionStart` / similar harness hooks that carry a literal user
-    /// utterance. Sensitive — never logged above `trace`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    body: Option<String>,
-},
-```
-
-Backwards-compatible: `#[serde(default)]` keeps existing wire payloads parsing. The `Debug` impl already redacts `Hook` fields (`crates/cairn-core/src/domain/capture.rs:475`); the new field follows the same redaction. Sensors that don't carry a body (e.g., `PostToolUse`) leave the field `None`; sensors that do (e.g., `UserPromptSubmit`) populate it.
-
-Test impact: existing `tests/capture_event.rs` round-trip tests must stay green; one new round-trip case covers the populated-body variant. No migration / WAL / store change — `CaptureEvent` is captured-time, not stored-form.
-
-This extension lands in **this PR**, not a follow-up: without it the high-priority acceptance criterion ("explicit remember/forget requests produce correct draft or forget intent") cannot be met for the primary chat path.
+Rationale on the `Ok` vs `Err` split: brief §5.2.a says "exceeding `budget` returns `ExtractBudgetExceeded`, falls through to next extractor." We honor that for the all-or-nothing case (zero outputs → fall through). For partial success we surface truncation as data, not error, so the chain has full information without exception-style control flow.
 
 ## 7. Default rule set (`defaults.rs`)
 
@@ -303,14 +322,17 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - Compile failure path: `RuleSet::from_config(<rule with bad pattern>)` → `InvalidRule`.
 - Duplicate ids rejected.
 - `RegexExtractor::name() == "regex"`, default budget = `{max_wall_ms: 2, max_drafts: 16}`.
-- `max_drafts` enforcement: synthesize a `RuleSet` whose user-rule list contains `max_drafts + 5` always-matching rules; assert `extract` returns exactly `max_drafts` outputs and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches rule declaration order.
+- `max_drafts` enforcement: synthesize a `RuleSet` whose user-rule list contains `max_drafts + 5` always-matching rules; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches rule declaration order.
+- `max_wall_ms` zero-output path: stub a sleeping rule (or set `budget.max_wall_ms = 0`); assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
+- `max_wall_ms` partial-output path: feed a body that matches one early rule, then trip the wall-clock budget; assert `truncated == TruncationReason::MaxWallMs { .. }` and `outputs.len() == 1`.
+- `ExtractInput.body == None` path: pass a `Cli` envelope with no body; assert text rules don't match and the result is empty (not an error).
 
 ### 10.2 Integration tests (`crates/cairn-core/tests/pipeline_extract_regex.rs`)
 
-- Synthesize one `CaptureEvent` per `CapturePayload` variant via `cairn-test-fixtures`.
-- Run `RegexExtractor::builtin().extract(&event).await` and assert expected `ExtractOutput`s.
+- Synthesize one `CaptureEvent` per `CapturePayload` variant via `cairn-test-fixtures`. Construct each `ExtractInput` with the appropriate `body` (caller-resolved text for `Hook` / `Cli` / `Mcp` / `Proactive`; `None` for the others).
+- Run `RegexExtractor::builtin().extract(&input).await` and assert expected `ExtractOutput`s.
 - `Snapshot (insta)` test on serialized `ExtractOutput` for stable rule ids — guards against accidental rule-id renames breaking downstream issue #75.
-- Empty-fallthrough: synthesize a `Cli` event with body `"hello world"` (no trigger). Assert `Vec::new()` returned. The chain wiring that would forward this to `LLMExtractor` lives in #74; this PR only verifies the empty result.
+- Empty-fallthrough: `Cli` event, body `"hello world"`. Assert `outputs.is_empty()` and `truncated == None`. The chain wiring that would forward this to `LLMExtractor` lives in #74; this PR only verifies the empty result.
 
 ### 10.3 Property tests (`proptest`)
 
@@ -334,9 +356,9 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 
 ## 11. Brief deviations
 
-1. **Trait return type.** §5.2.a writes `extract(...) -> Vec<MemoryDraft>`. The acceptance criterion of #73 says drafts **or** forget intents must be produced. We widen to `Result<Vec<ExtractOutput>, ExtractError>` for both reasons (forget routing + budget surfacing). Non-breaking — the trait is brand-new in this PR.
-2. **`MemoryDraft` fields.** Brief §5.2.a lists `{kind, body, entities, confidence}` plus #74's `{evidence, discard candidates}`. Regex output cannot produce `entities` / `evidence` reliably, so this PR ships `kind_hint`, `body`, `confidence`, `source_event`, `source_span`, `trigger_id`. #74 will add `entities` / `evidence` as `Option`-wrapped fields when the LLM extractor populates them.
-3. **Budget partial-success.** Brief §5.2.a: "exceeding `budget` returns `ExtractBudgetExceeded`, falls through to next extractor." We treat partial regex output as success (§6) since regex *is* the fallback layer — there is no extractor below it. Documented inline in `extract`.
+1. **Trait input.** §5.2.a writes `extract(event: &CaptureEvent) -> Vec<MemoryDraft>`. We widen the input to `&ExtractInput<'_>` so the caller can supply the resolved-body slice without expanding the `CaptureEvent` envelope. The envelope continues to carry `payload_ref` + `payload_hash`; the body is read once by the chain dispatcher and threaded into `ExtractInput` for every worker in the chain. Non-breaking — the trait is brand-new.
+2. **Trait return type.** §5.2.a writes `Vec<MemoryDraft>`. We return `Result<ExtractResult, ExtractError>` so the trait can carry (a) `ForgetIntent` outputs alongside drafts via `ExtractOutput`, and (b) typed truncation reasons (`max_drafts` / `max_wall_ms`) the chain dispatcher uses to decide whether to invoke the LLM extractor for the remainder. `BudgetExceeded` is reserved for the zero-output wall-clock case.
+3. **`MemoryDraft` fields.** Brief §5.2.a lists `{kind, body, entities, confidence}` plus #74's `{evidence, discard candidates}`. Regex output cannot produce `entities` / `evidence` reliably, so this PR ships `kind_hint`, `body`, `confidence`, `source_event`, `source_span`, `trigger_id`. #74 will add `entities` / `evidence` as `Option`-wrapped fields when the LLM extractor populates them.
 
 ## 12. Workspace impact
 
