@@ -36,14 +36,14 @@ expression: json
     {
       "capabilities": {
         "fts": false,
-        "graph_edges": false,
-        "transactions": false,
+        "graph_edges": true,
+        "transactions": true,
         "vector": false
       },
       "contract": "MemoryStore",
       "contract_version_range": {
-        "max_exclusive": "0.2.0",
-        "min": "0.1.0"
+        "max_exclusive": "0.3.0",
+        "min": "0.2.0"
       },
       "name": "cairn-store-sqlite",
       "source": "bundled:cairn-store-sqlite"

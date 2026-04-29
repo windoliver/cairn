@@ -1,0 +1,9 @@
+---
+source: crates/cairn-cli/tests/bootstrap.rs
+expression: normalized
+---
+cairn bootstrap: vault already initialized at <vault>
+  config    <vault>/.cairn/config.yaml  [existing]
+  db        <vault>/.cairn/cairn.db  (created on first ingest)
+  dirs      0 created, 19 existing
+  files     0 created, 4 skipped

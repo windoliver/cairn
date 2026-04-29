@@ -4,6 +4,7 @@ expression: "&r"
 ---
 {
   "id": "01HQZX9F5N0000000000000000",
+  "target_id": "01HQZX9F5N0000000000000000",
   "kind": "user",
   "class": "semantic",
   "visibility": "private",

@@ -1,5 +1,6 @@
 {
   "id": "01HQZX9F5N0000000000000003",
+  "target_id": "01HQZX9F5N0000000000000003",
   "kind": "playbook",
   "class": "procedural",
   "visibility": "project",

@@ -1,0 +1,14 @@
+---
+source: crates/cairn-cli/src/skill.rs
+expression: receipt
+---
+{
+  "target_dir": "/home/user/.cairn/skills/cairn",
+  "contract_version": "cairn.mcp.v1",
+  "idl_version": "0.0.1",
+  "files_created": [
+    "/home/user/.cairn/skills/cairn/SKILL.md"
+  ],
+  "files_skipped": [],
+  "registration_hint": "# Add to your CLAUDE.md:\n@~/.cairn/skills/cairn/SKILL.md"
+}

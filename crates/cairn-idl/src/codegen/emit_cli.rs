@@ -263,6 +263,19 @@ fn render_flag_arg(flag: &CliFlag) -> String {
     if let Some(action) = action {
         let _ = write!(out, ".action({action})");
     }
+    // For closed `list<enum(...)>` flags, expose comma-delimited single-
+    // token form in addition to repeated occurrences. We deliberately do
+    // NOT delimit `list<string>` / `list<path>` because commas are valid
+    // payload data there (e.g., `ingest --tags "foo,bar"` must preserve
+    // `foo,bar` as a single tag, not split into two).
+    if flag
+        .value_source
+        .strip_prefix("list<enum(")
+        .and_then(|s| s.strip_suffix(")>"))
+        .is_some()
+    {
+        let _ = write!(out, ".value_delimiter(',')");
+    }
     out
 }
 
@@ -363,4 +376,46 @@ fn escape_rust_str(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::ir::CliPositional;
+
+    /// Tagged-union variant with a repeatable positional must emit
+    /// `.num_args(1..)` so the generated clap command actually accepts
+    /// multiple values, matching the skill-compat gate's expectations.
+    #[test]
+    fn variant_command_emits_num_args_for_repeatable_positional() {
+        let variants = vec![
+            CliCommand {
+                command: "demo".to_string(),
+                flags: vec![CliFlag {
+                    name: "session_id".to_string(),
+                    long: "session".to_string(),
+                    value_source: "string".to_string(),
+                    cli_exemplar: None,
+                }],
+                positional: None,
+            },
+            CliCommand {
+                command: "demo".to_string(),
+                flags: vec![],
+                positional: Some(CliPositional {
+                    name: "ids".to_string(),
+                    description: "Many IDs".to_string(),
+                    repeatable: true,
+                    aliases_one_of: Vec::new(),
+                }),
+            },
+        ];
+        let mut w = RustWriter::new();
+        write_variant_command(&mut w, "demo", &variants).expect("emit");
+        let rendered = w.finish();
+        assert!(
+            rendered.contains(".num_args(1..)"),
+            "variant repeatable positional must emit num_args(1..); got:\n{rendered}"
+        );
+    }
 }

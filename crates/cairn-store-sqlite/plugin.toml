@@ -3,16 +3,16 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 
 [features]
 fts = false
 vector = false
-graph_edges = false
-transactions = false
+graph_edges = true
+transactions = true

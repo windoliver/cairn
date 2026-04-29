@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, DomainError, EvidenceVector, Identity, MemoryClass, MemoryKind,
-    MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+    MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
     record::{Ed25519Signature, RecordId},
 };
 use proptest::prelude::*;
@@ -26,6 +26,7 @@ fn record() -> MemoryRecord {
     let user_id = Identity::parse("usr:tafeng").expect("valid");
     MemoryRecord {
         id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
         kind: MemoryKind::User,
         class: MemoryClass::Semantic,
         visibility: MemoryVisibility::Private,
@@ -135,6 +136,7 @@ fn malformed_scope_rejected() {
 fn unsupported_visibility_rejected_at_deserialize() {
     let json = serde_json::json!({
         "id": "01HQZX9F5N0000000000000000",
+        "target_id": "01HQZX9F5N0000000000000000",
         "kind": "user",
         "class": "semantic",
         "visibility": "internal",

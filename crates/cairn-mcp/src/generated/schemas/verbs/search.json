@@ -920,6 +920,7 @@
         "value_source": "u32"
       },
       {
+        "cli_exemplar": "{\"field\":\"kind\",\"op\":\"eq\",\"value\":\"note\"}",
         "long": "filters",
         "name": "filters",
         "value_source": "json"

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActorChainEntry, CanonicalRecordHash, ChainRole, DomainError, EvidenceVector, Identity,
-    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, VerifiedSignedIntent,
+    IdentityKind, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId, VerifiedSignedIntent,
     actor_chain::validate_chain,
     taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
 };
@@ -140,6 +140,10 @@ impl<'de> Deserialize<'de> for RecordId {
 pub struct MemoryRecord {
     /// ULID — the stable record identifier.
     pub id: RecordId,
+    /// Supersession lineage key. For a fresh fact this equals `id`. On
+    /// supersession (`updates`-edge), the new record carries the prior
+    /// record's `target_id`. Same wire form as `id`. Brief §3, §3.0.
+    pub target_id: TargetId,
     /// Memory kind (§6.1).
     pub kind: MemoryKind,
     /// Memory class (§6.2).
@@ -696,18 +700,53 @@ const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{ActorChainEntry, ChainRole, Identity};
+/// Cross-crate test fixture re-export.
+///
+/// `sample_record` is the canonical valid `MemoryRecord` factory used by
+/// every test in this crate. Downstream crates (e.g. `cairn-store-sqlite`)
+/// need the same canonical sample for projection / round-trip tests, so the
+/// factory is hosted here under a `cfg(any(test, feature = "test-fixtures"))`
+/// gate. The `test-fixtures` feature is opt-in and intended for
+/// `[dev-dependencies]` only — it never lands in production binaries.
+#[cfg(any(test, feature = "test-fixtures"))]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "fixture factory for tests; bad inputs would mean the test data \
+              itself is broken and a panic surfaces that immediately"
+)]
+pub mod tests_export {
+    use std::collections::BTreeMap;
 
-    pub(crate) fn sample_record() -> MemoryRecord {
-        // Single human author at P0: scope.user, originating_agent_id, and
-        // chain author all bind to `usr:tafeng`. Delegation chains arrive
-        // with P2 countersignatures.
+    use super::{Ed25519Signature, MemoryRecord, RecordId};
+    use crate::contract::memory_store::StoredRecord;
+    use crate::domain::{
+        ActorChainEntry, ChainRole, EvidenceVector, Identity, Provenance, Rfc3339Timestamp,
+        ScopeTuple, TargetId,
+        taxonomy::{MemoryClass, MemoryKind, MemoryVisibility},
+    };
+
+    /// Wrap [`sample_record`] in a [`StoredRecord`] at the given store version.
+    /// Used by `MarkdownProjector` tests and other downstream code that needs
+    /// a `StoredRecord` rather than a bare `MemoryRecord`.
+    #[must_use]
+    pub fn sample_stored_record(version: u32) -> StoredRecord {
+        StoredRecord {
+            record: sample_record(),
+            version,
+        }
+    }
+
+    /// Construct a canonical valid [`MemoryRecord`] for tests and adapter
+    /// fixtures. Single human author at P0: `scope.user`,
+    /// `originating_agent_id`, and the chain author all bind to
+    /// `usr:tafeng`. Delegation chains arrive with P2 countersignatures.
+    #[must_use]
+    pub fn sample_record() -> MemoryRecord {
         let user_id = Identity::parse("usr:tafeng").expect("valid");
         MemoryRecord {
             id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+            target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
             kind: MemoryKind::User,
             class: MemoryClass::Semantic,
             visibility: MemoryVisibility::Private,
@@ -739,6 +778,13 @@ mod tests {
             extra_frontmatter: BTreeMap::new(),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_export::sample_record;
+    use super::*;
+    use crate::domain::{ActorChainEntry, ChainRole, Identity};
 
     #[test]
     fn valid_record_passes_validation() {
@@ -1366,5 +1412,32 @@ mod tests {
             .insert("zzz".to_owned(), serde_json::json!("bad"));
         let res: Result<MemoryRecord, _> = serde_json::from_value(value);
         assert!(res.is_err(), "unknown field should reject");
+    }
+
+    #[test]
+    fn target_id_independent_of_id() {
+        let r = sample_record();
+        // For a fresh record the convention is target_id == id, but the type
+        // does not enforce that — supersessions intentionally keep the prior
+        // target_id while issuing a new id.
+        assert_eq!(r.target_id.as_str(), r.id.as_str());
+    }
+
+    #[test]
+    fn target_id_round_trips_in_json() {
+        let mut r = sample_record();
+        let other = TargetId::parse("01HQZX9F5N1234567890ABCDEF").expect("valid");
+        r.target_id = other.clone();
+        let s = serde_json::to_string(&r).expect("ser");
+        let back: MemoryRecord = serde_json::from_str(&s).expect("de");
+        assert_eq!(back.target_id, other);
+    }
+
+    #[test]
+    fn missing_target_id_in_json_rejected() {
+        let mut value = serde_json::to_value(sample_record()).expect("ser");
+        value.as_object_mut().expect("object").remove("target_id");
+        let res: Result<MemoryRecord, _> = serde_json::from_value(value);
+        assert!(res.is_err(), "target_id is required");
     }
 }

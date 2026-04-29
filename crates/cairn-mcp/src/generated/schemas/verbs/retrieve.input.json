@@ -164,6 +164,7 @@
         "command": "retrieve",
         "flags": [
           {
+            "cli_exemplar": "{\"user\":\"u\"}",
             "long": "scope",
             "name": "scope",
             "value_source": "json"

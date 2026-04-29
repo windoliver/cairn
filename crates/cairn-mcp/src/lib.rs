@@ -14,8 +14,7 @@ pub mod error;
 pub mod generated;
 pub mod handler;
 
-pub use error::McpTransportError;
-pub use error::McpTransportError as TransportError;
+pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
@@ -94,7 +93,7 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 /// value.
 pub async fn serve_stdio() -> Result<(), TransportError> {
     let handler = CairnMcpHandler::new();
-    let transport = rmcp::transport::stdio();
+    let transport = rmcp::transport::io::stdio();
     let service = handler
         .serve(transport)
         .await

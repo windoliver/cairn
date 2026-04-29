@@ -40,7 +40,7 @@ pub fn retrieve_subcommand() -> clap::Command {
         .arg(clap::Arg::new("limit").long("limit").value_name("U32").value_parser(clap::value_parser!(u32)))
         .arg(clap::Arg::new("order").long("order").value_name("ENUM").value_parser(["asc", "desc"]))
         .arg(clap::Arg::new("rehydrate").long("rehydrate").action(clap::ArgAction::SetTrue))
-        .arg(clap::Arg::new("include").long("include").value_name("ENUM").value_parser(["tool_calls", "reasoning"]).action(clap::ArgAction::Append))
+        .arg(clap::Arg::new("include").long("include").value_name("ENUM").value_parser(["tool_calls", "reasoning"]).action(clap::ArgAction::Append).value_delimiter(','))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
         .arg(clap::Arg::new("turn_id").long("turn").value_name("U64").value_parser(clap::value_parser!(u64)))
         .arg(clap::Arg::new("path").long("folder").value_name("STRING"))

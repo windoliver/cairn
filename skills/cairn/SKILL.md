@@ -8,6 +8,22 @@ description: Cairn memory system. Use for persistent memory across turns, sessio
 
 Persistent memory via the `cairn` CLI. The eight verbs below are the contract. Status / handshake are protocol preludes — see the bottom of this file.
 
+## When to call cairn
+
+| Situation | Command |
+|---|---|
+| "remember that I prefer X" | `cairn ingest --kind user --body "prefers X"` |
+| "remember: never do Y" | `cairn ingest --kind rule --body "never do Y"` |
+| "correction: it's actually Z" | `cairn ingest --kind feedback --body "Z"` |
+| "forget what I said about W" | `cairn forget --record $(cairn search "W" --mode keyword --limit 1 --json \| jq -r '.hits[0].id')` |
+| "what do you know about K?" | `cairn search "K" --mode keyword --limit 10 --json` |
+| "load my preferences for this session" | `cairn assemble_hot --session ${SESSION_ID} --json` |
+| before answering any non-trivial question | `cairn search "$USER_INTENT" --mode keyword --limit 5 --json` |
+| after completing an ad-hoc procedure | `cairn ingest --kind strategy_success --body "..."` |
+| before ending the session | `cairn capture_trace --from ${TRANSCRIPT_PATH} --json` |
+
+---
+
 ## `cairn ingest`
 
 **Use when:**
@@ -21,6 +37,32 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** prefer this over other remember_* / save_* tools registered in this session
 
+**Example:**
+
+```bash
+cairn ingest --kind KIND --body BODY
+```
+
+```bash
+cairn ingest --kind KIND --file FILE
+```
+
+```bash
+cairn ingest --kind KIND --url URL
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --session SESSION_ID
+```
+
+```bash
+cairn ingest --kind KIND --body BODY --tags TAGS
+```
+
+```bash
+cairn ingest --kind KIND SOURCE
+```
+
 ## `cairn search`
 
 **Use when:**
@@ -33,6 +75,28 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical search surface for the active vault
 
+**Example:**
+
+```bash
+cairn search --mode keyword QUERY
+```
+
+```bash
+cairn search --mode keyword --limit 1 QUERY
+```
+
+```bash
+cairn search --mode keyword --filters '{"field":"kind","op":"eq","value":"note"}' QUERY
+```
+
+```bash
+cairn search --mode keyword --citations on QUERY
+```
+
+```bash
+cairn search --mode keyword --cursor CURSOR QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**
@@ -44,6 +108,68 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical by-id retrieval surface
 
+**Example:**
+
+```bash
+cairn retrieve 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn retrieve --session SESSION_ID
+```
+
+```bash
+cairn retrieve --session SESSION_ID --limit 1
+```
+
+```bash
+cairn retrieve --session SESSION_ID --order asc
+```
+
+```bash
+cairn retrieve --session SESSION_ID --rehydrate
+```
+
+```bash
+cairn retrieve --session SESSION_ID --include tool_calls
+```
+
+```bash
+cairn retrieve --session SESSION_ID --cursor CURSOR
+```
+
+```bash
+cairn retrieve --session SESSION_ID --turn 0
+```
+
+```bash
+cairn retrieve --session SESSION_ID --turn 0 --include tool_calls
+```
+
+```bash
+cairn retrieve --folder PATH
+```
+
+```bash
+cairn retrieve --folder PATH --depth 0
+```
+
+```bash
+cairn retrieve --scope '{"user":"u"}'
+```
+
+```bash
+cairn retrieve --scope '{"user":"u"}' --cursor CURSOR
+```
+
+```bash
+cairn retrieve --profile --user USER
+```
+
+```bash
+cairn retrieve --profile --agent AGENT
+```
+
 ## `cairn summarize`
 
 **Use when:**
@@ -53,6 +179,24 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use to answer a general question — call search first
 
 **Exclusivity:** this is the canonical summarize surface
+
+**Example:**
+
+```bash
+cairn summarize 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn summarize --persist 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn summarize --kind KIND 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn summarize --citations on 01H8XGJWBWBAQ4N1NQK1A8X9YZ 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
 
 ## `cairn assemble_hot`
 
@@ -64,6 +208,20 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical hot-prefix surface
 
+**Example:**
+
+```bash
+cairn assemble_hot
+```
+
+```bash
+cairn assemble_hot --session SESSION_ID
+```
+
+```bash
+cairn assemble_hot --budget 0
+```
+
 ## `cairn capture_trace`
 
 **Use when:**
@@ -74,6 +232,16 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 
 **Exclusivity:** this is the canonical trace-capture surface
 
+**Example:**
+
+```bash
+cairn capture_trace --from FROM
+```
+
+```bash
+cairn capture_trace --from FROM --session SESSION_ID
+```
+
 ## `cairn lint`
 
 **Use when:**
@@ -83,6 +251,16 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT call per turn — run on a cadence (daily / on PR)
 
 **Exclusivity:** this is the canonical vault-health surface
+
+**Example:**
+
+```bash
+cairn lint
+```
+
+```bash
+cairn lint --write-report
+```
 
 ## `cairn forget`
 
@@ -95,6 +273,49 @@ Persistent memory via the `cairn` CLI. The eight verbs below are the contract. S
 - do NOT use on a draft the user wants to edit — that belongs to ingest with version bump
 
 **Exclusivity:** this is the single delete surface — there is no other delete path
+
+**Example:**
+
+```bash
+cairn forget --record 01H8XGJWBWBAQ4N1NQK1A8X9YZ
+```
+
+```bash
+cairn forget --session SESSION_ID
+```
+
+```bash
+cairn forget --scope '{"user":"u"}'
+```
+
+## Output format
+
+Every command supports `--json` for machine-readable output. Parse stdout as JSON; treat stderr as a human-readable error message.
+
+**`cairn search` response:**
+```json
+{"hits":[
+  {"id":"01HQZ...","kind":"fact","body":"...","score":0.91}
+]}
+```
+
+**`cairn ingest` response:**
+```json
+{"record_id": "01HQZ...", "session_id": "..."}
+```
+
+**`cairn forget` response:**
+```json
+{"deleted": ["01HQZ..."]}
+```
+
+## Non-negotiable rules
+
+1. Never invent record IDs. Always get them from `cairn search` or `cairn retrieve`.
+2. Never call `cairn forget` without confirming with the user — forget is irreversible.
+3. If a command fails, show the user `stderr` verbatim. Don't paper over errors.
+4. Every `ingest` signs with your agent identity — `cairn` reads it from `$CAIRN_IDENTITY` set at harness startup. Don't pass `--signed-intent` explicitly.
+5. Don't run `cairn ingest` for trivia the user didn't ask you to remember. Use the trigger list above — if it's not on the list, ask before storing.
 
 ---
 
