@@ -1689,9 +1689,13 @@ mod wrapper_tests {
     fn oversize_payload_bypass_preserves_head_and_tail() {
         let mut oversized = vec![b'A'; MAX_INPUT_BYTES + 1];
         // Distinct head and tail markers so we can confirm preservation.
-        oversized[..5].copy_from_slice(b"HEADX");
+        // The head-leak hardening (Round 9) drops the head entirely when
+        // its window contains no `\n`, so place a `\n` after the head
+        // marker AND before the tail marker so both line up to a line
+        // boundary inside their respective windows.
+        oversized[..6].copy_from_slice(b"HEADX\n");
         let n = oversized.len();
-        oversized[n - 5..].copy_from_slice(b"YTAIL");
+        oversized[n - 6..].copy_from_slice(b"\nYTAIL");
         let evt = terminal_event(&oversized);
         let wrapped = UnstructuredTextBytes::try_from_terminal_event(
             &evt,
@@ -4183,5 +4187,245 @@ mod proptest_squash {
             };
             prop_assert_eq!(recomputed, out.compacted_hash);
         }
+
+        /// Output ALWAYS fits `max_bytes`, not just on the truncation
+        /// path. Pre-existing `byte_ceiling` only checked when
+        /// `truncated` was set; this strengthens the invariant.
+        #[test]
+        fn compacted_always_fits_max_bytes(
+            raw in proptest::collection::vec(any::<u8>(), 0..16_384),
+            cfg in arb_cfg(),
+        ) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            prop_assert!(
+                out.compacted_byte_len <= cfg.max_bytes(),
+                "compacted={} > max_bytes={}",
+                out.compacted_byte_len, cfg.max_bytes(),
+            );
+            prop_assert_eq!(out.compacted_bytes.len(), out.compacted_byte_len);
+        }
+
+        /// Compacted bytes must always be valid UTF-8 — staged path's
+        /// stage 1 guarantees this; bypass path emits sanitized
+        /// strings + ASCII markers. Any failure here means a stage
+        /// produced invalid bytes (e.g., split a multi-byte char).
+        #[test]
+        fn compacted_is_valid_utf8(
+            raw in proptest::collection::vec(any::<u8>(), 0..16_384),
+            cfg in arb_cfg(),
+        ) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            prop_assert!(std::str::from_utf8(&out.compacted_bytes).is_ok());
+        }
+
+        /// Stage 2 strips every ESC introducer (0x1B). No lone ESC
+        /// byte may ever survive into compacted output — that's the
+        /// load-bearing safety property of the sanitizer.
+        #[test]
+        fn no_lone_esc_in_output(
+            raw in proptest::collection::vec(any::<u8>(), 0..16_384),
+            cfg in arb_cfg(),
+        ) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            prop_assert!(
+                !out.compacted_bytes.contains(&0x1B),
+                "ESC leaked through sanitizer"
+            );
+        }
+
+        /// `lines_dropped_truncate` is bounded by the line count,
+        /// which is at most the byte count. `bytes_dropped_truncate`
+        /// is measured against the staged JOINED bytes (post-stage-1
+        /// lossy decode), which can be up to ~3× raw on invalid
+        /// UTF-8 (each bad byte → 3-byte U+FFFD). Bound loosely.
+        #[test]
+        fn drop_count_bounded(
+            raw in proptest::collection::vec(any::<u8>(), 0..16_384),
+            cfg in arb_cfg(),
+        ) {
+            let out = run_squash_for_proptest(&raw, &cfg);
+            prop_assert!(out.stats.lines_dropped_truncate <= raw.len());
+            // Worst-case stage 1 expansion + a margin for stage 6
+            // marker / layout overhead.
+            prop_assert!(
+                out.stats.bytes_dropped_truncate <= raw.len() * 3 + cfg.max_bytes(),
+                "bytes_dropped_truncate={} exceeds 3*raw.len()={} + max_bytes={}",
+                out.stats.bytes_dropped_truncate, raw.len() * 3, cfg.max_bytes(),
+            );
+        }
+
+        /// Squash is idempotent on its own output: feeding the
+        /// compacted bytes back through squash with the same config
+        /// produces the same compacted bytes (assuming the
+        /// compacted output is itself a valid terminal payload).
+        /// The output is sanitized and bounded, so a re-run should
+        /// be a no-op on the compaction front (allowing for the
+        /// trailing-newline normalisation rule).
+        #[test]
+        fn idempotent_on_compacted(
+            raw in proptest::collection::vec(any::<u8>(), 0..4096),
+            cfg in arb_cfg(),
+        ) {
+            let first = run_squash_for_proptest(&raw, &cfg);
+            let second = run_squash_for_proptest(&first.compacted_bytes, &cfg);
+            // Stage 1 / stage 2 / dedup / cap are no-ops on already-
+            // sanitized input. Stage 6 is a no-op when total bytes
+            // ≤ max_bytes (which they are by `compacted_always_fits`).
+            // So second.compacted_bytes == first.compacted_bytes.
+            prop_assert_eq!(&second.compacted_bytes, &first.compacted_bytes);
+        }
+    }
+}
+
+#[cfg(test)]
+mod corner_case_tests {
+    use super::wrapper_tests::terminal_event;
+    use super::*;
+
+    fn squash_raw(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
+        let evt = terminal_event(raw);
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            TerminalContext::InteractiveTty,
+        )
+        .expect("valid");
+        squash(wrapper, cfg)
+    }
+
+    #[test]
+    fn empty_raw_yields_empty_compacted() {
+        let cfg = SquashConfig::default();
+        let out = squash_raw(b"", &cfg);
+        assert!(out.compacted_bytes.is_empty());
+        assert_eq!(out.compacted_byte_len, 0);
+        assert!(!out.stats.truncated);
+    }
+
+    #[test]
+    fn single_lone_esc_byte() {
+        let cfg = SquashConfig::default();
+        let out = squash_raw(b"\x1b", &cfg);
+        assert!(!out.compacted_bytes.contains(&0x1B));
+        assert!(out.stats.ansi_stripped);
+    }
+
+    #[test]
+    fn single_lf_byte() {
+        let cfg = SquashConfig::default();
+        let out = squash_raw(b"\n", &cfg);
+        // A sole LF should survive (line separator preservation).
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(!out.stats.truncated);
+    }
+
+    #[test]
+    fn single_ascii_byte() {
+        let cfg = SquashConfig::default();
+        let out = squash_raw(b"A", &cfg);
+        assert_eq!(out.compacted_bytes, b"A");
+        assert!(!out.stats.truncated);
+    }
+
+    #[test]
+    fn min_max_bytes_boundary_config_runs() {
+        let cfg = SquashConfig::new(MIN_MAX_BYTES, 2, 2, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let raw: Vec<u8> = (0..1000u32).map(|i| b'a' + u8::try_from(i % 26).unwrap_or(0)).collect();
+        let mut payload: Vec<u8> = Vec::new();
+        for chunk in raw.chunks(20) {
+            payload.extend_from_slice(chunk);
+            payload.push(b'\n');
+        }
+        let out = squash_raw(&payload, &cfg);
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    #[test]
+    fn mixed_line_endings_normalize() {
+        let cfg = SquashConfig::default();
+        let raw = b"a\r\nb\nc\rd\r\ne";
+        let out = squash_raw(raw, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        // CRLF → LF normalised by stage 2; bare CR preserved as
+        // cr_bearing_lines signal.
+        assert!(body.contains("a\nb\nc"));
+        assert!(out.stats.cr_bearing_lines >= 1);
+    }
+
+    #[test]
+    fn multibyte_char_at_stage5_cap_boundary() {
+        // Build a single line whose byte length straddles the cap
+        // boundary in the middle of a 3-byte UTF-8 codepoint
+        // ('日' = 0xE6 0x97 0xA5). Stage 5 must truncate at a
+        // codepoint boundary, never split.
+        let cfg = SquashConfig::new(2048, 4, 4, 2, MIN_MAX_LINE_BYTES).unwrap();
+        let mut line = String::with_capacity(4096);
+        // Pad with ASCII so 日 lands right at the cap boundary.
+        let pad_len = MIN_MAX_LINE_BYTES - 2; // leave 2 bytes
+        line.push_str(&"x".repeat(pad_len));
+        for _ in 0..200 {
+            line.push('日');
+        }
+        let raw = line.as_bytes();
+        let out = squash_raw(raw, &cfg);
+        // Result must be valid UTF-8 and respect the budget.
+        assert!(std::str::from_utf8(&out.compacted_bytes).is_ok());
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+    }
+
+    #[test]
+    fn one_giant_line_no_newline() {
+        // 100K bytes of single line, no \n at all. Below
+        // MAX_INPUT_BYTES so staged path runs. Stage 5 should
+        // truncate the line.
+        let cfg = SquashConfig::default();
+        let raw: Vec<u8> = std::iter::repeat_n(b'X', 100_000).collect();
+        let out = squash_raw(&raw, &cfg);
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+        assert!(out.stats.truncated);
+    }
+
+    #[test]
+    fn all_blank_lines_thousand() {
+        let cfg = SquashConfig::default();
+        let raw: Vec<u8> = std::iter::repeat_n(b'\n', 1000).collect();
+        let out = squash_raw(&raw, &cfg);
+        assert!(out.compacted_byte_len <= cfg.max_bytes());
+        // Output is valid UTF-8.
+        assert!(std::str::from_utf8(&out.compacted_bytes).is_ok());
+    }
+
+    #[test]
+    fn dense_short_lines_route_through_staged_when_under_line_cap() {
+        let cfg = SquashConfig::default();
+        // Just under MAX_INPUT_LINES.
+        let line_count = 100;
+        let raw: Vec<u8> = (0..line_count)
+            .flat_map(|i| format!("L{i:03}\n").into_bytes())
+            .collect();
+        let out = squash_raw(&raw, &cfg);
+        // Should NOT route through bypass (no marker).
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            !body.contains("oversize bypass"),
+            "small input took bypass: {body}"
+        );
+    }
+
+    #[test]
+    fn extreme_dedup_run_collapses_to_marker() {
+        let cfg = SquashConfig::default();
+        let mut raw: Vec<u8> = Vec::new();
+        for _ in 0..1000 {
+            raw.extend_from_slice(b"same-line\n");
+        }
+        let out = squash_raw(&raw, &cfg);
+        assert!(out.stats.dedup_runs_collapsed > 0);
+        assert!(out.stats.truncated);
+        // Only ~1 occurrence of "same-line" should survive (plus
+        // possibly the dedup marker form).
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        let count = body.matches("same-line").count();
+        assert!(count <= 2, "dedup did not collapse: count={count}");
     }
 }
