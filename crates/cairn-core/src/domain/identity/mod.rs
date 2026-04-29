@@ -6,13 +6,21 @@
 //! `Identity` schema in `crates/cairn-idl/schema/common/primitives.json`.
 
 pub mod keys;
+pub mod records;
+
+pub use records::{
+    FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
+    PendingKeyDisableEntry, ProvisioningState, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
+    RevokePendingEntry,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainError;
 
 /// Which of the three identity kinds an [`Identity`] denotes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
     /// `hmn:` prefix — a human principal.
     Human,

@@ -21,6 +21,7 @@ ulid = { workspace = true }
 zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

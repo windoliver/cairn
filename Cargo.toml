@@ -40,6 +40,7 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 zeroize = { version = "1.7", default-features = false, features = ["zeroize_derive"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "zeroize", "rand_core"] }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
