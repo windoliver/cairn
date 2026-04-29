@@ -20,10 +20,15 @@
 -- mints a fresh session on next contact, rather than leaving zombie rows
 -- that look active but can never be resolved.
 --
--- Detection covers the three absolute-path forms `Path::is_absolute`
--- accepts on the platforms we ship: POSIX `/...`, Windows drive
--- (`X:\...`), and Windows UNC (`\\server\share`). Anything else stored
--- with a non-NULL `project_root` is treated as relative.
+-- Detection covers the absolute-path forms `Path::is_absolute` accepts
+-- on the platforms we ship: POSIX `/...`, Windows drive in either
+-- back-slash (`X:\...`) or forward-slash (`X:/...`) form, and Windows
+-- UNC (`\\server\share`). Both Windows drive spellings must be exempted
+-- because Rust's `Path::is_absolute` accepts `C:/repo` as absolute and
+-- `SessionIdentity::new` therefore lets it through; treating it as
+-- relative here would forcibly close a legitimate active session.
+-- Anything else stored with a non-NULL `project_root` is treated as
+-- relative.
 
 UPDATE sessions
    SET ended_at = strftime('%s','now') * 1000
@@ -31,7 +36,8 @@ UPDATE sessions
    AND project_root IS NOT NULL
    AND project_root NOT LIKE '/%'
    AND project_root NOT LIKE '\\%'
-   AND project_root NOT LIKE '_:\%';
+   AND project_root NOT LIKE '_:\%'
+   AND project_root NOT LIKE '_:/%';
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (14, '0014_sessions_close_relative_project_root', '', strftime('%s','now') * 1000);

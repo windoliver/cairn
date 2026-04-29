@@ -200,9 +200,14 @@ impl SessionIdentity {
 ///   UNC `\\server\share`) absolute forms. Relative paths are rejected
 ///   because two callers in different CWDs would otherwise share the same
 ///   `relative/path` string and collapse into one session.
-/// - Trims trailing `/` and `\` so `/repo`, `/repo/`, `C:\repo`, and
-///   `C:\repo\` collapse to one identity per platform. A lone `/` (POSIX
-///   root) or `C:\` (Windows drive root) is preserved.
+/// - Trims only trailing separators that are valid on the current
+///   platform (via [`std::path::is_separator`]). On POSIX that is `/`
+///   alone — `\` is a regular filename character there, so `/repo\`
+///   and `/repo` are distinct directories and must remain distinct
+///   sessions. On Windows both `/` and `\` count as separators, so
+///   `C:\repo`, `C:\repo\`, `C:/repo`, and `C:/repo/` all collapse to
+///   one identity. A lone `/` (POSIX root) or `C:\` (Windows drive
+///   root) is preserved.
 /// - Rejects whitespace-only paths.
 ///
 /// Filesystem canonicalization (symlink resolution, `..` collapse) is the
@@ -220,9 +225,13 @@ fn normalize_project_root(raw: &str) -> Result<String, DomainError> {
         });
     }
     // Trim trailing separators but keep enough that the path remains
-    // absolute. POSIX `/repo/` → `/repo`, `/` stays `/`. Windows `C:\repo\`
-    // → `C:\repo`, `C:\` stays `C:\`.
-    let trimmed = raw.trim_end_matches(['/', '\\']);
+    // absolute. POSIX `/repo/` → `/repo`, `/` stays `/`. Windows
+    // `C:\repo\` → `C:\repo`, `C:\` stays `C:\`. Use
+    // `std::path::is_separator` so `\` is *not* trimmed on POSIX
+    // (where it's a regular filename character) — otherwise `/repo\`
+    // and `/repo` would collapse to the same identity and break the
+    // `(user, agent, project_root)` isolation rule.
+    let trimmed = raw.trim_end_matches(std::path::is_separator);
     if trimmed.is_empty() || !std::path::Path::new(trimmed).is_absolute() {
         // Trimming removed the trailing separator that made the path
         // absolute (e.g. `/` → `` or `C:\` → `C:`). Keep the original
@@ -412,6 +421,24 @@ mod tests {
         let err = SessionIdentity::new(ident_user(), ident_agent(), Some("relative/path".into()))
             .unwrap_err();
         assert!(matches!(err, DomainError::InvalidProjectRoot { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_preserves_trailing_backslash_in_basename_on_posix() {
+        // On POSIX `\` is a regular filename character, not a separator.
+        // `/repo\` and `/repo` are different directories and must keep
+        // distinct identities — otherwise two unrelated projects can
+        // collapse into the same session row.
+        let with_bs = SessionIdentity::new(ident_user(), ident_agent(), Some("/repo\\".into()))
+            .expect("valid POSIX path with trailing \\\\ in basename");
+        let plain =
+            SessionIdentity::new(ident_user(), ident_agent(), Some("/repo".into())).expect("valid");
+        assert_ne!(
+            with_bs.project_root, plain.project_root,
+            "POSIX must preserve trailing backslash since it's a filename character there",
+        );
+        assert_eq!(with_bs.project_root.as_deref(), Some("/repo\\"));
     }
 
     #[test]

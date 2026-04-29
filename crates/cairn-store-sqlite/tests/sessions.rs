@@ -777,6 +777,7 @@ async fn migration_ends_active_rows_with_relative_project_root() {
             ("S_POSIX", "usr:abs1", "agt:cli:x:y:v1", Some("/abs/repo")),
             ("S_WIN", "usr:abs2", "agt:cli:x:y:v1", Some(r"C:\repo")),
             ("S_UNC", "usr:abs3", "agt:cli:x:y:v1", Some(r"\\srv\share")),
+            ("S_WINFWD", "usr:abs5", "agt:cli:x:y:v1", Some("C:/repo")),
             ("S_NULL", "usr:abs4", "agt:cli:x:y:v1", None),
         ] {
             conn.execute(
@@ -798,6 +799,7 @@ async fn migration_ends_active_rows_with_relative_project_root() {
         ("S_POSIX", "usr:abs1", Some("/abs/repo"), false),
         ("S_WIN", "usr:abs2", Some(r"C:\repo"), false),
         ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
+        ("S_WINFWD", "usr:abs5", Some("C:/repo"), false),
         ("S_NULL", "usr:abs4", None, false),
     ] {
         let sess = store
