@@ -840,18 +840,153 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         Ok(result)
     }
 
-    // ── Revocation two-phase tombstone stubs (C7) ─────────────────────────────
+    // ── Revocation two-phase tombstone (C7) ──────────────────────────────────
 
-    async fn begin_revocation(&self, _receipt: &RevocationReceipt) -> Result<(), RegistryError> {
-        unimplemented!("Task C7")
+    async fn begin_revocation(&self, receipt: &RevocationReceipt) -> Result<(), RegistryError> {
+        let now = Utc::now().to_rfc3339();
+        let target_str = receipt.payload.target.as_str().to_owned();
+
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Phase 1: transition identities row active → revoke_pending.
+        let rows_changed = tx
+            .execute(
+                "UPDATE identities \
+                 SET provisioning_state = 'revoke_pending', revoked_at = ?1 \
+                 WHERE id = ?2 AND provisioning_state = 'active'",
+                rusqlite::params![now, &target_str],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            // Distinguish NotFound from bad-state.
+            let existing_state: Option<String> = tx
+                .query_row(
+                    "SELECT provisioning_state FROM identities WHERE id = ?1",
+                    rusqlite::params![&target_str],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+            return match existing_state.as_deref() {
+                None => Err(RegistryError::NotFound),
+                Some(_) => Err(RegistryError::AlreadyRevoked {
+                    id: receipt.payload.target.clone(),
+                }),
+            };
+        }
+
+        // Insert the receipt row with pending_key_disable=1.
+        let payload_bytes = receipt
+            .payload
+            .canonical_json()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        tx.execute(
+            "INSERT INTO identity_receipts \
+             (op_kind, target_identity, signer_identity, signer_key_version, \
+              old_key_version, new_key_version, issued_at, signed_payload, \
+              signature, pending_key_disable) \
+             VALUES ('revocation', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+            rusqlite::params![
+                &target_str,
+                receipt.payload.signer.as_str(),
+                receipt.payload.signer_key_version.as_u32(),
+                receipt.payload.old_key_version.map(KeyVersion::as_u32),
+                receipt.payload.new_key_version.map(KeyVersion::as_u32),
+                receipt.payload.issued_at.to_rfc3339(),
+                payload_bytes,
+                &receipt.signature[..],
+            ],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let wal_payload = serde_json::to_vec(&receipt.payload)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "begin_revocation", &target_str, &wal_payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
-    async fn finalise_revocation(&self, _id: &Identity) -> Result<(), RegistryError> {
-        unimplemented!("Task C7")
+    async fn finalise_revocation(&self, id: &Identity) -> Result<(), RegistryError> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Phase 2: transition revoke_pending → revoked.
+        let rows_changed = tx
+            .execute(
+                "UPDATE identities \
+                 SET provisioning_state = 'revoked' \
+                 WHERE id = ?1 AND provisioning_state = 'revoke_pending'",
+                rusqlite::params![id.as_str()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+
+        // Clear the pending_key_disable flag on the matching receipt row(s).
+        tx.execute(
+            "UPDATE identity_receipts \
+             SET pending_key_disable = 0 \
+             WHERE target_identity = ?1 AND op_kind = 'revocation' AND pending_key_disable = 1",
+            rusqlite::params![id.as_str()],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let payload = id.as_str().as_bytes();
+        wal::wal_insert(&tx, "finalise_revocation", id.as_str(), payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_revoke_pending(&self) -> Result<Vec<RevokePendingEntry>, RegistryError> {
-        unimplemented!("Task C7")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ir.target_identity, i.revoked_at, ir.rowid \
+                 FROM identity_receipts ir \
+                 JOIN identities i ON i.id = ir.target_identity \
+                 WHERE i.provisioning_state = 'revoke_pending' \
+                   AND ir.op_kind = 'revocation' \
+                   AND ir.pending_key_disable = 1",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let entries = stmt
+            .query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let revoked_str: String = row.get(1)?;
+                let rowid: i64 = row.get(2)?;
+                Ok((id_str, revoked_str, rowid))
+            })
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let mut result = Vec::with_capacity(entries.len());
+        for (id_str, revoked_str, rowid) in entries {
+            let identity = Identity::parse(id_str).map_err(domain_err)?;
+            let revoked_at = chrono::DateTime::parse_from_rfc3339(&revoked_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            result.push(RevokePendingEntry {
+                identity,
+                revoked_at,
+                receipt_id: ReceiptId(rowid),
+            });
+        }
+        Ok(result)
     }
 
     // ── Two-phase purge tombstone stubs (C8) ──────────────────────────────────

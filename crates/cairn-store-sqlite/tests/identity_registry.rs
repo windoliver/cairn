@@ -4,13 +4,11 @@
 //! In-memory databases (C4 step 1/2) and `tempfile` on-disk databases
 //! (C4 step 2) are both used as appropriate.
 
-use cairn_core::contract::identity_registry::{
-    IdentityRegistry, IdentityVisibility, RegistryError,
-};
+use cairn_core::contract::identity_registry::{IdentityRegistry, IdentityVisibility, RegistryError};
 use cairn_core::domain::identity::{
     Identity, IdentityKind,
     keys::{IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash},
-    receipts::{ReceiptOpKind, ReceiptPayload, RotationReceipt},
+    receipts::{ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt},
     records::{IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId},
 };
 use cairn_store_sqlite::SqliteIdentityRegistry;
@@ -589,3 +587,139 @@ async fn pending_rotation_lifecycle() {
         "expected NotFound, got {err:?}"
     );
 }
+
+// ── C7 · revocation helpers ───────────────────────────────────────────────────
+
+/// Build a [`RevocationReceipt`] for `target` signed by `signing_key` owned
+/// by `signer_id` at `signer_key_version`.
+fn make_revocation_receipt(
+    target: &Identity,
+    signer_id: &Identity,
+    signer_key_version: KeyVersion,
+    signing_key: &SigningKey,
+) -> RevocationReceipt {
+    let payload = ReceiptPayload {
+        op_kind: ReceiptOpKind::Revocation,
+        target: target.clone(),
+        signer: signer_id.clone(),
+        signer_key_version,
+        old_key_version: Some(KeyVersion::FIRST),
+        new_key_version: None,
+        issued_at: chrono::Utc::now(),
+    };
+    let sig = payload.sign(signing_key).expect("sign revocation payload");
+    RevocationReceipt {
+        id: ReceiptId(0),
+        payload,
+        signature: sig.to_bytes().to_vec(),
+        pending_key_disable: true,
+    }
+}
+
+// ── C7 · begin_revocation transitions to revoke_pending ──────────────────────
+
+/// `begin_revocation` must transition an `active` identity to `revoke_pending`
+/// and insert a receipt row with `pending_key_disable = 1`.
+#[tokio::test]
+async fn begin_revocation_transitions_to_revoke_pending() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let receipt = make_revocation_receipt(&alice, &alice, KeyVersion::FIRST, &sk);
+    r.begin_revocation(&receipt)
+        .await
+        .expect("begin_revocation should succeed");
+
+    // Identity must now be revoke_pending (visible under Audit).
+    let rec = r
+        .get_identity(&alice, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity")
+        .expect("alice must exist");
+    assert_eq!(
+        rec.provisioning_state,
+        ProvisioningState::RevokePending,
+        "state must be revoke_pending"
+    );
+    assert!(rec.revoked_at.is_some(), "revoked_at must be set");
+
+    // list_revoke_pending must include alice.
+    let pending = r.list_revoke_pending().await.expect("list_revoke_pending");
+    assert!(
+        pending.iter().any(|e| e.identity == alice),
+        "alice must appear in revoke_pending list"
+    );
+}
+
+// ── C7 · finalise_revocation sets revoked and clears flag ────────────────────
+
+/// `finalise_revocation` after `begin_revocation` must move state to `Revoked`
+/// and clear `pending_key_disable`. `list_revoke_pending` must then be empty.
+#[tokio::test]
+async fn finalise_revocation_sets_revoked_and_clears_flag() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let receipt = make_revocation_receipt(&alice, &alice, KeyVersion::FIRST, &sk);
+    r.begin_revocation(&receipt)
+        .await
+        .expect("begin_revocation");
+
+    r.finalise_revocation(&alice)
+        .await
+        .expect("finalise_revocation");
+
+    // Audit visibility must show Revoked state.
+    let rec = r
+        .get_identity(&alice, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity")
+        .expect("alice must still exist");
+    assert_eq!(
+        rec.provisioning_state,
+        ProvisioningState::Revoked,
+        "state must be Revoked after finalise"
+    );
+
+    // list_revoke_pending must be empty.
+    let pending = r
+        .list_revoke_pending()
+        .await
+        .expect("list_revoke_pending after finalise");
+    assert!(
+        pending.is_empty(),
+        "list_revoke_pending must be empty after finalise"
+    );
+}
+
+// ── C7 · begin_revocation rejects non-active state ───────────────────────────
+
+/// `begin_revocation` on a `pending` identity must return `AlreadyRevoked`
+/// (or an equivalent rejection error), since only `active` identities can be
+/// revoked.
+#[tokio::test]
+async fn begin_revocation_rejects_non_active() {
+    let (r, _dir) = setup_first_bound_registry().await;
+
+    // Reserve a new identity (pending state, not active).
+    let id = Identity::parse("hmn:pending-target").expect("valid identity");
+    let (record, key) = make_record_and_key(&id);
+    r.reserve_identity(&record, &key)
+        .await
+        .expect("reserve_identity");
+
+    let mut rng = rand_core::OsRng;
+    let sk = SigningKey::generate(&mut rng);
+    let receipt = make_revocation_receipt(&id, &id, KeyVersion::FIRST, &sk);
+
+    let err = r
+        .begin_revocation(&receipt)
+        .await
+        .expect_err("begin_revocation on pending identity must fail");
+    assert!(
+        matches!(
+            err,
+            RegistryError::AlreadyRevoked { .. } | RegistryError::NotFound
+        ),
+        "expected AlreadyRevoked or NotFound, got {err:?}"
+    );
+}
+
