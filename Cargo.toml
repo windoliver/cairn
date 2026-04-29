@@ -24,6 +24,7 @@ async-trait = "0.1"
 rmcp = { version = "1.5.0", default-features = false, features = ["server", "transport-io"] }
 insta = { version = "1.40", features = ["json", "yaml"] }
 jsonschema = { version = "0.46", default-features = false }
+referencing = { version = "0.46", default-features = false }
 proptest = "1"
 rstest = "0.23"
 tempfile = "3"
@@ -32,11 +33,17 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 figment = { version = "0.10", features = ["yaml", "env"] }
 regex = { version = "1", default-features = false, features = ["std"] }
 serde_yaml = "0.9"
+unicode-normalization = "0.1"
 temp-env = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
+rusqlite_migration = "1"
 ulid = { version = "1.1", default-features = false, features = ["std"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+blake3 = { version = "1.5", default-features = false }
+bon = "3.7"
+tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
+walkdir = "2"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
@@ -48,6 +55,7 @@ cairn-sensors-local = { path = "crates/cairn-sensors-local", version = "0.0.1" }
 cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
 cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
+cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

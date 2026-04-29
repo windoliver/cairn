@@ -38,6 +38,18 @@ pub trait LLMProvider: Send + Sync {
     fn supported_contract_versions(&self) -> VersionRange;
 }
 
+/// Static identity descriptor for a [`LLMProvider`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+pub trait LLMProviderPlugin: LLMProvider + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,7 +59,7 @@ mod tests {
     #[async_trait::async_trait]
     impl LLMProvider for StubLlm {
         fn name(&self) -> &'static str {
-            "stub-llm"
+            Self::NAME
         }
         fn capabilities(&self) -> &LLMProviderCapabilities {
             static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
@@ -58,8 +70,14 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            Self::SUPPORTED_VERSIONS
         }
+    }
+
+    impl LLMProviderPlugin for StubLlm {
+        const NAME: &'static str = "stub-llm";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     #[test]
@@ -67,5 +85,11 @@ mod tests {
         let l: Box<dyn LLMProvider> = Box::new(StubLlm);
         assert_eq!(l.name(), "stub-llm");
         assert!(l.supported_contract_versions().accepts(CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn static_consts_accessible() {
+        assert_eq!(StubLlm::NAME, "stub-llm");
+        assert!(StubLlm::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
     }
 }

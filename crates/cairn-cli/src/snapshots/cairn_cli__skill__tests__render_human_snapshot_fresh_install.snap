@@ -1,0 +1,13 @@
+---
+source: crates/cairn-cli/src/skill.rs
+expression: render_human(&receipt)
+---
+cairn skill install: skill bundle installed at /home/user/.cairn/skills/cairn
+  SKILL.md  [created]
+  conventions.md  [created]
+  .version  [created]
+  01-remember-preference.md  [created]
+
+Registration hint:
+  # Add to your CLAUDE.md:
+  @~/.cairn/skills/cairn/SKILL.md

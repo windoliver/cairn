@@ -45,12 +45,13 @@ credentials required.
 ## 3. Workspace topology
 
 Rust workspace, edition 2024, resolver 3, toolchain pinned to `1.95.0`
-(`rust-toolchain.toml`). Eight crates under `crates/`:
+(`rust-toolchain.toml`). Crates under `crates/`:
 
 | Crate | Role |
 |---|---|
 | `cairn-core` | Traits, generated types, pure pipeline functions, error enums. **No I/O. No adapter deps.** |
 | `cairn-cli` | Terminal entry point (`cairn` binary). Wires adapters into the verb layer. |
+| `cairn-sdk` | Typed in-process SDK surface over the eight verbs + `status`/`handshake`. Depends on `cairn-core` only. |
 | `cairn-mcp` | MCP adapter (stdio/HTTP). ~300 LOC wrapper over verbs. |
 | `cairn-store-sqlite` | SQLite + FTS5 + sqlite-vec record store. |
 | `cairn-sensors-local` | Local sensors (hooks, IDE, terminal, clipboard, voice, screen). |
@@ -317,6 +318,8 @@ cargo test --doc --workspace --locked
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
 
 # docs.yml
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+mdbook build docs/site
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
   cargo doc --workspace --no-deps --document-private-items --locked
 
@@ -334,6 +337,11 @@ cargo publish --dry-run --locked --allow-dirty -p cairn-core
 A PR that touches generated code must also re-run `cargo run -p cairn-idl
 --bin cairn-codegen` and commit the result.
 
+A PR that touches CLI flags, config defaults, bundled plugins, IDL/MCP
+metadata, workspace package membership, or user-facing docs must also re-run
+`cargo run -p cairn-cli --bin cairn-docgen -- --write` and commit the generated
+Markdown under `docs/site/src/reference/generated/`.
+
 ---
 
 ## 9. Commit & PR etiquette
@@ -349,8 +357,8 @@ A PR that touches generated code must also re-run `cargo run -p cairn-idl
 - **MSRV:** declared in `[workspace.package] rust-version = "1.95.0"`. Bumping
   MSRV is a minor-version release and must be called out in the PR + changelog.
 - **Publish order** (when we ship to crates.io): leaf crates first —
-  `cairn-idl`, `cairn-core`, `cairn-test-fixtures` — then adapters
-  (`cairn-store-sqlite`, `cairn-sensors-local`, `cairn-mcp`,
+  `cairn-idl`, `cairn-core`, `cairn-test-fixtures` — then `cairn-sdk`,
+  then adapters (`cairn-store-sqlite`, `cairn-sensors-local`, `cairn-mcp`,
   `cairn-workflows`), finally `cairn-cli`. Dry-run with
   `cargo publish --dry-run`.
 
@@ -368,6 +376,7 @@ cairn/
 ├── crates/
 │   ├── cairn-core/                 ← traits, pure pipeline, errors (no I/O)
 │   ├── cairn-cli/                  ← `cairn` binary
+│   ├── cairn-sdk/                  ← typed in-process SDK over the verbs
 │   ├── cairn-mcp/                  ← MCP stdio/http adapter
 │   ├── cairn-store-sqlite/         ← SQLite + FTS5 + sqlite-vec
 │   ├── cairn-sensors-local/        ← hooks/IDE/term/clipboard/voice/screen

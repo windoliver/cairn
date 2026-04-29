@@ -117,6 +117,21 @@ pub enum PluginError {
         /// The name the manifest actually declares.
         manifest: PluginName,
     },
+
+    /// A config-driven factory closure returned an error during plugin construction.
+    ///
+    /// The source is boxed to break the circular type reference with `ConfigError`
+    /// (which already contains `PluginError` via `InvalidPluginName`).
+    #[error("plugin {plugin} for contract {contract} failed to construct: {source}")]
+    FactoryError {
+        /// Contract under which construction was attempted.
+        contract: &'static str,
+        /// The plugin being constructed.
+        plugin: PluginName,
+        /// The underlying construction error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
 use crate::contract::{
@@ -527,7 +542,13 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+    use crate::contract::llm_provider::LLMProviderPlugin;
+    use crate::contract::memory_store::{
+        CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
+        ListPage, MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin, RecordVersion,
+        StoreError, TombstoneReason, UpsertOutcome,
+    };
+    use crate::domain::{MemoryRecord, RecordId, TargetId};
 
     // -- PluginName tests -------------------------------------------------
 
@@ -594,14 +615,53 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             self.range
         }
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            Err("stub: upsert not implemented".into())
+        }
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            Ok(None)
+        }
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            Ok(ListPage {
+                records: vec![],
+                next_cursor: None,
+            })
+        }
+        async fn tombstone(&self, _id: &RecordId, _r: TombstoneReason) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn versions(&self, _t: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            Ok(vec![])
+        }
+        async fn put_edge(&self, _e: &Edge) -> Result<(), StoreError> {
+            Ok(())
+        }
+        async fn remove_edge(&self, _k: &EdgeKey) -> Result<bool, StoreError> {
+            Ok(false)
+        }
+        async fn neighbours(&self, _id: &RecordId, _d: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            Ok(vec![])
+        }
+        async fn search_keyword(
+            &self,
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            Err("stub: search_keyword not implemented".into())
+        }
+    }
+
+    impl MemoryStorePlugin for StubStore {
+        const NAME: &'static str = "stub-store";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0));
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 3, 0))
     }
 
     fn incompatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
+        VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0))
     }
 
     #[test]
@@ -698,12 +758,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 1
+minor = 2
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 "#
     }
@@ -756,6 +816,11 @@ patch = 0
             fn supported_contract_versions(&self) -> VersionRange {
                 self.range
             }
+        }
+        impl LLMProviderPlugin for StubLlm {
+            const NAME: &'static str = "cairn-store-sqlite";
+            const SUPPORTED_VERSIONS: VersionRange =
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
         }
 
         let mut reg = PluginRegistry::new();
@@ -830,6 +895,11 @@ patch = 0
                 self.range
             }
         }
+        impl LLMProviderPlugin for StubLlm {
+            const NAME: &'static str = "cairn-store-sqlite";
+            const SUPPORTED_VERSIONS: VersionRange =
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+        }
 
         let llm_manifest_text = r#"
 name = "cairn-store-sqlite"
@@ -873,5 +943,30 @@ patch = 0
             )
             .expect_err("cross-contract duplicate must fail");
         assert!(matches!(err, PluginError::DuplicateName { .. }));
+    }
+
+    #[test]
+    fn factory_error_display() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct FakeErr;
+        impl fmt::Display for FakeErr {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "db open failed")
+            }
+        }
+        impl std::error::Error for FakeErr {}
+
+        let err = PluginError::FactoryError {
+            contract: "MemoryStore",
+            plugin: PluginName::new("some-store").unwrap(),
+            source: Box::new(FakeErr),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("some-store"), "message: {msg}");
+        assert!(msg.contains("db open failed"), "message: {msg}");
+        assert!(err.source().is_some());
     }
 }

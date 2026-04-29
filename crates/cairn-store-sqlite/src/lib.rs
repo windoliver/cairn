@@ -1,14 +1,26 @@
-//! `SQLite` record store for Cairn (P0 scaffold).
+//! `SQLite` record store for Cairn.
 //!
-//! Schema, migrations, FTS5 and sqlite-vec integration arrive in
-//! follow-up issues (#46 and later). For now this crate ships only the
-//! plugin manifest, a stub `MemoryStore` impl with all capability flags
-//! `false`, and a `register()` entry point so the host can include it
-//! in `cairn plugins list/verify`.
+//! Async-fronted via `tokio_rusqlite`. Every `MemoryStore` trait method is
+//! one `conn.call(|c| { … })` round-trip on a dedicated DB thread. Records
+//! persist as a `record_json` blob plus denormalized hot columns; the WAL
+//! state machine (#8) lives at the verb layer.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
-use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
+pub mod error;
+pub mod migrations;
+pub mod open;
+pub mod store;
+mod verify;
+
+pub use error::StoreError;
+pub use open::{open, open_in_memory};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use open::{open_in_memory_sync, open_sync};
+pub use store::SqliteMemoryStore;
+pub use store::tx::StoreTx;
+
+use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
 
@@ -18,37 +30,11 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts. Shared by the trait impl and
-/// the compile-time guard below so the manifest range and the trait surface
-/// derive from one binding.
+/// Contract-version range this crate accepts (`[0.2.0, 0.3.0)`). Shared by
+/// the trait impl and the compile-time guard below so the manifest range
+/// and the trait surface derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
-
-/// P0 stub `MemoryStore`. All capability flags are `false`; verb methods
-/// land with the storage implementation in #46.
-#[derive(Default)]
-pub struct SqliteMemoryStore;
-
-#[async_trait::async_trait]
-impl MemoryStore for SqliteMemoryStore {
-    fn name(&self) -> &str {
-        PLUGIN_NAME
-    }
-
-    fn capabilities(&self) -> &MemoryStoreCapabilities {
-        static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-            fts: false,
-            vector: false,
-            graph_edges: false,
-            transactions: false,
-        };
-        &CAPS
-    }
-
-    fn supported_contract_versions(&self) -> VersionRange {
-        ACCEPTED_RANGE
-    }
-}
+    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

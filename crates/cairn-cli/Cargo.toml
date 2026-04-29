@@ -9,19 +9,26 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 description = "Cairn terminal entry point. Wires adapters into the verb layer."
+default-run = "cairn"
 
 [[bin]]
 name = "cairn"
 path = "src/main.rs"
 
+[[bin]]
+name = "cairn-docgen"
+path = "src/bin/cairn-docgen.rs"
+
 [dependencies]
 cairn-core = { workspace = true }
+cairn-idl = { workspace = true }
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
 figment = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
@@ -29,11 +36,13 @@ serde_json = { workspace = true }
 ulid = { workspace = true }
 base64 = { workspace = true }
 serde_yaml = { workspace = true }
-tokio = { workspace = true }
+toml = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
+cairn-sdk = { workspace = true }
 cairn-test-fixtures = { workspace = true }
 insta = { workspace = true }
 async-trait = { workspace = true }
