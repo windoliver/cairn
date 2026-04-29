@@ -1023,3 +1023,274 @@ async fn purge_full_path_lands_purged() {
         "signing key must be evicted after purge; got: {result:?}",
     );
 }
+
+// ── D8 helpers ────────────────────────────────────────────────────────────────
+
+/// Build an orphan pending row for `id_str` in `registry` — no keypair stored.
+///
+/// Used by `repair` and `reconcile` tests to simulate a crash between
+/// `reserve_identity` and `store_keypair`.
+async fn insert_orphan_pending(
+    registry: &cairn_store_sqlite::SqliteIdentityRegistry,
+    id_str: &str,
+) -> Identity {
+    let id = Identity::parse(id_str).expect("valid identity string");
+    let (record, key) = make_record_and_key(&id);
+    registry
+        .reserve_identity(&record, &key)
+        .await
+        .expect("reserve_identity for orphan pending");
+    id
+}
+
+// ── D8 tests ──────────────────────────────────────────────────────────────────
+
+/// `repair` must delete an orphan pending row (pending row exists but no
+/// keypair is in the keystore) and leave no pending rows behind.
+///
+/// Simulates a crash between `reserve_identity` and `store_keypair`.
+#[tokio::test]
+async fn repair_deletes_orphan_pending() {
+    use std::sync::Arc;
+
+    use cairn_test_fixtures::MemoryKeystore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    let registry = cairn_store_sqlite::SqliteIdentityRegistry::open_in_memory()
+        .expect("open in-memory registry");
+    let vault_id = VaultId::mint();
+    let keystore = MemoryKeystore::new();
+
+    // First-bind so vault_meta is present.
+    let sys_id = Identity::parse("hmn:system:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind for system identity");
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    // Insert an orphan pending row for alice — no keypair in keystore.
+    let alice_id = insert_orphan_pending(&registry, "hmn:alice:v1").await;
+
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id,
+        Arc::new(registry),
+        Arc::new(keystore),
+    );
+
+    svc.repair(&alice_id).await.expect("repair must succeed");
+
+    // The orphan pending row must be gone.
+    let remaining = svc
+        .registry
+        .list_pending_by_identity(&alice_id)
+        .await
+        .expect("list_pending_by_identity");
+    assert!(
+        remaining.is_empty(),
+        "orphan pending row must be deleted by repair; got: {remaining:?}",
+    );
+}
+
+/// `reconcile` must handle multiple orphan pending rows across distinct
+/// identities by deleting all of them in a single call.
+#[tokio::test]
+async fn reconcile_handles_multiple_orphans() {
+    use std::sync::Arc;
+
+    use cairn_test_fixtures::MemoryKeystore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    let registry = cairn_store_sqlite::SqliteIdentityRegistry::open_in_memory()
+        .expect("open in-memory registry");
+    let vault_id = VaultId::mint();
+    let keystore = MemoryKeystore::new();
+
+    // First-bind.
+    let sys_id = Identity::parse("hmn:system:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind for system identity");
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    // Two orphan pending rows for distinct identities.
+    let bob_id = insert_orphan_pending(&registry, "hmn:bob:v1").await;
+    let carol_id = insert_orphan_pending(&registry, "hmn:carol:v1").await;
+
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id,
+        Arc::new(registry),
+        Arc::new(keystore),
+    );
+
+    svc.reconcile().await.expect("reconcile must succeed");
+
+    // Both orphan pending rows must be gone.
+    let bob_remaining = svc
+        .registry
+        .list_pending_by_identity(&bob_id)
+        .await
+        .expect("list_pending_by_identity bob");
+    let carol_remaining = svc
+        .registry
+        .list_pending_by_identity(&carol_id)
+        .await
+        .expect("list_pending_by_identity carol");
+    assert!(
+        bob_remaining.is_empty(),
+        "bob orphan must be deleted; got: {bob_remaining:?}",
+    );
+    assert!(
+        carol_remaining.is_empty(),
+        "carol orphan must be deleted; got: {carol_remaining:?}",
+    );
+}
+
+/// `vault_id_recover` must recreate `.cairn/vault.id` and rewrite
+/// `.cairn/vault.binding` when the DB has a consistent `vault_meta`.
+///
+/// Simulates the common crash: `vault.id` was deleted or corrupted after a
+/// fully-committed first-bind.
+#[tokio::test]
+async fn vault_id_recover_writes_file_when_db_has_meta() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault_id = setup_vault_with_first_bind(&dir).await;
+
+    // `setup_vault_with_first_bind` uses a raw `reserve_first_identity` call
+    // (not the full `commit_first_identity`) so `vault.binding.pending` is
+    // still present.  Remove it to simulate a post-bind crash where only the
+    // sentinel was lost, not the DB state.
+    let pending_path = dir.path().join(".cairn/vault.binding.pending");
+    if pending_path.exists() {
+        fs::remove_file(&pending_path).expect("remove vault.binding.pending");
+    }
+
+    // Delete vault.id to simulate the crash we're recovering from.
+    let vault_id_path = dir.path().join(".cairn/vault.id");
+    fs::remove_file(&vault_id_path).expect("remove vault.id");
+    assert!(
+        !vault_id_path.exists(),
+        "vault.id must be absent before recovery"
+    );
+
+    // Also delete vault.binding so we can verify it gets rewritten.
+    let binding_path = dir.path().join(".cairn/vault.binding");
+    if binding_path.exists() {
+        fs::remove_file(&binding_path).expect("remove vault.binding");
+    }
+
+    let recovered = cairn_cli::identity::vault_id_recover(dir.path().to_path_buf(), false, None)
+        .await
+        .expect("vault_id_recover must succeed when DB has vault_meta");
+
+    // The recovered vault_id must match the original.
+    assert_eq!(
+        recovered.as_str(),
+        vault_id.as_str(),
+        "recovered vault_id must match the original",
+    );
+
+    // vault.id must now exist and contain the correct id.
+    let written = fs::read_to_string(&vault_id_path).expect("read vault.id after recovery");
+    assert_eq!(
+        written.trim(),
+        vault_id.as_str(),
+        "vault.id must contain the vault_id"
+    );
+}
+
+/// `finalise_binding` must rename `.cairn/vault.binding.pending` to
+/// `.cairn/vault.binding` when both the pending file and the DB's
+/// `vault_meta` are consistent.
+///
+/// Simulates the most common crash in `commit_first_identity`: a process
+/// kill after `reserve_first_identity` but before step 4 (writing
+/// `vault.binding` and removing the pending sentinel).
+#[tokio::test]
+async fn finalise_binding_renames_pending_when_db_consistent() {
+    use cairn_core::contract::identity_registry::IdentityRegistry as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    // Build a real registry and write vault_meta via reserve_first_identity.
+    let registry = cairn_store_sqlite::SqliteIdentityRegistry::open(&cairn_dir.join("cairn.db"))
+        .expect("open registry");
+
+    // Write a witness file with known content.
+    let witness_bytes = [0x42u8; 32];
+    let pending_path = cairn_dir.join("vault.binding.pending");
+    fs::write(&pending_path, witness_bytes).expect("write vault.binding.pending");
+    let hash = WitnessHash::from_witness(&witness_bytes);
+
+    let vault_id = VaultId::mint();
+    let id = Identity::parse("hmn:tester:v1").expect("valid");
+    let (record, key) = make_record_and_key(&id);
+    registry
+        .reserve_first_identity(&vault_id, &record, &key, hash, &pending_path)
+        .await
+        .expect("reserve_first_identity");
+
+    // Vault is now in the "crash state": pending exists, binding absent.
+    let binding_path = cairn_dir.join("vault.binding");
+    assert!(pending_path.exists(), "pending sentinel must exist");
+    assert!(!binding_path.exists(), "final binding must NOT exist yet");
+
+    // Run finalise_binding without abandoning.
+    cairn_cli::identity::finalise_binding(dir.path().to_path_buf(), false, None)
+        .await
+        .expect("finalise_binding must succeed");
+
+    // Post-conditions: binding exists, pending is gone, vault_id matches.
+    assert!(
+        binding_path.exists(),
+        "vault.binding must exist after finalise_binding",
+    );
+    assert!(
+        !pending_path.exists(),
+        "vault.binding.pending must be removed after finalise_binding",
+    );
+
+    // vault.id must have been written.
+    let vault_id_path = cairn_dir.join("vault.id");
+    let written = fs::read_to_string(&vault_id_path).expect("read vault.id");
+    assert_eq!(
+        written.trim(),
+        vault_id.as_str(),
+        "vault.id must contain the correct vault_id",
+    );
+}

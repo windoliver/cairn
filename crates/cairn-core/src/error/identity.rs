@@ -142,6 +142,25 @@ pub enum IdentityServiceError {
     /// `.cairn/maintenance/purge-ack` to confirm intentional data erasure.
     #[error("purge acknowledgement file missing or does not match identity")]
     PurgeAckMissing,
+
+    /// A partial first-bind requires re-running `provision` to complete.
+    ///
+    /// The crash state cannot be automatically recovered because either the
+    /// signing key material was not yet stored in the keystore, or the
+    /// witness file does not match the committed hash. Re-run
+    /// `cairn identity provision` to start a fresh first-bind.
+    #[error(
+        "partial first-bind cannot be automatically recovered — re-run `cairn identity provision`"
+    )]
+    PartialBindNeedsProvision,
+
+    /// The keychain probe found more than one vault namespace.
+    ///
+    /// `vault-id-recover --probe-keychain` discovered multiple `cairn:*`
+    /// namespaces in the OS keystore.  Pass `--vault-id <id>` explicitly to
+    /// disambiguate.
+    #[error("keychain probe found multiple vault namespaces — pass --vault-id to disambiguate")]
+    AmbiguousVaultNamespaces,
 }
 
 #[cfg(test)]
