@@ -9,8 +9,9 @@ use cairn_core::contract::identity_registry::{
 };
 use cairn_core::domain::identity::{
     Identity, IdentityKind,
-    keys::{IdentityRevision, KeyVersion, VaultId, WitnessHash},
-    records::{IdentityKeyEntry, ProvisioningState, PublicIdentityRecord},
+    keys::{IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash},
+    receipts::{ReceiptOpKind, ReceiptPayload, RotationReceipt},
+    records::{IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId},
 };
 use cairn_store_sqlite::SqliteIdentityRegistry;
 
@@ -343,4 +344,248 @@ async fn get_identity_with_visibility_filter() {
         .expect("pending identity must appear under IncludingPending");
     assert_eq!(visible.provisioning_state, ProvisioningState::Pending);
     assert_eq!(visible.id, id);
+}
+
+// ── C6 · rotation helpers ─────────────────────────────────────────────────────
+
+/// Build a `RotationReceipt` for `target` with the given key versions, signed
+/// by `signing_key` owned by `signer_id`.
+fn make_rotation_receipt(
+    target: &Identity,
+    signer_key_version: KeyVersion,
+    old_key_version: KeyVersion,
+    new_key_version: KeyVersion,
+    signing_key: &SigningKey,
+    signer_id: &Identity,
+) -> RotationReceipt {
+    let payload = ReceiptPayload {
+        op_kind: ReceiptOpKind::Rotation,
+        target: target.clone(),
+        signer: signer_id.clone(),
+        signer_key_version,
+        old_key_version: Some(old_key_version),
+        new_key_version: Some(new_key_version),
+        issued_at: chrono::Utc::now(),
+    };
+    let sig = payload.sign(signing_key).expect("sign payload");
+    RotationReceipt {
+        id: ReceiptId(0),
+        payload,
+        signature: sig.to_bytes().to_vec(),
+        pending_eviction: false,
+    }
+}
+
+/// Build an `IdentityKeyEntry` for `identity` at `key_version` using the
+/// verifying key bytes from `signing_key`.
+fn make_key_entry(
+    identity: &Identity,
+    key_version: KeyVersion,
+    signing_key: &SigningKey,
+) -> IdentityKeyEntry {
+    let vk = signing_key.verifying_key();
+    IdentityKeyEntry {
+        identity_id: identity.clone(),
+        key_version,
+        public_key: vk.to_bytes(),
+        signed_predecessor: None,
+        created_at: chrono::Utc::now(),
+        superseded_at: None,
+    }
+}
+
+/// Set up a registry with an active identity `hmn:alice` at key v1 and the
+/// signing key used for that identity.  Returns `(registry, tempdir,
+/// alice_identity, alice_signing_key)`.
+async fn setup_active_identity() -> (
+    SqliteIdentityRegistry,
+    tempfile::TempDir,
+    Identity,
+    SigningKey,
+) {
+    let (r, dir) = setup_first_bound_registry().await;
+
+    // Activate the first-bound identity so we can reserve a second one.
+    let first = Identity::parse("hmn:first").expect("valid identity");
+    r.activate_identity(&first, KeyVersion::FIRST)
+        .await
+        .expect("activate hmn:first");
+
+    // Reserve + activate hmn:alice.
+    let alice = Identity::parse("hmn:alice").expect("valid identity");
+    let mut rng = rand_core::OsRng;
+    let sk = SigningKey::generate(&mut rng);
+    let (record, key) = {
+        let now = chrono::Utc::now();
+        let record = PublicIdentityRecord {
+            id: alice.clone(),
+            kind: IdentityKind::Human,
+            current_key_version: KeyVersion::FIRST,
+            revision: IdentityRevision::FIRST,
+            provisioning_state: ProvisioningState::Pending,
+            created_at: now,
+            activated_at: None,
+            revoked_at: None,
+            purge_requested_at: None,
+            purged_at: None,
+        };
+        let key = IdentityKeyEntry {
+            identity_id: alice.clone(),
+            key_version: KeyVersion::FIRST,
+            public_key: sk.verifying_key().to_bytes(),
+            signed_predecessor: None,
+            created_at: now,
+            superseded_at: None,
+        };
+        (record, key)
+    };
+    r.reserve_identity(&record, &key)
+        .await
+        .expect("reserve hmn:alice");
+    r.activate_identity(&alice, KeyVersion::FIRST)
+        .await
+        .expect("activate hmn:alice");
+
+    (r, dir, alice, sk)
+}
+
+// ── C6 · apply_rotation CAS rejects stale expected_current ───────────────────
+
+/// `apply_rotation` with `expected_current` = v2 when the registry holds v1
+/// must return `KeyVersionConflict`.
+#[tokio::test]
+async fn apply_rotation_cas_rejects_stale_observed() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let v1 = KeyVersion::FIRST;
+    let v2 = v1.next().expect("v2");
+    let v3 = v2.next().expect("v3");
+
+    // Build a receipt claiming to rotate from v2→v3, but the registry has v1.
+    let receipt = make_rotation_receipt(&alice, v1, v2, v3, &sk, &alice);
+    let new_key = make_key_entry(&alice, v3, &sk);
+
+    // Supply expected_current=v2 which is stale (registry holds v1).
+    let err = r
+        .apply_rotation(&receipt, v2, &new_key)
+        .await
+        .expect_err("should fail with KeyVersionConflict");
+    assert!(
+        matches!(err, RegistryError::KeyVersionConflict { .. }),
+        "expected KeyVersionConflict, got {err:?}"
+    );
+}
+
+// ── C6 · apply_rotation happy path ───────────────────────────────────────────
+
+/// Full rotation v1→v2: asserts `current_key_version` advanced, predecessor
+/// `superseded_at` is set, new `identity_keys` row exists, receipt row is
+/// written, and `pending_rotations` is cleared.
+#[tokio::test]
+async fn apply_rotation_happy_path() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let v1 = KeyVersion::FIRST;
+    let v2 = v1.next().expect("v2");
+
+    // Insert a pending_rotation intent first (apply_rotation should clear it).
+    r.insert_pending_rotation(&alice, v2, "test-handle")
+        .await
+        .expect("insert_pending_rotation");
+    assert_eq!(
+        r.list_pending_rotations(&alice).await.expect("list").len(),
+        1,
+        "pending rotation should be present"
+    );
+
+    // Build the rotation receipt and new key.
+    let mut rng = rand_core::OsRng;
+    let new_sk = SigningKey::generate(&mut rng);
+    let receipt = make_rotation_receipt(&alice, v1, v1, v2, &sk, &alice);
+    let new_key = make_key_entry(&alice, v2, &new_sk);
+
+    r.apply_rotation(&receipt, v1, &new_key)
+        .await
+        .expect("apply_rotation");
+
+    // current_key_version must have advanced to v2.
+    let rec = r
+        .get_identity(&alice, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity")
+        .expect("alice must exist");
+    assert_eq!(
+        rec.current_key_version, v2,
+        "current_key_version should be v2"
+    );
+
+    // Both key versions must appear in list_keys; v1 must be superseded.
+    let keys = r.list_keys(&alice).await.expect("list_keys");
+    assert_eq!(keys.len(), 2, "two key rows expected");
+    let k1 = keys.iter().find(|k| k.key_version == v1).expect("v1 key");
+    assert!(k1.superseded_at.is_some(), "v1 must be superseded");
+    let k2 = keys.iter().find(|k| k.key_version == v2).expect("v2 key");
+    assert!(k2.superseded_at.is_none(), "v2 must not be superseded yet");
+
+    // pending_rotations must be empty after apply.
+    let pending = r
+        .list_pending_rotations(&alice)
+        .await
+        .expect("list after rotation");
+    assert!(pending.is_empty(), "pending_rotations must be cleared");
+}
+
+// ── C6 · pending_rotation lifecycle ──────────────────────────────────────────
+
+/// Insert a pending rotation, verify it appears in `list_pending_rotations`,
+/// then delete it and verify the list is empty.
+#[tokio::test]
+async fn pending_rotation_lifecycle() {
+    let (r, _dir, alice, _sk) = setup_active_identity().await;
+
+    let v2 = KeyVersion::FIRST.next().expect("v2");
+
+    // Initially empty.
+    let before = r
+        .list_pending_rotations(&alice)
+        .await
+        .expect("list before insert");
+    assert!(before.is_empty(), "no pending rotations initially");
+
+    // Insert.
+    r.insert_pending_rotation(&alice, v2, "my-handle")
+        .await
+        .expect("insert_pending_rotation");
+
+    let after_insert = r
+        .list_pending_rotations(&alice)
+        .await
+        .expect("list after insert");
+    assert_eq!(after_insert.len(), 1);
+    assert_eq!(after_insert[0].0, v2);
+    assert_eq!(after_insert[0].1, "my-handle");
+
+    // Delete.
+    r.delete_pending_rotation(&alice, v2)
+        .await
+        .expect("delete_pending_rotation");
+
+    let after_delete = r
+        .list_pending_rotations(&alice)
+        .await
+        .expect("list after delete");
+    assert!(
+        after_delete.is_empty(),
+        "pending rotation cleared after delete"
+    );
+
+    // Second delete must return NotFound.
+    let err = r
+        .delete_pending_rotation(&alice, v2)
+        .await
+        .expect_err("second delete should fail");
+    assert!(
+        matches!(err, RegistryError::NotFound),
+        "expected NotFound, got {err:?}"
+    );
 }
