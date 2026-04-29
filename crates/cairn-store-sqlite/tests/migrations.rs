@@ -193,9 +193,10 @@ fn consent_journal_kind_domain_enforced() {
         .execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
-               kind, decided_at_iso) \
+               kind, actor, decided_at_iso, payload_json) \
              VALUES ('c1', 's1', 'private', 'GRANT', 'usr:t', 0, \
-                     'not_a_kind', '2026-04-28T12:00:00Z')",
+                     'not_a_kind', 'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
             [],
         )
         .unwrap_err();
@@ -208,22 +209,24 @@ fn consent_journal_kind_domain_enforced() {
 #[test]
 fn consent_journal_accepts_known_kinds() {
     let conn = open_in_memory().expect("open");
-    for kind in [
-        "sensor_enable",
-        "sensor_disable",
-        "policy_change",
-        "remember_intent",
-        "forget_intent",
-        "grant",
-        "revoke",
-        "promote_receipt",
-    ] {
+    let cases: &[(&str, &str)] = &[
+        ("sensor_enable", r#"{"shape":"sensor_toggle"}"#),
+        ("sensor_disable", r#"{"shape":"sensor_toggle"}"#),
+        ("policy_change", r#"{"shape":"policy_delta"}"#),
+        ("remember_intent", r#"{"shape":"intent_receipt"}"#),
+        ("forget_intent", r#"{"shape":"intent_receipt"}"#),
+        ("grant", r#"{"shape":"decision"}"#),
+        ("revoke", r#"{"shape":"decision"}"#),
+        ("promote_receipt", r#"{"shape":"promote_receipt"}"#),
+    ];
+    for (kind, payload) in cases {
         conn.execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
-               kind, decided_at_iso) \
-             VALUES (?, 's', 'private', 'GRANT', 'usr:t', 0, ?, '2026-04-28T12:00:00Z')",
-            params![format!("c-{kind}"), kind],
+               kind, decided_at_iso, actor, payload_json) \
+             VALUES (?, 's', 'private', 'GRANT', 'usr:t', 0, ?, '2026-04-28T12:00:00Z', \
+                     'usr:t', ?)",
+            params![format!("c-{kind}"), kind, payload],
         )
         .unwrap_or_else(|e| panic!("kind {kind} should be accepted: {e}"));
     }
@@ -235,8 +238,10 @@ fn consent_journal_event_requires_iso_timestamp() {
     let err = conn
         .execute(
             "INSERT INTO consent_journal \
-              (consent_id, subject, scope, decision, granted_by, decided_at, kind) \
-             VALUES ('c-no-iso', 's', 'private', 'GRANT', 'usr:t', 0, 'grant')",
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, payload_json) \
+             VALUES ('c-no-iso', 's', 'private', 'GRANT', 'usr:t', 0, 'grant', \
+                     'usr:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
             [],
         )
         .unwrap_err();
@@ -267,9 +272,9 @@ fn forget_intent_payload_must_be_body_free() {
         .execute(
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
-               kind, decided_at_iso, payload_json) \
+               kind, actor, decided_at_iso, payload_json) \
              VALUES ('c2', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                     '2026-04-28T12:00:00Z', \
+                     'usr:t', '2026-04-28T12:00:00Z', \
                      '{\"target_id_hash\":\"h\",\"body\":\"leak\"}')",
             [],
         )
@@ -281,14 +286,78 @@ fn forget_intent_payload_must_be_body_free() {
 }
 
 #[test]
+fn forget_intent_payload_rejects_extended_banned_keys() {
+    // Brought into the trigger after Codex round 1 — earlier list missed
+    // these three, leaving a direct-SQL leak path. Test each individually.
+    let conn = open_in_memory().expect("open");
+    for banned in ["message", "payload_text", "user_input"] {
+        let payload = format!(
+            "{{\"shape\":\"intent_receipt\",\"target_id_hash\":\"hash:abc\",\"{banned}\":\"leak\"}}"
+        );
+        let err = conn
+            .execute(
+                "INSERT INTO consent_journal \
+                  (consent_id, subject, scope, decision, granted_by, decided_at, \
+                   kind, actor, decided_at_iso, payload_json) \
+                 VALUES (?, 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                         'usr:t', '2026-04-28T12:00:00Z', ?)",
+                params![format!("c-leak-{banned}"), payload],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("body-free"),
+            "banned key {banned} must be rejected, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn forget_intent_payload_rejects_malformed_json() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-json', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
+                     'usr:t', \
+                     '2026-04-28T12:00:00Z', 'not json at all')",
+            [],
+        )
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("body-free") || msg.contains("valid JSON payload"),
+        "malformed JSON must be rejected, got: {msg}"
+    );
+}
+
+#[test]
+fn non_forget_payload_also_body_free() {
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-promote-leak', 'h', 'team:p', 'GRANT', 'usr:t', 0, \
+                     'promote_receipt', 'usr:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"promote_receipt\",\"target_id_hash\":\"hash:abc\",\"body\":\"x\"}')",
+            [],
+        )
+        .unwrap_err();
+    assert!(format!("{err}").contains("body-free"));
+}
+
+#[test]
 fn forget_intent_payload_accepts_hash_only() {
     let conn = open_in_memory().expect("open");
     conn.execute(
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
-           kind, decided_at_iso, payload_json) \
+           kind, actor, decided_at_iso, payload_json) \
          VALUES ('c3', 'h', 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                 '2026-04-28T12:00:00Z', \
+                 'usr:t', '2026-04-28T12:00:00Z', \
                  '{\"target_id_hash\":\"hash:abc\",\"reason_code\":\"user_command\"}')",
         [],
     )
@@ -358,8 +427,10 @@ fn consent_journal_remains_append_only_under_0007() {
     conn.execute(
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
-           kind, decided_at_iso) \
-         VALUES ('c5', 's', 'private', 'GRANT', 'usr:t', 0, 'grant', '2026-04-28T12:00:00Z')",
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('c5', 's', 'private', 'GRANT', 'usr:t', 0, 'grant', \
+                 'usr:t', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
         [],
     )
     .expect("insert");

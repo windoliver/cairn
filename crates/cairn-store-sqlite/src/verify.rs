@@ -104,6 +104,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_kind_idx"),
     ("trigger", "consent_journal_kind_domain"),
     ("trigger", "consent_journal_event_requires_iso"),
+    ("trigger", "consent_journal_event_requires_actor"),
+    ("trigger", "consent_journal_event_requires_payload"),
+    ("trigger", "consent_journal_payload_shape_matches_kind"),
+    ("trigger", "consent_journal_payload_body_free"),
     ("trigger", "consent_journal_forget_receipt_body_free"),
 ];
 

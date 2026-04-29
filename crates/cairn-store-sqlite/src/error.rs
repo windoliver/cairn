@@ -22,4 +22,9 @@ pub enum StoreError {
     /// (missing trigger, mutated migration row, extra object, etc.).
     #[error("schema drift: {0}")]
     SchemaDrift(String),
+
+    /// `ConsentEvent` failed structural validation (kind/payload mismatch,
+    /// malformed hash, etc.) before insert.
+    #[error("invalid consent event: {0}")]
+    InvalidConsentEvent(#[from] cairn_core::domain::ConsentEventError),
 }

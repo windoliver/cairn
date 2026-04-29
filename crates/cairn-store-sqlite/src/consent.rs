@@ -31,6 +31,7 @@ use crate::error::StoreError;
 /// firing (unknown kind, body-bearing forget payload, missing iso, …) or
 /// the underlying `SQLite` layer reporting a constraint violation.
 pub fn append(conn: &Connection, event: &ConsentEvent) -> Result<i64, StoreError> {
+    event.validate()?;
     let payload_json =
         serde_json::to_string(&event.payload).map_err(|e| StoreError::VaultPath(e.to_string()))?;
     let decided_millis = rfc3339_to_millis(&event.decided_at);

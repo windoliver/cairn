@@ -10,6 +10,12 @@ use cairn_store_sqlite::consent::{
 };
 use cairn_store_sqlite::open_in_memory;
 
+/// Build a fixture hash of the form `hash:<32 lowercase hex>` from a
+/// numeric seed. Avoids hand-padding strings in every test.
+fn h(seed: u32) -> String {
+    format!("hash:{seed:0>32x}")
+}
+
 fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
@@ -51,7 +57,7 @@ fn sensor_event(consent_id: &str, label: &str) -> ConsentEvent {
 #[test]
 fn append_round_trips_through_query_by_op() {
     let conn = open_in_memory().expect("open");
-    let event = forget_event("c-1", "hash:abc123");
+    let event = forget_event("c-1", &h(0x00ab_c123));
     let rowid = append(&conn, &event).expect("append");
     assert!(rowid > 0);
 
@@ -63,9 +69,9 @@ fn append_round_trips_through_query_by_op() {
 #[test]
 fn query_by_actor_filters_to_principal() {
     let conn = open_in_memory().expect("open");
-    let mut alice = forget_event("c-a", "hash:a");
+    let mut alice = forget_event("c-a", &h(0xa));
     alice.actor = Identity::parse("usr:alice").expect("id");
-    let mut bob = forget_event("c-b", "hash:b");
+    let mut bob = forget_event("c-b", &h(0xb));
     bob.actor = Identity::parse("usr:bob").expect("id");
     bob.op_id = Some("op-bob".to_owned());
 
@@ -93,8 +99,8 @@ fn query_by_sensor_filters_to_label() {
 #[test]
 fn query_by_scope_filters_to_scope() {
     let conn = open_in_memory().expect("open");
-    append(&conn, &forget_event("c-private", "hash:p")).expect("p");
-    let mut team = forget_event("c-team", "hash:t");
+    append(&conn, &forget_event("c-private", &h(0xb1))).expect("p");
+    let mut team = forget_event("c-team", &h(0xb2));
     team.scope = "team:platform".to_owned();
     append(&conn, &team).expect("t");
 
@@ -106,8 +112,8 @@ fn query_by_scope_filters_to_scope() {
 #[test]
 fn read_since_rowid_advances_monotonically() {
     let conn = open_in_memory().expect("open");
-    let r1 = append(&conn, &forget_event("c-1", "hash:1")).expect("1");
-    let r2 = append(&conn, &forget_event("c-2", "hash:2")).expect("2");
+    let r1 = append(&conn, &forget_event("c-1", &h(1))).expect("1");
+    let r2 = append(&conn, &forget_event("c-2", &h(2))).expect("2");
     assert!(r2 > r1);
 
     let pending = read_since_rowid(&conn, 0).expect("all");
@@ -130,14 +136,12 @@ fn forget_receipt_grep_invariant() {
     // and verify that string never appears in any column of the row.
     let conn = open_in_memory().expect("open");
     let secret = "TOPSECRETBODY";
-    let event = forget_event("c-leak", "hash:redacted-of-TOPSECRETBODY");
-    // The hash column is allowed to contain the string `TOPSECRETBODY` as
-    // part of a salted-hash placeholder for this test, so we use a hash
-    // that does not contain the secret.
+    let salted = h(0xdead_beef);
+    let event = forget_event("c-leak", &salted);
     let event = ConsentEvent {
-        subject: "hash:salted".to_owned(),
+        subject: salted.clone(),
         payload: ConsentPayload::IntentReceipt {
-            target_id_hash: "hash:salted".to_owned(),
+            target_id_hash: salted.clone(),
             scope_tier: MemoryVisibility::Private,
             reason_code: "user_command".to_owned(),
         },
@@ -241,25 +245,28 @@ fn round_trip_preserves_every_kind() {
                 decided_at: Rfc3339Timestamp::parse("2026-04-28T12:00:00Z").expect("ts"),
                 expires_at: None,
             },
-            ConsentKind::PromoteReceipt => ConsentEvent {
-                consent_id: id.clone(),
-                kind: *kind,
-                actor: Identity::parse("usr:tafeng").expect("id"),
-                subject: "hash:promoted".to_owned(),
-                scope: "team:platform".to_owned(),
-                op_id: Some(format!("op-{id}")),
-                sensor_id: None,
-                payload: ConsentPayload::PromoteReceipt {
-                    target_id_hash: "hash:promoted".to_owned(),
-                    from_tier: MemoryVisibility::Private,
-                    to_tier: MemoryVisibility::Team,
-                    receipt_id: "rcpt-1".to_owned(),
-                },
-                decided_at: Rfc3339Timestamp::parse("2026-04-28T12:00:00Z").expect("ts"),
-                expires_at: None,
-            },
+            ConsentKind::PromoteReceipt => {
+                let promoted = h(0x00c0_ffee);
+                ConsentEvent {
+                    consent_id: id.clone(),
+                    kind: *kind,
+                    actor: Identity::parse("usr:tafeng").expect("id"),
+                    subject: promoted.clone(),
+                    scope: "team:platform".to_owned(),
+                    op_id: Some(format!("op-{id}")),
+                    sensor_id: None,
+                    payload: ConsentPayload::PromoteReceipt {
+                        target_id_hash: promoted,
+                        from_tier: MemoryVisibility::Private,
+                        to_tier: MemoryVisibility::Team,
+                        receipt_id: "rcpt-1".to_owned(),
+                    },
+                    decided_at: Rfc3339Timestamp::parse("2026-04-28T12:00:00Z").expect("ts"),
+                    expires_at: None,
+                }
+            }
             ConsentKind::RememberIntent | ConsentKind::ForgetIntent => {
-                let mut e = forget_event(&id, "hash:rt");
+                let mut e = forget_event(&id, &h(0xff));
                 e.kind = *kind;
                 e
             }

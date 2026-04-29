@@ -14,8 +14,51 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::domain::{Identity, MemoryVisibility, Rfc3339Timestamp, SensorLabel};
+
+/// Validation failures for [`ConsentEvent::validate`]. The store helpers
+/// promote these into `StoreError` so a misconstructed event cannot reach
+/// the journal.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConsentEventError {
+    /// `payload` does not match the variant required by `kind`.
+    #[error("kind {kind:?} requires {expected} payload, got {actual}")]
+    KindPayloadMismatch {
+        /// Event kind.
+        kind: ConsentKind,
+        /// Variant the kind required.
+        expected: &'static str,
+        /// Variant the caller supplied.
+        actual: &'static str,
+    },
+    /// A field that must hold a salted hash carries an unrecognized shape.
+    #[error("hash field {field} has malformed value: {message}")]
+    InvalidHash {
+        /// Which field failed (`subject`, `target_id_hash`, …).
+        field: &'static str,
+        /// Detail about why it failed.
+        message: String,
+    },
+    /// A reason / policy / config code is out of class.
+    #[error("code field {field} has malformed value: {message}")]
+    InvalidCode {
+        /// Which field failed (`reason_code`, `key`, …).
+        field: &'static str,
+        /// Detail about why it failed.
+        message: String,
+    },
+    /// A receipt-only field is missing or wrongly shaped.
+    #[error("receipt field {field} has malformed value: {message}")]
+    InvalidReceipt {
+        /// Which field failed (`receipt_id`, …).
+        field: &'static str,
+        /// Detail about why it failed.
+        message: String,
+    },
+}
 
 /// Allowed kinds of consent journal event. Mirrors the `kind` CHECK
 /// trigger in `crates/cairn-store-sqlite/src/migrations/sql/0007_consent_event.sql`.
@@ -173,6 +216,8 @@ impl ConsentEvent {
 
     /// Field names that must never appear anywhere in the wire form —
     /// they would imply user content is being persisted into the journal.
+    /// Mirrored by the `SQLite` trigger
+    /// `consent_journal_forget_receipt_body_free` in migration 0007.
     pub const BANNED_FIELDS: &'static [&'static str] = &[
         "body",
         "text",
@@ -188,6 +233,426 @@ impl ConsentEvent {
         "user_input",
         "message",
     ];
+
+    /// Validate kind/payload pairing, hash shapes, and reason codes.
+    /// Called by `cairn_store_sqlite::consent::append` before persisting,
+    /// so a misconstructed event cannot reach `consent_journal` or the
+    /// `.cairn/consent.log` mirror — even though the struct fields are
+    /// public. Pure function; safe to call from any context.
+    ///
+    /// # Errors
+    /// Returns [`ConsentEventError`] when the kind/payload pair is wrong,
+    /// or when a hash / code / receipt field is malformed.
+    pub fn validate(&self) -> Result<(), ConsentEventError> {
+        validate_consent_id(&self.consent_id)?;
+        validate_scope(&self.scope)?;
+        if let Some(op_id) = &self.op_id {
+            validate_op_id(op_id)?;
+        }
+        validate_sensor_id_presence(self.kind, self.sensor_id.as_ref())?;
+        validate_payload_for_kind(self)?;
+        Ok(())
+    }
+}
+
+const fn expected_payload_variant(kind: ConsentKind) -> &'static str {
+    match kind {
+        ConsentKind::SensorEnable | ConsentKind::SensorDisable => "sensor_toggle",
+        ConsentKind::PolicyChange => "policy_delta",
+        ConsentKind::RememberIntent | ConsentKind::ForgetIntent => "intent_receipt",
+        ConsentKind::Grant | ConsentKind::Revoke => "decision",
+        ConsentKind::PromoteReceipt => "promote_receipt",
+    }
+}
+
+const fn payload_variant_name(payload: &ConsentPayload) -> &'static str {
+    match payload {
+        ConsentPayload::SensorToggle { .. } => "sensor_toggle",
+        ConsentPayload::PolicyDelta { .. } => "policy_delta",
+        ConsentPayload::IntentReceipt { .. } => "intent_receipt",
+        ConsentPayload::Decision { .. } => "decision",
+        ConsentPayload::PromoteReceipt { .. } => "promote_receipt",
+    }
+}
+
+/// Sensor-id top-level field is required for sensor kinds and forbidden
+/// for every other kind. Without this, sensor events could be missed by
+/// `query_by_sensor` (`sensor_id` NULL) or non-sensor events could pollute
+/// it (`sensor_id` `Some` on a `policy_change`).
+fn validate_sensor_id_presence(
+    kind: ConsentKind,
+    sensor_id: Option<&SensorLabel>,
+) -> Result<(), ConsentEventError> {
+    let is_sensor_kind = matches!(kind, ConsentKind::SensorEnable | ConsentKind::SensorDisable);
+    match (is_sensor_kind, sensor_id) {
+        (true, Some(_)) | (false, None) => Ok(()),
+        (true, None) => Err(ConsentEventError::InvalidCode {
+            field: "sensor_id",
+            message: "sensor kinds require sensor_id".to_owned(),
+        }),
+        (false, Some(_)) => Err(ConsentEventError::InvalidCode {
+            field: "sensor_id",
+            message: "non-sensor kinds must not carry sensor_id".to_owned(),
+        }),
+    }
+}
+
+fn validate_payload_for_kind(event: &ConsentEvent) -> Result<(), ConsentEventError> {
+    match (event.kind, &event.payload) {
+        (
+            ConsentKind::SensorEnable | ConsentKind::SensorDisable,
+            ConsentPayload::SensorToggle {
+                reason_code,
+                sensor_label,
+            },
+        ) => validate_sensor_payload(event, reason_code, sensor_label),
+        (
+            ConsentKind::PolicyChange,
+            ConsentPayload::PolicyDelta {
+                key,
+                from_code,
+                to_code,
+            },
+        ) => {
+            validate_dotted_key("key", key)?;
+            validate_code("from_code", from_code)?;
+            validate_code("to_code", to_code)?;
+            validate_dotted_key("subject", &event.subject)
+        }
+        (
+            ConsentKind::RememberIntent | ConsentKind::ForgetIntent,
+            ConsentPayload::IntentReceipt {
+                target_id_hash,
+                reason_code,
+                ..
+            },
+        ) => {
+            validate_hash("target_id_hash", target_id_hash)?;
+            validate_code("reason_code", reason_code)?;
+            validate_hash("subject", &event.subject)
+        }
+        (
+            ConsentKind::Grant | ConsentKind::Revoke,
+            ConsentPayload::Decision {
+                subject_code,
+                policy_code,
+            },
+        ) => {
+            validate_subject_code("subject_code", subject_code)?;
+            if let Some(pc) = policy_code {
+                validate_subject_code("policy_code", pc)?;
+            }
+            validate_subject_code("subject", &event.subject)
+        }
+        (
+            ConsentKind::PromoteReceipt,
+            ConsentPayload::PromoteReceipt {
+                target_id_hash,
+                receipt_id,
+                ..
+            },
+        ) => {
+            validate_hash("target_id_hash", target_id_hash)?;
+            validate_receipt_id(receipt_id)?;
+            validate_hash("subject", &event.subject)
+        }
+        (kind, payload) => Err(ConsentEventError::KindPayloadMismatch {
+            kind,
+            expected: expected_payload_variant(kind),
+            actual: payload_variant_name(payload),
+        }),
+    }
+}
+
+fn validate_sensor_payload(
+    event: &ConsentEvent,
+    reason_code: &str,
+    sensor_label: &SensorLabel,
+) -> Result<(), ConsentEventError> {
+    validate_code("reason_code", reason_code)?;
+    // The top-level `sensor_id` and the payload `sensor_label` must
+    // agree: there's exactly one sensor this event refers to, and any
+    // divergence is a programming bug.
+    if let Some(top) = &event.sensor_id
+        && top != sensor_label
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field: "sensor_id",
+            message: "top-level sensor_id must equal payload.sensor_label".to_owned(),
+        });
+    }
+    // Subject must hold the sensor identity (`snr:` prefix + closed
+    // class). Reject raw text outright.
+    validate_sensor_subject(&event.subject)?;
+    if &event.subject[4..] != sensor_label.as_str() {
+        return Err(ConsentEventError::InvalidCode {
+            field: "subject",
+            message: "subject body must equal payload.sensor_label".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Hash slot — accepts only fixed cryptographic digest forms:
+///
+///   * `sha256:<64 lowercase hex>`  — canonical SHA-256.
+///   * `hash:<32..=128 lowercase hex>` — salted/truncated digest.
+///
+/// Both forms guarantee the suffix is hex-only, so user content can
+/// never ride through this field. `hash:TOPSECRETBODY`, raw tokens,
+/// IDs, and similar alphanumeric secrets all fail because letters
+/// outside `[0-9a-f]` are rejected.
+fn validate_hash(field: &'static str, value: &str) -> Result<(), ConsentEventError> {
+    if let Some(hex) = value.strip_prefix("sha256:") {
+        if hex.len() != 64 || !is_lowercase_hex(hex) {
+            return Err(ConsentEventError::InvalidHash {
+                field,
+                message: "sha256 must be `sha256:` + 64 lowercase hex".to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    let body = value
+        .strip_prefix("hash:")
+        .ok_or(ConsentEventError::InvalidHash {
+            field,
+            message: "must start with `sha256:` or `hash:`".to_owned(),
+        })?;
+    if !(32..=128).contains(&body.len()) {
+        return Err(ConsentEventError::InvalidHash {
+            field,
+            message: "hash body must be 32..=128 chars".to_owned(),
+        });
+    }
+    if !is_lowercase_hex(body) {
+        return Err(ConsentEventError::InvalidHash {
+            field,
+            message: "hash body must be lowercase hex [0-9a-f]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_lowercase_hex(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Code slot — short, lowercase, `[a-z][a-z0-9_-]{0,63}`. Bounded length
+/// + closed class makes it impossible to encode arbitrary user text.
+fn validate_code(field: &'static str, value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "empty".to_owned(),
+        });
+    }
+    if value.len() > 64 {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "longer than 64 chars".to_owned(),
+        });
+    }
+    let bytes = value.as_bytes();
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "first char must be [a-z]".to_owned(),
+        });
+    }
+    if !bytes
+        .iter()
+        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "chars must be in [a-z0-9_-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Dotted config key — e.g. `sensors.screen.enabled`. Same class as
+/// `code` plus `.`, length bounded.
+fn validate_dotted_key(field: &'static str, value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "empty".to_owned(),
+        });
+    }
+    if value.len() > 128 {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "longer than 128 chars".to_owned(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'.'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "chars must be in [a-z0-9_.-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Subject / policy code slot — typed identifier shape
+/// `[a-z][a-z0-9._:-]{0,127}`. Allows `:` for typed prefixes
+/// (`share_link:abcd`) and `.` for dotted keys; still bounded length and
+/// closed class so user content cannot ride through.
+fn validate_subject_code(field: &'static str, value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "empty".to_owned(),
+        });
+    }
+    if value.len() > 128 {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "longer than 128 chars".to_owned(),
+        });
+    }
+    let bytes = value.as_bytes();
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "first char must be [a-z]".to_owned(),
+        });
+    }
+    if !bytes
+        .iter()
+        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field,
+            message: "chars must be in [a-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// `scope` slot — closed class `[a-z0-9._:=,-]{1,256}`. Permits canonical
+/// scope tuple wire forms (`team:platform`, `private:agent=agt:foo:v1`,
+/// comma-joined keys). Bounded length, no whitespace, no quotes — user
+/// content cannot ride through.
+fn validate_scope(value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() || value.len() > 256 {
+        return Err(ConsentEventError::InvalidCode {
+            field: "scope",
+            message: "must be 1..=256 chars".to_owned(),
+        });
+    }
+    if !value.bytes().all(|b| {
+        matches!(
+            b,
+            b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'=' | b',' | b'-'
+        )
+    }) {
+        return Err(ConsentEventError::InvalidCode {
+            field: "scope",
+            message: "chars must be in [a-z0-9._:=,-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// `consent_id` slot — typed identifier `[A-Za-z0-9._:-]{1,64}`.
+/// ULIDs and typed prefixes (`c-1`, `consent:abcd`) both satisfy this.
+fn validate_consent_id(value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() || value.len() > 64 {
+        return Err(ConsentEventError::InvalidCode {
+            field: "consent_id",
+            message: "must be 1..=64 chars".to_owned(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field: "consent_id",
+            message: "chars must be in [A-Za-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// `op_id` slot — same shape as a receipt id (`[A-Za-z0-9._:-]{1,128}`).
+fn validate_op_id(value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() || value.len() > 128 {
+        return Err(ConsentEventError::InvalidCode {
+            field: "op_id",
+            message: "must be 1..=128 chars".to_owned(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field: "op_id",
+            message: "chars must be in [A-Za-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Sensor `subject` slot — `snr:<sensor-label-body>` form. Reuses the
+/// `SensorLabel` character class, with the `snr:` prefix mandatory because
+/// the journal's `subject` column has no other indicator of what kind
+/// of identity it is holding.
+fn validate_sensor_subject(value: &str) -> Result<(), ConsentEventError> {
+    let body = value
+        .strip_prefix("snr:")
+        .ok_or(ConsentEventError::InvalidCode {
+            field: "subject",
+            message: "sensor subject must start with `snr:`".to_owned(),
+        })?;
+    if body.is_empty() || body.len() > 128 {
+        return Err(ConsentEventError::InvalidCode {
+            field: "subject",
+            message: "sensor body must be 1..=128 chars".to_owned(),
+        });
+    }
+    if !body
+        .bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidCode {
+            field: "subject",
+            message: "sensor body chars must be in [A-Za-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Receipt id slot — accepts `rcpt:` prefix + closed character class.
+fn validate_receipt_id(value: &str) -> Result<(), ConsentEventError> {
+    if value.is_empty() {
+        return Err(ConsentEventError::InvalidReceipt {
+            field: "receipt_id",
+            message: "empty".to_owned(),
+        });
+    }
+    if value.len() > 128 {
+        return Err(ConsentEventError::InvalidReceipt {
+            field: "receipt_id",
+            message: "longer than 128 chars".to_owned(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(ConsentEventError::InvalidReceipt {
+            field: "receipt_id",
+            message: "chars must be in [A-Za-z0-9._:-]".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Walk a `serde_json::Value` and return every key name encountered.
@@ -219,17 +684,23 @@ fn walk(value: &serde_json::Value, acc: &mut BTreeMap<String, u32>) {
 mod tests {
     use super::*;
 
+    /// Build a fixture hash of the form `hash:<32 lowercase hex>`.
+    fn fixture_hash(seed: u32) -> String {
+        format!("hash:{seed:0>32x}")
+    }
+
     fn sample_forget() -> ConsentEvent {
+        let h = fixture_hash(0x00ab_c123);
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
             kind: ConsentKind::ForgetIntent,
             actor: Identity::parse("usr:tafeng").expect("valid identity"),
-            subject: "hash:abc123".to_owned(),
+            subject: h.clone(),
             scope: "private:agent=agt:claude-code".to_owned(),
             op_id: Some("op-01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
             sensor_id: None,
             payload: ConsentPayload::IntentReceipt {
-                target_id_hash: "hash:abc123".to_owned(),
+                target_id_hash: h,
                 scope_tier: MemoryVisibility::Private,
                 reason_code: "user_command".to_owned(),
             },
@@ -257,16 +728,17 @@ mod tests {
     }
 
     fn sample_promote() -> ConsentEvent {
+        let h = fixture_hash(0x00de_f456);
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
             kind: ConsentKind::PromoteReceipt,
             actor: Identity::parse("usr:tafeng").expect("valid identity"),
-            subject: "hash:def456".to_owned(),
+            subject: h.clone(),
             scope: "team:platform".to_owned(),
             op_id: Some("op-01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
             sensor_id: None,
             payload: ConsentPayload::PromoteReceipt {
-                target_id_hash: "hash:def456".to_owned(),
+                target_id_hash: h,
                 from_tier: MemoryVisibility::Private,
                 to_tier: MemoryVisibility::Team,
                 receipt_id: "rcpt-01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
@@ -349,6 +821,122 @@ mod tests {
             "decided_at":"2026-04-28T12:00:00Z"
         }"#;
         assert!(serde_json::from_str::<ConsentEvent>(bad).is_err());
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_samples() {
+        sample_forget().validate().expect("forget valid");
+        sample_sensor_enable().validate().expect("sensor valid");
+        sample_promote().validate().expect("promote valid");
+    }
+
+    #[test]
+    fn validate_rejects_kind_payload_mismatch() {
+        let mut event = sample_forget();
+        // Pair a forget kind with a Decision payload.
+        event.payload = ConsentPayload::Decision {
+            subject_code: "share_link".to_owned(),
+            policy_code: None,
+        };
+        let err = event.validate().expect_err("must reject");
+        assert!(matches!(err, ConsentEventError::KindPayloadMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_body_smuggled_in_target_id_hash() {
+        // Even though `target_id_hash` is a `String`, the validator binds
+        // it to the canonical hash shape — a forgotten body cannot ride
+        // through this field.
+        let bytes = "TOPSECRETBODY this is the actual user body content";
+        let mut event = sample_forget();
+        event.subject = bytes.to_owned();
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: bytes.to_owned(),
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "user_command".to_owned(),
+        };
+        let err = event.validate().expect_err("must reject");
+        assert!(
+            matches!(err, ConsentEventError::InvalidHash { .. }),
+            "expected InvalidHash, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_rejects_long_reason_code() {
+        let mut event = sample_forget();
+        let h = fixture_hash(0xabc);
+        event.subject = h.clone();
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: h,
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "x".repeat(65),
+        };
+        let err = event.validate().expect_err("too long");
+        assert!(matches!(err, ConsentEventError::InvalidCode { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_uppercase_reason_code() {
+        let mut event = sample_forget();
+        let h = fixture_hash(0xabc);
+        event.subject = h.clone();
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: h,
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "USER_COMMAND".to_owned(),
+        };
+        let err = event.validate().expect_err("must be lowercase");
+        assert!(matches!(err, ConsentEventError::InvalidCode { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_forget_subject_without_hash_prefix() {
+        let mut event = sample_forget();
+        event.subject = "the original target id".to_owned();
+        let err = event.validate().expect_err("subject must be hash-shaped");
+        assert!(matches!(err, ConsentEventError::InvalidHash { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_sha256_hash() {
+        let mut event = sample_forget();
+        event.subject = "sha256:NOTHEX".to_owned();
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: "sha256:NOTHEX".to_owned(),
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "user_command".to_owned(),
+        };
+        let err = event.validate().expect_err("bad hex");
+        assert!(matches!(err, ConsentEventError::InvalidHash { .. }));
+    }
+
+    #[test]
+    fn validate_rejects_promote_with_bad_receipt_id() {
+        let mut event = sample_promote();
+        let h = fixture_hash(0xabc);
+        event.subject = h.clone();
+        event.payload = ConsentPayload::PromoteReceipt {
+            target_id_hash: h,
+            from_tier: MemoryVisibility::Private,
+            to_tier: MemoryVisibility::Team,
+            receipt_id: "rcpt has spaces".to_owned(),
+        };
+        let err = event.validate().expect_err("bad receipt");
+        assert!(matches!(err, ConsentEventError::InvalidReceipt { .. }));
+    }
+
+    #[test]
+    fn validate_accepts_sha256_canonical_form() {
+        let mut event = sample_forget();
+        let h = format!("sha256:{}", "0".repeat(64));
+        event.subject = h.clone();
+        event.payload = ConsentPayload::IntentReceipt {
+            target_id_hash: h,
+            scope_tier: MemoryVisibility::Private,
+            reason_code: "user_command".to_owned(),
+        };
+        event.validate().expect("sha256 form valid");
     }
 
     #[test]

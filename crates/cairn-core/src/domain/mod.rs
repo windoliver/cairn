@@ -43,7 +43,7 @@ pub use capture::{
 };
 pub use capture_attribution::attribute;
 pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};
-pub use consent::{ConsentEvent, ConsentKind, ConsentPayload};
+pub use consent::{ConsentEvent, ConsentEventError, ConsentKind, ConsentPayload};
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};

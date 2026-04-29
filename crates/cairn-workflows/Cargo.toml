@@ -14,7 +14,9 @@ description = "Background workflows host (consolidate, promote, expire, evaluate
 cairn-core = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 async-trait = { workspace = true }
+fs4 = { workspace = true }
 rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

@@ -8,6 +8,12 @@ use cairn_store_sqlite::open_in_memory;
 use cairn_workflows::ConsentLogMaterializer;
 use tempfile::tempdir;
 
+/// Build a fixture hash of the form `hash:<32 lowercase hex>` from a
+/// numeric seed.
+fn h(seed: u32) -> String {
+    format!("hash:{seed:0>32x}")
+}
+
 fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
@@ -34,17 +40,19 @@ fn tick_appends_jsonl_and_advances_cursor() {
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     assert_eq!(mirror.cursor(), 0);
 
-    append(&conn, &forget_event("c-1", "hash:1")).expect("append 1");
-    append(&conn, &forget_event("c-2", "hash:2")).expect("append 2");
+    append(&conn, &forget_event("c-1", &h(1))).expect("append 1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("append 2");
 
     let n = mirror.tick(&conn).expect("tick");
     assert_eq!(n, 2);
     assert!(mirror.cursor() > 0);
 
-    let lines = mirror.read_lines().expect("read");
-    assert_eq!(lines.len(), 2);
-    let event_one: ConsentEvent = serde_json::from_str(&lines[0]).expect("decode 1");
-    assert_eq!(event_one.consent_id, "c-1");
+    let events = mirror.read_events().expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].consent_id, "c-1");
+    assert_eq!(events[1].consent_id, "c-2");
+    let raw = mirror.read_lines().expect("raw");
+    assert!(raw[0].contains("\"rowid\":"), "envelope must carry rowid");
 }
 
 #[test]
@@ -53,7 +61,7 @@ fn tick_is_idempotent_when_no_new_rows() {
     let dir = tempdir().expect("tempdir");
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
 
-    append(&conn, &forget_event("c-1", "hash:1")).expect("append");
+    append(&conn, &forget_event("c-1", &h(1))).expect("append");
     mirror.tick(&conn).expect("tick");
     let cursor_after_first = mirror.cursor();
     let lines_after_first = mirror.read_lines().expect("read");
@@ -71,7 +79,7 @@ fn cursor_recovers_across_reopen() {
 
     {
         let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
-        append(&conn, &forget_event("c-1", "hash:1")).expect("append");
+        append(&conn, &forget_event("c-1", &h(1))).expect("append");
         mirror.tick(&conn).expect("tick");
     }
 
@@ -79,7 +87,7 @@ fn cursor_recovers_across_reopen() {
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
     assert!(mirror.cursor() > 0);
 
-    append(&conn, &forget_event("c-2", "hash:2")).expect("append 2");
+    append(&conn, &forget_event("c-2", &h(2))).expect("append 2");
     let n = mirror.tick(&conn).expect("tick after reopen");
     assert_eq!(n, 1, "should mirror only the new row");
 
@@ -93,9 +101,9 @@ fn rebuild_from_db_replays_every_event() {
     let dir = tempdir().expect("tempdir");
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
 
-    append(&conn, &forget_event("c-1", "hash:1")).expect("a1");
-    append(&conn, &forget_event("c-2", "hash:2")).expect("a2");
-    append(&conn, &forget_event("c-3", "hash:3")).expect("a3");
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
     mirror.tick(&conn).expect("first tick");
     let original = mirror.read_lines().expect("read");
 
@@ -115,7 +123,7 @@ fn rebuild_works_when_log_was_deleted() {
     let conn = open_in_memory().expect("open store");
     let dir = tempdir().expect("tempdir");
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
-    append(&conn, &forget_event("c-1", "hash:1")).expect("a1");
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
     mirror.tick(&conn).expect("tick");
 
     std::fs::remove_file(mirror.log_path()).expect("delete log");
@@ -135,7 +143,7 @@ fn forget_receipt_log_is_body_free() {
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
 
     let secret = "TOPSECRETBODY";
-    let event = forget_event("c-leak", "hash:salted");
+    let event = forget_event("c-leak", &h(0xdead_beef));
     append(&conn, &event).expect("append");
     mirror.tick(&conn).expect("tick");
 
@@ -150,6 +158,89 @@ fn forget_receipt_log_is_body_free() {
 }
 
 #[test]
+fn cursor_recovery_uses_log_when_sidecar_lies() {
+    // The log is the authoritative cursor source. If the sidecar
+    // disagrees with the log (e.g., crash between fsync and rename), the
+    // materializer must trust the log and skip the rows it already wrote.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+
+    {
+        let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+        mirror.tick(&conn).expect("tick");
+    }
+
+    // Tamper with the sidecar: claim a future rowid that the log can't
+    // back up. The materializer must distrust the sidecar and recover
+    // from the log itself.
+    std::fs::write(dir.path().join("consent.cursor"), "999999\n").expect("tamper");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(n, 1, "must add only the new row, not duplicate older ones");
+
+    let events = mirror.read_events().expect("events");
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[2].consent_id, "c-3");
+}
+
+#[test]
+fn cursor_recovery_skips_torn_last_line() {
+    // Simulate a crash mid-line: the last line of the log is a partial
+    // envelope. Recovery must skip it and base the cursor on the last
+    // well-formed envelope.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+
+    {
+        let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+        mirror.tick(&conn).expect("tick");
+    }
+
+    // Append a torn line.
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("consent.log"))
+            .expect("open log");
+        write!(f, "{{\"rowid\":99,\"event\":{{\"partial").expect("torn write");
+    }
+
+    let mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    // Cursor must reflect the last well-formed envelope, not the torn
+    // line's truncated rowid.
+    assert!(mirror.cursor() > 0);
+    assert!(mirror.cursor() < 99, "must not adopt rowid from torn line");
+}
+
+#[test]
+fn cursor_survives_missing_sidecar() {
+    // If the sidecar is deleted but the log is intact, recovery must
+    // still place the cursor at the log's last envelope.
+    let conn = open_in_memory().expect("open");
+    let dir = tempdir().expect("tempdir");
+
+    let cursor_when_full;
+    {
+        let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        mirror.tick(&conn).expect("tick");
+        cursor_when_full = mirror.cursor();
+    }
+
+    std::fs::remove_file(dir.path().join("consent.cursor")).expect("rm sidecar");
+
+    let mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    assert_eq!(mirror.cursor(), cursor_when_full);
+}
+
+#[test]
 fn rebuild_is_authoritative_over_db_only() {
     // The database remains the source of truth: rebuilding from a vault
     // with a deleted log produces a log identical to the one constructed
@@ -161,8 +252,8 @@ fn rebuild_is_authoritative_over_db_only() {
     let mut mirror_a = ConsentLogMaterializer::open(dir_a.path()).expect("a");
     let mut mirror_b = ConsentLogMaterializer::open(dir_b.path()).expect("b");
 
-    append(&conn, &forget_event("c-1", "hash:1")).expect("1");
-    append(&conn, &forget_event("c-2", "hash:2")).expect("2");
+    append(&conn, &forget_event("c-1", &h(1))).expect("1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("2");
 
     mirror_a.tick(&conn).expect("tick a");
     mirror_b.rebuild_from_db(&conn).expect("rebuild b");
