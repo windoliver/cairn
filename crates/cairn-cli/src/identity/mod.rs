@@ -23,7 +23,7 @@ use cairn_core::{
         keystore::{Keystore, KeystoreError},
     },
     domain::identity::{
-        DefaultsState, Identity, IdentityKind, ProvisioningState,
+        BindingState, DefaultsState, Identity, IdentityKind, ProvisioningState,
         keys::{IdentityRevision, SecretHandle, VaultId},
         provision::{
             ProvisionInput, build_provisioning_plan, mint_agent_id, mint_human_id,
@@ -33,6 +33,9 @@ use cairn_core::{
     },
     error::identity::IdentityServiceError,
 };
+// Re-export these from cairn-core so callers can access them through the
+// identity module without importing cairn-core directly.
+pub use cairn_core::domain::identity::{IdentityStatusReport, MismatchCheckOutcome};
 use cairn_keychain::OsKeystore;
 use cairn_store_sqlite::SqliteIdentityRegistry;
 use chrono::Utc;
@@ -460,6 +463,165 @@ impl IdentityService {
                 }
             },
         }
+    }
+
+    /// Produce a point-in-time [`IdentityStatusReport`] for `cairn status`.
+    ///
+    /// Runs a **dry-run** mismatch sweep identical to the one in [`Self::open`]
+    /// but without mutating any state.  Safe to call after
+    /// [`Self::open_for_maintenance`] in `ReadOnly` mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdentityServiceError`] only for hard registry or keystore
+    /// backend failures.  Mismatches are reported in the returned struct, not
+    /// as errors.
+    pub async fn status_report(&self) -> Result<IdentityStatusReport, IdentityServiceError> {
+        let binding_state = self.detect_binding_state();
+        let defaults = self.detect_defaults().await?;
+        let (recon, mismatch_check) = self.dry_run_mismatch_sweep().await?;
+        let pending_evictions = self.registry.list_pending_evictions().await?.len() as u64;
+        let pending_key_disables = self.registry.list_pending_key_disables().await?.len() as u64;
+        let purge_pending_ids = self
+            .registry
+            .list_purge_pending()
+            .await?
+            .into_iter()
+            .map(|e| e.identity)
+            .collect();
+
+        Ok(IdentityStatusReport {
+            vault_id: Some(self.vault_id.clone()),
+            binding_state,
+            defaults,
+            mismatched_ids: recon.mismatched_ids,
+            desynchronized_active_ids: recon.desynchronized_active_ids,
+            pending_evictions,
+            pending_key_disables,
+            purge_pending_ids,
+            vault_degraded: recon.vault_degraded,
+            mismatch_check,
+        })
+    }
+
+    /// Check which binding sentinel files are present and return the
+    /// corresponding [`BindingState`].
+    fn detect_binding_state(&self) -> BindingState {
+        let cairn_dir = self.vault_path.join(".cairn");
+        if cairn_dir.join("vault.binding.pending").exists() {
+            BindingState::Pending
+        } else if cairn_dir.join("vault.binding").exists() {
+            BindingState::Bound
+        } else {
+            BindingState::Unbound
+        }
+    }
+
+    /// Detect whether the default human and agent identities are active.
+    ///
+    /// Matches OS-username slug for the human slot and
+    /// `claude-code / opus-4-7 / main` for the agent slot.
+    async fn detect_defaults(&self) -> Result<DefaultsState, IdentityServiceError> {
+        let human_slug = normalize_human_slug(&whoami::username());
+        let (harness, model, role) = ("claude-code", "opus-4-7", "main");
+
+        let all_humans = self
+            .registry
+            .list_identities(Some(IdentityKind::Human), IdentityVisibility::Operational)
+            .await?;
+        let all_agents = self
+            .registry
+            .list_identities(Some(IdentityKind::Agent), IdentityVisibility::Operational)
+            .await?;
+
+        let default_human = all_humans.iter().find(|r| {
+            r.provisioning_state == ProvisioningState::Active && slug_matches_human(r, &human_slug)
+        });
+        let default_agent = all_agents.iter().find(|r| {
+            r.provisioning_state == ProvisioningState::Active
+                && slug_matches_agent(r, harness, model, role)
+        });
+
+        Ok(match (default_human, default_agent) {
+            (Some(h), Some(a)) => DefaultsState::Active {
+                human: h.id.clone(),
+                agent: a.id.clone(),
+            },
+            _ => DefaultsState::NotInitialised,
+        })
+    }
+
+    /// Dry-run mismatch sweep (spec §4.5).
+    ///
+    /// - **Pending rows**: `NotFound` → orphan (not vault-degrading);
+    ///   pubkey mismatch → `record_mismatch`.
+    /// - **Active rows**: `NotFound` → `record_active_desync`; pubkey
+    ///   mismatch → `record_active_mismatch` (vault-degrading).
+    /// - `KeystoreError::Locked` → stop, return `KeystoreLocked`.
+    async fn dry_run_mismatch_sweep(
+        &self,
+    ) -> Result<(ReconciliationReport, MismatchCheckOutcome), IdentityServiceError> {
+        let mut recon = ReconciliationReport::default();
+        let mut mismatch_check = MismatchCheckOutcome::Completed;
+
+        'sweep: {
+            for pending in self.registry.list_pending().await? {
+                let handle = SecretHandle::for_identity(
+                    self.vault_id.clone(),
+                    pending.identity.clone(),
+                    pending.key_version,
+                );
+                match self.keystore.load_signing_key(&handle).await {
+                    Err(KeystoreError::NotFound) => {} // orphan — not degrading
+                    Ok(sk) => {
+                        if sk.verifying_key().to_bytes() != pending.public_key {
+                            recon.record_mismatch(pending.identity.clone());
+                        }
+                    }
+                    Err(KeystoreError::Locked) => {
+                        mismatch_check = MismatchCheckOutcome::KeystoreLocked;
+                        break 'sweep;
+                    }
+                    Err(e) => return Err(IdentityServiceError::Keystore(e)),
+                }
+            }
+
+            for active in self
+                .registry
+                .list_identities(None, IdentityVisibility::Operational)
+                .await?
+            {
+                if active.provisioning_state != ProvisioningState::Active {
+                    continue;
+                }
+                let handle = SecretHandle::for_identity(
+                    self.vault_id.clone(),
+                    active.id.clone(),
+                    active.current_key_version,
+                );
+                match self.keystore.load_signing_key(&handle).await {
+                    Err(KeystoreError::NotFound) => recon.record_active_desync(active.id),
+                    Ok(sk) => {
+                        let pubkeys: Vec<IdentityKeyEntry> =
+                            self.registry.list_keys(&active.id).await?;
+                        if let Some(current_key) = pubkeys
+                            .iter()
+                            .find(|k| k.key_version == active.current_key_version)
+                            && sk.verifying_key().to_bytes() != current_key.public_key
+                        {
+                            recon.record_active_mismatch(active.id);
+                        }
+                    }
+                    Err(KeystoreError::Locked) => {
+                        mismatch_check = MismatchCheckOutcome::KeystoreLocked;
+                        break 'sweep;
+                    }
+                    Err(e) => return Err(IdentityServiceError::Keystore(e)),
+                }
+            }
+        }
+
+        Ok((recon, mismatch_check))
     }
 
     /// Open in maintenance mode.
