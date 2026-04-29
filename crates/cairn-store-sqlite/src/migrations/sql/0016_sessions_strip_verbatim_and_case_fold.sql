@@ -110,12 +110,23 @@ UPDATE sessions
 -- semantics across CTEs are version-fragile.
 UPDATE sessions
    SET project_root = (
-     -- Strip verbatim, then slash-collapse + trim + lowercase.
+     -- Strip verbatim, then slash-collapse + trim + lowercase. Drive
+     -- root (`X:\`, length 3) must NOT have its trailing `\` trimmed
+     -- — `X:` would be drive-relative on Windows, which the runtime
+     -- classifier rejects. Same preservation applies after stripping
+     -- a verbatim drive prefix: `\\?\C:\` → `C:\` → keep as `c:\`.
      CASE
        WHEN project_root LIKE '\\?\UNC\%' THEN
          LOWER(RTRIM(REPLACE('\\' || substr(project_root, 9), '/', '\'), '\'))
        WHEN project_root LIKE '\\?\_:\%' OR project_root LIKE '\\?\_:/%' THEN
-         LOWER(RTRIM(REPLACE(substr(project_root, 5), '/', '\'), '\'))
+         LOWER(
+           CASE
+             WHEN length(REPLACE(substr(project_root, 5), '/', '\')) = 3
+                  AND REPLACE(substr(project_root, 5), '/', '\') LIKE '_:\'
+               THEN REPLACE(substr(project_root, 5), '/', '\')
+             ELSE RTRIM(REPLACE(substr(project_root, 5), '/', '\'), '\')
+           END
+         )
        WHEN length(REPLACE(project_root, '/', '\')) = 3
             AND REPLACE(project_root, '/', '\') LIKE '_:\'
          THEN LOWER(REPLACE(project_root, '/', '\'))

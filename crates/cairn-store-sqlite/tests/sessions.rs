@@ -1146,6 +1146,13 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
             ("S_MIX_DRV", "usr:solo1", r"H:\MixedCase\Path", 100_i64),
             // Standalone verbatim drive: must be stripped + lowercased.
             ("S_VRB_SOLO", "usr:solo2", r"\\?\K:\Solo", 100_i64),
+            // Verbatim drive ROOT: `\\?\C:\` must become `c:\` — NOT
+            // `c:`. Trimming trailing `\` here would yield a
+            // drive-relative path that the runtime classifier rejects,
+            // forking the session on the next discovery.
+            ("S_VRB_ROOT", "usr:solo3", r"\\?\C:\", 100_i64),
+            // Same risk for the slash-spelling: `\\?\D:/` → `d:\`.
+            ("S_VRB_ROOT_FWD", "usr:solo4", r"\\?\D:/", 100_i64),
             // POSIX must remain untouched (case + slashes).
             ("S_POSIX_KEEP", "usr:nix", "/Abs/Repo", 100_i64),
         ] {
@@ -1247,6 +1254,35 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
         "standalone verbatim drive must be stripped and lowercased",
     );
     assert!(vrb_solo.ended_at_unix_ms.is_none());
+
+    // Verbatim drive root must preserve the trailing `\`.
+    let vrb_root = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_VRB_ROOT").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_VRB_ROOT present");
+    assert_eq!(
+        vrb_root.identity.project_root.as_deref(),
+        Some(r"c:\"),
+        "verbatim drive root must keep its trailing separator (not `c:`)",
+    );
+    assert!(vrb_root.ended_at_unix_ms.is_none());
+
+    let vrb_root_fwd = store
+        .get_session_unchecked(
+            &cairn_core::domain::session::SessionId::parse("S_VRB_ROOT_FWD").expect("parse"),
+        )
+        .await
+        .expect("get")
+        .expect("S_VRB_ROOT_FWD present");
+    assert_eq!(
+        vrb_root_fwd.identity.project_root.as_deref(),
+        Some(r"d:\"),
+        "verbatim drive root with `/` must collapse to `d:\\` (not `d:`)",
+    );
+    assert!(vrb_root_fwd.ended_at_unix_ms.is_none());
 
     // POSIX must be untouched: case preserved, no slash flipping.
     let posix = store

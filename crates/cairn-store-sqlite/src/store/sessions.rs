@@ -739,6 +739,17 @@ fn is_busy_error(e: &rusqlite::Error) -> bool {
 /// Backoff is truncated-exponential, jittered with an LCG over the
 /// elapsed nanoseconds so we don't pull a `rand` dep, capped by the
 /// per-attempt remaining-deadline so the final sleep never overruns.
+/// Spread retries across the current backoff window so contending
+/// callers desynchronize. Returns `0..backoff_ms` (or 0 when
+/// `backoff_ms` is 0). Mixed with a fast hash so the same `elapsed_ns`
+/// produces different jitter at different scales.
+fn jitter_ms(elapsed_ns: u64, backoff_ms: u64) -> u64 {
+    let mixed = elapsed_ns
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .rotate_left(13);
+    mixed % backoff_ms.max(1)
+}
+
 async fn async_retry_busy<T, F, Fut>(operation: &'static str, mut f: F) -> Result<T, StoreError>
 where
     F: FnMut() -> Fut,
@@ -760,9 +771,7 @@ where
                     });
                 }
                 let elapsed_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                let jitter =
-                    (elapsed_ns.wrapping_mul(6_364_136_223_846_793_005)).rotate_left(13) & 0x3FF;
-                let raw_sleep_ms = backoff_ms.saturating_add(jitter / 1024);
+                let raw_sleep_ms = backoff_ms.saturating_add(jitter_ms(elapsed_ns, backoff_ms));
                 let remaining_ms = u64::try_from((deadline - now).as_millis()).unwrap_or(u64::MAX);
                 let sleep_ms = raw_sleep_ms.min(remaining_ms.max(1));
                 tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
@@ -1246,4 +1255,54 @@ fn read_session_by_id(
         last_activity_at_unix_ms: last_activity,
         ended_at_unix_ms: ended,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::jitter_ms;
+
+    #[test]
+    fn jitter_is_zero_when_backoff_is_zero() {
+        assert_eq!(jitter_ms(12_345, 0), 0);
+    }
+
+    #[test]
+    fn jitter_stays_below_backoff() {
+        for elapsed in [1_u64, 999, 1_000_000, 1_234_567_890, u64::MAX / 2] {
+            for backoff in [1_u64, 2, 4, 8, 16, 32, 64, 128, 256] {
+                let j = jitter_ms(elapsed, backoff);
+                assert!(j < backoff, "jitter {j} not < backoff {backoff}");
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_desynchronizes_for_distinct_elapsed_values() {
+        // Two contending callers with different elapsed-ns counters
+        // must NOT pick the same sleep at every backoff stage. Sample
+        // a handful of stages and require at least some divergence —
+        // the previous `& 0x3FF / 1024` calc returned 0 for everyone,
+        // so any non-zero result here is a regression guard.
+        let backoffs = [2_u64, 4, 8, 16, 32];
+        let mut diffs = 0_u32;
+        for (i, backoff) in backoffs.iter().enumerate() {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "test inputs are small u32-shaped values"
+            )]
+            let a = jitter_ms(1_000_000 + (i as u64) * 7919, *backoff);
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "test inputs are small u32-shaped values"
+            )]
+            let b = jitter_ms(2_345_678 + (i as u64) * 1009, *backoff);
+            if a != b {
+                diffs += 1;
+            }
+        }
+        assert!(
+            diffs >= 3,
+            "jitter must desynchronize most stages, got {diffs}/5",
+        );
+    }
 }
