@@ -51,7 +51,7 @@ use crate::store::{SqliteMemoryStore, current_unix_ms};
 const SEARCH_LIMIT_MAX: usize = 1000;
 
 /// Records-latest supersession predicate, written so `SQLite`'s partial-index
-/// proof rule can match it against migration 0012's
+/// proof rule can match it against migration 0013's
 /// `INDEX edges_updates_dst_idx ON edges(dst) WHERE kind = 'updates'`.
 ///
 /// Why this exact form:

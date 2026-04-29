@@ -1,4 +1,4 @@
--- Migration 0011: align records columns with the metadata filter DSL.
+-- Migration 0012: align records columns with the metadata filter DSL.
 -- Brief sources: §5.1 (Read path filter narrowing), §8.0.d (filter DSL).
 --
 -- core::domain::filter::compile_filter emits SQL that references three
@@ -28,4 +28,4 @@ ALTER TABLE records
   VIRTUAL;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (11, '0011_filter_alignment', '', strftime('%s','now') * 1000);
+  VALUES (12, '0012_filter_alignment', '', strftime('%s','now') * 1000);

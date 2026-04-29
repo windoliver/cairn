@@ -665,7 +665,7 @@ fn compile_node(filter: &SearchArgsFilters, params: &mut Vec<serde_json::Value>)
 ///    and the free-form `extra_frontmatter` map (`title`, `category`,
 ///    `priority`, `backlinks`) — emit `json_extract(...)` expressions. The
 ///    store side surfaces these via VIRTUAL generated columns in
-///    `crates/cairn-store-sqlite/src/migrations/sql/0011_filter_alignment.sql`
+///    `crates/cairn-store-sqlite/src/migrations/sql/0012_filter_alignment.sql`
 ///    so the same SQL evaluates correctly against the live schema.
 ///
 /// Routing store-owned fields (`path`, `is_static`, `tombstoned`, `active`,
@@ -689,7 +689,7 @@ fn field_col(name: &str) -> &'static str {
         "active" => "active",
 
         // ── Sub-object inside record_json (surfaced via the `provenance`
-        //    VIRTUAL generated column in migration 0011) ───────────────────
+        //    VIRTUAL generated column in migration 0012) ───────────────────
         "created_at" => "json_extract(provenance, '$.created_at')",
 
         // ── Scope-tuple dimensions ────────────────────────────────────────
@@ -714,7 +714,7 @@ fn field_col(name: &str) -> &'static str {
         // These never have a physical column — they are user-supplied
         // frontmatter that round-trips through `record_json`. The store
         // exposes the wrapping object via the `extra_frontmatter` VIRTUAL
-        // column in migration 0011.
+        // column in migration 0012.
         "title" => "json_extract(extra_frontmatter, '$.title')",
         "category" => "json_extract(extra_frontmatter, '$.category')",
         "priority" => "json_extract(extra_frontmatter, '$.priority')",

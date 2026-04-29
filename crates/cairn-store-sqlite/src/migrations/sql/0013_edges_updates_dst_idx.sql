@@ -1,4 +1,4 @@
--- Migration 0012: index `updates`-edge dst lookups.
+-- Migration 0013: index `updates`-edge dst lookups.
 -- Brief sources: §3 (records-in-SQLite), §5.1 (Read path supersession).
 --
 -- The keyword-search read path runs a correlated
@@ -19,4 +19,4 @@ CREATE INDEX edges_updates_dst_idx
   WHERE kind = 'updates';
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (12, '0012_edges_updates_dst_idx', '', strftime('%s','now') * 1000);
+  VALUES (13, '0013_edges_updates_dst_idx', '', strftime('%s','now') * 1000);

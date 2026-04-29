@@ -22,6 +22,19 @@ pub enum StoreError {
     #[error("schema drift: {0}")]
     SchemaDrift(String),
 
+    /// `ConsentEvent` failed structural validation (kind/payload mismatch,
+    /// malformed hash, etc.) before insert.
+    #[error("invalid consent event: {0}")]
+    InvalidConsentEvent(#[from] cairn_core::domain::ConsentEventError),
+
+    /// `MemoryRecord` failed structural validation at the write boundary
+    /// (out-of-range scalars, missing scope.user, empty body, malformed
+    /// actor chain, …) before insert. Rejecting here keeps malformed
+    /// records out of the row store rather than letting them persist and
+    /// fail later on read-back.
+    #[error("invalid record: {0}")]
+    InvalidRecord(#[from] cairn_core::domain::DomainError),
+
     /// Record id was looked up but not present (or only present as a
     /// tombstoned row that callers must not see via `get`).
     #[error("record not found: {id}")]

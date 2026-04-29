@@ -448,6 +448,6 @@ async fn unmatched_query_returns_empty_page() {
 }
 
 // Partial-index regression: the supersession predicate's coupling to
-// `edges_updates_dst_idx` (migration 0012) is verified inside the
+// `edges_updates_dst_idx` (migration 0013) is verified inside the
 // `crate::store::search` module so the test references the exact
 // production constant — see `supersession_clause_uses_partial_index`.
