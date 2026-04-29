@@ -280,8 +280,10 @@ impl SqliteMemoryStore {
                             tx.commit()?;
                             return Ok::<_, tokio_rusqlite::Error>(Ok(outcome));
                         }
-                        Err(InTxError::UniqueViolation) => {
+                        Err(InTxError::UniqueViolation | InTxError::StaleSnapshot) => {
                             // Drop tx → ROLLBACK; loop falls through to retry.
+                            // Both variants signal a transient conflict
+                            // resolved by re-running the SELECT.
                             drop(tx);
                         }
                         Err(InTxError::Sqlite(e)) => {
@@ -302,7 +304,7 @@ impl SqliteMemoryStore {
                 }
                 Ok::<_, tokio_rusqlite::Error>(Err(StoreError::Invariant {
                     what: format!(
-                        "resolve_or_create_session: {MAX_RACE_RETRIES} unique-conflict retries exhausted"
+                        "resolve_or_create_session: {MAX_RACE_RETRIES} conflict retries exhausted"
                     ),
                 }))
             })
@@ -483,14 +485,20 @@ impl SqliteMemoryStore {
 
 /// Internal error type for the in-tx body of
 /// [`SqliteMemoryStore::resolve_or_create_session`]. Distinguishes the
-/// retryable unique-index violation from terminal failures so the outer
-/// loop can choose to spin or surface the error.
+/// retryable conflicts from terminal failures so the outer loop can choose
+/// to spin or surface the error.
 #[derive(Debug)]
 enum InTxError {
     /// Partial unique index `sessions_one_active_per_identity_idx` rejected
     /// the INSERT — a concurrent caller won the race. Caller should
     /// rollback and retry.
     UniqueViolation,
+    /// The snapshot used to judge a row stale was invalidated by a
+    /// concurrent `touch_session` between our SELECT and the conditional
+    /// UPDATE (the compare-and-swap update affected zero rows). Caller
+    /// should rollback and retry; the next iteration's SELECT will see
+    /// the bumped `last_activity_at` and decide reuse.
+    StaleSnapshot,
     /// Other `SQLite` error.
     Sqlite(rusqlite::Error),
     /// Tag JSON serialization failed.
@@ -564,12 +572,22 @@ fn resolve_or_create_in_tx(
             return Ok(ResolveOutcome::Reused(session));
         }
         // Step 3: stale — close it so touch_session can no longer revive
-        // this id, then fall through to the INSERT.
-        tx.execute(
+        // this id, then fall through to the INSERT. The compare-and-swap on
+        // `last_activity_at` revalidates the staleness snapshot — if a
+        // concurrent `touch_session` bumped the row between our SELECT and
+        // this UPDATE, zero rows are affected and we restart the whole
+        // transaction. The next iteration's SELECT sees the fresh activity
+        // and decides reuse instead of erroneously ending a live session.
+        let updated = tx.execute(
             "UPDATE sessions SET ended_at = ?1 \
-             WHERE session_id = ?2 AND ended_at IS NULL",
-            params![now_ms, existing_id],
+             WHERE session_id = ?2 \
+               AND ended_at IS NULL \
+               AND last_activity_at = ?3",
+            params![now_ms, existing_id, last_activity_ms],
         )?;
+        if updated == 0 {
+            return Err(InTxError::StaleSnapshot);
+        }
     }
 
     // Step 4: INSERT a fresh row. Partial unique index may reject if a

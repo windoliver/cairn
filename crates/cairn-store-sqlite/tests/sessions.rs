@@ -289,6 +289,85 @@ async fn resolve_or_create_closes_stale_row_before_creating_new() {
 }
 
 #[tokio::test]
+async fn touch_after_stale_select_keeps_session_alive_under_race() {
+    // The dangerous interleaving is: resolve_or_create snapshots a stale
+    // last_activity_at, then a concurrent caller touch_session()s the same
+    // row, then resolve_or_create reaches the close UPDATE. Without a
+    // compare-and-swap on last_activity_at, resolve_or_create would end a
+    // freshly-active session and mint a replacement. With the CAS, the
+    // close UPDATE matches zero rows, the tx restarts, and the next SELECT
+    // sees the bumped activity → reuse.
+    //
+    // We can't deterministically schedule that interleaving from outside,
+    // but we can race many touchers against many resolvers and assert the
+    // invariant: at most one active session per identity, at any time.
+    let store = std::sync::Arc::new(open_in_memory().await.expect("open"));
+    let id = identity(Some("/repo"));
+    let seed = store
+        .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+        .await
+        .expect("seed");
+    let seed_id = seed.session().id.clone();
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let store = std::sync::Arc::clone(&store);
+        let id = id.clone();
+        handles.push(tokio::spawn(async move {
+            store
+                .resolve_or_create_session(&id, 86_400, NewSessionMetadata::default())
+                .await
+                .expect("resolve")
+                .into_session()
+                .id
+        }));
+    }
+    for _ in 0..16 {
+        let store = std::sync::Arc::clone(&store);
+        let seed_id = seed_id.clone();
+        handles.push(tokio::spawn(async move {
+            // Touch is best-effort — return the seed id either way.
+            let _ = store.touch_session(&seed_id).await;
+            seed_id
+        }));
+    }
+
+    let mut session_ids = std::collections::HashSet::new();
+    for h in handles {
+        session_ids.insert(h.await.expect("join"));
+    }
+    assert_eq!(
+        session_ids.len(),
+        1,
+        "live touches must not allow resolve to fork a new session: {session_ids:?}",
+    );
+}
+
+#[tokio::test]
+async fn empty_project_root_is_rejected_at_db_layer() {
+    // Migration 0013 installs BEFORE INSERT/UPDATE triggers that reject
+    // project_root = '' so an empty string can never re-introduce the
+    // NULL-vs-'' fragmentation that the coalesce-index closes. Direct
+    // construction goes through SessionIdentity::new (which already rejects
+    // empty), so this test reaches behind the API by upserting via the
+    // sync test helper to confirm the DB-level guard fires.
+    use cairn_store_sqlite::open_in_memory_sync;
+    let conn = open_in_memory_sync().expect("open sync");
+    let res = conn.execute(
+        "INSERT INTO sessions (session_id, user_id, agent_id, project_root, title, \
+                              created_at, last_activity_at, ended_at) \
+         VALUES ('S1', 'usr:alice', 'agt:foo:bar:baz:v1', '', '', 0, 0, NULL)",
+        [],
+    );
+    let err = res.expect_err("empty project_root must be rejected by trigger");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("project_root"),
+        "expected project_root guard error, got {msg}",
+    );
+}
+
+#[tokio::test]
 async fn concurrent_resolve_or_create_with_null_project_yields_one_session() {
     // SQLite unique indexes treat NULL as distinct, which would let two
     // racing inserts both succeed for vault-only (project_root = NULL)

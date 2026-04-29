@@ -14,11 +14,37 @@
 -- uniqueness. The lookup query continues to use the non-unique
 -- sessions_active_lookup_idx for speed; this index is purely a guardrail.
 
+-- Step 1: normalize any historical project_root='' rows to NULL so they
+-- collide on the new index the same way they collide on the lookup query
+-- (`project_root IS ?3`). Without this, an existing vault that ever wrote
+-- '' would fail this migration with a uniqueness error and refuse to open.
+UPDATE sessions SET project_root = NULL WHERE project_root = '';
+
 DROP INDEX sessions_one_active_per_identity_idx;
 
 CREATE UNIQUE INDEX sessions_one_active_per_identity_idx
   ON sessions(user_id, agent_id, COALESCE(project_root, ''))
   WHERE ended_at IS NULL;
+
+-- Step 2: prevent future writers from re-introducing the empty-string form.
+-- ALTER TABLE on SQLite cannot add a CHECK constraint in place; triggers
+-- are the equivalent enforcement mechanism (also used elsewhere in this
+-- store, e.g. the schema_migrations append-only triggers).
+CREATE TRIGGER sessions_project_root_no_empty_insert
+  BEFORE INSERT ON sessions
+  FOR EACH ROW
+  WHEN NEW.project_root = ''
+BEGIN
+  SELECT RAISE(ABORT, 'sessions.project_root must be NULL or non-empty');
+END;
+
+CREATE TRIGGER sessions_project_root_no_empty_update
+  BEFORE UPDATE ON sessions
+  FOR EACH ROW
+  WHEN NEW.project_root = ''
+BEGIN
+  SELECT RAISE(ABORT, 'sessions.project_root must be NULL or non-empty');
+END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (13, '0013_sessions_unique_active_coalesce', '', strftime('%s','now') * 1000);
