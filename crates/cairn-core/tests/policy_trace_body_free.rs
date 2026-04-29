@@ -1,24 +1,20 @@
 //! Invariant: the JSON serialization of any `to_wire` output never
 //! contains a body-bearing field name regardless of the contained
-//! `PolicyDetail`. Same body-free pattern as #94's `ConsentEvent` walker.
-//!
-//! Banned key names — even appearing as a substring of a value would
-//! be suspicious — match the #94 invariant set:
-//! `body | text | raw | command | url | content | payload`.
+//! `PolicyDetail`. Reuses `ConsentEvent::BANNED_FIELDS` (13 keys) so
+//! the `policy_trace` invariant stays in lockstep with #94's consent
+//! journal walker.
 
 use std::collections::BTreeMap;
 
-use cairn_core::domain::MemoryVisibility;
+use cairn_core::domain::{MemoryVisibility, consent::ConsentEvent};
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
 use cairn_core::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire};
-
-const BANNED_KEYS: &[&str] = &["body", "text", "raw", "command", "url", "content", "payload"];
 
 fn walk(v: &serde_json::Value) {
     match v {
         serde_json::Value::Object(o) => {
             for (k, child) in o {
-                for banned in BANNED_KEYS {
+                for banned in ConsentEvent::BANNED_FIELDS {
                     assert_ne!(
                         k.as_str(),
                         *banned,
