@@ -490,7 +490,11 @@ fn supersession_predicate_uses_partial_index() {
         "edges_updates_dst_idx must key on dst (got {key_cols:?})",
     );
 
-    // (2) The index must remain partial with the supersession predicate.
+    // (2) The index must remain partial with *exactly* the supersession
+    // predicate. A substring check would accept a broadened predicate
+    // such as `WHERE kind = 'updates' OR kind = 'mentions'`, which would
+    // re-introduce the bloat / write-amplification migration 0012
+    // explicitly avoids — so we assert exact, normalized DDL equality.
     let ddl: String = conn
         .query_row(
             "SELECT sql FROM sqlite_schema \
@@ -500,9 +504,11 @@ fn supersession_predicate_uses_partial_index() {
         )
         .expect("read index DDL");
     let normalized: String = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        normalized.contains("WHERE kind = 'updates'"),
-        "edges_updates_dst_idx must remain partial on kind = 'updates', got: {ddl}",
+    assert_eq!(
+        normalized, "CREATE INDEX edges_updates_dst_idx ON edges(dst) WHERE kind = 'updates'",
+        "edges_updates_dst_idx DDL must be exactly the supersession-only \
+         partial index; broadened predicates re-introduce edges-table \
+         bloat. Got: {ddl}",
     );
 
     // (3) EQP must report a SEARCH on the index, not just a SCAN that
