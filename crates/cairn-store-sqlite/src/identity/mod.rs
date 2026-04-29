@@ -1118,24 +1118,197 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
     // ── Receipt reconciliation flag-clear stubs (C9) ──────────────────────────
 
-    async fn clear_pending_eviction(&self, _receipt_id: &ReceiptId) -> Result<(), RegistryError> {
-        unimplemented!("Task C9")
+    async fn clear_pending_eviction(&self, receipt_id: &ReceiptId) -> Result<(), RegistryError> {
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Read the target_identity before we clear the flag (needed for WAL).
+        let target: Option<String> = tx
+            .query_row(
+                "SELECT target_identity FROM identity_receipts WHERE rowid = ?1",
+                rusqlite::params![receipt_id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let target = target.ok_or(RegistryError::NotFound)?;
+
+        let rows_changed = tx
+            .execute(
+                "UPDATE identity_receipts SET pending_eviction = 0 \
+                 WHERE rowid = ?1 AND pending_eviction = 1",
+                rusqlite::params![receipt_id.0],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+
+        let payload = serde_json::json!({ "receipt_id": receipt_id.0 });
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "clear_pending_eviction", &target, &payload_bytes)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_pending_evictions(&self) -> Result<Vec<PendingEvictionEntry>, RegistryError> {
-        unimplemented!("Task C9")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, target_identity, new_key_version, issued_at \
+                 FROM identity_receipts \
+                 WHERE pending_eviction = 1",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let rowid: i64 = row.get(0)?;
+                let target_str: String = row.get(1)?;
+                let new_kv_u32: Option<u32> = row.get(2)?;
+                let issued_str: String = row.get(3)?;
+                Ok((rowid, target_str, new_kv_u32, issued_str))
+            })
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for (rowid, target_str, new_kv_u32, issued_str) in rows {
+            let identity = Identity::parse(target_str).map_err(domain_err)?;
+            let evict_version_raw = new_kv_u32.ok_or_else(|| {
+                RegistryError::Backend("pending_eviction receipt has NULL new_key_version".into())
+            })?;
+            let nz = std::num::NonZeroU32::new(evict_version_raw).ok_or_else(|| {
+                RegistryError::Backend("new_key_version is 0 in eviction receipt".into())
+            })?;
+            let evict_version = KeyVersion::new(nz);
+            let rotated_at = chrono::DateTime::parse_from_rfc3339(&issued_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            result.push(PendingEvictionEntry {
+                receipt_id: ReceiptId(rowid),
+                identity,
+                evict_version,
+                rotated_at,
+            });
+        }
+        Ok(result)
     }
 
     async fn clear_pending_key_disable(
         &self,
-        _receipt_id: &ReceiptId,
+        receipt_id: &ReceiptId,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C9")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Read the target_identity before we clear the flag (needed for WAL).
+        let target: Option<String> = tx
+            .query_row(
+                "SELECT target_identity FROM identity_receipts WHERE rowid = ?1",
+                rusqlite::params![receipt_id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let target = target.ok_or(RegistryError::NotFound)?;
+
+        let rows_changed = tx
+            .execute(
+                "UPDATE identity_receipts SET pending_key_disable = 0 \
+                 WHERE rowid = ?1 AND pending_key_disable = 1",
+                rusqlite::params![receipt_id.0],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+
+        let payload = serde_json::json!({ "receipt_id": receipt_id.0 });
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "clear_pending_key_disable", &target, &payload_bytes)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_pending_key_disables(
         &self,
     ) -> Result<Vec<PendingKeyDisableEntry>, RegistryError> {
-        unimplemented!("Task C9")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, target_identity, issued_at \
+                 FROM identity_receipts \
+                 WHERE pending_key_disable = 1",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let rowid: i64 = row.get(0)?;
+                let target_str: String = row.get(1)?;
+                let issued_str: String = row.get(2)?;
+                Ok((rowid, target_str, issued_str))
+            })
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // For each entry, fetch active key versions as retained_versions.
+        let mut result = Vec::with_capacity(rows.len());
+        for (rowid, target_str, issued_str) in rows {
+            let identity = Identity::parse(target_str.clone()).map_err(domain_err)?;
+            let revoked_at = chrono::DateTime::parse_from_rfc3339(&issued_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+            // Retained versions = keys NOT yet superseded for this identity.
+            let mut kv_stmt = conn
+                .prepare(
+                    "SELECT key_version FROM identity_keys \
+                     WHERE identity_id = ?1 AND superseded_at IS NULL \
+                     ORDER BY key_version",
+                )
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            let kv_rows = kv_stmt
+                .query_map(rusqlite::params![&target_str], |r| {
+                    let v: u32 = r.get(0)?;
+                    Ok(v)
+                })
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+            let mut retained_versions = Vec::with_capacity(kv_rows.len());
+            for v in kv_rows {
+                let nz = std::num::NonZeroU32::new(v).ok_or_else(|| {
+                    RegistryError::Backend("key_version is 0".into())
+                })?;
+                retained_versions.push(KeyVersion::new(nz));
+            }
+
+            result.push(PendingKeyDisableEntry {
+                receipt_id: ReceiptId(rowid),
+                identity,
+                revoked_at,
+                retained_versions,
+            });
+        }
+        Ok(result)
     }
 }

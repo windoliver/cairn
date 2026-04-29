@@ -894,3 +894,139 @@ async fn list_purge_pending_returns_pending_rows() {
         "id2 must still appear"
     );
 }
+
+// ── C9 · clear_pending_eviction / list_pending_evictions ─────────────────────
+
+/// After `apply_rotation` with `pending_eviction = true`, calling
+/// `clear_pending_eviction` must clear the flag so that
+/// `list_pending_evictions` returns empty.
+#[tokio::test]
+async fn clear_pending_eviction_clears_flag() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let v1 = KeyVersion::FIRST;
+    let v2 = v1.next().expect("v2");
+
+    // Build a rotation receipt with pending_eviction = true.
+    let mut rng = rand_core::OsRng;
+    let new_sk = SigningKey::generate(&mut rng);
+    let mut receipt = make_rotation_receipt(&alice, v1, v1, v2, &sk, &alice);
+    receipt.pending_eviction = true;
+    let new_key = make_key_entry(&alice, v2, &new_sk);
+
+    r.apply_rotation(&receipt, v1, &new_key)
+        .await
+        .expect("apply_rotation with pending_eviction");
+
+    // list_pending_evictions must return the entry.
+    let evictions = r
+        .list_pending_evictions()
+        .await
+        .expect("list_pending_evictions");
+    assert_eq!(evictions.len(), 1, "one eviction pending after rotation");
+    let entry = &evictions[0];
+    assert_eq!(entry.identity, alice);
+    assert_eq!(entry.evict_version, v2);
+
+    // Clear the flag.
+    r.clear_pending_eviction(&entry.receipt_id)
+        .await
+        .expect("clear_pending_eviction");
+
+    // Now list must be empty.
+    let after = r
+        .list_pending_evictions()
+        .await
+        .expect("list_pending_evictions after clear");
+    assert!(
+        after.is_empty(),
+        "list_pending_evictions must be empty after clear"
+    );
+}
+
+/// After a rotation with `pending_eviction = true` and WITHOUT clearing,
+/// `list_pending_evictions` must return one entry.
+#[tokio::test]
+async fn list_pending_evictions_lists_unfinalised() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let v1 = KeyVersion::FIRST;
+    let v2 = v1.next().expect("v2");
+    let mut rng = rand_core::OsRng;
+    let new_sk = SigningKey::generate(&mut rng);
+    let mut receipt = make_rotation_receipt(&alice, v1, v1, v2, &sk, &alice);
+    receipt.pending_eviction = true;
+    let new_key = make_key_entry(&alice, v2, &new_sk);
+
+    r.apply_rotation(&receipt, v1, &new_key)
+        .await
+        .expect("apply_rotation");
+
+    let evictions = r
+        .list_pending_evictions()
+        .await
+        .expect("list_pending_evictions");
+    assert_eq!(evictions.len(), 1, "one entry pending eviction");
+    assert_eq!(evictions[0].identity, alice);
+}
+
+// ── C9 · clear_pending_key_disable / list_pending_key_disables ───────────────
+
+/// `begin_revocation` sets `pending_key_disable = 1`. After
+/// `finalise_revocation`, the flag is cleared (done inside `finalise_revocation`
+/// itself). Verify that `list_pending_key_disables` is empty after finalise.
+#[tokio::test]
+async fn clear_pending_key_disable_after_finalise() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let receipt = make_revocation_receipt(&alice, &alice, KeyVersion::FIRST, &sk);
+    r.begin_revocation(&receipt)
+        .await
+        .expect("begin_revocation");
+
+    // Flag should be set: verify list is non-empty.
+    let before = r
+        .list_pending_key_disables()
+        .await
+        .expect("list_pending_key_disables before finalise");
+    assert_eq!(
+        before.len(),
+        1,
+        "one pending_key_disable before finalise_revocation"
+    );
+
+    r.finalise_revocation(&alice)
+        .await
+        .expect("finalise_revocation");
+
+    // After finalise, list must be empty (finalise_revocation cleared the flag).
+    let after = r
+        .list_pending_key_disables()
+        .await
+        .expect("list_pending_key_disables after finalise");
+    assert!(
+        after.is_empty(),
+        "list_pending_key_disables must be empty after finalise_revocation"
+    );
+}
+
+/// `begin_revocation` without `finalise_revocation` must leave one entry in
+/// `list_pending_key_disables`.
+#[tokio::test]
+async fn list_pending_key_disables_returns_revocation_in_flight() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let receipt = make_revocation_receipt(&alice, &alice, KeyVersion::FIRST, &sk);
+    r.begin_revocation(&receipt)
+        .await
+        .expect("begin_revocation");
+
+    let pending = r
+        .list_pending_key_disables()
+        .await
+        .expect("list_pending_key_disables");
+    assert_eq!(pending.len(), 1, "one pending_key_disable in-flight");
+    assert_eq!(pending[0].identity, alice);
+    // retained_versions for an unrevoked identity is the active key.
+    assert!(!pending[0].retained_versions.is_empty(), "retained_versions must be non-empty");
+}
