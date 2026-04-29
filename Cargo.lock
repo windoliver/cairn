@@ -274,6 +274,7 @@ dependencies = [
  "cairn-core",
  "ed25519-dalek",
  "keyring",
+ "rand_core 0.6.4",
  "thiserror",
  "tokio",
  "zeroize",
