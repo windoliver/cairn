@@ -5,6 +5,13 @@
   <p>
     Local-first vaults. A stable eight-verb contract. Durable learning off the request path.
   </p>
+  <p>
+    <a href="https://windoliver.github.io/cairn/">Documentation</a>
+    ·
+    <a href="docs/site/src/quickstart.md">Quickstart</a>
+    ·
+    <a href="docs/site/src/reference/generated/cli.md">CLI Reference</a>
+  </p>
 </div>
 
 ---
@@ -15,8 +22,10 @@
 > `cairn-test-fixtures`). The IDL/codegen surfaces, config bootstrap,
 > `status`, `handshake`, `plugins list`, and `plugins verify` are implemented.
 > The eight memory verbs are exposed but still fail closed as P0 stubs until
-> storage and dispatch land. See `docs/design/architecture.md` and
-> `docs/site/src/index.md`.
+> storage and dispatch land. See the
+> [documentation site](https://windoliver.github.io/cairn/),
+> [architecture brief](docs/design/architecture.md), and
+> [docs source](docs/site/src/index.md).
 
 Cairn is a memory framework for agent loops. It gives local and cloud agents a shared substrate for per-turn capture, search, retrieval, rolling summaries, trace learning, hot-memory assembly, promotion to reusable playbooks, and auditable forget-me flows.
 
