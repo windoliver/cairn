@@ -27,6 +27,9 @@ In scope:
 - Built-in default rule set covering §11.6 + §18.a triggers and the most common hook / tool-frame events.
 - Schema-validated user-rule extension hook (`RuleSet::from_config`) without binding to `.cairn/config.yaml` yet.
 - Two-phase dispatch with **untruncatable built-in rules** (Phase A) and budget-bounded user rules (Phase B). Built-ins cover all §11.6 / §18.a explicit triggers, so truncation cannot silently lose `remember` / `forget` / `skillify` intents.
+- Clause-aware text-rule dispatch: bodies are split on a small fixed separator set so compound utterances like `"forget X, remember Y"` produce both outputs (first-match-wins applies *per clause*, not per body). Bounded clause cap to keep adversarial inputs cheap.
+- Hardened `forget` resolver contract: regex-originated substring matches **never** auto-authorize delete; resolver routes them to an interactive `forget_ambiguous` outcome. Auto-proceed is gated on `match_strategy == Exact` (quoted-string capture) plus a unique candidate, or on a stable `record_id` passed by an out-of-band caller.
+- Pinned canonical text source for `Proactive` events: the user-visible message body, never the agent's `rationale`.
 - Per-rule wall-clock budget enforcement and hard `max_drafts` cap on Phase B; typed `TruncationReason` returned to the caller (§6).
 - Documented chain handoff contract for #74: `(source_event, kind_hint)` dedup key on truncation so the LLM extractor can safely run on the same body without re-emitting Phase A drafts.
 - Unit, integration, property, and a CI-friendly latency assertion test.
@@ -247,14 +250,24 @@ pub enum ForgetMatchStrategy {
 
 **Resolver contract for #75 (documented here so the dependency is visible):**
 
-A `ForgetIntent` is a *candidate* for deletion, never an instruction. The resolver in #75 must:
+A `ForgetIntent` is a *candidate* for deletion, never an instruction. `forget` is irreversible (§5.6), so the resolver must require strong evidence of user intent. The resolver in #75 must:
 
 1. Find the candidate set using `kind_filter` + `match_strategy(target_text_normalized)`.
-2. If the candidate set has exactly one record, the `forget` verb proceeds (still subject to consent + WAL — §5.6).
-3. If the candidate set is empty, write a `lint`-surfaced `forget_unresolved` event; never delete.
-4. If the candidate set has more than one record, **never** silently pick one. Instead emit an interactive `forget_ambiguous` outcome (CLI / MCP / SDK surface) listing matches; the user disambiguates with a follow-up call. Documented as part of #75's scope.
+2. **Auto-proceed is only allowed when both of these hold**:
+   - `match_strategy == Exact` (target text was either a quoted-string capture or otherwise anchored, not a free substring), and
+   - the candidate set has exactly one record.
 
-This PR ships only the structured `ForgetIntent` type and the populated fields from regex-matched triggers; it does not implement the resolver.
+   Even then the verb stays subject to the consent + WAL gates of §5.6.
+3. **Substring matches never auto-proceed.** Every `match_strategy == Substring` intent — even when the candidate set has exactly one record — is surfaced as a `forget_ambiguous` interactive outcome (CLI / MCP / SDK) listing the candidate(s) and requiring the user to either pass a stable `record_id` on a follow-up call or confirm. Substring is a hint; it is not authorization.
+4. If the candidate set is empty, write a `lint`-surfaced `forget_unresolved` event; never delete.
+5. For any candidate set size > 1, regardless of strategy, emit `forget_ambiguous` and require disambiguation by stable `record_id`. Never silently pick one.
+6. **Stable-id path is also supported**: callers (notably the chain dispatcher and any agent surface) may attach an explicit `record_id: Option<RecordId>` to the resolver call. When present, that path bypasses the text-match resolver entirely. The regex extractor never populates it — only out-of-band callers do (CLI flag, MCP arg).
+
+The built-in `forget` rule emits `match_strategy = Substring`, which means a regex-originated forget intent on its own can never authorize a delete: it always either matches no records (lint) or routes through `forget_ambiguous`. To get auto-proceed, the user has to (a) phrase the request with quoted text the resolver can promote to `Exact`, (b) pass a stable record id directly to the verb, or (c) confirm in the interactive outcome. All three paths are explicit. This closes the round-4 risk that a single accidental substring match could authorize the wrong delete.
+
+User rules may emit `match_strategy = Exact` only if they capture a quoted-string group from the body (e.g. `forget "my old address"`); enforced by a runtime check in `from_config` that any rule with `Exact` declares a `quoted_capture: true` field. `match_strategy = Fuzzy` is rejected by `from_config` until #75 ships fuzzy matching.
+
+This PR ships only the structured `ForgetIntent` type and the populated fields from regex-matched triggers; it does not implement the resolver. The contract is captured here so that #75 cannot accidentally weaken it later without an explicit spec amendment.
 
 ## 5. Rule shape
 
@@ -275,6 +288,22 @@ pub enum RegexRule {
         id: String,
         pattern: String,
         target_group: u8,
+        /// Match strategy emitted by this rule into the resulting
+        /// `ForgetIntent`. The default rule emits `Substring`; the
+        /// resolver in #75 routes substring intents to interactive
+        /// confirmation regardless of candidate-set size.
+        ///
+        /// Validated by `from_config`:
+        /// - `Substring` (default): always allowed.
+        /// - `Exact`: only allowed when the rule captures a
+        ///   quoted-string group; the rule must additionally set
+        ///   `quoted_capture: true` and the pattern must wrap
+        ///   `target_group` in `"…"` or `'…'`.
+        /// - `Fuzzy`: rejected until #75 ships fuzzy matching.
+        #[serde(default = "ForgetMatchStrategy::default_substring")]
+        match_strategy: ForgetMatchStrategy,
+        #[serde(default)]
+        quoted_capture: bool,
     },
     HookEvent {
         id: String,
@@ -336,7 +365,7 @@ The split between built-in and user-rule buckets is the load-bearing fix for "tr
 | `Terminal` | `tool_frame_rules` filtered to `Terminal` | n/a |
 | `Ide` | `tool_frame_rules` filtered to `Ide` | n/a |
 | `Cli`, `Mcp` | `text_rules` if `input.body.is_some()` | `input.body` (caller resolves the user-supplied ingest payload from `payload_ref`) |
-| `Proactive` | `text_rules` if `input.body.is_some()` | `input.body` (caller may pass either the agent's message body or `rationale` extract; both are textual) |
+| `Proactive` | `text_rules` if `input.body.is_some()` | **`input.body` is the user-visible message body only.** The `rationale` field on `CapturePayload::Proactive` is internal agent reasoning and is **never** an extraction source — using it would persist internal text as user memories and create an unstable trust boundary. Callers that resolve a `Proactive` body must read the message-body bytes from `payload_ref` (verifying `payload_hash`) and *not* substitute `rationale`. The caller contract documents this explicitly; the extractor cannot enforce it from inside (the bytes look the same), so it is a hard rule on the resolution layer. |
 | `Voice`, `Screen`, `Clipboard`, `RecordingBatch` | none in this PR — extender lands with the relevant sensor issue | n/a |
 
 For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector.
@@ -360,9 +389,28 @@ Dispatch runs in two phases per event:
 1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. **Phase A is never truncated.** No `max_drafts` check, no per-rule `max_wall_ms` check. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex) — together they fit well under the 2 ms budget on commodity hardware. Phase A's runtime is the floor of `max_wall_ms`; if the deployment's hardware genuinely cannot meet 2 ms for built-ins, that is a configuration error, surfaced as a startup self-check (out of scope for #73; tracked as a follow-up).
 2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
 
-**First-match-wins for text rules (per body, per phase).** Within text rules, dispatch is ordered and stops at the first match: once any `TriggerPhrase` or `ForgetPhrase` matches the body in Phase A, Phase A's text rules stop and Phase B's text rules are also skipped for that body. (Built-ins win over user rules; intent overlap between user-config and a built-in trigger is resolved in favor of the built-in semantics. User rules can still cover sensor-specific signals via Hook / ToolFrame, which run on independent payload dimensions.) Rationale: text triggers are mutually-exclusive intents — a single utterance is either a `remember`, a `forget`, a `correction`, or a recipe; producing two drafts with different `kind_hint`s for the same body is a write-amplification bug.
+**Clause-aware first-match-wins for text rules.** Bodies are split into clauses on a small fixed set of separators before text-rule dispatch:
 
-**No multi-fire per rule per event.** A given rule fires at most once per event (no scanning the body for multiple matches of the same pattern). Hook and tool-frame rules likewise produce at most one output per matching event.
+- `,` (comma)
+- `;` (semicolon)
+- `.` followed by whitespace or end-of-string (sentence boundary)
+- standalone conjunctions: `\band\b`, `\bbut\b`, `\bthen\b` (case-insensitive)
+
+Each resulting clause is dispatched independently, with first-match-wins **per clause** (not per body). Empty clauses (after trimming) are skipped. Hook and tool-frame rules ignore clause splitting and continue to run at most once per event.
+
+This handles compound utterances correctly:
+
+| Body | Clauses (after split) | Outputs |
+|---|---|---|
+| `"forget my old address and remember the new one is 1 Main St"` | `["forget my old address", "remember the new one is 1 Main St"]` | `Forget(target="my old address")` + `Draft(kind=user, body="the new one is 1 Main St")` |
+| `"correction: it's actually Z; remember that"` | `["correction: it's actually Z", "remember that"]` | `Draft(kind=feedback, body="it's actually Z")` + `Draft(kind=user, body="that")` (low-quality remember; that's fine — confidence stays at 0.95 from the rule, but #75's filter has its own discard reasons) |
+| `"remember that I prefer dark mode"` | `["remember that I prefer dark mode"]` | `Draft(kind=user, body="I prefer dark mode")` (single clause, single output) |
+
+**Per-clause first-match-wins still prevents the original overlap bug.** The "remember never share API keys" case sits in one clause, so the `remember.rule` priority over `remember.preference` from §6 still holds.
+
+**Bounded clause count.** The clause splitter caps at 8 clauses per body. Beyond that, the body is treated as a single clause (split discarded) and a `tracing::warn!(splitter = "regex", body_len, "clause cap reached")` is emitted. The cap exists to keep adversarial inputs (e.g. comma-saturated payloads) from amplifying work; 8 covers any realistic compound utterance.
+
+**No multi-fire per rule per event.** A given rule fires at most once per *clause*. The same rule can fire on multiple clauses of one body — that is the desired behavior for compound utterances (e.g. two consecutive `correction:` clauses). Hook and tool-frame rules continue to fire at most once per event.
 
 ### 6.3 Budget enforcement (Phase B only)
 
@@ -407,11 +455,13 @@ The chain dispatcher in #74 enforces the following match on this PR's output. It
 |---|---|---|
 | `Err(ExtractError::BudgetExceeded { .. })` | Fall through to LLM extractor on the same body. | No regex output exists, so no duplicate-write risk. |
 | `Err(ExtractError::BodyResolution { .. })` | Surface or retry per the failure variant; **do not** treat as bodyless. | Failed resolution is not "no body". |
-| `Ok(result)` with `truncated == MaxDrafts` | Fall through to LLM extractor on the same body. **Dedup contract:** `MemoryDraft.kind_hint` from a built-in trigger acts as the dedup key — the LLM extractor must skip producing drafts that share `(source_event, kind_hint)` with any draft already in `result.outputs`. This is fine because built-ins always run to completion: any explicit trigger that fired regex-side is already represented in `result.outputs` and must not be re-emitted by the LLM. | Built-ins finished, so explicit user intents are captured and dedupable; only user-rule discovery is incomplete. |
+| `Ok(result)` with `truncated == MaxDrafts` | Fall through to LLM extractor on the same body. **Dedup contract:** every text-rule-produced output carries `source_span` (the byte range it consumed from the body). The LLM extractor is instructed to skip any draft whose `source_span` overlaps with a span already represented in `result.outputs`, and to skip producing forget intents at all when `result.outputs` contains any `Forget(_)`. Spans are stable: clause-split offsets are computed against the original body bytes, not against the trimmed clause string. | Built-ins finished — every clause that matched regex-side has a recorded span — so the LLM cannot accidentally re-emit those clauses. Only spans the regex did not cover are eligible for LLM enrichment. |
 | `Ok(result)` with `truncated == MaxWallMs { .. }` | Same as `MaxDrafts`. | Same rationale. |
-| `Ok(result)` with `truncated == None` | Fall through to LLM extractor unless `result.outputs` already contains a forget intent (in which case stop the chain — forget intents must not be re-emitted). | Non-truncated regex pass is complete; LLM is then doing additive enrichment, not re-derivation. |
+| `Ok(result)` with `truncated == None` | Fall through to LLM extractor on uncovered spans only, with the same span-dedup contract. | Non-truncated regex pass is complete for the spans it touched; LLM is then doing additive enrichment on the rest, not re-derivation. |
 
-The dedup contract by `(source_event, kind_hint)` makes built-ins idempotent across the regex→LLM boundary even under truncation: any trigger phrase that the regex caught will be in `outputs`, and the LLM will be instructed to skip those kinds for the same event. **Explicit `remember` / `forget` / `skillify` requests are therefore never lost to truncation** — they are always covered by Phase A, which runs to completion.
+**Span discipline:** every `MemoryDraft` and every `ForgetIntent` produced by a text rule must populate `source_span` (clause start/end in the original body's byte offsets). This is enforced at construction time — the regex emitter is the only path that creates these, and it has the offsets in scope. Hook and tool-frame outputs carry `source_span = None` (they have no body to anchor to) and the LLM extractor never runs on those events anyway, so the dedup key is well-defined where it is needed.
+
+Span-based dedup makes built-ins idempotent across the regex→LLM boundary even under truncation: any clause that the regex covered is annotated with its byte range, and the LLM will be instructed to ignore those ranges for the same event. **Explicit `remember` / `forget` / `skillify` requests are never lost to truncation** — they are always covered by Phase A on every clause they appear in.
 
 #74 will own the actual dispatcher implementation and metrics (`chain.regex_truncated`, `chain.body_resolution_failed`); this PR's job is to produce the inputs that contract takes.
 
@@ -468,6 +518,14 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - **Overlap regression:** body `"remember never share API keys"` produces exactly one output, with `kind_hint = "rule"` (matched by `remember.rule`, not `remember.preference`). Body `"remember that I prefer dark mode"` produces exactly one output with `kind_hint = "user"`. First-match-wins: a body that synthetically matches two TriggerPhrase rules emits only the first.
 - **Built-ins are untruncatable:** synthesize a `RuleSet` with `builtin()` plus a user-rule list of `max_drafts + 5` always-matching rules; pass a body that the built-in `remember.preference` matches. Assert (a) the built-in fires (Phase A produced its draft), (b) `truncated == TruncationReason::MaxDrafts` from Phase B, (c) `outputs[0].kind_hint == "user"` (built-in came first), (d) `outputs.len() == max_drafts`. Demonstrates that truncation cannot silently drop a `remember` trigger.
 - **Body resolution failure:** `ExtractInput.body = BodyResolution::Failed(BodyResolutionError::HashMismatch { .. })`; assert `extract` returns `Err(ExtractError::BodyResolution { event_id, source: HashMismatch { .. } })` and produces zero outputs (no partial side effects).
+- **Compound utterance:** body `"forget my old address and remember the new one is 1 Main St"`; assert `outputs.len() == 2`, `outputs[0]` is `Forget(target_text_normalized="my old address")`, `outputs[1]` is `Draft(kind="user", body="the new one is 1 Main St")`. Both have non-overlapping `source_span`s.
+- **Clause cap:** body with 10 comma-separated `remember X, remember Y, ...` clauses; assert at most 8 are processed and exactly one `clause cap reached` warn fires.
+- **Within-clause first-match-wins:** body `"remember never share API keys"`; assert single output with `kind = "rule"`. (The clause splitter must not break this case — `"remember never share API keys"` stays as one clause because there is no separator.)
+- **Forget contract — substring stays substring:** `forget` rule fires on `"forget my old address"`; assert `match_strategy == Substring` (not `Exact`). Round-trip serde preserves it.
+- **Forget contract — Fuzzy rejected:** `RuleSet::from_config(<rule with match_strategy: Fuzzy>)` returns `Err(InvalidRule)`. (This guards the resolver contract: even if a future user-config tries to declare `Fuzzy`, the extractor refuses to compile it until #75 is wired up.)
+- **Forget contract — user `Exact` requires `quoted_capture: true`:** user rule with `match_strategy: Exact` and `quoted_capture: false` (or absent) → `InvalidRule`.
+- **Proactive canonical source:** test fixture verifies a `Proactive` envelope is dispatched with `body = message_body`, never `rationale`. (The check sits in the test fixture builder so a future test author cannot accidentally pass `rationale` through.)
+- **Span discipline:** every text-rule output has `source_span = Some(_)`; every Hook / ToolFrame output has `source_span = None`. Property test asserts the invariant across `extract` outputs.
 - `max_drafts` enforcement: build a `RuleSet` whose **user**-rule list contains `max_drafts + 5` always-matching rules and an empty built-in set; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches user-rule declaration order.
 - `max_wall_ms` zero-output path: empty built-ins, set `budget.max_wall_ms = 0`, one user rule that does work; assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
 - `max_wall_ms` partial-output path: empty built-ins, two user rules — first matches, second sleeps past the budget; assert `truncated == TruncationReason::MaxWallMs { .. }` and `outputs.len() == 1`.
