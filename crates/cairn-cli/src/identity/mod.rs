@@ -7,6 +7,7 @@
 //! - delegates cryptographic storage to [`OsKeystore`] and durable identity
 //!   state to [`SqliteIdentityRegistry`].
 
+pub mod cli;
 mod first_bind;
 mod lock;
 mod purge;
