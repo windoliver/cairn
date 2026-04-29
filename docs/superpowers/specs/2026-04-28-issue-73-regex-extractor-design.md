@@ -31,7 +31,7 @@ In scope:
 - Hardened `forget` resolver contract: regex-originated substring matches **never** auto-authorize delete; resolver routes them to an interactive `forget_ambiguous` outcome. Auto-proceed is gated on `match_strategy == Exact` (quoted-string capture) plus a unique candidate, or on a stable `record_id` passed by an out-of-band caller.
 - Pinned canonical text source for `Proactive` events: the user-visible message body, never the agent's `rationale`.
 - Per-rule wall-clock budget enforcement and hard `max_drafts` cap on Phase B; typed `TruncationReason` returned to the caller (§6).
-- Documented chain handoff contract for #74: regex emits typed `uncovered_spans` so the LLM extractor runs on the parts of the body the regex did not touch. Suppression is **span-scoped, not event-scoped**, and **confidence-gated** (regex spans below `CONFIDENCE_GATE_FOR_SUPPRESSION = 0.9` stay eligible for LLM re-extraction). Weak regex matches cannot block LLM recovery on the same span.
+- Documented chain handoff contract for #74: regex emits typed `llm_eligible_spans` derived from clause spans minus high-confidence (≥0.9) regex coverage, plus any `ClauseCapExceeded` tail. Suppression is **span-scoped, not event-scoped**, and **confidence-gated** even under truncation: low-confidence regex spans remain LLM-eligible so weak matches cannot block LLM recovery.
 - Unit, integration, property, and a CI-friendly latency assertion test.
 
 Explicitly **not** modified by this PR:
@@ -130,13 +130,20 @@ pub enum BodyResolutionError {
     Io(String),
 }
 
+/// `#[async_trait]` is required, not native async-fn-in-traits + RPITIT.
+/// The chain dispatcher in #74 holds extractors as `Box<dyn ExtractorWorker>`
+/// (homogeneous storage of regex / llm / agent workers under one type), and a
+/// trait with native `async fn` is not object-safe in Rust 1.95. CLAUDE.md
+/// §6.3 explicitly carves out this case: "Keep async_trait only when trait
+/// objects (`dyn Trait`) are required." This is one of those cases.
+#[async_trait::async_trait]
 pub trait ExtractorWorker: Send + Sync {
     fn name(&self) -> &'static str;
     fn budget(&self) -> ExtractBudget;
     async fn extract(
         &self,
         input: &ExtractInput<'_>,
-    ) -> Result<Vec<ExtractOutput>, ExtractError>;
+    ) -> Result<ExtractResult, ExtractError>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +174,11 @@ pub enum ExtractError {
 }
 ```
 
-Note: edition-2024 native `async fn` in traits + RPITIT (CLAUDE.md §6.3). Use `dyn ExtractorWorker` only at the chain boundary (#74), where boxed-future erasure is fine.
+Trait-object storage is the load-bearing constraint: the chain in #74 holds
+`Vec<Box<dyn ExtractorWorker>>` to dispatch regex/llm/agent uniformly, so the
+trait must be object-safe. `async_trait` adds a heap-allocated future per
+call but the chain only invokes one extractor per event per phase — a single
+boxing allocation, well below the latency budget.
 
 ### 4.2 `MemoryDraft`
 
@@ -389,14 +400,17 @@ Dispatch runs in two phases per event:
 1. **Phase A — built-ins.** Run all built-in rules for the relevant payload family in the order listed in `defaults.rs`. **Phase A is never truncated.** No `max_drafts` check, no per-rule `max_wall_ms` check. Built-ins are bounded (≤ 16 in §7) and cheap (anchored, linear regex) — together they fit well under the 2 ms budget on commodity hardware. Phase A's runtime is the floor of `max_wall_ms`; if the deployment's hardware genuinely cannot meet 2 ms for built-ins, that is a configuration error, surfaced as a startup self-check (out of scope for #73; tracked as a follow-up).
 2. **Phase B — user rules.** Run user rules for the same payload family. **Phase B is the only truncation surface.** `max_drafts` and `max_wall_ms` are checked after each user rule.
 
-**Clause-aware first-match-wins for text rules.** Bodies are split into clauses on a small fixed set of separators before text-rule dispatch:
+**Clause-aware first-match-wins for text rules.** Bodies are split into clauses on a deliberately conservative separator set:
 
-- `,` (comma)
-- `;` (semicolon)
-- `.` followed by whitespace or end-of-string (sentence boundary)
-- standalone conjunctions: `\band\b`, `\bbut\b`, `\bthen\b` (case-insensitive)
+- `;` (semicolon) — always a clause boundary.
+- `.` followed by whitespace or end-of-string — sentence boundary, always a clause boundary. Decimal points and abbreviations (`U.S.`) are followed by a non-whitespace character so they don't split.
+- `,` followed by whitespace and a **trigger-prefix lookahead** — only splits when the next clause starts with one of `remember`, `forget`, `correction`, `skillify`, or `this is how` (case-insensitive, word-anchored). This means `"forget X, remember Y"` splits but `"alice, bob, and carol are on call"` does not.
+- conjunction (`\band\b`, `\bbut\b`, `\bthen\b`) followed by whitespace and the **same trigger-prefix lookahead**. `"forget X and remember Y"` splits; `"remember that Alice and Bob are on call"` stays intact (the `and` is not followed by a trigger prefix).
+- Quote-aware: separators inside `"…"`, `'…'`, or backticks do not split. Implemented with a tiny one-pass scanner; the regex crate doesn't need to support balanced groups.
 
 Each resulting clause is dispatched independently, with first-match-wins **per clause** (not per body). Empty clauses (after trimming) are skipped. Hook and tool-frame rules ignore clause splitting and continue to run at most once per event.
+
+Trigger-prefix gating is the round-7 fix: ordinary remembered facts like `"remember that Alice and Bob are on call"` must stay as one clause, otherwise the built-in `remember.preference` (confidence 0.95) would capture only `"Alice"` and gate the LLM out of recovering the rest. The lookahead makes splitting *meaningful* — only when both sides plausibly carry their own intent — and harmless on plain English.
 
 This handles compound utterances correctly:
 
@@ -408,7 +422,7 @@ This handles compound utterances correctly:
 
 **Per-clause first-match-wins still prevents the original overlap bug.** The "remember never share API keys" case sits in one clause, so the `remember.rule` priority over `remember.preference` from §6 still holds.
 
-**Bounded clause count.** The clause splitter caps at 8 clauses per body. The first 8 clauses are dispatched as normal; **the remaining body bytes (from the start of clause 9 to end-of-body) are recorded as a single uncovered span** in `ExtractResult.uncovered_spans` (see §6.4) and `truncated` is set to `TruncationReason::ClauseCapExceeded { processed: 8, body_len }`. A `tracing::warn!(splitter = "regex", body_len, "clause cap reached")` is emitted. The earlier behaviour ("collapse to single-clause first-match-wins on overflow") is rejected because it would silently drop later explicit commands in long compound utterances — exactly the failure mode this design exists to prevent. The cap exists to bound work, not to discard intent: the LLM extractor is free to take the uncovered tail and complete the extraction.
+**Bounded clause count.** The clause splitter caps at 8 clauses per body. The first 8 clauses are dispatched as normal; **the remaining body bytes (from the start of clause 9 to end-of-body) are recorded as a single uncovered span** in `ExtractResult.llm_eligible_spans` (see §6.4) and `truncated` is set to `TruncationReason::ClauseCapExceeded { processed: 8, body_len }`. A `tracing::warn!(splitter = "regex", body_len, "clause cap reached")` is emitted. The earlier behaviour ("collapse to single-clause first-match-wins on overflow") is rejected because it would silently drop later explicit commands in long compound utterances — exactly the failure mode this design exists to prevent. The cap exists to bound work, not to discard intent: the LLM extractor is free to take the uncovered tail and complete the extraction.
 
 **No multi-fire per rule per event.** A given rule fires at most once per *clause*. The same rule can fire on multiple clauses of one body — that is the desired behavior for compound utterances (e.g. two consecutive `correction:` clauses). Hook and tool-frame rules continue to fire at most once per event.
 
@@ -435,12 +449,15 @@ The per-rule check ensures a large or pathological user-rule list cannot blow th
 pub struct ExtractResult {
     pub outputs: Vec<ExtractOutput>,
     pub truncated: TruncationReason,
-    /// Byte ranges of the original body that the regex pass did NOT
-    /// cover. The chain dispatcher uses this to bound LLM extraction:
-    /// the LLM should run on these spans (or on the whole body if this
-    /// vector is empty and `truncated == None` allows it). Always sorted
-    /// and disjoint; safe to feed directly into a slice-extraction loop.
-    pub uncovered_spans: Vec<TextSpan>,
+    /// Byte ranges of the original body that the LLM extractor in the
+    /// chain SHOULD run on. Includes (a) clauses that no text rule
+    /// matched, (b) clauses matched only by a regex with
+    /// `confidence < CONFIDENCE_GATE_FOR_SUPPRESSION`, and (c) any tail
+    /// uncovered because of `ClauseCapExceeded`. Sorted and disjoint;
+    /// safe to feed directly into a slice-extraction loop. This is the
+    /// canonical input the chain dispatcher consumes — derive nothing
+    /// else from raw output spans.
+    pub llm_eligible_spans: Vec<TextSpan>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,19 +466,34 @@ pub enum TruncationReason {
     None,
     MaxDrafts,
     MaxWallMs { elapsed_ms: u32 },
-    /// Body had > 8 clauses; first 8 dispatched, the remainder is in
-    /// `uncovered_spans` for the LLM extractor to pick up.
+    /// Body had > 8 clauses; first 8 dispatched, the remainder is part
+    /// of `llm_eligible_spans` for the LLM extractor to pick up.
     ClauseCapExceeded { processed: u8, body_len: u32 },
 }
 ```
 
-`uncovered_spans` is computed against the original body bytes:
+`llm_eligible_spans` is computed against the original body bytes. The
+algorithm builds the list explicitly so it stays correct under all
+truncation modes:
 
-- A clause that matched a text rule contributes its `source_span` to a *covered* set.
-- A clause that did not match contributes its span to *uncovered*.
-- Bytes consumed by clause separators are merged into adjacent uncovered ranges.
-- When `ClauseCapExceeded` fires, the tail (from clause 9's start to end-of-body) is appended to *uncovered* as a single range.
-- For non-text payload variants (`NotApplicable` body, hook/tool-frame events) `uncovered_spans` is empty.
+1. Start with every clause span produced by the splitter.
+2. Subtract any clause span that was matched by a regex output with
+   `confidence >= CONFIDENCE_GATE_FOR_SUPPRESSION` (default 0.9). Those
+   spans are "fully claimed" by regex and the LLM should not revisit
+   them.
+3. Append the tail span when `ClauseCapExceeded` fires (from clause 9's
+   start to end-of-body).
+4. Merge adjacent or overlapping ranges; merge separator bytes into
+   adjacent uncovered ranges.
+5. For non-text payload variants (`NotApplicable` body, hook /
+   tool-frame events) the list is empty.
+
+Crucially, **a low-confidence regex match does not subtract its span**.
+If a synthetic user rule with `confidence: 0.5` matched clause 1, that
+clause's span stays in `llm_eligible_spans` so the LLM can produce a
+competing higher-quality draft. Filter (#75) breaks ties by confidence.
+This makes the round-7 invariant — "weak regex matches stay
+re-checkable, even under truncation" — provable by construction.
 
 Trait signature: `async fn extract(...) -> Result<ExtractResult, ExtractError>`.
 
@@ -473,8 +505,8 @@ The chain dispatcher in #74 enforces the following match on this PR's output. It
 |---|---|---|
 | `Err(ExtractError::BudgetExceeded { .. })` | Fall through to LLM extractor on the same body. | No regex output exists, so no duplicate-write risk. |
 | `Err(ExtractError::BodyResolution { .. })` | Surface or retry per the failure variant; **do not** treat as bodyless. | Failed resolution is not "no body". |
-| `Ok(result)` with `truncated == MaxDrafts` / `MaxWallMs` / `ClauseCapExceeded` | Run LLM extractor on `result.uncovered_spans` (sliced from the body). Drafts produced by the LLM coexist with regex drafts; downstream Filter (#75) deduplicates by confidence. | Regex output is preserved; LLM gets exactly the byte ranges regex did not cover. No silent loss. |
-| `Ok(result)` with `truncated == None` | Same: run LLM extractor on `result.uncovered_spans`. If the vector is empty and the body was non-empty, the LLM still runs on the full body for additive enrichment (entity extraction, etc.) but the chain marks any LLM draft whose span overlaps a regex draft as `competing` — Filter (#75) breaks the tie by confidence + kind agreement, not by suppression. | Regex on its own is not authoritative enough to silence the LLM; weak regex matches (low confidence, partial body) must be re-checkable. |
+| `Ok(result)` with `truncated == MaxDrafts` / `MaxWallMs` / `ClauseCapExceeded` | Run LLM extractor on `result.llm_eligible_spans` (sliced from the body). Drafts produced by the LLM coexist with regex drafts; downstream Filter (#75) deduplicates by confidence. | Regex output is preserved; LLM gets exactly the byte ranges regex did not cover. No silent loss. |
+| `Ok(result)` with `truncated == None` | Same: run LLM extractor on `result.llm_eligible_spans`. If the vector is empty and the body was non-empty, the LLM still runs on the full body for additive enrichment (entity extraction, etc.) but the chain marks any LLM draft whose span overlaps a regex draft as `competing` — Filter (#75) breaks the tie by confidence + kind agreement, not by suppression. | Regex on its own is not authoritative enough to silence the LLM; weak regex matches (low confidence, partial body) must be re-checkable. |
 | `Err(ExtractError::BudgetExceeded { .. })` | Fall through to LLM extractor on the full body. | No regex output to coexist with. |
 | `Err(ExtractError::BodyResolution { .. })` | Surface or retry per the failure variant; do not treat as bodyless. | Failed resolution is not "no body". |
 
@@ -545,11 +577,14 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - **Overlap regression:** body `"remember never share API keys"` produces exactly one output, with `kind_hint = "rule"` (matched by `remember.rule`, not `remember.preference`). Body `"remember that I prefer dark mode"` produces exactly one output with `kind_hint = "user"`. First-match-wins: a body that synthetically matches two TriggerPhrase rules emits only the first.
 - **Built-ins are untruncatable:** synthesize a `RuleSet` with `builtin()` plus a user-rule list of `max_drafts + 5` always-matching rules; pass a body that the built-in `remember.preference` matches. Assert (a) the built-in fires (Phase A produced its draft), (b) `truncated == TruncationReason::MaxDrafts` from Phase B, (c) `outputs[0].kind_hint == "user"` (built-in came first), (d) `outputs.len() == max_drafts`. Demonstrates that truncation cannot silently drop a `remember` trigger.
 - **Body resolution failure:** `ExtractInput.body = BodyResolution::Failed(BodyResolutionError::HashMismatch { .. })`; assert `extract` returns `Err(ExtractError::BodyResolution { event_id, source: HashMismatch { .. } })` and produces zero outputs (no partial side effects).
-- **Compound utterance:** body `"forget my old address and remember the new one is 1 Main St"`; assert `outputs.len() == 2`, `outputs[0]` is `Forget(target_text_normalized="my old address")`, `outputs[1]` is `Draft(kind="user", body="the new one is 1 Main St")`. Both have non-overlapping `source_span`s. `uncovered_spans` is empty.
-- **Clause cap preserves overflow as uncovered:** body with 10 comma-separated `remember X, remember Y, ...` clauses; assert (a) `outputs.len() == 8`, (b) `truncated == ClauseCapExceeded { processed: 8, body_len }`, (c) `uncovered_spans` contains exactly one range starting at the byte offset of clause 9 and ending at end-of-body, (d) one `clause cap reached` warn fires. Earlier-spec behaviour ("collapse to single-clause") is forbidden — guard with a regression test that asserts the body is **not** matched as a single first-match-wins string.
-- **Uncovered spans on partial coverage:** body `"hello world. remember that I prefer dark mode"`; assert `outputs.len() == 1`, the regex draft's `source_span` covers clause 2 only, and `uncovered_spans` contains one range covering clause 1 (`"hello world"` plus the `. ` separator merge).
-- **Confidence gate:** add a synthetic user rule with `confidence: 0.5` matching `"hello (.+)"`; pass body `"hello world"`. Assert (a) the rule fires and is in `outputs`, (b) `uncovered_spans` is empty (the span was covered by output) **but** the chain dedup contract treats the span as eligible for LLM re-extraction (asserted via a unit test on the `outputs[*].confidence < CONFIDENCE_GATE_FOR_SUPPRESSION` predicate exposed for #74). The high-confidence (≥0.9) built-in `remember.preference` matching the same body would mark its span as suppression-eligible.
-- **Span-scoped forget suppression:** body `"forget my address. anyway, please also forget that other thing"`; built-in `forget` matches the first clause. Assert `outputs[0]` is the `Forget` intent on clause 1, `uncovered_spans` contains the second clause's range (so the LLM dispatcher in #74 can run `forget` re-extraction on clause 2 independently). The contract that "regex Forget does NOT suppress LLM forget on other spans" is asserted via a unit test on the contract documentation.
+- **Compound utterance:** body `"forget my old address and remember the new one is 1 Main St"`; assert `outputs.len() == 2`, `outputs[0]` is `Forget(target_text_normalized="my old address")`, `outputs[1]` is `Draft(kind="user", body="the new one is 1 Main St")`. Both have non-overlapping `source_span`s. `llm_eligible_spans` is empty (both clauses matched at confidence ≥ 0.9).
+- **Conjunction-split safety (round-7 regression):** body `"remember that Alice and Bob are on call"`; assert `outputs.len() == 1`, the single draft body is `"Alice and Bob are on call"` (whole sentence, not just `"Alice"`). The `and` here is not followed by a trigger prefix, so the splitter must keep the body as one clause. Mirror tests for `but` and `then`. Add a snapshot for `"remember that I prefer dark mode but actually light mode at night"` showing it stays one clause.
+- **Quote-aware splitting:** body `'remember that "X, Y, and Z" is the order'`; assert `outputs.len() == 1` and the captured body preserves the quoted list intact (no split inside quotes).
+- **Clause cap preserves overflow as uncovered:** body with 10 comma-separated `remember X, remember Y, ...` clauses; assert (a) `outputs.len() == 8`, (b) `truncated == ClauseCapExceeded { processed: 8, body_len }`, (c) `llm_eligible_spans` contains exactly one range starting at the byte offset of clause 9 and ending at end-of-body, (d) one `clause cap reached` warn fires. Earlier-spec behaviour ("collapse to single-clause") is forbidden — guard with a regression test that asserts the body is **not** matched as a single first-match-wins string.
+- **Uncovered spans on partial coverage:** body `"hello world. remember that I prefer dark mode"`; assert `outputs.len() == 1`, the regex draft's `source_span` covers clause 2 only, and `llm_eligible_spans` contains one range covering clause 1 (`"hello world"` plus the `. ` separator merge).
+- **Confidence gate:** add a synthetic user rule with `confidence: 0.5` matching `"hello (.+)"`; pass body `"hello world"`. Assert (a) the rule fires and is in `outputs`, (b) **`llm_eligible_spans` contains the matched clause's span** — the low-confidence regex output does not subtract its span from the LLM-eligible set. Mirror with `confidence: 0.95`: assert `llm_eligible_spans` is empty for that case.
+- **Confidence gate under truncation:** combine the previous test with a Phase-B truncation (`max_drafts: 1`, two always-matching low-confidence user rules); assert `truncated == MaxDrafts`, `outputs.len() == 1`, and `llm_eligible_spans` includes both the matched span (low confidence) and the unprocessed clause's span. The earlier-spec failure mode ("low-confidence match becomes terminal under truncation") is forbidden — guard with a regression test.
+- **Span-scoped forget suppression:** body `"forget my address. anyway, please also forget that other thing"`; built-in `forget` matches the first clause. Assert `outputs[0]` is the `Forget` intent on clause 1, `llm_eligible_spans` contains the second clause's range (so the LLM dispatcher in #74 can run `forget` re-extraction on clause 2 independently). The contract that "regex Forget does NOT suppress LLM forget on other spans" is asserted via a unit test on the contract documentation.
 - **Within-clause first-match-wins:** body `"remember never share API keys"`; assert single output with `kind = "rule"`. (The clause splitter must not break this case — `"remember never share API keys"` stays as one clause because there is no separator.)
 - **Forget contract — substring stays substring:** `forget` rule fires on `"forget my old address"`; assert `match_strategy == Substring` (not `Exact`). Round-trip serde preserves it.
 - **Forget contract — Fuzzy rejected:** `RuleSet::from_config(<rule with match_strategy: Fuzzy>)` returns `Err(InvalidRule)`. (This guards the resolver contract: even if a future user-config tries to declare `Fuzzy`, the extractor refuses to compile it until #75 is wired up.)
@@ -602,8 +637,9 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 ## 12. Workspace impact
 
 - Add `regex = { version = "1", default-features = false, features = ["std", "perf"] }` to `[workspace.dependencies]`. Disabling the `unicode` features keeps the binary slim; add Unicode-aware features only when a built-in rule needs them. CLAUDE.md §6.7 — workspace dep, justified in PR.
-- `cairn-core` opts in to `regex = { workspace = true }`.
-- `cargo deny` allowlist already covers MIT/Apache-2.0; `regex` is dual-licensed as both. No `deny.toml` change.
+- Add `async-trait = "0.1"` to `[workspace.dependencies]`. Required because `ExtractorWorker` is held as `Box<dyn ExtractorWorker>` at the chain boundary in #74, and a trait with native `async fn` is not object-safe in Rust 1.95. CLAUDE.md §6.3 explicitly carves this out.
+- `cairn-core` opts in to `regex = { workspace = true }` and `async-trait = { workspace = true }`.
+- `cargo deny` allowlist already covers MIT/Apache-2.0; both crates are dual-licensed as such. No `deny.toml` change.
 - Workspace-lint compliance: no new `#[allow]`s; no `unsafe`; `#![forbid(unsafe_code)]` already applies.
 - Core boundary check (`scripts/check-core-boundary.sh`): unaffected — `regex` is an external crate, not a workspace crate.
 
