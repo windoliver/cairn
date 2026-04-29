@@ -18,10 +18,7 @@ fn cairn_bin() -> Command {
 }
 
 fn run_json(args: &[&str]) -> Value {
-    let out = cairn_bin()
-        .args(args)
-        .output()
-        .expect("spawn cairn binary");
+    let out = cairn_bin().args(args).output().expect("spawn cairn binary");
     assert!(
         out.status.success(),
         "cairn {args:?} exited non-zero: {}",
@@ -68,17 +65,16 @@ fn status_parity_cli_vs_sdk() {
 #[test]
 fn handshake_parity_cli_vs_sdk() {
     let mut cli = run_json(&["handshake", "--json"]);
-    let mut sdk =
-        serde_json::to_value(Sdk::new().handshake()).expect("sdk handshake serializes");
+    let mut sdk = serde_json::to_value(Sdk::new().handshake()).expect("sdk handshake serializes");
 
-    let volatile: &[&[&str]] = &[
-        &["challenge", "nonce"],
-        &["challenge", "expires_at"],
-    ];
+    let volatile: &[&[&str]] = &[&["challenge", "nonce"], &["challenge", "expires_at"]];
     mask(&mut cli, volatile);
     mask(&mut sdk, volatile);
 
-    assert_eq!(cli, sdk, "CLI and SDK handshake envelopes must agree on shape");
+    assert_eq!(
+        cli, sdk,
+        "CLI and SDK handshake envelopes must agree on shape"
+    );
 }
 
 #[test]
@@ -103,7 +99,10 @@ fn status_volatile_fields_have_expected_shape() {
             .as_str()
             .unwrap_or_else(|| panic!("{label}: started_at missing"));
         assert_eq!(started.len(), 20, "{label}: started_at must be 20 chars");
-        assert!(started.ends_with('Z'), "{label}: started_at must end with Z");
+        assert!(
+            started.ends_with('Z'),
+            "{label}: started_at must end with Z"
+        );
         assert!(started.contains('T'), "{label}: started_at must contain T");
     }
 }
@@ -116,8 +115,15 @@ fn handshake_volatile_fields_have_expected_shape() {
         let nonce = value["challenge"]["nonce"]
             .as_str()
             .unwrap_or_else(|| panic!("{label}: nonce missing"));
-        assert_eq!(nonce.len(), 24, "{label}: nonce must be 16-byte base64 (24 chars)");
-        assert!(nonce.ends_with("=="), "{label}: nonce must end with == padding");
+        assert_eq!(
+            nonce.len(),
+            24,
+            "{label}: nonce must be 16-byte base64 (24 chars)"
+        );
+        assert!(
+            nonce.ends_with("=="),
+            "{label}: nonce must end with == padding"
+        );
         let expires = value["challenge"]["expires_at"]
             .as_u64()
             .unwrap_or_else(|| panic!("{label}: expires_at must be u64"));

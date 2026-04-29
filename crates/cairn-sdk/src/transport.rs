@@ -346,7 +346,9 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
         // non-ASCII so values like "http:💥/x" cannot reach storage.
         return Err(invalid("url: must be ASCII (percent-encode non-ASCII)"));
     }
-    if s.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
+    if s.bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
         return Err(invalid("url: must not contain whitespace or control chars"));
     }
     let Some(colon) = s.find(':') else {
@@ -358,8 +360,7 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
     let scheme = &s[..colon];
     let mut chars = scheme.chars();
     let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
-    let rest_ok =
-        chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
     if !(first_ok && rest_ok) {
         return Err(invalid("url: must be a valid URI"));
     }

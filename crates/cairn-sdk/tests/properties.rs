@@ -57,8 +57,9 @@ fn ingest_with_url(url: String) -> IngestArgs {
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 fn valid_ulid_string() -> impl Strategy<Value = String> {
-    proptest::collection::vec(0..CROCKFORD.len(), 26..=26)
-        .prop_map(|idxs| String::from_utf8(idxs.into_iter().map(|i| CROCKFORD[i]).collect()).unwrap())
+    proptest::collection::vec(0..CROCKFORD.len(), 26..=26).prop_map(|idxs| {
+        String::from_utf8(idxs.into_iter().map(|i| CROCKFORD[i]).collect()).unwrap()
+    })
 }
 
 proptest! {

@@ -9,6 +9,8 @@
 
 use cairn_sdk::error::ErrorCode;
 use cairn_sdk::generated::common::{Cursor, ScopeFilter, Ulid};
+use cairn_sdk::generated::envelope::ResponseVerb;
+use cairn_sdk::generated::verbs::ingest::IngestData;
 use cairn_sdk::generated::verbs::search::SearchArgsFilters;
 use cairn_sdk::generated::verbs::{
     assemble_hot::AssembleHotArgs,
@@ -20,8 +22,6 @@ use cairn_sdk::generated::verbs::{
     search::{SearchArgs, SearchArgsMode},
     summarize::SummarizeArgs,
 };
-use cairn_sdk::generated::envelope::ResponseVerb;
-use cairn_sdk::generated::verbs::ingest::IngestData;
 use cairn_sdk::{Sdk, SdkError, VerbResponse, version};
 
 fn sdk() -> Sdk {
@@ -78,8 +78,14 @@ fn verb_response_serializes_as_canonical_envelope() {
     };
     let value = serde_json::to_value(&resp).expect("serializes");
     let obj = value.as_object().expect("envelope is object");
-    assert_eq!(obj.get("contract").and_then(|v| v.as_str()), Some("cairn.mcp.v1"));
-    assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("committed"));
+    assert_eq!(
+        obj.get("contract").and_then(|v| v.as_str()),
+        Some("cairn.mcp.v1")
+    );
+    assert_eq!(
+        obj.get("status").and_then(|v| v.as_str()),
+        Some("committed")
+    );
     assert_eq!(obj.get("verb").and_then(|v| v.as_str()), Some("ingest"));
     for k in ["operation_id", "policy_trace", "data"] {
         assert!(obj.contains_key(k), "envelope missing {k}");
@@ -243,30 +249,140 @@ fn ingest_rejects_schema_minlength_violations() {
         url: None,
     };
     let cases: [(&str, IngestArgs); 16] = [
-        ("body", IngestArgs { body: Some(String::new()), ..bases() }),
-        ("file", IngestArgs { body: None, file: Some(String::new()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some(String::new()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some("not-a-uri".to_owned()), ..bases() }),
+        (
+            "body",
+            IngestArgs {
+                body: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "file",
+            IngestArgs {
+                body: None,
+                file: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("not-a-uri".to_owned()),
+                ..bases()
+            },
+        ),
         // Schemed-but-empty hier-part / colon-only / scheme-only / leading-digit:
-        ("url",  IngestArgs { body: None, url: Some("http:".to_owned()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some(":rest".to_owned()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some("1bad:rest".to_owned()), ..bases() }),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http:".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some(":rest".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("1bad:rest".to_owned()),
+                ..bases()
+            },
+        ),
         // Whitespace / control chars in any position must reject:
-        ("url",  IngestArgs { body: None, url: Some("http: ".to_owned()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some("http:\nfoo".to_owned()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some("http:\tfoo".to_owned()), ..bases() }),
-        ("url",  IngestArgs { body: None, url: Some("http:\u{0007}foo".to_owned()), ..bases() }),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http: ".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http:\nfoo".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http:\tfoo".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http:\u{0007}foo".to_owned()),
+                ..bases()
+            },
+        ),
         // Raw non-ASCII per RFC 3986 §2.1:
-        ("url",  IngestArgs { body: None, url: Some("http://example.com/💥".to_owned()), ..bases() }),
-        ("kind", IngestArgs { kind: String::new(), ..bases() }),
-        ("session_id", IngestArgs { session_id: Some(String::new()), ..bases() }),
-        ("tags", IngestArgs { tags: Some(vec![String::new()]), ..bases() }),
-        ("frontmatter", IngestArgs { frontmatter: Some(serde_json::json!([1, 2])), ..bases() }),
+        (
+            "url",
+            IngestArgs {
+                body: None,
+                url: Some("http://example.com/💥".to_owned()),
+                ..bases()
+            },
+        ),
+        (
+            "kind",
+            IngestArgs {
+                kind: String::new(),
+                ..bases()
+            },
+        ),
+        (
+            "session_id",
+            IngestArgs {
+                session_id: Some(String::new()),
+                ..bases()
+            },
+        ),
+        (
+            "tags",
+            IngestArgs {
+                tags: Some(vec![String::new()]),
+                ..bases()
+            },
+        ),
+        (
+            "frontmatter",
+            IngestArgs {
+                frontmatter: Some(serde_json::json!([1, 2])),
+                ..bases()
+            },
+        ),
     ];
     for (needle, args) in cases {
         match sdk().ingest(&args).expect_err("must reject") {
             SdkError::InvalidArgs { reason } => {
-                assert!(reason.contains(needle), "reason {reason:?} missing {needle:?}");
+                assert!(
+                    reason.contains(needle),
+                    "reason {reason:?} missing {needle:?}"
+                );
             }
             other => panic!("expected InvalidArgs for {needle}, got {other:?}"),
         }
