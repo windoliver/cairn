@@ -98,9 +98,16 @@ pub(crate) async fn dispatch(
         }
 
         if body_too_large {
-            truncated = TruncationReason::BodyTooLarge {
-                body_len: u32::try_from(text.len()).unwrap_or(u32::MAX),
-            };
+            // Preserve an earlier `MaxDrafts` signal: if user
+            // hook/tool-frame already exhausted the user-output budget
+            // and dropped outputs, that data-loss reason must remain
+            // visible rather than be silently replaced by the body-size
+            // skip.
+            if matches!(truncated, TruncationReason::None) {
+                truncated = TruncationReason::BodyTooLarge {
+                    body_len: u32::try_from(text.len()).unwrap_or(u32::MAX),
+                };
+            }
         } else {
             // Built-in (Phase A) outputs are first-party and not counted
             // against `max_user_drafts`. Phase B continues consuming the
@@ -428,7 +435,26 @@ fn normalize_target(s: &str) -> String {
     // selectors.
     let trimmed = out
         .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
-    trimmed.to_owned()
+    // Strip a single balanced outer quote pair so `forget "my old address"`
+    // emits `my old address`, not `"my old address"`. Without this the
+    // resolver compares a quoted selector against unquoted record bodies
+    // and silently misses the stored memory.
+    let unquoted = strip_balanced_outer_quotes(trimmed);
+    unquoted.to_owned()
+}
+
+fn strip_balanced_outer_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 {
+        return s;
+    }
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first == b'"' || first == b'\'' || first == b'`') && first == last {
+        // ASCII single-byte quotes only — safe to slice on byte indices.
+        return &s[1..s.len() - 1];
+    }
+    s
 }
 
 fn compute_llm_eligible_spans(

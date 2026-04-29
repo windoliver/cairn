@@ -127,13 +127,17 @@ impl<'a> ResolvedBody<'a> {
         })
     }
 
-    /// Construct from a `CapturePayload::Hook` envelope.
+    /// Construct from a `CapturePayload::Hook` envelope. Only hooks
+    /// that canonically carry **user utterance text** are accepted —
+    /// tool-output hooks like `PostToolUse` cannot be re-tagged as
+    /// `HookUtterance` and persisted as user memory.
     ///
     /// # Errors
     ///
-    /// Returns [`BodyResolutionError::PayloadVariantMismatch`] if `payload`
-    /// is not the `Hook` variant or its `hook_name` differs from the
-    /// caller-supplied `hook_name`.
+    /// Returns [`BodyResolutionError::PayloadVariantMismatch`] if
+    /// `payload` is not the `Hook` variant, its `hook_name` differs
+    /// from the caller-supplied `hook_name`, or `hook_name` is not a
+    /// recognised user-utterance hook.
     pub fn from_hook_utterance(
         text: &'a str,
         payload: &CapturePayload,
@@ -155,6 +159,12 @@ impl<'a> ResolvedBody<'a> {
                 got: "CapturePayload::Hook (hook_name mismatch)",
             });
         }
+        if !is_user_utterance_hook(hook_name) {
+            return Err(BodyResolutionError::PayloadVariantMismatch {
+                expected: "CapturePayload::Hook (user-utterance hook)",
+                got: "CapturePayload::Hook (non-user-utterance hook)",
+            });
+        }
         Ok(Self {
             text,
             source: BodySource::HookUtterance,
@@ -172,6 +182,16 @@ impl<'a> ResolvedBody<'a> {
     pub fn source(&self) -> BodySource {
         self.source
     }
+}
+
+/// Hook names whose payload body canonically carries direct user
+/// utterance text. Adding a new entry is a trust-boundary change —
+/// the hook must be one whose payload contains text the user actually
+/// typed, not tool output or agent-produced content.
+const USER_UTTERANCE_HOOKS: &[&str] = &["UserPromptSubmit"];
+
+fn is_user_utterance_hook(hook_name: &str) -> bool {
+    USER_UTTERANCE_HOOKS.contains(&hook_name)
 }
 
 fn payload_variant_name(p: &CapturePayload) -> &'static str {
@@ -243,6 +263,19 @@ mod tests {
         let body = ResolvedBody::from_hook_utterance("hi", &payload, "UserPromptSubmit")
             .expect("matching hook");
         assert_eq!(body.source(), BodySource::HookUtterance);
+    }
+
+    #[test]
+    fn from_hook_utterance_rejects_non_user_hook() {
+        // PostToolUse is not a user-utterance hook; even a matching
+        // hook_name string must be rejected so tool-output text cannot
+        // be persisted as user memory.
+        let payload = CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: None,
+        };
+        let err = ResolvedBody::from_hook_utterance("hi", &payload, "PostToolUse").unwrap_err();
+        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
     }
 
     #[test]

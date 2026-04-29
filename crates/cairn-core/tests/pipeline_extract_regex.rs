@@ -190,6 +190,20 @@ async fn oversize_body_still_extracts_trigger() {
 }
 
 #[tokio::test]
+async fn quoted_forget_target_strips_outer_quotes() {
+    // `forget "my old address"` must emit `my old address`, not
+    // `"my old address"`, so the resolver matches the stored record.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(&event, r#"forget "my old address""#);
+    let res = extractor.extract(&input).await.expect("ok");
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    assert_eq!(intent.target_text_normalized, "my old address");
+}
+
+#[tokio::test]
 async fn comma_separated_forget_strips_trailing_separator() {
     // `forget X, and remember Y` and `forget X, remember Y` must emit a
     // forget target without the trailing comma — otherwise the resolver
