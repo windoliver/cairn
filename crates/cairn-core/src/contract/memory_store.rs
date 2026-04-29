@@ -173,13 +173,24 @@ pub trait MemoryStore: Send + Sync {
     /// **Scope is the caller's responsibility.** This method does NOT
     /// derive a scope tuple from its arguments. Callers (the verb-layer
     /// dispatch in `cairn-cli`) MUST resolve the authorized scope (brief
-    /// §5.1 Scope Resolve stage) and either narrow to a `visibility_allowlist`
-    /// or compose a [`crate::domain::filter::ValidatedFilter`] over the
-    /// `kind` / `class` / `visibility` predicates plus any record-side
-    /// scope dimension exposed by the filter DSL. Calling
-    /// `search_keyword` against a shared multi-tenant DB without first
-    /// running scope resolution will leak rows that match the keyword
-    /// query but belong to a different scope.
+    /// §5.1 Scope Resolve stage) before invoking and fold it into the
+    /// query in one of two ways:
+    ///
+    /// 1. **`visibility_allowlist`** — a tier-only narrowing. Sufficient
+    ///    when the authorized scope is a single tier (e.g. an org-public
+    ///    search for an unauthenticated agent).
+    /// 2. **`filter`** — compose a [`crate::domain::filter::ValidatedFilter`]
+    ///    that includes equality predicates over the scope-tuple
+    ///    dimensions. The filter DSL exposes `scope_tenant`,
+    ///    `scope_workspace`, `scope_session_id`, `scope_entity`,
+    ///    `scope_user`, and `scope_agent` for exactly this purpose; they
+    ///    compile to `json_extract(scope, '$.<dim>')` against the
+    ///    canonical `ScopeTuple` JSON.
+    ///
+    /// Calling `search_keyword` against a shared multi-tenant DB with
+    /// neither narrowing applied returns every row matching the keyword
+    /// regardless of scope — the verb layer is the policy boundary that
+    /// prevents this in production.
     async fn search_keyword(
         &self,
         args: &KeywordSearchArgs<'_>,

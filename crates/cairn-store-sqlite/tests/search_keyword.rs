@@ -17,7 +17,7 @@ use cairn_core::contract::memory_store::{
 };
 use cairn_core::domain::filter::validate_filter;
 use cairn_core::domain::taxonomy::{MemoryKind, MemoryVisibility};
-use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
+use cairn_core::domain::{MemoryRecord, RecordId, ScopeTuple, TargetId};
 use cairn_core::generated::verbs::search::SearchArgsFilters;
 use cairn_store_sqlite::{SqliteMemoryStore, open_in_memory};
 
@@ -234,6 +234,75 @@ async fn filter_path_string_contains_narrows_by_projected_path() {
         page.candidates.len(),
         2,
         "all projected paths share `vault/`"
+    );
+}
+
+// ── Cross-scope isolation via the scope_* filter fields ──────────────────────
+
+#[tokio::test]
+async fn cross_scope_records_isolate_via_scope_user_filter() {
+    let store = open_in_memory().await.expect("open");
+    // Two records, same body and visibility, two distinct `scope.user`
+    // identities. Pre-fix this would have leaked rows across scopes
+    // because the filter DSL had no `scope_*` predicates.
+    let mut alice = record_with('A', "shared body keyword needle", MemoryKind::User);
+    alice.scope = ScopeTuple {
+        user: Some("usr:alice".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let mut bob = record_with('B', "shared body keyword needle", MemoryKind::User);
+    bob.scope = ScopeTuple {
+        user: Some("usr:bob".to_owned()),
+        ..ScopeTuple::default()
+    };
+    store.upsert(&alice).await.expect("alice");
+    store.upsert(&bob).await.expect("bob");
+
+    // Filter that only Alice's scope passes.
+    let raw = serde_json::json!({
+        "field": "scope_user",
+        "op": "eq",
+        "value": "usr:alice",
+    });
+    let parsed: SearchArgsFilters = serde_json::from_value(raw).expect("filter parse");
+    let validated = validate_filter(&parsed).expect("filter valid");
+    let mut a = args("needle", 10);
+    a.filter = Some(validated);
+    let page = store.search_keyword(&a).await.expect("search");
+    assert_eq!(page.candidates.len(), 1, "scope_user filter must isolate");
+    let scope = &page.candidates[0].scope;
+    assert_eq!(scope.user.as_deref(), Some("usr:alice"));
+}
+
+#[tokio::test]
+async fn omitting_scope_filter_returns_every_scope() {
+    // Companion to `cross_scope_records_isolate_via_scope_user_filter`:
+    // pins the documented invariant that the store does NOT enforce
+    // scope on its own. A caller that forgets to add a scope predicate
+    // gets every matching row — this is the boundary the verb layer in
+    // #62 is responsible for closing in production.
+    let store = open_in_memory().await.expect("open");
+    let mut alice = record_with('A', "shared body keyword needle", MemoryKind::User);
+    alice.scope = ScopeTuple {
+        user: Some("usr:alice".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let mut bob = record_with('B', "shared body keyword needle", MemoryKind::User);
+    bob.scope = ScopeTuple {
+        user: Some("usr:bob".to_owned()),
+        ..ScopeTuple::default()
+    };
+    store.upsert(&alice).await.expect("alice");
+    store.upsert(&bob).await.expect("bob");
+
+    let page = store
+        .search_keyword(&args("needle", 10))
+        .await
+        .expect("search");
+    assert_eq!(
+        page.candidates.len(),
+        2,
+        "without a scope_* filter both rows surface — verb layer must add one",
     );
 }
 

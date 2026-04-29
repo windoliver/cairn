@@ -63,6 +63,19 @@ const KNOWN_FIELDS: &[(&str, FieldType)] = &[
     ("path", FieldType::Str),
     ("title", FieldType::Str),
     ("category", FieldType::Str),
+    // Scope-tuple dimensions (§4.2 / §6). Backed by `json_extract` over the
+    // `records.scope` column so callers can narrow keyword/list reads by
+    // tenant / workspace / entity / user / agent / session without having
+    // to materialize the scope tuple as separate columns. `project` is
+    // intentionally absent — `ScopeTuple::validate` rejects records that
+    // carry a `project` value at write time, so a filter predicate against
+    // it would always evaluate to NULL.
+    ("scope_tenant", FieldType::Str),
+    ("scope_workspace", FieldType::Str),
+    ("scope_session_id", FieldType::Str),
+    ("scope_entity", FieldType::Str),
+    ("scope_user", FieldType::Str),
+    ("scope_agent", FieldType::Str),
     // Numeric fields.
     ("priority", FieldType::Number),
     ("version", FieldType::Number),
@@ -678,6 +691,18 @@ fn field_col(name: &str) -> &'static str {
         // ── Sub-object inside record_json (surfaced via the `provenance`
         //    VIRTUAL generated column in migration 0011) ───────────────────
         "created_at" => "json_extract(provenance, '$.created_at')",
+
+        // ── Scope-tuple dimensions ────────────────────────────────────────
+        // The `scope` column on `records` is the canonical JSON
+        // serialization of `ScopeTuple` (None fields omitted). Surfacing
+        // each dimension as a `json_extract` keeps the filter SQL portable
+        // across stores that materialize scope differently.
+        "scope_tenant" => "json_extract(scope, '$.tenant')",
+        "scope_workspace" => "json_extract(scope, '$.workspace')",
+        "scope_session_id" => "json_extract(scope, '$.session_id')",
+        "scope_entity" => "json_extract(scope, '$.entity')",
+        "scope_user" => "json_extract(scope, '$.user')",
+        "scope_agent" => "json_extract(scope, '$.agent')",
 
         // ── JSON-array columns on records ─────────────────────────────────
         // `tags` is Vec<String> — flat string array; standard json_each works.
