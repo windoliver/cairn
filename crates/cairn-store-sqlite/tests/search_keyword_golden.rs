@@ -140,10 +140,7 @@ async fn golden_search_args_keyword_filters_to_user_private() {
     let key_args = KeywordSearchArgs {
         query: args.query.clone(),
         filter: Some(validated),
-        visibility_allowlist: vec![
-            MemoryVisibility::Private,
-            MemoryVisibility::Public,
-        ],
+        visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit,
         cursor: None,
     };
@@ -170,10 +167,7 @@ async fn golden_leaf_eq_filter_narrows_to_user_kind() {
     let key_args = KeywordSearchArgs {
         query: "dark".to_owned(),
         filter: Some(validated),
-        visibility_allowlist: vec![
-            MemoryVisibility::Private,
-            MemoryVisibility::Public,
-        ],
+        visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit: 10,
         cursor: None,
     };
@@ -202,10 +196,7 @@ async fn golden_or_with_not_admits_public_or_non_private() {
     let key_args = KeywordSearchArgs {
         query: "dark OR vim".to_owned(),
         filter: Some(validated),
-        visibility_allowlist: vec![
-            MemoryVisibility::Private,
-            MemoryVisibility::Public,
-        ],
+        visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit: 10,
         cursor: None,
     };
