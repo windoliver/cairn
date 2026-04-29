@@ -152,11 +152,48 @@ pub(crate) async fn dispatch(
         }
     }
 
+    // Enforce the total output cap across ALL phases (built-in hooks,
+    // built-in tool-frames, Phase A built-in text, Phase B user text).
+    // This makes `budget.max_drafts` a true contract for downstream
+    // back-pressure rather than a Phase-B-only guard.
+    let max_drafts = usize::from(budget.max_drafts);
+    if outputs.len() > max_drafts {
+        outputs.truncate(max_drafts);
+        if matches!(truncated, TruncationReason::None) {
+            truncated = TruncationReason::MaxDrafts;
+        }
+    }
+
+    // Normalise llm_eligible_spans once at the end: sort by start, then
+    // merge overlapping/adjacent spans so callers receive a disjoint
+    // span list. The clause-cap fallback and `compute_llm_eligible_spans`
+    // both push into the same buffer, so without this final pass we can
+    // hand the LLM extractor duplicate or overlapping ranges.
+    normalise_spans(&mut llm_spans);
+
     Ok(ExtractResult {
         outputs,
         truncated,
         llm_eligible_spans: llm_spans,
     })
+}
+
+fn normalise_spans(spans: &mut Vec<TextSpan>) {
+    if spans.len() < 2 {
+        return;
+    }
+    spans.sort_by_key(|s| s.start);
+    let mut merged: Vec<TextSpan> = Vec::with_capacity(spans.len());
+    for s in spans.drain(..) {
+        if let Some(last) = merged.last_mut()
+            && s.start <= last.end
+        {
+            last.end = last.end.max(s.end);
+            continue;
+        }
+        merged.push(s);
+    }
+    *spans = merged;
 }
 
 fn run_hook_rules(rules: &[CompiledRule], event: &CaptureEvent, outputs: &mut Vec<ExtractOutput>) {
@@ -511,5 +548,54 @@ mod tests {
         assert_eq!(normalize_target("  Hello   World  "), "hello world");
         assert_eq!(normalize_target("ABC"), "abc");
         assert_eq!(normalize_target(""), "");
+    }
+
+    #[tokio::test]
+    async fn total_max_drafts_caps_outputs_across_all_phases() {
+        // A body with many independent "remember X" sentences produces
+        // many built-in Phase A drafts. Without a global cap, those all
+        // ship; with the cap, output count must not exceed budget.
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 100,
+            max_drafts: 3,
+        };
+        let body_text = (0..20)
+            .map(|i| format!("remember thing {i}"))
+            .collect::<Vec<_>>()
+            .join(". ");
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            &body_text,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        );
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+        };
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+        assert!(
+            result.outputs.len() <= 3,
+            "outputs {} exceeded max_drafts cap of 3",
+            result.outputs.len()
+        );
+        assert_eq!(result.truncated, TruncationReason::MaxDrafts);
+    }
+
+    #[test]
+    fn normalise_spans_merges_overlaps_and_dedupes() {
+        let mut spans = vec![
+            TextSpan::new(10, 20),
+            TextSpan::new(0, 5),
+            TextSpan::new(15, 25),
+            TextSpan::new(5, 10),
+        ];
+        normalise_spans(&mut spans);
+        assert_eq!(spans, vec![TextSpan::new(0, 25)]);
     }
 }
