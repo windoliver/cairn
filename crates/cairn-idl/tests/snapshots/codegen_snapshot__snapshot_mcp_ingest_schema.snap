@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-idl/tests/codegen_snapshot.rs
-assertion_line: 51
 expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
 ---
 {
@@ -126,6 +125,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
       }
     ],
     "positional": {
+      "aliases_one_of": [
+        "body",
+        "file",
+        "url"
+      ],
       "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
       "name": "source"
     }

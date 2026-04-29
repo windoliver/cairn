@@ -7,12 +7,12 @@ use std::io;
 
 /// Errors owned by the stdio transport layer.
 ///
-/// These are failures in the MCP framing / lifecycle — not cairn verb
-/// failures. Verb errors surface as `CallToolResult { is_error: true }`.
+/// These are failures in the MCP framing / lifecycle, not cairn verb failures.
+/// Verb errors surface as `CallToolResult { is_error: true }`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TransportError {
-    /// stdio I/O failure (read EOF, broken pipe, etc.)
+    /// stdio I/O failure (read EOF, broken pipe, etc.).
     #[error("stdio I/O error: {0}")]
     Io(#[from] io::Error),
 

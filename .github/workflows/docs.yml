@@ -3,6 +3,9 @@ name: docs
 # Documentation gates:
 #   - rustdoc with `-D warnings` so broken intra-doc links and missing-docs
 #     violations fail CI rather than rotting silently.
+#   - generated docs drift check so CLI/config/plugin/IDL/MCP reference docs
+#     stay in sync with code.
+#   - mdBook build so the GitHub Pages source is structurally valid.
 #   - lychee link checker on Markdown so README / docs / design briefs do
 #     not accumulate dead links.
 #
@@ -30,6 +33,40 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  generated-reference:
+    name: docs / generated reference
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: docs-generated-reference
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cairn-docgen --check
+        run: cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+
+  mdbook:
+    name: docs / mdbook build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: docs-mdbook
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install mdBook
+        run: cargo install mdbook --version 0.5.2 --no-default-features --features search --locked
+      - name: mdbook build docs/site
+        run: mdbook build docs/site
+
   rustdoc:
     name: docs / cargo doc
     runs-on: ubuntu-latest

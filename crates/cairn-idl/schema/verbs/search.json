@@ -20,7 +20,8 @@
       {
         "name": "filters",
         "long": "filters",
-        "value_source": "json"
+        "value_source": "json",
+        "cli_exemplar": "{\"field\":\"kind\",\"op\":\"eq\",\"value\":\"note\"}"
       },
       {
         "name": "citations",
