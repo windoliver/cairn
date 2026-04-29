@@ -243,7 +243,11 @@ impl RuleSet {
 | `Proactive` | `text_rules` if `input.body.is_some()` | `input.body` (caller may pass either the agent's message body or `rationale` extract; both are textual) |
 | `Voice`, `Screen`, `Clipboard`, `RecordingBatch` | none in this PR — extender lands with the relevant sensor issue | n/a |
 
-For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector. The first hit on a rule wins per event-rule pair — no multiple drafts per single rule per event.
+For each matching rule, the extractor pushes a `Draft(MemoryDraft)` (or `Forget(ForgetIntent)`) onto the result vector.
+
+**First-match-wins for text rules (per body).** Within `text_rules`, dispatch is ordered and stops at the first match: once any `TriggerPhrase` or `ForgetPhrase` matches the body, the remaining text rules are skipped for that body. Hook rules and tool-frame rules are unaffected (a single event can carry both a hook signal and a text body, and those are independent dimensions). Rationale: text triggers are mutually-exclusive intents — a single utterance is either a `remember`, a `forget`, a `correction`, or a recipe; producing two drafts with different `kind_hint`s for the same body is a write-amplification bug. First-match-wins makes overlap impossible by construction; rule ordering in §7 then encodes priority.
+
+**No multi-fire per rule per event.** A given rule fires at most once per event (no scanning the body for multiple matches of the same pattern). Hook and tool-frame rules likewise produce at most one output per matching event.
 
 **`max_drafts` enforcement (hard cap).** Checked inside the per-rule loop, after pushing each output. When `outputs.len() >= budget.max_drafts`:
 
@@ -276,24 +280,36 @@ pub enum TruncationReason {
 
 The trait signature becomes `async fn extract(...) -> Result<ExtractResult, ExtractError>`. Downstream stages can branch on `result.truncated` without re-running budget arithmetic. `ExtractError::BudgetExceeded` is reserved for the **zero-output** wall-clock case (chain falls through); over-cap or wall-clock-with-partial cases are `Ok` with `truncated` set.
 
+**Partial-handoff contract (terminal-on-truncation).** When `truncated != TruncationReason::None`, the chain dispatcher (#74) **must not** invoke any subsequent extractor on the same body. The truncated regex pass is the terminal extraction for that event:
+
+- The regex pass already produced one or more outputs from the body. Re-running the LLM extractor on the same body would re-emit those same drafts (different `trigger_id`, same body text), creating duplicate writes — there is no stable cross-extractor dedup key in this PR (`MemoryDraft.body` is the closest, and substrings/paraphrases mean LLM output won't byte-match regex output).
+- Conversely, the unmatched portion of the body is not knowable: text rules use first-match-wins on the whole body, not span-anchored windows, so we cannot describe a "remainder" by byte range. Inventing one would require a span-tracking redesign that is out of scope for #73.
+- Truncation already produces a `tracing::warn!`; the chain dispatcher additionally emits a `chain.regex_truncated_terminal` metric (defined in #74) so operators can observe how often this fires. If it fires often, the right fix is to grow `max_drafts` / `max_wall_ms`, not to chain-on-truncation.
+
+Stated as a rule the chain enforces: **`Ok(result)` with `result.truncated != None`** terminates the chain for that event with `result.outputs` as the final extraction. **`Err(BudgetExceeded { .. })`** (zero outputs) falls through to the next extractor. The two cases are disjoint and exhaustive for budget-related outcomes; #74 will encode this in its dispatcher with a single match arm.
+
 Determinism: rules are dispatched in a stable order — built-in rules first (declaration order in `defaults.rs`), then user rules in `from_config` declaration order. Two identical events therefore produce identical truncated sets when the cap is hit.
 
 Rationale on the `Ok` vs `Err` split: brief §5.2.a says "exceeding `budget` returns `ExtractBudgetExceeded`, falls through to next extractor." We honor that for the all-or-nothing case (zero outputs → fall through). For partial success we surface truncation as data, not error, so the chain has full information without exception-style control flow.
 
 ## 7. Default rule set (`defaults.rs`)
 
-| Rule id | Variant | Pattern (case-insensitive) | Kind hint | Confidence |
-|---|---|---|---|---|
-| `remember.preference` | TriggerPhrase | `^\s*remember\s+(?:that\s+)?(.+?)\s*$` | `user` | 0.95 |
-| `remember.rule` | TriggerPhrase | `^\s*remember:?\s*never\s+(.+?)\s*$` | `rule` | 0.95 |
-| `correction` | TriggerPhrase | `^\s*correction:?\s*(.+?)\s*$` | `feedback` | 0.95 |
-| `success.recipe` | TriggerPhrase | `this is how we did it\s*[—-]\s*it worked` | `strategy_success` | 0.85 |
-| `skillify` | TriggerPhrase | `\bskillify\s+(?:this|it)\b` | `playbook` | 0.95 |
-| `forget` | ForgetPhrase | `^\s*forget\s+(?:that\s+|what\s+)?(.+?)\s*$` | n/a (target = group 1) | n/a |
-| `hook.post_tool_use` | HookEvent | hook=`PostToolUse` | `trace` | 0.8 |
-| `hook.stop` | HookEvent | hook=`Stop` | `trace` | 0.7 |
-| `hook.pre_compact` | HookEvent | hook=`PreCompact` | `trace` | 0.7 |
-| `tool.terminal_failure` | ToolFrame | Terminal, exit_code_nonzero=true | `strategy_failure` | 0.7 |
+Text rules are listed in dispatch order (most specific first); first-match-wins per §6.
+
+| Order | Rule id | Variant | Pattern (case-insensitive) | Kind hint | Confidence |
+|---|---|---|---|---|---|
+| 1 | `remember.rule` | TriggerPhrase | `^\s*remember(?::|,)?\s+never\s+(.+?)\s*$` | `rule` | 0.95 |
+| 2 | `remember.preference` | TriggerPhrase | `^\s*remember(?:\s+that)?\s+(.+?)\s*$` | `user` | 0.95 |
+| 3 | `correction` | TriggerPhrase | `^\s*correction:?\s+(.+?)\s*$` | `feedback` | 0.95 |
+| 4 | `success.recipe` | TriggerPhrase | `^\s*this is how we did it\s*[—-]\s*it worked\s*$` | `strategy_success` | 0.85 |
+| 5 | `skillify` | TriggerPhrase | `^\s*skillify\s+(?:this|it)\s*$` | `playbook` | 0.95 |
+| 6 | `forget` | ForgetPhrase | `^\s*forget\s+(?:that\s+|what\s+)?(.+?)\s*$` | n/a (target = group 1) | n/a |
+| — | `hook.post_tool_use` | HookEvent | hook=`PostToolUse` | `trace` | 0.8 |
+| — | `hook.stop` | HookEvent | hook=`Stop` | `trace` | 0.7 |
+| — | `hook.pre_compact` | HookEvent | hook=`PreCompact` | `trace` | 0.7 |
+| — | `tool.terminal_failure` | ToolFrame | Terminal, exit_code_nonzero=true | `strategy_failure` | 0.7 |
+
+Ordering is load-bearing: `remember.rule` must precede `remember.preference` so an utterance like `remember never share API keys` produces exactly one `rule` draft, not a `rule` + `user` pair. `from_config` rejects user rules that share an `id` with a built-in; user rules are appended after built-ins, so a user rule can never preempt a built-in trigger by re-binding an identical pattern.
 
 All `TriggerPhrase` patterns are anchored or right-bounded, use bounded quantifiers, and are constructed with `regex::RegexBuilder::case_insensitive(true)` to keep matching linear and below the latency budget. Patterns are **conservative** — false negatives are fine (LLM extractor in #74 catches them); false positives at high confidence are not (they cause unwanted writes).
 
@@ -322,6 +338,8 @@ No `unwrap()` / `expect()` in `cairn-core` (CLAUDE.md §6.2). All regex `RegexBu
 - Compile failure path: `RuleSet::from_config(<rule with bad pattern>)` → `InvalidRule`.
 - Duplicate ids rejected.
 - `RegexExtractor::name() == "regex"`, default budget = `{max_wall_ms: 2, max_drafts: 16}`.
+- **Overlap regression:** body `"remember never share API keys"` produces exactly one output, with `kind_hint = "rule"` (matched by `remember.rule`, not `remember.preference`). Body `"remember that I prefer dark mode"` produces exactly one output with `kind_hint = "user"`. First-match-wins: a body that synthetically matches two TriggerPhrase rules emits only the first.
+- **Terminal-on-truncation contract:** `ExtractResult` with `truncated == MaxDrafts` from a body that *also* would have matched additional unscanned rules — assert `outputs.len() == max_drafts`. (The chain dispatcher's enforcement of "no LLM on truncated" is exercised in #74; this PR's responsibility is producing the correct truncation flag.)
 - `max_drafts` enforcement: synthesize a `RuleSet` whose user-rule list contains `max_drafts + 5` always-matching rules; assert `extract` returns exactly `max_drafts` outputs, `truncated == TruncationReason::MaxDrafts`, and emits exactly one `tracing::warn!` (captured via `tracing-test`). Truncation order matches rule declaration order.
 - `max_wall_ms` zero-output path: stub a sleeping rule (or set `budget.max_wall_ms = 0`); assert `extract` returns `Err(BudgetExceeded { worker: "regex", elapsed_ms })`.
 - `max_wall_ms` partial-output path: feed a body that matches one early rule, then trip the wall-clock budget; assert `truncated == TruncationReason::MaxWallMs { .. }` and `outputs.len() == 1`.
