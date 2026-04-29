@@ -1665,7 +1665,8 @@ pub trait IdentityRegistry: Send + Sync {
     // applying the change (or vice versa); the trait does not allow
     // that. Conformance tests assert post-call invariants on every
     // mutated row plus signature re-verification.
-    async fn apply_rotation(&self, receipt: &RotationReceipt, expected_current: KeyVersion) -> Result<(), RegistryError>;
+    // Per implementation experience: the new-key row insert must share the rotation txn (#50 plan task C6).
+    async fn apply_rotation(&self, receipt: &RotationReceipt, expected_current: KeyVersion, new_key: &IdentityKeyEntry) -> Result<(), RegistryError>;
     // Two-phase revocation tombstone (§3.10). `begin_revocation` flips
     // active → revoke_pending; `finalise_revocation` flips
     // revoke_pending → revoked once the keystore-side disable is

@@ -623,38 +623,221 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         Ok(rows)
     }
 
-    // ── Rotation stubs (C6) ───────────────────────────────────────────────────
+    // ── Rotation (C6) ────────────────────────────────────────────────────────
 
     async fn apply_rotation(
         &self,
-        _receipt: &RotationReceipt,
-        _expected_current: KeyVersion,
+        receipt: &RotationReceipt,
+        expected_current: KeyVersion,
+        new_key: &IdentityKeyEntry,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C6")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let new_v = receipt.payload.new_key_version.ok_or_else(|| {
+            RegistryError::Backend("rotation receipt missing new_key_version".into())
+        })?;
+        let target = receipt.payload.target.as_str();
+
+        // CAS: advance current_key_version only if it still equals expected_current.
+        let updated = tx
+            .execute(
+                "UPDATE identities SET current_key_version = ?1 \
+                 WHERE id = ?2 AND current_key_version = ?3",
+                rusqlite::params![new_v.as_u32(), target, expected_current.as_u32()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if updated == 0 {
+            // Read the actual stored version to populate KeyVersionConflict.
+            let actual: u32 = tx
+                .query_row(
+                    "SELECT current_key_version FROM identities WHERE id = ?1",
+                    rusqlite::params![target],
+                    |r| r.get(0),
+                )
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            let nz = std::num::NonZeroU32::new(actual).ok_or_else(|| {
+                RegistryError::Backend("invalid current_key_version stored".into())
+            })?;
+            return Err(RegistryError::KeyVersionConflict {
+                existing: KeyVersion::new(nz),
+                attempted: expected_current,
+            });
+        }
+
+        // Stamp predecessor's superseded_at.
+        tx.execute(
+            "UPDATE identity_keys SET superseded_at = ?1 \
+             WHERE identity_id = ?2 AND key_version = ?3",
+            rusqlite::params![
+                chrono::Utc::now().to_rfc3339(),
+                target,
+                expected_current.as_u32()
+            ],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Insert the new key row in the same transaction (load-bearing: spec gap fix).
+        insert_identity_key_row(&tx, new_key)?;
+
+        // Delete the matching pending_rotations row (if any).
+        tx.execute(
+            "DELETE FROM pending_rotations WHERE identity_id = ?1 AND planned_version = ?2",
+            rusqlite::params![target, new_v.as_u32()],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        // Insert the receipt row.
+        let payload_bytes = receipt
+            .payload
+            .canonical_json()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        tx.execute(
+            "INSERT INTO identity_receipts \
+             (op_kind, target_identity, signer_identity, signer_key_version, \
+              old_key_version, new_key_version, issued_at, signed_payload, \
+              signature, pending_eviction) \
+             VALUES ('rotation', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                target,
+                receipt.payload.signer.as_str(),
+                receipt.payload.signer_key_version.as_u32(),
+                receipt.payload.old_key_version.map(KeyVersion::as_u32),
+                new_v.as_u32(),
+                receipt.payload.issued_at.to_rfc3339(),
+                payload_bytes,
+                &receipt.signature[..],
+                i32::from(receipt.pending_eviction),
+            ],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let wal_payload = serde_json::to_vec(&receipt.payload)
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(&tx, "apply_rotation", target, &wal_payload)?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn insert_pending_rotation(
         &self,
-        _identity: &Identity,
-        _planned_version: KeyVersion,
-        _planned_handle: &str,
+        identity: &Identity,
+        planned_version: KeyVersion,
+        planned_handle: &str,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C6")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        tx.execute(
+            "INSERT INTO pending_rotations \
+             (identity_id, planned_version, planned_handle, intended_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                identity.as_str(),
+                planned_version.as_u32(),
+                planned_handle,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let payload = serde_json::json!({
+            "identity": identity.as_str(),
+            "planned_version": planned_version.as_u32(),
+            "planned_handle": planned_handle,
+        });
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(
+            &tx,
+            "insert_pending_rotation",
+            identity.as_str(),
+            &payload_bytes,
+        )?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn delete_pending_rotation(
         &self,
-        _identity: &Identity,
-        _planned_version: KeyVersion,
+        identity: &Identity,
+        planned_version: KeyVersion,
     ) -> Result<(), RegistryError> {
-        unimplemented!("Task C6")
+        let mut conn = self.conn.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows_changed = tx
+            .execute(
+                "DELETE FROM pending_rotations \
+                 WHERE identity_id = ?1 AND planned_version = ?2",
+                rusqlite::params![identity.as_str(), planned_version.as_u32()],
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        if rows_changed == 0 {
+            return Err(RegistryError::NotFound);
+        }
+
+        let payload = serde_json::json!({
+            "identity": identity.as_str(),
+            "planned_version": planned_version.as_u32(),
+        });
+        let payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        wal::wal_insert(
+            &tx,
+            "delete_pending_rotation",
+            identity.as_str(),
+            &payload_bytes,
+        )?;
+
+        tx.commit()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Ok(())
     }
 
     async fn list_pending_rotations(
         &self,
-        _identity: &Identity,
+        identity: &Identity,
     ) -> Result<Vec<(KeyVersion, String)>, RegistryError> {
-        unimplemented!("Task C6")
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT planned_version, planned_handle \
+                 FROM pending_rotations \
+                 WHERE identity_id = ?1 \
+                 ORDER BY planned_version",
+            )
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let rows = stmt
+            .query_map(rusqlite::params![identity.as_str()], |row| {
+                let v: u32 = row.get(0)?;
+                let h: String = row.get(1)?;
+                Ok((v, h))
+            })
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for (v, h) in rows {
+            let nz = std::num::NonZeroU32::new(v)
+                .ok_or_else(|| RegistryError::Backend("invalid planned_version stored".into()))?;
+            result.push((KeyVersion::new(nz), h));
+        }
+        Ok(result)
     }
 
     // ── Revocation two-phase tombstone stubs (C7) ─────────────────────────────

@@ -27,6 +27,8 @@ tokio = { workspace = true, features = ["rt"] }
 cairn-test-fixtures = { workspace = true }
 tempfile = { workspace = true }
 chrono = { workspace = true }
+rand_core = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

@@ -353,6 +353,10 @@ pub trait IdentityRegistry: Send + Sync {
 
     /// Apply a signed rotation receipt using compare-and-swap on `expected_current`.
     ///
+    /// Inserts the `new_key` row into `identity_keys` **within the same
+    /// transaction** as the `current_key_version` advance and the receipt row,
+    /// so that a crash between those two writes is impossible.
+    ///
     /// Fails atomically if the current version stored in the registry is not
     /// `expected_current` at the time of the write, preventing lost-update
     /// races during concurrent rotations.
@@ -365,6 +369,7 @@ pub trait IdentityRegistry: Send + Sync {
         &self,
         receipt: &RotationReceipt,
         expected_current: KeyVersion,
+        new_key: &IdentityKeyEntry,
     ) -> Result<(), RegistryError>;
 
     // ── Pre-commit rotation intent (§3.6 step 0a) ────────────────────────────
