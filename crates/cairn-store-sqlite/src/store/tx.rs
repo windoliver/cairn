@@ -52,6 +52,8 @@ impl StoreTx<'_> {
     pub fn upsert(&mut self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
         upsert_in_tx(&mut self.tx, record)
     }
+    // Note: `upsert_in_tx` performs `record.validate()` first thing, so
+    // structural failures surface as `StoreError::InvalidRecord` here too.
 
     /// Synchronous tombstone. Marks one specific `record_id` row as
     /// tombstoned with the given reason. Idempotent: re-tombstoning the

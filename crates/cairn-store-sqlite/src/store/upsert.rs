@@ -61,6 +61,10 @@ impl SqliteMemoryStore {
         &self,
         record: &MemoryRecord,
     ) -> Result<UpsertOutcome, StoreError> {
+        // Validate at the boundary so structural failures surface as a
+        // typed `StoreError::InvalidRecord` rather than getting wrapped in
+        // `StoreError::Worker(Other(_))` by the `tokio_rusqlite` worker.
+        record.validate()?;
         let conn = self.require_conn("upsert")?.clone();
         let record = record.clone();
 
@@ -92,6 +96,13 @@ pub(crate) fn upsert_in_tx(
     tx: &mut Transaction<'_>,
     record: &MemoryRecord,
 ) -> Result<UpsertOutcome, StoreError> {
+    // Structural gate at the write boundary: malformed records (empty body,
+    // out-of-range scalars, missing scope.user, broken actor chain) are
+    // rejected before any row is touched. Both callers (`do_upsert` and
+    // `StoreTx::upsert`) also validate up front to surface the error
+    // without the `tokio_rusqlite::Error::Other` wrapping; this inner
+    // call is the belt-and-braces invariant.
+    record.validate()?;
     let body_hash = BodyHash::compute(&record.body);
     let prior = read_active(tx, record.target_id.as_str())?;
     let now_ms = current_unix_ms();
