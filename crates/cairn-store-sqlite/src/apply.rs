@@ -247,20 +247,21 @@ fn stage_version_impl(
         });
     }
 
-    // Visibility-tier admission. Read-side rebac (see `rebac.rs`)
-    // fails closed on session/project/team/org for non-system
-    // principals because Principal does not yet carry verified
-    // session id or membership context. Persisting those tiers
-    // anyway would create records that no normal caller can ever
-    // read again. Reject at write time so the store does not accept
-    // unreachable data.
+    // Visibility-tier admission. The store admits any tier whose
+    // read-side semantics are implemented in `rebac.rs`. Tiers
+    // currently supported: private, session, project, public.
+    // team/org remain blocked at write time because ScopeTuple does
+    // not yet carry team/org membership dimensions — persisting them
+    // would create records no caller can ever read again.
     match record.visibility {
         cairn_core::domain::MemoryVisibility::Private
+        | cairn_core::domain::MemoryVisibility::Session
+        | cairn_core::domain::MemoryVisibility::Project
         | cairn_core::domain::MemoryVisibility::Public => {}
         _ => {
             return Err(StoreError::Invariant(
-                "visibility tier not yet supported: only `private` and `public` are admitted \
-                 until Principal carries verified session/membership context",
+                "visibility tier not yet supported: team/org require ScopeTuple \
+                 dimensions that have not yet been added (brief-level change)",
             ));
         }
     }

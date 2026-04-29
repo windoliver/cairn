@@ -36,6 +36,22 @@ pub struct Principal {
     /// `is_system: true` on the wire would be a trivial REBAC bypass.
     #[serde(skip_deserializing)]
     is_system: bool,
+    /// Verified session id for `session`-tier authorization. Must be set
+    /// out-of-band by the verb layer from a trusted session token; the
+    /// store treats it as authoritative.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// Verified project id for `project`-tier authorization.
+    #[serde(default)]
+    project_id: Option<String>,
+    /// Verified team memberships for `team`-tier authorization. Each
+    /// entry must be a team id the verb layer has cryptographically
+    /// confirmed the principal belongs to.
+    #[serde(default)]
+    team_ids: Vec<String>,
+    /// Verified org memberships for `org`-tier authorization.
+    #[serde(default)]
+    org_ids: Vec<String>,
 }
 
 impl Principal {
@@ -45,6 +61,10 @@ impl Principal {
         Self {
             identity: Some(identity),
             is_system: false,
+            session_id: None,
+            project_id: None,
+            team_ids: Vec::new(),
+            org_ids: Vec::new(),
         }
     }
 
@@ -60,7 +80,50 @@ impl Principal {
         Self {
             identity: None,
             is_system: true,
+            session_id: None,
+            project_id: None,
+            team_ids: Vec::new(),
+            org_ids: Vec::new(),
         }
+    }
+
+    /// Attach verified session/project/team/org context. Each setter
+    /// trusts its caller — the verb layer must validate against a
+    /// session token or membership service before forwarding into
+    /// the store. Returning `Self` keeps construction fluent.
+    #[must_use]
+    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Attach a verified project id.
+    #[must_use]
+    pub fn with_project(mut self, project_id: impl Into<String>) -> Self {
+        self.project_id = Some(project_id.into());
+        self
+    }
+
+    /// Attach verified team memberships.
+    #[must_use]
+    pub fn with_teams<I, S>(mut self, team_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.team_ids = team_ids.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Attach verified org memberships.
+    #[must_use]
+    pub fn with_orgs<I, S>(mut self, org_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.org_ids = org_ids.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Whether this is the WAL-executor system sentinel.
@@ -73,6 +136,30 @@ impl Principal {
     #[must_use]
     pub fn identity(&self) -> Option<&Identity> {
         self.identity.as_ref()
+    }
+
+    /// Verified session id, if any.
+    #[must_use]
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Verified project id, if any.
+    #[must_use]
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    /// Verified team memberships.
+    #[must_use]
+    pub fn team_ids(&self) -> &[String] {
+        &self.team_ids
+    }
+
+    /// Verified org memberships.
+    #[must_use]
+    pub fn org_ids(&self) -> &[String] {
+        &self.org_ids
     }
 }
 
@@ -101,7 +188,7 @@ mod tests {
         // `is_system: true` must not produce a privileged principal,
         // because `principal_can_read` short-circuits on `is_system()`
         // and would otherwise bypass all rebac scope filtering.
-        let forged = r#"{"identity":null,"is_system":true}"#;
+        let forged = r#"{"identity":null,"is_system":true,"session_id":null,"project_id":null,"team_ids":[],"org_ids":[]}"#;
         let p: Principal = serde_json::from_str(forged).expect("deserializes");
         assert!(!p.is_system(), "system bit must be ignored on deserialize");
     }

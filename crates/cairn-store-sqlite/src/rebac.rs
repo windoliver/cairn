@@ -19,14 +19,18 @@ use serde_json::Value;
 ///   it names the lifecycle-owning agent runtime, which can be shared
 ///   across users, so allowing agent-equality reads would leak rows
 ///   between tenants on the same agent identity.
-/// - `"session"`, `"project"`, `"team"`, `"org"` → fail closed for
-///   non-system principals. These tiers require verified context
-///   (session id, project membership, team/org membership) that the
-///   current `Principal` cannot carry. Aliasing them to owner-match
-///   would silently broaden access — a `"session"` row would be
-///   readable by every later session of the same user, when the
-///   contract says it is session-scoped. Reject until the
-///   authorization inputs exist.
+/// - `"session"` visibility  → session match: the verified
+///   `principal.session_id()` must equal `scope.session_id`. The
+///   verb layer must populate this from a trusted session token
+///   before forwarding into the store; the store itself trusts the
+///   value as authoritative.
+/// - `"project"` visibility  → project match: verified
+///   `principal.project_id()` must equal `scope.project`.
+/// - `"team"`, `"org"` visibility  → fail closed for non-system
+///   principals. The current `ScopeTuple` does not carry team or org
+///   fields, so the store has no row-side data to authorize against.
+///   Adding those dimensions is a brief-level change and must be
+///   resolved before these tiers are admitted.
 /// - `"public"` → any identified principal may read (public-by-design).
 /// - Unknown / missing visibility → deny (fail closed).
 #[must_use]
@@ -66,9 +70,22 @@ pub fn principal_can_read(principal: &Principal, scope_json: &str, taxonomy_json
             let scope_user = scope.get("user").and_then(Value::as_str).unwrap_or("");
             !scope_user.is_empty() && id_str == scope_user
         }
+        "session" => {
+            let scope_session = scope
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let principal_session = principal.session_id().unwrap_or("");
+            !scope_session.is_empty() && scope_session == principal_session
+        }
+        "project" => {
+            let scope_project = scope.get("project").and_then(Value::as_str).unwrap_or("");
+            let principal_project = principal.project_id().unwrap_or("");
+            !scope_project.is_empty() && scope_project == principal_project
+        }
         "public" => true,
-        // session/project/team/org: fail closed until Principal carries
-        // verified session id and membership context.
+        // team/org: fail closed until ScopeTuple gains team/org
+        // dimensions (brief-level change).
         _ => false,
     }
 }
@@ -139,17 +156,55 @@ mod tests {
     }
 
     #[test]
-    fn project_visibility_fails_closed_for_all_non_system_principals() {
-        // `project` is one of the 6 documented visibility tiers but
-        // its semantics require verified project membership context
-        // that P0 does not plumb. Owner and non-owner are both denied;
-        // system principals (e.g. WAL executor) bypass.
-        let owner = principal_for("usr:alice");
-        let non_owner = principal_for("usr:bob");
-        let scope = r#"{"user":"usr:alice"}"#;
+    fn project_visibility_requires_matching_project_context() {
+        // Without a project context, the principal cannot read
+        // project-scoped rows (even when the row scope's user
+        // matches).
+        let no_ctx = principal_for("usr:alice");
+        let scope = r#"{"user":"usr:alice","project":"proj:foo"}"#;
         let tax = r#"{"visibility":"project"}"#;
-        assert!(!principal_can_read(&owner, scope, tax));
-        assert!(!principal_can_read(&non_owner, scope, tax));
+        assert!(!principal_can_read(&no_ctx, scope, tax));
+
+        // With matching project context, access is granted.
+        let in_proj = principal_for("usr:alice").with_project("proj:foo");
+        assert!(principal_can_read(&in_proj, scope, tax));
+
+        // Wrong project context is denied.
+        let other_proj = principal_for("usr:alice").with_project("proj:bar");
+        assert!(!principal_can_read(&other_proj, scope, tax));
+    }
+
+    #[test]
+    fn session_visibility_requires_matching_session_id() {
+        let scope = r#"{"user":"usr:alice","session_id":"sess:abc"}"#;
+        let tax = r#"{"visibility":"session"}"#;
+
+        let no_ctx = principal_for("usr:alice");
+        assert!(!principal_can_read(&no_ctx, scope, tax));
+
+        let in_sess = principal_for("usr:alice").with_session("sess:abc");
+        assert!(principal_can_read(&in_sess, scope, tax));
+
+        let other_sess = principal_for("usr:alice").with_session("sess:xyz");
+        assert!(!principal_can_read(&other_sess, scope, tax));
+    }
+
+    #[test]
+    fn team_and_org_still_fail_closed() {
+        // ScopeTuple does not yet carry team/org dimensions — adding
+        // them is a brief-level change, so these tiers continue to
+        // fail closed for all non-system principals.
+        let p = principal_for("usr:alice")
+            .with_teams(["team:eng"])
+            .with_orgs(["org:acme"]);
+        let scope = r#"{"user":"usr:alice"}"#;
+        for tier in ["team", "org"] {
+            let tax = format!(r#"{{"visibility":"{tier}"}}"#);
+            assert!(
+                !principal_can_read(&p, scope, &tax),
+                "{tier} must fail closed until ScopeTuple is extended"
+            );
+        }
     }
 
     #[test]

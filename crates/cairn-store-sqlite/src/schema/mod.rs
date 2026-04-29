@@ -135,6 +135,12 @@ pub static MIGRATIONS: LazyLock<Vec<Migration>> = LazyLock::new(|| {
             sql: include_str!("../../migrations/0016_drop_legacy_null_record_json.sql"),
             checksum: checksum_for("0016_drop_legacy_null_record_json.sql"),
         },
+        Migration {
+            id: 17,
+            name: "0017_backfill_purge_version_snapshots.sql",
+            sql: include_str!("../../migrations/0017_backfill_purge_version_snapshots.sql"),
+            checksum: checksum_for("0017_backfill_purge_version_snapshots.sql"),
+        },
     ]
 });
 
