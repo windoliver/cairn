@@ -6,8 +6,12 @@
 //! `Identity` schema in `crates/cairn-idl/schema/common/primitives.json`.
 
 pub mod keys;
+pub mod receipts;
 pub mod records;
 
+pub use receipts::{
+    ReceiptError, ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt,
+};
 pub use records::{
     FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
     PendingKeyDisableEntry, ProvisioningState, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
