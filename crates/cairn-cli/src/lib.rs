@@ -11,6 +11,7 @@ pub mod docgen;
 pub(crate) mod generated;
 pub mod mcp;
 pub mod plugins;
+pub mod session_source;
 pub mod skill;
 pub mod vault;
 pub mod verbs;

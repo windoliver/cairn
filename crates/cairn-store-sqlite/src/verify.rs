@@ -102,6 +102,16 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // 0010_ranking_indexes
     ("index", "records_confidence_idx"),
     ("index", "records_updated_at_idx"),
+    // 0011_sessions
+    ("table", "sessions"),
+    ("index", "sessions_active_lookup_idx"),
+    ("index", "sessions_last_activity_idx"),
+    // 0012_sessions_unique_active
+    ("index", "sessions_one_active_per_identity_idx"),
+    // 0013_sessions_unique_active_coalesce (drops + recreates the index
+    // above; index name unchanged. Adds the empty-string guards.)
+    ("trigger", "sessions_project_root_no_empty_insert"),
+    ("trigger", "sessions_project_root_no_empty_update"),
 ];
 
 fn hash_hex(content: &str) -> String {

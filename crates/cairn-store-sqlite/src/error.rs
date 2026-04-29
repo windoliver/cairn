@@ -66,6 +66,54 @@ pub enum StoreError {
         what: String,
     },
 
+    /// An explicit session id was supplied (via `--session`, env, or
+    /// harness) but the persisted row's `(user, agent, project_root)`
+    /// does not match the caller's identity. Treat this as a hard
+    /// authentication failure — the id is foreign and must not be used.
+    /// Brief §8.1.
+    #[error(
+        "session identity mismatch for session_id `{session_id}`: \
+         the persisted row belongs to a different (user, agent, project_root)"
+    )]
+    SessionIdentityMismatch {
+        /// The session id whose ownership check failed.
+        session_id: String,
+    },
+
+    /// An explicit session id was supplied but no such session exists in
+    /// the store. Brief §8.1: explicit ids are authoritative — a typo or
+    /// stale `CAIRN_SESSION_ID` should fail closed rather than silently
+    /// fall through to auto-discover, which would split writes into a
+    /// different session.
+    #[error("explicit session id `{session_id}` does not exist")]
+    SessionNotFound {
+        /// The session id that was not found.
+        session_id: String,
+    },
+
+    /// An explicit session id was supplied but the row has already been
+    /// closed (`ended_at IS NOT NULL`). Brief §8.1: the caller asked
+    /// specifically for this session — silently moving them to a new
+    /// session would mix two conversations.
+    #[error("explicit session id `{session_id}` is ended (closed at {ended_at_unix_ms}ms)")]
+    SessionEnded {
+        /// The session id that was found but ended.
+        session_id: String,
+        /// Unix epoch milliseconds when the session was ended.
+        ended_at_unix_ms: i64,
+    },
+
+    /// Sustained write contention exceeded the operation's deadline.
+    /// Distinct from `Sqlite(SQLITE_BUSY)` so callers can classify this as
+    /// retriable on the next user action without scraping error codes.
+    #[error("store busy after {elapsed_ms}ms of retries on `{operation}`")]
+    Busy {
+        /// The store operation that exhausted its retry deadline.
+        operation: &'static str,
+        /// Elapsed time spent retrying, in milliseconds.
+        elapsed_ms: u64,
+    },
+
     /// Method called on a store constructed via `Default::default()`
     /// (the registry stub) instead of [`crate::open()`] /
     /// [`crate::open_in_memory()`]. Distinct from `Invariant` so callers
