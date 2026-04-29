@@ -11,5 +11,7 @@
 //! `BTreeMap<…>` require for the trace itself.
 
 mod gate;
+mod outcome;
 
 pub use gate::PolicyGate;
+pub use outcome::PolicyOutcome;
