@@ -803,7 +803,9 @@ async fn migration_ends_active_rows_with_relative_project_root() {
         ("S_POSIX", "usr:abs1", Some("/abs/repo"), false),
         ("S_WIN", "usr:abs2", Some(r"C:\repo"), false),
         ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
-        ("S_WINFWD", "usr:abs5", Some("C:/repo"), false),
+        // 0014 leaves C:/repo active; 0015 then canonicalizes it to
+        // backslash form so post-upgrade callers can resolve it.
+        ("S_WINFWD", "usr:abs5", Some(r"C:\repo"), false),
         ("S_BS_REL", "usr:legacy2", Some(r"\repo"), true),
         ("S_NULL", "usr:abs4", None, false),
     ] {
@@ -821,6 +823,122 @@ async fn migration_ends_active_rows_with_relative_project_root() {
             sess.ended_at_unix_ms,
         );
     }
+}
+
+#[tokio::test]
+async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
+    // A vault from a prior resolver that stored `C:/repo` (or
+    // `//srv/share`) survives migration 0014 (those are absolute paths
+    // by string shape) but, with the new write-path canonicalization,
+    // post-upgrade callers normalize to `C:\repo` / `\\srv\share`.
+    // Lookup keys on the raw stored string, so the legacy row would
+    // become unreachable and resolve_or_create would fork a new
+    // session. Migration 0015 rewrites the surviving Windows-shape
+    // rows to backslash form so post-upgrade discovery hits them.
+    use rusqlite_migration::{M, Migrations};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cairn.db");
+
+    {
+        let mut conn = rusqlite::Connection::open(&db_path).expect("conn");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA busy_timeout=5000;",
+        )
+        .expect("pragmas");
+        let migrations = Migrations::new(vec![
+            M::up(include_str!("../src/migrations/sql/0001_records.sql")),
+            M::up(include_str!("../src/migrations/sql/0002_wal.sql")),
+            M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
+            M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
+            M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0007_tombstone_reason.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0008_record_extensions.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0010_ranking_indexes.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0011_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0012_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0014_sessions_close_relative_project_root.sql"
+            )),
+        ]);
+        migrations.to_latest(&mut conn).expect("migrate to 14");
+
+        // Seed: forward-slash drive (`C:/repo`), forward-slash UNC
+        // (`//srv/share`), already-canonical backslash drive that must
+        // not be touched, and a POSIX path containing `/` that must
+        // also not be corrupted into `\`.
+        for (sid, user, root) in [
+            ("S_DRV_FWD", "usr:win1", "C:/repo"),
+            ("S_UNC_FWD", "usr:win2", "//srv/share"),
+            ("S_DRV_OK", "usr:win3", r"D:\repo"),
+            ("S_POSIX_OK", "usr:nix1", "/abs/repo"),
+        ] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (session_id, user_id, agent_id, project_root, title, \
+                    created_at, last_activity_at, ended_at) \
+                 VALUES (?1, ?2, 'agt:cli:x:y:v1', ?3, '', 100, 100, NULL)",
+                rusqlite::params![sid, user, root],
+            )
+            .expect("insert");
+        }
+    }
+
+    let store = open(&db_path).await.expect("open after 0015");
+
+    for (sid, expect_root) in [
+        ("S_DRV_FWD", r"C:\repo"),
+        ("S_UNC_FWD", r"\\srv\share"),
+        ("S_DRV_OK", r"D:\repo"),
+        ("S_POSIX_OK", "/abs/repo"),
+    ] {
+        let sess = store
+            .get_session(&cairn_core::domain::session::SessionId::parse(sid).expect("parse"))
+            .await
+            .expect("get")
+            .unwrap_or_else(|| panic!("{sid} present"));
+        assert_eq!(
+            sess.identity.project_root.as_deref(),
+            Some(expect_root),
+            "{sid}: expected {expect_root}, got {:?}",
+            sess.identity.project_root,
+        );
+        assert!(
+            sess.ended_at_unix_ms.is_none(),
+            "{sid} must remain active across canonicalization",
+        );
+    }
+
+    // A post-upgrade caller using the canonical write-path identity
+    // (`C:\repo`) finds the legacy `C:/repo` row by the same id.
+    let canonical_id = SessionIdentity::new(
+        Identity::parse("usr:win1").expect("user"),
+        Identity::parse("agt:cli:x:y:v1").expect("agent"),
+        Some(r"C:\repo".into()),
+    )
+    .expect("identity");
+    let found = store
+        .find_active_session(&canonical_id)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(found.id.as_str(), "S_DRV_FWD");
 }
 
 #[tokio::test]
