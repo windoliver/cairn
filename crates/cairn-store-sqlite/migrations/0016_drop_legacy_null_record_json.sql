@@ -24,4 +24,32 @@ CREATE TABLE IF NOT EXISTS records_legacy_quarantine AS
 INSERT INTO records_legacy_quarantine
   SELECT * FROM records WHERE record_json IS NULL;
 
+-- Cascade graph cleanup. `edges` and `edge_versions` reference rows
+-- by record_id; leaving them would silently corrupt later backlink
+-- traversals and purge snapshot computation. Quarantine the affected
+-- edge audit history alongside the records so operators have a
+-- complete recovery trail.
+CREATE TABLE IF NOT EXISTS edges_legacy_quarantine AS
+  SELECT * FROM edges WHERE 0 = 1;
+CREATE TABLE IF NOT EXISTS edge_versions_legacy_quarantine AS
+  SELECT * FROM edge_versions WHERE 0 = 1;
+
+INSERT INTO edges_legacy_quarantine
+  SELECT * FROM edges
+  WHERE from_id IN (SELECT record_id FROM records_legacy_quarantine)
+     OR to_id   IN (SELECT record_id FROM records_legacy_quarantine);
+
+INSERT INTO edge_versions_legacy_quarantine
+  SELECT * FROM edge_versions
+  WHERE from_id IN (SELECT record_id FROM records_legacy_quarantine)
+     OR to_id   IN (SELECT record_id FROM records_legacy_quarantine);
+
+DELETE FROM edges
+  WHERE from_id IN (SELECT record_id FROM records_legacy_quarantine)
+     OR to_id   IN (SELECT record_id FROM records_legacy_quarantine);
+
+DELETE FROM edge_versions
+  WHERE from_id IN (SELECT record_id FROM records_legacy_quarantine)
+     OR to_id   IN (SELECT record_id FROM records_legacy_quarantine);
+
 DELETE FROM records WHERE record_json IS NULL;

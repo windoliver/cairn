@@ -330,6 +330,26 @@ fn activate_version_impl(
         return Err(StoreError::NotFound(target_id.clone()));
     }
 
+    // Tombstone retirement: a target with any tombstoned version is
+    // retired (Phase A forget). Stage already rejects new versions for
+    // such targets, but a delayed/retried activate against a version
+    // staged before the tombstone could still flip `active` flags
+    // post-retirement. Reads stay hidden because get/list filter on
+    // tombstoned, but the lifecycle mutation skews purge snapshots
+    // and audit history. Reject unconditionally.
+    let tombstoned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE target_id = ?1 AND tombstoned = 1",
+            params![target_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(store_err)?;
+    if tombstoned > 0 {
+        return Err(StoreError::Conflict {
+            kind: ConflictKind::UniqueViolation,
+        });
+    }
+
     // Distinguish 'no active row' (legitimate first activation) from
     // backend errors (schema drift, corruption, lock failure). Mapping
     // every error to None would silently rewrite `active` flags on top
