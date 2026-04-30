@@ -57,6 +57,11 @@ pub fn refuse_if_degraded(
     report: &ReconciliationReport,
     mismatched_ids: Vec<Identity>,
 ) -> Result<(), IdentityServiceError> {
+    if report.keystore_locked {
+        // Incomplete sweep: cannot prove vault is healthy. Hard stop for
+        // any caller that intends to mutate state.
+        return Err(IdentityServiceError::VaultReconciliationIncomplete);
+    }
     if report.vault_degraded {
         return Err(IdentityServiceError::VaultDegraded { mismatched_ids });
     }

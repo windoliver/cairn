@@ -175,6 +175,30 @@ pub enum IdentityServiceError {
         /// The identity stuck in `PurgePending`.
         id: Identity,
     },
+
+    /// `finalise-binding --abandon` was requested, but the database already
+    /// holds a committed `vault_meta` (and a pending first-bind row).
+    ///
+    /// Abandoning would destroy the local recovery artifacts (pending
+    /// sentinel and keystore witness) while leaving the registry believing
+    /// the vault is bound. Re-run `cairn identity finalise-binding` without
+    /// `--abandon` to resume the partial bind, or perform manual rollback if
+    /// resume cannot succeed.
+    #[error(
+        "finalise-binding --abandon refused: vault_meta is already committed; re-run without --abandon to resume"
+    )]
+    AbandonAfterCommit,
+
+    /// The reconciliation sweep returned an incomplete report because the
+    /// keystore was locked during the scan.
+    ///
+    /// Mutating verbs treat this as a hard stop: an incomplete sweep cannot
+    /// distinguish a clean vault from one with mismatches beyond the lock
+    /// point. Operator must unlock the keystore and re-run the verb.
+    #[error(
+        "vault health check incomplete: keystore was locked during reconciliation — unlock the keystore and retry"
+    )]
+    VaultReconciliationIncomplete,
 }
 
 #[cfg(test)]
