@@ -249,6 +249,14 @@ fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
         {
             Some("CapturePayload::Hook (user utterance)")
         }
+        // Proactive (Mode C) payloads carry an agent-emitted user-visible
+        // message body per spec, but the wire envelope does not yet
+        // include a hashable message-body field, so `ResolvedBody` has
+        // no constructor for it. Treat as text-bearing here so a
+        // `NotApplicable`/`Failed` body surfaces a typed failure rather
+        // than degrading to empty extraction. Tracked for the
+        // proactive-body follow-up issue.
+        CapturePayload::Proactive { .. } => Some("CapturePayload::Proactive"),
         _ => None,
     }
 }
@@ -655,6 +663,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ExtractError::BodyResolution { .. }));
+    }
+
+    #[tokio::test]
+    async fn proactive_payload_with_no_body_surfaces_missing_body() {
+        // Proactive (Mode C) events are text-bearing per spec but the
+        // wire envelope does not yet carry a hashable message-body
+        // field. Until that wiring lands, dispatch must fail closed
+        // rather than silently return an empty success.
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget::regex_default();
+        let event = make_event(CapturePayload::Proactive {
+            kind: "feedback".into(),
+            rationale: "test".into(),
+        });
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+        };
+        let err = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExtractError::MissingBody { .. }));
     }
 
     #[tokio::test]
