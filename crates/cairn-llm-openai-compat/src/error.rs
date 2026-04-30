@@ -7,8 +7,6 @@ use cairn_core::contract::LlmError;
 ///
 /// Heuristic mapping based on error message text — sufficient for P0.
 /// Tasks 6–8 will tighten this once we inspect HTTP status codes directly.
-// Used in Tasks 6–8 when complete() is wired up.
-#[allow(dead_code)]
 pub(crate) fn map_openai_error(e: &OpenAIError) -> LlmError {
     let msg = e.to_string();
     if msg.contains("401")

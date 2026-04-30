@@ -1,6 +1,12 @@
 //! [`OpenAiCompatProvider`] — implements [`LLMProvider`] over `async-openai`.
 
-use async_openai::{Client, config::OpenAIConfig};
+use async_openai::{
+    Client,
+    config::OpenAIConfig,
+    types::chat::{
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+    },
+};
 use cairn_core::{
     config::LlmConfig,
     contract::version::{ContractVersion, VersionRange},
@@ -11,15 +17,13 @@ use cairn_core::{
 };
 
 use crate::config::to_openai_config;
+use crate::error::map_openai_error;
 
 /// OpenAI-compatible [`LLMProvider`] adapter.
 pub struct OpenAiCompatProvider {
-    /// Underlying async-openai HTTP client. Used by `complete()` in Tasks 6–8.
-    // Fields wired in Tasks 6–8; dead_code until then.
-    #[allow(dead_code)]
+    /// Underlying async-openai HTTP client.
     client: Client<OpenAIConfig>,
-    /// Model name resolved at construction time. Used by `complete()` in Tasks 6–8.
-    #[allow(dead_code)]
+    /// Model name resolved at construction time.
     model: String,
     /// Static capability advertisement.
     capabilities: LLMProviderCapabilities,
@@ -81,10 +85,61 @@ impl LLMProvider for OpenAiCompatProvider {
         Self::SUPPORTED_VERSIONS
     }
 
-    async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
-        // Full implementation in Tasks 6–8.
-        Err(LlmError::CapabilityMissing {
-            capability: "not yet implemented".into(),
-        })
+    async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+        // JSON schema path requires json_mode capability — guard it now,
+        // full validation wired in Task 7.
+        if req.schema.is_some() && !self.capabilities.json_mode {
+            return Err(LlmError::CapabilityMissing {
+                capability: "json_mode".into(),
+            });
+        }
+
+        // Choose the model: per-request override or the instance default.
+        let model = req.model.as_deref().unwrap_or(&self.model);
+
+        // Build the user message from the prompt string.
+        let user_msg = ChatCompletionRequestUserMessageArgs::default()
+            .content(req.prompt.as_str())
+            .build()
+            .map_err(|e| LlmError::ProviderUnreachable {
+                detail: e.to_string(),
+            })?;
+
+        // Build the chat completion request.
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder.model(model).messages([user_msg.into()]);
+
+        // Apply token budget when set.
+        if let Some(budget) = &req.budget && let Some(max_tok) = budget.max_tokens {
+            builder.max_completion_tokens(max_tok);
+        }
+
+        // JSON schema path — Task 7 wires full structured-output validation.
+        if req.schema.is_some() {
+            todo!("JSON schema enforcement — implemented in Task 7")
+        }
+
+        let request = builder.build().map_err(|e| LlmError::ProviderUnreachable {
+            detail: e.to_string(),
+        })?;
+
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
+            .map_err(|e| map_openai_error(&e))?;
+
+        // Extract content from the first choice.
+        let content = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .ok_or_else(|| LlmError::ProviderUnreachable {
+                detail: "provider returned empty choices or null content".into(),
+            })?;
+
+        Ok(CompletionOutput::Text(content))
     }
 }
