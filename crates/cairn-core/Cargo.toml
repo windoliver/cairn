@@ -55,6 +55,7 @@ insta = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tracing-test = "0.2"
+jsonschema = { workspace = true }
 
 [[bin]]
 name = "filter_smoke"

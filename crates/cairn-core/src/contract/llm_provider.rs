@@ -229,4 +229,45 @@ mod tests {
         let out = provider.complete(&req).await.unwrap();
         assert!(matches!(out, CompletionOutput::Text(_)));
     }
+
+    // Pure jsonschema validation tests — verify schema enforcement logic
+    // independent of the adapter. Uses jsonschema as a dev-dep only.
+
+    #[test]
+    fn valid_object_passes_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["kind"],
+            "properties": { "kind": { "type": "string" } }
+        });
+        let value = serde_json::json!({ "kind": "feedback" });
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.validate(&value).is_ok());
+    }
+
+    #[test]
+    fn missing_required_field_fails_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["kind", "confidence"],
+            "properties": {
+                "kind": { "type": "string" },
+                "confidence": { "type": "number" }
+            }
+        });
+        let value = serde_json::json!({ "kind": "feedback" }); // missing "confidence"
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.validate(&value).is_err());
+    }
+
+    #[test]
+    fn wrong_type_fails_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "confidence": { "type": "number" } }
+        });
+        let value = serde_json::json!({ "confidence": "not-a-number" });
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.validate(&value).is_err());
+    }
 }
