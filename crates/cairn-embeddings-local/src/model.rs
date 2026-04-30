@@ -56,16 +56,31 @@ impl EmbeddingModel for MockEmbedder {
 }
 
 /// Produce a deterministic normalised 384-dim vector from a string.
-/// Uses blake3 hash repeated to fill 384*4 bytes, then reinterpreted as f32 LE.
+///
+/// Uses blake3's extended output function (XOF) to fill `384 * 4` bytes,
+/// then interprets each 4-byte group as a signed `i32` in little-endian and
+/// converts to `f32`. This avoids the subnormal-collapse problem that would
+/// arise from treating arbitrary hash bytes directly as raw `f32` bit patterns.
 #[must_use]
 pub fn mock_vector(text: &str) -> Vec<f32> {
-    let hash = blake3::hash(text.as_bytes());
-    let bytes = hash.as_bytes();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(text.as_bytes());
+    let mut xof = hasher.finalize_xof();
     let needed = 384 * 4;
-    let extended: Vec<u8> = bytes.iter().cycle().take(needed).copied().collect();
-    let mut v: Vec<f32> = extended
+    let mut raw = vec![0u8; needed];
+    xof.fill(&mut raw);
+    // Interpret each 4-byte XOF chunk as a normal f32 in the range [1.0, 2.0)
+    // by injecting bits 22..0 into the mantissa and setting a fixed exponent (127).
+    // Bit 31 provides the sign (-1.0 or +1.0 range). This avoids both subnormals
+    // and the cast-precision-loss lint from i32-to-f32 casting.
+    let mut v: Vec<f32> = raw
         .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .map(|c| {
+            let bits = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            // Force exponent to 127 (biased), keep sign and lower 23 mantissa bits.
+            let normal_bits = (bits & 0x8000_0000) | (127 << 23) | (bits & 0x007f_ffff);
+            f32::from_bits(normal_bits)
+        })
         .collect();
     l2_normalize(&mut v);
     v
