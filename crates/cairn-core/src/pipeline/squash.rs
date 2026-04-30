@@ -142,12 +142,21 @@ impl SquashConfig {
 
     /// Enable or disable the TTY-render pre-stage (stage 2b).
     ///
-    /// **Default is off.** Stage 2b rewrites bytes via cursor-rewind/overwrite
-    /// semantics for any line containing bare `\r`, which is fine for
-    /// genuine progress-bar output but corrupts binary-ish or diagnostic
-    /// payloads that legitimately embed CR. Callers must opt in once they
-    /// have classified the input as terminal-frame text (or accept the lossy
-    /// trade-off for that capture).
+    /// **Default is off.** Stage 2b rewrites lines containing bare `\r`
+    /// under last-non-empty-`\r`-segment-wins semantics (see
+    /// `stage2b_tty_render` for the rationale). That is correct for the
+    /// dominant progress-bar pattern but lossy for binary-ish or
+    /// diagnostic payloads that legitimately embed CR. Callers must opt
+    /// in once they have classified the input as terminal-frame text.
+    ///
+    /// **Oversize-bypass interaction.** This flag is honored only on the
+    /// staged path. Inputs that trip `oversize_bypass` (byte ceiling,
+    /// line cardinality, or decode-expansion gate) skip stage 2b
+    /// entirely and the retained head/tail windows preserve CR-bearing
+    /// bytes verbatim regardless of the flag. `tty_frames_coalesced`
+    /// will be zero on bypassed inputs even when the flag is on, which
+    /// callers can use as a signal that stage 2b did not run. See the
+    /// `tty_render_skipped_on_oversize_bypass` regression test.
     #[must_use]
     pub fn with_tty_render_enabled(mut self, enabled: bool) -> Self {
         self.tty_render_enabled = enabled;
@@ -2583,28 +2592,41 @@ mod stage2_tests {
 /// Stage 2b: optional TTY-render pre-stage.
 ///
 /// Interprets bare `\r` (carriage-return without a following `\n`) as a
-/// cursor-rewind to column 0 with overwrite semantics, emitting only the
-/// terminally-visible content per `\n`-delimited line. Reduces output size
-/// on progress-bar style captures (e.g.,
+/// progress-frame separator and emits the **last non-empty `\r`-delimited
+/// segment** of each `\n`-delimited line. Reduces output size on
+/// progress-bar style captures (e.g.,
 /// `Downloading 1%\rDownloading 2%\rDownloading 3%` collapses to
 /// `Downloading 3%`).
 ///
-/// CSI-K (erase-in-line) is not handled here: stage 2 has already stripped
-/// every CSI sequence, so the surviving `\r<text>` patterns are what this
-/// stage renders. Documented as part of issue #219's scope.
+/// **Why last-segment-wins instead of overlay-with-overwrite.** Stage 2
+/// has already stripped every CSI sequence by the time stage 2b runs, so
+/// CSI-K (erase-in-line) — the canonical signal that a shorter replacement
+/// frame supersedes its predecessor — is gone. Naive byte-level overlay
+/// would corrupt that common pattern (e.g. `very long status\r\x1b[Kdone`
+/// would render as `done long status` with stale tail bytes from the prior
+/// frame). Treating each `\r` as a frame boundary and keeping the final
+/// non-empty frame is correct for full-line rewrites (the dominant
+/// progress-output pattern) and degrades predictably for partial rewrites:
+/// `aaaa\rbb` collapses to `bb` rather than the terminal-faithful `bbaa`.
+/// This is the documented trade-off of running after stage 2.
 ///
-/// Pure char-level rendering: `\r` resets cursor to 0; subsequent characters
-/// overwrite buffer positions left-to-right, extending the buffer when the
-/// cursor exceeds current length. UTF-8 char granularity (not terminal cell
-/// width) is used; this is sufficient for the documented scope and avoids a
-/// width-table dependency.
+/// If only empty frames follow the last `\r` (e.g. `foo\r`), the rendered
+/// line is the last non-empty frame in *original* order — i.e., `foo` —
+/// so trailing-CR no-ops remain idempotent.
 ///
 /// Counters:
 /// - `frames_coalesced`: number of `\n`-delimited lines that contained at
 ///   least one `\r` and were rewritten (one per source line, not per `\r`).
 /// - `bytes_saved`: original line bytes minus rendered line bytes, summed.
-///   Saturating-clamped at zero so an equal-length overwrite contributes
+///   Saturating-clamped at zero so an equal-length rewrite contributes
 ///   nothing and a (theoretical) longer rewrite cannot underflow.
+///
+/// **Oversize bypass interaction:** stage 2b runs only on the staged path.
+/// Inputs that trip `oversize_bypass` (byte ceiling, line cardinality, or
+/// decode expansion) skip stage 2b entirely; the retained head/tail windows
+/// keep CR-bearing bytes verbatim regardless of `tty_render_enabled`. See
+/// the doc comment on `SquashConfig::with_tty_render_enabled` for the
+/// pinned-behavior regression test.
 fn stage2b_tty_render(
     input: &str,
     frames_coalesced: &mut usize,
@@ -2643,24 +2665,17 @@ fn stage2b_tty_render(
     out
 }
 
-/// Render a single line with bare-CR overwrite semantics. See `stage2b_tty_render`
-/// for rationale. Caller guarantees the line contains at least one `\r`.
+/// Render a single line under last-non-empty-`\r`-segment-wins semantics.
+/// See `stage2b_tty_render` for the rationale. Caller guarantees the line
+/// contains at least one `\r`.
 fn render_cr_line(line: &str) -> String {
-    let mut buf: Vec<char> = Vec::new();
-    let mut cursor: usize = 0;
-    for c in line.chars() {
-        if c == '\r' {
-            cursor = 0;
-            continue;
-        }
-        if cursor < buf.len() {
-            buf[cursor] = c;
-        } else {
-            buf.push(c);
-        }
-        cursor += 1;
-    }
-    buf.into_iter().collect()
+    // Last-non-empty wins: walking from the right, the first non-empty
+    // segment is the final visible frame. If every segment is empty
+    // (e.g. `\r\r\r`), the rendered line is itself empty.
+    line.rsplit('\r')
+        .find(|seg| !seg.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -2699,9 +2714,25 @@ mod stage2b_tests {
     }
 
     #[test]
-    fn shorter_overwrite_leaves_tail() {
+    fn shorter_replacement_drops_prior_tail() {
+        // Last-non-empty-segment-wins: documented trade-off, see
+        // `stage2b_tty_render` doc comment. The terminal-faithful answer
+        // would be "bbaa", but without the CSI-K signal we cannot
+        // distinguish that from the common progress-bar replacement.
         let (out, frames, _saved) = render("aaaa\rbb");
-        assert_eq!(out, "bbaa");
+        assert_eq!(out, "bb");
+        assert_eq!(frames, 1);
+    }
+
+    #[test]
+    fn csi_k_erased_short_replacement_renders_correctly() {
+        // Regression for /review-loop round 2 finding 1: when the producer
+        // emitted `very long status\r\x1b[Kdone`, stage 2 already stripped
+        // the `\x1b[K` before stage 2b ran. Last-segment-wins resolves the
+        // resulting `very long status\rdone` to the user-visible `done`,
+        // not the byte-overlay artefact `done long status`.
+        let (out, frames, _saved) = render("very long status\rdone");
+        assert_eq!(out, "done");
         assert_eq!(frames, 1);
     }
 
@@ -2714,7 +2745,7 @@ mod stage2b_tests {
     }
 
     #[test]
-    fn longer_overwrite_extends_buffer() {
+    fn longer_replacement_supersedes() {
         let (out, frames, saved) = render("ab\rxyz");
         assert_eq!(out, "xyz");
         assert_eq!(frames, 1);
@@ -2778,9 +2809,19 @@ mod stage2b_tests {
 
     #[test]
     fn cr_with_utf8_chars() {
+        // Last-non-empty wins: `δ` is the final frame, no prior bytes leak.
         let (out, _, _) = render("αβγ\rδ");
-        // α at pos 0 → δ; βγ trail. Expected "δβγ".
-        assert_eq!(out, "δβγ");
+        assert_eq!(out, "δ");
+    }
+
+    #[test]
+    fn all_segments_empty_renders_empty_line() {
+        // `\r\r\r` between newlines: every segment is empty. Output for
+        // that line is empty. Frame count still reflects that a CR-bearing
+        // line was processed.
+        let (out, frames, _) = render("foo\n\r\r\r\nbar");
+        assert_eq!(out, "foo\n\nbar");
+        assert_eq!(frames, 1);
     }
 }
 
@@ -4754,9 +4795,9 @@ mod corner_case_tests {
 
     #[test]
     fn tty_render_only_rewrite_sets_truncated_bit() {
-        // Regression for #219 review: a CR rewrite with no other lossy
-        // stage firing must still flip `stats.truncated` so downstream
-        // audit gates don't treat rewritten output as pristine.
+        // Regression for /review-loop round 1 finding 1: a CR rewrite with
+        // no other lossy stage firing must still flip `stats.truncated` so
+        // downstream audit gates don't treat rewritten output as pristine.
         let cfg = SquashConfig::default().with_tty_render_enabled(true);
         // Single short line, pure CR rewrite, no ANSI / no oversize / no
         // dedup / no per-line cap.
@@ -4770,6 +4811,29 @@ mod corner_case_tests {
             out.stats.truncated,
             "CR-only rewrite must set truncated bit"
         );
+    }
+
+    #[test]
+    fn tty_render_skipped_on_oversize_bypass() {
+        // Regression for /review-loop round 2 finding 2: stage 2b runs only
+        // on the staged path. Inputs that trip `oversize_bypass` (here, the
+        // line-cardinality gate) skip stage 2b regardless of the flag.
+        // Pinning this so callers don't silently rely on tty rendering for
+        // pathologically large captures.
+        let cfg_off = SquashConfig::default();
+        let cfg_on = SquashConfig::default().with_tty_render_enabled(true);
+        // Build > MAX_INPUT_LINES newlines of CR-bearing progress lines.
+        let mut raw = Vec::with_capacity(MAX_INPUT_LINES * 16);
+        for i in 0..=MAX_INPUT_LINES {
+            raw.extend_from_slice(format!("p{i}\rdone{i}\n").as_bytes());
+        }
+        let out_off = squash_raw(&raw, &cfg_off);
+        let out_on = squash_raw(&raw, &cfg_on);
+        assert_eq!(
+            out_off.compacted_bytes, out_on.compacted_bytes,
+            "tty_render_enabled must be a no-op on the bypass path"
+        );
+        assert_eq!(out_on.stats.tty_frames_coalesced, 0);
     }
 
     #[test]
