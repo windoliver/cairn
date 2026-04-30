@@ -163,6 +163,87 @@ fn tagged_union_verb_requires_target_flag() {
 }
 
 #[test]
+fn search_accepts_explain_flag() {
+    // Clap accepts `--explain` (a SetTrue boolean flag generated from
+    // search.json's x-cairn-cli flags). Without the policy_trace
+    // capability advertised, the handler fails-closed with sysexit 69
+    // (covered by the next test) — but it must not be `UnknownArgument`.
+    let out = cli()
+        .args(["search", "--explain", "test"])
+        .output()
+        .expect("cairn");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "search must accept --explain; got: {stderr:?}",
+    );
+}
+
+#[test]
+fn search_explain_fails_closed_with_capability_unavailable() {
+    // P0 does not advertise cairn.mcp.v1.policy_trace, so `--explain`
+    // must fail-closed with EX_UNAVAILABLE (69) and a
+    // CapabilityUnavailable error envelope before any verb dispatch.
+    // Mirrors the SDK fail-closed path; together they enforce the
+    // x-cairn-capability-when-true annotation in search.json
+    // (PR #237 round 4).
+    let out = cli()
+        .args(["search", "--explain", "test"])
+        .output()
+        .expect("cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(69),
+        "search --explain without policy_trace must exit 69 (EX_UNAVAILABLE); got status {:?}, stderr {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("CapabilityUnavailable"),
+        "stderr must surface CapabilityUnavailable: {stderr:?}",
+    );
+    assert!(
+        stderr.contains("cairn.mcp.v1.policy_trace"),
+        "stderr must name the missing capability: {stderr:?}",
+    );
+}
+
+#[test]
+fn search_explain_json_emits_capability_unavailable_envelope() {
+    // The JSON form of the same fail-closed path: error.code is
+    // CapabilityUnavailable and error.data.capability is
+    // cairn.mcp.v1.policy_trace.
+    let out = cli()
+        .args(["search", "--explain", "test", "--json"])
+        .output()
+        .expect("cairn");
+    assert_eq!(out.status.code(), Some(69));
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("not valid JSON: {e}\nstdout: {stdout:?}"));
+    assert_eq!(v["status"].as_str(), Some("aborted"));
+    assert_eq!(v["error"]["code"].as_str(), Some("CapabilityUnavailable"));
+    assert_eq!(
+        v["error"]["data"]["capability"].as_str(),
+        Some("cairn.mcp.v1.policy_trace")
+    );
+}
+
+#[test]
+fn search_help_lists_explain_flag() {
+    // The generated help screen must surface --explain so callers can
+    // discover it. Regression guard against the IDL/x-cairn-cli drift
+    // codex flagged in PR #237.
+    let out = cli().args(["search", "--help"]).output().expect("cairn");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("--explain"),
+        "search --help must list --explain flag; got: {stdout}",
+    );
+}
+
+#[test]
 fn unknown_argument_fails_closed() {
     // Clap UnknownArgument → exit 64 (EX_USAGE) per spec §5.2.
     let out = cli()
