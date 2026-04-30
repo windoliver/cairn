@@ -78,7 +78,7 @@ pub struct SquashConfig {
     tail_lines: usize,
     dedup_min_run: usize,
     max_line_bytes: usize,
-    tty_render_enabled: bool,
+    progress_frame_collapse_enabled: bool,
 }
 
 impl SquashConfig {
@@ -136,35 +136,52 @@ impl SquashConfig {
             tail_lines,
             dedup_min_run,
             max_line_bytes,
-            tty_render_enabled: false,
+            progress_frame_collapse_enabled: false,
         })
     }
 
-    /// Enable or disable the TTY-render pre-stage (stage 2b).
+    /// Enable or disable the progress-frame-collapse pre-stage (stage 2b).
     ///
-    /// **Default is off.** Stage 2b rewrites lines containing bare `\r`
-    /// under last-non-empty-`\r`-segment-wins semantics (see
-    /// `stage2b_tty_render` for the rationale). That is correct for the
-    /// dominant progress-bar pattern but lossy for binary-ish or
-    /// diagnostic payloads that legitimately embed CR. Callers must opt
-    /// in once they have classified the input as terminal-frame text.
+    /// **This is NOT a general-purpose terminal renderer.** It is a
+    /// narrowly-scoped opt-in for producers that emit
+    /// **full-line progress-frame rewrites** — the
+    /// `\rDownloading 2%\rDownloading 3%` pattern from build tools,
+    /// package managers, and progress bars, where each `\r`-delimited
+    /// frame supersedes the previous one in its entirety.
+    ///
+    /// **Default is off.** When enabled, stage 2b collapses each
+    /// `\n`-delimited line that contains `\r` to its last non-empty
+    /// `\r`-segment (see `stage2b_progress_collapse` for the rationale).
+    /// That is correct for the documented full-line-rewrite pattern but
+    /// **lossy** for any other use of CR: binary or protocol payloads
+    /// that legitimately embed `\r`, interactive output that uses `\r`
+    /// for partial rewrites without `CSI K` (e.g. `aaaa\rbb` rendering
+    /// as terminal-faithful `bbaa`), or arbitrary captures whose CR
+    /// usage you have not classified.
+    ///
+    /// Do NOT enable this for "generic interactive terminal text" — the
+    /// happy path is narrow on purpose. Callers must classify the input
+    /// as full-frame-rewrite progress output and accept the lossy
+    /// semantics for that capture.
     ///
     /// **Oversize-bypass interaction.** When the flag is on, stage 2b
     /// runs on both the staged path and on the head/tail windows of
-    /// `oversize_bypass`, so `tty_render_enabled` produces consistent
-    /// semantics across the byte-ceiling / line-cardinality /
-    /// decode-expansion gates. See the
-    /// `tty_render_applies_on_oversize_bypass` regression test.
+    /// `oversize_bypass` (including the giant-final-line branch), so the
+    /// flag produces consistent semantics across the byte-ceiling /
+    /// line-cardinality / decode-expansion gates. See the
+    /// `progress_collapse_applies_on_oversize_bypass` and
+    /// `progress_collapse_applies_on_giant_final_line_bypass` regression
+    /// tests.
     #[must_use]
-    pub fn with_tty_render_enabled(mut self, enabled: bool) -> Self {
-        self.tty_render_enabled = enabled;
+    pub fn with_progress_frame_collapse_enabled(mut self, enabled: bool) -> Self {
+        self.progress_frame_collapse_enabled = enabled;
         self
     }
 
-    /// Returns whether the TTY-render pre-stage is enabled.
+    /// Returns whether the progress-frame-collapse pre-stage is enabled.
     #[must_use]
-    pub fn tty_render_enabled(&self) -> bool {
-        self.tty_render_enabled
+    pub fn progress_frame_collapse_enabled(&self) -> bool {
+        self.progress_frame_collapse_enabled
     }
 
     /// Returns `max_bytes`.
@@ -1804,7 +1821,7 @@ pub struct SquashStats {
     pub long_lines_truncated: usize,
     /// True iff `compacted_bytes` is NOT a verbatim sanitization-free
     /// copy of the input — i.e., any lossy transform acted: stage 2
-    /// ANSI/OSC strip, stage 2 OSC recovery drop, stage 2b TTY-render
+    /// ANSI/OSC strip, stage 2 OSC recovery drop, stage 2b progress-frame collapse
     /// overwrite, stage 4 dedup collapse, stage 5 per-line cap, stage 6
     /// head/tail truncation, or the oversize bypass. Downstream code
     /// that gates fallback / raw-retention / warning banners on a
@@ -1824,13 +1841,13 @@ pub struct SquashStats {
     /// apart from sanitization or trim loss. Always feeds `truncated`.
     pub utf8_replacement: bool,
     /// Number of `\n`-delimited lines that contained at least one bare
-    /// `\r` and were rewritten by stage 2b (TTY-render pre-stage).
+    /// `\r` and were rewritten by stage 2b (progress-frame collapse).
     /// Counted per source line, not per `\r`.
-    pub tty_frames_coalesced: usize,
+    pub progress_frames_coalesced: usize,
     /// Bytes saved by stage 2b: original line bytes minus rendered line
     /// bytes, summed across coalesced lines. Saturating-clamped at zero
     /// (rewrites that don't shrink contribute nothing).
-    pub tty_bytes_saved: usize,
+    pub progress_bytes_saved: usize,
 }
 
 use std::borrow::Cow;
@@ -2587,7 +2604,7 @@ mod stage2_tests {
     }
 }
 
-/// Stage 2b: optional TTY-render pre-stage.
+/// Stage 2b: optional progress-frame-collapse pre-stage.
 ///
 /// Interprets bare `\r` (carriage-return without a following `\n`) as a
 /// progress-frame separator and emits the **last non-empty `\r`-delimited
@@ -2626,7 +2643,7 @@ mod stage2_tests {
 /// the pre-render sanitized text on both paths, so it remains a stable
 /// indicator of source-capture CRs even when stage 2b later rewrites them
 /// away.
-fn stage2b_tty_render(
+fn stage2b_progress_collapse(
     input: &str,
     frames_coalesced: &mut usize,
     bytes_saved: &mut usize,
@@ -2665,7 +2682,7 @@ fn stage2b_tty_render(
 }
 
 /// Render a single line under last-non-empty-`\r`-segment-wins semantics.
-/// See `stage2b_tty_render` for the rationale. Caller guarantees the line
+/// See `stage2b_progress_collapse` for the rationale. Caller guarantees the line
 /// contains at least one `\r`.
 fn render_cr_line(line: &str) -> String {
     // Last-non-empty wins: walking from the right, the first non-empty
@@ -2684,7 +2701,7 @@ mod stage2b_tests {
     fn render(input: &str) -> (String, usize, usize) {
         let mut frames = 0;
         let mut saved = 0;
-        let out = stage2b_tty_render(input, &mut frames, &mut saved);
+        let out = stage2b_progress_collapse(input, &mut frames, &mut saved);
         (out, frames, saved)
     }
 
@@ -2715,7 +2732,7 @@ mod stage2b_tests {
     #[test]
     fn shorter_replacement_drops_prior_tail() {
         // Last-non-empty-segment-wins: documented trade-off, see
-        // `stage2b_tty_render` doc comment. The terminal-faithful answer
+        // `stage2b_progress_collapse` doc comment. The terminal-faithful answer
         // would be "bbaa", but without the CSI-K signal we cannot
         // distinguish that from the common progress-bar replacement.
         let (out, frames, _saved) = render("aaaa\rbb");
@@ -2781,10 +2798,10 @@ mod stage2b_tests {
     fn idempotent_when_cr_resolved() {
         let mut f1 = 0;
         let mut s1 = 0;
-        let pass1 = stage2b_tty_render("Downloading 1%\rDownloading 2%", &mut f1, &mut s1);
+        let pass1 = stage2b_progress_collapse("Downloading 1%\rDownloading 2%", &mut f1, &mut s1);
         let mut f2 = 0;
         let mut s2 = 0;
-        let pass2 = stage2b_tty_render(&pass1, &mut f2, &mut s2);
+        let pass2 = stage2b_progress_collapse(&pass1, &mut f2, &mut s2);
         assert_eq!(pass1, pass2, "second pass must be a no-op");
         assert_eq!(f2, 0, "no frames coalesced on second pass");
         assert_eq!(s2, 0, "no bytes saved on second pass");
@@ -3593,14 +3610,14 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         &mut stats.ansi_stripped,
         &mut stats.osc_recovery_bytes_dropped,
     );
-    // Stage 2b: opt-in TTY-render pre-stage (issue #219). Resolves bare
-    // `\r` cursor rewinds before stage-3 line split so progress-bar lines
-    // collapse to their terminally-visible content instead of expanding
-    // dedup misses. Off by default — rewriting CR-bearing bytes corrupts
-    // binary or diagnostic payloads that legitimately embed `\r`, so
-    // callers must classify the input as terminal-frame text first. When
-    // it does run, `tty_frames_coalesced` feeds the `truncated` bit below
-    // (the rewrite is lossy by definition).
+    // Stage 2b: opt-in progress-frame-collapse pre-stage (issue #219).
+    // Collapses bare-`\r` lines to their last non-empty `\r`-segment so
+    // full-line progress-bar rewrites stop expanding dedup misses. Off
+    // by default — narrowly scoped to producers that emit full-frame
+    // rewrites; binary, diagnostic, or partial-rewrite captures must
+    // not enable it. When it does run, `progress_frames_coalesced`
+    // feeds the `truncated` bit below (the rewrite is lossy by
+    // definition).
     //
     // Skipped when the config flag is off or when the stage-2 output
     // contains no `\r` (cheap fast path; avoids an extra String allocation).
@@ -3610,11 +3627,11 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     // that had a CR but stage 2b resolved to a clean rendered line) must
     // not look identical to a CR-free capture.
     stats.cr_bearing_lines = stage2.split('\n').filter(|l| l.contains('\r')).count();
-    let stage2b: Cow<'_, str> = if cfg.tty_render_enabled() && stage2.contains('\r') {
-        Cow::Owned(stage2b_tty_render(
+    let stage2b: Cow<'_, str> = if cfg.progress_frame_collapse_enabled() && stage2.contains('\r') {
+        Cow::Owned(stage2b_progress_collapse(
             &stage2,
-            &mut stats.tty_frames_coalesced,
-            &mut stats.tty_bytes_saved,
+            &mut stats.progress_frames_coalesced,
+            &mut stats.progress_bytes_saved,
         ))
     } else {
         Cow::Borrowed(stage2.as_ref())
@@ -3643,12 +3660,12 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     stats.long_lines_truncated = long_lines_count;
     // `truncated` means "compacted_bytes is not a verbatim sanitize-free
     // copy of the input." Set it for any lossy stage that fired during
-    // the staged path: ANSI strip, OSC recovery drop, stage 2b TTY-render
+    // the staged path: ANSI strip, OSC recovery drop, stage 2b progress-frame collapse
     // overwrite, dedup collapse, per-line cap. Stage 6's drop loop sets
     // it again on tail/head trim.
     if stats.ansi_stripped
         || stats.osc_recovery_bytes_dropped > 0
-        || stats.tty_frames_coalesced > 0
+        || stats.progress_frames_coalesced > 0
         || stats.dedup_runs_collapsed > 0
         || long_lines_count > 0
         || stats.utf8_replacement
@@ -3785,19 +3802,20 @@ fn oversize_bypass(
         .split('\n')
         .filter(|l| l.contains('\r'))
         .count();
-    // Stage 2b also runs on the bypass path so `tty_render_enabled` does
+    // Stage 2b also runs on the bypass path so `progress_frame_collapse_enabled` does
     // not silently flip semantics when an input crosses a bypass gate.
     // Renders before trimming so the trim sees the rendered (typically
     // shorter) text and we do not waste budget on stale CR frames.
-    let head_rendered: Cow<'_, str> = if cfg.tty_render_enabled() && head_sanitized.contains('\r') {
-        Cow::Owned(stage2b_tty_render(
-            &head_sanitized,
-            &mut stats.tty_frames_coalesced,
-            &mut stats.tty_bytes_saved,
-        ))
-    } else {
-        Cow::Borrowed(head_sanitized.as_ref())
-    };
+    let head_rendered: Cow<'_, str> =
+        if cfg.progress_frame_collapse_enabled() && head_sanitized.contains('\r') {
+            Cow::Owned(stage2b_progress_collapse(
+                &head_sanitized,
+                &mut stats.progress_frames_coalesced,
+                &mut stats.progress_bytes_saved,
+            ))
+        } else {
+            Cow::Borrowed(head_sanitized.as_ref())
+        };
     let head_trimmed = trim_to_byte_budget_at_boundary(&head_rendered, half);
     // Drop any trailing partial line from head. If `head_trimmed`
     // contains NO `\n` at all, the entire window is a prefix of one
@@ -3850,13 +3868,13 @@ fn oversize_bypass(
             .count();
         stats.ansi_stripped |= tail_stripped;
         // Stage 2b on the tail window for the same reason as the head:
-        // honor `tty_render_enabled` even on the bypass path.
+        // honor `progress_frame_collapse_enabled` even on the bypass path.
         let tail_rendered: Cow<'_, str> =
-            if cfg.tty_render_enabled() && tail_sanitized.contains('\r') {
-                Cow::Owned(stage2b_tty_render(
+            if cfg.progress_frame_collapse_enabled() && tail_sanitized.contains('\r') {
+                Cow::Owned(stage2b_progress_collapse(
                     &tail_sanitized,
-                    &mut stats.tty_frames_coalesced,
-                    &mut stats.tty_bytes_saved,
+                    &mut stats.progress_frames_coalesced,
+                    &mut stats.progress_bytes_saved,
                 ))
             } else {
                 Cow::Borrowed(tail_sanitized.as_ref())
@@ -4029,11 +4047,11 @@ fn oversize_bypass(
             // we trimmed first and rendered after, the trim could chop
             // mid-frame and leave a partial CR run that survives stage 2b.
             let suffix_rendered: Cow<'_, str> =
-                if cfg.tty_render_enabled() && suffix_sanitized.contains('\r') {
-                    Cow::Owned(stage2b_tty_render(
+                if cfg.progress_frame_collapse_enabled() && suffix_sanitized.contains('\r') {
+                    Cow::Owned(stage2b_progress_collapse(
                         &suffix_sanitized,
-                        &mut stats.tty_frames_coalesced,
-                        &mut stats.tty_bytes_saved,
+                        &mut stats.progress_frames_coalesced,
+                        &mut stats.progress_bytes_saved,
                     ))
                 } else {
                     Cow::Borrowed(suffix_sanitized.as_ref())
@@ -4051,7 +4069,7 @@ fn oversize_bypass(
             // raw input span [suffix_window_start..] is preserved
             // — sanitization / stage-2b shrinkage is reported via
             // `ansi_stripped` / `osc_recovery_bytes_dropped` /
-            // `tty_frames_coalesced`, not `bytes_dropped_truncate`.
+            // `progress_frames_coalesced`, not `bytes_dropped_truncate`.
             let was_front_trimmed = suffix.len() < suffix_rendered.len();
             tail_source_bytes = if was_front_trimmed {
                 suffix.len().min(raw_byte_len - suffix_window_start)
@@ -4534,13 +4552,13 @@ mod squash_fixtures_tests {
 
     /// Same fixture as `snapshot_real_progress_with_hyperlink` but with
     /// stage 2b explicitly enabled: progress lines should collapse to
-    /// their final visible state. Pins the opt-in TTY-render path
-    /// (issue #219).
+    /// their final visible state. Pins the opt-in
+    /// progress-frame-collapse path (issue #219).
     #[test]
-    fn snapshot_real_progress_with_hyperlink_tty_render() {
+    fn snapshot_real_progress_with_hyperlink_collapsed() {
         insta::assert_snapshot!(run_fixture(
             "real_progress_with_hyperlink.txt",
-            &SquashConfig::default().with_tty_render_enabled(true)
+            &SquashConfig::default().with_progress_frame_collapse_enabled(true)
         ));
     }
 }
@@ -4818,14 +4836,14 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn mixed_line_endings_with_tty_render_resolves_cr() {
+    fn mixed_line_endings_with_progress_collapse_resolves_cr() {
         // With stage 2b explicitly enabled, bare CR collapses to the last
-        // non-empty `\r`-segment: "c\rd" → "d". `tty_frames_coalesced`
+        // non-empty `\r`-segment: "c\rd" → "d". `progress_frames_coalesced`
         // reflects the rewrite. `cr_bearing_lines` is computed from the
         // pre-rewrite sanitized text (round-3 review finding 2) so it
         // remains a stable audit signal that the source contained CRs
         // even though stage 2b removed them.
-        let cfg = SquashConfig::default().with_tty_render_enabled(true);
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
         let raw = b"a\r\nb\nc\rd\r\ne";
         let out = squash_raw(raw, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
@@ -4834,7 +4852,7 @@ mod corner_case_tests {
             out.stats.cr_bearing_lines >= 1,
             "pre-render CR audit signal must survive stage 2b"
         );
-        assert_eq!(out.stats.tty_frames_coalesced, 1);
+        assert_eq!(out.stats.progress_frames_coalesced, 1);
         assert!(
             out.stats.truncated,
             "stage 2b rewrite must set truncated bit"
@@ -4842,16 +4860,16 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn tty_render_only_rewrite_sets_truncated_bit() {
+    fn progress_collapse_only_rewrite_sets_truncated_bit() {
         // Regression for /review-loop round 1 finding 1: a CR rewrite with
         // no other lossy stage firing must still flip `stats.truncated` so
         // downstream audit gates don't treat rewritten output as pristine.
-        let cfg = SquashConfig::default().with_tty_render_enabled(true);
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
         // Single short line, pure CR rewrite, no ANSI / no oversize / no
         // dedup / no per-line cap.
         let raw = b"progress\rdone\n";
         let out = squash_raw(raw, &cfg);
-        assert_eq!(out.stats.tty_frames_coalesced, 1);
+        assert_eq!(out.stats.progress_frames_coalesced, 1);
         assert_eq!(out.stats.dedup_runs_collapsed, 0);
         assert_eq!(out.stats.long_lines_truncated, 0);
         assert!(!out.stats.ansi_stripped);
@@ -4862,7 +4880,7 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn tty_render_applies_on_oversize_bypass() {
+    fn progress_collapse_applies_on_oversize_bypass() {
         // Regression for /review-loop round 3 finding 1: stage 2b must run
         // on both head and tail windows of the oversize bypass path so the
         // same config produces consistent semantics across the size cliff.
@@ -4870,7 +4888,7 @@ mod corner_case_tests {
         // and confirm the rendered output drops the early `\r<frame>`
         // bytes while leaving the bypass shape (head, marker, tail) intact.
         let cfg_off = SquashConfig::default();
-        let cfg_on = SquashConfig::default().with_tty_render_enabled(true);
+        let cfg_on = SquashConfig::default().with_progress_frame_collapse_enabled(true);
         let mut raw = Vec::with_capacity(MAX_INPUT_LINES * 16);
         for i in 0..=MAX_INPUT_LINES {
             raw.extend_from_slice(format!("p{i}\rdone{i}\n").as_bytes());
@@ -4878,7 +4896,7 @@ mod corner_case_tests {
         let out_off = squash_raw(&raw, &cfg_off);
         let out_on = squash_raw(&raw, &cfg_on);
         assert!(
-            out_on.stats.tty_frames_coalesced > 0,
+            out_on.stats.progress_frames_coalesced > 0,
             "stage 2b must run inside the bypass path when the flag is on"
         );
         assert_ne!(
@@ -4897,18 +4915,18 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn tty_render_applies_on_giant_final_line_bypass() {
+    fn progress_collapse_applies_on_giant_final_line_bypass() {
         // Regression for /review-loop round 4 finding 1: the oversize
         // bypass `tail_aligned_to_line == false` branch (giant final
         // line, no safe `\n` boundary in the retained tail window) must
         // also run stage 2b. Otherwise progress-bar payloads whose final
         // line is itself oversized leak raw `\r`-separated frames into
-        // the output even with `tty_render_enabled(true)`.
+        // the output even with `progress_frame_collapse_enabled(true)`.
         //
         // Calls `super::oversize_bypass` directly to avoid allocating
         // MAX_INPUT_BYTES (64 MiB) just to trigger the gate — same trick
         // as `oversize_bypass_tail_window_inside_giant_final_line_preserves_suffix`.
-        let cfg = SquashConfig::default().with_tty_render_enabled(true);
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
         let mut raw: Vec<u8> = Vec::new();
         raw.extend_from_slice(b"head\n");
         // Giant final line filled with progress-bar style `\r`-separated
@@ -4929,7 +4947,7 @@ mod corner_case_tests {
             super::BypassReason::ByteCeiling,
         );
         assert!(
-            out.stats.tty_frames_coalesced > 0,
+            out.stats.progress_frames_coalesced > 0,
             "stage 2b must run on the giant-final-line bypass branch"
         );
         assert!(
