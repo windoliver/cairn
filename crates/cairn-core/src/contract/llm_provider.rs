@@ -8,6 +8,30 @@ use crate::contract::version::{ContractVersion, VersionRange};
 /// Contract version for `LLMProvider`. Bumps when the trait surface changes.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
 
+/// Errors returned by [`LLMProvider::complete`] (ADR 0001 error codes).
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LlmError {
+    /// No provider configured; LLM-dependent verbs fail closed (exit 78).
+    #[error("llm.not_configured: {remediation}")]
+    NotConfigured { remediation: String },
+    /// Provider host/port refused connection or DNS failed or timed out.
+    #[error("llm.provider_unreachable: {detail}")]
+    ProviderUnreachable { detail: String },
+    /// Provider returned HTTP 401 or 403.
+    #[error("llm.auth_denied")]
+    AuthDenied,
+    /// Provider is reachable but lacks a required capability (e.g. json_mode).
+    #[error("llm.capability_missing: {capability}")]
+    CapabilityMissing { capability: String },
+    /// Provider returned output that failed JSON parse or schema validation.
+    #[error("llm.invalid_json_output: {detail}")]
+    InvalidJsonOutput { detail: String, raw: String },
+    /// Completion exceeded the configured token or time budget.
+    #[error("llm.budget_exceeded")]
+    BudgetExceeded,
+}
+
 /// Static capability declaration for a `LLMProvider` impl.
 // Three flags cover distinct LLM API dimensions; a state machine adds
 // indirection with no clarity gain here.
@@ -91,5 +115,25 @@ mod tests {
     fn static_consts_accessible() {
         assert_eq!(StubLlm::NAME, "stub-llm");
         assert!(StubLlm::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn lm_error_not_configured_display() {
+        let e = LlmError::NotConfigured {
+            remediation: "cairn config set llm.provider ollama".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "llm.not_configured: cairn config set llm.provider ollama"
+        );
+    }
+
+    #[test]
+    fn lm_error_invalid_json_display() {
+        let e = LlmError::InvalidJsonOutput {
+            detail: "missing field `kind`".into(),
+            raw: "{}".into(),
+        };
+        assert!(e.to_string().contains("llm.invalid_json_output"));
     }
 }
