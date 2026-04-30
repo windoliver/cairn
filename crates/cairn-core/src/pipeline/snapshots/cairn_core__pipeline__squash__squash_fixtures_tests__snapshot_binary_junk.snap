@@ -1,7 +1,7 @@
 ---
 source: crates/cairn-core/src/pipeline/squash.rs
-assertion_line: 4402
+assertion_line: 4077
 expression: "run_fixture(\"binary_junk.bin\", &SquashConfig::default())"
 ---
 ����9^����<a����?d����Bg���� Ej����#Hm���&Kp���)Ns���,Qv���
-2W|���5Z���8]����;`����>c����Af����Di����"Gl���%Jo���(Mr���+Pu���	.Sx���1V{���4Y~���7\����:_����=b����e����C
+/Ty���2W|���5Z���8]����;`����>c����Af����Di����"Gl���%Jo���(Mr���+Pu���	.Sx���1V{���4Y~���7\����:_����=b����e����C

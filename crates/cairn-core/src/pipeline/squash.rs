@@ -136,15 +136,18 @@ impl SquashConfig {
             tail_lines,
             dedup_min_run,
             max_line_bytes,
-            tty_render_enabled: true,
+            tty_render_enabled: false,
         })
     }
 
     /// Enable or disable the TTY-render pre-stage (stage 2b).
     ///
-    /// When enabled (default), bare `\r` cursor rewinds within a line are
-    /// resolved to the terminally-visible content before dedup runs. Disable
-    /// for raw-fidelity debugging of cursor behavior.
+    /// **Default is off.** Stage 2b rewrites bytes via cursor-rewind/overwrite
+    /// semantics for any line containing bare `\r`, which is fine for
+    /// genuine progress-bar output but corrupts binary-ish or diagnostic
+    /// payloads that legitimately embed CR. Callers must opt in once they
+    /// have classified the input as terminal-frame text (or accept the lossy
+    /// trade-off for that capture).
     #[must_use]
     pub fn with_tty_render_enabled(mut self, enabled: bool) -> Self {
         self.tty_render_enabled = enabled;
@@ -1794,11 +1797,12 @@ pub struct SquashStats {
     pub long_lines_truncated: usize,
     /// True iff `compacted_bytes` is NOT a verbatim sanitization-free
     /// copy of the input — i.e., any lossy transform acted: stage 2
-    /// ANSI/OSC strip, stage 2 OSC recovery drop, stage 4 dedup
-    /// collapse, stage 5 per-line cap, stage 6 head/tail truncation,
-    /// or the oversize bypass. Downstream code that gates fallback /
-    /// raw-retention / warning banners on a single coarse bit should
-    /// use this; per-stage counters give the breakdown.
+    /// ANSI/OSC strip, stage 2 OSC recovery drop, stage 2b TTY-render
+    /// overwrite, stage 4 dedup collapse, stage 5 per-line cap, stage 6
+    /// head/tail truncation, or the oversize bypass. Downstream code
+    /// that gates fallback / raw-retention / warning banners on a
+    /// single coarse bit should use this; per-stage counters give the
+    /// breakdown.
     pub truncated: bool,
     /// Bytes discarded by stage-2 OSC recovery on unterminated escape
     /// sequences (introducer + body up to the next `\n`, or to EOF if
@@ -3549,12 +3553,17 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         &mut stats.ansi_stripped,
         &mut stats.osc_recovery_bytes_dropped,
     );
-    // Stage 2b: optional TTY-render pre-stage (issue #219). Resolves bare
+    // Stage 2b: opt-in TTY-render pre-stage (issue #219). Resolves bare
     // `\r` cursor rewinds before stage-3 line split so progress-bar lines
     // collapse to their terminally-visible content instead of expanding
-    // dedup misses. Skipped when the config flag is off (raw-fidelity
-    // debugging) or when the stage-2 output contains no `\r` (cheap fast
-    // path; avoids an extra String allocation).
+    // dedup misses. Off by default — rewriting CR-bearing bytes corrupts
+    // binary or diagnostic payloads that legitimately embed `\r`, so
+    // callers must classify the input as terminal-frame text first. When
+    // it does run, `tty_frames_coalesced` feeds the `truncated` bit below
+    // (the rewrite is lossy by definition).
+    //
+    // Skipped when the config flag is off or when the stage-2 output
+    // contains no `\r` (cheap fast path; avoids an extra String allocation).
     let stage2b: Cow<'_, str> = if cfg.tty_render_enabled() && stage2.contains('\r') {
         Cow::Owned(stage2b_tty_render(
             &stage2,
@@ -3590,10 +3599,12 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     stats.long_lines_truncated = long_lines_count;
     // `truncated` means "compacted_bytes is not a verbatim sanitize-free
     // copy of the input." Set it for any lossy stage that fired during
-    // the staged path: ANSI strip, OSC recovery drop, dedup collapse,
-    // per-line cap. Stage 6's drop loop sets it again on tail/head trim.
+    // the staged path: ANSI strip, OSC recovery drop, stage 2b TTY-render
+    // overwrite, dedup collapse, per-line cap. Stage 6's drop loop sets
+    // it again on tail/head trim.
     if stats.ansi_stripped
         || stats.osc_recovery_bytes_dropped > 0
+        || stats.tty_frames_coalesced > 0
         || stats.dedup_runs_collapsed > 0
         || long_lines_count > 0
         || stats.utf8_replacement
@@ -4426,12 +4437,26 @@ mod squash_fixtures_tests {
     /// Hand-crafted progress-bar + OSC-8 hyperlink + SGR error
     /// payload: exercises CR carriage returns, CSI K (erase line),
     /// SGR colors, and an OSC-8 link with a real URL — the kind of
-    /// adversarial mix the round-by-round review surfaced.
+    /// adversarial mix the round-by-round review surfaced. Default
+    /// config: stage 2b is OFF, so CR-bearing progress lines are
+    /// preserved verbatim (the legacy raw-fidelity behavior).
     #[test]
     fn snapshot_real_progress_with_hyperlink() {
         insta::assert_snapshot!(run_fixture(
             "real_progress_with_hyperlink.txt",
             &SquashConfig::default()
+        ));
+    }
+
+    /// Same fixture as `snapshot_real_progress_with_hyperlink` but with
+    /// stage 2b explicitly enabled: progress lines should collapse to
+    /// their final visible state. Pins the opt-in TTY-render path
+    /// (issue #219).
+    #[test]
+    fn snapshot_real_progress_with_hyperlink_tty_render() {
+        insta::assert_snapshot!(run_fixture(
+            "real_progress_with_hyperlink.txt",
+            &SquashConfig::default().with_tty_render_enabled(true)
         ));
     }
 }
@@ -4698,10 +4723,9 @@ mod corner_case_tests {
 
     #[test]
     fn mixed_line_endings_normalize() {
-        // With stage 2b disabled, CRLF → LF normalises and bare CR is
-        // preserved as a `cr_bearing_lines` signal — pinning the legacy
-        // raw-fidelity path that #219 made opt-in.
-        let cfg = SquashConfig::default().with_tty_render_enabled(false);
+        // Default config: stage 2b is OFF. CRLF → LF normalises and bare
+        // CR is preserved as a `cr_bearing_lines` signal.
+        let cfg = SquashConfig::default();
         let raw = b"a\r\nb\nc\rd\r\ne";
         let out = squash_raw(raw, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
@@ -4711,17 +4735,41 @@ mod corner_case_tests {
 
     #[test]
     fn mixed_line_endings_with_tty_render_resolves_cr() {
-        // With stage 2b on (the default), bare CR collapses via overwrite
+        // With stage 2b explicitly enabled, bare CR collapses via overwrite
         // semantics: "c\rd" → "d". Counter `tty_frames_coalesced` reflects
         // the rewrite; `cr_bearing_lines` is zero because stage 3 sees no
-        // CR after stage 2b ran.
-        let cfg = SquashConfig::default();
+        // CR after stage 2b ran. Rewriting the bytes also flips `truncated`.
+        let cfg = SquashConfig::default().with_tty_render_enabled(true);
         let raw = b"a\r\nb\nc\rd\r\ne";
         let out = squash_raw(raw, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         assert!(body.contains("a\nb\nd\ne"), "got: {body:?}");
         assert_eq!(out.stats.cr_bearing_lines, 0);
         assert_eq!(out.stats.tty_frames_coalesced, 1);
+        assert!(
+            out.stats.truncated,
+            "stage 2b rewrite must set truncated bit"
+        );
+    }
+
+    #[test]
+    fn tty_render_only_rewrite_sets_truncated_bit() {
+        // Regression for #219 review: a CR rewrite with no other lossy
+        // stage firing must still flip `stats.truncated` so downstream
+        // audit gates don't treat rewritten output as pristine.
+        let cfg = SquashConfig::default().with_tty_render_enabled(true);
+        // Single short line, pure CR rewrite, no ANSI / no oversize / no
+        // dedup / no per-line cap.
+        let raw = b"progress\rdone\n";
+        let out = squash_raw(raw, &cfg);
+        assert_eq!(out.stats.tty_frames_coalesced, 1);
+        assert_eq!(out.stats.dedup_runs_collapsed, 0);
+        assert_eq!(out.stats.long_lines_truncated, 0);
+        assert!(!out.stats.ansi_stripped);
+        assert!(
+            out.stats.truncated,
+            "CR-only rewrite must set truncated bit"
+        );
     }
 
     #[test]
