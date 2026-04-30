@@ -29,7 +29,9 @@ impl ModelCache {
     /// Create a cache rooted at `models_root` (typically `.cairn/models/`).
     #[must_use]
     pub fn new(models_root: &Path) -> Self {
-        Self { root: models_root.to_owned() }
+        Self {
+            root: models_root.to_owned(),
+        }
     }
 
     /// Path to the directory for a given model.
@@ -55,7 +57,10 @@ impl ModelCache {
     ///
     /// Returns [`EmbeddingError::ModelNotFetched`] if the model has not been
     /// downloaded yet, or any I/O / inference error encountered during load.
-    pub fn ensure(&self, kind: EmbeddingModelKind) -> Result<Arc<dyn EmbeddingModel>, EmbeddingError> {
+    pub fn ensure(
+        &self,
+        kind: EmbeddingModelKind,
+    ) -> Result<Arc<dyn EmbeddingModel>, EmbeddingError> {
         if !self.is_present(kind) {
             return Err(EmbeddingError::ModelNotFetched { kind });
         }
@@ -105,8 +110,8 @@ impl ModelCache {
         }
         std::fs::create_dir_all(&tmp)?;
 
-        let api = hf_hub::api::sync::Api::new()
-            .map_err(|e| EmbeddingError::Network(e.to_string()))?;
+        let api =
+            hf_hub::api::sync::Api::new().map_err(|e| EmbeddingError::Network(e.to_string()))?;
         let repo = api.model(kind.hf_repo().to_owned());
 
         let mut bytes_downloaded: u64 = 0;

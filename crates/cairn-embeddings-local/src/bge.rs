@@ -11,7 +11,7 @@ use cairn_core::config::EmbeddingModelKind;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
-use tokenizers::{TruncationParams, Tokenizer};
+use tokenizers::{Tokenizer, TruncationParams};
 
 use crate::EmbeddingError;
 use crate::model::{EmbeddingModel, l2_normalize};
@@ -47,8 +47,7 @@ impl BgeSmall {
         let vb = VarBuilder::from_buffered_safetensors(weights_bytes, DType::F32, &device)?;
         let model = BertModel::load(vb, &config)?;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(EmbeddingError::from)?;
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(EmbeddingError::from)?;
         // Enable 512-token truncation; update in-place if already set.
         if let Some(trunc) = tokenizer.get_truncation_mut() {
             trunc.max_length = MAX_TOKENS;
@@ -80,9 +79,9 @@ impl BgeSmall {
         let attention_mask = Tensor::new(mask.as_slice(), &device)?.unsqueeze(0)?;
 
         // Mean pooling over the sequence dimension.
-        let output =
-            self.model
-                .forward(&input_ids, &token_type_ids, Some(&attention_mask))?;
+        let output = self
+            .model
+            .forward(&input_ids, &token_type_ids, Some(&attention_mask))?;
         let pooled = output.mean(1)?;
         let mut v: Vec<f32> = pooled.squeeze(0)?.to_vec1()?;
         l2_normalize(&mut v);

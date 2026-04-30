@@ -1024,7 +1024,10 @@ mod tests {
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
         let caps = config.capabilities(false);
         assert!(caps.keyword_search);
-        assert!(!caps.semantic_search, "model absent → no semantic even with LLM");
+        assert!(
+            !caps.semantic_search,
+            "model absent → no semantic even with LLM"
+        );
         assert!(!caps.hybrid_search, "hybrid always false at v0.1");
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);

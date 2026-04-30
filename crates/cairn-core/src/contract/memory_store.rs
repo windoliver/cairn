@@ -643,7 +643,10 @@ mod tests {
                 model_label: "bge-small-en-v1.5".into(),
             })
             .await;
-        assert!(sem_result.is_err(), "default search_semantic must return error");
+        assert!(
+            sem_result.is_err(),
+            "default search_semantic must return error"
+        );
     }
 
     #[test]

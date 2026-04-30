@@ -26,5 +26,8 @@ fn bge_query_differs_from_document() {
     let model = cache.ensure(EmbeddingModelKind::BgeSmallEnV1_5).unwrap();
     let qv = model.embed_query("foo").unwrap();
     let dv = model.embed_document("foo").unwrap();
-    assert_ne!(qv, dv, "BGE must produce different vectors for query vs document");
+    assert_ne!(
+        qv, dv,
+        "BGE must produce different vectors for query vs document"
+    );
 }
