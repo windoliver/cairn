@@ -92,11 +92,15 @@ impl IdentityService {
         let registry: Arc<dyn IdentityRegistry> = Arc::new(SqliteIdentityRegistry::open(&db_path)?);
 
         // 3. Compare file_id ↔ db vault_meta.
-        let (db_id, _witness) = registry
-            .read_vault_meta()
-            .await?
-            .ok_or(IdentityServiceError::VaultIdMissing)?;
-        if file_id != db_id {
+        //
+        // Pre-first-bind: a freshly-bootstrapped vault has `.cairn/vault.id`
+        // but no `vault_meta` row yet (the row is committed by
+        // `reserve_first_identity`). Treat the absent row as "no DB-side
+        // claim yet" and use the file id; only enforce the consistency
+        // check when both sides exist.
+        if let Some((db_id, _witness)) = registry.read_vault_meta().await?
+            && file_id != db_id
+        {
             return Err(IdentityServiceError::VaultIdConflict { file_id, db_id });
         }
 
