@@ -47,6 +47,18 @@ pub struct StoredRecord {
     pub version: u32,
 }
 
+/// Counts of derived-index rows vs canonical records, for the lint
+/// `index_drift` check (brief §8 row 7). Counts only — content sampling is
+/// out of scope for v0.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IndexStats {
+    /// Active, non-tombstoned canonical records.
+    pub records_active: u64,
+    /// Rows in the FTS5 mirror.
+    pub fts5_rows: u64,
+}
+
 /// Storage contract — typed CRUD over `MemoryRecord`.
 ///
 /// Brief §4 row 1. Method bodies arrive in #46 (`SQLite` impl);
@@ -195,6 +207,16 @@ pub trait MemoryStore: Send + Sync {
         &self,
         args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError>;
+
+    // ── Lint support (#96) ────────────────────────────────────────────────────
+
+    /// Counts that drive the `lint` index-drift check. Default impl returns
+    /// an unsupported error so adapters can opt in incrementally;
+    /// the production SQLite adapter (Task 4) and FixtureStore (Task 5)
+    /// override.
+    async fn index_stats(&self) -> Result<IndexStats, StoreError> {
+        Err("index_stats: not supported by this store adapter".into())
+    }
 }
 
 /// Static identity descriptor for a [`MemoryStore`] plugin (§4.1).
@@ -592,5 +614,15 @@ mod tests {
     fn static_consts_accessible() {
         assert_eq!(StubStore::NAME, "stub");
         assert!(StubStore::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn index_stats_is_constructible_and_carries_counts() {
+        let s = IndexStats {
+            records_active: 10,
+            fts5_rows: 10,
+        };
+        assert_eq!(s.records_active, 10);
+        assert_eq!(s.fts5_rows, 10);
     }
 }
