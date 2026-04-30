@@ -28,6 +28,15 @@ const M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
     include_str!("sql/0018_sessions_canonicalize_windows_paths.sql");
 const M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
     include_str!("sql/0019_sessions_strip_verbatim_and_case_fold.sql");
+const M0020_WORKFLOW_JOBS: &str = include_str!("sql/0020_workflow_jobs.sql");
+
+/// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
+/// downstream crates (notably `cairn-workflows`, which hashes the
+/// migration source for runtime drift detection) can read it through
+/// the package API instead of `include_str!`-ing a sibling crate's
+/// source path — the latter breaks `cargo publish` since the sibling
+/// is not in the package archive.
+pub const WORKFLOW_JOBS_MIGRATION_SQL: &str = M0020_WORKFLOW_JOBS;
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -79,6 +88,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0019_sessions_strip_verbatim_and_case_fold",
         M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
     ),
+    (20, "0020_workflow_jobs", M0020_WORKFLOW_JOBS),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -105,5 +115,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0017_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
         M::up(M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
         M::up(M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
+        M::up(M0020_WORKFLOW_JOBS),
     ])
 }
