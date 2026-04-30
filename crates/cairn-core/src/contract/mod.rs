@@ -43,9 +43,13 @@ pub use manifest::{ContractKind, PluginManifest};
 pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
-<<<<<<< HEAD
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use identity_registry::{
+    IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
+    RegistryError,
+};
+pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
@@ -53,17 +57,3 @@ pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngress
 pub use workflow_orchestrator::{
     WorkflowOrchestrator, WorkflowOrchestratorCapabilities, WorkflowOrchestratorPlugin,
 };
-=======
-pub use agent_provider::{AgentProvider, AgentProviderCapabilities};
-pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities};
-pub use identity_registry::{
-    IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
-    RegistryError,
-};
-pub use keystore::{Keystore, KeystoreError};
-pub use llm_provider::{LLMProvider, LLMProviderCapabilities};
-pub use mcp_server::{MCPServer, MCPServerCapabilities};
-pub use memory_store::{MemoryStore, MemoryStoreCapabilities};
-pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities};
-pub use workflow_orchestrator::{WorkflowOrchestrator, WorkflowOrchestratorCapabilities};
->>>>>>> 6d1a34b (feat(core): add Keystore contract trait (#50))
