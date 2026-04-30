@@ -486,7 +486,20 @@ impl IdentityService {
     pub async fn status_report(&self) -> Result<IdentityStatusReport, IdentityServiceError> {
         let binding_state = self.detect_binding_state();
         let defaults = self.detect_defaults().await?;
-        let (recon, mismatch_check) = self.dry_run_mismatch_sweep().await?;
+
+        // Check for vault.id ↔ vault_meta split-brain BEFORE running any
+        // keystore sweep. ReadOnly maintenance mode picks one side silently;
+        // status must surface the conflict instead of inspecting only one
+        // namespace and reporting it as healthy.
+        let file_id = std::fs::read_to_string(self.vault_path.join(".cairn/vault.id"))
+            .ok()
+            .and_then(|s| VaultId::parse(s.trim()).ok());
+        let db_id = self.registry.read_vault_meta().await?.map(|(id, _)| id);
+        let id_conflict = match (&file_id, &db_id) {
+            (Some(f), Some(d)) => f != d,
+            _ => false,
+        };
+
         let pending_evictions = self.registry.list_pending_evictions().await?.len() as u64;
         let pending_key_disables = self.registry.list_pending_key_disables().await?.len() as u64;
         let purge_pending_ids = self
@@ -497,6 +510,24 @@ impl IdentityService {
             .map(|e| e.identity)
             .collect();
 
+        if id_conflict {
+            // Skip the keystore sweep — sweeping the wrong namespace would
+            // produce misleading mismatches. Mark vault degraded.
+            return Ok(IdentityStatusReport {
+                vault_id: Some(self.vault_id.clone()),
+                binding_state,
+                defaults,
+                mismatched_ids: vec![],
+                desynchronized_active_ids: vec![],
+                pending_evictions,
+                pending_key_disables,
+                purge_pending_ids,
+                vault_degraded: true,
+                mismatch_check: MismatchCheckOutcome::VaultIdConflict,
+            });
+        }
+
+        let (recon, mismatch_check) = self.dry_run_mismatch_sweep().await?;
         Ok(IdentityStatusReport {
             vault_id: Some(self.vault_id.clone()),
             binding_state,
