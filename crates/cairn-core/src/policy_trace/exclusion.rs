@@ -16,14 +16,17 @@ use super::{PolicyDetail, PolicyGate};
 
 /// Per-record exclusion entry returned on search/retrieve responses
 /// when `args.explain` is true.
+///
+/// Fields are private to seal the Tier-2-only invariant: the only
+/// constructor [`Self::new`] rejects non-`ReadFilter*` gates. External
+/// callers cannot bypass it via `RecordExclusion { gate: ScopeCheck, … }`
+/// because the field-literal form is unavailable outside the module.
+/// Read-only accessors expose the data after construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordExclusion {
-    /// Target id of the record that was filtered.
-    pub target_id: TargetId,
-    /// The Tier-2 read-filter gate that excluded the record.
-    pub gate: PolicyGate,
-    /// Body-free metadata for the exclusion.
-    pub detail: PolicyDetail,
+    target_id: TargetId,
+    gate: PolicyGate,
+    detail: PolicyDetail,
 }
 
 impl RecordExclusion {
@@ -51,6 +54,26 @@ impl RecordExclusion {
             gate,
             detail,
         }
+    }
+
+    /// Borrow the target id of the filtered record.
+    #[must_use]
+    pub fn target_id(&self) -> &TargetId {
+        &self.target_id
+    }
+
+    /// The Tier-2 read-filter gate that excluded the record. Always
+    /// one of `ReadFilterRelevance` / `ReadFilterStaleness` /
+    /// `ReadFilterDedup`; the constructor enforces this.
+    #[must_use]
+    pub const fn gate(&self) -> PolicyGate {
+        self.gate
+    }
+
+    /// Body-free metadata describing the exclusion.
+    #[must_use]
+    pub const fn detail(&self) -> &PolicyDetail {
+        &self.detail
     }
 }
 

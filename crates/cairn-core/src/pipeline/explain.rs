@@ -236,8 +236,8 @@ mod tests {
         let (kept, excluded) = explain_filter(candidates, cfg);
         assert!(kept.is_empty());
         assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].gate, PolicyGate::ReadFilterStaleness);
-        assert_eq!(excluded[0].detail, PolicyDetail::None);
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterStaleness);
+        assert_eq!(excluded[0].detail(), &PolicyDetail::None);
     }
 
     #[test]
@@ -253,8 +253,8 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].target_id(), &id('A'));
         assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].target_id, id('B'));
-        assert_eq!(excluded[0].gate, PolicyGate::ReadFilterDedup);
+        assert_eq!(excluded[0].target_id(), &id('B'));
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterDedup);
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].target_id(), &id('B'));
         assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].gate, PolicyGate::ReadFilterStaleness);
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterStaleness);
     }
 
     #[test]
@@ -287,8 +287,8 @@ mod tests {
         assert_eq!(kept.len(), 1, "exactly one survives dedup");
         assert_eq!(kept[0].target_id(), &id('B'), "non-NaN wins over NaN");
         assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].target_id, id('A'));
-        assert_eq!(excluded[0].gate, PolicyGate::ReadFilterDedup);
+        assert_eq!(excluded[0].target_id(), &id('A'));
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterDedup);
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].target_id(), &id('A'), "non-NaN keeps its win");
         assert_eq!(excluded.len(), 1);
-        assert_eq!(excluded[0].target_id, id('B'));
+        assert_eq!(excluded[0].target_id(), &id('B'));
     }
 
     #[test]

@@ -24,6 +24,25 @@ macro_rules! reject_tier1_gate {
     };
 }
 
+// Compile-time assertion that `RecordExclusion`'s fields are private,
+// so external callers cannot bypass the `new` constructor by writing
+//
+//     RecordExclusion { gate: PolicyGate::ScopeCheck, target_id: …, detail: … }
+//
+// (which would dodge the ReadFilter*-only invariant). The assertion is
+// the field-literal form below — it MUST fail to compile from this
+// integration-test crate. If a future change makes any field `pub`,
+// uncomment the body and the build will succeed, signalling the
+// regression that codex flagged in PR #237 round 5:
+//
+//     fn _record_exclusion_struct_literal_must_not_compile() {
+//         let _ = RecordExclusion {
+//             target_id: TargetId::parse(FIXTURE_ID).unwrap(),
+//             gate: PolicyGate::ScopeCheck,
+//             detail: PolicyDetail::None,
+//         };
+//     }
+
 // Test each non-ReadFilter* PolicyGate variant panics on construction.
 reject_tier1_gate!(rejects_presidio_redaction, PolicyGate::PresidioRedaction);
 reject_tier1_gate!(
@@ -50,9 +69,9 @@ fn exclusion_holds_target_gate_detail() {
         PolicyGate::ReadFilterStaleness,
         PolicyDetail::None,
     );
-    assert_eq!(e.target_id, id);
-    assert_eq!(e.gate, PolicyGate::ReadFilterStaleness);
-    assert_eq!(e.detail, PolicyDetail::None);
+    assert_eq!(e.target_id(), &id);
+    assert_eq!(e.gate(), PolicyGate::ReadFilterStaleness);
+    assert_eq!(e.detail(), &PolicyDetail::None);
 }
 
 #[test]
@@ -64,7 +83,7 @@ fn exclusion_accepts_all_three_read_filter_gates() {
         PolicyGate::ReadFilterDedup,
     ] {
         let e = RecordExclusion::new(id.clone(), gate, PolicyDetail::None);
-        assert_eq!(e.gate, gate);
+        assert_eq!(e.gate(), gate);
     }
 }
 
