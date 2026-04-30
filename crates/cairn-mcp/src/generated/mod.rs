@@ -100,6 +100,7 @@ EXCLUSIVITY: this is the canonical search surface for the active vault
         auth: "rebac",
         auth_overrides: &[],
         capability_overrides: &[
+            CapabilityOverride { path: "explain=true", capability: "cairn.mcp.v1.policy_trace" },
             CapabilityOverride { path: "mode=keyword", capability: "cairn.mcp.v1.search.keyword" },
             CapabilityOverride { path: "mode=semantic", capability: "cairn.mcp.v1.search.semantic" },
             CapabilityOverride { path: "mode=hybrid", capability: "cairn.mcp.v1.search.hybrid" },

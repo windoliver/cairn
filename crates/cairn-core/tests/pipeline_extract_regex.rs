@@ -3,11 +3,11 @@
 
 #![allow(missing_docs)]
 
+use cairn_core::domain::taxonomy::MemoryKind;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, ChainRole,
     Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
 };
-use cairn_core::domain::taxonomy::MemoryKind;
 use cairn_core::pipeline::extract::regex::{RegexRule, RuleSet};
 use cairn_core::pipeline::extract::{
     BodyResolution, BodyResolutionError, Confidence, ExtractBudget, ExtractInput, ExtractOutput,
@@ -364,7 +364,10 @@ async fn clause_cap_extracts_first_64_and_surfaces_tail_to_llm() {
         .iter()
         .filter(|o| matches!(o, ExtractOutput::Forget(_)))
         .count();
-    assert_eq!(forgets, 64, "regex must extract exactly the first 64 clauses");
+    assert_eq!(
+        forgets, 64,
+        "regex must extract exactly the first 64 clauses"
+    );
     assert!(matches!(
         res.truncated,
         TruncationReason::ClauseCapExceeded { processed: 64, .. }
