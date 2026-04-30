@@ -9,3 +9,6 @@ Cargo.lock.bak
 # Stray rustc artifact occasionally emitted at repo root by certain build
 # flows (e.g. some IDE-driven `rustc --emit=metadata` runs).
 *.rmeta
+
+# insta snapshot review artifacts (pending approval).
+*.snap.new
