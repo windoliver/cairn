@@ -228,6 +228,75 @@ string_enum! {
     unknown_msg: "expected regex | llm | agent | custom:<name>",
 }
 
+// ── Search ────────────────────────────────────────────────────────────────
+
+/// Embedding model selection for local semantic search (brief §3.0).
+///
+/// Variant strings are kebab-case to match the brief's model identifiers.
+/// Lives in `cairn-core` (not in `cairn-embeddings-local`) so `CairnConfig`
+/// can reference it without a workspace-dep direction violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum EmbeddingModelKind {
+    /// BGE-small-en-v1.5, 384-dim, MIT license. Default.
+    /// Applies asymmetric query prefix for retrieval.
+    #[default]
+    #[serde(rename = "bge-small-en-v1.5")]
+    BgeSmallEnV1_5,
+    /// all-MiniLM-L6-v2, 384-dim, Apache 2.0.
+    #[serde(rename = "all-MiniLM-L6-v2")]
+    AllMiniLmL6V2,
+}
+
+impl EmbeddingModelKind {
+    /// Stable kebab-case label used in file-system paths and DB rows.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BgeSmallEnV1_5 => "bge-small-en-v1.5",
+            Self::AllMiniLmL6V2 => "all-MiniLM-L6-v2",
+        }
+    }
+
+    /// `HuggingFace` repo id for model download.
+    #[must_use]
+    pub fn hf_repo(self) -> &'static str {
+        match self {
+            Self::BgeSmallEnV1_5 => "BAAI/bge-small-en-v1.5",
+            Self::AllMiniLmL6V2 => "sentence-transformers/all-MiniLM-L6-v2",
+        }
+    }
+
+    /// Expected output dimension of the model.
+    #[must_use]
+    pub fn dim(self) -> usize {
+        384
+    }
+}
+
+/// Local semantic search configuration (brief §3.0).
+///
+/// `local_embeddings: false` drops `cairn.mcp.v1.search.semantic` and
+/// `cairn.mcp.v1.search.hybrid` from `status.capabilities`. Those modes
+/// return `CapabilityUnavailable` — no silent fallback (brief §3.0 fail-closed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Enable local embedding runtime. Default `true`.
+    pub local_embeddings: bool,
+    /// Which embedding model to use. Default `bge-small-en-v1.5`.
+    pub embedding_model: EmbeddingModelKind,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            local_embeddings: true,
+            embedding_model: EmbeddingModelKind::default(),
+        }
+    }
+}
+
 // ── Top-level ─────────────────────────────────────────────────────────────
 
 /// Root config type. Deserialized from `.cairn/config.yaml` (brief §3.1).
@@ -250,6 +319,8 @@ pub struct CairnConfig {
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
     pub pipeline: PipelineConfig,
+    /// Local semantic search configuration.
+    pub search: SearchConfig,
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
@@ -535,7 +606,7 @@ pub struct ExtractBudget {
 
 /// Derived capability set, computed from `CairnConfig` (no I/O).
 ///
-/// The verb layer calls `config.capabilities()` before dispatching to
+/// The verb layer calls `config.capabilities(model_present)` before dispatching to
 /// gate features that require capabilities that may not be present.
 // Six orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
@@ -543,9 +614,9 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff `llm.provider` is `Some`.
+    /// True iff `search.local_embeddings` is true and embedding model files exist on disk.
     pub semantic_search: bool,
-    /// True iff `semantic_search` (requires vector embeddings).
+    /// Reserved for follow-up issue; always `false` at v0.1.
     pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub llm_extract: bool,
@@ -641,25 +712,36 @@ impl CairnConfig {
 
     /// Derive the active capability set from this config (pure, no I/O).
     ///
+    /// `model_present` should be `true` when the configured embedding model
+    /// files exist on disk (stat-checked at startup).
+    ///
     /// The verb layer uses this to gate features before dispatch.
     #[must_use]
-    pub fn capabilities(&self) -> CapabilitySet {
+    pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
+        let semantic = self.search.local_embeddings && model_present;
         let agent_extract = self
             .pipeline
             .extract
             .chain
             .iter()
-            .any(|e| e.worker == ExtractorWorkerKind::Agent);
+            .any(|e| matches!(e.worker, ExtractorWorkerKind::Agent));
 
         CapabilitySet {
             keyword_search: true,
-            semantic_search: llm_on,
-            hybrid_search: llm_on,
+            semantic_search: semantic,
+            hybrid_search: false, // follow-up issue; always false at v0.1
             llm_extract: llm_on,
             agent_extract,
-            graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
+            graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
         }
+    }
+
+    /// Convenience: equivalent to `capabilities(false)`.
+    /// Use when filesystem access is unavailable (e.g., pure config tests).
+    #[must_use]
+    pub fn capabilities_no_model(&self) -> CapabilitySet {
+        self.capabilities(false)
     }
 }
 
@@ -920,10 +1002,10 @@ mod tests {
 
     #[test]
     fn capabilities_llm_off_by_default() {
-        let caps = CairnConfig::default().capabilities();
+        let caps = CairnConfig::default().capabilities(false);
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(!caps.semantic_search, "no LLM → no semantic");
-        assert!(!caps.hybrid_search, "no LLM → no hybrid");
+        assert!(!caps.semantic_search, "model absent → no semantic");
+        assert!(!caps.hybrid_search, "hybrid always false at v0.1");
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(!caps.graph_edges, "sqlite → no graph edges");
@@ -933,10 +1015,10 @@ mod tests {
     fn capabilities_llm_on() {
         let mut config = CairnConfig::default();
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
-        let caps = config.capabilities();
+        let caps = config.capabilities(false);
         assert!(caps.keyword_search);
-        assert!(caps.semantic_search);
-        assert!(caps.hybrid_search);
+        assert!(!caps.semantic_search, "model absent → no semantic even with LLM");
+        assert!(!caps.hybrid_search, "hybrid always false at v0.1");
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
     }
@@ -950,7 +1032,7 @@ mod tests {
             trigger: None,
             budget: ExtractBudget::default(),
         });
-        let caps = config.capabilities();
+        let caps = config.capabilities(false);
         assert!(caps.agent_extract);
     }
 
@@ -959,6 +1041,60 @@ mod tests {
         let json = serde_json::to_string_pretty(&CairnConfig::default())
             .expect("CairnConfig::default() must be serializable");
         insta::assert_snapshot!(json);
+    }
+
+    #[test]
+    fn semantic_on_when_local_embeddings_and_model_present() {
+        let config = CairnConfig::default();
+        let caps = config.capabilities(true);
+        assert!(caps.semantic_search);
+        assert!(!caps.hybrid_search, "hybrid is a follow-up issue");
+    }
+
+    #[test]
+    fn semantic_off_when_local_embeddings_false() {
+        let mut config = CairnConfig::default();
+        config.search.local_embeddings = false;
+        let caps = config.capabilities(true); // model present but opt-out
+        assert!(!caps.semantic_search);
+    }
+
+    #[test]
+    fn semantic_off_when_model_absent() {
+        let config = CairnConfig::default(); // local_embeddings: true
+        let caps = config.capabilities(false); // model not on disk
+        assert!(!caps.semantic_search);
+    }
+
+    #[test]
+    fn semantic_not_tied_to_llm_provider() {
+        let mut config = CairnConfig::default();
+        // LLM present but model absent → semantic still false.
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        let caps = config.capabilities(false);
+        assert!(!caps.semantic_search);
+        // Model present → semantic true regardless of LLM.
+        let caps2 = config.capabilities(true);
+        assert!(caps2.semantic_search);
+    }
+
+    #[test]
+    fn embedding_model_kind_as_str() {
+        assert_eq!(
+            EmbeddingModelKind::BgeSmallEnV1_5.as_str(),
+            "bge-small-en-v1.5"
+        );
+        assert_eq!(
+            EmbeddingModelKind::AllMiniLmL6V2.as_str(),
+            "all-MiniLM-L6-v2"
+        );
+    }
+
+    #[test]
+    fn search_config_default() {
+        let c = SearchConfig::default();
+        assert!(c.local_embeddings);
+        assert_eq!(c.embedding_model, EmbeddingModelKind::BgeSmallEnV1_5);
     }
 
     proptest! {
