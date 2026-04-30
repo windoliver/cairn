@@ -225,7 +225,7 @@ pub enum SquashConfigError {
     },
 }
 
-use crate::domain::capture::{CaptureEvent, CapturePayload, PayloadHash};
+use crate::domain::capture::{CaptureEvent, CapturePayload, PayloadHash, TerminalContext};
 use sha2::{Digest, Sha256};
 
 /// Bytes the dispatch driver classified as unstructured terminal text.
@@ -238,22 +238,24 @@ pub struct UnstructuredTextBytes<'a> {
 
 impl<'a> UnstructuredTextBytes<'a> {
     /// Construct from a `CaptureEvent` plus the raw payload bytes the
-    /// event's `payload_ref` pointed at, and the sensor-supplied
-    /// terminal context.
+    /// event's `payload_ref` pointed at. The terminal context is read
+    /// from `CapturePayload::Terminal { context, .. }` so the captured
+    /// event is self-describing and replay reproduces the same routing
+    /// decision (issue #218).
     ///
     /// # Stability
-    /// `pub(crate)` until #218 lands. The current signature accepts
-    /// `TerminalContext` as a side input, which lets a misbehaving caller
-    /// reclassify a stored structured payload as interactive and lose
-    /// machine-readable bytes through squash. Once `TerminalContext` is
-    /// persisted on `CapturePayload::Terminal` (see #218), this becomes
-    /// derivable from the event alone and the API stabilizes. The
-    /// surrounding `pipeline` module is also `pub(crate)` until the
-    /// dispatch driver (#217) is the sole entry point.
+    /// `pub(crate)` until the dispatch driver (#217) is the sole entry
+    /// point. The signature derives the context from the event alone —
+    /// a misbehaving caller can no longer reclassify a stored structured
+    /// payload as interactive.
     ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, or
-    /// `StructuredContextRejected` per the spec's caller contract.
+    /// `StructuredContextRejected` per the spec's caller contract. A
+    /// `Terminal` payload whose `context` is `None` (forward-compat with
+    /// pre-#218 events) is treated as
+    /// `NonInteractiveOrStructured` and rejected with
+    /// `StructuredContextRejected` — fail closed (CLAUDE.md §4 #6).
     // Only reachable from #[cfg(test)] modules until #217 wires the
     // dispatch driver; default-feature non-test builds legitimately
     // leave it dead.
@@ -261,7 +263,6 @@ impl<'a> UnstructuredTextBytes<'a> {
     pub(crate) fn try_from_terminal_event(
         event: &CaptureEvent,
         raw: &'a [u8],
-        context: TerminalContext,
     ) -> Result<Self, UnstructuredBindError> {
         // Reject malformed envelopes outright — we never want to lossily
         // compact bytes whose source_family / sensor / payload disagree.
@@ -272,10 +273,10 @@ impl<'a> UnstructuredTextBytes<'a> {
         // here. `squash()` detects them and applies an in-band bypass
         // that does head+tail byte slicing without per-stage clones, so
         // the raw bytes are preserved (head + tail) rather than dropped.
-        if !matches!(event.payload, CapturePayload::Terminal { .. }) {
+        let CapturePayload::Terminal { context, .. } = &event.payload else {
             return Err(UnstructuredBindError::NotTerminalPayload);
-        }
-        if context != TerminalContext::InteractiveTty {
+        };
+        if *context != Some(TerminalContext::InteractiveTty) {
             return Err(UnstructuredBindError::StructuredContextRejected);
         }
         let digest = Sha256::digest(raw);
@@ -301,17 +302,6 @@ impl<'a> UnstructuredTextBytes<'a> {
     pub fn raw_hash(&self) -> &PayloadHash {
         &self.raw_hash
     }
-}
-
-/// Sensor-supplied execution context for a Terminal payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum TerminalContext {
-    /// The terminal session is an interactive TTY; output is unstructured.
-    InteractiveTty,
-    /// Non-interactive session or structured (machine-readable) output;
-    /// squash must be bypassed.
-    NonInteractiveOrStructured,
 }
 
 /// Errors returned by [`UnstructuredTextBytes::try_from_terminal_event`].
@@ -443,6 +433,7 @@ mod wrapper_tests {
             payload: CapturePayload::Terminal {
                 command: "echo hi".into(),
                 exit_code: Some(0),
+                context: Some(TerminalContext::InteractiveTty),
             },
             source_family: SourceFamily::Terminal,
         }
@@ -468,12 +459,7 @@ mod wrapper_tests {
     fn rejects_non_terminal_variant() {
         let bytes = b"hello\n";
         let evt = hook_event(bytes);
-        let err = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            bytes,
-            TerminalContext::InteractiveTty,
-        )
-        .unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
         assert!(matches!(err, UnstructuredBindError::NotTerminalPayload));
     }
 
@@ -482,25 +468,36 @@ mod wrapper_tests {
         let bytes = b"hello\n";
         let mut evt = terminal_event(bytes);
         evt.payload_hash = payload_hash_of(b"different bytes");
-        let err = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            bytes,
-            TerminalContext::InteractiveTty,
-        )
-        .unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
         assert!(matches!(err, UnstructuredBindError::HashMismatch));
     }
 
     #[test]
     fn rejects_structured_context() {
         let bytes = b"hello\n";
-        let evt = terminal_event(bytes);
-        let err = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            bytes,
-            TerminalContext::NonInteractiveOrStructured,
-        )
-        .unwrap_err();
+        let mut evt = terminal_event(bytes);
+        if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
+            *context = Some(TerminalContext::NonInteractiveOrStructured);
+        }
+        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            UnstructuredBindError::StructuredContextRejected
+        ));
+    }
+
+    /// Forward-compat: an event captured before #218 has no `context`
+    /// field (`None` after `serde(default)`). The squash gate fails
+    /// closed (CLAUDE.md §4 #6) and rejects with
+    /// `StructuredContextRejected`.
+    #[test]
+    fn rejects_missing_context_fail_closed() {
+        let bytes = b"hello\n";
+        let mut evt = terminal_event(bytes);
+        if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
+            *context = None;
+        }
+        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
         assert!(matches!(
             err,
             UnstructuredBindError::StructuredContextRejected
@@ -511,12 +508,8 @@ mod wrapper_tests {
     fn accepts_terminal_interactive_tty_with_matching_hash() {
         let bytes = b"hello\n";
         let evt = terminal_event(bytes);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            bytes,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid construction");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes)
+            .expect("valid construction");
         assert_eq!(wrapped.as_bytes(), bytes);
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
@@ -1077,12 +1070,7 @@ mod wrapper_tests {
         let n = MAX_INPUT_BYTES / 3 + 1;
         let raw = vec![0xFFu8; n];
         let evt = terminal_event(&raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            &raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
@@ -1107,12 +1095,7 @@ mod wrapper_tests {
         // fire and stage 1 actually runs. No ANSI, no dedup, no cap.
         let raw = b"\xFF\xFF\xFFhello\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(
@@ -1135,12 +1118,7 @@ mod wrapper_tests {
         // stripped. No stage 5 or stage 6 loss.
         let raw = b"\x1b[31mred\x1b[0m\nplain\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.ansi_stripped, "ansi was stripped");
@@ -1157,12 +1135,7 @@ mod wrapper_tests {
         // Repeated line, no ANSI. Default dedup_min_run = 2.
         let raw = b"same\nsame\nsame\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.dedup_runs_collapsed > 0, "dedup acted");
@@ -1544,12 +1517,8 @@ mod wrapper_tests {
         raw.extend(std::iter::repeat_n(b'\n', n));
         raw.extend_from_slice(b"FINAL\n");
         let evt = terminal_event(&raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            &raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("under byte ceiling");
+        let wrapped =
+            UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("under byte ceiling");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated, "must take bypass path");
@@ -1662,12 +1631,8 @@ mod wrapper_tests {
         // payload becomes U+FFFD on lossy decode (1B → 3B expansion).
         let oversized = vec![0xFFu8; MAX_INPUT_BYTES + 1];
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            &oversized,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
+            .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1697,12 +1662,8 @@ mod wrapper_tests {
         let n = oversized.len();
         oversized[n - 6..].copy_from_slice(b"\nYTAIL");
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            &oversized,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
+            .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1727,12 +1688,7 @@ mod wrapper_tests {
         let mut evt = terminal_event(bytes);
         // Force source_family / payload-variant disagreement.
         evt.source_family = SourceFamily::Hook;
-        let err = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            bytes,
-            TerminalContext::InteractiveTty,
-        )
-        .unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
         assert!(
             matches!(err, UnstructuredBindError::EventValidationFailed(_)),
             "got: {err:?}"
@@ -3805,12 +3761,7 @@ pub fn fuzz_entrypoint(raw: &[u8], cfg: &SquashConfig) -> Option<SquashOutput> {
         },
         source_family: SourceFamily::Terminal,
     };
-    let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-        &event,
-        raw,
-        TerminalContext::InteractiveTty,
-    )
-    .ok()?;
+    let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw).ok()?;
     Some(squash(wrapper, cfg))
 }
 
@@ -3877,12 +3828,8 @@ mod squash_integration_tests {
 
     fn run_squash(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid wrapper");
+        let wrapper =
+            UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid wrapper");
         squash(wrapper, cfg)
     }
 
@@ -4109,12 +4056,8 @@ mod squash_fixtures_tests {
     fn run_fixture(name: &str, cfg: &SquashConfig) -> String {
         let raw = fixture(name);
         let evt = terminal_event(&raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            &raw,
-            TerminalContext::InteractiveTty,
-        )
-        .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw)
+            .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
         let out = squash(wrapper, cfg);
         String::from_utf8_lossy(&out.compacted_bytes).into_owned()
     }
@@ -4190,24 +4133,16 @@ mod squash_perf {
 
         // Warm-up.
         for _ in 0..3 {
-            let w = UnstructuredTextBytes::try_from_terminal_event(
-                &evt,
-                &raw,
-                TerminalContext::InteractiveTty,
-            )
-            .expect("valid wrapper");
+            let w =
+                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
 
         let iters: u32 = 50;
         let start = Instant::now();
         for _ in 0..iters {
-            let w = UnstructuredTextBytes::try_from_terminal_event(
-                &evt,
-                &raw,
-                TerminalContext::InteractiveTty,
-            )
-            .expect("valid wrapper");
+            let w =
+                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
         let avg = start.elapsed() / iters;
@@ -4226,12 +4161,7 @@ mod proptest_squash {
 
     fn run_squash_for_proptest(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
         squash(wrapper, cfg)
     }
 
@@ -4372,12 +4302,7 @@ mod corner_case_tests {
 
     fn squash_raw(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
-            &evt,
-            raw,
-            TerminalContext::InteractiveTty,
-        )
-        .expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
         squash(wrapper, cfg)
     }
 

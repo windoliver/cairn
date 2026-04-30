@@ -10,7 +10,7 @@
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, ChainRole,
     DomainError, Identity, PayloadHash, Rfc3339Timestamp, SensorLabel, SourceFamily,
-    validate_label,
+    TerminalContext, validate_label,
 };
 use proptest::prelude::*;
 
@@ -56,6 +56,7 @@ fn family_defaults(family: SourceFamily) -> (&'static str, CapturePayload) {
             CapturePayload::Terminal {
                 command: "ls".into(),
                 exit_code: Some(0),
+                context: Some(TerminalContext::InteractiveTty),
             },
         ),
         SourceFamily::Clipboard => (
@@ -428,6 +429,7 @@ fn debug_redaction_sweep() {
             CapturePayload::Terminal {
                 command: format!("echo {secret}"),
                 exit_code: None,
+                context: Some(TerminalContext::InteractiveTty),
             },
         ),
         (

@@ -43,7 +43,7 @@ pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{
     CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
-    SensorLabel, SourceFamily,
+    SensorLabel, SourceFamily, TerminalContext,
 };
 pub use capture_attribution::attribute;
 pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};

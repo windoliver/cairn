@@ -359,6 +359,26 @@ impl std::fmt::Display for SourceFamily {
     }
 }
 
+/// Sensor-classified execution context for a [`CapturePayload::Terminal`]
+/// event. Determines whether the captured bytes are unstructured TTY
+/// output (eligible for tool-squash compaction) or
+/// machine-readable / non-interactive output (squash bypassed).
+///
+/// Persisted on the event so replay (WAL recovery, re-ingest) reproduces
+/// the same routing decision the dispatch driver took at capture time.
+/// Sensors set this at capture time; the squash gate reads it back from
+/// `CapturePayload::Terminal { context, .. }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TerminalContext {
+    /// The terminal session is an interactive TTY; output is unstructured.
+    InteractiveTty,
+    /// Non-interactive session or structured (machine-readable) output;
+    /// squash must be bypassed.
+    NonInteractiveOrStructured,
+}
+
 /// Modality-specific payload metadata for a [`CaptureEvent`].
 ///
 /// The variant **must agree** with the event's [`SourceFamily`] —
@@ -401,6 +421,19 @@ pub enum CapturePayload {
         /// time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Sensor-classified execution context. Determines whether the
+        /// payload is unstructured TTY output (eligible for squash) or
+        /// machine-readable / non-interactive output (squash bypassed).
+        ///
+        /// Persisted on the event so replay (WAL recovery, re-ingest)
+        /// reproduces the same routing decision the dispatch driver
+        /// took at capture time.
+        ///
+        /// Forward-compat: events serialized before this field existed
+        /// deserialize with `None`, which the squash gate treats as
+        /// "unknown — fail closed and bypass" (matches CLAUDE.md §4 #6).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<TerminalContext>,
     },
     /// Clipboard snapshot.
     Clipboard {
@@ -477,9 +510,12 @@ impl std::fmt::Debug for CapturePayload {
             Self::Ide { .. } => f
                 .debug_struct("CapturePayload::Ide")
                 .finish_non_exhaustive(),
-            Self::Terminal { exit_code, .. } => f
+            Self::Terminal {
+                exit_code, context, ..
+            } => f
                 .debug_struct("CapturePayload::Terminal")
                 .field("exit_code", exit_code)
+                .field("context", context)
                 .finish_non_exhaustive(),
             Self::Clipboard {
                 mime_type,
@@ -1345,5 +1381,56 @@ mod tests {
         let s = serde_json::to_string(&v).expect("ser");
         let res: Result<CaptureEvent, _> = serde_json::from_str(&s);
         assert!(res.is_err(), "unknown fields must be rejected");
+    }
+
+    /// Forward-compat: a `Terminal` payload serialized before #218 has
+    /// no `context` field; it must deserialize with `context: None`.
+    #[test]
+    fn terminal_payload_deserializes_without_context_field() {
+        let json = r#"{
+            "source_family": "terminal",
+            "command": "cargo build",
+            "exit_code": 0
+        }"#;
+        let payload: CapturePayload = serde_json::from_str(json).expect("parse");
+        match payload {
+            CapturePayload::Terminal { context, .. } => assert_eq!(context, None),
+            other => panic!("expected Terminal, got {other:?}"),
+        }
+    }
+
+    /// `Terminal { context: Some(InteractiveTty) }` round-trips through
+    /// JSON in the documented snake_case wire form.
+    #[test]
+    fn terminal_payload_serde_round_trip_with_context() {
+        let original = CapturePayload::Terminal {
+            command: "cargo test".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::InteractiveTty),
+        };
+        let json = serde_json::to_string(&original).expect("ser");
+        assert!(
+            json.contains(r#""context":"interactive_tty""#),
+            "wire form should be snake_case: {json}"
+        );
+        let parsed: CapturePayload = serde_json::from_str(&json).expect("de");
+        assert_eq!(parsed, original);
+    }
+
+    /// `Terminal { context: None }` serializes without emitting the
+    /// `context` field (skip_serializing_if), preserving wire bytes for
+    /// callers that haven't been updated yet.
+    #[test]
+    fn terminal_payload_omits_none_context_on_serialize() {
+        let payload = CapturePayload::Terminal {
+            command: "ls".into(),
+            exit_code: None,
+            context: None,
+        };
+        let json = serde_json::to_string(&payload).expect("ser");
+        assert!(
+            !json.contains("context"),
+            "None context must not be serialized: {json}"
+        );
     }
 }
