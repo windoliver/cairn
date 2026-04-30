@@ -150,6 +150,7 @@ pub enum RecordExclusionGate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordExclusion {
+    /// Body-free wire code from PolicyDetail.to_wire_string(). Empty string for None; otherwise starts with a lowercase letter and contains only a-z0-9_:=, — no whitespace, no free text.
     pub detail: String,
     pub gate: RecordExclusionGate,
     pub target_id: crate::generated::common::Ulid,
