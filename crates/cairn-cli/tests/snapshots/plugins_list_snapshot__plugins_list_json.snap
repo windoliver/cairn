@@ -35,7 +35,7 @@ expression: json
     },
     {
       "capabilities": {
-        "fts": false,
+        "fts": true,
         "graph_edges": true,
         "transactions": true,
         "vector": false

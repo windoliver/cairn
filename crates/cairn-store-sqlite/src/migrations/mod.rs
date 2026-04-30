@@ -16,16 +16,18 @@ const M0008_RECORD_EXTENSIONS: &str = include_str!("sql/0008_record_extensions.s
 const M0009_CONSENT_EVENT: &str = include_str!("sql/0009_consent_event.sql");
 const M0010_RANKING_INDEXES: &str = include_str!("sql/0010_ranking_indexes.sql");
 const M0011_CONSENT_EVENT_HARDENING: &str = include_str!("sql/0011_consent_event_hardening.sql");
-const M0012_SESSIONS: &str = include_str!("sql/0012_sessions.sql");
-const M0013_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0013_sessions_unique_active.sql");
-const M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
-    include_str!("sql/0014_sessions_unique_active_coalesce.sql");
-const M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
-    include_str!("sql/0015_sessions_close_relative_project_root.sql");
-const M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
-    include_str!("sql/0016_sessions_canonicalize_windows_paths.sql");
-const M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
-    include_str!("sql/0017_sessions_strip_verbatim_and_case_fold.sql");
+const M0012_FILTER_ALIGNMENT: &str = include_str!("sql/0012_filter_alignment.sql");
+const M0013_EDGES_UPDATES_DST_IDX: &str = include_str!("sql/0013_edges_updates_dst_idx.sql");
+const M0014_SESSIONS: &str = include_str!("sql/0014_sessions.sql");
+const M0015_SESSIONS_UNIQUE_ACTIVE: &str = include_str!("sql/0015_sessions_unique_active.sql");
+const M0016_SESSIONS_UNIQUE_ACTIVE_COALESCE: &str =
+    include_str!("sql/0016_sessions_unique_active_coalesce.sql");
+const M0017_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT: &str =
+    include_str!("sql/0017_sessions_close_relative_project_root.sql");
+const M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
+    include_str!("sql/0018_sessions_canonicalize_windows_paths.sql");
+const M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
+    include_str!("sql/0019_sessions_strip_verbatim_and_case_fold.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -45,31 +47,37 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0011_consent_event_hardening",
         M0011_CONSENT_EVENT_HARDENING,
     ),
-    (12, "0012_sessions", M0012_SESSIONS),
+    (12, "0012_filter_alignment", M0012_FILTER_ALIGNMENT),
     (
         13,
-        "0013_sessions_unique_active",
-        M0013_SESSIONS_UNIQUE_ACTIVE,
+        "0013_edges_updates_dst_idx",
+        M0013_EDGES_UPDATES_DST_IDX,
     ),
-    (
-        14,
-        "0014_sessions_unique_active_coalesce",
-        M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE,
-    ),
+    (14, "0014_sessions", M0014_SESSIONS),
     (
         15,
-        "0015_sessions_close_relative_project_root",
-        M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT,
+        "0015_sessions_unique_active",
+        M0015_SESSIONS_UNIQUE_ACTIVE,
     ),
     (
         16,
-        "0016_sessions_canonicalize_windows_paths",
-        M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS,
+        "0016_sessions_unique_active_coalesce",
+        M0016_SESSIONS_UNIQUE_ACTIVE_COALESCE,
     ),
     (
         17,
-        "0017_sessions_strip_verbatim_and_case_fold",
-        M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
+        "0017_sessions_close_relative_project_root",
+        M0017_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT,
+    ),
+    (
+        18,
+        "0018_sessions_canonicalize_windows_paths",
+        M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS,
+    ),
+    (
+        19,
+        "0019_sessions_strip_verbatim_and_case_fold",
+        M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
     ),
 ];
 
@@ -89,11 +97,13 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0009_CONSENT_EVENT),
         M::up(M0010_RANKING_INDEXES),
         M::up(M0011_CONSENT_EVENT_HARDENING),
-        M::up(M0012_SESSIONS),
-        M::up(M0013_SESSIONS_UNIQUE_ACTIVE),
-        M::up(M0014_SESSIONS_UNIQUE_ACTIVE_COALESCE),
-        M::up(M0015_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
-        M::up(M0016_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
-        M::up(M0017_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
+        M::up(M0012_FILTER_ALIGNMENT),
+        M::up(M0013_EDGES_UPDATES_DST_IDX),
+        M::up(M0014_SESSIONS),
+        M::up(M0015_SESSIONS_UNIQUE_ACTIVE),
+        M::up(M0016_SESSIONS_UNIQUE_ACTIVE_COALESCE),
+        M::up(M0017_SESSIONS_CLOSE_RELATIVE_PROJECT_ROOT),
+        M::up(M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
+        M::up(M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
     ])
 }

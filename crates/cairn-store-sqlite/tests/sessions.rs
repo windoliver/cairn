@@ -337,12 +337,18 @@ async fn migration_dedupes_preexisting_active_null_project_duplicates() {
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 12");
+        migrations.to_latest(&mut conn).expect("migrate to 17");
 
         // Seed two active rows for the same vault-only identity at the
         // same NULL project_root — legal at this schema, illegal under 13.
@@ -767,15 +773,21 @@ async fn migration_ends_active_rows_with_relative_project_root() {
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0016_sessions_unique_active_coalesce.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 13");
+        migrations.to_latest(&mut conn).expect("migrate to 18");
 
         // Seed: one relative-path row (legacy) plus three absolute-path
         // rows (POSIX, Windows drive, Windows UNC) plus one NULL row.
@@ -805,7 +817,7 @@ async fn migration_ends_active_rows_with_relative_project_root() {
     }
 
     // Run to head — 0014 should end S_REL and leave the others alone.
-    let store = open(&db_path).await.expect("open after 0014");
+    let store = open(&db_path).await.expect("open after 0017");
 
     for (sid, user, root, expect_ended) in [
         ("S_REL", "usr:legacy", Some("subdir/repo"), true),
@@ -887,18 +899,24 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0016_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0017_sessions_close_relative_project_root.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 14");
+        migrations.to_latest(&mut conn).expect("migrate to 19");
 
         // Seed: forward-slash drive (`C:/repo`), forward-slash UNC
         // (`//srv/share`), already-canonical backslash drive that must
@@ -940,7 +958,7 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         }
     }
 
-    let store = open(&db_path).await.expect("open after 0015");
+    let store = open(&db_path).await.expect("open after 0018");
 
     for (sid, expect_root) in [
         ("S_DRV_FWD", r"c:\repo"),
@@ -1033,18 +1051,24 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0016_sessions_unique_active_coalesce.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0017_sessions_close_relative_project_root.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 14");
+        migrations.to_latest(&mut conn).expect("migrate to 19");
 
         // Seed an *ended* legacy row stored as `C:/repo/`.
         conn.execute(
@@ -1058,7 +1082,7 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
         .expect("insert ended");
     }
 
-    let store = open(&db_path).await.expect("open after 0015");
+    let store = open(&db_path).await.expect("open after 0018");
 
     // Caller's canonical identity for the same project.
     let canonical = SessionIdentity::new(
@@ -1128,21 +1152,27 @@ async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolv
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0016_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0016_sessions_canonicalize_windows_paths.sql"
+                "../src/migrations/sql/0017_sessions_close_relative_project_root.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0018_sessions_canonicalize_windows_paths.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 15");
+        migrations.to_latest(&mut conn).expect("migrate to 17");
 
         // Two ended verbatim rows: drive (with mixed case + trailing
         // separator) and UNC. Both must surface SessionEnded after
@@ -1162,7 +1192,7 @@ async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolv
         }
     }
 
-    let store = open(&db_path).await.expect("open after 0016");
+    let store = open(&db_path).await.expect("open after 0019");
 
     for (sid, user, raw_caller_root) in [
         ("S_ENDED_VRB_DRV", "usr:vrb1", r"C:\Repo"),
@@ -1239,21 +1269,27 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
             M::up(include_str!(
                 "../src/migrations/sql/0011_consent_event_hardening.sql"
             )),
-            M::up(include_str!("../src/migrations/sql/0012_sessions.sql")),
             M::up(include_str!(
-                "../src/migrations/sql/0013_sessions_unique_active.sql"
+                "../src/migrations/sql/0012_filter_alignment.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0014_sessions_unique_active_coalesce.sql"
+                "../src/migrations/sql/0013_edges_updates_dst_idx.sql"
+            )),
+            M::up(include_str!("../src/migrations/sql/0014_sessions.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0015_sessions_unique_active.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0015_sessions_close_relative_project_root.sql"
+                "../src/migrations/sql/0016_sessions_unique_active_coalesce.sql"
             )),
             M::up(include_str!(
-                "../src/migrations/sql/0016_sessions_canonicalize_windows_paths.sql"
+                "../src/migrations/sql/0017_sessions_close_relative_project_root.sql"
+            )),
+            M::up(include_str!(
+                "../src/migrations/sql/0018_sessions_canonicalize_windows_paths.sql"
             )),
         ]);
-        migrations.to_latest(&mut conn).expect("migrate to 15");
+        migrations.to_latest(&mut conn).expect("migrate to 17");
 
         // Two pairs that collapse to the same canonical key under 0016.
         // Per pair: one verbatim/mixed-case legacy row + one already
@@ -1291,7 +1327,7 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
         }
     }
 
-    let store = open(&db_path).await.expect("open after 0016");
+    let store = open(&db_path).await.expect("open after 0019");
 
     // Pair A: verbatim row newer → wins; plain row ended.
     let pair_a_winner = store

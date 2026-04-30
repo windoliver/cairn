@@ -1,4 +1,4 @@
--- Migration 0015: end any active session row whose `project_root` is a
+-- Migration 0017: end any active session row whose `project_root` is a
 -- relative path.
 -- Brief source: §8.1 Session Lifecycle (canonical project_root).
 --
@@ -40,4 +40,4 @@ UPDATE sessions
    AND project_root NOT LIKE '_:/%';
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (15, '0015_sessions_close_relative_project_root', '', strftime('%s','now') * 1000);
+  VALUES (17, '0017_sessions_close_relative_project_root', '', strftime('%s','now') * 1000);

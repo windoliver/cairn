@@ -139,13 +139,15 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ),
     ("trigger", "consent_journal_event_metadata_domains"),
     ("trigger", "consent_journal_sensor_id_domain"),
-    // 0012_sessions
+    // 0013_edges_updates_dst_idx
+    ("index", "edges_updates_dst_idx"),
+    // 0014_sessions
     ("table", "sessions"),
     ("index", "sessions_active_lookup_idx"),
     ("index", "sessions_last_activity_idx"),
-    // 0013_sessions_unique_active
+    // 0015_sessions_unique_active
     ("index", "sessions_one_active_per_identity_idx"),
-    // 0014_sessions_unique_active_coalesce (drops + recreates the index
+    // 0016_sessions_unique_active_coalesce (drops + recreates the index
     // above; index name unchanged. Adds the empty-string guards.)
     ("trigger", "sessions_project_root_no_empty_insert"),
     ("trigger", "sessions_project_root_no_empty_update"),

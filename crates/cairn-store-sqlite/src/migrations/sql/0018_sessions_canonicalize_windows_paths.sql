@@ -1,4 +1,4 @@
--- Migration 0016: canonicalize legacy Windows-shape `project_root`
+-- Migration 0018: canonicalize legacy Windows-shape `project_root`
 -- values to the backslash + trimmed-trailing-separator form
 -- `SessionIdentity::new` produces.
 -- Brief source: §8.1 Session Lifecycle (canonical project_root).
@@ -103,4 +103,4 @@ UPDATE sessions
       OR project_root LIKE '\\%' );
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (16, '0016_sessions_canonicalize_windows_paths', '', strftime('%s','now') * 1000);
+  VALUES (18, '0018_sessions_canonicalize_windows_paths', '', strftime('%s','now') * 1000);

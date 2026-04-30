@@ -34,6 +34,7 @@ cairn-core = { workspace = true, features = ["test-fixtures"] }
 cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 proptest = { workspace = true }
+serde = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
