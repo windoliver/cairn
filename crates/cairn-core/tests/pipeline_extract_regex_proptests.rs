@@ -30,7 +30,7 @@ fn fixture_event() -> CaptureEvent {
             },
             ActorChainEntry {
                 role: ChainRole::Author,
-                identity: Identity::parse("usr:tafeng").expect("valid"),
+                identity: Identity::parse("hmn:tafeng").expect("valid"),
                 at: ts(),
             },
         ],

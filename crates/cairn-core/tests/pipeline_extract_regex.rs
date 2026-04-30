@@ -42,7 +42,7 @@ fn cli_event() -> CaptureEvent {
         capture_mode: CaptureMode::Explicit,
         actor_chain: vec![
             entry(ChainRole::Delegator, "agt:claude-code:opus-4-7:main:v1"),
-            entry(ChainRole::Author, "usr:tafeng"),
+            entry(ChainRole::Author, "hmn:tafeng"),
         ],
         refs: None,
         payload_hash: hash(),

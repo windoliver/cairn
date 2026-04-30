@@ -1,18 +1,42 @@
 //! Identity newtype and discriminator (brief §4.2).
 //!
 //! Three identity kinds — `HumanIdentity`, `AgentIdentity`, `SensorIdentity`
-//! — share one wire form: `<prefix>:<body>` where `prefix ∈ {agt, usr, snr}`
+//! — share one wire form: `<prefix>:<body>` where `prefix ∈ {agt, hmn, snr}`
 //! and `body` matches `[A-Za-z0-9._:-]+`. The pattern matches the
 //! `Identity` schema in `crates/cairn-idl/schema/common/primitives.json`.
+
+pub mod keys;
+pub mod provision;
+pub mod receipts;
+pub mod records;
+pub mod status;
+
+pub use provision::{
+    ProvisionInput, ProvisioningPlan, build_provisioning_plan, mint_agent_id, mint_human_id,
+    mint_sensor_id, normalize_human_slug,
+};
+pub use receipts::{
+    ReceiptError, ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt,
+};
+pub use records::{
+    FirstBindState, IdentityKeyEntry, PendingEvictionEntry, PendingIdentityEntry,
+    PendingKeyDisableEntry, ProvisioningState, PublicIdentityRecord, PurgePendingEntry, ReceiptId,
+    RevokePendingEntry,
+};
+pub use status::{
+    BindingState, DefaultsState, IdentityStatusReport, MismatchCheckOutcome, MismatchOutcome,
+    ReconciliationReport,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::domain::DomainError;
 
 /// Which of the three identity kinds an [`Identity`] denotes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IdentityKind {
-    /// `usr:` prefix — a human principal.
+    /// `hmn:` prefix — a human principal.
     Human,
     /// `agt:` prefix — an agent (model + harness + role + revision).
     Agent,
@@ -34,13 +58,13 @@ impl Identity {
         let raw = raw.into();
         let body = if let Some(b) = raw.strip_prefix("agt:") {
             b
-        } else if let Some(b) = raw.strip_prefix("usr:") {
+        } else if let Some(b) = raw.strip_prefix("hmn:") {
             b
         } else if let Some(b) = raw.strip_prefix("snr:") {
             b
         } else {
             return Err(DomainError::InvalidIdentity {
-                message: "must start with one of [agt:, usr:, snr:]".to_owned(),
+                message: "must start with one of [agt:, hmn:, snr:]".to_owned(),
             });
         };
         if body.is_empty() {
@@ -64,7 +88,7 @@ impl Identity {
     pub fn kind(&self) -> IdentityKind {
         if self.0.starts_with("agt:") {
             IdentityKind::Agent
-        } else if self.0.starts_with("usr:") {
+        } else if self.0.starts_with("hmn:") {
             IdentityKind::Human
         } else {
             IdentityKind::Sensor
@@ -106,7 +130,7 @@ mod tests {
 
     #[test]
     fn parse_human() {
-        let id = Identity::parse("usr:tafeng").expect("valid");
+        let id = Identity::parse("hmn:tafeng").expect("valid");
         assert_eq!(id.kind(), IdentityKind::Human);
     }
 
@@ -119,6 +143,13 @@ mod tests {
     #[test]
     fn rejects_unknown_prefix() {
         let err = Identity::parse("bot:foo").unwrap_err();
+        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
+    }
+
+    #[test]
+    fn rejects_legacy_usr_prefix() {
+        // `usr:` is the pre-#50 prefix — banned now in favor of `hmn:`.
+        let err = Identity::parse("usr:tafeng").unwrap_err();
         assert!(matches!(err, DomainError::InvalidIdentity { .. }));
     }
 
