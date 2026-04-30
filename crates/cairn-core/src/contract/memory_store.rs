@@ -59,6 +59,20 @@ pub struct IndexStats {
     pub fts5_rows: u64,
 }
 
+impl IndexStats {
+    /// Construct an [`IndexStats`] value.
+    ///
+    /// Provided so that adapter crates outside `cairn-core` can build the
+    /// struct despite the `#[non_exhaustive]` attribute.
+    #[must_use]
+    pub fn new(records_active: u64, fts5_rows: u64) -> Self {
+        Self {
+            records_active,
+            fts5_rows,
+        }
+    }
+}
+
 /// Storage contract — typed CRUD over `MemoryRecord`.
 ///
 /// Brief §4 row 1. Method bodies arrive in #46 (`SQLite` impl);
@@ -212,7 +226,7 @@ pub trait MemoryStore: Send + Sync {
 
     /// Counts that drive the `lint` index-drift check. Default impl returns
     /// an unsupported error so adapters can opt in incrementally;
-    /// the production SQLite adapter (Task 4) and FixtureStore (Task 5)
+    /// the production `SqliteMemoryStore` (Task 4) and `FixtureStore` (Task 5)
     /// override.
     async fn index_stats(&self) -> Result<IndexStats, StoreError> {
         Err("index_stats: not supported by this store adapter".into())
