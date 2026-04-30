@@ -249,14 +249,12 @@ fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
         {
             Some("CapturePayload::Hook (user utterance)")
         }
-        // Proactive (Mode C) payloads carry an agent-emitted user-visible
-        // message body per spec, but the wire envelope does not yet
-        // include a hashable message-body field, so `ResolvedBody` has
-        // no constructor for it. Treat as text-bearing here so a
-        // `NotApplicable`/`Failed` body surfaces a typed failure rather
-        // than degrading to empty extraction. Tracked for the
-        // proactive-body follow-up issue.
-        CapturePayload::Proactive { .. } => Some("CapturePayload::Proactive"),
+        // Proactive (Mode C) payloads will be text-bearing once the
+        // envelope grows a hashable message-body field and ResolvedBody
+        // gains a `from_proactive_message` constructor. Until then they
+        // are explicitly NOT classified as text-bearing here so dispatch
+        // does not fail every Mode C event with `MissingBody`. Tracked
+        // for the proactive-body follow-up issue.
         _ => None,
     }
 }
@@ -666,11 +664,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn proactive_payload_with_no_body_surfaces_missing_body() {
-        // Proactive (Mode C) events are text-bearing per spec but the
-        // wire envelope does not yet carry a hashable message-body
-        // field. Until that wiring lands, dispatch must fail closed
-        // rather than silently return an empty success.
+    async fn proactive_payload_runs_hook_tool_frame_rules_only() {
+        // Until the wire envelope grows a hashable message-body field
+        // and ResolvedBody gains a proactive constructor, proactive
+        // events run hook/tool-frame rules only. They must NOT fail
+        // every event closed (would break Mode C traffic) and must
+        // NOT silently absorb a bogus Resolved text body (no
+        // constructor to verify provenance).
         let rules = RuleSet::builtin();
         let prefilter = TriggerPrefilter::new();
         let budget = ExtractBudget::regex_default();
@@ -682,10 +682,10 @@ mod tests {
             event: &event,
             body: BodyResolution::NotApplicable,
         };
-        let err = dispatch(&rules, &prefilter, &budget, &input)
+        let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
-            .unwrap_err();
-        assert!(matches!(err, ExtractError::MissingBody { .. }));
+            .expect("proactive event must not hard-fail");
+        assert!(matches!(result.truncated, TruncationReason::None));
     }
 
     #[tokio::test]
