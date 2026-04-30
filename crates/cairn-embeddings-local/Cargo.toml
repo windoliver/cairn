@@ -26,7 +26,6 @@ blake3 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
@@ -35,3 +34,10 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true
+
+# safetensors and serde are not directly imported with `use`, but are
+# required as explicit deps: safetensors is needed by candle-nn's
+# `from_buffered_safetensors` feature gate; serde enables `Deserialize` on
+# candle-transformers' `BertConfig` when loaded via serde_json.
+[package.metadata.cargo-machete]
+ignored = ["safetensors", "serde"]

@@ -1,0 +1,10 @@
+# cargo-audit configuration for Cairn.
+# See https://docs.rs/cargo-audit/latest/cargo_audit/config/struct.AuditConfig.html
+
+[advisories]
+ignore = [
+    # paste 1.0.x is pulled in transitively via gemm → candle-core → cairn-embeddings-local.
+    # The advisory is informational (unmaintained, not a vulnerability/CVE).
+    # We cannot easily replace it without forking candle; tracked for update (#48).
+    "RUSTSEC-2024-0436",
+]
