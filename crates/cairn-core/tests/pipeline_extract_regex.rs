@@ -197,6 +197,28 @@ async fn body_resolution_failure_surfaces_typed_error() {
 }
 
 #[tokio::test]
+async fn quoted_punctuation_does_not_truncate_window() {
+    // Punctuation inside balanced quotes must not end the phrase
+    // window, otherwise the stored draft body is cut off mid-clause.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(
+        &event,
+        r#"remember that she shouted "go!" and prefers tea"#,
+    );
+    let res = extractor.extract(&input).await.expect("ok");
+    assert_eq!(res.outputs.len(), 1);
+    let ExtractOutput::Draft(d) = &res.outputs[0] else {
+        panic!("expected draft");
+    };
+    assert!(
+        d.body.contains("prefers tea"),
+        "draft body must include text past quoted `!`: got {:?}",
+        d.body
+    );
+}
+
+#[tokio::test]
 async fn quoted_remember_is_not_extracted() {
     let extractor = RegexExtractor::builtin();
     let event = cli_event();

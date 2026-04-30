@@ -589,15 +589,14 @@ fn compute_llm_eligible_spans(
     if last_end < body_len {
         eligible.push(TextSpan::new(last_end, body_len));
     }
-    // Drop spans that a high-confidence output has fully covered.
-    let eligible: Vec<TextSpan> = eligible
-        .into_iter()
-        .filter(|s| {
-            !covered_high_conf
-                .iter()
-                .any(|c| c.overlaps(*s) && c.start <= s.start && c.end >= s.end)
-        })
-        .collect();
+    // Carve high-confidence covered subspans out of each eligible
+    // span instead of only dropping fully-covered windows. This keeps
+    // the suppression contract honest for narrow user rules: a
+    // high-confidence prefix match still removes its own bytes, but
+    // unrelated trailing text in the same clause stays LLM-eligible.
+    let mut eligible_vec = eligible;
+    subtract_covered(&mut eligible_vec, covered_high_conf);
+    let eligible = eligible_vec;
     // Sort and merge overlapping/adjacent spans.
     let mut sorted = eligible;
     sorted.sort_by_key(|s| s.start);

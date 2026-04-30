@@ -264,6 +264,10 @@ pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindo
     let bytes = body.as_bytes();
     let hits = &scan.hits;
     let truncation_hard_stop = scan.first_omitted_start.map(|s| s as usize);
+    // Reuse the prefilter's quote-aware span detection so window
+    // termination skips punctuation inside balanced quotes (e.g.
+    // `remember she shouted "go!"` keeps the full clause).
+    let quote_spans = collect_quote_spans(body);
     let mut windows = Vec::with_capacity(hits.len());
     for (i, hit) in hits.iter().enumerate() {
         let start = hit.start as usize;
@@ -272,7 +276,7 @@ pub fn build_phrase_windows(body: &str, scan: &PrefilterScan) -> Vec<PhraseWindo
             .map(|h| h.start as usize)
             .or(truncation_hard_stop)
             .unwrap_or(bytes.len());
-        let raw_stop = find_window_stop(bytes, start, next_hit_start);
+        let raw_stop = find_window_stop(bytes, start, next_hit_start, &quote_spans);
         // When the window butts up against the next trigger hit (i.e.,
         // `next_hit_start` and not a sentence boundary), trim the
         // trailing conjunction word (`and`/`but`/`then`) plus surrounding
@@ -328,9 +332,23 @@ fn trim_trailing_conjunction(bytes: &[u8], start: usize, end: usize) -> usize {
     i.max(start)
 }
 
-fn find_window_stop(bytes: &[u8], start: usize, hard_stop: usize) -> usize {
+fn find_window_stop(
+    bytes: &[u8],
+    start: usize,
+    hard_stop: usize,
+    quote_spans: &[(usize, usize)],
+) -> usize {
     let mut i = start;
     while i < hard_stop {
+        // Skip past any quote span that contains `i`; punctuation
+        // inside quoted substrings must not terminate the window.
+        if let Some(&(_, qe)) = quote_spans
+            .iter()
+            .find(|(qs, qe)| *qs <= i && i < *qe)
+        {
+            i = qe;
+            continue;
+        }
         let b = bytes[i];
         match b {
             b';' | b'\n' | b'!' | b'?' => return i,
