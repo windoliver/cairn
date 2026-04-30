@@ -116,17 +116,8 @@ pub(super) async fn rotate(
         .store_keypair(&new_handle, &new_signing_key)
         .await?;
 
-    // ── Step 3: read-back verify ──────────────────────────────────────────────
-    let loaded = svc.keystore.load_signing_key(&new_handle).await?;
-    let loaded_pub = loaded.verifying_key().to_bytes();
-    let expected_pub = new_signing_key.verifying_key().to_bytes();
-
-    if loaded_pub != expected_pub {
-        return Err(IdentityServiceError::KeyMaterialDesynchronized {
-            id: id.clone(),
-            reason: "new key read-back pubkey mismatch after store".to_owned(),
-        });
-    }
+    // ── Step 3: read-back verify (with rollback on failure) ─────────────────
+    verify_or_rollback(svc, id, new_key_version, &new_handle, &new_signing_key).await?;
 
     // ── Step 4: load OLD signing key + build + sign rotation receipt ──────────
     let old_handle = SecretHandle::for_identity(svc.vault_id.clone(), id.clone(), old_key_version);
@@ -158,8 +149,8 @@ pub(super) async fn rotate(
     let needs_eviction = post_rotation_count > MAX_KEY_HISTORY;
 
     let receipt = RotationReceipt {
-        // Placeholder rowid — `apply_rotation` inserts the actual row and
-        // returns via `list_pending_evictions` after the fact.
+        // Placeholder rowid — `apply_rotation` returns the real id after
+        // it commits the receipt row, which we substitute below.
         id: ReceiptId(0),
         payload,
         signature: sig.to_bytes().to_vec(),
@@ -191,7 +182,8 @@ pub(super) async fn rotate(
     //   - inserts the new identity_keys row
     //   - deletes the pending_rotations WAL row (the one we inserted in step 0a)
     //   - inserts the identity_receipts row
-    svc.registry
+    let receipt_id = svc
+        .registry
         .apply_rotation(&receipt, old_key_version, &new_key_entry)
         .await?;
 
@@ -202,48 +194,50 @@ pub(super) async fn rotate(
     // ── Step 7: evict eldest key if over MAX_KEY_HISTORY ─────────────────────
     evict_eldest_if_needed(svc, id, new_key_version).await?;
 
-    // Build the final receipt with the actual receipt rowid from the DB.
-    // Query via list_pending_evictions to find our receipt.
-    let actual_receipt = resolve_receipt(svc, id, new_key_version, receipt).await?;
-
-    Ok(actual_receipt)
+    Ok(RotationReceipt {
+        id: receipt_id,
+        ..receipt
+    })
 }
 
-/// Resolve the actual `ReceiptId` assigned by the DB for the rotation receipt
-/// we just applied.  We query `list_pending_evictions` and find the entry
-/// whose `evict_version` is the old version for this identity.
-///
-/// If no matching eviction entry is found (e.g., `pending_eviction = false`
-/// was set by the adapter), we fall back to `ReceiptId(0)`.
-async fn resolve_receipt(
+/// Read back the just-stored keypair and verify the round-tripped public key
+/// matches what we generated. On any failure, best-effort delete the keystore
+/// entry and the `pending_rotations` row before surfacing the error so a
+/// follow-up rotation can retry cleanly. Without this rollback, a backend
+/// that lied about `store_keypair` success would leave durable signing
+/// material the registry does not point at and a `pending_rotations` row
+/// whose unique key blocks every retry.
+async fn verify_or_rollback(
     svc: &IdentityService,
     id: &Identity,
     new_key_version: KeyVersion,
-    placeholder: RotationReceipt,
-) -> Result<RotationReceipt, IdentityServiceError> {
-    let evictions = svc.registry.list_pending_evictions().await?;
-    // The eviction entry for this rotation has evict_version = old_key_version
-    // (the version we just replaced).
-    let old_version = placeholder
-        .payload
-        .old_key_version
-        .unwrap_or(KeyVersion::FIRST);
-
-    if let Some(entry) = evictions
-        .iter()
-        .find(|e| &e.identity == id && e.evict_version == old_version)
-    {
-        Ok(RotationReceipt {
-            id: entry.receipt_id.clone(),
-            ..placeholder
-        })
-    } else {
-        // No pending eviction entry — the adapter may not have written one
-        // (e.g., key count was below MAX_KEY_HISTORY and eviction was not
-        // needed yet).  Return the placeholder with id=0 as a best-effort.
-        let _ = new_key_version; // silence unused-variable lint
-        Ok(placeholder)
+    new_handle: &SecretHandle,
+    new_signing_key: &SigningKey,
+) -> Result<(), IdentityServiceError> {
+    let reason: Option<String> = match svc.keystore.load_signing_key(new_handle).await {
+        Ok(loaded) => {
+            let loaded_pub = loaded.verifying_key().to_bytes();
+            let expected_pub = new_signing_key.verifying_key().to_bytes();
+            if loaded_pub == expected_pub {
+                None
+            } else {
+                Some("new key read-back pubkey mismatch after store".to_owned())
+            }
+        }
+        Err(e) => Some(format!("new key read-back load failed: {e}")),
+    };
+    if let Some(reason) = reason {
+        let _ = svc.keystore.delete_keypair(new_handle).await;
+        let _ = svc
+            .registry
+            .delete_pending_rotation(id, new_key_version)
+            .await;
+        return Err(IdentityServiceError::KeyMaterialDesynchronized {
+            id: id.clone(),
+            reason,
+        });
     }
+    Ok(())
 }
 
 /// Evict the oldest key version from the keystore when the per-identity key

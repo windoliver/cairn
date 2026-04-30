@@ -399,7 +399,7 @@ pub trait IdentityRegistry: Send + Sync {
         receipt: &RotationReceipt,
         expected_current: KeyVersion,
         new_key: &IdentityKeyEntry,
-    ) -> Result<(), RegistryError>;
+    ) -> Result<ReceiptId, RegistryError>;
 
     // ── Pre-commit rotation intent (§3.6 step 0a) ────────────────────────────
 

@@ -806,7 +806,7 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         receipt: &RotationReceipt,
         expected_current: KeyVersion,
         new_key: &IdentityKeyEntry,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<ReceiptId, RegistryError> {
         let mut conn = self.conn.lock();
         let tx = conn
             .transaction()
@@ -891,13 +891,15 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         )
         .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
+        let receipt_id = ReceiptId(tx.last_insert_rowid());
+
         let wal_payload = serde_json::to_vec(&receipt.payload)
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
         wal::wal_insert(&tx, "apply_rotation", target, &wal_payload)?;
 
         tx.commit()
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
-        Ok(())
+        Ok(receipt_id)
     }
 
     async fn insert_pending_rotation(
