@@ -149,14 +149,12 @@ impl SquashConfig {
     /// diagnostic payloads that legitimately embed CR. Callers must opt
     /// in once they have classified the input as terminal-frame text.
     ///
-    /// **Oversize-bypass interaction.** This flag is honored only on the
-    /// staged path. Inputs that trip `oversize_bypass` (byte ceiling,
-    /// line cardinality, or decode-expansion gate) skip stage 2b
-    /// entirely and the retained head/tail windows preserve CR-bearing
-    /// bytes verbatim regardless of the flag. `tty_frames_coalesced`
-    /// will be zero on bypassed inputs even when the flag is on, which
-    /// callers can use as a signal that stage 2b did not run. See the
-    /// `tty_render_skipped_on_oversize_bypass` regression test.
+    /// **Oversize-bypass interaction.** When the flag is on, stage 2b
+    /// runs on both the staged path and on the head/tail windows of
+    /// `oversize_bypass`, so `tty_render_enabled` produces consistent
+    /// semantics across the byte-ceiling / line-cardinality /
+    /// decode-expansion gates. See the
+    /// `tty_render_applies_on_oversize_bypass` regression test.
     #[must_use]
     pub fn with_tty_render_enabled(mut self, enabled: bool) -> Self {
         self.tty_render_enabled = enabled;
@@ -2621,12 +2619,13 @@ mod stage2_tests {
 ///   Saturating-clamped at zero so an equal-length rewrite contributes
 ///   nothing and a (theoretical) longer rewrite cannot underflow.
 ///
-/// **Oversize bypass interaction:** stage 2b runs only on the staged path.
-/// Inputs that trip `oversize_bypass` (byte ceiling, line cardinality, or
-/// decode expansion) skip stage 2b entirely; the retained head/tail windows
-/// keep CR-bearing bytes verbatim regardless of `tty_render_enabled`. See
-/// the doc comment on `SquashConfig::with_tty_render_enabled` for the
-/// pinned-behavior regression test.
+/// **Oversize bypass interaction:** stage 2b also runs on the head and tail
+/// windows of `oversize_bypass` when the flag is on, so semantics stay
+/// consistent across the byte-ceiling / line-cardinality / decode-expansion
+/// gates. The bare-CR audit signal (`cr_bearing_lines`) is recorded from
+/// the pre-render sanitized text on both paths, so it remains a stable
+/// indicator of source-capture CRs even when stage 2b later rewrites them
+/// away.
 fn stage2b_tty_render(
     input: &str,
     frames_coalesced: &mut usize,
@@ -3605,6 +3604,12 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     //
     // Skipped when the config flag is off or when the stage-2 output
     // contains no `\r` (cheap fast path; avoids an extra String allocation).
+    // Audit signal: count CR-bearing lines on the **pre-stage-2b** sanitized
+    // text so consumers always see the source-capture hazard count, even
+    // when stage 2b later rewrites the bytes away. Hidden CRs (i.e., lines
+    // that had a CR but stage 2b resolved to a clean rendered line) must
+    // not look identical to a CR-free capture.
+    stats.cr_bearing_lines = stage2.split('\n').filter(|l| l.contains('\r')).count();
     let stage2b: Cow<'_, str> = if cfg.tty_render_enabled() && stage2.contains('\r') {
         Cow::Owned(stage2b_tty_render(
             &stage2,
@@ -3616,8 +3621,6 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     };
     let (raw_lines_borrow, trailing_newline) = stage3_split_lines(&stage2b);
     let raw_lines: Vec<String> = raw_lines_borrow.iter().map(|s| (*s).to_string()).collect();
-
-    stats.cr_bearing_lines = raw_lines.iter().filter(|l| l.contains('\r')).count();
 
     let (post_dedup, pair_companion_idx) = stage4_dedup_structured_with_pair_flag(
         &raw_lines,
@@ -3782,7 +3785,20 @@ fn oversize_bypass(
         .split('\n')
         .filter(|l| l.contains('\r'))
         .count();
-    let head_trimmed = trim_to_byte_budget_at_boundary(&head_sanitized, half);
+    // Stage 2b also runs on the bypass path so `tty_render_enabled` does
+    // not silently flip semantics when an input crosses a bypass gate.
+    // Renders before trimming so the trim sees the rendered (typically
+    // shorter) text and we do not waste budget on stale CR frames.
+    let head_rendered: Cow<'_, str> = if cfg.tty_render_enabled() && head_sanitized.contains('\r') {
+        Cow::Owned(stage2b_tty_render(
+            &head_sanitized,
+            &mut stats.tty_frames_coalesced,
+            &mut stats.tty_bytes_saved,
+        ))
+    } else {
+        Cow::Borrowed(head_sanitized.as_ref())
+    };
+    let head_trimmed = trim_to_byte_budget_at_boundary(&head_rendered, half);
     // Drop any trailing partial line from head. If `head_trimmed`
     // contains NO `\n` at all, the entire window is a prefix of one
     // giant source line — emit nothing rather than a mid-line prefix
@@ -3833,13 +3849,25 @@ fn oversize_bypass(
             .filter(|l| l.contains('\r'))
             .count();
         stats.ansi_stripped |= tail_stripped;
-        let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_sanitized, half);
+        // Stage 2b on the tail window for the same reason as the head:
+        // honor `tty_render_enabled` even on the bypass path.
+        let tail_rendered: Cow<'_, str> =
+            if cfg.tty_render_enabled() && tail_sanitized.contains('\r') {
+                Cow::Owned(stage2b_tty_render(
+                    &tail_sanitized,
+                    &mut stats.tty_frames_coalesced,
+                    &mut stats.tty_bytes_saved,
+                ))
+            } else {
+                Cow::Borrowed(tail_sanitized.as_ref())
+            };
+        let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_rendered, half);
         // The raw slice was line-aligned (begins after a `\n`), so an
         // UN-trimmed tail starts on a line boundary. Only realign if
         // `trim_to_byte_budget_at_boundary_from_end` actually shaved
         // bytes off the front — that's when the first byte can sit
         // mid-line again (Round-7 finding).
-        let was_trimmed = tail_trimmed.len() < tail_sanitized.len();
+        let was_trimmed = tail_trimmed.len() < tail_rendered.len();
         // `final_line_truncated` triggers when the tail was actually
         // trimmed AND the resulting suffix has no `\n` — i.e., the
         // payload's last source line alone exceeds the tail budget.
@@ -4776,16 +4804,21 @@ mod corner_case_tests {
 
     #[test]
     fn mixed_line_endings_with_tty_render_resolves_cr() {
-        // With stage 2b explicitly enabled, bare CR collapses via overwrite
-        // semantics: "c\rd" → "d". Counter `tty_frames_coalesced` reflects
-        // the rewrite; `cr_bearing_lines` is zero because stage 3 sees no
-        // CR after stage 2b ran. Rewriting the bytes also flips `truncated`.
+        // With stage 2b explicitly enabled, bare CR collapses to the last
+        // non-empty `\r`-segment: "c\rd" → "d". `tty_frames_coalesced`
+        // reflects the rewrite. `cr_bearing_lines` is computed from the
+        // pre-rewrite sanitized text (round-3 review finding 2) so it
+        // remains a stable audit signal that the source contained CRs
+        // even though stage 2b removed them.
         let cfg = SquashConfig::default().with_tty_render_enabled(true);
         let raw = b"a\r\nb\nc\rd\r\ne";
         let out = squash_raw(raw, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
         assert!(body.contains("a\nb\nd\ne"), "got: {body:?}");
-        assert_eq!(out.stats.cr_bearing_lines, 0);
+        assert!(
+            out.stats.cr_bearing_lines >= 1,
+            "pre-render CR audit signal must survive stage 2b"
+        );
         assert_eq!(out.stats.tty_frames_coalesced, 1);
         assert!(
             out.stats.truncated,
@@ -4814,26 +4847,38 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn tty_render_skipped_on_oversize_bypass() {
-        // Regression for /review-loop round 2 finding 2: stage 2b runs only
-        // on the staged path. Inputs that trip `oversize_bypass` (here, the
-        // line-cardinality gate) skip stage 2b regardless of the flag.
-        // Pinning this so callers don't silently rely on tty rendering for
-        // pathologically large captures.
+    fn tty_render_applies_on_oversize_bypass() {
+        // Regression for /review-loop round 3 finding 1: stage 2b must run
+        // on both head and tail windows of the oversize bypass path so the
+        // same config produces consistent semantics across the size cliff.
+        // Drive the line-cardinality gate with CR-bearing progress lines
+        // and confirm the rendered output drops the early `\r<frame>`
+        // bytes while leaving the bypass shape (head, marker, tail) intact.
         let cfg_off = SquashConfig::default();
         let cfg_on = SquashConfig::default().with_tty_render_enabled(true);
-        // Build > MAX_INPUT_LINES newlines of CR-bearing progress lines.
         let mut raw = Vec::with_capacity(MAX_INPUT_LINES * 16);
         for i in 0..=MAX_INPUT_LINES {
             raw.extend_from_slice(format!("p{i}\rdone{i}\n").as_bytes());
         }
         let out_off = squash_raw(&raw, &cfg_off);
         let out_on = squash_raw(&raw, &cfg_on);
-        assert_eq!(
-            out_off.compacted_bytes, out_on.compacted_bytes,
-            "tty_render_enabled must be a no-op on the bypass path"
+        assert!(
+            out_on.stats.tty_frames_coalesced > 0,
+            "stage 2b must run inside the bypass path when the flag is on"
         );
-        assert_eq!(out_on.stats.tty_frames_coalesced, 0);
+        assert_ne!(
+            out_off.compacted_bytes, out_on.compacted_bytes,
+            "rendered bypass output must differ from raw-CR bypass output"
+        );
+        // Bypass output should never contain `\r` once rendered.
+        assert!(
+            !out_on.compacted_bytes.contains(&b'\r'),
+            "rendered bypass output must not retain bare CR bytes"
+        );
+        // Both paths still flip the coarse `truncated` bit (bypass always
+        // does) and surface the bare-CR audit signal from the source.
+        assert!(out_on.stats.truncated);
+        assert!(out_on.stats.cr_bearing_lines > 0);
     }
 
     #[test]
