@@ -63,8 +63,24 @@ proptest! {
             let extractor = RegexExtractor::builtin();
             let res = extractor.extract(&input).await;
             prop_assert!(res.is_ok());
+            // `max_drafts` bounds USER-rule outputs only — built-in
+            // triggers are intentionally uncapped (see
+            // dispatch::tests::builtin_outputs_are_uncapped). The
+            // builtin RuleSet has no user rules, so user-rule output
+            // count must be 0 here.
             if let Ok(r) = res {
-                prop_assert!(r.outputs.len() <= extractor.budget().max_drafts as usize);
+                let user_outputs = r
+                    .outputs
+                    .iter()
+                    .filter(|o| match o {
+                        ExtractOutput::Draft(d) => d
+                            .trigger_id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("user.")),
+                        ExtractOutput::Forget(i) => i.trigger_id.starts_with("user."),
+                    })
+                    .count();
+                prop_assert!(user_outputs <= extractor.budget().max_drafts as usize);
             }
             Ok::<(), TestCaseError>(())
         }).unwrap();

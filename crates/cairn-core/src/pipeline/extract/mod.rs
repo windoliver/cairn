@@ -16,6 +16,7 @@ pub mod regex;
 
 pub use body::{
     BodyResolution, BodyResolutionError, BodySource, ResolvedBody, UserIngestPayloadKind,
+    is_user_utterance_hook,
 };
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};

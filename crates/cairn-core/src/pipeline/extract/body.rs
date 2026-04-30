@@ -190,7 +190,13 @@ impl<'a> ResolvedBody<'a> {
 /// typed, not tool output or agent-produced content.
 const USER_UTTERANCE_HOOKS: &[&str] = &["UserPromptSubmit"];
 
-fn is_user_utterance_hook(hook_name: &str) -> bool {
+/// True when `hook_name` is a hook whose payload body canonically
+/// carries direct user utterance text. Single source of truth for the
+/// trust-boundary decision: callers anywhere in `cairn-core` (e.g.
+/// dispatch's text-bearing payload classifier) MUST consult this
+/// instead of duplicating the allowlist.
+#[must_use]
+pub fn is_user_utterance_hook(hook_name: &str) -> bool {
     USER_UTTERANCE_HOOKS.contains(&hook_name)
 }
 

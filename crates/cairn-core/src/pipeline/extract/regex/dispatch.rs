@@ -236,16 +236,18 @@ pub(crate) async fn dispatch(
 }
 
 /// Returns the payload variant name when the event's payload always
-/// carries extractable user text. Hook payloads return `Some` only for
-/// known user-utterance hooks (e.g. `UserPromptSubmit`); tool-output
-/// hooks like `PostToolUse` legitimately carry no body and return
-/// `None` so they can run hook/tool-frame rules without a body.
+/// carries extractable user text. Hook payloads delegate to the single
+/// trust-boundary helper [`super::super::is_user_utterance_hook`] so a
+/// new entry to that allowlist automatically flows here — no duplicated
+/// list to drift.
 fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
     match p {
         CapturePayload::Cli { .. } => Some("CapturePayload::Cli"),
         CapturePayload::Mcp { .. } => Some("CapturePayload::Mcp"),
-        CapturePayload::Hook { hook_name, .. } if hook_name == "UserPromptSubmit" => {
-            Some("CapturePayload::Hook (UserPromptSubmit)")
+        CapturePayload::Hook { hook_name, .. }
+            if super::super::is_user_utterance_hook(hook_name) =>
+        {
+            Some("CapturePayload::Hook (user utterance)")
         }
         _ => None,
     }
