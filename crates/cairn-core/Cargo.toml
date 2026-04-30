@@ -46,6 +46,7 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true, features = ["unicode-perl", "unicode-case"] }
 unicode-normalization = { workspace = true }
+bon = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

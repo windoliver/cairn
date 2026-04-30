@@ -3,6 +3,7 @@
 //! P0 scaffold: surface only. The single `complete(prompt, schema?)` method
 //! and structured-output enforcement arrive in #144.
 
+use crate::config::ExtractBudget;
 use crate::contract::version::{ContractVersion, VersionRange};
 
 /// Contract version for `LLMProvider`. Bumps when the trait surface changes.
@@ -44,6 +45,31 @@ pub enum LlmError {
     /// Completion exceeded the configured token or time budget.
     #[error("llm.budget_exceeded")]
     BudgetExceeded,
+}
+
+/// Input to [`LLMProvider::complete`].
+#[derive(Debug, Clone, bon::Builder)]
+pub struct CompletionRequest {
+    /// The user/system prompt to send to the model.
+    pub prompt: String,
+    /// Optional JSON Schema. When `Some`, triggers JSON-mode enforcement:
+    /// the adapter sends `response_format: json_schema` and validates the
+    /// returned value against this schema before returning.
+    pub schema: Option<serde_json::Value>,
+    /// Override the model configured in `LlmConfig`. `None` uses the default.
+    pub model: Option<String>,
+    /// Token and wall-clock budget. `None` means unlimited.
+    pub budget: Option<ExtractBudget>,
+}
+
+/// Output from [`LLMProvider::complete`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum CompletionOutput {
+    /// Free-form text response (no schema was requested).
+    Text(String),
+    /// Validated JSON response (schema was provided and output matched).
+    Json(serde_json::Value),
 }
 
 /// Static capability declaration for a `LLMProvider` impl.
@@ -149,5 +175,38 @@ mod tests {
             raw: "{}".into(),
         };
         assert!(e.to_string().contains("llm.invalid_json_output"));
+    }
+
+    #[test]
+    fn completion_request_builder_minimal() {
+        let req = CompletionRequest::builder()
+            .prompt("hello".to_string())
+            .build();
+        assert_eq!(req.prompt, "hello");
+        assert!(req.schema.is_none());
+        assert!(req.model.is_none());
+        assert!(req.budget.is_none());
+    }
+
+    #[test]
+    fn completion_request_builder_with_schema() {
+        let schema = serde_json::json!({ "type": "object" });
+        let req = CompletionRequest::builder()
+            .prompt("hello".to_string())
+            .schema(schema.clone())
+            .build();
+        assert_eq!(req.schema.as_ref().unwrap(), &schema);
+    }
+
+    #[test]
+    fn completion_output_is_text() {
+        let out = CompletionOutput::Text("hi".into());
+        assert!(matches!(out, CompletionOutput::Text(_)));
+    }
+
+    #[test]
+    fn completion_output_is_json() {
+        let out = CompletionOutput::Json(serde_json::json!({"k": "v"}));
+        assert!(matches!(out, CompletionOutput::Json(_)));
     }
 }
