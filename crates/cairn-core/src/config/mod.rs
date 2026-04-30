@@ -268,9 +268,16 @@ impl EmbeddingModelKind {
     }
 
     /// Expected output dimension of the model.
+    ///
+    /// Uses an explicit `match` so the compiler forces this to be updated
+    /// whenever a new variant is added.
     #[must_use]
+    #[allow(clippy::match_same_arms)] // intentional: exhaustive match forces updates on new variants
     pub fn dim(self) -> usize {
-        384
+        match self {
+            Self::BgeSmallEnV1_5 => 384,
+            Self::AllMiniLmL6V2 => 384,
+        }
     }
 }
 
@@ -1095,6 +1102,17 @@ mod tests {
         let c = SearchConfig::default();
         assert!(c.local_embeddings);
         assert_eq!(c.embedding_model, EmbeddingModelKind::BgeSmallEnV1_5);
+    }
+
+    #[test]
+    fn embedding_model_kind_serde_round_trip() {
+        let json = serde_json::to_string(&EmbeddingModelKind::AllMiniLmL6V2).unwrap();
+        assert_eq!(json, r#""all-MiniLM-L6-v2""#);
+        let back: EmbeddingModelKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, EmbeddingModelKind::AllMiniLmL6V2);
+        // Also verify BgeSmallEnV1_5
+        let json2 = serde_json::to_string(&EmbeddingModelKind::BgeSmallEnV1_5).unwrap();
+        assert_eq!(json2, r#""bge-small-en-v1.5""#);
     }
 
     proptest! {
