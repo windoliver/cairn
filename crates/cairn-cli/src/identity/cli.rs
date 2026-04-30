@@ -234,7 +234,10 @@ pub fn run_identity(matches: &ArgMatches, explicit_vault: Option<String>) -> Exi
     //   2. subcommand-local `--vault-path` (legacy, kept for back-compat)
     //   3. cwd walk-up via the registry resolver
     //   4. registry default
-    let vault_path = resolve_vault_path(matches, explicit_vault);
+    let vault_path = match resolve_vault_path(matches, explicit_vault) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
 
     match matches.subcommand() {
         Some(("status", sub)) => run_status(sub, vault_path),
@@ -264,19 +267,26 @@ pub fn run_identity(matches: &ArgMatches, explicit_vault: Option<String>) -> Exi
 /// 2. Subcommand-local `--vault-path` (legacy).
 /// 3. cwd walk-up + registry default (via [`crate::vault::resolve_vault`]).
 /// 4. cwd as last-ditch fallback.
-fn resolve_vault_path(matches: &ArgMatches, explicit_vault: Option<String>) -> PathBuf {
+fn resolve_vault_path(
+    matches: &ArgMatches,
+    explicit_vault: Option<String>,
+) -> Result<PathBuf, ExitCode> {
     // 1. Subcommand-local --vault-path always wins if explicitly given.
     //    (Kept for back-compat; future cleanups may remove the per-subcommand flag.)
     if let Some(p) = matches.get_one::<String>("vault-path") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
 
-    // 2. Use the global resolver when an explicit vault selector is present
-    //    OR fall back to walk-up / registry default.
+    // Build the registry store. When an explicit vault selector is
+    // present we MUST resolve through it — silently falling through to
+    // the cwd would let a destructive verb mutate the wrong vault.
     let store_path = std::env::var("CAIRN_REGISTRY")
         .ok()
         .map(PathBuf::from)
         .or_else(|| crate::vault::VaultRegistryStore::default_path().ok());
+
+    let explicit_present = explicit_vault.is_some();
+
     if let Some(store_path) = store_path {
         let store = crate::vault::VaultRegistryStore::new(store_path);
         let opts = crate::vault::ResolveOpts {
@@ -284,13 +294,29 @@ fn resolve_vault_path(matches: &ArgMatches, explicit_vault: Option<String>) -> P
             cwd: std::env::current_dir().ok(),
             store: &store,
         };
-        if let Ok(p) = crate::vault::resolve_vault(opts) {
-            return p;
+        match crate::vault::resolve_vault(opts) {
+            Ok(p) => return Ok(p),
+            Err(e) if explicit_present => {
+                // Fail closed when the operator named a target.
+                eprintln!(
+                    "cairn identity: explicit --vault/CAIRN_VAULT could not be resolved: {e}"
+                );
+                return Err(ExitCode::from(EX_CONFIG));
+            }
+            Err(_) => {
+                // No explicit selector — fall through to cwd.
+            }
         }
+    } else if explicit_present {
+        eprintln!(
+            "cairn identity: explicit --vault/CAIRN_VAULT supplied but no vault registry is \
+             available (set CAIRN_REGISTRY or initialise the default registry)"
+        );
+        return Err(ExitCode::from(EX_CONFIG));
     }
 
-    // 3. Last resort.
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // No explicit selector — last-resort cwd fallback.
+    Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 // ── error → exit code ─────────────────────────────────────────────────────────

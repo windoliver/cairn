@@ -380,6 +380,14 @@ pub async fn finalise_binding(
                 return Err(IdentityServiceError::PartialBindNeedsProvision);
             }
 
+            // Before promoting the sentinels, verify that the rest of the
+            // first-bind sequence completed. If a pending row still exists
+            // for the first identity AND its keystore entry is missing, the
+            // crash happened before `store_keypair`/`activate_identity` —
+            // declaring success here would mark the vault as bound while
+            // the first identity has no usable signing key.
+            verify_first_bind_completed(&registry, &db_vault_id).await?;
+
             // Write the final binding file BEFORE removing the pending sentinel
             // so that a second crash still leaves one file rather than neither.
             fs::write(&binding_path, db_witness_hash.as_bytes())
@@ -387,10 +395,12 @@ pub async fn finalise_binding(
             File::open(&binding_path)
                 .and_then(|f| f.sync_all())
                 .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+            fsync_dir(&cairn_dir)?;
 
             // Remove the pending sentinel.
             fs::remove_file(&pending_path)
                 .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+            fsync_dir(&cairn_dir)?;
 
             // Write vault.id for convenience (idempotent — only if absent).
             let vault_id_path = cairn_dir.join("vault.id");
@@ -398,11 +408,42 @@ pub async fn finalise_binding(
                 fs::write(&vault_id_path, db_vault_id.as_str()).map_err(|e| {
                     IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                 })?;
+                fsync_dir(&cairn_dir)?;
             }
 
             Ok(())
         }
     }
+}
+
+/// fsync the directory at `dir` so dirent changes (file create/remove) are
+/// durable across crashes. Mirrors the discipline in `commit_first_identity`.
+fn fsync_dir(dir: &std::path::Path) -> Result<(), IdentityServiceError> {
+    File::open(dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))
+}
+
+/// Refuse to promote the sentinels when the first identity is still in
+/// `pending` state in the registry — that state means the operator-visible
+/// first-bind sequence (`store_keypair` + `activate_identity`) has not yet
+/// completed, so finalising would mark the vault bound while leaving the
+/// first identity unusable.
+///
+/// This is a best-effort check using the registry's pending list. If no
+/// pending rows exist, we assume the sequence completed (or there was
+/// nothing to complete). Callers that want stronger guarantees should
+/// re-run `provision` instead of `finalise-binding`.
+async fn verify_first_bind_completed(
+    registry: &SqliteIdentityRegistry,
+    _vault_id: &VaultId,
+) -> Result<(), IdentityServiceError> {
+    use cairn_core::contract::identity_registry::IdentityRegistry as _;
+    let pending = registry.list_pending().await?;
+    if !pending.is_empty() {
+        return Err(IdentityServiceError::PartialBindNeedsProvision);
+    }
+    Ok(())
 }
 
 // ── vault_id_recover ──────────────────────────────────────────────────────────

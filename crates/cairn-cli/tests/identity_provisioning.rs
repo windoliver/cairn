@@ -1237,12 +1237,17 @@ async fn vault_id_recover_writes_file_when_db_has_meta() {
 /// `.cairn/vault.binding` when both the pending file and the DB's
 /// `vault_meta` are consistent.
 ///
-/// Simulates the most common crash in `commit_first_identity`: a process
-/// kill after `reserve_first_identity` but before step 4 (writing
-/// `vault.binding` and removing the pending sentinel).
+/// **Regression — codex review round 8 finding #2:** when the first identity
+/// is still in `pending` state in the registry (because the crash happened
+/// after `reserve_first_identity` but before `store_keypair` /
+/// `activate_identity`), `finalise_binding` MUST refuse with
+/// `PartialBindNeedsProvision`. Promoting the sentinels here would mark
+/// the vault bound while the first identity has no usable signing key.
 #[tokio::test]
-async fn finalise_binding_renames_pending_when_db_consistent() {
-    use cairn_core::contract::identity_registry::IdentityRegistry as _;
+async fn finalise_binding_refuses_when_first_identity_pending() {
+    use cairn_core::{
+        contract::identity_registry::IdentityRegistry as _, error::identity::IdentityServiceError,
+    };
 
     let dir = tempfile::tempdir().expect("tempdir");
     let cairn_dir = dir.path().join(".cairn");
@@ -1266,33 +1271,31 @@ async fn finalise_binding_renames_pending_when_db_consistent() {
         .await
         .expect("reserve_first_identity");
 
-    // Vault is now in the "crash state": pending exists, binding absent.
+    // Vault is now in the "crash state": pending exists, binding absent,
+    // first identity is pending (no store_keypair / activate_identity).
     let binding_path = cairn_dir.join("vault.binding");
     assert!(pending_path.exists(), "pending sentinel must exist");
     assert!(!binding_path.exists(), "final binding must NOT exist yet");
 
-    // Run finalise_binding without abandoning.
-    cairn_cli::identity::finalise_binding(dir.path().to_path_buf(), false, None)
+    // finalise_binding must refuse — sentinels would otherwise lie about
+    // the vault being bound.
+    let err = cairn_cli::identity::finalise_binding(dir.path().to_path_buf(), false, None)
         .await
-        .expect("finalise_binding must succeed");
-
-    // Post-conditions: binding exists, pending is gone, vault_id matches.
+        .expect_err("finalise_binding must refuse a still-pending first identity");
     assert!(
-        binding_path.exists(),
-        "vault.binding must exist after finalise_binding",
-    );
-    assert!(
-        !pending_path.exists(),
-        "vault.binding.pending must be removed after finalise_binding",
+        matches!(err, IdentityServiceError::PartialBindNeedsProvision),
+        "expected PartialBindNeedsProvision, got {err:?}",
     );
 
-    // vault.id must have been written.
-    let vault_id_path = cairn_dir.join("vault.id");
-    let written = fs::read_to_string(&vault_id_path).expect("read vault.id");
-    assert_eq!(
-        written.trim(),
-        vault_id.as_str(),
-        "vault.id must contain the correct vault_id",
+    // Recovery sentinels must remain untouched so the operator can re-run
+    // `provision` to complete the first-bind.
+    assert!(
+        pending_path.exists(),
+        "vault.binding.pending must remain on refusal",
+    );
+    assert!(
+        !binding_path.exists(),
+        "vault.binding must NOT be written on refusal",
     );
 }
 
