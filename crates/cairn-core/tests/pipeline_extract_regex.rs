@@ -148,6 +148,39 @@ async fn empty_fallthrough_returns_no_outputs() {
 }
 
 #[tokio::test]
+async fn missing_body_for_cli_payload_is_typed_error() {
+    use cairn_core::pipeline::extract::ExtractError;
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = ExtractInput {
+        event: &event,
+        body: BodyResolution::NotApplicable,
+    };
+    let err = extractor.extract(&input).await.unwrap_err();
+    assert!(matches!(err, ExtractError::MissingBody { .. }));
+}
+
+#[tokio::test]
+async fn trigger_after_closing_quote_fires() {
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(&event, r#"He said "done." forget my address"#);
+    let res = extractor.extract(&input).await.expect("ok");
+    assert_eq!(res.outputs.len(), 1, "expected forget after closing quote");
+    assert!(matches!(res.outputs[0], ExtractOutput::Forget(_)));
+}
+
+#[tokio::test]
+async fn trigger_after_closing_paren_fires() {
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(&event, "(see below). remember that I prefer cash");
+    let res = extractor.extract(&input).await.expect("ok");
+    assert_eq!(res.outputs.len(), 1, "expected remember after closing paren");
+    assert!(matches!(res.outputs[0], ExtractOutput::Draft(_)));
+}
+
+#[tokio::test]
 async fn body_resolution_failure_surfaces_typed_error() {
     let extractor = RegexExtractor::builtin();
     let event = cli_event();

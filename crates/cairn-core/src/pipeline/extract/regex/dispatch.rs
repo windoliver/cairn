@@ -27,7 +27,18 @@ pub(crate) async fn dispatch(
             let _ = rb.source();
             Some(rb.text())
         }
-        BodyResolution::NotApplicable => None,
+        BodyResolution::NotApplicable => {
+            // Reject NotApplicable for payload variants that always
+            // carry user text. Otherwise a caller bug (or version skew)
+            // turns explicit user intents into silent empty results.
+            if let Some(variant) = text_bearing_payload_variant(&input.event.payload) {
+                return Err(ExtractError::MissingBody {
+                    event_id: input.event.event_id.as_str().to_owned(),
+                    payload_variant: variant,
+                });
+            }
+            None
+        }
         BodyResolution::Failed(err) => {
             return Err(ExtractError::BodyResolution {
                 event_id: input.event.event_id.as_str().to_owned(),
@@ -205,6 +216,22 @@ pub(crate) async fn dispatch(
         truncated,
         llm_eligible_spans: llm_spans,
     })
+}
+
+/// Returns the payload variant name when the event's payload always
+/// carries extractable user text. Hook payloads return `Some` only for
+/// known user-utterance hooks (e.g. `UserPromptSubmit`); tool-output
+/// hooks like `PostToolUse` legitimately carry no body and return
+/// `None` so they can run hook/tool-frame rules without a body.
+fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
+    match p {
+        CapturePayload::Cli { .. } => Some("CapturePayload::Cli"),
+        CapturePayload::Mcp { .. } => Some("CapturePayload::Mcp"),
+        CapturePayload::Hook { hook_name, .. } if hook_name == "UserPromptSubmit" => {
+            Some("CapturePayload::Hook (UserPromptSubmit)")
+        }
+        _ => None,
+    }
 }
 
 fn normalise_spans(spans: &mut Vec<TextSpan>) {

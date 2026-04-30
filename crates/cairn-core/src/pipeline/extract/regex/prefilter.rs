@@ -115,6 +115,16 @@ pub fn is_sentence_start(body: &[u8], pos: usize) -> bool {
     if i == 0 {
         return true;
     }
+    // Walk back over closing delimiters (`"`, `'`, `` ` ``, `)`, `]`, `}`)
+    // so that `He said "done." forget my address` and
+    // `(...). remember that ...` correctly resolve to the period that
+    // ends the prior sentence rather than the closer.
+    while i > 0 && matches!(body[i - 1], b'"' | b'\'' | b'`' | b')' | b']' | b'}') {
+        i -= 1;
+    }
+    if i == 0 {
+        return true;
+    }
     let prev = body[i - 1];
     match prev {
         b'\n' | b';' | b'?' | b'!' | b',' => true,

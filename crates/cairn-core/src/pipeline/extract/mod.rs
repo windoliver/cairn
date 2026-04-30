@@ -172,6 +172,18 @@ pub enum ExtractError {
         #[source]
         source: BodyResolutionError,
     },
+    /// A text-bearing event was passed with `BodyResolution::NotApplicable`.
+    /// Returned when the payload variant (e.g. `Cli`, `Mcp`, or a known
+    /// user-utterance hook) is one whose body should always be resolved
+    /// before extraction. Silently treating the body as absent would
+    /// drop explicit `remember`/`forget` intents.
+    #[error("missing body for text-bearing event {event_id} (payload variant `{payload_variant}`)")]
+    MissingBody {
+        /// `CaptureEvent` id (for cross-referencing logs / traces).
+        event_id: String,
+        /// The payload variant family that should have produced a body.
+        payload_variant: &'static str,
+    },
 }
 
 /// The pluggable extractor contract — see brief §5.2.a and spec §4.1.
