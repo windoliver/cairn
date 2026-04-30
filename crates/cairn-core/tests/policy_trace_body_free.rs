@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use cairn_core::domain::{MemoryVisibility, consent::ConsentEvent};
+use cairn_core::domain::{MemoryVisibility, TargetId, consent::ConsentEvent};
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
 use cairn_core::policy_trace::{
-    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
+    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, RecordExclusion,
+    to_wire, to_wire_exclusions,
 };
 
 /// Hard ceiling on any string value in a serialized policy trace. Real
@@ -117,4 +118,38 @@ proptest::proptest! {
         let json = serde_json::to_string(&wire).expect("serializable");
         assert_body_free(&json);
     }
+}
+
+fn id(suffix: char) -> TargetId {
+    TargetId::parse(format!("01HQZX9F5N000000000000000{suffix}")).expect("valid ULID")
+}
+
+#[test]
+fn exclusions_are_body_free() {
+    let mut counts = BTreeMap::new();
+    counts.insert(RedactionTag::Email, 1);
+    let exclusions = vec![
+        RecordExclusion::new(id('A'), PolicyGate::ReadFilterRelevance, PolicyDetail::None),
+        RecordExclusion::new(
+            id('B'),
+            PolicyGate::ReadFilterStaleness,
+            PolicyDetail::DiscardReason(DiscardReason::PiiBlocked),
+        ),
+        RecordExclusion::new(
+            id('C'),
+            PolicyGate::ReadFilterDedup,
+            PolicyDetail::RedactionTagCounts(counts),
+        ),
+    ];
+    let wire = to_wire_exclusions(&exclusions);
+    let json = serde_json::to_string(&wire).expect("serializable");
+    assert_body_free(&json);
+}
+
+#[test]
+#[should_panic(expected = "whitespace")]
+fn walker_catches_free_text_in_values() {
+    // Sanity check: the walker rejects string values containing spaces.
+    let bad = serde_json::json!([{ "detail": "raw body: hello world" }]);
+    assert_body_free(&serde_json::to_string(&bad).expect("serializable"));
 }

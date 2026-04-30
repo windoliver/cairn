@@ -5,6 +5,9 @@
   "description": "Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.",
   "properties": {
     "detail": {
+      "description": "Body-free wire code from PolicyDetail.to_wire_string(). Empty string for None; otherwise starts with a lowercase letter and contains only a-z0-9_:=, — no whitespace, no free text.",
+      "maxLength": 128,
+      "pattern": "^([a-z][a-z0-9_:=,]*)?$",
       "type": "string"
     },
     "gate": {
