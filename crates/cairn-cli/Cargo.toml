@@ -26,6 +26,7 @@ cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
+cairn-llm-openai-compat = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
@@ -49,6 +50,9 @@ async-trait = { workspace = true }
 proptest = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
+wiremock = { workspace = true }
+assert_cmd = "2"
+predicates = "3"
 
 [lints]
 workspace = true

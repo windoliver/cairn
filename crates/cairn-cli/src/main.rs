@@ -44,7 +44,10 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
+    let needs_vault_guard = !matches!(
+        active_subcommand,
+        "vault" | "bootstrap" | "plugins" | "mcp" | "llm"
+    );
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -98,6 +101,7 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("llm", sub)) => run_llm(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -397,4 +401,41 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
         }
         _ => unreachable!("clap subcommand_required(true) on vault"),
     }
+}
+
+fn run_llm(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("probe", sub)) => run_llm_probe(sub),
+        _ => unreachable!("clap subcommand_required(true) on llm"),
+    }
+}
+
+fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
+    let json = matches.get_flag("json");
+    let prompt = matches.get_one::<String>("prompt").cloned();
+
+    // Load config from cwd. The probe is a vault-agnostic diagnostic;
+    // it reads `.cairn/config.yaml` from the current directory if present,
+    // otherwise uses defaults (which produces NotConfigured).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = match cairn_cli::config::load(&cwd, &cairn_cli::config::CliOverrides::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cairn llm probe: config error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cairn llm probe: tokio init error — {e}");
+            return ExitCode::from(70); // EX_SOFTWARE
+        }
+    };
+
+    runtime.block_on(cairn_cli::llm::run_probe(&config, json, prompt.as_deref()))
 }

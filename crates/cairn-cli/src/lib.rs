@@ -9,6 +9,7 @@ pub mod command;
 pub mod config;
 pub mod docgen;
 pub(crate) mod generated;
+pub mod llm;
 pub mod mcp;
 pub mod plugins;
 pub mod render;
