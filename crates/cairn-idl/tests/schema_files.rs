@@ -661,3 +661,35 @@ fn every_ref_resolves_to_a_real_file_or_local_fragment() {
         }
     }
 }
+
+#[test]
+fn search_explain_arg_is_capability_gated_when_true() {
+    // PR #95 round 3 finding: `args.explain: bool` must declare which
+    // capability gates the `true` value, so a server that does not
+    // advertise `cairn.mcp.v1.policy_trace` can fail-closed on
+    // `explain: true`. The codegen does not currently rewrite property
+    // schemas to per-value oneOf for booleans (string-const only), so
+    // this contract is encoded as a property-level
+    // `x-cairn-capability-when-true` annotation that human readers,
+    // future codegen, and runtime validators can pick up.
+    let v = read_json(&schema_dir().join("verbs/search.json"));
+    let explain = v
+        .pointer("/$defs/Args/properties/explain")
+        .expect("search.json must declare args.explain (round-3 contract)");
+    let cap = explain
+        .get("x-cairn-capability-when-true")
+        .and_then(serde_json::Value::as_str)
+        .expect(
+            "args.explain must carry x-cairn-capability-when-true so servers without the \
+             capability can reject explain=true (sysexit 69)",
+        );
+    let caps = capabilities_enum();
+    assert_eq!(
+        cap, "cairn.mcp.v1.policy_trace",
+        "args.explain must gate `true` on cairn.mcp.v1.policy_trace; got {cap}"
+    );
+    assert!(
+        caps.contains(cap),
+        "the gating capability must be a declared member of capabilities/capabilities.json; got {cap}"
+    );
+}

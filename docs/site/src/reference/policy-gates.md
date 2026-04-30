@@ -19,6 +19,13 @@ shifts) travel with the MCP contract version (`cairn.mcp.v2.*`) — a
 fresh closed `Capabilities` enum at that point — rather than as a `.v2`
 suffix on this capability, matching the existing sibling pattern.
 
+`search` accepts an `explain: bool` argument. The IDL gates
+`explain: true` on `cairn.mcp.v1.policy_trace` via the same
+`x-cairn-capability` per-value annotation already used by search modes:
+servers that do not advertise the capability MUST reject `explain: true`
+with `CapabilityUnavailable` (sysexit 69). `explain: false` (the default)
+is always accepted.
+
 ## Gate vocabulary
 
 | Gate string                  | Brief         | Fires on         | Typical `result` | Typical `detail`                                |

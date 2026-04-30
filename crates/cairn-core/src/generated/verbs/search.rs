@@ -226,7 +226,7 @@ pub struct SearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<crate::generated::common::Cursor>,
-    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explain: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,7 +248,7 @@ struct RawSearchArgs {
     /// Opaque continuation token from a prior search Data.next_cursor.
     #[serde(default)]
     cursor: Option<crate::generated::common::Cursor>,
-    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.
+    /// When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).
     #[serde(default)]
     explain: Option<bool>,
     #[serde(default)]

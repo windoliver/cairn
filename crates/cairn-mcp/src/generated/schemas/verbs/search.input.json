@@ -17,8 +17,9 @@
         },
         "explain": {
           "default": false,
-          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see.",
-          "type": "boolean"
+          "description": "When true, populate policy_trace and data.excluded with per-record exclusions for Tier-2 read filters. Has no effect on the candidate set the caller could see. `explain: true` requires the cairn.mcp.v1.policy_trace capability — servers that do not advertise it MUST reject `explain: true` with CapabilityUnavailable (sysexit 69).",
+          "type": "boolean",
+          "x-cairn-capability-when-true": "cairn.mcp.v1.policy_trace"
         },
         "filters": {
           "$ref": "#/$defs/filter"

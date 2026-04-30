@@ -8,20 +8,71 @@ use std::collections::HashSet;
 use crate::domain::TargetId;
 use crate::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion};
 
-/// One candidate from the store query. Caller-visible by definition;
-/// the store filters Tier-1-invisible records before populating this.
+/// One candidate from the store query, **after** scope and Tier-1
+/// visibility filtering. Constructing one is a deliberate assertion
+/// (SAFETY-style) that the store has already filtered out records the
+/// caller cannot see — `explain_filter` surfaces `target_id` for stale
+/// or duplicate items, which would leak record existence if the
+/// assertion does not hold.
+///
+/// Fields are private; the only constructor is
+/// [`Self::from_scope_filter`].
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    /// Lineage key for the record.
-    pub target_id: TargetId,
-    /// How many days old the record is.
-    pub age_days: u32,
-    /// Relevance score from the ranker; higher wins dedup. NaN scores
-    /// always lose to non-NaN scores; ties between two NaN scores
-    /// resolve to the first-seen candidate.
-    pub relevance_score: f32,
-    /// Content hash used for deduplication.
-    pub content_hash: String,
+    target_id: TargetId,
+    age_days: u32,
+    relevance_score: f32,
+    content_hash: String,
+}
+
+impl Candidate {
+    /// Construct a candidate **after** the store has applied scope and
+    /// Tier-1 visibility predicates. This is the only constructor: the
+    /// name is the assertion. Calling it without first running scope
+    /// filtering will leak record existence through
+    /// [`explain_filter`]'s `excluded` set (brief §5.1, §14).
+    ///
+    /// `relevance_score`: NaN values lose to non-NaN; two NaNs resolve
+    /// to first-seen.
+    #[must_use]
+    pub fn from_scope_filter(
+        target_id: TargetId,
+        age_days: u32,
+        relevance_score: f32,
+        content_hash: String,
+    ) -> Self {
+        Self {
+            target_id,
+            age_days,
+            relevance_score,
+            content_hash,
+        }
+    }
+
+    /// Borrow the candidate's target id (e.g. for read-only inspection
+    /// after partitioning).
+    #[must_use]
+    pub fn target_id(&self) -> &TargetId {
+        &self.target_id
+    }
+
+    /// Age in days, as supplied at construction.
+    #[must_use]
+    pub const fn age_days(&self) -> u32 {
+        self.age_days
+    }
+
+    /// Relevance score, as supplied at construction.
+    #[must_use]
+    pub const fn relevance_score(&self) -> f32 {
+        self.relevance_score
+    }
+
+    /// Content hash used for dedup partitioning.
+    #[must_use]
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
 }
 
 /// Pure partition configuration.
@@ -57,7 +108,12 @@ impl ReadFilterReason {
     }
 }
 
-/// Partition `candidates` into kept and excluded sets. Order:
+/// Partition scope-filtered `candidates` into kept and excluded sets.
+/// Each input must already be a [`Candidate`] (constructible only via
+/// [`Candidate::from_scope_filter`]) — the caller asserts at the type
+/// boundary that scope and Tier-1 visibility have been applied.
+///
+/// Order:
 ///
 /// 1. Staleness — exclude any candidate older than the threshold.
 /// 2. Dedup — globally across the post-staleness set, keep the
