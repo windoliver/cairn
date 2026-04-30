@@ -445,7 +445,8 @@ fn apply_text_rule(
     outputs: &mut Vec<ExtractOutput>,
     covered_high_conf: &mut Vec<TextSpan>,
 ) {
-    let slice = &body[window.span.start as usize..window.span.end as usize];
+    let win_start = window.span.start as usize;
+    let slice = &body[win_start..window.span.end as usize];
     match &rule.kind {
         CompiledRuleKind::TriggerPhrase {
             re,
@@ -457,16 +458,21 @@ fn apply_text_rule(
                 let group_text = caps
                     .get(*capture_group as usize)
                     .map_or(slice, |m| m.as_str());
+                // Use the full match span (group 0) for suppression so
+                // a narrow user rule that only matches a prefix does
+                // not silently mask trailing text in the same window
+                // from the LLM extractor.
+                let match_span = match_span_in_body(&caps, win_start, window.span);
                 outputs.push(ExtractOutput::Draft(MemoryDraft {
                     kind_hint: kind_hint.clone(),
                     body: group_text.to_owned(),
                     confidence: *confidence,
                     source_event: event.event_id.clone(),
-                    source_span: Some(window.span),
+                    source_span: Some(match_span),
                     trigger_id: Some(rule.id.clone()),
                 }));
                 if confidence.as_f32() >= CONFIDENCE_GATE_FOR_SUPPRESSION {
-                    covered_high_conf.push(window.span);
+                    covered_high_conf.push(match_span);
                 }
             }
         }
@@ -478,21 +484,39 @@ fn apply_text_rule(
         } => {
             if let Some(caps) = re.captures(slice) {
                 let target = caps.get(*target_group as usize).map_or("", |m| m.as_str());
+                let match_span = match_span_in_body(&caps, win_start, window.span);
                 outputs.push(ExtractOutput::Forget(ForgetIntent {
                     target_text_normalized: normalize_target(target),
                     match_strategy: *match_strategy,
                     kind_filter: None,
-                    source_span: window.span,
+                    source_span: match_span,
                     confidence: *confidence,
                     source_event: event.event_id.clone(),
                     trigger_id: rule.id.clone(),
                 }));
                 if confidence.as_f32() >= CONFIDENCE_GATE_FOR_SUPPRESSION {
-                    covered_high_conf.push(window.span);
+                    covered_high_conf.push(match_span);
                 }
             }
         }
         _ => {}
+    }
+}
+
+/// Translate the regex group-0 match (which is in `slice` coordinates,
+/// i.e. relative to `win_start`) into absolute body coordinates. Falls
+/// back to `window_span` if the regex backend returns no group 0.
+fn match_span_in_body(
+    caps: &::regex::Captures<'_>,
+    win_start: usize,
+    window_span: TextSpan,
+) -> TextSpan {
+    if let Some(m) = caps.get(0) {
+        let abs_start = u32::try_from(win_start + m.start()).unwrap_or(u32::MAX);
+        let abs_end = u32::try_from(win_start + m.end()).unwrap_or(u32::MAX);
+        TextSpan::new(abs_start, abs_end)
+    } else {
+        window_span
     }
 }
 
