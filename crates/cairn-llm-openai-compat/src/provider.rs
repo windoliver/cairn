@@ -46,10 +46,13 @@ impl OpenAiCompatProvider {
     }
 
     /// Test-only constructor with explicit capabilities.
-    // Used in Tasks 6–8 integration tests.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn with_capabilities(
+    ///
+    /// # Note
+    /// This is exposed as `pub` so integration tests in `tests/` can use it.
+    /// Do not rely on this in production code.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_capabilities(
         base_url: &str,
         model: &str,
         capabilities: LLMProviderCapabilities,
