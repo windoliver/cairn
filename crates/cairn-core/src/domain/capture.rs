@@ -1492,7 +1492,7 @@ mod tests {
     }
 
     /// `Terminal { context: Some(InteractiveTty) }` round-trips through
-    /// JSON in the documented snake_case wire form.
+    /// JSON in the documented `snake_case` wire form.
     #[test]
     fn terminal_payload_serde_round_trip_with_context() {
         let original = CapturePayload::Terminal {
@@ -1510,8 +1510,8 @@ mod tests {
     }
 
     /// `Terminal { context: None }` serializes without emitting the
-    /// `context` field (skip_serializing_if), preserving wire bytes for
-    /// callers that haven't been updated yet.
+    /// `context` field (`skip_serializing_if`), preserving wire bytes
+    /// for callers that haven't been updated yet.
     #[test]
     fn terminal_payload_omits_none_context_on_serialize() {
         let payload = CapturePayload::Terminal {
