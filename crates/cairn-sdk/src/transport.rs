@@ -133,9 +133,16 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the requested mode's capability must
     /// be advertised by [`Self::status`], otherwise the call is rejected
     /// with [`SdkError::CapabilityUnavailable`] before any dispatch.
+    /// `args.explain == Some(true)` additionally requires
+    /// `cairn.mcp.v1.policy_trace` (per the
+    /// `x-cairn-capability-when-true` annotation in
+    /// `crates/cairn-idl/schema/verbs/search.json`).
     pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
         validate_search(args)?;
         self.require_capability(args.mode.capability())?;
+        if args.explain == Some(true) {
+            self.require_capability(Some("cairn.mcp.v1.policy_trace"))?;
+        }
         Err(unimplemented("search"))
     }
 
@@ -829,8 +836,11 @@ fn unimplemented(verb: &'static str) -> SdkError {
 }
 
 fn p0_capabilities() -> Vec<Capabilities> {
-    // P0 advertises no capabilities — the store adapter is not wired yet.
-    // Mirrors `cairn-cli::verbs::status::p0_capabilities`.
+    // Mirrors `cairn-cli::verbs::status::p0_capabilities`. Empty in P0:
+    // capabilities are advertised only when the runtime can honor them
+    // end-to-end. `cairn.mcp.v1.policy_trace` (#95) and the store-driven
+    // search / retrieve / forget mode capabilities arrive as their
+    // respective verb-runtime issues close (#9 / #61 / #62).
     vec![]
 }
 

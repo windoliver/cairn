@@ -41,6 +41,8 @@ pub enum Capabilities {
     CairnMcpV1ExtensionFederation,
     #[serde(rename = "cairn.mcp.v1.extension.sessiontree")]
     CairnMcpV1ExtensionSessiontree,
+    #[serde(rename = "cairn.mcp.v1.policy_trace")]
+    CairnMcpV1PolicyTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -133,6 +135,25 @@ impl<'de> ::serde::Deserialize<'de> for Nonce16Base64 {
         }
         Ok(Nonce16Base64(s))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecordExclusionGate {
+    ReadFilterRelevance,
+    ReadFilterStaleness,
+    ReadFilterDedup,
+}
+
+/// Per-record exclusion entry returned on search responses when args.explain is true. Records the caller cannot otherwise see (Tier-1 visibility) never appear here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordExclusion {
+    /// Body-free wire code from PolicyDetail.to_wire_string(). Empty string for None; otherwise starts with a lowercase letter and contains only a-z0-9_:=, — no whitespace, no free text.
+    pub detail: String,
+    pub gate: RecordExclusionGate,
+    pub target_id: crate::generated::common::Ulid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
