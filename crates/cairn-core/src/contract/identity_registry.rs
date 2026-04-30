@@ -101,6 +101,19 @@ pub struct PurgeAcknowledgement(
     pub(crate) (),
 );
 
+#[cfg(any(test, feature = "test-helpers"))]
+impl PurgeAcknowledgement {
+    /// Test-only constructor.
+    ///
+    /// Creates a `PurgeAcknowledgement` without going through the filesystem
+    /// verifier.  Available under `cfg(test)` and the `test-helpers` feature
+    /// so integration tests in adapter crates can build values of this type.
+    #[must_use]
+    pub fn for_test() -> Self {
+        Self(())
+    }
+}
+
 /// A human-readable reason for a purge request (e.g., GDPR erasure).
 ///
 /// Stored verbatim in the `purge_pending` WAL row and surfaced in audit logs.
@@ -353,6 +366,10 @@ pub trait IdentityRegistry: Send + Sync {
 
     /// Apply a signed rotation receipt using compare-and-swap on `expected_current`.
     ///
+    /// Inserts the `new_key` row into `identity_keys` **within the same
+    /// transaction** as the `current_key_version` advance and the receipt row,
+    /// so that a crash between those two writes is impossible.
+    ///
     /// Fails atomically if the current version stored in the registry is not
     /// `expected_current` at the time of the write, preventing lost-update
     /// races during concurrent rotations.
@@ -365,6 +382,7 @@ pub trait IdentityRegistry: Send + Sync {
         &self,
         receipt: &RotationReceipt,
         expected_current: KeyVersion,
+        new_key: &IdentityKeyEntry,
     ) -> Result<(), RegistryError>;
 
     // ── Pre-commit rotation intent (§3.6 step 0a) ────────────────────────────
