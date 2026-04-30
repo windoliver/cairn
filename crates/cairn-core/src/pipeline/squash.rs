@@ -78,6 +78,7 @@ pub struct SquashConfig {
     tail_lines: usize,
     dedup_min_run: usize,
     max_line_bytes: usize,
+    tty_render_enabled: bool,
 }
 
 impl SquashConfig {
@@ -135,7 +136,25 @@ impl SquashConfig {
             tail_lines,
             dedup_min_run,
             max_line_bytes,
+            tty_render_enabled: true,
         })
+    }
+
+    /// Enable or disable the TTY-render pre-stage (stage 2b).
+    ///
+    /// When enabled (default), bare `\r` cursor rewinds within a line are
+    /// resolved to the terminally-visible content before dedup runs. Disable
+    /// for raw-fidelity debugging of cursor behavior.
+    #[must_use]
+    pub fn with_tty_render_enabled(mut self, enabled: bool) -> Self {
+        self.tty_render_enabled = enabled;
+        self
+    }
+
+    /// Returns whether the TTY-render pre-stage is enabled.
+    #[must_use]
+    pub fn tty_render_enabled(&self) -> bool {
+        self.tty_render_enabled
     }
 
     /// Returns `max_bytes`.
@@ -1793,6 +1812,14 @@ pub struct SquashStats {
     /// budget-driven truncation so audit consumers can tell decode loss
     /// apart from sanitization or trim loss. Always feeds `truncated`.
     pub utf8_replacement: bool,
+    /// Number of `\n`-delimited lines that contained at least one bare
+    /// `\r` and were rewritten by stage 2b (TTY-render pre-stage).
+    /// Counted per source line, not per `\r`.
+    pub tty_frames_coalesced: usize,
+    /// Bytes saved by stage 2b: original line bytes minus rendered line
+    /// bytes, summed across coalesced lines. Saturating-clamped at zero
+    /// (rewrites that don't shrink contribute nothing).
+    pub tty_bytes_saved: usize,
 }
 
 use std::borrow::Cow;
@@ -2546,6 +2573,210 @@ mod stage2_tests {
         assert!(stripped);
         assert!(out.starts_with("prefix\n"), "got: {out:?}");
         assert!(!out.contains("dangling"), "got: {out:?}");
+    }
+}
+
+/// Stage 2b: optional TTY-render pre-stage.
+///
+/// Interprets bare `\r` (carriage-return without a following `\n`) as a
+/// cursor-rewind to column 0 with overwrite semantics, emitting only the
+/// terminally-visible content per `\n`-delimited line. Reduces output size
+/// on progress-bar style captures (e.g.,
+/// `Downloading 1%\rDownloading 2%\rDownloading 3%` collapses to
+/// `Downloading 3%`).
+///
+/// CSI-K (erase-in-line) is not handled here: stage 2 has already stripped
+/// every CSI sequence, so the surviving `\r<text>` patterns are what this
+/// stage renders. Documented as part of issue #219's scope.
+///
+/// Pure char-level rendering: `\r` resets cursor to 0; subsequent characters
+/// overwrite buffer positions left-to-right, extending the buffer when the
+/// cursor exceeds current length. UTF-8 char granularity (not terminal cell
+/// width) is used; this is sufficient for the documented scope and avoids a
+/// width-table dependency.
+///
+/// Counters:
+/// - `frames_coalesced`: number of `\n`-delimited lines that contained at
+///   least one `\r` and were rewritten (one per source line, not per `\r`).
+/// - `bytes_saved`: original line bytes minus rendered line bytes, summed.
+///   Saturating-clamped at zero so an equal-length overwrite contributes
+///   nothing and a (theoretical) longer rewrite cannot underflow.
+fn stage2b_tty_render(
+    input: &str,
+    frames_coalesced: &mut usize,
+    bytes_saved: &mut usize,
+) -> String {
+    if !input.contains('\r') {
+        return input.to_string();
+    }
+    let trailing = input.ends_with('\n');
+    let body = if trailing {
+        &input[..input.len() - 1]
+    } else {
+        input
+    };
+    let mut out = String::with_capacity(input.len());
+    let mut first = true;
+    for line in body.split('\n') {
+        if first {
+            first = false;
+        } else {
+            out.push('\n');
+        }
+        if line.contains('\r') {
+            let original_len = line.len();
+            let rendered = render_cr_line(line);
+            *frames_coalesced += 1;
+            *bytes_saved = bytes_saved.saturating_add(original_len.saturating_sub(rendered.len()));
+            out.push_str(&rendered);
+        } else {
+            out.push_str(line);
+        }
+    }
+    if trailing {
+        out.push('\n');
+    }
+    out
+}
+
+/// Render a single line with bare-CR overwrite semantics. See `stage2b_tty_render`
+/// for rationale. Caller guarantees the line contains at least one `\r`.
+fn render_cr_line(line: &str) -> String {
+    let mut buf: Vec<char> = Vec::new();
+    let mut cursor: usize = 0;
+    for c in line.chars() {
+        if c == '\r' {
+            cursor = 0;
+            continue;
+        }
+        if cursor < buf.len() {
+            buf[cursor] = c;
+        } else {
+            buf.push(c);
+        }
+        cursor += 1;
+    }
+    buf.into_iter().collect()
+}
+
+#[cfg(test)]
+mod stage2b_tests {
+    use super::*;
+
+    fn render(input: &str) -> (String, usize, usize) {
+        let mut frames = 0;
+        let mut saved = 0;
+        let out = stage2b_tty_render(input, &mut frames, &mut saved);
+        (out, frames, saved)
+    }
+
+    #[test]
+    fn no_cr_passthrough_no_counters() {
+        let (out, frames, saved) = render("plain text\nnext line\n");
+        assert_eq!(out, "plain text\nnext line\n");
+        assert_eq!(frames, 0);
+        assert_eq!(saved, 0);
+    }
+
+    #[test]
+    fn empty_input_passthrough() {
+        let (out, frames, saved) = render("");
+        assert_eq!(out, "");
+        assert_eq!(frames, 0);
+        assert_eq!(saved, 0);
+    }
+
+    #[test]
+    fn single_cr_collapses_progress_bar() {
+        let (out, frames, saved) = render("Downloading 1%\rDownloading 2%\rDownloading 3%");
+        assert_eq!(out, "Downloading 3%");
+        assert_eq!(frames, 1);
+        assert_eq!(saved, "Downloading 1%\rDownloading 2%\r".len());
+    }
+
+    #[test]
+    fn shorter_overwrite_leaves_tail() {
+        let (out, frames, _saved) = render("aaaa\rbb");
+        assert_eq!(out, "bbaa");
+        assert_eq!(frames, 1);
+    }
+
+    #[test]
+    fn equal_length_overwrite_no_bytes_saved() {
+        let (out, frames, saved) = render("abc\rxyz");
+        assert_eq!(out, "xyz");
+        assert_eq!(frames, 1);
+        assert_eq!(saved, "abc\r".len());
+    }
+
+    #[test]
+    fn longer_overwrite_extends_buffer() {
+        let (out, frames, saved) = render("ab\rxyz");
+        assert_eq!(out, "xyz");
+        assert_eq!(frames, 1);
+        assert_eq!(saved, "ab\r".len());
+    }
+
+    #[test]
+    fn cr_in_one_line_only_counts_once_per_line() {
+        let (out, frames, _saved) = render("plain\nfoo\rbar\rbaz\nlast\n");
+        assert_eq!(out, "plain\nbaz\nlast\n");
+        assert_eq!(frames, 1);
+    }
+
+    #[test]
+    fn multiple_lines_each_with_cr_count_separately() {
+        let (out, frames, _saved) = render("a\rb\nc\rd\n");
+        assert_eq!(out, "b\nd\n");
+        assert_eq!(frames, 2);
+    }
+
+    #[test]
+    fn trailing_newline_preserved() {
+        let (out, _, _) = render("foo\rbar\n");
+        assert_eq!(out, "bar\n");
+    }
+
+    #[test]
+    fn no_trailing_newline_preserved() {
+        let (out, _, _) = render("foo\rbar");
+        assert_eq!(out, "bar");
+    }
+
+    #[test]
+    fn idempotent_when_cr_resolved() {
+        let mut f1 = 0;
+        let mut s1 = 0;
+        let pass1 = stage2b_tty_render("Downloading 1%\rDownloading 2%", &mut f1, &mut s1);
+        let mut f2 = 0;
+        let mut s2 = 0;
+        let pass2 = stage2b_tty_render(&pass1, &mut f2, &mut s2);
+        assert_eq!(pass1, pass2, "second pass must be a no-op");
+        assert_eq!(f2, 0, "no frames coalesced on second pass");
+        assert_eq!(s2, 0, "no bytes saved on second pass");
+    }
+
+    #[test]
+    fn leading_cr_resets_at_start_of_line() {
+        let (out, _, _) = render("\rhello");
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn cr_does_not_cross_lf_boundary() {
+        // Stage 2 normalizes \r\n → \n, but a bare \r adjacent to \n could
+        // theoretically reach this stage. \r resets cursor within the line;
+        // chars already in the buffer survive when no overwrite follows.
+        let (out, frames, _) = render("foo\r\nbar");
+        assert_eq!(out, "foo\nbar");
+        assert_eq!(frames, 1);
+    }
+
+    #[test]
+    fn cr_with_utf8_chars() {
+        let (out, _, _) = render("αβγ\rδ");
+        // α at pos 0 → δ; βγ trail. Expected "δβγ".
+        assert_eq!(out, "δβγ");
     }
 }
 
@@ -3318,7 +3549,22 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         &mut stats.ansi_stripped,
         &mut stats.osc_recovery_bytes_dropped,
     );
-    let (raw_lines_borrow, trailing_newline) = stage3_split_lines(&stage2);
+    // Stage 2b: optional TTY-render pre-stage (issue #219). Resolves bare
+    // `\r` cursor rewinds before stage-3 line split so progress-bar lines
+    // collapse to their terminally-visible content instead of expanding
+    // dedup misses. Skipped when the config flag is off (raw-fidelity
+    // debugging) or when the stage-2 output contains no `\r` (cheap fast
+    // path; avoids an extra String allocation).
+    let stage2b: Cow<'_, str> = if cfg.tty_render_enabled() && stage2.contains('\r') {
+        Cow::Owned(stage2b_tty_render(
+            &stage2,
+            &mut stats.tty_frames_coalesced,
+            &mut stats.tty_bytes_saved,
+        ))
+    } else {
+        Cow::Borrowed(stage2.as_ref())
+    };
+    let (raw_lines_borrow, trailing_newline) = stage3_split_lines(&stage2b);
     let raw_lines: Vec<String> = raw_lines_borrow.iter().map(|s| (*s).to_string()).collect();
 
     stats.cr_bearing_lines = raw_lines.iter().filter(|l| l.contains('\r')).count();
@@ -4452,14 +4698,30 @@ mod corner_case_tests {
 
     #[test]
     fn mixed_line_endings_normalize() {
+        // With stage 2b disabled, CRLF → LF normalises and bare CR is
+        // preserved as a `cr_bearing_lines` signal — pinning the legacy
+        // raw-fidelity path that #219 made opt-in.
+        let cfg = SquashConfig::default().with_tty_render_enabled(false);
+        let raw = b"a\r\nb\nc\rd\r\ne";
+        let out = squash_raw(raw, &cfg);
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(body.contains("a\nb\nc"));
+        assert!(out.stats.cr_bearing_lines >= 1);
+    }
+
+    #[test]
+    fn mixed_line_endings_with_tty_render_resolves_cr() {
+        // With stage 2b on (the default), bare CR collapses via overwrite
+        // semantics: "c\rd" → "d". Counter `tty_frames_coalesced` reflects
+        // the rewrite; `cr_bearing_lines` is zero because stage 3 sees no
+        // CR after stage 2b ran.
         let cfg = SquashConfig::default();
         let raw = b"a\r\nb\nc\rd\r\ne";
         let out = squash_raw(raw, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
-        // CRLF → LF normalised by stage 2; bare CR preserved as
-        // cr_bearing_lines signal.
-        assert!(body.contains("a\nb\nc"));
-        assert!(out.stats.cr_bearing_lines >= 1);
+        assert!(body.contains("a\nb\nd\ne"), "got: {body:?}");
+        assert_eq!(out.stats.cr_bearing_lines, 0);
+        assert_eq!(out.stats.tty_frames_coalesced, 1);
     }
 
     #[test]

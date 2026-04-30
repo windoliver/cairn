@@ -1,11 +1,11 @@
 ---
 source: crates/cairn-core/src/pipeline/squash.rs
-assertion_line: 4105
+assertion_line: 4429
 expression: "run_fixture(\"real_progress_with_hyperlink.txt\", &SquashConfig::default())"
 ---
-progress done step 1
-progress done step 2
-progress done step 3
+done step 1
+done step 2
+done step 3
 error: failed at file.rs:42
 see log
 finished
