@@ -97,6 +97,10 @@ cairn search --mode keyword --citations on QUERY
 cairn search --mode keyword --cursor CURSOR QUERY
 ```
 
+```bash
+cairn search --mode keyword --explain QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**

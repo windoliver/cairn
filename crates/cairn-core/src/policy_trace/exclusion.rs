@@ -7,6 +7,10 @@
 //! a Tier-1 gate panics as a fail-closed safety check.
 
 use crate::domain::TargetId;
+use crate::generated::common::{
+    RecordExclusion as WireRecordExclusion, RecordExclusionGate as WireRecordExclusionGate,
+    Ulid as WireUlid,
+};
 
 use super::{PolicyDetail, PolicyGate};
 
@@ -48,4 +52,30 @@ impl RecordExclusion {
             detail,
         }
     }
+}
+
+impl From<&RecordExclusion> for WireRecordExclusion {
+    fn from(src: &RecordExclusion) -> Self {
+        let gate = match src.gate {
+            PolicyGate::ReadFilterRelevance => WireRecordExclusionGate::ReadFilterRelevance,
+            PolicyGate::ReadFilterStaleness => WireRecordExclusionGate::ReadFilterStaleness,
+            PolicyGate::ReadFilterDedup => WireRecordExclusionGate::ReadFilterDedup,
+            other => {
+                unreachable!("RecordExclusion::new rejects non-ReadFilter* gates; got {other:?}")
+            }
+        };
+        Self {
+            target_id: WireUlid(src.target_id.to_string()),
+            gate,
+            detail: src.detail.to_wire_string(),
+        }
+    }
+}
+
+/// Map a slice of producer-side exclusions into the wire shape used by
+/// `SearchData.excluded`. Body-free: each `detail` is the stable code
+/// from [`PolicyDetail::to_wire_string`].
+#[must_use]
+pub fn to_wire_exclusions(items: &[RecordExclusion]) -> Vec<WireRecordExclusion> {
+    items.iter().map(WireRecordExclusion::from).collect()
 }

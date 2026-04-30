@@ -32,6 +32,11 @@
         "name": "cursor",
         "long": "cursor",
         "value_source": "string"
+      },
+      {
+        "name": "explain",
+        "long": "explain",
+        "value_source": "bool"
       }
     ],
     "positional": {

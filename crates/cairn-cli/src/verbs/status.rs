@@ -3,8 +3,12 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! P0 advertises `cairn.mcp.v1.policy_trace` (#95); store-driven
-//! capabilities land with #9.
+//! P0 advertises `cairn.mcp.v1.policy_trace` (#95) as a vocabulary-only
+//! capability: it pins the closed `PolicyGate` enum and the body-free
+//! `policy_trace[]` envelope shape. Runtime emission from the verb path
+//! lands with #9 / #61 / #62 — until then `policy_trace[]` may be empty.
+//! Store-driven capabilities (search modes, retrieve targets, forget
+//! modes) also land with #9.
 
 use std::process::ExitCode;
 
@@ -52,10 +56,15 @@ pub fn run(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Advertised P0 capabilities. Currently emits the gate-vocabulary
-/// capability that signals every mutating verb populates `policy_trace`
-/// per `docs/site/src/reference/policy-gates.md` (#95). Other store-driven
-/// capabilities land with #9.
+/// Advertised P0 capabilities.
+///
+/// `cairn.mcp.v1.policy_trace` is **vocabulary-only**: it pins the closed
+/// `PolicyGate` set and the body-free `policy_trace[]` envelope shape
+/// per `docs/site/src/reference/policy-gates.md` (#95). It does **not**
+/// promise that every response carries a non-empty trace today — verb
+/// runtime wiring lands with #9 / #61 / #62. Other store-driven
+/// capabilities (search modes, retrieve targets, forget modes) also land
+/// with #9.
 fn p0_capabilities() -> Vec<Capabilities> {
     vec![Capabilities::CairnMcpV1PolicyTrace]
 }

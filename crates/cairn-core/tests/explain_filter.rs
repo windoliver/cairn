@@ -20,7 +20,6 @@ fn id(suffix: char) -> TargetId {
 fn empty_candidates_yields_empty_kept_and_excluded() {
     let cfg = ExplainConfig {
         staleness_threshold_days: 30,
-        dedup_window: 5,
     };
     let (kept, excluded) = explain_filter(Vec::<Candidate>::new(), &cfg);
     assert!(kept.is_empty());
@@ -31,7 +30,6 @@ fn empty_candidates_yields_empty_kept_and_excluded() {
 fn stale_candidate_is_excluded_with_staleness_gate() {
     let cfg = ExplainConfig {
         staleness_threshold_days: 30,
-        dedup_window: 5,
     };
     let candidates = vec![Candidate {
         target_id: id('A'),
@@ -50,7 +48,6 @@ fn stale_candidate_is_excluded_with_staleness_gate() {
 fn duplicate_content_hash_excluded_by_dedup() {
     let cfg = ExplainConfig {
         staleness_threshold_days: 30,
-        dedup_window: 5,
     };
     let candidates = vec![
         Candidate {
@@ -78,7 +75,6 @@ fn duplicate_content_hash_excluded_by_dedup() {
 fn stale_takes_precedence_over_dedup() {
     let cfg = ExplainConfig {
         staleness_threshold_days: 30,
-        dedup_window: 5,
     };
     let candidates = vec![
         Candidate {
@@ -99,6 +95,84 @@ fn stale_takes_precedence_over_dedup() {
     assert_eq!(kept[0].target_id, id('B'));
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0].gate, PolicyGate::ReadFilterStaleness);
+}
+
+#[test]
+fn nan_score_loses_to_non_nan_regardless_of_arrival_order() {
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+    };
+    // NaN seen first; non-NaN second — non-NaN must win the dedup.
+    let candidates = vec![
+        Candidate {
+            target_id: id('A'),
+            age_days: 1,
+            relevance_score: f32::NAN,
+            content_hash: "h".to_owned(),
+        },
+        Candidate {
+            target_id: id('B'),
+            age_days: 1,
+            relevance_score: 0.1,
+            content_hash: "h".to_owned(),
+        },
+    ];
+    let (kept, excluded) = explain_filter(candidates, &cfg);
+    assert_eq!(kept.len(), 1, "exactly one survives dedup");
+    assert_eq!(kept[0].target_id, id('B'), "non-NaN wins over NaN");
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].target_id, id('A'));
+    assert_eq!(excluded[0].gate, PolicyGate::ReadFilterDedup);
+}
+
+#[test]
+fn nan_score_loses_to_non_nan_when_seen_second() {
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+    };
+    // Non-NaN first, NaN second — NaN must lose to the non-NaN that came first.
+    let candidates = vec![
+        Candidate {
+            target_id: id('A'),
+            age_days: 1,
+            relevance_score: 0.1,
+            content_hash: "h".to_owned(),
+        },
+        Candidate {
+            target_id: id('B'),
+            age_days: 1,
+            relevance_score: f32::NAN,
+            content_hash: "h".to_owned(),
+        },
+    ];
+    let (kept, excluded) = explain_filter(candidates, &cfg);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].target_id, id('A'), "non-NaN keeps its win");
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].target_id, id('B'));
+}
+
+#[test]
+fn two_nan_scores_resolve_to_first_seen() {
+    let cfg = ExplainConfig {
+        staleness_threshold_days: 30,
+    };
+    let candidates = vec![
+        Candidate {
+            target_id: id('A'),
+            age_days: 1,
+            relevance_score: f32::NAN,
+            content_hash: "h".to_owned(),
+        },
+        Candidate {
+            target_id: id('B'),
+            age_days: 1,
+            relevance_score: f32::NAN,
+            content_hash: "h".to_owned(),
+        },
+    ];
+    let (kept, _excluded) = explain_filter(candidates, &cfg);
+    assert_eq!(kept[0].target_id, id('A'), "first NaN wins tie-break");
 }
 
 #[test]

@@ -16,10 +16,9 @@ pub struct Candidate {
     pub target_id: TargetId,
     /// How many days old the record is.
     pub age_days: u32,
-    /// Relevance score from the ranker; higher wins dedup.
-    /// NaN scores never win — the implementation uses `>` so any
-    /// non-NaN candidate beats a NaN one, and the first non-NaN
-    /// candidate per `content_hash` is preferred.
+    /// Relevance score from the ranker; higher wins dedup. NaN scores
+    /// always lose to non-NaN scores; ties between two NaN scores
+    /// resolve to the first-seen candidate.
     pub relevance_score: f32,
     /// Content hash used for deduplication.
     pub content_hash: String,
@@ -30,14 +29,6 @@ pub struct Candidate {
 pub struct ExplainConfig {
     /// Candidates older than this are excluded as `ReadFilterStaleness`.
     pub staleness_threshold_days: u32,
-    /// Number of recent records to consult for dedup-window comparison.
-    ///
-    /// **Reserved.** The current implementation deduplicates globally
-    /// across the post-staleness candidate set and ignores this value.
-    /// A future windowing-aware implementation will respect it. Pass
-    /// any value (e.g. `usize::MAX`) until then; the field exists so
-    /// the wire shape is stable when windowing lands.
-    pub dedup_window: usize,
 }
 
 /// Reason a candidate was filtered. `as_gate` maps to the producer
@@ -50,7 +41,7 @@ pub enum ReadFilterReason {
     Relevance,
     /// Record's `age_days` exceeded the threshold.
     Staleness,
-    /// Record's `content_hash` already seen within the dedup window.
+    /// Record's `content_hash` already chose a higher-relevance winner.
     Dedup,
 }
 
@@ -69,8 +60,10 @@ impl ReadFilterReason {
 /// Partition `candidates` into kept and excluded sets. Order:
 ///
 /// 1. Staleness — exclude any candidate older than the threshold.
-/// 2. Dedup — within the dedup window, keep the highest-relevance
-///    candidate per `content_hash`; exclude the rest.
+/// 2. Dedup — globally across the post-staleness set, keep the
+///    highest-relevance candidate per `content_hash`; exclude the
+///    rest. NaN scores lose to non-NaN; ties between NaNs resolve to
+///    the first-seen candidate.
 ///
 /// Relevance pruning is not applied here — callers that want a
 /// top-N cut compose this with their own ranker.
@@ -96,11 +89,9 @@ pub fn explain_filter(
     }
 
     // 2. Dedup by content_hash — keep highest-relevance per hash,
-    //    preserve the original order of the kept candidates.
-    // `dedup_window` is reserved for future windowing semantics;
-    // the current implementation deduplicates globally across the
-    // post-staleness set.
-    let _ = cfg.dedup_window;
+    //    preserve the original order of the kept candidates. NaN
+    //    scores always lose to non-NaN scores; two NaNs resolve to
+    //    first-seen.
     let mut best_index_by_hash: HashMap<String, usize> = HashMap::new();
     for (idx, c) in after_stale.iter().enumerate() {
         match best_index_by_hash.get(&c.content_hash) {
@@ -109,7 +100,12 @@ pub fn explain_filter(
             }
             Some(&prev_idx) => {
                 let prev_score = after_stale[prev_idx].relevance_score;
-                if c.relevance_score > prev_score {
+                let cur_score = c.relevance_score;
+                // Non-NaN beats NaN. Two NaNs keep the first-seen.
+                // Two non-NaNs use ordinary `>`.
+                let cur_wins =
+                    !cur_score.is_nan() && (prev_score.is_nan() || cur_score > prev_score);
+                if cur_wins {
                     best_index_by_hash.insert(c.content_hash.clone(), idx);
                 }
             }

@@ -3,7 +3,10 @@
 //! a fail-closed safety check against leaking record ids.
 
 use cairn_core::domain::TargetId;
-use cairn_core::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion};
+use cairn_core::generated::common::{
+    RecordExclusion as WireRecordExclusion, RecordExclusionGate as WireRecordExclusionGate,
+};
+use cairn_core::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion, to_wire_exclusions};
 
 // Valid TargetId: 26-char Crockford base32, leading char 0..=7.
 const FIXTURE_ID: &str = "01HQZX9F5N0000000000000000";
@@ -63,4 +66,59 @@ fn exclusion_accepts_all_three_read_filter_gates() {
         let e = RecordExclusion::new(id.clone(), gate, PolicyDetail::None);
         assert_eq!(e.gate, gate);
     }
+}
+
+#[test]
+fn wire_conversion_maps_each_read_filter_gate() {
+    let id = TargetId::parse(FIXTURE_ID).expect("valid ULID");
+    let cases = [
+        (
+            PolicyGate::ReadFilterRelevance,
+            WireRecordExclusionGate::ReadFilterRelevance,
+        ),
+        (
+            PolicyGate::ReadFilterStaleness,
+            WireRecordExclusionGate::ReadFilterStaleness,
+        ),
+        (
+            PolicyGate::ReadFilterDedup,
+            WireRecordExclusionGate::ReadFilterDedup,
+        ),
+    ];
+    for (core_gate, wire_gate) in cases {
+        let core = RecordExclusion::new(id.clone(), core_gate, PolicyDetail::None);
+        let wire: WireRecordExclusion = (&core).into();
+        assert_eq!(wire.gate, wire_gate);
+        assert_eq!(wire.target_id.0, FIXTURE_ID);
+    }
+}
+
+#[test]
+fn wire_conversion_serializes_detail_as_stable_code() {
+    let id = TargetId::parse(FIXTURE_ID).expect("valid ULID");
+    let core = RecordExclusion::new(id, PolicyGate::ReadFilterStaleness, PolicyDetail::None);
+    let wire: WireRecordExclusion = (&core).into();
+    assert_eq!(
+        wire.detail,
+        PolicyDetail::None.to_wire_string(),
+        "wire detail must come from PolicyDetail::to_wire_string()"
+    );
+}
+
+#[test]
+fn to_wire_exclusions_preserves_order_and_count() {
+    let a = TargetId::parse("01HQZX9F5N000000000000000A").expect("valid ULID");
+    let b = TargetId::parse("01HQZX9F5N000000000000000B").expect("valid ULID");
+    let items = vec![
+        RecordExclusion::new(a.clone(), PolicyGate::ReadFilterDedup, PolicyDetail::None),
+        RecordExclusion::new(
+            b.clone(),
+            PolicyGate::ReadFilterStaleness,
+            PolicyDetail::None,
+        ),
+    ];
+    let wire = to_wire_exclusions(&items);
+    assert_eq!(wire.len(), 2);
+    assert_eq!(wire[0].target_id.0, a.to_string());
+    assert_eq!(wire[1].target_id.0, b.to_string());
 }

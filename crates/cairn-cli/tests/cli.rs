@@ -163,6 +163,35 @@ fn tagged_union_verb_requires_target_flag() {
 }
 
 #[test]
+fn search_accepts_explain_flag() {
+    // Clap accepts `--explain` (a SetTrue boolean flag generated from
+    // search.json's x-cairn-cli flags). Verb dispatch still hits the
+    // unimplemented stub in P0 — the flag must parse without UnknownArgument.
+    let out = cli()
+        .args(["search", "--explain", "test"])
+        .output()
+        .expect("cairn");
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "search must accept --explain; got: {stderr:?}",
+    );
+}
+
+#[test]
+fn search_help_lists_explain_flag() {
+    // The generated help screen must surface --explain so callers can
+    // discover it. Regression guard against the IDL/x-cairn-cli drift
+    // codex flagged in PR #237.
+    let out = cli().args(["search", "--help"]).output().expect("cairn");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    assert!(
+        stdout.contains("--explain"),
+        "search --help must list --explain flag; got: {stdout}",
+    );
+}
+
+#[test]
 fn unknown_argument_fails_closed() {
     // Clap UnknownArgument → exit 64 (EX_USAGE) per spec §5.2.
     let out = cli()

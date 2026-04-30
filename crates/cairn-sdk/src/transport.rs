@@ -830,8 +830,11 @@ fn unimplemented(verb: &'static str) -> SdkError {
 
 fn p0_capabilities() -> Vec<Capabilities> {
     // Mirrors `cairn-cli::verbs::status::p0_capabilities`.
-    // P0 advertises the gate-vocabulary capability (#95); store-driven
-    // capabilities land with #9.
+    // `cairn.mcp.v1.policy_trace` is vocabulary-only (#95): it pins the
+    // closed PolicyGate set and the body-free policy_trace[] envelope
+    // shape, but does not promise non-empty traces until verb runtime
+    // wiring lands (#9 / #61 / #62). Store-driven capabilities also
+    // land with #9.
     vec![Capabilities::CairnMcpV1PolicyTrace]
 }
 

@@ -19,6 +19,6 @@ mod outcome;
 
 pub use detail::PolicyDetail;
 pub use entry::{PolicyTraceEntry, to_wire};
-pub use exclusion::RecordExclusion;
+pub use exclusion::{RecordExclusion, to_wire_exclusions};
 pub use gate::PolicyGate;
 pub use outcome::PolicyOutcome;
