@@ -976,14 +976,18 @@ impl std::fmt::Debug for CaptureEvent {
 
 impl CaptureEvent {
     /// Build a [`CaptureEvent`] from typed parts, running every
-    /// invariant via [`Self::validate`] before yielding the value.
-    /// In-process callers that want construction-time enforcement (the
-    /// same guarantee `serde(try_from = "CaptureEventRaw")` gives the
-    /// wire-deserialization path) should prefer this over field
-    /// literals. Direct field construction is allowed — this matches
-    /// the [`crate::domain::MemoryRecord`] convention — but it is the
-    /// caller's responsibility to call [`Self::validate`] before
-    /// trusting the value at any boundary.
+    /// invariant via [`Self::validate_for_capture`] before yielding
+    /// the value. `try_new` is the in-process *write*-boundary
+    /// constructor — it mints fresh events that will be persisted /
+    /// emitted, so it enforces the strict variant (#218: terminal
+    /// events must carry `context`). The wire-deserialization path
+    /// (`serde(try_from = "CaptureEventRaw")`) intentionally uses the
+    /// permissive [`Self::validate`] so legacy on-disk data is not
+    /// stranded across upgrade. Direct field construction is allowed
+    /// — this matches the [`crate::domain::MemoryRecord`] convention
+    /// — but it is the caller's responsibility to call the
+    /// appropriate validator (read vs write) before trusting the
+    /// value at any boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         event_id: CaptureEventId,
@@ -1009,7 +1013,7 @@ impl CaptureEvent {
             payload,
             source_family,
         };
-        event.validate()?;
+        event.validate_for_capture()?;
         Ok(event)
     }
 
