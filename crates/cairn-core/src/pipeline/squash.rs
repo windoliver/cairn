@@ -1815,7 +1815,13 @@ pub struct SquashStats {
     pub dedup_runs_collapsed: usize,
     /// Number of lines dropped by stage 6 head/tail truncation.
     pub lines_dropped_truncate: usize,
-    /// Total bytes dropped by stage 6 head/tail truncation.
+    /// Bytes dropped by stage 6 head/tail truncation, measured on the
+    /// **post-stage-2b rendered text**. When `progress_frame_collapse_enabled`
+    /// is on, stage 2b shrinks CR-bearing lines before stage 6 sees them,
+    /// so this counter under-reports raw source-byte loss for collapsed
+    /// lines. Audit consumers that need a source-byte view should call
+    /// `source_bytes_lost_total()` instead, which sums this with
+    /// `progress_bytes_saved` and `osc_recovery_bytes_dropped`.
     pub bytes_dropped_truncate: usize,
     /// Number of lines that exceeded `max_line_bytes` and were truncated in stage 5.
     pub long_lines_truncated: usize,
@@ -1844,10 +1850,38 @@ pub struct SquashStats {
     /// `\r` and were rewritten by stage 2b (progress-frame collapse).
     /// Counted per source line, not per `\r`.
     pub progress_frames_coalesced: usize,
-    /// Bytes saved by stage 2b: original line bytes minus rendered line
-    /// bytes, summed across coalesced lines. Saturating-clamped at zero
-    /// (rewrites that don't shrink contribute nothing).
+    /// Source bytes dropped by stage 2b: original line bytes minus
+    /// rendered line bytes, summed across coalesced lines. Saturating-
+    /// clamped at zero (rewrites that don't shrink contribute nothing).
+    /// These bytes never reach stage 4/5/6, so they are NOT included in
+    /// `bytes_dropped_truncate`. Audit consumers tracking total
+    /// source-byte loss should use `source_bytes_lost_total()`.
     pub progress_bytes_saved: usize,
+}
+
+impl SquashStats {
+    /// Upper bound on raw source bytes that did not survive into
+    /// `compacted_bytes`, summing every counter that measures source-byte
+    /// loss: stage 2 OSC recovery, stage 2b progress-frame collapse, and
+    /// stage 6 head/tail truncation (the latter measured on rendered
+    /// bytes, which is at most the source-byte cost when stage 2b ran).
+    ///
+    /// Use this — not `bytes_dropped_truncate` alone — for audit /
+    /// retention decisions on captures where
+    /// `progress_frame_collapse_enabled` may have run. ANSI strip,
+    /// dedup collapse, stage 5 per-line truncation, and the oversize
+    /// bypass also discard source bytes; they contribute via
+    /// `truncated`, `ansi_stripped`, `dedup_runs_collapsed`,
+    /// `long_lines_truncated`, and `bytes_dropped_truncate` respectively.
+    /// This getter is the conservative additive lower bound for source
+    /// loss; the coarse `truncated` bit remains the canonical "non-
+    /// verbatim output" signal.
+    #[must_use]
+    pub fn source_bytes_lost_total(&self) -> usize {
+        self.progress_bytes_saved
+            .saturating_add(self.bytes_dropped_truncate)
+            .saturating_add(self.osc_recovery_bytes_dropped)
+    }
 }
 
 use std::borrow::Cow;
@@ -4856,6 +4890,48 @@ mod corner_case_tests {
         assert!(
             out.stats.truncated,
             "stage 2b rewrite must set truncated bit"
+        );
+    }
+
+    #[test]
+    fn progress_collapse_loss_visible_in_source_bytes_lost_total() {
+        // Regression for /review-loop round 6: bytes_dropped_truncate
+        // measures stage-6 drops in **rendered** bytes, so when stage 2b
+        // shrinks a CR-bearing line first the field under-reports raw
+        // source-byte loss. Audit consumers that need a source-byte view
+        // must use `source_bytes_lost_total()`, which folds in
+        // `progress_bytes_saved`. Pin that relationship.
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        // A single line of `frame00\rframe01\r...\rframeNN` — no other
+        // lossy stage fires, so stage 6 won't run and only stage 2b
+        // contributes loss. That's the cleanest read of the relationship.
+        let mut raw = String::new();
+        for i in 0..30 {
+            use std::fmt::Write;
+            write!(&mut raw, "frame{i:02}\r").expect("write to String never fails");
+        }
+        raw.push_str("final");
+        raw.push('\n');
+        let raw_bytes = raw.as_bytes().to_vec();
+        let original_line_bytes = raw_bytes.len() - 1; // minus the trailing \n
+        let out = squash_raw(&raw_bytes, &cfg);
+        // Stage 2b ran and shrunk the line.
+        assert_eq!(out.stats.progress_frames_coalesced, 1);
+        assert!(out.stats.progress_bytes_saved > 0);
+        // Stage 6 didn't drop anything (single short line, well under
+        // any cap), so bytes_dropped_truncate is zero — but
+        // source_bytes_lost_total still reflects the stage-2b collapse.
+        assert_eq!(out.stats.bytes_dropped_truncate, 0);
+        assert_eq!(
+            out.stats.source_bytes_lost_total(),
+            out.stats.progress_bytes_saved,
+            "source-byte loss must include stage 2b collapse even when stage 6 didn't drop"
+        );
+        // Sanity: the rendered "final" plus its newline is what survived.
+        assert_eq!(
+            out.stats.progress_bytes_saved,
+            original_line_bytes - "final".len(),
+            "all per-frame bytes except `final` were collapsed away"
         );
     }
 
