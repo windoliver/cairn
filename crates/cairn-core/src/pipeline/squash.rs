@@ -4023,21 +4023,36 @@ fn oversize_bypass(
                 .filter(|l| l.contains('\r'))
                 .count();
             stats.ansi_stripped |= suf_stripped;
+            // Stage 2b on the giant-final-line suffix: render the full
+            // suffix BEFORE trimming so the trim sees only the final
+            // visible frame, not stale `\r`-separated progress text. If
+            // we trimmed first and rendered after, the trim could chop
+            // mid-frame and leave a partial CR run that survives stage 2b.
+            let suffix_rendered: Cow<'_, str> =
+                if cfg.tty_render_enabled() && suffix_sanitized.contains('\r') {
+                    Cow::Owned(stage2b_tty_render(
+                        &suffix_sanitized,
+                        &mut stats.tty_frames_coalesced,
+                        &mut stats.tty_bytes_saved,
+                    ))
+                } else {
+                    Cow::Borrowed(suffix_sanitized.as_ref())
+                };
             // Reserve room for the final-line marker before trimming.
             let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
             let used = compacted_bytes.len();
             let remaining = max_body.saturating_sub(used + final_marker.len());
-            let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_sanitized, remaining);
+            let suffix = trim_to_byte_budget_at_boundary_from_end(&suffix_rendered, remaining);
             compacted_bytes.extend_from_slice(final_marker);
             compacted_bytes.extend_from_slice(suffix.as_bytes());
             // Round-2 (newer loop): only count front-trim as
             // truncation loss in raw terms. If the budget swallowed
-            // the entire sanitized suffix without trimming, the full
+            // the entire rendered suffix without trimming, the full
             // raw input span [suffix_window_start..] is preserved
-            // — sanitization-driven shrinkage is reported via
-            // `ansi_stripped` / `osc_recovery_bytes_dropped`, not
-            // `bytes_dropped_truncate`.
-            let was_front_trimmed = suffix.len() < suffix_sanitized.len();
+            // — sanitization / stage-2b shrinkage is reported via
+            // `ansi_stripped` / `osc_recovery_bytes_dropped` /
+            // `tty_frames_coalesced`, not `bytes_dropped_truncate`.
+            let was_front_trimmed = suffix.len() < suffix_rendered.len();
             tail_source_bytes = if was_front_trimmed {
                 suffix.len().min(raw_byte_len - suffix_window_start)
             } else {
@@ -4879,6 +4894,53 @@ mod corner_case_tests {
         // does) and surface the bare-CR audit signal from the source.
         assert!(out_on.stats.truncated);
         assert!(out_on.stats.cr_bearing_lines > 0);
+    }
+
+    #[test]
+    fn tty_render_applies_on_giant_final_line_bypass() {
+        // Regression for /review-loop round 4 finding 1: the oversize
+        // bypass `tail_aligned_to_line == false` branch (giant final
+        // line, no safe `\n` boundary in the retained tail window) must
+        // also run stage 2b. Otherwise progress-bar payloads whose final
+        // line is itself oversized leak raw `\r`-separated frames into
+        // the output even with `tty_render_enabled(true)`.
+        //
+        // Calls `super::oversize_bypass` directly to avoid allocating
+        // MAX_INPUT_BYTES (64 MiB) just to trigger the gate — same trick
+        // as `oversize_bypass_tail_window_inside_giant_final_line_preserves_suffix`.
+        let cfg = SquashConfig::default().with_tty_render_enabled(true);
+        let mut raw: Vec<u8> = Vec::new();
+        raw.extend_from_slice(b"head\n");
+        // Giant final line filled with progress-bar style `\r`-separated
+        // frames; the last tail (`done-FINAL`) is the only visible frame.
+        for _ in 0..2_000 {
+            raw.extend_from_slice(b"progress-bytes\r");
+        }
+        raw.extend_from_slice(b"done-FINAL");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert!(
+            out.stats.tty_frames_coalesced > 0,
+            "stage 2b must run on the giant-final-line bypass branch"
+        );
+        assert!(
+            !out.compacted_bytes.contains(&b'\r'),
+            "giant-final-line rendered output must not retain bare CR"
+        );
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("done-FINAL"),
+            "the final visible frame must survive: got {body:?}"
+        );
     }
 
     #[test]
