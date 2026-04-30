@@ -461,6 +461,67 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
 }
 
 #[test]
+fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
+    // P0 advertises no capabilities. `args.explain == Some(true)` is
+    // gated on `cairn.mcp.v1.policy_trace` per the
+    // `x-cairn-capability-when-true` annotation in
+    // `crates/cairn-idl/schema/verbs/search.json`. Mirrors the CLI
+    // fail-closed path; together they enforce the gate end-to-end.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(true),
+    };
+    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable {
+            capability,
+            operation_id,
+            ..
+        } => {
+            assert!(
+                capability == "cairn.mcp.v1.search.keyword"
+                    || capability == "cairn.mcp.v1.policy_trace",
+                "expected mode or policy_trace capability error; got {capability}"
+            );
+            assert_eq!(operation_id.0.len(), 26);
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_explain_false_does_not_require_policy_trace() {
+    // The default `explain: None` (and explicit `Some(false)`) must NOT
+    // require the policy_trace capability. Only `Some(true)` triggers
+    // the gate.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(false),
+    };
+    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            // Should be the search mode capability, not policy_trace —
+            // explain=false must not trigger the policy_trace gate.
+            assert_eq!(capability, "cairn.mcp.v1.search.keyword");
+        }
+        other => panic!("expected CapabilityUnavailable for keyword mode, got {other:?}"),
+    }
+}
+
+#[test]
 fn search_rejects_unadvertised_modes_with_capability_unavailable() {
     // P0 advertises no capabilities, so every search mode must fail closed
     // with CapabilityUnavailable rather than the generic Internal stub.

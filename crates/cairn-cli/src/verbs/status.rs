@@ -69,6 +69,21 @@ fn p0_capabilities() -> Vec<Capabilities> {
     vec![]
 }
 
+/// True if `capability` is in the current `status.capabilities` list.
+/// Used by capability-gated args (e.g. `search --explain`) to fail closed
+/// before verb dispatch when the required capability is not advertised
+/// (CLAUDE.md §4.6).
+#[must_use]
+pub fn p0_capabilities_advertises(capability: &str) -> bool {
+    p0_capabilities().iter().any(|c| {
+        serde_json::to_value(c)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(capability)
+    })
+}
+
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
 fn chrono_like_now() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

@@ -133,9 +133,16 @@ impl<T: Transport> Sdk<T> {
     /// Fail-closed (CLAUDE.md §4.6): the requested mode's capability must
     /// be advertised by [`Self::status`], otherwise the call is rejected
     /// with [`SdkError::CapabilityUnavailable`] before any dispatch.
+    /// `args.explain == Some(true)` additionally requires
+    /// `cairn.mcp.v1.policy_trace` (per the
+    /// `x-cairn-capability-when-true` annotation in
+    /// `crates/cairn-idl/schema/verbs/search.json`).
     pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
         validate_search(args)?;
         self.require_capability(args.mode.capability())?;
+        if args.explain == Some(true) {
+            self.require_capability(Some("cairn.mcp.v1.policy_trace"))?;
+        }
         Err(unimplemented("search"))
     }
 
