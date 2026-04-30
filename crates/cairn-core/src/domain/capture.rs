@@ -414,6 +414,17 @@ pub enum CapturePayload {
         event_kind: String,
     },
     /// Terminal command + output.
+    ///
+    /// **Rollback / mixed-version note (#218):** the `context` field
+    /// was added in #218. The enclosing [`CapturePayload`] enum still
+    /// uses `#[serde(deny_unknown_fields)]`, so a reader on a binary
+    /// without #218 will reject any persisted event that carries
+    /// `context`. Until envelope versioning lands, downgrade to a
+    /// pre-#218 binary is not supported on disks containing terminal
+    /// events written by a #218+ writer. This is acceptable for the
+    /// pre-v1 P0 surface (no shipped writer persists `CapturePayload`
+    /// yet — sensor wiring is gated behind #84 and the squash boundary
+    /// is `pub(crate)` until #217 lands the dispatch driver).
     Terminal {
         /// Argv-style command line.
         command: String,
@@ -429,9 +440,12 @@ pub enum CapturePayload {
         /// reproduces the same routing decision the dispatch driver
         /// took at capture time.
         ///
-        /// Forward-compat: events serialized before this field existed
-        /// deserialize with `None`, which the squash gate treats as
-        /// "unknown — fail closed and bypass" (matches CLAUDE.md §4 #6).
+        /// Forward-compat at the serde layer: events serialized before
+        /// this field existed deserialize with `None`. Strictness lives
+        /// at the envelope-validation boundary —
+        /// [`CapturePayload::validate`] rejects `None` so legacy data
+        /// fails loudly during validation rather than silently routing
+        /// through a different pipeline path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<TerminalContext>,
     },
@@ -594,8 +608,25 @@ impl CapturePayload {
                 require_non_empty("file_path", file_path)?;
                 require_non_empty("event_kind", event_kind)?;
             }
-            Self::Terminal { command, .. } => {
+            Self::Terminal {
+                command, context, ..
+            } => {
                 require_non_empty("command", command)?;
+                // #218: every terminal event reaching `validate` must
+                // carry a context — sensors set this at capture time
+                // and the dispatch driver (#217) reads it back. A
+                // missing field means the event was authored by a
+                // pre-#218 writer; treating that as a silent
+                // squash-bypass would mask wire-format drift, so we
+                // surface it as a validation failure here. Forward-
+                // compat at the serde layer is preserved
+                // (`Option<TerminalContext>` + `serde(default)`); the
+                // strictness lives at the envelope-validation boundary
+                // so legacy data fails loudly instead of silently
+                // routing through a different pipeline path.
+                if context.is_none() {
+                    return Err(DomainError::EmptyField { field: "context" });
+                }
             }
             Self::Clipboard { mime_type, .. } => {
                 require_non_empty("mime_type", mime_type)?;

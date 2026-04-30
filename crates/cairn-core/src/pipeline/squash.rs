@@ -252,10 +252,11 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, or
     /// `StructuredContextRejected` per the spec's caller contract. A
-    /// `Terminal` payload whose `context` is `None` (forward-compat with
-    /// pre-#218 events) is treated as
-    /// `NonInteractiveOrStructured` and rejected with
-    /// `StructuredContextRejected` — fail closed (CLAUDE.md §4 #6).
+    /// pre-#218 `Terminal` payload whose `context` is `None` fails at
+    /// the envelope-validation step ahead of squash routing and is
+    /// returned as `EventValidationFailed` — see
+    /// [`CapturePayload::validate`] for why legacy `None` is rejected
+    /// loudly rather than treated as a silent bypass.
     // Only reachable from #[cfg(test)] modules until #217 wires the
     // dispatch driver; default-feature non-test builds legitimately
     // leave it dead.
@@ -486,22 +487,27 @@ mod wrapper_tests {
         ));
     }
 
-    /// Forward-compat: an event captured before #218 has no `context`
-    /// field (`None` after `serde(default)`). The squash gate fails
-    /// closed (CLAUDE.md §4 #6) and rejects with
-    /// `StructuredContextRejected`.
+    /// A pre-#218 (legacy) terminal event has no `context` field
+    /// (`None` after `serde(default)`). To prevent silent squash-bypass
+    /// drift on legacy data, [`CapturePayload::validate`] rejects
+    /// `None` for terminal payloads — the squash constructor surfaces
+    /// it as `EventValidationFailed`, not `StructuredContextRejected`,
+    /// so callers cannot mistake legacy data for a deliberately
+    /// non-interactive payload.
     #[test]
-    fn rejects_missing_context_fail_closed() {
+    fn rejects_missing_context_via_validate() {
         let bytes = b"hello\n";
         let mut evt = terminal_event(bytes);
         if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
             *context = None;
         }
         let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
-        assert!(matches!(
-            err,
-            UnstructuredBindError::StructuredContextRejected
-        ));
+        match err {
+            UnstructuredBindError::EventValidationFailed(
+                crate::domain::DomainError::EmptyField { field },
+            ) => assert_eq!(field, "context"),
+            other => panic!("expected EventValidationFailed(EmptyField{{context}}), got {other:?}"),
+        }
     }
 
     #[test]
