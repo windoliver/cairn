@@ -40,10 +40,23 @@ pub(crate) async fn dispatch(
             None
         }
         BodyResolution::Failed(err) => {
-            return Err(ExtractError::BodyResolution {
-                event_id: input.event.event_id.as_str().to_owned(),
-                source: err.clone(),
-            });
+            // Text-bearing payloads must fail loudly — losing the body
+            // means losing the user intent. Non-text payloads (Hook
+            // tool-output, Terminal, Ide, …) still have structured
+            // hook/tool-frame data the dispatcher can extract from, so
+            // a transient body-resolution failure does not abort them.
+            if text_bearing_payload_variant(&input.event.payload).is_some() {
+                return Err(ExtractError::BodyResolution {
+                    event_id: input.event.event_id.as_str().to_owned(),
+                    source: err.clone(),
+                });
+            }
+            tracing::warn!(
+                worker = "regex",
+                error = %err,
+                "body resolution failed for non-text payload; continuing without body"
+            );
+            None
         }
     };
 
@@ -189,14 +202,18 @@ pub(crate) async fn dispatch(
             }
         }
 
-        compute_llm_eligible_spans(text, &windows, &covered, &mut llm_spans);
-
         if body_too_large {
-            llm_spans.clear();
-            llm_spans.push(TextSpan::new(
-                0,
-                u32::try_from(text.len()).unwrap_or(u32::MAX),
-            ));
+            // The body skipped Phase B but Phase A still ran, so we
+            // hand the LLM extractor the full body MINUS any high-
+            // confidence regex coverage. Replacing with `0..body_len`
+            // would re-expose explicit `remember`/`forget` clauses to
+            // the LLM and risk duplicate or conflicting outputs.
+            let body_len = u32::try_from(text.len()).unwrap_or(u32::MAX);
+            let mut full = vec![TextSpan::new(0, body_len)];
+            subtract_covered(&mut full, &covered);
+            llm_spans.extend(full);
+        } else {
+            compute_llm_eligible_spans(text, &windows, &covered, &mut llm_spans);
         }
     }
 
@@ -232,6 +249,38 @@ fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// Subtract `covered` spans from `spans` in place. Each input span is
+/// split around any fully or partially covering range, dropping bytes
+/// that a high-confidence regex output already claims.
+fn subtract_covered(spans: &mut Vec<TextSpan>, covered: &[TextSpan]) {
+    if covered.is_empty() {
+        return;
+    }
+    let mut sorted = covered.to_vec();
+    sorted.sort_by_key(|s| s.start);
+    let mut out: Vec<TextSpan> = Vec::with_capacity(spans.len());
+    for s in spans.drain(..) {
+        let mut cur_start = s.start;
+        let cur_end = s.end;
+        for c in &sorted {
+            if c.end <= cur_start || c.start >= cur_end {
+                continue;
+            }
+            if c.start > cur_start {
+                out.push(TextSpan::new(cur_start, c.start));
+            }
+            cur_start = cur_start.max(c.end);
+            if cur_start >= cur_end {
+                break;
+            }
+        }
+        if cur_start < cur_end {
+            out.push(TextSpan::new(cur_start, cur_end));
+        }
+    }
+    *spans = out;
 }
 
 fn normalise_spans(spans: &mut Vec<TextSpan>) {
@@ -588,9 +637,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn body_resolution_failure_propagates() {
+    async fn body_resolution_failure_propagates_for_text_payload() {
         use crate::pipeline::extract::body::BodyResolutionError;
         let rules = RuleSet::empty();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget::regex_default();
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
+        };
+        let err = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExtractError::BodyResolution { .. }));
+    }
+
+    #[tokio::test]
+    async fn body_resolution_failure_does_not_abort_non_text_payload() {
+        // PostToolUse hook does not need a text body — a transient
+        // resolver error must not suppress hook/tool-frame extraction.
+        use crate::pipeline::extract::body::BodyResolutionError;
+        let rules = RuleSet::builtin();
         let prefilter = TriggerPrefilter::new();
         let budget = ExtractBudget::regex_default();
         let event = make_event(CapturePayload::Hook {
@@ -601,10 +671,13 @@ mod tests {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
         };
-        let err = dispatch(&rules, &prefilter, &budget, &input)
+        let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
-            .unwrap_err();
-        assert!(matches!(err, ExtractError::BodyResolution { .. }));
+            .expect("non-text payload must continue");
+        assert!(
+            !result.outputs.is_empty(),
+            "PostToolUse hook should still fire"
+        );
     }
 
     #[tokio::test]

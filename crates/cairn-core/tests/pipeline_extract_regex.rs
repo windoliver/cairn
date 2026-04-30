@@ -205,22 +205,6 @@ async fn quoted_remember_is_not_extracted() {
     assert!(res.outputs.is_empty());
 }
 
-#[tokio::test]
-async fn oversize_body_still_extracts_trigger() {
-    let extractor = RegexExtractor::builtin();
-    let event = cli_event();
-    let mut body_text = "lorem ipsum. ".repeat(20_000);
-    body_text.push_str("forget my old address");
-    let input = body_input(&event, &body_text);
-    let res = extractor.extract(&input).await.expect("ok");
-    assert_eq!(res.outputs.len(), 1);
-    assert!(matches!(res.outputs[0], ExtractOutput::Forget(_)));
-    assert!(matches!(
-        res.truncated,
-        TruncationReason::BodyTooLarge { .. }
-    ));
-    assert_eq!(res.llm_eligible_spans.len(), 1);
-}
 
 #[tokio::test]
 async fn apostrophes_in_contractions_do_not_swallow_trigger() {
@@ -294,6 +278,36 @@ async fn single_period_abbreviation_does_not_fire_forget() {
         "Dr. abbreviation must not fire forget; got {:?}",
         res.outputs
     );
+}
+
+#[tokio::test]
+async fn oversize_body_extracts_trigger_and_excludes_covered_span() {
+    // The forget clause Phase A captures must not appear in
+    // llm_eligible_spans on an oversize body, otherwise the LLM
+    // extractor would re-emit a duplicate ForgetIntent for an
+    // irreversible operation.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let mut body_text = "lorem ipsum. ".repeat(20_000);
+    body_text.push_str("forget my old address");
+    let input = body_input(&event, &body_text);
+    let res = extractor.extract(&input).await.expect("ok");
+    assert_eq!(res.outputs.len(), 1);
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    assert!(matches!(
+        res.truncated,
+        TruncationReason::BodyTooLarge { .. }
+    ));
+    let covered = intent.source_span;
+    for span in &res.llm_eligible_spans {
+        assert!(
+            span.end <= covered.start || span.start >= covered.end,
+            "llm_eligible_spans must not overlap covered forget span: \
+             span={span:?} covered={covered:?}"
+        );
+    }
 }
 
 #[tokio::test]
