@@ -4,7 +4,7 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, ResponseFormat,
     },
 };
 use cairn_core::{
@@ -114,9 +114,10 @@ impl LLMProvider for OpenAiCompatProvider {
             builder.max_completion_tokens(max_tok);
         }
 
-        // JSON schema path — Task 7 wires full structured-output validation.
+        // JSON schema path: set json_object mode so the endpoint returns parseable JSON.
+        // We then validate against the provided schema ourselves after the call.
         if req.schema.is_some() {
-            todo!("JSON schema enforcement — implemented in Task 7")
+            builder.response_format(ResponseFormat::JsonObject);
         }
 
         let request = builder.build().map_err(|e| LlmError::ProviderUnreachable {
@@ -139,6 +140,32 @@ impl LLMProvider for OpenAiCompatProvider {
             .ok_or_else(|| LlmError::ProviderUnreachable {
                 detail: "provider returned empty choices or null content".into(),
             })?;
+
+        // JSON schema path: parse and validate the response body.
+        if let Some(schema) = &req.schema {
+            // Parse the response as JSON.
+            let value: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| LlmError::InvalidJsonOutput {
+                    detail: e.to_string(),
+                    raw: content.clone(),
+                })?;
+
+            // Compile the schema and validate the parsed value.
+            let compiled =
+                jsonschema::validator_for(schema).map_err(|e| LlmError::InvalidJsonOutput {
+                    detail: format!("invalid schema: {e}"),
+                    raw: content.clone(),
+                })?;
+
+            compiled
+                .validate(&value)
+                .map_err(|e| LlmError::InvalidJsonOutput {
+                    detail: e.to_string(),
+                    raw: content.clone(),
+                })?;
+
+            return Ok(CompletionOutput::Json(value));
+        }
 
         Ok(CompletionOutput::Text(content))
     }
