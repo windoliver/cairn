@@ -14,19 +14,33 @@ pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
 pub enum LlmError {
     /// No provider configured; LLM-dependent verbs fail closed (exit 78).
     #[error("llm.not_configured: {remediation}")]
-    NotConfigured { remediation: String },
+    NotConfigured {
+        /// Suggested remediation command, e.g. `cairn config set llm.provider ollama`.
+        remediation: String,
+    },
     /// Provider host/port refused connection or DNS failed or timed out.
     #[error("llm.provider_unreachable: {detail}")]
-    ProviderUnreachable { detail: String },
+    ProviderUnreachable {
+        /// Error detail from the transport layer.
+        detail: String,
+    },
     /// Provider returned HTTP 401 or 403.
     #[error("llm.auth_denied")]
     AuthDenied,
-    /// Provider is reachable but lacks a required capability (e.g. json_mode).
+    /// Provider is reachable but lacks a required capability (e.g. `json_mode`).
     #[error("llm.capability_missing: {capability}")]
-    CapabilityMissing { capability: String },
+    CapabilityMissing {
+        /// Name of the missing capability, e.g. `json_mode`.
+        capability: String,
+    },
     /// Provider returned output that failed JSON parse or schema validation.
     #[error("llm.invalid_json_output: {detail}")]
-    InvalidJsonOutput { detail: String, raw: String },
+    InvalidJsonOutput {
+        /// Validation or parse error message.
+        detail: String,
+        /// Raw string returned by the model.
+        raw: String,
+    },
     /// Completion exceeded the configured token or time budget.
     #[error("llm.budget_exceeded")]
     BudgetExceeded,
