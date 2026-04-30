@@ -7,9 +7,12 @@ use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, ChainRole,
     Identity, PayloadHash, Rfc3339Timestamp, SourceFamily,
 };
+use cairn_core::domain::taxonomy::MemoryKind;
+use cairn_core::pipeline::extract::regex::{RegexRule, RuleSet};
 use cairn_core::pipeline::extract::{
-    BodyResolution, BodyResolutionError, ExtractInput, ExtractOutput, ExtractorWorker,
-    ForgetMatchStrategy, RegexExtractor, ResolvedBody, TruncationReason, UserIngestPayloadKind,
+    BodyResolution, BodyResolutionError, Confidence, ExtractBudget, ExtractInput, ExtractOutput,
+    ExtractorWorker, ForgetMatchStrategy, KindHint, RegexExtractor, ResolvedBody, TruncationReason,
+    UserIngestPayloadKind,
 };
 
 fn ts() -> Rfc3339Timestamp {
@@ -339,4 +342,135 @@ async fn multi_sentence_trigger_after_period() {
     let res = extractor.extract(&input).await.expect("ok");
     assert_eq!(res.outputs.len(), 1);
     assert!(matches!(res.outputs[0], ExtractOutput::Forget(_)));
+}
+
+#[tokio::test]
+async fn clause_cap_extracts_first_64_and_surfaces_tail_to_llm() {
+    // 65 explicit `forget X.` clauses: regex extracts the first 64,
+    // remaining triggers must appear in `llm_eligible_spans` (so the
+    // chain's LLM extractor can recover them) and `truncated` reports
+    // `ClauseCapExceeded`.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let body_text = (0..65)
+        .map(|i| format!("forget item {i}."))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let input = body_input(&event, &body_text);
+    let res = extractor.extract(&input).await.expect("ok");
+
+    let forgets = res
+        .outputs
+        .iter()
+        .filter(|o| matches!(o, ExtractOutput::Forget(_)))
+        .count();
+    assert_eq!(forgets, 64, "regex must extract exactly the first 64 clauses");
+    assert!(matches!(
+        res.truncated,
+        TruncationReason::ClauseCapExceeded { processed: 64, .. }
+    ));
+    // Tail span must reach the body end and start somewhere within the
+    // body so the 65th `forget` is recoverable by the LLM extractor.
+    let body_len = u32::try_from(body_text.len()).unwrap();
+    let tail_present = res
+        .llm_eligible_spans
+        .iter()
+        .any(|s| s.end == body_len && s.start < body_len);
+    assert!(
+        tail_present,
+        "expected llm_eligible_spans tail reaching body end; got {:?}",
+        res.llm_eligible_spans
+    );
+}
+
+#[tokio::test]
+async fn hook_body_resolution_failure_does_not_abort_hook_extraction() {
+    // PostToolUse is not text-bearing — a transient body-resolution
+    // failure must still let the built-in hook rule fire.
+    let extractor = RegexExtractor::builtin();
+    let event = CaptureEvent {
+        event_id: ulid(),
+        sensor_id: Identity::parse("snr:local:hook:default:v1").expect("valid"),
+        capture_mode: CaptureMode::Auto,
+        actor_chain: vec![entry(ChainRole::Author, "agt:claude-code:opus-4-7:main:v1")],
+        refs: None,
+        payload_hash: hash(),
+        payload_ref: "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FB0.json".into(),
+        captured_at: ts(),
+        payload: CapturePayload::Hook {
+            hook_name: "PostToolUse".into(),
+            tool_name: None,
+        },
+        source_family: SourceFamily::Hook,
+    };
+    let input = ExtractInput {
+        event: &event,
+        body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".into())),
+    };
+    let res = extractor.extract(&input).await.expect("must not abort");
+    assert!(
+        !res.outputs.is_empty(),
+        "PostToolUse hook rule should still fire; got {:?}",
+        res.outputs
+    );
+}
+
+#[tokio::test]
+async fn partial_match_user_rule_suppresses_only_its_bytes() {
+    // A high-confidence user TriggerPhrase that matches a narrow prefix
+    // of a phrase window must NOT mask trailing bytes in the same
+    // window from the LLM extractor — only the matched span gets
+    // suppressed.
+    let confidence = Confidence::try_from(0.95_f32).expect("valid");
+    let kind_hint = KindHint::from(MemoryKind::User);
+    let user_rule = RegexRule::TriggerPhrase {
+        id: "user.prefix.only".into(),
+        // Anchored at sentence start; matches only `remember foo` even
+        // when the clause continues. `\bfoo\b` keeps the match narrow.
+        pattern: r"(?i)remember foo\b".into(),
+        kind_hint,
+        confidence,
+        capture_group: None,
+    };
+    // Use an empty rule set + just the user rule so the built-in
+    // `remember.*` rule does not pre-empt the user rule via Phase A
+    // first-match-wins. This isolates partial-match suppression.
+    let rules = RuleSet::from_config(&[user_rule]).expect("compile ok");
+    let extractor = RegexExtractor::from_parts(rules, ExtractBudget::regex_default());
+    let event = cli_event();
+    // The window the prefilter builds for `remember` runs to the next
+    // sentence terminator. Trailing text (`and bar baz quux`) must
+    // remain LLM-eligible despite the high-confidence prefix match.
+    let body_text = "remember foo and bar baz quux extra trailing text";
+    let input = body_input(&event, body_text);
+    let res = extractor.extract(&input).await.expect("ok");
+
+    let user_match = res
+        .outputs
+        .iter()
+        .find_map(|o| match o {
+            ExtractOutput::Draft(d) if d.trigger_id.as_deref() == Some("user.prefix.only") => {
+                d.source_span
+            }
+            _ => None,
+        })
+        .expect("user rule should fire");
+
+    // The matched span covers only `remember foo` (12 bytes).
+    let matched_text = &body_text[user_match.start as usize..user_match.end as usize];
+    assert_eq!(matched_text.to_ascii_lowercase(), "remember foo");
+
+    // Trailing bytes after the match must remain LLM-eligible — at
+    // least one llm_eligible_span must overlap [match.end, body_end).
+    let body_end = u32::try_from(body_text.len()).unwrap();
+    let trailing_eligible = res
+        .llm_eligible_spans
+        .iter()
+        .any(|s| s.end > user_match.end && s.start < body_end);
+    assert!(
+        trailing_eligible,
+        "trailing bytes after partial match must stay LLM-eligible; \
+         match={user_match:?} spans={:?}",
+        res.llm_eligible_spans
+    );
 }
