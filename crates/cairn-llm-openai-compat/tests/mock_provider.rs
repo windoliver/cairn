@@ -199,3 +199,51 @@ async fn json_mode_not_supported_no_http_call() {
         "expected CapabilityMissing(json_mode), got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn budget_exceeded_on_finish_reason_length() {
+    let server = MockServer::start().await;
+    let mut resp = chat_response("truncat");
+    resp["choices"][0]["finish_reason"] = serde_json::json!("length");
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(resp))
+        .mount(&server)
+        .await;
+
+    let config = LlmConfig {
+        provider: Some(LlmProvider::OpenaiCompatible),
+        base_url: Some(server.uri()),
+        model: Some("gpt-4o-mini".into()),
+        api_key: Some("test-key".into()),
+    };
+    let provider = build_llm_provider(&config).unwrap();
+    let req = CompletionRequest::builder()
+        .prompt("hi".to_string())
+        .build();
+    let err = provider.complete(&req).await.unwrap_err();
+    assert!(
+        matches!(err, LlmError::BudgetExceeded),
+        "expected BudgetExceeded, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_unreachable() {
+    // Port 1 is reserved and guaranteed to refuse connections.
+    let config = LlmConfig {
+        provider: Some(LlmProvider::OpenaiCompatible),
+        base_url: Some("http://127.0.0.1:1".into()),
+        model: Some("any".into()),
+        api_key: Some("any".into()),
+    };
+    let provider = build_llm_provider(&config).unwrap();
+    let req = CompletionRequest::builder()
+        .prompt("hi".to_string())
+        .build();
+    let err = provider.complete(&req).await.unwrap_err();
+    assert!(
+        matches!(err, LlmError::ProviderUnreachable { .. }),
+        "expected ProviderUnreachable, got {err:?}"
+    );
+}

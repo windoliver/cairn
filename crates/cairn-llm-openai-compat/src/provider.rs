@@ -4,7 +4,8 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, ResponseFormat,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, FinishReason,
+        ResponseFormat, ResponseFormatJsonSchema,
     },
 };
 use cairn_core::{
@@ -47,10 +48,10 @@ impl OpenAiCompatProvider {
 
     /// Test-only constructor with explicit capabilities.
     ///
-    /// # Note
-    /// This is exposed as `pub` so integration tests in `tests/` can use it.
-    /// Do not rely on this in production code.
-    #[doc(hidden)]
+    /// # Stability
+    /// Only available with the `testing` feature. Semver-exempt — do not rely
+    /// on this in production code.
+    #[cfg(feature = "testing")]
     #[must_use]
     pub fn with_capabilities(
         base_url: &str,
@@ -88,6 +89,7 @@ impl LLMProvider for OpenAiCompatProvider {
         Self::SUPPORTED_VERSIONS
     }
 
+    #[tracing::instrument(skip(self, req), err, fields(model, schema_mode = req.schema.is_some()))]
     async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
         // JSON schema path requires json_mode capability — guard it now,
         // full validation wired in Task 7.
@@ -99,6 +101,7 @@ impl LLMProvider for OpenAiCompatProvider {
 
         // Choose the model: per-request override or the instance default.
         let model = req.model.as_deref().unwrap_or(&self.model);
+        tracing::Span::current().record("model", model);
 
         // Build the user message from the prompt string.
         let user_msg = ChatCompletionRequestUserMessageArgs::default()
@@ -119,10 +122,17 @@ impl LLMProvider for OpenAiCompatProvider {
             builder.max_completion_tokens(max_tok);
         }
 
-        // JSON schema path: set json_object mode so the endpoint returns parseable JSON.
-        // We then validate against the provided schema ourselves after the call.
-        if req.schema.is_some() {
-            builder.response_format(ResponseFormat::JsonObject);
+        // JSON schema path: pass the caller's schema to the endpoint so it returns
+        // structured JSON conforming to that schema.
+        if let Some(schema) = &req.schema {
+            builder.response_format(ResponseFormat::JsonSchema {
+                json_schema: ResponseFormatJsonSchema {
+                    name: "output".to_string(),
+                    description: None,
+                    schema: Some(schema.clone()),
+                    strict: Some(true),
+                },
+            });
         }
 
         let request = builder.build().map_err(|e| LlmError::ProviderUnreachable {
@@ -136,14 +146,26 @@ impl LLMProvider for OpenAiCompatProvider {
             .await
             .map_err(|e| map_openai_error(&e))?;
 
-        // Extract content from the first choice.
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
+        // Extract the first choice.
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::ProviderUnreachable {
+                    detail: "provider returned empty choices".into(),
+                })?;
+
+        // Treat a truncated response as a budget overrun.
+        if matches!(choice.finish_reason, Some(FinishReason::Length)) {
+            return Err(LlmError::BudgetExceeded);
+        }
+
+        let content = choice
+            .message
+            .content
             .ok_or_else(|| LlmError::ProviderUnreachable {
-                detail: "provider returned empty choices or null content".into(),
+                detail: "provider returned null content".into(),
             })?;
 
         // JSON schema path: parse and validate the response body.
