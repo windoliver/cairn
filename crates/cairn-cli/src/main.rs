@@ -193,15 +193,13 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
                     );
                 }
                 Err(e) => {
-                    // Non-fatal: warn but continue. The vault layout is already
-                    // set up; the user can run `cairn admin model fetch` later.
                     eprintln!(
-                        "cairn bootstrap: warning — could not fetch embedding model '{}': {e:#}",
+                        "cairn bootstrap: failed to fetch embedding model '{}': {e:#}\n\
+                         Check network access (or set HF_ENDPOINT for a mirror), \
+                         or disable with `search.local_embeddings: false` in .cairn/config.yaml",
                         kind.as_str()
                     );
-                    eprintln!(
-                        "cairn bootstrap: run `cairn admin model fetch` when network is available"
-                    );
+                    return ExitCode::from(69); // EX_UNAVAILABLE
                 }
             }
         }
