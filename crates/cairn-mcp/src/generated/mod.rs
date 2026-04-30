@@ -193,7 +193,7 @@ EXCLUSIVITY: this is the canonical trace-capture surface
         description: r#"`lint` — verb lint.
 
 POSITIVE — use when:
-• use to check vault health — contradictions, orphans, stale claims, missing concept pages
+• use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift
 
 NEGATIVE — do not use when:
 • do NOT call per turn — run on a cadence (daily / on PR)
