@@ -10,7 +10,10 @@ use cairn_core::contract::agent_provider::{
 use cairn_core::contract::frontend_adapter::{
     FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin,
 };
-use cairn_core::contract::llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
+use cairn_core::contract::llm_provider::{
+    CompletionOutput, CompletionRequest, LlmError, LLMProvider, LLMProviderCapabilities,
+    LLMProviderPlugin,
+};
 use cairn_core::contract::mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 use cairn_core::contract::memory_store::{
     CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
@@ -580,6 +583,12 @@ mod llm_provider_factory_plugin {
         }
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
+        }
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<CompletionOutput, LlmError> {
+            Ok(CompletionOutput::Text("stub".into()))
         }
     }
 

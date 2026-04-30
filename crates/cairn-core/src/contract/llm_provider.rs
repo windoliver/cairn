@@ -100,6 +100,16 @@ pub trait LLMProvider: Send + Sync {
 
     /// Range of `LLMProvider::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+
+    /// Single LLM completion call.
+    ///
+    /// When `req.schema` is `Some`, the adapter MUST enforce JSON-schema
+    /// validation before returning `CompletionOutput::Json`. Invalid output
+    /// returns `LlmError::InvalidJsonOutput` — never reaches the store.
+    async fn complete(
+        &self,
+        req: &CompletionRequest,
+    ) -> Result<CompletionOutput, LlmError>;
 }
 
 /// Static identity descriptor for a [`LLMProvider`] plugin (§4.1).
@@ -135,6 +145,12 @@ mod tests {
         }
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
+        }
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<CompletionOutput, LlmError> {
+            Ok(CompletionOutput::Text("stub".into()))
         }
     }
 
@@ -208,5 +224,15 @@ mod tests {
     fn completion_output_is_json() {
         let out = CompletionOutput::Json(serde_json::json!({"k": "v"}));
         assert!(matches!(out, CompletionOutput::Json(_)));
+    }
+
+    #[tokio::test]
+    async fn stub_complete_returns_text() {
+        let provider: Box<dyn LLMProvider> = Box::new(StubLlm);
+        let req = CompletionRequest::builder()
+            .prompt("hello".to_string())
+            .build();
+        let out = provider.complete(&req).await.unwrap();
+        assert!(matches!(out, CompletionOutput::Text(_)));
     }
 }
