@@ -645,6 +645,151 @@ async fn init_defaults_is_idempotent_when_already_active() {
     assert_eq!(a1, a2, "agent id must be stable across calls");
 }
 
+// ── D6 tests ──────────────────────────────────────────────────────────────────
+
+/// `rotate` must advance `current_key_version` from 1 to 2 for an active
+/// identity (spec §3.6 two-phase cross-store rotation).
+///
+/// Test:
+/// 1. Set up a service with a bootstrapped vault (first-bind to system identity).
+/// 2. Provision a fresh `hmn:alice:v1` identity via the D4 provision path.
+/// 3. Call `svc.rotate(&alice_id)`.
+/// 4. Assert the registry shows `current_key_version = 2`.
+/// 5. Assert the new keypair is loadable from the keystore.
+///
+/// Eviction: the per-identity key count after first rotation is 2, which is
+/// below `MAX_KEY_HISTORY = 3`, so no eviction occurs on the first rotation.
+#[tokio::test]
+async fn rotate_advances_current_key_version() {
+    use std::sync::Arc;
+
+    use cairn_core::{
+        contract::identity_registry::IdentityVisibility,
+        domain::identity::{IdentityKind, keys::SecretHandle, provision::ProvisionInput},
+    };
+    use cairn_test_fixtures::MemoryKeystore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+
+    // Bootstrap: first-bind with a system identity.
+    let registry = SqliteIdentityRegistry::open_in_memory().expect("open in-memory registry");
+    let vault_id = VaultId::mint();
+    let sys_id = Identity::parse("hmn:system:v1").expect("valid");
+    let sys_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: sys_id,
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    let keystore = MemoryKeystore::new();
+    let sys_plan = build_provisioning_plan(sys_input, &mut rand_core::OsRng, chrono::Utc::now());
+    cairn_cli::identity::commit_first_identity(
+        dir.path(),
+        vault_id.clone(),
+        sys_plan,
+        &registry,
+        &keystore,
+    )
+    .await
+    .expect("first bind for system identity");
+    fs::write(cairn_dir.join("vault.id"), vault_id.as_str()).expect("write vault.id");
+
+    let svc = cairn_cli::identity::IdentityService::new_for_test(
+        dir.path().to_path_buf(),
+        vault_id.clone(),
+        Arc::new(registry),
+        Arc::new(keystore),
+    );
+
+    // Provision a fresh alice identity.
+    let alice_id = Identity::parse("hmn:alice:v1").expect("valid");
+    let alice_input = ProvisionInput {
+        vault_id: vault_id.clone(),
+        id: alice_id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, alice_input, &mut rand_core::OsRng)
+        .await
+        .expect("provision alice");
+
+    // Verify alice is Active with key_version=1 before rotation.
+    let before = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity before")
+        .expect("alice must exist before rotation");
+    assert_eq!(
+        before.current_key_version.as_u32(),
+        1,
+        "current_key_version must be 1 before rotation",
+    );
+
+    // Rotate alice's key.
+    let receipt = svc
+        .rotate(&alice_id)
+        .await
+        .expect("rotate must succeed for active identity");
+
+    // The receipt must reflect the new key version.
+    assert_eq!(
+        receipt.payload.new_key_version,
+        Some(KeyVersion::FIRST.next().expect("kv2")),
+        "receipt must carry new_key_version = 2",
+    );
+
+    // Registry must reflect current_key_version = 2.
+    let after = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity after")
+        .expect("alice must exist after rotation");
+    assert_eq!(
+        after.current_key_version.as_u32(),
+        2,
+        "current_key_version must be 2 after rotation",
+    );
+    assert_eq!(
+        after.provisioning_state,
+        ProvisioningState::Active,
+        "alice must remain Active after rotation",
+    );
+
+    // The new key (version 2) must be loadable from the keystore.
+    let new_handle =
+        SecretHandle::for_identity(vault_id, alice_id.clone(), after.current_key_version);
+    svc.keystore
+        .load_signing_key(&new_handle)
+        .await
+        .expect("new signing key (v2) must be loadable from keystore after rotation");
+}
+
+/// `rotate` must return `Registry(NotFound)` when the identity does not exist.
+#[tokio::test]
+async fn rotate_returns_not_found_for_unknown_identity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, _) = setup_service_after_first_bind(&dir).await;
+
+    let ghost = Identity::parse("hmn:ghost:v1").expect("valid");
+    let err = svc
+        .rotate(&ghost)
+        .await
+        .expect_err("rotate must fail for unknown identity");
+    assert!(
+        matches!(
+            err,
+            IdentityServiceError::Registry(
+                cairn_core::contract::identity_registry::RegistryError::NotFound
+            )
+        ),
+        "expected Registry(NotFound), got: {err:?}",
+    );
+}
+
 /// `init_defaults` must mint v2 when the v1 default human has been purged.
 ///
 /// Spec §3.5 revision-bump rule: if the highest-revision row is in a
@@ -690,5 +835,191 @@ async fn init_defaults_mints_v2_after_v1_purged() {
         human.as_str(),
         expected_v2,
         "v2 human id must be hmn:{slug}:v2",
+    );
+}
+
+// ── D7 helpers ────────────────────────────────────────────────────────────────
+
+/// Provision a fresh identity and return the `(service, identity)` pair.
+///
+/// Reuses `setup_service_after_first_bind` so `vault_meta` is already present.
+async fn setup_service_with_active_identity(
+    dir: &tempfile::TempDir,
+    id_str: &str,
+) -> (cairn_cli::identity::IdentityService, Identity) {
+    let (svc, vault_id) = setup_service_after_first_bind(dir).await;
+    let id = Identity::parse(id_str).expect("valid identity string");
+    let input = ProvisionInput {
+        vault_id,
+        id: id.clone(),
+        kind: IdentityKind::Human,
+        revision: IdentityRevision::FIRST,
+    };
+    svc.provision(IdentityKind::Human, input, &mut rand_core::OsRng)
+        .await
+        .expect("provision must succeed");
+    (svc, id)
+}
+
+// ── D7 tests ──────────────────────────────────────────────────────────────────
+
+/// `revoke` must leave the target identity in `Revoked` state and evict the
+/// signing key from the keystore (spec §3.10 two-phase tombstone).
+///
+/// Self-revocation path: `signer == target`.
+#[tokio::test]
+async fn revoke_disables_signing_at_begin_revocation() {
+    use cairn_core::{
+        contract::{identity_registry::IdentityVisibility, keystore::KeystoreError},
+        domain::identity::keys::SecretHandle,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Retrieve the key version before revocation so we can check keystore eviction.
+    let row_before = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity before revoke")
+        .expect("alice must exist");
+    let key_version_before = row_before.current_key_version;
+
+    // Self-revocation.
+    svc.revoke(&alice_id, &alice_id)
+        .await
+        .expect("revoke must succeed for active identity");
+
+    // Registry must show `Revoked`.
+    let row_after = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Operational)
+        .await
+        .expect("get_identity after revoke")
+        .expect("alice must still be visible at Operational after revocation");
+    assert_eq!(
+        row_after.provisioning_state,
+        ProvisioningState::Revoked,
+        "identity must be Revoked after revoke()",
+    );
+
+    // Keystore must no longer hold the signing key.
+    let handle = SecretHandle::for_identity(svc.vault_id.clone(), alice_id, key_version_before);
+    let result = svc.keystore.load_signing_key(&handle).await;
+    assert!(
+        matches!(result, Err(KeystoreError::NotFound)),
+        "signing key must be evicted after revoke; got: {result:?}",
+    );
+}
+
+/// `revoke` must return `Registry(AlreadyRevoked)` when the target is already
+/// in a non-active state (spec §3.10).
+#[tokio::test]
+async fn revoke_returns_already_revoked_for_non_active() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // First revocation succeeds.
+    svc.revoke(&alice_id, &alice_id)
+        .await
+        .expect("first revoke must succeed");
+
+    // Second revocation must fail.
+    let err = svc
+        .revoke(&alice_id, &alice_id)
+        .await
+        .expect_err("second revoke must fail");
+
+    assert!(
+        matches!(
+            err,
+            IdentityServiceError::Registry(
+                cairn_core::contract::identity_registry::RegistryError::AlreadyRevoked { .. }
+            )
+        ),
+        "expected Registry(AlreadyRevoked), got: {err:?}",
+    );
+}
+
+/// `purge` must fail with [`IdentityServiceError::PurgeAckMissing`] when
+/// `.cairn/maintenance/purge-ack` has not been written (spec §3.10).
+#[tokio::test]
+async fn purge_refuses_without_ack_file() {
+    use cairn_core::contract::identity_registry::PurgeReason;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    let err = svc
+        .purge(&alice_id, PurgeReason("test".to_owned()))
+        .await
+        .expect_err("purge must fail without ack file");
+
+    assert!(
+        matches!(err, IdentityServiceError::PurgeAckMissing),
+        "expected PurgeAckMissing, got: {err:?}",
+    );
+}
+
+/// Full purge path: write ack file, call `purge`, verify state = `Purged`,
+/// ack file removed, and keystore entries gone (spec §3.10).
+#[tokio::test]
+async fn purge_full_path_lands_purged() {
+    use cairn_core::{
+        contract::{
+            identity_registry::{IdentityVisibility, PurgeReason},
+            keystore::KeystoreError,
+        },
+        domain::identity::keys::SecretHandle,
+    };
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (svc, alice_id) = setup_service_with_active_identity(&dir, "hmn:alice:v1").await;
+
+    // Capture the key version before purge.
+    let row_before = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity before purge")
+        .expect("alice must exist");
+    let kv = row_before.current_key_version;
+
+    // Write purge-ack file.
+    let maintenance_dir = dir.path().join(".cairn/maintenance");
+    fs::create_dir_all(&maintenance_dir).expect("create maintenance dir");
+    let ack_path = maintenance_dir.join("purge-ack");
+    fs::write(&ack_path, alice_id.as_str()).expect("write purge-ack");
+
+    svc.purge(&alice_id, PurgeReason("GDPR erasure".to_owned()))
+        .await
+        .expect("purge must succeed");
+
+    // State must be Purged.
+    let row_after = svc
+        .registry
+        .get_identity(&alice_id, IdentityVisibility::Audit)
+        .await
+        .expect("get_identity after purge")
+        .expect("purged identity must still be visible at Audit level");
+    assert_eq!(
+        row_after.provisioning_state,
+        ProvisioningState::Purged,
+        "identity must be Purged after purge()",
+    );
+
+    // Ack file must have been removed.
+    assert!(
+        !ack_path.exists(),
+        "purge-ack file must be removed after successful purge",
+    );
+
+    // Keystore must no longer hold the signing key.
+    let handle = SecretHandle::for_identity(svc.vault_id.clone(), alice_id, kv);
+    let result = svc.keystore.load_signing_key(&handle).await;
+    assert!(
+        matches!(result, Err(KeystoreError::NotFound)),
+        "signing key must be evicted after purge; got: {result:?}",
     );
 }
