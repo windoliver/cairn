@@ -223,15 +223,21 @@ fn json_flag() -> Arg {
 /// Dispatch `cairn identity <subcommand>` to the appropriate [`IdentityService`]
 /// method and return the appropriate exit code.
 ///
-/// `matches` is the [`ArgMatches`] for the `identity` subcommand (not the
-/// root command).  The vault path is resolved from `--vault-path` if present,
-/// or falls back to the current directory.
+/// `matches` is the [`ArgMatches`] for the `identity` subcommand.
+/// `explicit_vault` is the global `--vault` flag merged with `CAIRN_VAULT` env
+/// (resolved by `main`); it takes precedence over the subcommand's own
+/// `--vault-path` if both are set, matching the §3.3 precedence rule.
 #[must_use]
-pub fn run_identity(matches: &ArgMatches) -> ExitCode {
-    // Resolve the vault path.  `identity` subcommands that need a live service
-    // receive it; static commands (vault-id-recover, finalise-binding) receive
-    // the raw path only.
-    let vault_path = resolve_vault_path(matches);
+pub fn run_identity(matches: &ArgMatches, explicit_vault: Option<String>) -> ExitCode {
+    // Resolve the vault path with full §3.3 precedence:
+    //   1. global `--vault` flag / `CAIRN_VAULT` env (passed in as `explicit_vault`)
+    //   2. subcommand-local `--vault-path` (legacy, kept for back-compat)
+    //   3. cwd walk-up via the registry resolver
+    //   4. registry default
+    let vault_path = match resolve_vault_path(matches, explicit_vault) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
 
     match matches.subcommand() {
         Some(("status", sub)) => run_status(sub, vault_path),
@@ -254,13 +260,65 @@ pub fn run_identity(matches: &ArgMatches) -> ExitCode {
 
 // ── vault path resolution ─────────────────────────────────────────────────────
 
-/// Resolve the vault root path from optional args or fall back to `$PWD`.
-fn resolve_vault_path(matches: &ArgMatches) -> PathBuf {
-    matches
-        .get_one::<String>("vault-path")
+/// Resolve the vault root path with full §3.3 precedence.
+///
+/// Priority:
+/// 1. Global `--vault` flag or `CAIRN_VAULT` env (passed via `explicit_vault`).
+/// 2. Subcommand-local `--vault-path` (legacy).
+/// 3. cwd walk-up + registry default (via [`crate::vault::resolve_vault`]).
+/// 4. cwd as last-ditch fallback.
+fn resolve_vault_path(
+    matches: &ArgMatches,
+    explicit_vault: Option<String>,
+) -> Result<PathBuf, ExitCode> {
+    // 1. Subcommand-local --vault-path always wins if explicitly given.
+    //    Use try_get_one because no current identity subcommand defines this
+    //    arg — `get_one` would panic on the unknown id. Kept as a hook for
+    //    future per-subcommand overrides.
+    if let Ok(Some(p)) = matches.try_get_one::<String>("vault-path") {
+        return Ok(PathBuf::from(p));
+    }
+
+    // Build the registry store. When an explicit vault selector is
+    // present we MUST resolve through it — silently falling through to
+    // the cwd would let a destructive verb mutate the wrong vault.
+    let store_path = std::env::var("CAIRN_REGISTRY")
+        .ok()
         .map(PathBuf::from)
-        .or_else(|| std::env::var("CAIRN_VAULT").ok().map(PathBuf::from))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .or_else(|| crate::vault::VaultRegistryStore::default_path().ok());
+
+    let explicit_present = explicit_vault.is_some();
+
+    if let Some(store_path) = store_path {
+        let store = crate::vault::VaultRegistryStore::new(store_path);
+        let opts = crate::vault::ResolveOpts {
+            explicit: explicit_vault,
+            cwd: std::env::current_dir().ok(),
+            store: &store,
+        };
+        match crate::vault::resolve_vault(opts) {
+            Ok(p) => return Ok(p),
+            Err(e) if explicit_present => {
+                // Fail closed when the operator named a target.
+                eprintln!(
+                    "cairn identity: explicit --vault/CAIRN_VAULT could not be resolved: {e}"
+                );
+                return Err(ExitCode::from(EX_CONFIG));
+            }
+            Err(_) => {
+                // No explicit selector — fall through to cwd.
+            }
+        }
+    } else if explicit_present {
+        eprintln!(
+            "cairn identity: explicit --vault/CAIRN_VAULT supplied but no vault registry is \
+             available (set CAIRN_REGISTRY or initialise the default registry)"
+        );
+        return Err(ExitCode::from(EX_CONFIG));
+    }
+
+    // No explicit selector — last-resort cwd fallback.
+    Ok(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 // ── error → exit code ─────────────────────────────────────────────────────────
@@ -272,9 +330,11 @@ fn identity_exit_code(err: &IdentityServiceError) -> u8 {
         IdentityServiceError::Keystore(cairn_core::contract::keystore::KeystoreError::Locked) => {
             EX_UNAVAILABLE
         }
-        IdentityServiceError::VaultDegraded { .. } | IdentityServiceError::FirstBindInProgress => {
-            EX_TEMPFAIL
-        }
+        IdentityServiceError::VaultDegraded { .. }
+        | IdentityServiceError::FirstBindInProgress
+        | IdentityServiceError::PurgeResumeRequired { .. }
+        | IdentityServiceError::VaultReconciliationIncomplete
+        | IdentityServiceError::AbandonAfterCommit => EX_TEMPFAIL,
         IdentityServiceError::VaultIdMissing | IdentityServiceError::VaultIdConflict { .. } => {
             EX_CONFIG
         }
@@ -563,7 +623,13 @@ fn run_revoke(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
             Err(e) => return identity_err("revoke", &e),
         };
 
-        // Resolve signer: explicit arg, else first active agent, else self.
+        // Resolve signer: explicit arg, else first independent active agent.
+        // We deliberately do NOT fall back to self-revocation: a destructive
+        // trust-state mutation must be authorized by an independent signer
+        // (or be an explicit operator opt-in via `--signer <target>`).
+        // Self-revocation by a compromised identity would otherwise produce a
+        // valid-looking receipt and weaken the trust boundary on exactly the
+        // failure path we care about.
         let signer = if let Some(s) = signer_str {
             match Identity::parse(s.clone()) {
                 Ok(i) => i,
@@ -573,12 +639,13 @@ fn run_revoke(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
                 }
             }
         } else {
-            // Default: first active agent from registry.
             match resolve_first_active_agent(&svc).await {
-                Ok(Some(id)) => id,
-                Ok(None) => {
-                    // Fall back to self-revocation.
-                    target.clone()
+                Ok(Some(id)) if id != target => id,
+                Ok(_) => {
+                    // No independent signer available. Fail closed; operator
+                    // must pass `--signer <id>` explicitly (including the
+                    // self-revocation case `--signer <target>`).
+                    return identity_err("revoke", &IdentityServiceError::NoLiveAttributableSigner);
                 }
                 Err(e) => return identity_err("revoke", &e),
             }
@@ -663,6 +730,7 @@ fn run_repair(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
 
 fn run_purge(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
     let json = sub.get_flag("json");
+    let resume = sub.get_flag("resume");
     let id_str = sub
         .get_one::<String>("id")
         .expect("invariant: id is required");
@@ -679,7 +747,7 @@ fn run_purge(sub: &ArgMatches, vault_path: PathBuf) -> ExitCode {
             Err(e) => return identity_err("purge", &e),
         };
         let reason = PurgeReason("cli".to_owned());
-        match svc.purge(&id, reason).await {
+        match svc.purge(&id, reason, resume).await {
             Ok(()) => {
                 if json {
                     println!("{}", serde_json::json!({ "purged": id.as_str() }));

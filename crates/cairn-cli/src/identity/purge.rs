@@ -50,6 +50,7 @@ pub(super) async fn purge(
     svc: &IdentityService,
     target: &Identity,
     reason: PurgeReason,
+    resume: bool,
 ) -> Result<(), IdentityServiceError> {
     // ── Step 1: acquire per-identity lock ─────────────────────────────────────
     let cairn_dir = svc.vault_path.join(".cairn");
@@ -85,7 +86,13 @@ pub(super) async fn purge(
 
     match current_state {
         Some(ProvisioningState::PurgePending) => {
-            // Already in purge_pending — crash-resume path; skip step 4.
+            // Already in purge_pending — crash-resume path. Refuse to silently
+            // resume a destructive operation without an explicit operator
+            // opt-in: the CLI's `--resume` flag must be set.
+            if !resume {
+                return Err(IdentityServiceError::PurgeResumeRequired { id: target.clone() });
+            }
+            // Resume confirmed; skip step 4.
         }
         Some(ProvisioningState::Purged) => {
             // Already purged — idempotent success.
@@ -102,13 +109,32 @@ pub(super) async fn purge(
         }
     }
 
-    // ── Step 5: delete all key versions from keystore ────────────────────────
+    // ── Step 5: delete all key versions from keystore + read-back verify ─────
+    //
+    // `purged` is the strongest terminal state. We must NOT advance the
+    // registry to `purged` until every targeted keystore handle is verified
+    // absent — otherwise a backend that reports successful delete while
+    // leaving the secret behind would let signing material survive a
+    // "completed" purge, silently breaking the §3.10 erasure contract.
     let key_entries = svc.registry.list_keys(target).await?;
     for entry in &key_entries {
         let handle =
             SecretHandle::for_identity(svc.vault_id.clone(), target.clone(), entry.key_version);
         match svc.keystore.delete_keypair(&handle).await {
             Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "purge: keystore entry survived delete for key_version={}",
+                        entry.key_version
+                    ),
+                });
+            }
             Err(e) => return Err(IdentityServiceError::Keystore(e)),
         }
     }
@@ -122,6 +148,19 @@ pub(super) async fn purge(
             Ok(()) | Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
             Err(e) => return Err(IdentityServiceError::Keystore(e)),
         }
+        match svc.keystore.load_signing_key(&handle).await {
+            Err(cairn_core::contract::keystore::KeystoreError::NotFound) => {}
+            Ok(_) => {
+                return Err(IdentityServiceError::KeyMaterialDesynchronized {
+                    id: target.clone(),
+                    reason: format!(
+                        "purge: keystore entry survived delete for pending_rotation \
+                         key_version={planned_version}"
+                    ),
+                });
+            }
+            Err(e) => return Err(IdentityServiceError::Keystore(e)),
+        }
         match svc
             .registry
             .delete_pending_rotation(target, planned_version)
@@ -132,7 +171,8 @@ pub(super) async fn purge(
         }
     }
 
-    // ── Step 7: phase 2 — finalise purge ─────────────────────────────────────
+    // ── Step 7: phase 2 — finalise purge (only after read-back proves every
+    //              targeted handle is absent) ────────────────────────────────
     svc.registry.finalise_purge(target).await?;
 
     // ── Step 8: remove ack file (best-effort) ─────────────────────────────────
@@ -153,19 +193,25 @@ impl IdentityService {
     /// [`IdentityServiceError::PurgeAckMissing`].
     ///
     /// Runs the two-phase WAL tombstone: `mark_purge_pending` → key eviction
-    /// → `finalise_purge`.  The function is re-entrant: if it is called after
-    /// a crash that left the identity in `PurgePending` state it resumes from
-    /// step 5 without re-writing the WAL row.
+    /// → `finalise_purge`.
+    ///
+    /// `resume` must be `true` when continuing a previously crashed purge
+    /// (target already in `PurgePending`); otherwise the call returns
+    /// [`IdentityServiceError::PurgeResumeRequired`] to force an explicit
+    /// operator decision. This guard prevents accidental destructive
+    /// resumption of a partial purge.
     ///
     /// # Errors
     ///
-    /// Returns [`IdentityServiceError`] on missing ack, lock contention,
-    /// keystore failures, or registry failures.
+    /// Returns [`IdentityServiceError`] on missing ack, missing `--resume`
+    /// when one is required, lock contention, keystore failures, or registry
+    /// failures.
     pub async fn purge(
         &self,
         target: &Identity,
         reason: PurgeReason,
+        resume: bool,
     ) -> Result<(), IdentityServiceError> {
-        purge(self, target, reason).await
+        purge(self, target, reason, resume).await
     }
 }

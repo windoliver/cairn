@@ -78,6 +78,7 @@ impl SqliteIdentityRegistry {
     /// Returns [`RegistryError::Backend`] if the connection or migration fails.
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory().map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Self::configure_connection(&conn)?;
         Self::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -91,10 +92,30 @@ impl SqliteIdentityRegistry {
     /// Returns [`RegistryError::Backend`] if the connection or migration fails.
     pub fn open(db_path: &Path) -> Result<Self, RegistryError> {
         let conn = Connection::open(db_path).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Self::configure_connection(&conn)?;
         Self::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Apply per-connection pragmas. `SQLite` enforces foreign keys per
+    /// connection and they default to OFF; the schema's `ON DELETE CASCADE`
+    /// rules and composite receipt FKs are only honored when this pragma
+    /// is on. Fail closed if it cannot be enabled — silently running with
+    /// FK enforcement off would mask integrity bugs.
+    fn configure_connection(conn: &Connection) -> Result<(), RegistryError> {
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        if on != 1 {
+            return Err(RegistryError::Backend(
+                "PRAGMA foreign_keys did not stick — FK enforcement off".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Apply [`MIGRATION_0002`] to `conn` if it has not already been applied.
@@ -806,7 +827,7 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         receipt: &RotationReceipt,
         expected_current: KeyVersion,
         new_key: &IdentityKeyEntry,
-    ) -> Result<(), RegistryError> {
+    ) -> Result<ReceiptId, RegistryError> {
         let mut conn = self.conn.lock();
         let tx = conn
             .transaction()
@@ -891,13 +912,15 @@ impl IdentityRegistry for SqliteIdentityRegistry {
         )
         .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
+        let receipt_id = ReceiptId(tx.last_insert_rowid());
+
         let wal_payload = serde_json::to_vec(&receipt.payload)
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
         wal::wal_insert(&tx, "apply_rotation", target, &wal_payload)?;
 
         tx.commit()
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
-        Ok(())
+        Ok(receipt_id)
     }
 
     async fn insert_pending_rotation(
@@ -1312,6 +1335,9 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
         let target = target.ok_or(RegistryError::NotFound)?;
 
+        // Idempotent: clearing an already-cleared flag is a successful no-op.
+        // Reserve `NotFound` for missing receipt rows; recovery code re-runs
+        // `clear_pending_*` on retry and must converge cleanly.
         let rows_changed = tx
             .execute(
                 "UPDATE identity_receipts SET pending_eviction = 0 \
@@ -1321,7 +1347,11 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         if rows_changed == 0 {
-            return Err(RegistryError::NotFound);
+            // Receipt row exists (target was Some above) but flag is already
+            // clear → idempotent success; skip the WAL write.
+            tx.commit()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            return Ok(());
         }
 
         let payload = serde_json::json!({ "receipt_id": receipt_id.0 });
@@ -1335,10 +1365,15 @@ impl IdentityRegistry for SqliteIdentityRegistry {
     }
 
     async fn list_pending_evictions(&self) -> Result<Vec<PendingEvictionEntry>, RegistryError> {
+        // Per spec §3.6: a pending_eviction receipt records that the OLD key
+        // version (the predecessor that was just superseded) still needs to be
+        // deleted from the keystore. Returning `new_key_version` here would
+        // make repair/reconcile delete the freshly active key — a data-loss
+        // bug. Always source `evict_version` from `old_key_version`.
         let conn = self.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT rowid, target_identity, new_key_version, issued_at \
+                "SELECT rowid, target_identity, old_key_version, issued_at \
                  FROM identity_receipts \
                  WHERE pending_eviction = 1",
             )
@@ -1348,22 +1383,22 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .query_map([], |row| {
                 let rowid: i64 = row.get(0)?;
                 let target_str: String = row.get(1)?;
-                let new_kv_u32: Option<u32> = row.get(2)?;
+                let old_kv_u32: Option<u32> = row.get(2)?;
                 let issued_str: String = row.get(3)?;
-                Ok((rowid, target_str, new_kv_u32, issued_str))
+                Ok((rowid, target_str, old_kv_u32, issued_str))
             })
             .map_err(|e| RegistryError::Backend(Box::new(e)))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         let mut result = Vec::with_capacity(rows.len());
-        for (rowid, target_str, new_kv_u32, issued_str) in rows {
+        for (rowid, target_str, old_kv_u32, issued_str) in rows {
             let identity = Identity::parse(target_str).map_err(domain_err)?;
-            let evict_version_raw = new_kv_u32.ok_or_else(|| {
-                RegistryError::Backend("pending_eviction receipt has NULL new_key_version".into())
+            let evict_version_raw = old_kv_u32.ok_or_else(|| {
+                RegistryError::Backend("pending_eviction receipt has NULL old_key_version".into())
             })?;
             let nz = std::num::NonZeroU32::new(evict_version_raw).ok_or_else(|| {
-                RegistryError::Backend("new_key_version is 0 in eviction receipt".into())
+                RegistryError::Backend("old_key_version is 0 in eviction receipt".into())
             })?;
             let evict_version = KeyVersion::new(nz);
             let rotated_at = chrono::DateTime::parse_from_rfc3339(&issued_str)
@@ -1397,6 +1432,8 @@ impl IdentityRegistry for SqliteIdentityRegistry {
 
         let target = target.ok_or(RegistryError::NotFound)?;
 
+        // Idempotent: clearing an already-cleared flag is a successful no-op.
+        // See `clear_pending_eviction` for rationale.
         let rows_changed = tx
             .execute(
                 "UPDATE identity_receipts SET pending_key_disable = 0 \
@@ -1406,7 +1443,9 @@ impl IdentityRegistry for SqliteIdentityRegistry {
             .map_err(|e| RegistryError::Backend(Box::new(e)))?;
 
         if rows_changed == 0 {
-            return Err(RegistryError::NotFound);
+            tx.commit()
+                .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+            return Ok(());
         }
 
         let payload = serde_json::json!({ "receipt_id": receipt_id.0 });

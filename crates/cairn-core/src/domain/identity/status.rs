@@ -36,6 +36,15 @@ pub struct ReconciliationReport {
     /// `true` when at least one mismatch or active-mismatch has been recorded,
     /// indicating the vault is in a degraded state requiring operator attention.
     pub vault_degraded: bool,
+    /// `true` when the reconciliation sweep stopped early because the keystore
+    /// returned `KeystoreError::Locked` during the scan.
+    ///
+    /// When set, this report is **incomplete**: any mismatch or desync that
+    /// would have been recorded after the locked lookup is missing. Mutating
+    /// callers MUST treat this as a hard stop and refuse to proceed (see
+    /// `cairn-cli`'s `refuse_if_degraded`).
+    #[serde(default)]
+    pub keystore_locked: bool,
 }
 
 impl ReconciliationReport {
@@ -60,6 +69,14 @@ impl ReconciliationReport {
     /// `vault_degraded`.
     pub fn record_active_desync(&mut self, id: Identity) {
         self.desynchronized_active_ids.push(id);
+    }
+
+    /// Mark the sweep as incomplete because the keystore was locked.
+    ///
+    /// Sets `keystore_locked = true`; callers that mutate state must refuse
+    /// to proceed since unseen mismatches may exist beyond the lock point.
+    pub fn record_keystore_locked(&mut self) {
+        self.keystore_locked = true;
     }
 }
 

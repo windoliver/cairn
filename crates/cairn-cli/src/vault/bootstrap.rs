@@ -232,11 +232,23 @@ fn preflight_vault_id(
     }
 
     // vault.id is absent — check whether the vault has already been bound.
-    if binding_sentinel_exists(vault) || probe_vault_meta_exists(db_path) {
+    if binding_sentinel_exists(vault) {
         anyhow::bail!(
             "vault.id lost — run `cairn identity vault-id-recover` to restore it \
-             (vault has been bound but .cairn/vault.id is missing)"
+             (binding sentinel exists but .cairn/vault.id is missing)"
         );
+    }
+    match probe_vault_meta(db_path) {
+        VaultMetaProbe::Present => anyhow::bail!(
+            "vault.id lost — run `cairn identity vault-id-recover` to restore it \
+             (vault_meta row exists but .cairn/vault.id is missing)"
+        ),
+        VaultMetaProbe::Indeterminate(reason) => anyhow::bail!(
+            "vault.id missing and {reason} — refusing to mint a new vault.id over a \
+             possibly-bound vault. Run `cairn identity vault-id-recover` or \
+             investigate the database."
+        ),
+        VaultMetaProbe::Absent => {}
     }
 
     // Fresh vault; caller will mint + write after dirs exist.
@@ -294,20 +306,55 @@ fn binding_sentinel_exists(vault: &Path) -> bool {
         || vault.join(".cairn/vault.binding.pending").exists()
 }
 
-/// Return `true` when the `SQLite` database at `db_path` contains a
-/// `vault_meta` row (i.e. the vault has completed at least one first-bind).
-/// Opens the DB read-only to avoid taking a write lock. Returns `false` on
-/// any error (missing file, locked DB, etc.) so bootstrap can continue safely.
-fn probe_vault_meta_exists(db_path: &Path) -> bool {
-    use rusqlite::OpenFlags;
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+/// Tri-state result of probing the `vault_meta` row.
+///
+/// `Indeterminate` carries the underlying failure reason and forces the
+/// caller to fail closed rather than treat an opaque DB error as an
+/// "unbound" signal — minting a fresh `vault.id` over a locked or corrupt
+/// database would silently strand committed identities under the prior
+/// keystore namespace.
+enum VaultMetaProbe {
+    /// `vault_meta` row exists — vault was bound.
+    Present,
+    /// DB file missing OR `vault_meta` table missing OR no row — fresh vault.
+    Absent,
+    /// DB exists but could not be inspected. Bootstrap must refuse.
+    Indeterminate(String),
+}
+
+/// Probe `vault_meta` in `db_path`. See [`VaultMetaProbe`].
+fn probe_vault_meta(db_path: &Path) -> VaultMetaProbe {
+    use rusqlite::{ErrorCode, OpenFlags};
+    if !db_path.exists() {
+        return VaultMetaProbe::Absent;
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    ) else {
-        return false;
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return VaultMetaProbe::Indeterminate(format!(
+                "could not open {}: {e}",
+                db_path.display()
+            ));
+        }
     };
-    conn.query_row("SELECT 1 FROM vault_meta WHERE rowid = 1", [], |_| Ok(true))
-        .unwrap_or(false)
+    match conn.query_row("SELECT 1 FROM vault_meta WHERE rowid = 1", [], |_| Ok(())) {
+        Ok(()) => VaultMetaProbe::Present,
+        Err(rusqlite::Error::QueryReturnedNoRows) => VaultMetaProbe::Absent,
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::Unknown => {
+            // SQLITE_ERROR for missing table — the schema hasn't been initialised.
+            VaultMetaProbe::Absent
+        }
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
+            VaultMetaProbe::Absent
+        }
+        Err(e) => VaultMetaProbe::Indeterminate(format!(
+            "vault_meta probe failed for {}: {e}",
+            db_path.display()
+        )),
+    }
 }
 
 /// Render a human-readable summary of a bootstrap receipt.

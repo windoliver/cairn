@@ -128,8 +128,11 @@ pub(super) async fn repair(
                 }
             }
             Err(KeystoreError::Locked) => {
-                // Keystore locked — truncate the sweep rather than hard-fail.
-                break;
+                // Keystore locked — sweep is truncated; surfacing Ok here would
+                // give a false clean bill of health while pending rows /
+                // evictions are left behind. Promote to a typed incomplete
+                // error so reconcile() and CLI map it to EX_TEMPFAIL.
+                return Err(IdentityServiceError::VaultReconciliationIncomplete);
             }
             Err(e) => return Err(IdentityServiceError::Keystore(e)),
         }
@@ -151,10 +154,12 @@ pub(super) async fn repair(
                 row.current_key_version,
             );
             match svc.keystore.load_signing_key(&handle).await {
-                Err(KeystoreError::NotFound | KeystoreError::Locked) | Ok(_) => {
+                Err(KeystoreError::NotFound) | Ok(_) => {
                     // NotFound → desynchronised active (no mutation here).
-                    // Locked   → cannot check; safe to skip.
                     // Ok(_)    → healthy; nothing to do.
+                }
+                Err(KeystoreError::Locked) => {
+                    return Err(IdentityServiceError::VaultReconciliationIncomplete);
                 }
                 Err(e) => return Err(IdentityServiceError::Keystore(e)),
             }
@@ -162,8 +167,23 @@ pub(super) async fn repair(
     }
 
     // ── Step 4: sweep pending eviction rows for this identity ─────────────────
+    //
+    // Defense-in-depth: never delete the current_key_version even if a stale
+    // receipt somehow points at it. The adapter-level fix (sourcing
+    // evict_version from old_key_version) is the primary safeguard; this
+    // guard catches future regressions.
+    let current_active = svc
+        .registry
+        .get_identity(id, IdentityVisibility::Operational)
+        .await?
+        .map(|r| r.current_key_version);
     let evictions = svc.registry.list_pending_evictions().await?;
     for entry in evictions.iter().filter(|e| &e.identity == id) {
+        if Some(entry.evict_version) == current_active {
+            // Refuse to delete the active key. Leave the receipt's flag set
+            // so a follow-up audit can investigate. Skip silently here.
+            continue;
+        }
         let handle =
             SecretHandle::for_identity(svc.vault_id.clone(), id.clone(), entry.evict_version);
         match svc.keystore.delete_keypair(&handle).await {
@@ -264,7 +284,7 @@ pub(super) async fn reconcile(svc: &IdentityService) -> Result<(), IdentityServi
 pub async fn finalise_binding(
     vault_path: PathBuf,
     abandon: bool,
-    _vault_id_override: Option<VaultId>,
+    vault_id_override: Option<VaultId>,
 ) -> Result<(), IdentityServiceError> {
     let cairn_dir = vault_path.join(".cairn");
     let pending_path = cairn_dir.join("vault.binding.pending");
@@ -279,14 +299,22 @@ pub async fn finalise_binding(
             let db_path = cairn_dir.join("cairn.db");
             let registry = SqliteIdentityRegistry::open(&db_path)?;
             if registry.read_vault_meta().await?.is_none() {
-                // Binding file present but DB never wrote vault_meta.
-                // TODO: if `_vault_id_override` is provided and we can probe the
-                // keystore for the witness, reconstruct vault_meta here.  For now,
-                // surface a typed error so the caller can run `provision` again.
-                return Err(IdentityServiceError::PartialBindNeedsProvision);
+                // Binding file present but DB never wrote vault_meta. Without
+                // a `vault_id_override` we can't identify the keystore
+                // namespace; without the namespace we can't tell whether the
+                // witness still owns it. Refuse so the operator runs the
+                // explicit recovery path with --vault-id.
+                let Some(vault_id) = vault_id_override else {
+                    return Err(IdentityServiceError::PartialBindNeedsProvision);
+                };
+                // Verify: keystore witness for `vault_id` must hash to the
+                // bytes in `.binding`. If not, we'd be discarding evidence
+                // of the wrong vault.
+                recover_orphan_binding(&cairn_dir, &binding_path, vault_id).await
+            } else {
+                // Consistent state — nothing to do.
+                Ok(())
             }
-            // Consistent state — nothing to do.
-            Ok(())
         }
         (false, false) => {
             // No binding files at all — vault not yet bound.  Nothing to recover.
@@ -295,9 +323,44 @@ pub async fn finalise_binding(
         (true, _) => {
             // `.pending` exists — crash occurred during first-bind.
             if abandon {
-                // Drop the pending sentinel.  The keystore witness (if already
-                // stored) will be orphaned but is harmless — it only blocks a
-                // future `provision` for the same vault_id.
+                // Removing only the pending sentinel while a keystore witness
+                // remains under the same vault_id permanently claims the
+                // namespace: future `provision` attempts hit
+                // `VaultNamespaceClaimed` with no local recovery artifact.
+                // Require an explicit vault_id (from DB vault_meta or
+                // operator-supplied) so we can delete the keystore witness
+                // first; otherwise fail closed.
+                let db_path = cairn_dir.join("cairn.db");
+                let db_vault_id = match SqliteIdentityRegistry::open(&db_path).ok() {
+                    Some(r) => r.read_vault_meta().await.ok().flatten().map(|(id, _)| id),
+                    None => None,
+                };
+                // If `reserve_first_identity` already committed `vault_meta`
+                // and a pending identity row, abandoning here would orphan
+                // committed registry state — the registry would still believe
+                // the vault is bound while we destroy the recovery artifacts.
+                // Refuse so the operator runs the resume path instead.
+                if db_vault_id.is_some() {
+                    return Err(IdentityServiceError::AbandonAfterCommit);
+                }
+                let target_vault_id = vault_id_override.or(db_vault_id);
+                let Some(vault_id) = target_vault_id else {
+                    // No way to identify the keystore witness — refuse abandon
+                    // rather than orphan the namespace.
+                    return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+                };
+
+                // Best-effort delete the keystore witness for this vault_id.
+                // Any error other than NotFound/Unsupported aborts abandon so
+                // the operator can investigate.
+                let keystore = cairn_keychain::OsKeystore::new(vault_id.clone());
+                let witness_handle = SecretHandle::for_witness(vault_id);
+                match keystore.delete_secret(&witness_handle).await {
+                    Ok(()) | Err(KeystoreError::NotFound | KeystoreError::DiscoveryUnsupported) => {
+                    }
+                    Err(e) => return Err(IdentityServiceError::Keystore(e)),
+                }
+
                 fs::remove_file(&pending_path).map_err(|e| {
                     IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                 })?;
@@ -330,6 +393,14 @@ pub async fn finalise_binding(
                 return Err(IdentityServiceError::PartialBindNeedsProvision);
             }
 
+            // Before promoting the sentinels, verify that the rest of the
+            // first-bind sequence completed. If a pending row still exists
+            // for the first identity AND its keystore entry is missing, the
+            // crash happened before `store_keypair`/`activate_identity` —
+            // declaring success here would mark the vault as bound while
+            // the first identity has no usable signing key.
+            verify_first_bind_completed(&registry, &db_vault_id).await?;
+
             // Write the final binding file BEFORE removing the pending sentinel
             // so that a second crash still leaves one file rather than neither.
             fs::write(&binding_path, db_witness_hash.as_bytes())
@@ -337,10 +408,12 @@ pub async fn finalise_binding(
             File::open(&binding_path)
                 .and_then(|f| f.sync_all())
                 .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+            fsync_dir(&cairn_dir)?;
 
             // Remove the pending sentinel.
             fs::remove_file(&pending_path)
                 .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+            fsync_dir(&cairn_dir)?;
 
             // Write vault.id for convenience (idempotent — only if absent).
             let vault_id_path = cairn_dir.join("vault.id");
@@ -348,11 +421,101 @@ pub async fn finalise_binding(
                 fs::write(&vault_id_path, db_vault_id.as_str()).map_err(|e| {
                     IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
                 })?;
+                fsync_dir(&cairn_dir)?;
             }
 
             Ok(())
         }
     }
+}
+
+/// Recover the `.binding exists, vault_meta missing` crash state.
+///
+/// Pre: caller has confirmed `.cairn/vault.binding` exists, the DB has no
+/// `vault_meta` row, and the operator has supplied `vault_id` via
+/// `--vault-id`. We:
+///   1. Load the keystore witness for `vault_id`.
+///   2. Verify it hashes to the bytes in `.cairn/vault.binding`.
+///   3. Delete the keystore witness AND the local binding sentinel so a
+///      fresh `provision` can rebind the vault from scratch.
+///
+/// Without step 3 the operator would be stuck between
+/// `PartialBindNeedsProvision` (told to re-run provision) and
+/// `VaultNamespaceClaimed` (refusal because the witness still owns the
+/// namespace). This is the documented escape hatch.
+async fn recover_orphan_binding(
+    cairn_dir: &std::path::Path,
+    binding_path: &std::path::Path,
+    vault_id: VaultId,
+) -> Result<(), IdentityServiceError> {
+    let local_bytes = fs::read(binding_path)
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    let local_hash: [u8; 32] = local_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| IdentityServiceError::PartialBindNeedsProvision)?;
+
+    let keystore = cairn_keychain::OsKeystore::new(vault_id.clone());
+    let witness_handle = SecretHandle::for_witness(vault_id);
+    let witness_bytes = match keystore.load_secret(&witness_handle).await {
+        Ok(b) => b,
+        Err(KeystoreError::NotFound) => {
+            // No witness in the keystore — local binding is orphaned, safe
+            // to clear so a fresh provision can succeed.
+            fs::remove_file(binding_path)
+                .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+            fsync_dir(cairn_dir)?;
+            return Ok(());
+        }
+        Err(e) => return Err(IdentityServiceError::Keystore(e)),
+    };
+    let computed =
+        cairn_core::domain::identity::keys::WitnessHash::from_witness(witness_bytes.as_slice());
+    if computed.as_bytes() != &local_hash {
+        // Witness in keystore is for a different vault — refuse to delete
+        // anything; operator must investigate.
+        return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+    }
+
+    // Verified match. Drop both so a fresh provision can rebind.
+    match keystore.delete_secret(&witness_handle).await {
+        Ok(()) | Err(KeystoreError::NotFound | KeystoreError::DiscoveryUnsupported) => {}
+        Err(e) => return Err(IdentityServiceError::Keystore(e)),
+    }
+    fs::remove_file(binding_path)
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fsync_dir(cairn_dir)?;
+    Ok(())
+}
+
+/// fsync the directory at `dir` so dirent changes (file create/remove) are
+/// durable across crashes. Mirrors the discipline in `commit_first_identity`.
+fn fsync_dir(dir: &std::path::Path) -> Result<(), IdentityServiceError> {
+    File::open(dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))
+}
+
+/// Refuse to promote the sentinels when the first identity is still in
+/// `pending` state in the registry — that state means the operator-visible
+/// first-bind sequence (`store_keypair` + `activate_identity`) has not yet
+/// completed, so finalising would mark the vault bound while leaving the
+/// first identity unusable.
+///
+/// This is a best-effort check using the registry's pending list. If no
+/// pending rows exist, we assume the sequence completed (or there was
+/// nothing to complete). Callers that want stronger guarantees should
+/// re-run `provision` instead of `finalise-binding`.
+async fn verify_first_bind_completed(
+    registry: &SqliteIdentityRegistry,
+    _vault_id: &VaultId,
+) -> Result<(), IdentityServiceError> {
+    use cairn_core::contract::identity_registry::IdentityRegistry as _;
+    let pending = registry.list_pending().await?;
+    if !pending.is_empty() {
+        return Err(IdentityServiceError::PartialBindNeedsProvision);
+    }
+    Ok(())
 }
 
 // ── vault_id_recover ──────────────────────────────────────────────────────────
@@ -421,9 +584,15 @@ pub async fn vault_id_recover(
     }
 
     // ── Step 2a: probe keychain if requested ───────────────────────────────────
+    //
+    // SAFETY: a discovered namespace must NOT be auto-adopted on local
+    // evidence alone — running recovery in a sibling directory could
+    // otherwise silently bind this vault to an unrelated vault's keychain
+    // namespace. Require either:
+    //   (a) `.cairn/vault.binding` exists locally AND its bytes match the
+    //       witness stored in the keystore for the discovered namespace, OR
+    //   (b) operator passes `--vault-id <id>` explicitly.
     if probe_keychain {
-        // We need any `VaultId` as a constructor argument; the probe itself
-        // is independent of which vault we're bound to.
         let probe_vault_id = VaultId::parse("00000000-0000-0000-0000-000000000000")
             .map_err(|e| IdentityServiceError::Registry(RegistryError::Backend(Box::new(e))))?;
         let probe_keystore = cairn_keychain::OsKeystore::new(probe_vault_id);
@@ -433,18 +602,12 @@ pub async fn vault_id_recover(
                     // No namespaces found; fall through to override.
                 }
                 1 => {
-                    let recovered = namespaces
+                    let candidate = namespaces
                         .into_iter()
                         .next()
                         .expect("invariant: len == 1 ⇒ first() is Some");
-                    fs::create_dir_all(&cairn_dir).map_err(|e| {
-                        IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
-                    })?;
-                    let vault_id_path = cairn_dir.join("vault.id");
-                    fs::write(&vault_id_path, recovered.as_str()).map_err(|e| {
-                        IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e)))
-                    })?;
-                    return Ok(recovered);
+                    verify_and_adopt_namespace(&cairn_dir, candidate.clone()).await?;
+                    return Ok(candidate);
                 }
                 _ => {
                     return Err(IdentityServiceError::AmbiguousVaultNamespaces);
@@ -458,17 +621,112 @@ pub async fn vault_id_recover(
     }
 
     // ── Step 2b: caller-supplied override ─────────────────────────────────────
+    //
+    // The explicit `--vault-id` is operator-authoritative. Two paths:
+    //
+    // 1. `.cairn/vault.binding` exists locally → require witness round-trip
+    //    proof (same as `--probe-keychain`); refuse on mismatch.
+    // 2. `.cairn/vault.binding` is missing → recovery from local-metadata
+    //    loss. Load the keystore witness for `override_id` and rebuild
+    //    `vault.binding` from its hash. Operator typed the id, so they
+    //    accept responsibility for choosing the right namespace.
     if let Some(override_id) = vault_id_override {
-        fs::create_dir_all(&cairn_dir)
-            .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
-        let vault_id_path = cairn_dir.join("vault.id");
-        fs::write(&vault_id_path, override_id.as_str())
-            .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+        adopt_namespace_from_override(&cairn_dir, override_id.clone()).await?;
         return Ok(override_id);
     }
 
     // ── Step 2c: nothing worked ────────────────────────────────────────────────
     Err(IdentityServiceError::VaultIdMissing)
+}
+
+/// Adopt a namespace named explicitly by the operator via `--vault-id`.
+///
+/// When `.cairn/vault.binding` exists, defer to [`verify_and_adopt_namespace`]
+/// (witness round-trip required). When it does not exist (local-metadata
+/// loss), load the keystore witness, rebuild `vault.binding` from its hash,
+/// and adopt the namespace.
+async fn adopt_namespace_from_override(
+    cairn_dir: &std::path::Path,
+    candidate: VaultId,
+) -> Result<(), IdentityServiceError> {
+    let local_binding = cairn_dir.join("vault.binding");
+    if local_binding.exists() {
+        return verify_and_adopt_namespace(cairn_dir, candidate).await;
+    }
+
+    // Local metadata loss: the operator's `--vault-id` is authoritative.
+    // Load the keystore witness, rebuild `.binding` from its hash, write
+    // `vault.id`. Refuse only if no witness exists (nothing to anchor on).
+    let bound_keystore = cairn_keychain::OsKeystore::new(candidate.clone());
+    let witness_handle =
+        cairn_core::domain::identity::keys::SecretHandle::for_witness(candidate.clone());
+    let witness_bytes = match bound_keystore.load_secret(&witness_handle).await {
+        Ok(b) => b,
+        Err(KeystoreError::NotFound) => {
+            return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+        }
+        Err(e) => return Err(IdentityServiceError::Keystore(e)),
+    };
+    let witness_hash =
+        cairn_core::domain::identity::keys::WitnessHash::from_witness(witness_bytes.as_slice());
+
+    fs::create_dir_all(cairn_dir)
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fs::write(&local_binding, witness_hash.as_bytes())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    File::open(&local_binding)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fsync_dir(cairn_dir)?;
+    let vault_id_path = cairn_dir.join("vault.id");
+    fs::write(&vault_id_path, candidate.as_str())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fsync_dir(cairn_dir)?;
+    Ok(())
+}
+
+/// Verify that `candidate` is the keystore namespace for the local vault and,
+/// on success, write `.cairn/vault.id` to bind to it.
+///
+/// Requires:
+///   1. `.cairn/vault.binding` exists locally and is exactly 32 bytes.
+///   2. The keystore witness for `candidate` hashes to those 32 bytes.
+///
+/// Either condition failing returns [`IdentityServiceError::AmbiguousVaultNamespaces`]
+/// — we never adopt a namespace on weaker evidence than a witness round-trip.
+async fn verify_and_adopt_namespace(
+    cairn_dir: &std::path::Path,
+    candidate: VaultId,
+) -> Result<(), IdentityServiceError> {
+    let local_binding = cairn_dir.join("vault.binding");
+    let local_hash: [u8; 32] = match fs::read(&local_binding) {
+        Ok(b) if b.len() == 32 => b
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityServiceError::AmbiguousVaultNamespaces)?,
+        _ => return Err(IdentityServiceError::AmbiguousVaultNamespaces),
+    };
+    let bound_keystore = cairn_keychain::OsKeystore::new(candidate.clone());
+    let witness_handle =
+        cairn_core::domain::identity::keys::SecretHandle::for_witness(candidate.clone());
+    let witness_bytes = match bound_keystore.load_secret(&witness_handle).await {
+        Ok(b) => b,
+        Err(KeystoreError::NotFound) => {
+            return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+        }
+        Err(e) => return Err(IdentityServiceError::Keystore(e)),
+    };
+    let computed =
+        cairn_core::domain::identity::keys::WitnessHash::from_witness(witness_bytes.as_slice());
+    if computed.as_bytes() != &local_hash {
+        return Err(IdentityServiceError::AmbiguousVaultNamespaces);
+    }
+    fs::create_dir_all(cairn_dir)
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    let vault_id_path = cairn_dir.join("vault.id");
+    fs::write(&vault_id_path, candidate.as_str())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    Ok(())
 }
 
 // ── IdentityService method wrappers ──────────────────────────────────────────

@@ -928,7 +928,11 @@ async fn clear_pending_eviction_clears_flag() {
     assert_eq!(evictions.len(), 1, "one eviction pending after rotation");
     let entry = &evictions[0];
     assert_eq!(entry.identity, alice);
-    assert_eq!(entry.evict_version, v2);
+    // `evict_version` is the OLD key version that needs to be deleted from
+    // the keystore — never the freshly active new version. (Regression guard
+    // for the data-loss bug where evict_version was sourced from
+    // new_key_version.)
+    assert_eq!(entry.evict_version, v1);
 
     // Clear the flag.
     r.clear_pending_eviction(&entry.receipt_id)
@@ -1266,4 +1270,43 @@ async fn receipt_fk_phantom_key_version_rejected() {
             ),
         "expected FK constraint violation, got: {err:?}"
     );
+}
+
+// ── Regression test for adversarial-review round 3 finding #3 ─────────────────
+
+/// `clear_pending_eviction` and `clear_pending_key_disable` must be idempotent
+/// — calling them on a receipt whose flag is already 0 returns Ok, not
+/// `NotFound`. Recovery code retries these calls after partial success and
+/// must converge cleanly.
+#[tokio::test]
+async fn clear_pending_eviction_is_idempotent() {
+    let (r, _dir, alice, sk) = setup_active_identity().await;
+
+    let v1 = KeyVersion::FIRST;
+    let v2 = v1.next().expect("v2");
+    let mut rng = rand_core::OsRng;
+    let new_sk = SigningKey::generate(&mut rng);
+    let mut receipt = make_rotation_receipt(&alice, v1, v1, v2, &sk, &alice);
+    receipt.pending_eviction = true;
+    let new_key = make_key_entry(&alice, v2, &new_sk);
+
+    r.apply_rotation(&receipt, v1, &new_key)
+        .await
+        .expect("apply_rotation");
+
+    let evictions = r
+        .list_pending_evictions()
+        .await
+        .expect("list_pending_evictions");
+    let receipt_id = &evictions[0].receipt_id;
+
+    // First clear succeeds.
+    r.clear_pending_eviction(receipt_id)
+        .await
+        .expect("first clear must succeed");
+
+    // Second clear (flag already 0) must also succeed — idempotent.
+    r.clear_pending_eviction(receipt_id)
+        .await
+        .expect("second clear must be idempotent (flag already 0)");
 }

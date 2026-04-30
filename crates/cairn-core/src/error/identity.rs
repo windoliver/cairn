@@ -161,6 +161,44 @@ pub enum IdentityServiceError {
     /// disambiguate.
     #[error("keychain probe found multiple vault namespaces — pass --vault-id to disambiguate")]
     AmbiguousVaultNamespaces,
+
+    /// A previous purge crashed mid-flow and left the identity in
+    /// `PurgePending` state. Resuming a partial purge is destructive and
+    /// requires explicit `--resume` to confirm operator intent.
+    ///
+    /// Re-run `cairn identity purge <id> --resume` (after re-confirming the
+    /// purge-ack file) to continue.
+    #[error(
+        "identity is in purge_pending state from a prior crashed purge — pass --resume to confirm resumption"
+    )]
+    PurgeResumeRequired {
+        /// The identity stuck in `PurgePending`.
+        id: Identity,
+    },
+
+    /// `finalise-binding --abandon` was requested, but the database already
+    /// holds a committed `vault_meta` (and a pending first-bind row).
+    ///
+    /// Abandoning would destroy the local recovery artifacts (pending
+    /// sentinel and keystore witness) while leaving the registry believing
+    /// the vault is bound. Re-run `cairn identity finalise-binding` without
+    /// `--abandon` to resume the partial bind, or perform manual rollback if
+    /// resume cannot succeed.
+    #[error(
+        "finalise-binding --abandon refused: vault_meta is already committed; re-run without --abandon to resume"
+    )]
+    AbandonAfterCommit,
+
+    /// The reconciliation sweep returned an incomplete report because the
+    /// keystore was locked during the scan.
+    ///
+    /// Mutating verbs treat this as a hard stop: an incomplete sweep cannot
+    /// distinguish a clean vault from one with mismatches beyond the lock
+    /// point. Operator must unlock the keystore and re-run the verb.
+    #[error(
+        "vault health check incomplete: keystore was locked during reconciliation — unlock the keystore and retry"
+    )]
+    VaultReconciliationIncomplete,
 }
 
 #[cfg(test)]
