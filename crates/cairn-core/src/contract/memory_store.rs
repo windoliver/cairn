@@ -5,7 +5,8 @@ use crate::domain::record::MemoryRecord;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
+/// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs` landed.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -195,6 +196,22 @@ pub trait MemoryStore: Send + Sync {
         &self,
         args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError>;
+
+    /// Semantic (ANN) search over the sqlite-vec `record_vectors` table.
+    ///
+    /// Returns `CapabilityUnavailable` when `capabilities().vector` is `false`
+    /// (model absent or `search.local_embeddings: false`). Default impl
+    /// returns `CapabilityUnavailable` so adapters that don't support vectors
+    /// compile without boilerplate.
+    ///
+    /// Scope is the caller's responsibility — same rules as `search_keyword`.
+    async fn search_semantic(
+        &self,
+        args: &SemanticSearchArgs<'_>,
+    ) -> Result<SemanticSearchPage, StoreError> {
+        let _ = args;
+        Err(String::from("capability unavailable: vector").into())
+    }
 }
 
 /// Static identity descriptor for a [`MemoryStore`] plugin (§4.1).
@@ -474,6 +491,34 @@ pub struct KeywordSearchPage {
     pub next_cursor: Option<KeywordCursor>,
 }
 
+/// Args for the semantic (ANN) branch of `search`.
+///
+/// No cursor: ANN is top-K only at v0.1. Scope-resolution rules are
+/// identical to [`KeywordSearchArgs`] — callers fold scope into `filter`
+/// or `visibility_allowlist` before invoking.
+#[derive(Debug, Clone)]
+pub struct SemanticSearchArgs<'a> {
+    /// Raw user query. The embedder applies any asymmetric prefix internally.
+    pub query: String,
+    /// Pre-validated filter tree. Same semantics as in [`KeywordSearchArgs`].
+    pub filter: Option<ValidatedFilter<'a>>,
+    /// Visibility values the caller is allowed to see; empty = no filter.
+    pub visibility_allowlist: Vec<MemoryVisibility>,
+    /// Number of nearest neighbours to return (top-K).
+    pub limit: usize,
+    /// Label of the active embedding model (e.g., `"bge-small-en-v1.5"`).
+    /// The store skips rows whose `record_vectors.model` column differs —
+    /// they were produced by a stale model and will be rebuilt by the reindex drain.
+    pub model_label: String,
+}
+
+/// One page of candidates returned by the semantic branch of `search`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemanticSearchPage {
+    /// Candidates ordered by ascending L2 distance (smaller = more similar).
+    pub candidates: Vec<SearchCandidate>,
+}
+
 /// A single candidate row from a search query, with the signal columns the
 /// reranker needs.
 #[derive(Debug, Clone, PartialEq)]
@@ -505,6 +550,9 @@ pub struct SearchCandidate {
     /// Serialized `MemoryRecord` for callers that want full hydration
     /// without a second round-trip. Never logged above `trace`.
     pub record_json: String,
+    /// L2 distance from the query vector. `None` on keyword-only candidates.
+    /// Used by the hybrid ranker (follow-up issue); always `None` from `search_keyword`.
+    pub semantic_distance: Option<f32>,
 }
 
 #[cfg(test)]
@@ -568,7 +616,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
+            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
     }
 
     #[tokio::test]
@@ -586,6 +634,16 @@ mod tests {
                 .records
                 .is_empty()
         );
+        let sem_result = s
+            .search_semantic(&SemanticSearchArgs {
+                query: "test".into(),
+                filter: None,
+                visibility_allowlist: vec![],
+                limit: 10,
+                model_label: "bge-small-en-v1.5".into(),
+            })
+            .await;
+        assert!(sem_result.is_err(), "default search_semantic must return error");
     }
 
     #[test]

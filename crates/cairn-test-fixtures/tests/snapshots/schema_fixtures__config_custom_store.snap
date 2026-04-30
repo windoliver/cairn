@@ -83,5 +83,9 @@ expression: "&c"
         }
       ]
     }
+  },
+  "search": {
+    "local_embeddings": true,
+    "embedding_model": "bge-small-en-v1.5"
   }
 }

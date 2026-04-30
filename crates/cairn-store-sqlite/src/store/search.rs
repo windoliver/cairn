@@ -270,6 +270,7 @@ fn project_row(row: &RawRow, now_ms: i64) -> Result<SearchCandidate, StoreError>
         staleness_seconds,
         snippet: row.snippet.clone(),
         record_json: row.record_json.clone(),
+        semantic_distance: None,
     })
 }
 
