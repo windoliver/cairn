@@ -1118,6 +1118,29 @@ impl CaptureEvent {
 
         Ok(())
     }
+
+    /// Strict validation for newly-authored events at the capture /
+    /// write boundary. Runs [`Self::validate`] then delegates to
+    /// [`CapturePayload::validate_for_capture`] so fresh-write
+    /// invariants (#218: `Terminal.context` populated) are enforced
+    /// at the event level — not just the payload level — so callers
+    /// have a single entry point for "may this event be persisted /
+    /// emitted?".
+    ///
+    /// Sensors, the dispatch driver, and any adapter that mints a
+    /// fresh `CaptureEvent` MUST call this method (not
+    /// [`Self::validate`]) before persisting or emitting the event.
+    /// The read-side [`Self::validate`] stays permissive so legacy
+    /// data is not stranded across upgrade.
+    ///
+    /// # Errors
+    /// Any [`DomainError`] returned by [`Self::validate`] or
+    /// [`CapturePayload::validate_for_capture`].
+    pub fn validate_for_capture(&self) -> Result<(), DomainError> {
+        self.validate()?;
+        self.payload.validate_for_capture()?;
+        Ok(())
+    }
 }
 
 /// True iff a [`CaptureMode`] is permitted to carry events of a given
@@ -1545,5 +1568,33 @@ mod tests {
         payload
             .validate_for_capture()
             .expect("populated context must validate for capture");
+    }
+
+    /// Event-level write boundary: `CaptureEvent::validate_for_capture`
+    /// rejects a fresh terminal event whose payload `context` is
+    /// missing, so persistence / emission paths can use a single
+    /// entry point and the invariant is enforced at the event level
+    /// rather than relying on every caller to remember
+    /// `payload.validate_for_capture()` separately.
+    #[test]
+    fn capture_event_validate_for_capture_rejects_missing_terminal_context() {
+        let mut ev = auto_event();
+        ev.sensor_id = Identity::parse("snr:local:terminal:default:v1").expect("valid");
+        ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:terminal:default:v1")];
+        ev.source_family = SourceFamily::Terminal;
+        ev.payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        // Permissive validate accepts the legacy shape.
+        ev.validate()
+            .expect("read-path validate must accept legacy event");
+        // Strict write-boundary validator rejects it.
+        let err = ev.validate_for_capture().unwrap_err();
+        match err {
+            DomainError::EmptyField { field } => assert_eq!(field, "context"),
+            other => panic!("expected EmptyField{{context}}, got {other:?}"),
+        }
     }
 }
