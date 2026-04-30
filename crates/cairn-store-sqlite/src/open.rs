@@ -11,9 +11,10 @@ use crate::migrations::migrations;
 use crate::store::SqliteMemoryStore;
 use crate::verify::{verify_migration_history, verify_schema_fingerprint};
 
-/// Default capability flags after PR-A. PR-B flips `fts` to `true`.
+/// Default capability flags. `fts` is enabled by the FTS5 search path
+/// in `src/store/search.rs`; `vector` ships in a later issue (#48).
 pub(crate) static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-    fts: false,
+    fts: true,
     vector: false,
     graph_edges: true,
     transactions: true,

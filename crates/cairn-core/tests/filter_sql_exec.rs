@@ -5,14 +5,18 @@
 //!
 //! - Scalar columns for direct `MemoryRecord` fields (`kind`, `class`,
 //!   `visibility`, `confidence`).
+//! - Store-owned scalar columns set by `cairn-store-sqlite::projection`:
+//!   `path`, `version`, `is_static`, `tombstoned`, `active`. These are NOT
+//!   inside `extra_frontmatter` — the filter compiler routes them to the
+//!   physical columns.
 //! - A `provenance TEXT` JSON column — `created_at` lives here as
 //!   `json_extract(provenance, '$.created_at')`.
 //! - A `tags TEXT` JSON column for the plain-string array.
 //! - An `actor_chain TEXT` JSON column storing `Vec<ActorChainEntry>` objects;
 //!   array ops filter on `json_extract(value, '$.identity')`.
-//! - An `extra_frontmatter TEXT` JSON column for all ingest-supplied fields
-//!   (`title`, `category`, `path`, `priority`, `version`, `is_static`,
-//!   `tombstoned`, `active`, `backlinks`).
+//! - An `extra_frontmatter TEXT` JSON column for ingest-supplied fields
+//!   that have no physical column (`title`, `category`, `priority`,
+//!   `backlinks`).
 //!
 //! This validates SQL syntax AND semantics against the actual expression
 //! mapping in `field_col` — not just structure.
@@ -34,6 +38,11 @@ fn open_db() -> Connection {
             class             TEXT,
             visibility        TEXT,
             confidence        REAL,
+            path              TEXT,
+            version           INTEGER,
+            is_static         INTEGER,
+            tombstoned        INTEGER,
+            active            INTEGER,
             provenance        TEXT,
             tags              TEXT,
             actor_chain       TEXT,
@@ -98,8 +107,9 @@ fn seed_db() -> Connection {
 
     // r1: kind=user, confidence=0.9, tags=["infra","migration"]
     //     actor_chain=[{role:author,identity:agt:claude}]
-    //     extra_frontmatter: title, category=shipped, priority=8, is_static=0,
-    //                        tombstoned=0, active=1, backlinks=[], version=1
+    //     physical: path=vault/.../r1.md, version=1, is_static=0,
+    //               tombstoned=0, active=1
+    //     extra_frontmatter: title, category=shipped, priority=8, backlinks=[]
     insert(
         &conn,
         &[
@@ -108,6 +118,11 @@ fn seed_db() -> Connection {
             ("class", "semantic"),
             ("visibility", "private"),
             ("confidence", "0.9"),
+            ("path", "vault/private/r1.md"),
+            ("version", "1"),
+            ("is_static", "0"),
+            ("tombstoned", "0"),
+            ("active", "1"),
             (
                 "provenance",
                 r#"{"created_at":"2026-04-01T10:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
@@ -119,15 +134,16 @@ fn seed_db() -> Connection {
             ),
             (
                 "extra_frontmatter",
-                r#"{"title":"pg migration strategy","category":"shipped","priority":8,"version":1,"is_static":0,"tombstoned":0,"active":1,"backlinks":[]}"#,
+                r#"{"title":"pg migration strategy","category":"shipped","priority":8,"backlinks":[]}"#,
             ),
         ],
     );
 
     // r2: kind=feedback, confidence=0.5, tags=["pref"]
     //     actor_chain=[{role:author,identity:usr:tafeng}]
-    //     extra_frontmatter: title, category=draft, priority=3, is_static=1,
-    //                        tombstoned=0, active=1, backlinks=[], version=2
+    //     physical: path=vault/.../r2.md, version=2, is_static=1,
+    //               tombstoned=0, active=1
+    //     extra_frontmatter: title, category=draft, priority=3, backlinks=[]
     insert(
         &conn,
         &[
@@ -136,6 +152,11 @@ fn seed_db() -> Connection {
             ("class", "semantic"),
             ("visibility", "private"),
             ("confidence", "0.5"),
+            ("path", "vault/private/r2.md"),
+            ("version", "2"),
+            ("is_static", "1"),
+            ("tombstoned", "0"),
+            ("active", "1"),
             (
                 "provenance",
                 r#"{"created_at":"2026-04-02T11:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
@@ -147,15 +168,16 @@ fn seed_db() -> Connection {
             ),
             (
                 "extra_frontmatter",
-                r#"{"title":"user prefers dark mode","category":"draft","priority":3,"version":2,"is_static":1,"tombstoned":0,"active":1,"backlinks":[]}"#,
+                r#"{"title":"user prefers dark mode","category":"draft","priority":3,"backlinks":[]}"#,
             ),
         ],
     );
 
     // r3: kind=rule, confidence=0.8, tags=["infra","db","backup"]
     //     actor_chain=[{role:author,identity:agt:claude}]
-    //     extra_frontmatter: title, category=shipped, priority=9, is_static=0,
-    //                        tombstoned=1, active=0, backlinks=["r1"], version=1
+    //     physical: path=vault/.../r3.md, version=1, is_static=0,
+    //               tombstoned=1, active=0
+    //     extra_frontmatter: title, category=shipped, priority=9, backlinks=["r1"]
     insert(
         &conn,
         &[
@@ -164,6 +186,11 @@ fn seed_db() -> Connection {
             ("class", "semantic"),
             ("visibility", "private"),
             ("confidence", "0.8"),
+            ("path", "vault/private/r3.md"),
+            ("version", "1"),
+            ("is_static", "0"),
+            ("tombstoned", "1"),
+            ("active", "0"),
             (
                 "provenance",
                 r#"{"created_at":"2026-04-03T09:00:00Z","source_sensor":"snr:local:hook:cc-session:v1"}"#,
@@ -175,7 +202,7 @@ fn seed_db() -> Connection {
             ),
             (
                 "extra_frontmatter",
-                r#"{"title":"always use pg for backups","category":"shipped","priority":9,"version":1,"is_static":0,"tombstoned":1,"active":0,"backlinks":["r1"]}"#,
+                r#"{"title":"always use pg for backups","category":"shipped","priority":9,"backlinks":["r1"]}"#,
             ),
         ],
     );

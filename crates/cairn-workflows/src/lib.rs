@@ -5,6 +5,10 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod consent_mirror;
+
+pub use consent_mirror::{ConsentLogMaterializer, MirrorError};
+
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::contract::workflow_orchestrator::{
     CONTRACT_VERSION, WorkflowOrchestrator, WorkflowOrchestratorCapabilities,

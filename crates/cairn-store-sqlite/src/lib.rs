@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod consent;
 pub mod error;
 pub mod migrations;
 pub mod open;
@@ -18,6 +19,7 @@ pub use open::{open, open_in_memory};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
+pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;
