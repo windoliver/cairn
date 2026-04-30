@@ -272,8 +272,10 @@ fn resolve_vault_path(
     explicit_vault: Option<String>,
 ) -> Result<PathBuf, ExitCode> {
     // 1. Subcommand-local --vault-path always wins if explicitly given.
-    //    (Kept for back-compat; future cleanups may remove the per-subcommand flag.)
-    if let Some(p) = matches.get_one::<String>("vault-path") {
+    //    Use try_get_one because no current identity subcommand defines this
+    //    arg — `get_one` would panic on the unknown id. Kept as a hook for
+    //    future per-subcommand overrides.
+    if let Ok(Some(p)) = matches.try_get_one::<String>("vault-path") {
         return Ok(PathBuf::from(p));
     }
 
