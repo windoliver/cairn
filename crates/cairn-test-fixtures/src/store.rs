@@ -32,6 +32,7 @@ pub use cairn_core::domain::record::tests_export::{sample_record, sample_stored_
 #[derive(Debug, Default)]
 pub struct FixtureStore {
     inner: Mutex<HashMap<String, RowEntry>>,
+    index_stats_override: Mutex<Option<cairn_core::contract::memory_store::IndexStats>>,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +50,20 @@ impl FixtureStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Force the next `index_stats` call to return these counts. Used by
+    /// tests that seed deliberate `records_active` / `fts5_rows` drift
+    /// for the lint `index_drift` check (#96 §6.7).
+    #[allow(
+        clippy::expect_used,
+        reason = "Mutex poisoning in tests means a prior test panicked; surfacing it via expect is fine"
+    )]
+    pub fn set_index_stats_override(&self, stats: cairn_core::contract::memory_store::IndexStats) {
+        *self
+            .index_stats_override
+            .lock()
+            .expect("fixture store mutex poisoned") = Some(stats);
     }
 }
 
@@ -230,6 +245,23 @@ impl MemoryStore for FixtureStore {
         Ok(vec![])
     }
 
+    async fn index_stats(
+        &self,
+    ) -> Result<cairn_core::contract::memory_store::IndexStats, StoreError> {
+        use cairn_core::contract::memory_store::IndexStats;
+        if let Some(s) = *self
+            .index_stats_override
+            .lock()
+            .expect("fixture store mutex poisoned")
+        {
+            return Ok(s);
+        }
+        let guard = self.inner.lock().expect("fixture store mutex poisoned");
+        let active = guard.values().filter(|e| e.active && !e.tombstoned).count();
+        let active = u64::try_from(active).map_err(|e| -> StoreError { e.to_string().into() })?;
+        Ok(IndexStats::new(active, active))
+    }
+
     async fn search_keyword(
         &self,
         _args: &KeywordSearchArgs<'_>,
@@ -315,5 +347,28 @@ mod tests {
         assert_eq!(store.name(), "fixture");
         let result = store.list(&ListArgs::default()).await.unwrap();
         assert!(result.records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fixture_index_stats_matches_active_record_count_by_default() {
+        use cairn_core::contract::memory_store::MemoryStore;
+        let store = FixtureStore::default();
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert");
+        let stats = store.index_stats().await.expect("index_stats");
+        assert_eq!(stats.records_active, 1);
+        assert_eq!(stats.fts5_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn fixture_index_stats_can_be_overridden_for_drift_tests() {
+        use cairn_core::contract::memory_store::{IndexStats, MemoryStore};
+        let store = FixtureStore::default();
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert");
+        store.set_index_stats_override(IndexStats::new(5, 4));
+        let stats = store.index_stats().await.expect("index_stats");
+        assert_eq!(stats.records_active, 5);
+        assert_eq!(stats.fts5_rows, 4);
     }
 }
