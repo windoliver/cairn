@@ -199,9 +199,13 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
         };
         let data = run_checks(&inputs);
-        // Stubs all return empty; aggregate must be 0.
-        assert_eq!(data.summary.total, 0);
-        assert_eq!(data.findings.len(), 0);
+        // actor_chain emits one deferred-check info finding (#256); all other
+        // stubs return empty.
+        assert_eq!(data.summary.total, data.findings.len() as u64);
+        assert_eq!(data.summary.by_severity.error, 0);
+        assert_eq!(data.summary.by_severity.warning, 0);
+        // Exactly the one deferred info finding from actor_chain (§6.2/#256).
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 
     #[test]
@@ -216,9 +220,10 @@ mod tests {
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);
-        // by_severity totals must match findings counts (all zero with stubs).
+        // actor_chain emits one deferred-check info finding (#256); all other
+        // stubs return empty.
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        assert_eq!(data.summary.by_severity.info, 0);
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 }
