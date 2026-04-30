@@ -161,10 +161,15 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 #[test]
 fn status_advertises_no_capabilities_in_p0() {
     let resp = sdk().status();
-    // Mirrors `cairn status` — store not wired, so no capabilities.
+    // Mirrors `cairn status` — P0 advertises no capabilities until verb
+    // runtime can honor them (#9 / #61 / #62). The IDL declares
+    // `cairn.mcp.v1.policy_trace` (#95) and the store-driven mode
+    // capabilities; advertising them before they are honored would
+    // mislead negotiating clients.
     assert!(
         resp.capabilities.is_empty(),
-        "P0 must advertise no capabilities until store wires up"
+        "P0 SDK status must advertise an empty capabilities list; got {:?}",
+        resp.capabilities
     );
     assert!(resp.extensions.is_empty());
 }
@@ -425,6 +430,7 @@ fn search_rejects_empty_query_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: String::new(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -444,12 +450,74 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hello".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("limit"), "reason: {reason}");
         }
         other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
+    // P0 advertises no capabilities. `args.explain == Some(true)` is
+    // gated on `cairn.mcp.v1.policy_trace` per the
+    // `x-cairn-capability-when-true` annotation in
+    // `crates/cairn-idl/schema/verbs/search.json`. Mirrors the CLI
+    // fail-closed path; together they enforce the gate end-to-end.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(true),
+    };
+    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable {
+            capability,
+            operation_id,
+            ..
+        } => {
+            assert!(
+                capability == "cairn.mcp.v1.search.keyword"
+                    || capability == "cairn.mcp.v1.policy_trace",
+                "expected mode or policy_trace capability error; got {capability}"
+            );
+            assert_eq!(operation_id.0.len(), 26);
+        }
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
+    }
+}
+
+#[test]
+fn search_explain_false_does_not_require_policy_trace() {
+    // The default `explain: None` (and explicit `Some(false)`) must NOT
+    // require the policy_trace capability. Only `Some(true)` triggers
+    // the gate.
+    let args = SearchArgs {
+        citations: None,
+        cursor: None,
+        filters: None,
+        limit: None,
+        mode: SearchArgsMode::Keyword,
+        query: "hello".to_owned(),
+        scope: None,
+        explain: Some(false),
+    };
+    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    match err {
+        SdkError::CapabilityUnavailable { capability, .. } => {
+            // Should be the search mode capability, not policy_trace —
+            // explain=false must not trigger the policy_trace gate.
+            assert_eq!(capability, "cairn.mcp.v1.search.keyword");
+        }
+        other => panic!("expected CapabilityUnavailable for keyword mode, got {other:?}"),
     }
 }
 
@@ -470,6 +538,7 @@ fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             mode,
             query: "hello".to_owned(),
             scope: None,
+            explain: None,
         };
         let err = sdk().search(&args).expect_err("must fail closed in P0");
         match err {
@@ -534,6 +603,7 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -562,6 +632,7 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -585,6 +656,7 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -617,6 +689,7 @@ fn search_accepts_extended_filter_operators() {
             mode: SearchArgsMode::Keyword,
             query: "hi".to_owned(),
             scope: None,
+            explain: None,
         };
         match sdk().search(&args).expect_err("P0 has no capability") {
             SdkError::CapabilityUnavailable { .. } => {}
@@ -652,6 +725,7 @@ fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
             mode: SearchArgsMode::Keyword,
             query: "hi".to_owned(),
             scope: None,
+            explain: None,
         };
         match sdk().search(&args).expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
@@ -672,6 +746,7 @@ fn search_rejects_malformed_cursor_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: None,
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
@@ -691,6 +766,7 @@ fn search_rejects_empty_scope_filter_with_invalid_args() {
         mode: SearchArgsMode::Keyword,
         query: "hi".to_owned(),
         scope: Some(empty_scope_filter()),
+        explain: None,
     };
     match sdk().search(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
