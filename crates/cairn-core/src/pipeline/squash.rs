@@ -1819,9 +1819,14 @@ pub struct SquashStats {
     /// **post-stage-2b rendered text**. When `progress_frame_collapse_enabled`
     /// is on, stage 2b shrinks CR-bearing lines before stage 6 sees them,
     /// so this counter under-reports raw source-byte loss for collapsed
-    /// lines. Audit consumers that need a source-byte view should call
-    /// `source_bytes_lost_total()` instead, which sums this with
-    /// `progress_bytes_saved` and `osc_recovery_bytes_dropped`.
+    /// lines (the collapsed bytes are reported separately under
+    /// `progress_bytes_saved`).
+    ///
+    /// Stage 4 dedup-run collapse and stage 5 per-line cap also discard
+    /// source bytes but only surface here as line counters
+    /// (`dedup_runs_collapsed`, `long_lines_truncated`); they do not
+    /// flow into this byte counter. Use the coarse `truncated` bit as
+    /// the canonical "any source bytes lost" signal.
     pub bytes_dropped_truncate: usize,
     /// Number of lines that exceeded `max_line_bytes` and were truncated in stage 5.
     pub long_lines_truncated: usize,
@@ -1853,36 +1858,24 @@ pub struct SquashStats {
     /// Source bytes dropped by stage 2b: original line bytes minus
     /// rendered line bytes, summed across coalesced lines. Saturating-
     /// clamped at zero (rewrites that don't shrink contribute nothing).
-    /// These bytes never reach stage 4/5/6, so they are NOT included in
-    /// `bytes_dropped_truncate`. Audit consumers tracking total
-    /// source-byte loss should use `source_bytes_lost_total()`.
+    /// These bytes never reach stages 4/5/6, so they are NOT included
+    /// in `bytes_dropped_truncate`. This counter reflects only stage 2b;
+    /// other lossy stages have their own counters (or, for dedup and
+    /// stage 5 cap, only line-count counters).
     pub progress_bytes_saved: usize,
 }
 
-impl SquashStats {
-    /// Upper bound on raw source bytes that did not survive into
-    /// `compacted_bytes`, summing every counter that measures source-byte
-    /// loss: stage 2 OSC recovery, stage 2b progress-frame collapse, and
-    /// stage 6 head/tail truncation (the latter measured on rendered
-    /// bytes, which is at most the source-byte cost when stage 2b ran).
-    ///
-    /// Use this — not `bytes_dropped_truncate` alone — for audit /
-    /// retention decisions on captures where
-    /// `progress_frame_collapse_enabled` may have run. ANSI strip,
-    /// dedup collapse, stage 5 per-line truncation, and the oversize
-    /// bypass also discard source bytes; they contribute via
-    /// `truncated`, `ansi_stripped`, `dedup_runs_collapsed`,
-    /// `long_lines_truncated`, and `bytes_dropped_truncate` respectively.
-    /// This getter is the conservative additive lower bound for source
-    /// loss; the coarse `truncated` bit remains the canonical "non-
-    /// verbatim output" signal.
-    #[must_use]
-    pub fn source_bytes_lost_total(&self) -> usize {
-        self.progress_bytes_saved
-            .saturating_add(self.bytes_dropped_truncate)
-            .saturating_add(self.osc_recovery_bytes_dropped)
-    }
-}
+// Note: an earlier revision (review-loop round 6) added a
+// `source_bytes_lost_total()` accessor that summed three byte-loss
+// counters. Round 7 review correctly pointed out that the field set
+// is incomplete — stage 4 dedup collapse and stage 5 per-line cap
+// also discard source bytes but do not have byte-counter equivalents.
+// Exposing a `*_total()` method invited callers to treat it as
+// authoritative, which it cannot be without threading per-line
+// source-byte spans through stages 4/5/6. The accessor was removed
+// rather than ship a misleading API; the canonical "non-verbatim
+// output" signal remains the coarse `truncated` bit, and per-stage
+// counters give the breakdown each stage can honestly report.
 
 use std::borrow::Cow;
 
@@ -3828,24 +3821,29 @@ fn oversize_bypass(
         &mut stats.osc_recovery_bytes_dropped,
     );
     stats.ansi_stripped |= head_stripped;
-    // CR-bearing detection on the sanitized head: bare `\r` in the
-    // retained content is a renderer-safety hazard the module
-    // documents, and the bypass path must surface that signal to
-    // callers just like the staged path does.
-    stats.cr_bearing_lines += head_sanitized
+    // Stage 2b also runs on the bypass path so `progress_frame_collapse_enabled`
+    // does not silently flip semantics when an input crosses a bypass gate.
+    // Renders before trimming so the trim sees the rendered (typically
+    // shorter) text and we do not waste budget on stale CR frames.
+    //
+    // /review-loop round 7 finding 2: tally CR-bearing-line counts and
+    // stage 2b counters into LOCAL accumulators first; fold into `stats`
+    // only after we know the head actually contributes output. Otherwise
+    // a giant single-line payload would have its head dropped (no `\n`
+    // boundary) AND get re-counted in the giant-final-line suffix branch
+    // below, double-counting one source line into the audit signals.
+    let head_cr_bearing_local: usize = head_sanitized
         .split('\n')
         .filter(|l| l.contains('\r'))
         .count();
-    // Stage 2b also runs on the bypass path so `progress_frame_collapse_enabled` does
-    // not silently flip semantics when an input crosses a bypass gate.
-    // Renders before trimming so the trim sees the rendered (typically
-    // shorter) text and we do not waste budget on stale CR frames.
+    let mut head_progress_frames_local: usize = 0;
+    let mut head_progress_bytes_local: usize = 0;
     let head_rendered: Cow<'_, str> =
         if cfg.progress_frame_collapse_enabled() && head_sanitized.contains('\r') {
             Cow::Owned(stage2b_progress_collapse(
                 &head_sanitized,
-                &mut stats.progress_frames_coalesced,
-                &mut stats.progress_bytes_saved,
+                &mut head_progress_frames_local,
+                &mut head_progress_bytes_local,
             ))
         } else {
             Cow::Borrowed(head_sanitized.as_ref())
@@ -3861,6 +3859,16 @@ fn oversize_bypass(
         Some(idx) => &head_trimmed[..idx],
         None => "",
     };
+    // Head fate decided. Fold local counters only when the head actually
+    // contributed bytes; otherwise drop them so the suffix branch (which
+    // reprocesses the same source range) does not see them counted twice.
+    if !head.is_empty() {
+        stats.cr_bearing_lines += head_cr_bearing_local;
+        stats.progress_frames_coalesced += head_progress_frames_local;
+        stats.progress_bytes_saved = stats
+            .progress_bytes_saved
+            .saturating_add(head_progress_bytes_local);
+    }
 
     // Tail is anchored from the end of raw (Round-6: tail-first
     // priority); `provisional_tail_start` is already disjoint from
@@ -4894,17 +4902,15 @@ mod corner_case_tests {
     }
 
     #[test]
-    fn progress_collapse_loss_visible_in_source_bytes_lost_total() {
-        // Regression for /review-loop round 6: bytes_dropped_truncate
-        // measures stage-6 drops in **rendered** bytes, so when stage 2b
-        // shrinks a CR-bearing line first the field under-reports raw
-        // source-byte loss. Audit consumers that need a source-byte view
-        // must use `source_bytes_lost_total()`, which folds in
-        // `progress_bytes_saved`. Pin that relationship.
+    fn progress_collapse_loss_does_not_leak_into_bytes_dropped_truncate() {
+        // Regression for /review-loop rounds 6+7: when stage 2b shrinks a
+        // CR-bearing line and no later stage drops it, the collapsed
+        // bytes show up under `progress_bytes_saved` only — never under
+        // `bytes_dropped_truncate` (which is stage-6-specific and
+        // measured on rendered text). Audit consumers must read both
+        // counters; the `truncated` bit is the canonical
+        // any-source-loss signal.
         let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
-        // A single line of `frame00\rframe01\r...\rframeNN` — no other
-        // lossy stage fires, so stage 6 won't run and only stage 2b
-        // contributes loss. That's the cleanest read of the relationship.
         let mut raw = String::new();
         for i in 0..30 {
             use std::fmt::Write;
@@ -4915,23 +4921,17 @@ mod corner_case_tests {
         let raw_bytes = raw.as_bytes().to_vec();
         let original_line_bytes = raw_bytes.len() - 1; // minus the trailing \n
         let out = squash_raw(&raw_bytes, &cfg);
-        // Stage 2b ran and shrunk the line.
         assert_eq!(out.stats.progress_frames_coalesced, 1);
         assert!(out.stats.progress_bytes_saved > 0);
-        // Stage 6 didn't drop anything (single short line, well under
-        // any cap), so bytes_dropped_truncate is zero — but
-        // source_bytes_lost_total still reflects the stage-2b collapse.
         assert_eq!(out.stats.bytes_dropped_truncate, 0);
-        assert_eq!(
-            out.stats.source_bytes_lost_total(),
-            out.stats.progress_bytes_saved,
-            "source-byte loss must include stage 2b collapse even when stage 6 didn't drop"
-        );
-        // Sanity: the rendered "final" plus its newline is what survived.
         assert_eq!(
             out.stats.progress_bytes_saved,
             original_line_bytes - "final".len(),
-            "all per-frame bytes except `final` were collapsed away"
+            "all per-frame bytes except `final` collapsed away"
+        );
+        assert!(
+            out.stats.truncated,
+            "stage 2b collapse alone must flip the canonical truncated bit"
         );
     }
 
@@ -4988,6 +4988,69 @@ mod corner_case_tests {
         // does) and surface the bare-CR audit signal from the source.
         assert!(out_on.stats.truncated);
         assert!(out_on.stats.cr_bearing_lines > 0);
+    }
+
+    #[test]
+    fn bypass_dropped_head_does_not_leak_progress_collapse_stats() {
+        // Regression for /review-loop round 7 finding 2: when the bypass
+        // head window has no safe `\n` boundary, the whole head is
+        // dropped (`head = ""`). Stage 2b counters and `cr_bearing_lines`
+        // for that head window MUST NOT be folded into stats — those
+        // bytes never reach the output, so reporting them as audit
+        // loss inflates the signal (and would double-count if the
+        // giant-final-line suffix branch later reprocesses the same
+        // source range).
+        //
+        // Construct a payload where the head window is pure CR-heavy
+        // progress text with no `\n`, and the tail window holds CR-free
+        // diagnostic lines with their own newlines. Pre-fix, the head's
+        // local counters leaked into stats; post-fix, they do not.
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let mut raw: Vec<u8> = Vec::new();
+        // Head window covers bytes [0..head_raw_end]; with the default
+        // config that is ≈ 16 KB. Fill it with CR-heavy progress text
+        // and *no* `\n`, so head_trimmed has no line boundary and the
+        // bypass drops the head entirely. The first `\n` lands beyond
+        // the head window, then CR-free tail lines follow.
+        for _ in 0..2_000 {
+            raw.extend_from_slice(b"progress-bytes\r");
+        }
+        raw.push(b'\n');
+        for i in 0..1_000 {
+            raw.extend_from_slice(format!("tail-diagnostic-{i:04}\n").as_bytes());
+        }
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        // Tail had no `\r`, head was dropped → all CR/progress counters
+        // must remain at zero. Pre-fix, the head's CR-bearing line
+        // (1) and stage 2b counters (1 frame, ~14 KB saved) leaked.
+        assert_eq!(
+            out.stats.cr_bearing_lines, 0,
+            "dropped head must not leak cr_bearing_lines"
+        );
+        assert_eq!(
+            out.stats.progress_frames_coalesced, 0,
+            "dropped head must not leak progress_frames_coalesced"
+        );
+        assert_eq!(
+            out.stats.progress_bytes_saved, 0,
+            "dropped head must not leak progress_bytes_saved"
+        );
+        // Sanity: tail content survived.
+        let body = String::from_utf8_lossy(&out.compacted_bytes);
+        assert!(
+            body.contains("tail-diagnostic-"),
+            "tail diagnostic lines must survive"
+        );
     }
 
     #[test]
