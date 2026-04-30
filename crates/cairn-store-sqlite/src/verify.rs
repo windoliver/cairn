@@ -139,6 +139,29 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ),
     ("trigger", "consent_journal_event_metadata_domains"),
     ("trigger", "consent_journal_sensor_id_domain"),
+    // 0013_edges_updates_dst_idx
+    ("index", "edges_updates_dst_idx"),
+    // 0014_sessions
+    ("table", "sessions"),
+    ("index", "sessions_active_lookup_idx"),
+    ("index", "sessions_last_activity_idx"),
+    // 0015_sessions_unique_active
+    ("index", "sessions_one_active_per_identity_idx"),
+    // 0016_sessions_unique_active_coalesce (drops + recreates the index
+    // above; index name unchanged. Adds the empty-string guards.)
+    ("trigger", "sessions_project_root_no_empty_insert"),
+    ("trigger", "sessions_project_root_no_empty_update"),
+    // 0020_workflow_jobs
+    ("table", "workflow_jobs"),
+    ("index", "workflow_jobs_ready_idx"),
+    ("index", "workflow_jobs_queued_queue_key_idx"),
+    ("index", "workflow_jobs_lease_expiry_idx"),
+    ("index", "workflow_jobs_queue_key_leased_uniq"),
+    ("index", "workflow_jobs_dedupe_uniq"),
+    ("trigger", "workflow_jobs_identity_immutable"),
+    ("trigger", "workflow_jobs_terminal_absorbing"),
+    ("trigger", "workflow_jobs_state_transition"),
+    ("trigger", "workflow_jobs_no_delete"),
 ];
 
 fn hash_hex(content: &str) -> String {

@@ -154,7 +154,7 @@ pub struct ConsentEvent {
     pub consent_id: String,
     /// What kind of event this row records.
     pub kind: ConsentKind,
-    /// Principal that authored the event (`usr:…` / `agt:…`). The store
+    /// Principal that authored the event (`hmn:…` / `agt:…`). The store
     /// indexes this as the `actor` column for identity-keyed queries.
     pub actor: Identity,
     /// Subject of the event — meaning is `kind`-specific (sensor label,
@@ -694,7 +694,7 @@ mod tests {
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
             kind: ConsentKind::ForgetIntent,
-            actor: Identity::parse("usr:tafeng").expect("valid identity"),
+            actor: Identity::parse("hmn:tafeng").expect("valid identity"),
             subject: h.clone(),
             scope: "private:agent=agt:claude-code".to_owned(),
             op_id: Some("op-01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
@@ -713,7 +713,7 @@ mod tests {
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
             kind: ConsentKind::SensorEnable,
-            actor: Identity::parse("usr:tafeng").expect("valid identity"),
+            actor: Identity::parse("hmn:tafeng").expect("valid identity"),
             subject: "snr:local:screen:host:v1".to_owned(),
             scope: "global".to_owned(),
             op_id: None,
@@ -732,7 +732,7 @@ mod tests {
         ConsentEvent {
             consent_id: "01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned(),
             kind: ConsentKind::PromoteReceipt,
-            actor: Identity::parse("usr:tafeng").expect("valid identity"),
+            actor: Identity::parse("hmn:tafeng").expect("valid identity"),
             subject: h.clone(),
             scope: "team:platform".to_owned(),
             op_id: Some("op-01ARZ3NDEKTSV4RRFFQ69G5FAX".to_owned()),
@@ -796,7 +796,7 @@ mod tests {
         let bad = r#"{
             "consent_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "kind":"forget_intent",
-            "actor":"usr:tafeng",
+            "actor":"hmn:tafeng",
             "subject":"hash:abc",
             "scope":"private",
             "payload":{"shape":"intent_receipt","target_id_hash":"hash:abc",
@@ -812,7 +812,7 @@ mod tests {
         let bad = r#"{
             "consent_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "kind":"forget_intent",
-            "actor":"usr:tafeng",
+            "actor":"hmn:tafeng",
             "subject":"hash:abc",
             "scope":"private",
             "payload":{"shape":"intent_receipt","target_id_hash":"hash:abc",

@@ -14,7 +14,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 11);
+    assert_eq!(head, 20);
 }
 
 #[test]
@@ -30,7 +30,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 11);
+    assert_eq!(head, 20);
 }
 
 #[test]
@@ -196,8 +196,8 @@ fn consent_journal_kind_domain_enforced() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c1', 's1', 'private', 'GRANT', 'usr:t', 0, \
-                     'not_a_kind', 'usr:t', '2026-04-28T12:00:00Z', \
+             VALUES ('c1', 's1', 'private', 'GRANT', 'hmn:t', 0, \
+                     'not_a_kind', 'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
             [],
         )
@@ -250,8 +250,8 @@ fn consent_journal_accepts_known_kinds() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, decided_at_iso, actor, sensor_id, payload_json) \
-             VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, ?, '2026-04-28T12:00:00Z', \
-                     'usr:t', ?, ?)",
+             VALUES (?, ?, 'private', 'GRANT', 'hmn:t', 0, ?, '2026-04-28T12:00:00Z', \
+                     'hmn:t', ?, ?)",
             params![format!("c-{kind}"), subject, kind, sensor_id, payload],
         )
         .unwrap_or_else(|e| panic!("kind {kind} should be accepted: {e}"));
@@ -266,8 +266,8 @@ fn consent_journal_event_requires_iso_timestamp() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, payload_json) \
-             VALUES ('c-no-iso', 's', 'private', 'GRANT', 'usr:t', 0, 'grant', \
-                     'usr:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
+             VALUES ('c-no-iso', 's', 'private', 'GRANT', 'hmn:t', 0, 'grant', \
+                     'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
             [],
         )
         .unwrap_err();
@@ -285,7 +285,7 @@ fn consent_journal_kind_null_back_compat() {
     conn.execute(
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at) \
-         VALUES ('legacy', 's', 'private', 'GRANT', 'usr:t', 0)",
+         VALUES ('legacy', 's', 'private', 'GRANT', 'hmn:t', 0)",
         [],
     )
     .expect("legacy insert with NULL kind");
@@ -300,8 +300,8 @@ fn forget_intent_payload_must_be_body_free() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c2', 'hash:11111111111111111111111111111111', \
-                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"intent_receipt\",\
                        \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
                        \"scope_tier\":\"private\",\"reason_code\":\"user_command\",\
@@ -332,8 +332,8 @@ fn forget_intent_payload_rejects_extended_banned_keys() {
                 "INSERT INTO consent_journal \
                   (consent_id, subject, scope, decision, granted_by, decided_at, \
                    kind, actor, decided_at_iso, payload_json) \
-                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                         'usr:t', '2026-04-28T12:00:00Z', ?)",
+                 VALUES (?, ?, 'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                         'hmn:t', '2026-04-28T12:00:00Z', ?)",
                 params![format!("c-leak-{banned}"), hash, payload],
             )
             .unwrap_err();
@@ -353,8 +353,8 @@ fn forget_intent_payload_rejects_malformed_json() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-bad-json', 'hash:11111111111111111111111111111111', \
-                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                     'usr:t', \
+                     'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                     'hmn:t', \
                      '2026-04-28T12:00:00Z', 'not json at all')",
             [],
         )
@@ -375,8 +375,8 @@ fn non_forget_payload_also_body_free() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-promote-leak', 'hash:11111111111111111111111111111111', \
-                     'team:p', 'GRANT', 'usr:t', 0, \
-                     'promote_receipt', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'team:p', 'GRANT', 'hmn:t', 0, \
+                     'promote_receipt', 'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"promote_receipt\",\
                        \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
                        \"from_tier\":\"private\",\"to_tier\":\"team\",\
@@ -396,8 +396,8 @@ fn forget_intent_payload_accepts_hash_only() {
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, actor, decided_at_iso, payload_json) \
          VALUES ('c3', 'hash:11111111111111111111111111111111', \
-                 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                 'usr:t', '2026-04-28T12:00:00Z', \
+                 'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                 'hmn:t', '2026-04-28T12:00:00Z', \
                  '{\"shape\":\"intent_receipt\",\
                    \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
                    \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
@@ -413,9 +413,9 @@ fn consent_journal_queryable_by_op_actor_sensor_scope() {
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, decided_at_iso, op_id, actor, sensor_id, payload_json) \
-         VALUES ('c4', 'snr:local:screen:host:v1', 'global', 'GRANT', 'usr:t', 0, \
+         VALUES ('c4', 'snr:local:screen:host:v1', 'global', 'GRANT', 'hmn:t', 0, \
                  'sensor_enable', '2026-04-28T12:00:00Z', \
-                 'op-1', 'usr:tafeng', 'local:screen:host:v1', \
+                 'op-1', 'hmn:tafeng', 'local:screen:host:v1', \
                  '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:screen:host:v1\",\
                    \"reason_code\":\"first_run_prompt\"}')",
         [],
@@ -435,7 +435,7 @@ fn consent_journal_queryable_by_op_actor_sensor_scope() {
     // queryable by identity (actor)
     let by_actor: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM consent_journal WHERE actor = 'usr:tafeng'",
+            "SELECT COUNT(*) FROM consent_journal WHERE actor = 'hmn:tafeng'",
             [],
             |r| r.get(0),
         )
@@ -478,8 +478,8 @@ fn consent_journal_payload_missing_shape_is_rejected() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-noshape', 'sensors.x', \
-                     'global', 'GRANT', 'usr:t', 0, 'policy_change', \
-                     'usr:t', '2026-04-28T12:00:00Z', '{}')",
+                     'global', 'GRANT', 'hmn:t', 0, 'policy_change', \
+                     'hmn:t', '2026-04-28T12:00:00Z', '{}')",
             [],
         )
         .unwrap_err();
@@ -501,7 +501,7 @@ fn consent_journal_sensor_kind_requires_sensor_id() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-sensor-no-id', 'snr:local:hook:host:v1', 'global', 'GRANT', \
-                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'sensor_enable', 'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\",\"reason_code\":\"first_run_prompt\"}')",
             [],
         )
@@ -521,7 +521,7 @@ fn consent_journal_sensor_id_must_match_payload_label() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-sensor-mismatch', 'snr:local:a:host:v1', 'global', 'GRANT', \
-                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'sensor_enable', 'hmn:t', '2026-04-28T12:00:00Z', \
                      'local:a:host:v1', \
                      '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:b:host:v1\",\
                        \"reason_code\":\"first_run_prompt\"}')",
@@ -543,7 +543,7 @@ fn consent_journal_non_sensor_kind_forbids_sensor_id() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-policy-with-sensor', 'sensors.x', 'global', 'GRANT', \
-                     'usr:t', 0, 'policy_change', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'policy_change', 'hmn:t', '2026-04-28T12:00:00Z', \
                      'local:hook:host:v1', \
                      '{\"shape\":\"policy_delta\",\"key\":\"sensors.x\",\
                        \"from_code\":\"a\",\"to_code\":\"b\"}')",
@@ -565,7 +565,7 @@ fn consent_journal_sensor_subject_must_match_sensor_id() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-sensor-bad-subject', 'snr:local:WRONG:host:v1', 'global', 'GRANT', \
-                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'sensor_enable', 'hmn:t', '2026-04-28T12:00:00Z', \
                      'local:hook:host:v1', \
                      '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"local:hook:host:v1\",\"reason_code\":\"first_run_prompt\"}')",
             [],
@@ -587,7 +587,7 @@ fn consent_journal_hash_kind_subject_shape_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-bad-subject', 'TOPSECRETBODY', 'private', 'GRANT', \
-                     'usr:t', 0, 'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"intent_receipt\",\
                        \"target_id_hash\":\"hash:11111111111111111111111111111111\",\
                        \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
@@ -609,8 +609,8 @@ fn consent_journal_hash_kind_target_id_hash_shape_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-bad-target', 'hash:11111111111111111111111111111111', \
-                     'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"plainstring\",\
                        \"scope_tier\":\"private\",\"reason_code\":\"user_command\"}')",
             [],
@@ -636,7 +636,7 @@ fn consent_journal_sensor_payload_requires_sensor_label() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-no-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
-                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'sensor_enable', 'hmn:t', '2026-04-28T12:00:00Z', \
                      'local:hook:host:v1', \
                      '{\"shape\":\"sensor_toggle\",\"reason_code\":\"first_run_prompt\"}')",
             [],
@@ -654,7 +654,7 @@ fn consent_journal_sensor_payload_requires_sensor_label() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, sensor_id, payload_json) \
              VALUES ('c-num-label', 'snr:local:hook:host:v1', 'global', 'GRANT', \
-                     'usr:t', 0, 'sensor_enable', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'hmn:t', 0, 'sensor_enable', 'hmn:t', '2026-04-28T12:00:00Z', \
                      'local:hook:host:v1', \
                      '{\"shape\":\"sensor_toggle\",\"sensor_label\":42,\
                        \"reason_code\":\"first_run_prompt\"}')",
@@ -694,8 +694,8 @@ fn consent_journal_hash_kind_requires_target_id_hash_text() {
                 "INSERT INTO consent_journal \
                   (consent_id, subject, scope, decision, granted_by, decided_at, \
                    kind, actor, decided_at_iso, payload_json) \
-                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, 'forget_intent', \
-                         'usr:t', '2026-04-28T12:00:00Z', ?)",
+                 VALUES (?, ?, 'private', 'GRANT', 'hmn:t', 0, 'forget_intent', \
+                         'hmn:t', '2026-04-28T12:00:00Z', ?)",
                 params![format!("c-{label}"), hash, payload],
             )
             .unwrap_err();
@@ -783,7 +783,7 @@ fn consent_journal_payload_required_fields_enforced() {
                 "INSERT INTO consent_journal \
                   (consent_id, subject, scope, decision, granted_by, decided_at, \
                    kind, actor, decided_at_iso, sensor_id, payload_json) \
-                 VALUES (?, ?, 'private', 'GRANT', 'usr:t', 0, ?, 'usr:t', \
+                 VALUES (?, ?, 'private', 'GRANT', 'hmn:t', 0, ?, 'hmn:t', \
                          '2026-04-28T12:00:00Z', ?, ?)",
                 params![format!("c-{cid}"), subject, kind, sensor_id, payload],
             )
@@ -813,8 +813,8 @@ fn consent_journal_payload_rejects_invalid_visibility_tier() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-bad-tier', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-bad-tier', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![hash, payload],
         )
         .unwrap_err();
@@ -841,8 +841,8 @@ fn consent_journal_payload_rejects_unknown_top_level_key() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-unknown-key', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-unknown-key', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![hash, payload],
         )
         .unwrap_err();
@@ -868,7 +868,7 @@ fn consent_journal_decision_policy_code_must_be_text_or_null() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-pol-num', 'share_link:abcd', 'private', 'GRANT', \
-                     'usr:t', 0, 'grant', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+                     'hmn:t', 0, 'grant', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![payload],
         )
         .unwrap_err();
@@ -896,8 +896,8 @@ fn consent_journal_event_rejects_nonpositive_rowid() {
                 "INSERT INTO consent_journal \
                   (rowid, consent_id, subject, scope, decision, granted_by, decided_at, \
                    kind, actor, decided_at_iso, payload_json) \
-                 VALUES (?, ?, ?, 'private', 'GRANT', 'usr:t', 0, \
-                         'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+                 VALUES (?, ?, ?, 'private', 'GRANT', 'hmn:t', 0, \
+                         'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
                 params![bad, format!("c-rowid-{bad}"), hash, payload],
             )
             .unwrap_err();
@@ -925,8 +925,8 @@ fn consent_journal_payload_rejects_cross_variant_key() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-cross-key', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-cross-key', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![hash, payload],
         )
         .unwrap_err();
@@ -953,8 +953,8 @@ fn consent_journal_payload_rejects_smuggled_reason_code() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-bad-reason', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-bad-reason', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![hash, payload],
         )
         .unwrap_err();
@@ -981,8 +981,8 @@ fn consent_journal_payload_rejects_duplicate_top_level_keys() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-dup', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-dup', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             params![hash, payload],
         )
         .unwrap_err();
@@ -1006,8 +1006,8 @@ fn consent_journal_subject_domain_enforced_for_non_hash_kinds() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-grant-leak', 'please share secret token ABC123', \
-                     'private', 'GRANT', 'usr:t', 0, 'grant', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'private', 'GRANT', 'hmn:t', 0, 'grant', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"decision\",\"subject_code\":\"share_link:abcd\"}')",
             [],
         )
@@ -1023,8 +1023,8 @@ fn consent_journal_subject_domain_enforced_for_non_hash_kinds() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-policy-empty', '', \
-                     'global', 'GRANT', 'usr:t', 0, 'policy_change', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'global', 'GRANT', 'hmn:t', 0, 'policy_change', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"policy_delta\",\"key\":\"sensors.x\",\
                        \"from_code\":\"a\",\"to_code\":\"b\"}')",
             [],
@@ -1051,8 +1051,8 @@ fn consent_journal_event_metadata_domain_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('please share secret token ABC123', 'sensor.x', \
-                     'private', 'GRANT', 'usr:t', 0, 'policy_change', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'private', 'GRANT', 'hmn:t', 0, 'policy_change', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
                        \"from_code\":\"a\",\"to_code\":\"b\"}')",
             [],
@@ -1070,8 +1070,8 @@ fn consent_journal_event_metadata_domain_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
              VALUES ('c-scope-bad', 'sensor.x', \
-                     'Private Project Scope', 'GRANT', 'usr:t', 0, \
-                     'policy_change', 'usr:t', '2026-04-28T12:00:00Z', \
+                     'Private Project Scope', 'GRANT', 'hmn:t', 0, \
+                     'policy_change', 'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
                        \"from_code\":\"a\",\"to_code\":\"b\"}')",
             [],
@@ -1089,8 +1089,8 @@ fn consent_journal_event_metadata_domain_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json, op_id) \
              VALUES ('c-op-bad', 'sensor.x', \
-                     'private', 'GRANT', 'usr:t', 0, 'policy_change', \
-                     'usr:t', '2026-04-28T12:00:00Z', \
+                     'private', 'GRANT', 'hmn:t', 0, 'policy_change', \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"policy_delta\",\"key\":\"sensor.x\",\
                        \"from_code\":\"a\",\"to_code\":\"b\"}', \
                      'op id with spaces')",
@@ -1120,8 +1120,8 @@ fn consent_journal_sensor_id_domain_enforced() {
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, sensor_id, actor, decided_at_iso, payload_json) \
              VALUES ('c-sensor-spaces', 'snr:local hook host v1', \
-                     'private', 'GRANT', 'usr:t', 0, 'sensor_enable', \
-                     'local hook host v1', 'usr:t', \
+                     'private', 'GRANT', 'hmn:t', 0, 'sensor_enable', \
+                     'local hook host v1', 'hmn:t', \
                      '2026-04-28T12:00:00Z', \
                      '{\"shape\":\"sensor_toggle\",\
                        \"sensor_label\":\"local hook host v1\",\
@@ -1141,8 +1141,8 @@ fn consent_journal_sensor_id_domain_enforced() {
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, sensor_id, actor, decided_at_iso, payload_json) \
          VALUES ('c-sensor-long', 'snr:{long}', \
-                 'private', 'GRANT', 'usr:t', 0, 'sensor_enable', \
-                 '{long}', 'usr:t', '2026-04-28T12:00:00Z', \
+                 'private', 'GRANT', 'hmn:t', 0, 'sensor_enable', \
+                 '{long}', 'hmn:t', '2026-04-28T12:00:00Z', \
                  '{{\"shape\":\"sensor_toggle\",\
                     \"sensor_label\":\"{long}\",\
                     \"reason_code\":\"user_grant\"}}')",
@@ -1161,8 +1161,8 @@ fn consent_journal_remains_append_only_under_0007() {
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, actor, decided_at_iso, payload_json) \
-         VALUES ('c5', 's', 'private', 'GRANT', 'usr:t', 0, 'grant', \
-                 'usr:t', '2026-04-28T12:00:00Z', \
+         VALUES ('c5', 's', 'private', 'GRANT', 'hmn:t', 0, 'grant', \
+                 'hmn:t', '2026-04-28T12:00:00Z', \
                  '{\"shape\":\"decision\",\"subject_code\":\"x\"}')",
         [],
     )

@@ -20,7 +20,7 @@ use std::path::Path;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, DomainError, Identity, IdentityKind, PayloadHash, Rfc3339Timestamp, SensorLabel,
-    SourceFamily, attribute, validate_label,
+    SourceFamily, TerminalContext, attribute, validate_label,
 };
 use proptest::prelude::*;
 
@@ -83,7 +83,7 @@ fn explicit_event() -> CaptureEvent {
         capture_mode: CaptureMode::Explicit,
         actor_chain: vec![
             entry(ChainRole::Delegator, "agt:claude-code:opus-4-7:main:v1"),
-            entry(ChainRole::Author, "usr:tafeng"),
+            entry(ChainRole::Author, "hmn:tafeng"),
         ],
         refs: None,
         payload_hash: hash(),
@@ -137,7 +137,7 @@ fn explicit_event_validates_and_traces_to_human() {
 
     let author = attribute(ev.capture_mode, &ev.actor_chain).expect("attributed");
     assert_eq!(author.identity.kind(), IdentityKind::Human);
-    assert_eq!(author.identity.as_str(), "usr:tafeng");
+    assert_eq!(author.identity.as_str(), "hmn:tafeng");
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn explicit_event_with_only_sensor_chain_is_rejected() {
 #[test]
 fn auto_event_with_human_author_is_rejected() {
     let mut ev = auto_event();
-    ev.actor_chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+    ev.actor_chain = vec![entry(ChainRole::Author, "hmn:tafeng")];
     let err = ev.validate().unwrap_err();
     assert!(matches!(err, DomainError::AttributionMismatch { .. }));
 }
@@ -475,6 +475,7 @@ fn debug_redacts_sensitive_payload_fields() {
     ev.payload = CapturePayload::Terminal {
         command: "echo SUPER_SECRET_TOKEN_42".into(),
         exit_code: Some(0),
+        context: Some(TerminalContext::InteractiveTty),
     };
     let dump = format!("{ev:?}");
     assert!(

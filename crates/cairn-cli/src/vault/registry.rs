@@ -180,11 +180,13 @@ pub fn resolve_vault(opts: ResolveOpts<'_>) -> anyhow::Result<PathBuf> {
 
 fn resolve_explicit(s: &str, store: &VaultRegistryStore) -> anyhow::Result<PathBuf> {
     // Treat as a filesystem path when it starts with `/`, `~`, `./`, `../`,
-    // or contains a path separator.
+    // is exactly `.` or `..`, or contains a path separator.
     if s.starts_with('/')
         || s.starts_with('~')
         || s.starts_with("./")
         || s.starts_with("../")
+        || s == "."
+        || s == ".."
         || s.contains(std::path::MAIN_SEPARATOR)
     {
         return Ok(expand_tilde(s));

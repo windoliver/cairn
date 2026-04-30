@@ -10,7 +10,7 @@
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, ChainRole,
     DomainError, Identity, PayloadHash, Rfc3339Timestamp, SensorLabel, SourceFamily,
-    validate_label,
+    TerminalContext, validate_label,
 };
 use proptest::prelude::*;
 
@@ -56,6 +56,7 @@ fn family_defaults(family: SourceFamily) -> (&'static str, CapturePayload) {
             CapturePayload::Terminal {
                 command: "ls".into(),
                 exit_code: Some(0),
+                context: Some(TerminalContext::InteractiveTty),
             },
         ),
         SourceFamily::Clipboard => (
@@ -147,7 +148,7 @@ fn chain_for(mode: CaptureMode, sensor_id: &str) -> Vec<ActorChainEntry> {
         CaptureMode::Auto => vec![entry(ChainRole::Author, sensor_id)],
         CaptureMode::Explicit => vec![
             entry(ChainRole::Delegator, "agt:claude-code:opus-4-7:main:v1"),
-            entry(ChainRole::Author, "usr:tafeng"),
+            entry(ChainRole::Author, "hmn:tafeng"),
         ],
         CaptureMode::Proactive => vec![entry(
             ChainRole::Author,
@@ -428,6 +429,7 @@ fn debug_redaction_sweep() {
             CapturePayload::Terminal {
                 command: format!("echo {secret}"),
                 exit_code: None,
+                context: Some(TerminalContext::InteractiveTty),
             },
         ),
         (

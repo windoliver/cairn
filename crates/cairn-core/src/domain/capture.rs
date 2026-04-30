@@ -359,6 +359,26 @@ impl std::fmt::Display for SourceFamily {
     }
 }
 
+/// Sensor-classified execution context for a [`CapturePayload::Terminal`]
+/// event. Determines whether the captured bytes are unstructured TTY
+/// output (eligible for tool-squash compaction) or
+/// machine-readable / non-interactive output (squash bypassed).
+///
+/// Persisted on the event so replay (WAL recovery, re-ingest) reproduces
+/// the same routing decision the dispatch driver took at capture time.
+/// Sensors set this at capture time; the squash gate reads it back from
+/// `CapturePayload::Terminal { context, .. }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TerminalContext {
+    /// The terminal session is an interactive TTY; output is unstructured.
+    InteractiveTty,
+    /// Non-interactive session or structured (machine-readable) output;
+    /// squash must be bypassed.
+    NonInteractiveOrStructured,
+}
+
 /// Modality-specific payload metadata for a [`CaptureEvent`].
 ///
 /// The variant **must agree** with the event's [`SourceFamily`] —
@@ -394,6 +414,17 @@ pub enum CapturePayload {
         event_kind: String,
     },
     /// Terminal command + output.
+    ///
+    /// **Rollback / mixed-version note (#218):** the `context` field
+    /// was added in #218. The enclosing [`CapturePayload`] enum still
+    /// uses `#[serde(deny_unknown_fields)]`, so a reader on a binary
+    /// without #218 will reject any persisted event that carries
+    /// `context`. Until envelope versioning lands, downgrade to a
+    /// pre-#218 binary is not supported on disks containing terminal
+    /// events written by a #218+ writer. This is acceptable for the
+    /// pre-v1 P0 surface (no shipped writer persists `CapturePayload`
+    /// yet — sensor wiring is gated behind #84 and the squash boundary
+    /// is `pub(crate)` until #217 lands the dispatch driver).
     Terminal {
         /// Argv-style command line.
         command: String,
@@ -401,6 +432,34 @@ pub enum CapturePayload {
         /// time.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// Sensor-classified execution context. Determines whether the
+        /// payload is unstructured TTY output (eligible for squash) or
+        /// machine-readable / non-interactive output (squash bypassed).
+        ///
+        /// Persisted on the event so replay (WAL recovery, re-ingest)
+        /// reproduces the same routing decision the dispatch driver
+        /// took at capture time.
+        ///
+        /// Dual-validation pattern (#218):
+        /// - **Write boundary** (sensors, dispatch driver, any caller
+        ///   minting a fresh terminal event) MUST call
+        ///   [`CapturePayload::validate_for_capture`] before persisting
+        ///   or emitting the event. That method requires
+        ///   `context: Some(_)` so a fresh write cannot create the
+        ///   indistinguishable-from-legacy `None` shape on disk.
+        /// - **Read boundary** ([`CapturePayload::validate`] / replay /
+        ///   WAL recovery / re-ingest) stays permissive: events
+        ///   serialized before this field existed deserialize with
+        ///   `None` and still validate, so the upgrade does not strand
+        ///   historical data.
+        ///
+        /// The squash boundary
+        /// (`UnstructuredTextBytes::try_from_terminal_event`) handles
+        /// the legacy `None` case with a distinct `LegacyMissingContext`
+        /// error so callers see "needs migration" rather than mistaking
+        /// legacy data for a deliberately structured payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<TerminalContext>,
     },
     /// Clipboard snapshot.
     Clipboard {
@@ -477,9 +536,12 @@ impl std::fmt::Debug for CapturePayload {
             Self::Ide { .. } => f
                 .debug_struct("CapturePayload::Ide")
                 .finish_non_exhaustive(),
-            Self::Terminal { exit_code, .. } => f
+            Self::Terminal {
+                exit_code, context, ..
+            } => f
                 .debug_struct("CapturePayload::Terminal")
                 .field("exit_code", exit_code)
+                .field("context", context)
                 .finish_non_exhaustive(),
             Self::Clipboard {
                 mime_type,
@@ -560,6 +622,18 @@ impl CapturePayload {
             }
             Self::Terminal { command, .. } => {
                 require_non_empty("command", command)?;
+                // #218: `context` is intentionally NOT validated as
+                // required here. Pre-#218 events deserialize with
+                // `context: None` and must remain readable across
+                // upgrade so replay / WAL recovery / re-ingest do not
+                // strand historical data. The squash boundary
+                // (`UnstructuredTextBytes::try_from_terminal_event`)
+                // refuses to silently route `None` as a structured
+                // bypass — it returns a distinct
+                // `LegacyMissingContext` error instead, so callers
+                // surface the migration-needed signal without losing
+                // the ability to deserialize the event at the
+                // envelope boundary.
             }
             Self::Clipboard { mime_type, .. } => {
                 require_non_empty("mime_type", mime_type)?;
@@ -602,6 +676,33 @@ impl CapturePayload {
                 require_non_empty("kind", kind)?;
                 require_non_empty("rationale", rationale)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Strict validation for newly-authored events at the
+    /// capture / write boundary. Runs [`Self::validate`] plus the
+    /// invariants that a *fresh* event must satisfy but that legacy
+    /// (read-side) data may legitimately violate.
+    ///
+    /// #218: terminal events authored on or after this revision must
+    /// carry a populated `context`. Sensors, the dispatch driver, and
+    /// any adapter that mints a `CapturePayload::Terminal` must call
+    /// this method (not [`Self::validate`]) before persisting or
+    /// emitting the event. The read-side
+    /// [`Self::validate`] stays permissive so replay / WAL recovery /
+    /// re-ingest of pre-#218 data is not stranded by the upgrade.
+    ///
+    /// # Errors
+    /// Any [`DomainError`] returned by [`Self::validate`], plus
+    /// [`DomainError::EmptyField`] (`field = "context"`) for a
+    /// terminal event with `context: None`.
+    pub fn validate_for_capture(&self) -> Result<(), DomainError> {
+        self.validate()?;
+        if let Self::Terminal { context, .. } = self
+            && context.is_none()
+        {
+            return Err(DomainError::EmptyField { field: "context" });
         }
         Ok(())
     }
@@ -875,14 +976,18 @@ impl std::fmt::Debug for CaptureEvent {
 
 impl CaptureEvent {
     /// Build a [`CaptureEvent`] from typed parts, running every
-    /// invariant via [`Self::validate`] before yielding the value.
-    /// In-process callers that want construction-time enforcement (the
-    /// same guarantee `serde(try_from = "CaptureEventRaw")` gives the
-    /// wire-deserialization path) should prefer this over field
-    /// literals. Direct field construction is allowed — this matches
-    /// the [`crate::domain::MemoryRecord`] convention — but it is the
-    /// caller's responsibility to call [`Self::validate`] before
-    /// trusting the value at any boundary.
+    /// invariant via [`Self::validate_for_capture`] before yielding
+    /// the value. `try_new` is the in-process *write*-boundary
+    /// constructor — it mints fresh events that will be persisted /
+    /// emitted, so it enforces the strict variant (#218: terminal
+    /// events must carry `context`). The wire-deserialization path
+    /// (`serde(try_from = "CaptureEventRaw")`) intentionally uses the
+    /// permissive [`Self::validate`] so legacy on-disk data is not
+    /// stranded across upgrade. Direct field construction is allowed
+    /// — this matches the [`crate::domain::MemoryRecord`] convention
+    /// — but it is the caller's responsibility to call the
+    /// appropriate validator (read vs write) before trusting the
+    /// value at any boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         event_id: CaptureEventId,
@@ -908,7 +1013,7 @@ impl CaptureEvent {
             payload,
             source_family,
         };
-        event.validate()?;
+        event.validate_for_capture()?;
         Ok(event)
     }
 
@@ -1015,6 +1120,29 @@ impl CaptureEvent {
         }
         bind_chain_sensor_entries(&self.actor_chain, &self.sensor_id)?;
 
+        Ok(())
+    }
+
+    /// Strict validation for newly-authored events at the capture /
+    /// write boundary. Runs [`Self::validate`] then delegates to
+    /// [`CapturePayload::validate_for_capture`] so fresh-write
+    /// invariants (#218: `Terminal.context` populated) are enforced
+    /// at the event level — not just the payload level — so callers
+    /// have a single entry point for "may this event be persisted /
+    /// emitted?".
+    ///
+    /// Sensors, the dispatch driver, and any adapter that mints a
+    /// fresh `CaptureEvent` MUST call this method (not
+    /// [`Self::validate`]) before persisting or emitting the event.
+    /// The read-side [`Self::validate`] stays permissive so legacy
+    /// data is not stranded across upgrade.
+    ///
+    /// # Errors
+    /// Any [`DomainError`] returned by [`Self::validate`] or
+    /// [`CapturePayload::validate_for_capture`].
+    pub fn validate_for_capture(&self) -> Result<(), DomainError> {
+        self.validate()?;
+        self.payload.validate_for_capture()?;
         Ok(())
     }
 }
@@ -1291,7 +1419,7 @@ mod tests {
 
     #[test]
     fn sensor_label_rejects_non_sensor_identity() {
-        let usr = Identity::parse("usr:tafeng").expect("valid");
+        let usr = Identity::parse("hmn:tafeng").expect("valid");
         let err = SensorLabel::from_identity(&usr).unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
     }
@@ -1345,5 +1473,132 @@ mod tests {
         let s = serde_json::to_string(&v).expect("ser");
         let res: Result<CaptureEvent, _> = serde_json::from_str(&s);
         assert!(res.is_err(), "unknown fields must be rejected");
+    }
+
+    /// Forward-compat: a `Terminal` payload serialized before #218 has
+    /// no `context` field; it must deserialize with `context: None`.
+    #[test]
+    fn terminal_payload_deserializes_without_context_field() {
+        let json = r#"{
+            "source_family": "terminal",
+            "command": "cargo build",
+            "exit_code": 0
+        }"#;
+        let payload: CapturePayload = serde_json::from_str(json).expect("parse");
+        match payload {
+            CapturePayload::Terminal { context, .. } => assert_eq!(context, None),
+            other => panic!("expected Terminal, got {other:?}"),
+        }
+    }
+
+    /// `Terminal { context: Some(InteractiveTty) }` round-trips through
+    /// JSON in the documented `snake_case` wire form.
+    #[test]
+    fn terminal_payload_serde_round_trip_with_context() {
+        let original = CapturePayload::Terminal {
+            command: "cargo test".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::InteractiveTty),
+        };
+        let json = serde_json::to_string(&original).expect("ser");
+        assert!(
+            json.contains(r#""context":"interactive_tty""#),
+            "wire form should be snake_case: {json}"
+        );
+        let parsed: CapturePayload = serde_json::from_str(&json).expect("de");
+        assert_eq!(parsed, original);
+    }
+
+    /// `Terminal { context: None }` serializes without emitting the
+    /// `context` field (`skip_serializing_if`), preserving wire bytes
+    /// for callers that haven't been updated yet.
+    #[test]
+    fn terminal_payload_omits_none_context_on_serialize() {
+        let payload = CapturePayload::Terminal {
+            command: "ls".into(),
+            exit_code: None,
+            context: None,
+        };
+        let json = serde_json::to_string(&payload).expect("ser");
+        assert!(
+            !json.contains("context"),
+            "None context must not be serialized: {json}"
+        );
+    }
+
+    /// Write boundary: `validate_for_capture` rejects a fresh
+    /// terminal event whose `context` is missing — sensors and the
+    /// dispatch driver cannot mint indistinguishable-from-legacy
+    /// records.
+    #[test]
+    fn validate_for_capture_rejects_missing_terminal_context() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        let err = payload.validate_for_capture().unwrap_err();
+        match err {
+            DomainError::EmptyField { field } => assert_eq!(field, "context"),
+            other => panic!("expected EmptyField{{context}}, got {other:?}"),
+        }
+    }
+
+    /// Read boundary: `validate` (the permissive variant) still
+    /// accepts a `None` context so legacy / replayed data is not
+    /// stranded.
+    #[test]
+    fn validate_accepts_missing_terminal_context_for_read_path() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        payload
+            .validate()
+            .expect("read-path validate must accept legacy event");
+    }
+
+    /// Write boundary: a populated context passes
+    /// `validate_for_capture` so the strict variant does not
+    /// over-reject well-formed events.
+    #[test]
+    fn validate_for_capture_accepts_populated_terminal_context() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::InteractiveTty),
+        };
+        payload
+            .validate_for_capture()
+            .expect("populated context must validate for capture");
+    }
+
+    /// Event-level write boundary: `CaptureEvent::validate_for_capture`
+    /// rejects a fresh terminal event whose payload `context` is
+    /// missing, so persistence / emission paths can use a single
+    /// entry point and the invariant is enforced at the event level
+    /// rather than relying on every caller to remember
+    /// `payload.validate_for_capture()` separately.
+    #[test]
+    fn capture_event_validate_for_capture_rejects_missing_terminal_context() {
+        let mut ev = auto_event();
+        ev.sensor_id = Identity::parse("snr:local:terminal:default:v1").expect("valid");
+        ev.actor_chain = vec![entry(ChainRole::Author, "snr:local:terminal:default:v1")];
+        ev.source_family = SourceFamily::Terminal;
+        ev.payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        // Permissive validate accepts the legacy shape.
+        ev.validate()
+            .expect("read-path validate must accept legacy event");
+        // Strict write-boundary validator rejects it.
+        let err = ev.validate_for_capture().unwrap_err();
+        match err {
+            DomainError::EmptyField { field } => assert_eq!(field, "context"),
+            other => panic!("expected EmptyField{{context}}, got {other:?}"),
+        }
     }
 }

@@ -43,6 +43,29 @@ pub fn unimplemented_response(verb: ResponseVerb) -> Response {
     }
 }
 
+/// Build a `CapabilityUnavailable` aborted response. `capability` must be
+/// a known capability string (validated by the envelope wire schema).
+/// CLI callers should pair this with `ExitCode::from(69)` (`EX_UNAVAILABLE`).
+#[must_use]
+pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    Response {
+        contract: "cairn.mcp.v1".to_owned(),
+        data: None,
+        error: Some(serde_json::json!({
+            "code": "CapabilityUnavailable",
+            "message": format!(
+                "this server does not advertise {capability}; the requested feature requires it"
+            ),
+            "data": { "capability": capability },
+        })),
+        operation_id: new_operation_id(),
+        policy_trace: Vec::<ResponsePolicyTrace>::new(),
+        status: ResponseStatus::Aborted,
+        target: None,
+        verb,
+    }
+}
+
 /// Serialize a value as compact JSON + newline to stdout.
 pub fn emit_json<T: serde::Serialize>(value: &T) {
     let mut out = std::io::stdout().lock();

@@ -14,11 +14,17 @@
 //!   [`WorkflowOrchestrator`] / [`WorkflowOrchestratorCapabilities`],
 //!   [`SensorIngress`] / [`SensorIngressCapabilities`],
 //!   [`MCPServer`] / [`MCPServerCapabilities`].
+//! - Identity provisioning contract (§4.1): [`Keystore`] / [`KeystoreError`],
+//!   [`IdentityRegistry`] / [`RegistryError`] / [`IdentityVisibility`] /
+//!   [`MaintenanceMode`] / [`PurgeAcknowledgement`] / [`PurgeReason`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
+pub mod identity_registry;
+pub mod job_store;
+pub mod keystore;
 pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
@@ -40,6 +46,15 @@ pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use identity_registry::{
+    IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
+    RegistryError,
+};
+pub use job_store::{
+    EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
+    LeaseToken, LeasedJob, RetryPolicy,
+};
+pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};

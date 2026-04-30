@@ -18,7 +18,7 @@ fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
         kind: ConsentKind::ForgetIntent,
-        actor: Identity::parse("usr:tafeng").expect("id"),
+        actor: Identity::parse("hmn:tafeng").expect("id"),
         subject: target_hash.to_owned(),
         scope: "private".to_owned(),
         op_id: Some(format!("op-{consent_id}")),

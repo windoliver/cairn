@@ -13,6 +13,11 @@ audience = "maintainer"
 page = "reference/idl.md"
 generated_reference = "reference/generated/contract-verbs.md"
 
+[packages.cairn-keychain]
+audience = "operator"
+page = "usage/cli.md"
+generated_reference = ""
+
 [packages.cairn-mcp]
 audience = "integration-author"
 page = "usage/mcp.md"

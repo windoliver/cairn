@@ -5,13 +5,13 @@
   "class": "semantic",
   "visibility": "private",
   "scope": {
-    "user": "usr:tafeng"
+    "user": "hmn:tafeng"
   },
   "body": "User prefers dark mode and compact UI density.",
   "provenance": {
     "source_sensor": "snr:local:hook:cc-session:v1",
     "created_at": "2026-04-26T00:00:00Z",
-    "originating_agent_id": "usr:tafeng",
+    "originating_agent_id": "hmn:tafeng",
     "source_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "consent_ref": "consent:01HQZ",
     "llm_id_if_any": null
@@ -28,7 +28,7 @@
   "actor_chain": [
     {
       "role": "author",
-      "identity": "usr:tafeng",
+      "identity": "hmn:tafeng",
       "at": "2026-04-26T00:00:00Z"
     }
   ],

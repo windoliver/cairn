@@ -4,21 +4,26 @@
 //! one `conn.call(|c| { … })` round-trip on a dedicated DB thread. Records
 //! persist as a `record_json` blob plus denormalized hot columns; the WAL
 //! state machine (#8) lives at the verb layer.
+//!
+//! This crate also ships [`SqliteIdentityRegistry`] (issue #50).
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
 pub mod error;
+mod identity;
 pub mod migrations;
 pub mod open;
 pub mod store;
 mod verify;
 
 pub use error::StoreError;
+pub use identity::SqliteIdentityRegistry;
 pub use open::{open, open_in_memory};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
+pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;

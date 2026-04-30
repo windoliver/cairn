@@ -353,7 +353,7 @@ pub struct SignedIntent {
     pub chain_parents: Vec<crate::generated::common::Ulid>,
     pub expires_at: String,
     pub issued_at: String,
-    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
+    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1.
     pub issuer: crate::generated::common::Identity,
     pub key_version: i64,
     /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
@@ -388,7 +388,7 @@ struct RawSignedIntent {
     chain_parents: Vec<crate::generated::common::Ulid>,
     expires_at: String,
     issued_at: String,
-    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1.
+    /// AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1.
     issuer: crate::generated::common::Identity,
     key_version: i64,
     /// Fresh per message; 16 bytes base64-encoded (22 chars unpadded or 24 chars with `==` padding).
@@ -433,7 +433,7 @@ impl ::core::convert::TryFrom<RawSignedIntent> for SignedIntent {
         }
         if !is_ed25519_signature(&raw.signature.0) { return Err("signature: must be \"ed25519:\" + 128 lowercase hex chars"); }
         if !is_sha256_target_hash(&raw.target_hash) { return Err("target_hash: must be \"sha256:\" + 64 lowercase hex chars"); }
-        if !is_identity(&raw.issuer.0) { return Err("issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]"); }
+        if !is_identity(&raw.issuer.0) { return Err("issuer: must start with one of [agt:, hmn:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]"); }
         if raw.scope.tenant.is_empty() { return Err("scope.tenant: must not be empty"); }
         if raw.scope.workspace.is_empty() { return Err("scope.workspace: must not be empty"); }
         if raw.scope.entity.is_empty() { return Err("scope.entity: must not be empty"); }
@@ -504,11 +504,11 @@ fn is_sha256_target_hash(s: &str) -> bool {
     tail.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a
+/// Return true iff `s` starts with `agt:`, `hmn:`, or `snr:` followed by a
 /// non-empty body in `[A-Za-z0-9._:-]`.
 fn is_identity(s: &str) -> bool {
     let tail = if let Some(t) = s.strip_prefix("agt:") { t }
-        else if let Some(t) = s.strip_prefix("usr:") { t }
+        else if let Some(t) = s.strip_prefix("hmn:") { t }
         else if let Some(t) = s.strip_prefix("snr:") { t }
         else { return false; };
     if tail.is_empty() { return false; }
@@ -588,7 +588,7 @@ fn is_rfc3339_datetime(s: &str) -> bool {
 /// Return true iff `s` is one of the closed capability strings in
 /// `capabilities/capabilities.json#oneOf[].const`.
 fn is_known_capability(s: &str) -> bool {
-    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree")
+    matches!(s, "cairn.mcp.v1.search.keyword" | "cairn.mcp.v1.search.semantic" | "cairn.mcp.v1.search.hybrid" | "cairn.mcp.v1.retrieve.record" | "cairn.mcp.v1.retrieve.session" | "cairn.mcp.v1.retrieve.turn" | "cairn.mcp.v1.retrieve.folder" | "cairn.mcp.v1.retrieve.scope" | "cairn.mcp.v1.retrieve.profile" | "cairn.mcp.v1.forget.record" | "cairn.mcp.v1.forget.session" | "cairn.mcp.v1.forget.scope" | "cairn.mcp.v1.extension.aggregate" | "cairn.mcp.v1.extension.admin" | "cairn.mcp.v1.extension.federation" | "cairn.mcp.v1.extension.sessiontree" | "cairn.mcp.v1.policy_trace")
 }
 
 /// Structural validator for the error envelope payload. Mirrors the

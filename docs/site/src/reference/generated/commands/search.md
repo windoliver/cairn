@@ -31,6 +31,9 @@ Options:
       --cursor <STRING>
 
 
+      --explain
+
+
       --json
           Emit machine-readable JSON response envelope to stdout
 
