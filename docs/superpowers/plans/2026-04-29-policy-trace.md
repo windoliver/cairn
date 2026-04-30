@@ -1469,6 +1469,43 @@ impl RecordExclusion {
     pub const fn gate(&self) -> PolicyGate { self.gate }
     pub const fn detail(&self) -> &PolicyDetail { &self.detail }
 }
+
+// --- Wire conversion ---
+// `cairn-core::policy_trace::RecordExclusion` is the producer-side
+// (sealed, Tier-2-only) type. The generated `common::RecordExclusion`
+// in `cairn-core/src/generated/common/mod.rs` is the wire shape used
+// by `SearchData.excluded`. The conversion lives next to the producer
+// type so the body-free `detail` rule (`PolicyDetail::to_wire_string`)
+// is enforced in one place.
+
+use crate::generated::common::{
+    RecordExclusion as WireRecordExclusion,
+    RecordExclusionGate as WireRecordExclusionGate,
+    Ulid as WireUlid,
+};
+
+impl From<&RecordExclusion> for WireRecordExclusion {
+    fn from(src: &RecordExclusion) -> Self {
+        let gate = match src.gate {
+            PolicyGate::ReadFilterRelevance => WireRecordExclusionGate::ReadFilterRelevance,
+            PolicyGate::ReadFilterStaleness => WireRecordExclusionGate::ReadFilterStaleness,
+            PolicyGate::ReadFilterDedup => WireRecordExclusionGate::ReadFilterDedup,
+            other => unreachable!(
+                "RecordExclusion::new rejects non-ReadFilter* gates; got {other:?}"
+            ),
+        };
+        Self {
+            target_id: WireUlid(src.target_id.to_string()),
+            gate,
+            detail: src.detail.to_wire_string(),
+        }
+    }
+}
+
+#[must_use]
+pub fn to_wire_exclusions(items: &[RecordExclusion]) -> Vec<WireRecordExclusion> {
+    items.iter().map(WireRecordExclusion::from).collect()
+}
 ```
 
 - [ ] **Step 4: Re-export**
@@ -1485,7 +1522,7 @@ mod outcome;
 
 pub use detail::PolicyDetail;
 pub use entry::{PolicyTraceEntry, to_wire};
-pub use exclusion::RecordExclusion;
+pub use exclusion::{RecordExclusion, to_wire_exclusions};
 pub use gate::PolicyGate;
 pub use outcome::PolicyOutcome;
 ```
@@ -1493,7 +1530,7 @@ pub use outcome::PolicyOutcome;
 - [ ] **Step 5: Run the test (expect pass)**
 
 Run: `cargo nextest run -p cairn-core --test policy_trace_exclusion`
-Expected: PASS — both tests green (one expects panic).
+Expected: PASS — panic guards plus wire-conversion tests all green.
 
 - [ ] **Step 6: Commit**
 
@@ -1718,8 +1755,15 @@ Verify by running: `grep -n "pub mod" crates/cairn-core/src/pipeline/mod.rs`. Ex
 
 - [ ] **Step 5: Run the test (expect pass)**
 
-Run: `cargo nextest run -p cairn-core --test explain_filter`
-Expected: PASS — all five tests green.
+Tests are inline in `pipeline::explain` (so they can use the
+`pub(crate)` constructor and function). Run them via the lib unit-test
+binary, not an `--test` integration target:
+
+```bash
+cargo nextest run -p cairn-core --lib pipeline::explain::
+```
+
+Expected: PASS — all explain inline tests green.
 
 - [ ] **Step 6: Run clippy**
 
@@ -1730,8 +1774,7 @@ Expected: PASS.
 
 ```bash
 git add crates/cairn-core/src/pipeline/explain.rs \
-        crates/cairn-core/src/pipeline/mod.rs \
-        crates/cairn-core/tests/explain_filter.rs
+        crates/cairn-core/src/pipeline/mod.rs
 git commit -m "feat(core): explain_filter pure partition for --explain (#95)"
 ```
 
