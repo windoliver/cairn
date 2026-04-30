@@ -124,7 +124,9 @@ impl IdentityService {
                     }
                 }
                 Err(KeystoreError::Locked) => {
-                    // Keystore locked — sweep incomplete; stop without marking degraded.
+                    // Keystore locked — sweep incomplete. Mark the report so
+                    // mutating callers treat this as a hard stop, then break.
+                    report.record_keystore_locked();
                     break;
                 }
                 Err(e) => return Err(IdentityServiceError::Keystore(e)),
@@ -158,7 +160,10 @@ impl IdentityService {
                         report.record_active_mismatch(active.id);
                     }
                 }
-                Err(KeystoreError::Locked) => break,
+                Err(KeystoreError::Locked) => {
+                    report.record_keystore_locked();
+                    break;
+                }
                 Err(e) => return Err(IdentityServiceError::Keystore(e)),
             }
         }

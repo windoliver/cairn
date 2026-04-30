@@ -304,7 +304,9 @@ fn identity_exit_code(err: &IdentityServiceError) -> u8 {
         }
         IdentityServiceError::VaultDegraded { .. }
         | IdentityServiceError::FirstBindInProgress
-        | IdentityServiceError::PurgeResumeRequired { .. } => EX_TEMPFAIL,
+        | IdentityServiceError::PurgeResumeRequired { .. }
+        | IdentityServiceError::VaultReconciliationIncomplete
+        | IdentityServiceError::AbandonAfterCommit => EX_TEMPFAIL,
         IdentityServiceError::VaultIdMissing | IdentityServiceError::VaultIdConflict { .. } => {
             EX_CONFIG
         }
