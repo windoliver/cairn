@@ -440,14 +440,24 @@ pub enum CapturePayload {
         /// reproduces the same routing decision the dispatch driver
         /// took at capture time.
         ///
-        /// Forward-compat: events serialized before this field existed
-        /// deserialize with `None` and still pass
-        /// [`CapturePayload::validate`] so replay / WAL recovery /
-        /// re-ingest do not strand historical data. The squash boundary
+        /// Dual-validation pattern (#218):
+        /// - **Write boundary** (sensors, dispatch driver, any caller
+        ///   minting a fresh terminal event) MUST call
+        ///   [`CapturePayload::validate_for_capture`] before persisting
+        ///   or emitting the event. That method requires
+        ///   `context: Some(_)` so a fresh write cannot create the
+        ///   indistinguishable-from-legacy `None` shape on disk.
+        /// - **Read boundary** ([`CapturePayload::validate`] / replay /
+        ///   WAL recovery / re-ingest) stays permissive: events
+        ///   serialized before this field existed deserialize with
+        ///   `None` and still validate, so the upgrade does not strand
+        ///   historical data.
+        ///
+        /// The squash boundary
         /// (`UnstructuredTextBytes::try_from_terminal_event`) handles
-        /// `None` with a distinct `LegacyMissingContext` error so
-        /// callers see "needs migration" rather than mistaking legacy
-        /// data for a deliberately structured payload.
+        /// the legacy `None` case with a distinct `LegacyMissingContext`
+        /// error so callers see "needs migration" rather than mistaking
+        /// legacy data for a deliberately structured payload.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<TerminalContext>,
     },
@@ -666,6 +676,33 @@ impl CapturePayload {
                 require_non_empty("kind", kind)?;
                 require_non_empty("rationale", rationale)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Strict validation for newly-authored events at the
+    /// capture / write boundary. Runs [`Self::validate`] plus the
+    /// invariants that a *fresh* event must satisfy but that legacy
+    /// (read-side) data may legitimately violate.
+    ///
+    /// #218: terminal events authored on or after this revision must
+    /// carry a populated `context`. Sensors, the dispatch driver, and
+    /// any adapter that mints a `CapturePayload::Terminal` must call
+    /// this method (not [`Self::validate`]) before persisting or
+    /// emitting the event. The read-side
+    /// [`Self::validate`] stays permissive so replay / WAL recovery /
+    /// re-ingest of pre-#218 data is not stranded by the upgrade.
+    ///
+    /// # Errors
+    /// Any [`DomainError`] returned by [`Self::validate`], plus
+    /// [`DomainError::EmptyField`] (`field = "context"`) for a
+    /// terminal event with `context: None`.
+    pub fn validate_for_capture(&self) -> Result<(), DomainError> {
+        self.validate()?;
+        if let Self::Terminal { context, .. } = self
+            && context.is_none()
+        {
+            return Err(DomainError::EmptyField { field: "context" });
         }
         Ok(())
     }
@@ -1460,5 +1497,53 @@ mod tests {
             !json.contains("context"),
             "None context must not be serialized: {json}"
         );
+    }
+
+    /// Write boundary: `validate_for_capture` rejects a fresh
+    /// terminal event whose `context` is missing — sensors and the
+    /// dispatch driver cannot mint indistinguishable-from-legacy
+    /// records.
+    #[test]
+    fn validate_for_capture_rejects_missing_terminal_context() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        let err = payload.validate_for_capture().unwrap_err();
+        match err {
+            DomainError::EmptyField { field } => assert_eq!(field, "context"),
+            other => panic!("expected EmptyField{{context}}, got {other:?}"),
+        }
+    }
+
+    /// Read boundary: `validate` (the permissive variant) still
+    /// accepts a `None` context so legacy / replayed data is not
+    /// stranded.
+    #[test]
+    fn validate_accepts_missing_terminal_context_for_read_path() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: None,
+        };
+        payload
+            .validate()
+            .expect("read-path validate must accept legacy event");
+    }
+
+    /// Write boundary: a populated context passes
+    /// `validate_for_capture` so the strict variant does not
+    /// over-reject well-formed events.
+    #[test]
+    fn validate_for_capture_accepts_populated_terminal_context() {
+        let payload = CapturePayload::Terminal {
+            command: "echo hi".into(),
+            exit_code: Some(0),
+            context: Some(TerminalContext::InteractiveTty),
+        };
+        payload
+            .validate_for_capture()
+            .expect("populated context must validate for capture");
     }
 }
