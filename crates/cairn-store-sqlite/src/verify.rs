@@ -139,6 +139,8 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ),
     ("trigger", "consent_journal_event_metadata_domains"),
     ("trigger", "consent_journal_sensor_id_domain"),
+    // 0013_edges_updates_dst_idx
+    ("index", "edges_updates_dst_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {
