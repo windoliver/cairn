@@ -499,8 +499,7 @@ impl SqliteMemoryStore {
                     what: format!("embed_query failed: {e}"),
                 })?;
 
-        let query_bytes: Vec<u8> =
-            query_vec.iter().flat_map(|&f| f.to_le_bytes()).collect();
+        let query_bytes: Vec<u8> = query_vec.iter().flat_map(|&f| f.to_le_bytes()).collect();
         let limit = args.limit.clamp(1, SEARCH_LIMIT_MAX);
         let visibilities: Vec<String> = args
             .visibility_allowlist
@@ -669,9 +668,10 @@ fn project_semantic_row(row: &SemanticRawRow) -> Result<SearchCandidate, StoreEr
     let class = MemoryClass::parse(&row.class).map_err(|e| StoreError::Invariant {
         what: format!("invalid class `{}`: {e}", row.class),
     })?;
-    let visibility = MemoryVisibility::parse(&row.visibility).map_err(|e| StoreError::Invariant {
-        what: format!("invalid visibility `{}`: {e}", row.visibility),
-    })?;
+    let visibility =
+        MemoryVisibility::parse(&row.visibility).map_err(|e| StoreError::Invariant {
+            what: format!("invalid visibility `{}`: {e}", row.visibility),
+        })?;
     Ok(SearchCandidate {
         record_id,
         target_id,

@@ -237,9 +237,7 @@ fn admin_subcommand() -> clap::Command {
                     clap::Arg::new("all")
                         .long("all")
                         .action(clap::ArgAction::SetTrue)
-                        .help(
-                            "Enqueue ALL active records before draining (use after model swap)",
-                        ),
+                        .help("Enqueue ALL active records before draining (use after model swap)"),
                 )
                 .arg(
                     clap::Arg::new("json")

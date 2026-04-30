@@ -83,9 +83,7 @@ pub fn run(sub: &ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCod
         );
     };
 
-    rt.block_on(async move {
-        run_reindex_async(&db_path, &models_root, kind, all, json).await
-    })
+    rt.block_on(async move { run_reindex_async(&db_path, &models_root, kind, all, json).await })
 }
 
 #[allow(clippy::too_many_lines)]

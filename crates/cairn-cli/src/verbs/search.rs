@@ -89,10 +89,7 @@ fn run_keyword(json: bool) -> ExitCode {
 
 #[allow(clippy::too_many_lines)]
 fn run_semantic(sub: &ArgMatches, json: bool) -> ExitCode {
-    let query = sub
-        .get_one::<String>("query")
-        .cloned()
-        .unwrap_or_default();
+    let query = sub.get_one::<String>("query").cloned().unwrap_or_default();
     let limit: usize = sub
         .get_one::<i64>("limit")
         .copied()
@@ -222,26 +219,25 @@ async fn run_semantic_async(
     };
 
     // Open store with embedder.
-    let store = match cairn_store_sqlite::open_with_embedder(db_path, Some(Arc::clone(&embedder)))
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            let op_id = new_operation_id();
-            let msg = format!("store open: {e}");
-            if json {
-                emit_json(&serde_json::json!({
-                    "operation_id": op_id.0,
-                    "verb": "search",
-                    "status": "error",
-                    "error": { "code": "Internal", "message": msg }
-                }));
-            } else {
-                human_error("search", "Internal", &msg, &op_id);
+    let store =
+        match cairn_store_sqlite::open_with_embedder(db_path, Some(Arc::clone(&embedder))).await {
+            Ok(s) => s,
+            Err(e) => {
+                let op_id = new_operation_id();
+                let msg = format!("store open: {e}");
+                if json {
+                    emit_json(&serde_json::json!({
+                        "operation_id": op_id.0,
+                        "verb": "search",
+                        "status": "error",
+                        "error": { "code": "Internal", "message": msg }
+                    }));
+                } else {
+                    human_error("search", "Internal", &msg, &op_id);
+                }
+                return ExitCode::FAILURE;
             }
-            return ExitCode::FAILURE;
-        }
-    };
+        };
 
     // Build visibility allowlist (P0: all tiers).
     let visibility_allowlist = vec![
@@ -299,8 +295,7 @@ fn render_semantic_results(
             .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({ "hits": hits }))
-                .unwrap_or_default()
+            serde_json::to_string_pretty(&serde_json::json!({ "hits": hits })).unwrap_or_default()
         );
     } else if page.candidates.is_empty() {
         println!("search: no results");

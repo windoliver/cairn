@@ -49,7 +49,10 @@ async fn search_semantic_capability_unavailable_without_embedder() {
 async fn search_semantic_returns_results_after_upsert() {
     let embedder = make_embedder();
     let store = open_in_memory_with_embedder(Some(embedder)).await.unwrap();
-    assert!(store.capabilities().vector, "store must have vector capability");
+    assert!(
+        store.capabilities().vector,
+        "store must have vector capability"
+    );
 
     let r = make_record();
     let outcome = store.upsert(&r).await.unwrap();
@@ -84,8 +87,9 @@ async fn search_semantic_returns_results_after_upsert() {
 #[tokio::test]
 async fn search_semantic_with_vector_returns_results() {
     let embedder = make_embedder();
-    let store =
-        open_in_memory_with_embedder(Some(Arc::clone(&embedder))).await.unwrap();
+    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder)))
+        .await
+        .unwrap();
 
     let r = make_record();
     let outcome = store.upsert(&r).await.unwrap();

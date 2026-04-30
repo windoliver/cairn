@@ -162,11 +162,9 @@ pub async fn drain_once(
 
     let remaining_raw: i64 = conn
         .call(|c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM pending_embeddings",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
+            c.query_row("SELECT COUNT(*) FROM pending_embeddings", [], |r| {
+                r.get::<_, i64>(0)
+            })
             .map_err(Into::into)
         })
         .await?;

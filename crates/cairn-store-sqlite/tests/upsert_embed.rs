@@ -12,7 +12,9 @@ use cairn_test_fixtures::sample_record;
 async fn upsert_with_embedder_writes_vector_row() {
     let embedder: Arc<dyn EmbeddingModel> =
         Arc::new(MockEmbedder::new(EmbeddingModelKind::BgeSmallEnV1_5));
-    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder))).await.unwrap();
+    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder)))
+        .await
+        .unwrap();
     let r = sample_record(1);
     let outcome = store.upsert(&r).await.unwrap();
     assert!(outcome.content_changed);
@@ -30,7 +32,10 @@ async fn upsert_with_embedder_writes_vector_row() {
         })
         .await
         .unwrap();
-    assert!(found, "record_vectors must have a row after upsert with embedder");
+    assert!(
+        found,
+        "record_vectors must have a row after upsert with embedder"
+    );
 }
 
 #[tokio::test]
@@ -76,7 +81,9 @@ async fn upsert_embed_failure_queues_pending() {
     }
 
     let embedder: Arc<dyn EmbeddingModel> = Arc::new(AlwaysFail);
-    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder))).await.unwrap();
+    let store = open_in_memory_with_embedder(Some(Arc::clone(&embedder)))
+        .await
+        .unwrap();
     let r = sample_record(3);
     // Upsert must SUCCEED even when embedding fails.
     let outcome = store.upsert(&r).await.unwrap();
@@ -113,5 +120,8 @@ async fn upsert_embed_failure_queues_pending() {
         })
         .await
         .unwrap();
-    assert_eq!(pending_count, 1, "pending_embeddings must have a row when embed failed");
+    assert_eq!(
+        pending_count, 1,
+        "pending_embeddings must have a row when embed failed"
+    );
 }

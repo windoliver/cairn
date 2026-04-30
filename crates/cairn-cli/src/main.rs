@@ -46,8 +46,10 @@ fn main() -> ExitCode {
     let active_subcommand = matches.subcommand_name().unwrap_or("");
     // admin verbs resolve their own vault path from CAIRN_VAULT / CWD; the
     // registry guard here would reject them when no vault is registered.
-    let needs_vault_guard =
-        !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp" | "admin");
+    let needs_vault_guard = !matches!(
+        active_subcommand,
+        "vault" | "bootstrap" | "plugins" | "mcp" | "admin"
+    );
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -169,9 +171,8 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
 
     // After vault layout creation, load config and optionally fetch the
     // embedding model (search.local_embeddings: true and model not present).
-    let config =
-        cairn_cli::config::load(&vault_path, &cairn_cli::config::CliOverrides::default())
-            .unwrap_or_default();
+    let config = cairn_cli::config::load(&vault_path, &cairn_cli::config::CliOverrides::default())
+        .unwrap_or_default();
 
     if config.search.local_embeddings {
         let models_root = vault_path.join(".cairn").join("models");

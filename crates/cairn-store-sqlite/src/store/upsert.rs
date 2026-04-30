@@ -32,7 +32,10 @@ use crate::store::{SqliteMemoryStore, current_unix_ms};
 /// Outcome of the pre-transaction embedding step.
 enum EmbedOutcome {
     /// Embedding computed successfully. Contains LE bytes + model label.
-    Succeeded { vector: Vec<u8>, model_label: String },
+    Succeeded {
+        vector: Vec<u8>,
+        model_label: String,
+    },
     /// Embedder errored. Record is written; queued in `pending_embeddings`.
     Failed { error: String },
     /// No embedder configured; skip vector entirely.
@@ -97,14 +100,18 @@ impl SqliteMemoryStore {
                         error = %e,
                         "embed failed before upsert tx; will queue in pending_embeddings",
                     );
-                    EmbedOutcome::Failed { error: e.to_string() }
+                    EmbedOutcome::Failed {
+                        error: e.to_string(),
+                    }
                 }
                 Err(join_err) => {
                     tracing::warn!(
                         error = %join_err,
                         "embed task panicked before upsert tx; will queue in pending_embeddings",
                     );
-                    EmbedOutcome::Failed { error: join_err.to_string() }
+                    EmbedOutcome::Failed {
+                        error: join_err.to_string(),
+                    }
                 }
             }
         } else {
@@ -124,7 +131,10 @@ impl SqliteMemoryStore {
                     .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
 
                 match &embed_outcome {
-                    EmbedOutcome::Succeeded { vector, model_label } => {
+                    EmbedOutcome::Succeeded {
+                        vector,
+                        model_label,
+                    } => {
                         // sqlite-vec vec0 virtual tables do not support UPSERT syntax.
                         // Use DELETE + INSERT to replace an existing row atomically.
                         tx.execute(
