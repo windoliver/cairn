@@ -38,6 +38,8 @@ smoke = []
 fuzz = []
 
 [dependencies]
+aho-corasick = { workspace = true }
+tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -62,6 +64,7 @@ rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 rand_core = { workspace = true }
 rand = { workspace = true }
+tracing-test = "0.2"
 
 [[bin]]
 name = "filter_smoke"

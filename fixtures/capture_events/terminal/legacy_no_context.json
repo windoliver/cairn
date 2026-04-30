@@ -1,0 +1,25 @@
+{
+  "event_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "sensor_id": "snr:local:terminal:cli:v1",
+  "capture_mode": "auto",
+  "actor_chain": [
+    {
+      "role": "author",
+      "identity": "snr:local:terminal:cli:v1",
+      "at": "2026-04-27T00:00:00Z"
+    }
+  ],
+  "refs": {
+    "session_id": "sess",
+    "turn_id": "turn"
+  },
+  "payload_hash": "sha256:e369e579447ff49d83ba3430128f2886c8d1a68e388680ea84d2016fd7333039",
+  "payload_ref": "sources/terminal/01ARZ3NDEKTSV4RRFFQ69G5FAV.txt",
+  "captured_at": "2026-04-27T00:00:00Z",
+  "payload": {
+    "source_family": "terminal",
+    "command": "cargo build",
+    "exit_code": 0
+  },
+  "source_family": "terminal"
+}

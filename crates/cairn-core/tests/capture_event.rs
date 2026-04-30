@@ -20,7 +20,7 @@ use std::path::Path;
 use cairn_core::domain::{
     ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
     ChainRole, DomainError, Identity, IdentityKind, PayloadHash, Rfc3339Timestamp, SensorLabel,
-    SourceFamily, attribute, validate_label,
+    SourceFamily, TerminalContext, attribute, validate_label,
 };
 use proptest::prelude::*;
 
@@ -475,6 +475,7 @@ fn debug_redacts_sensitive_payload_fields() {
     ev.payload = CapturePayload::Terminal {
         command: "echo SUPER_SECRET_TOKEN_42".into(),
         exit_code: Some(0),
+        context: Some(TerminalContext::InteractiveTty),
     };
     let dump = format!("{ev:?}");
     assert!(
