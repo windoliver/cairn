@@ -4,7 +4,7 @@
 use cairn_core::domain::MemoryVisibility;
 use cairn_core::generated::envelope::ResponsePolicyTraceResult;
 use cairn_core::policy_trace::{
-    PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
+    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
 };
 
 #[test]
@@ -35,7 +35,7 @@ fn to_wire_maps_each_field() {
         PolicyTraceEntry::new(
             PolicyGate::FilterShouldMemorize,
             PolicyOutcome::Deny,
-            PolicyDetail::ErrorCode("pii_blocked"),
+            PolicyDetail::ErrorCode(PolicyErrorCode::from_static("pii_blocked")),
         ),
     ];
     let wire = to_wire(&entries);
@@ -81,8 +81,14 @@ fn deny_constructor_uses_provided_detail() {
 
 #[test]
 fn error_constructor_wraps_static_code() {
-    let e = PolicyTraceEntry::error(PolicyGate::ConsentJournalAppend, "wal_failure");
+    let e = PolicyTraceEntry::error(
+        PolicyGate::ConsentJournalAppend,
+        PolicyErrorCode::WAL_FAILURE,
+    );
     assert_eq!(e.gate, PolicyGate::ConsentJournalAppend);
     assert_eq!(e.outcome, PolicyOutcome::Error);
-    assert_eq!(e.detail, PolicyDetail::ErrorCode("wal_failure"));
+    assert_eq!(
+        e.detail,
+        PolicyDetail::ErrorCode(PolicyErrorCode::WAL_FAILURE)
+    );
 }

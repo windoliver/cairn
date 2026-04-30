@@ -3,7 +3,7 @@
 
 use crate::generated::envelope::{ResponsePolicyTrace, ResponsePolicyTraceResult};
 
-use super::{PolicyDetail, PolicyGate, PolicyOutcome};
+use super::{PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome};
 
 /// One gate outcome. Verbs build a `Vec<PolicyTraceEntry>` and call
 /// [`to_wire`] at the envelope boundary.
@@ -40,9 +40,12 @@ impl PolicyTraceEntry {
         Self::new(gate, PolicyOutcome::Deny, detail)
     }
 
-    /// `(gate, Error, ErrorCode(code))`.
+    /// `(gate, Error, ErrorCode(code))`. `code` is a validated
+    /// [`PolicyErrorCode`]; its construction (via `from_static`,
+    /// or one of the associated `const` shortcuts) enforces the
+    /// `snake_case` rule and rules out free-text bodies.
     #[must_use]
-    pub const fn error(gate: PolicyGate, code: &'static str) -> Self {
+    pub const fn error(gate: PolicyGate, code: PolicyErrorCode) -> Self {
         Self::new(gate, PolicyOutcome::Error, PolicyDetail::ErrorCode(code))
     }
 }

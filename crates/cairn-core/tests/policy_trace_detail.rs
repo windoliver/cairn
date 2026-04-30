@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use cairn_core::domain::MemoryVisibility;
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
-use cairn_core::policy_trace::PolicyDetail;
+use cairn_core::policy_trace::{PolicyDetail, PolicyErrorCode};
 
 #[test]
 fn none_is_empty_string() {
@@ -44,7 +44,51 @@ fn scope_mismatch_emits_required_tier_only() {
 }
 
 #[test]
-fn error_code_uses_static_string() {
-    let d = PolicyDetail::ErrorCode("wal_failure");
+fn error_code_uses_validated_static_code() {
+    let d = PolicyDetail::ErrorCode(PolicyErrorCode::WAL_FAILURE);
     assert_eq!(d.to_wire_string(), "error:wal_failure");
+}
+
+#[test]
+fn error_code_from_static_accepts_snake_case() {
+    let c = PolicyErrorCode::from_static("custom_code_42");
+    assert_eq!(c.as_str(), "custom_code_42");
+}
+
+#[test]
+#[should_panic(expected = "[a-z][a-z0-9_]")]
+fn error_code_rejects_free_text_with_spaces() {
+    // A careless `&'static str` like `"raw body: hello world"` would
+    // smuggle free text into `policy_trace.detail`. The validator must
+    // panic to fail-close the body-free invariant (brief §14).
+    let _ = PolicyErrorCode::from_static("raw body: hello world");
+}
+
+#[test]
+#[should_panic(expected = "[a-z][a-z0-9_]")]
+fn error_code_rejects_punctuation() {
+    let _ = PolicyErrorCode::from_static("user-said-hi!");
+}
+
+#[test]
+#[should_panic(expected = "[a-z][a-z0-9_]")]
+fn error_code_rejects_uppercase() {
+    let _ = PolicyErrorCode::from_static("WAL_FAILURE");
+}
+
+#[test]
+#[should_panic(expected = "[a-z][a-z0-9_]")]
+fn error_code_rejects_empty_string() {
+    let _ = PolicyErrorCode::from_static("");
+}
+
+#[test]
+fn error_code_is_valid_helper_matches_constructor() {
+    assert!(PolicyErrorCode::is_valid("ok_code"));
+    assert!(PolicyErrorCode::is_valid("a"));
+    assert!(!PolicyErrorCode::is_valid(""));
+    assert!(!PolicyErrorCode::is_valid("Bad"));
+    assert!(!PolicyErrorCode::is_valid("has space"));
+    assert!(!PolicyErrorCode::is_valid("9starts_with_digit"));
+    assert!(!PolicyErrorCode::is_valid(&"a".repeat(65)));
 }

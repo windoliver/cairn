@@ -9,8 +9,13 @@ use std::collections::BTreeMap;
 use cairn_core::domain::{MemoryVisibility, consent::ConsentEvent};
 use cairn_core::pipeline::filter::{DiscardReason, RedactionTag};
 use cairn_core::policy_trace::{
-    PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
+    PolicyDetail, PolicyErrorCode, PolicyGate, PolicyOutcome, PolicyTraceEntry, to_wire,
 };
+
+/// Hard ceiling on any string value in a serialized policy trace. Real
+/// detail strings are short (`error:wal_failure`, `redacted:email=2`);
+/// anything past this is almost certainly smuggled body text.
+const MAX_STRING_LEN: usize = 128;
 
 fn walk(v: &serde_json::Value) {
     match v {
@@ -27,6 +32,21 @@ fn walk(v: &serde_json::Value) {
             }
         }
         serde_json::Value::Array(a) => a.iter().for_each(walk),
+        serde_json::Value::String(s) => {
+            assert!(
+                s.len() <= MAX_STRING_LEN,
+                "policy trace string value is suspiciously long ({} > {MAX_STRING_LEN}): {s:?}",
+                s.len()
+            );
+            assert!(
+                !s.chars().any(char::is_whitespace),
+                "policy trace string value must not contain whitespace (free-text marker): {s:?}"
+            );
+            assert!(
+                s.is_ascii(),
+                "policy trace string value must be ASCII (non-ASCII suggests free text): {s:?}"
+            );
+        }
         _ => {}
     }
 }
@@ -63,7 +83,10 @@ fn sample_entries() -> Vec<PolicyTraceEntry> {
                 required_tier: MemoryVisibility::Project,
             },
         ),
-        PolicyTraceEntry::error(PolicyGate::ConsentJournalAppend, "wal_failure"),
+        PolicyTraceEntry::error(
+            PolicyGate::ConsentJournalAppend,
+            PolicyErrorCode::WAL_FAILURE,
+        ),
     ]
 }
 

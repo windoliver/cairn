@@ -31,8 +31,70 @@ pub enum PolicyDetail {
         /// Minimum visibility tier the operation required.
         required_tier: MemoryVisibility,
     },
-    /// Stable static error code (never a free message).
-    ErrorCode(&'static str),
+    /// Stable error code. Construction is validated; a free-text
+    /// message cannot be slipped in via `&'static str`.
+    ErrorCode(PolicyErrorCode),
+}
+
+/// A validated error code for [`PolicyDetail::ErrorCode`]. The code
+/// MUST match `[a-z][a-z0-9_]{0,63}` — short, lowercase, `snake_case`.
+/// This rules out spaces, punctuation, and casing that would let a
+/// caller smuggle free-text body content into a policy trace.
+///
+/// Use the associated `const` shortcuts (`Self::WAL_FAILURE` …) for
+/// known codes; fall back to [`Self::from_static`] for new codes
+/// declared at the call site as `&'static str` literals — that
+/// constructor panics if the code is malformed, fail-closing the
+/// body-free invariant in §14 of the brief.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyErrorCode(&'static str);
+
+impl PolicyErrorCode {
+    /// Persistent WAL apply failure.
+    pub const WAL_FAILURE: Self = Self("wal_failure");
+    /// Signed-intent verification failed at the envelope.
+    pub const SIGNATURE_INVALID: Self = Self("signature_invalid");
+    /// Consent journal append failed (broken chain or I/O).
+    pub const CONSENT_APPEND_FAILED: Self = Self("consent_append_failed");
+
+    /// Construct from a `'static` literal. Panics if the code is not
+    /// `[a-z][a-z0-9_]{0,63}` — fail-closed against accidental free
+    /// text in `policy_trace.detail`.
+    #[must_use]
+    pub fn from_static(code: &'static str) -> Self {
+        assert!(
+            Self::is_valid(code),
+            "PolicyErrorCode must match [a-z][a-z0-9_]{{0,63}}; got {code:?}"
+        );
+        Self(code)
+    }
+
+    /// `true` if `code` is a well-formed `snake_case` error code.
+    #[must_use]
+    pub const fn is_valid(code: &str) -> bool {
+        let bytes = code.as_bytes();
+        if bytes.is_empty() || bytes.len() > 64 {
+            return false;
+        }
+        if !bytes[0].is_ascii_lowercase() {
+            return false;
+        }
+        let mut i = 1;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    /// The code as a `&'static str`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
 }
 
 impl PolicyDetail {
@@ -59,7 +121,7 @@ impl PolicyDetail {
             Self::ScopeMismatch { required_tier } => {
                 format!("scope_required:{}", required_tier.as_str())
             }
-            Self::ErrorCode(c) => format!("error:{c}"),
+            Self::ErrorCode(c) => format!("error:{}", c.as_str()),
         }
     }
 }
