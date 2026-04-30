@@ -39,8 +39,7 @@ use crate::error::StoreError;
 pub struct SqliteMemoryStore {
     pub(crate) conn: Option<Arc<AsyncConn>>,
     /// Optional local embedding model. Presence enables `caps.vector`.
-    /// Used by Task 7 (`do_search_semantic`) and Task 8 (embed-on-write).
-    #[allow(dead_code, reason = "consumed in Tasks 7 and 8 (do_search_semantic, upsert)")]
+    /// Used by `do_search_semantic` (Task 7) and embed-on-write in `do_upsert` (Task 8).
     pub(crate) embedder: Option<Arc<dyn EmbeddingModel>>,
     /// Dynamic capability advertisement. Set at open time based on whether
     /// an embedder was supplied.
