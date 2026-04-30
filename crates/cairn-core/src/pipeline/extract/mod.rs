@@ -56,7 +56,14 @@ pub struct ExtractInput<'a> {
 pub struct ExtractBudget {
     /// Wall-clock budget in milliseconds.
     pub max_wall_ms: u32,
-    /// Maximum number of outputs.
+    /// Maximum number of **user-rule** outputs in a single extraction.
+    ///
+    /// Built-in outputs (first-party `remember`/`forget` triggers,
+    /// built-in hook events, built-in tool-frame events) are
+    /// **not** counted against this cap — explicit user intents must
+    /// never be silently dropped under back-pressure. Callers that
+    /// need a hard total-output bound must apply it at the chain
+    /// dispatcher above this extractor.
     pub max_drafts: u16,
 }
 
