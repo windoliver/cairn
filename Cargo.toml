@@ -50,6 +50,14 @@ fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
 walkdir = "2"
 
+# Embedding runtime — cairn-embeddings-local only
+candle-core = { version = "0.10", default-features = false }
+candle-nn = { version = "0.10", default-features = false }
+candle-transformers = { version = "0.10", default-features = false }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
+safetensors = { version = "0.7", default-features = false }
+
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
 # tracks `[workspace.package].version`; bump them together.
@@ -61,6 +69,7 @@ cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
 cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
 cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
+cairn-embeddings-local = { path = "crates/cairn-embeddings-local", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
