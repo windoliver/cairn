@@ -364,11 +364,8 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "parking_lot",
-<<<<<<< HEAD
  "proptest",
-=======
  "rand_core 0.6.4",
->>>>>>> a5360fd (feat(store-sqlite): rotation pending_rotations + CAS apply_rotation (#50))
  "rusqlite",
  "rusqlite_migration",
  "serde",
