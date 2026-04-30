@@ -17,6 +17,7 @@ homepage = "https://github.com/windoliver/cairn"
 readme = "README.md"
 
 [workspace.dependencies]
+aho-corasick = { version = "1", default-features = false, features = ["std", "perf-literal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

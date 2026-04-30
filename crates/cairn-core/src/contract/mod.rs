@@ -23,6 +23,7 @@ pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
 pub mod identity_registry;
+pub mod job_store;
 pub mod keystore;
 pub mod llm_provider;
 pub mod manifest;
@@ -48,6 +49,10 @@ pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, Fronten
 pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
     RegistryError,
+};
+pub use job_store::{
+    EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
+    LeaseToken, LeasedJob, RetryPolicy,
 };
 pub use keystore::{Keystore, KeystoreError};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
