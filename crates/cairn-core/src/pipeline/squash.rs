@@ -1323,6 +1323,38 @@ mod wrapper_tests {
         );
     }
 
+    /// Round-10 regression: stage 2's CRLF rule pops only ONE preceding
+    /// `\r`, so `\r\r\r\n` survives stage 2 as `\r\n` and the staged
+    /// path classifies it as one CR-bearing line. Round 9's bypass
+    /// counter naively stripped the entire trailing `\r` run and
+    /// reported zero, hiding a real bare-CR hazard at the bypass gate.
+    /// This test pins parity: a CRRRLF-rich oversize payload must
+    /// register as CR-bearing on the bypass path.
+    #[test]
+    fn oversize_bypass_triple_cr_lf_is_counted() {
+        let mut raw: Vec<u8> = Vec::new();
+        for i in 0..6_000 {
+            raw.extend_from_slice(format!("line-{i:05}\r\r\r\n").as_bytes());
+        }
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert!(
+            out.stats.cr_bearing_lines >= 6_000,
+            "every \\r\\r\\r\\n line must register as CR-bearing; got {}",
+            out.stats.cr_bearing_lines,
+        );
+    }
+
     /// Round-1 (newer loop) regression: bypass `lines_dropped_truncate`
     /// must reflect raw lines actually omitted from the middle, and
     /// `bytes_dropped_truncate` must exclude ANSI bytes stripped during
@@ -3890,31 +3922,41 @@ fn oversize_bypass(
     // capture hazard exactly on the captures most likely to hit it
     // (round-8 finding).
     //
-    // CRLF normalization parity (round-9 finding): the staged path's
-    // stage 2 collapses `\r\n` (and any preceding `\r` run, i.e.,
-    // `\r\r\n`) to `\n` before computing this counter. A naive raw-byte
-    // split-on-`\n` would mis-count every Windows-style line as
-    // CR-bearing, breaking staged-vs-bypass equivalence on the most
-    // common large-log shape. Walk lines manually and strip the
-    // trailing-`\r` run from each `\n`-terminated line before checking
-    // for `\r`. An unterminated final line keeps its trailing `\r`
-    // (stage 2 preserves it as bare CR there).
+    // CRLF normalization parity (round-9 + round-10 findings): the
+    // staged path's stage 2 collapses `\r\n` to `\n` and also pops ONE
+    // preceding `\r` from its output (so `\r\r\n` → `\n`). Any further
+    // CRs before that pair are PRESERVED on the staged path: e.g.
+    // `\r\r\r\n` → stage 2 → `\r\n` (line "\r" → 1 CR-bearing) and
+    // `\r\r\r\r\n` → `\r\r\n` (line "\r\r" → 1 CR-bearing). Mirror that
+    // rule here by stripping up to two — never more — trailing `\r`s
+    // from each `\n`-terminated line before checking for residual `\r`.
+    // Stripping the entire trailing run (round 9's first attempt) would
+    // hide real bare-CR hazards on `\r\r\r\n`-style endings exactly at
+    // the bypass gate (round-10 [high] finding). An unterminated final
+    // line keeps its trailing `\r`s (stage 2 preserves them as bare CR
+    // there).
     //
-    // Residual gap: `\r` bytes appearing INSIDE an unterminated control
-    // string that stage 2's OSC recovery would discard remain counted
-    // here — the bypass cannot affordably re-run the escape-sequence
-    // parser over the full input. This is acknowledged over-count, not
-    // an under-count, and only fires on captures whose dropped middle
-    // contains an unterminated `ESC ]` body — vanishingly rare and
-    // strictly safer than the under-count it replaces.
+    // Persistent gap (rounds 8/9/10): `\r` bytes appearing INSIDE an
+    // ESC-introduced control string (OSC, DCS, APC, PM, SOS — both
+    // terminated and unterminated) that stage 2 would strip remain
+    // counted here, because the bypass scan cannot affordably re-run
+    // stage 2's escape-state parser over the full input. This produces
+    // a size-dependent false positive on captures whose dropped middle
+    // contains a control-string body with embedded `\r`. Mitigating it
+    // would require porting stage 2's escape parser to operate on raw
+    // bytes — out of scope for this PR; tracked separately. The signal
+    // remains conservative-by-over-counting, which is the safer side
+    // for an audit/warning gate.
     stats.cr_bearing_lines = {
         let mut count = 0usize;
         let mut start = 0usize;
         for (i, &b) in raw_bytes.iter().enumerate() {
             if b == b'\n' {
                 let mut end = i;
-                while end > start && raw_bytes[end - 1] == b'\r' {
+                let mut stripped = 0usize;
+                while stripped < 2 && end > start && raw_bytes[end - 1] == b'\r' {
                     end -= 1;
+                    stripped += 1;
                 }
                 if raw_bytes[start..end].contains(&b'\r') {
                     count += 1;
