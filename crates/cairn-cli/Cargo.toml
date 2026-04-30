@@ -30,6 +30,7 @@ cairn-workflows = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
+rusqlite = { workspace = true }
 figment = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
@@ -56,6 +57,7 @@ cairn-store-sqlite = { workspace = true }
 insta = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }
+rusqlite = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }

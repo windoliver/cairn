@@ -8,10 +8,9 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, plugins, verbs};
+use cairn_cli::{command, identity, plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
-
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
         std::path::PathBuf::from(p)
@@ -44,7 +43,12 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
+    // `identity` manages vault-path internally for each subcommand; exclude
+    // from the top-level vault registry guard (which requires a named vault).
+    let needs_vault_guard = !matches!(
+        active_subcommand,
+        "vault" | "bootstrap" | "plugins" | "mcp" | "identity"
+    );
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -98,6 +102,7 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("identity", sub)) => identity::cli::run_identity(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -133,7 +138,13 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cairn bootstrap: {e:#}");
-            ExitCode::from(74) // EX_IOERR
+            // EX_DATAERR (65) — vault.id is lost; DB or binding sentinel
+            // proves the vault was already bound. The user must recover.
+            if format!("{e:#}").contains("vault.id lost") {
+                ExitCode::from(65)
+            } else {
+                ExitCode::from(74) // EX_IOERR
+            }
         }
     }
 }

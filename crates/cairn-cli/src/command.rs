@@ -1,6 +1,6 @@
 //! Shared clap command tree for the runtime CLI and generated docs.
 
-use crate::{generated, skill, verbs};
+use crate::{generated, identity, skill, verbs};
 
 /// Build the `cairn` command tree used by both `main.rs` and `cairn-docgen`.
 #[must_use]
@@ -43,6 +43,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
+        .subcommand(identity::cli::identity_subcommand())
 }
 
 fn bootstrap_subcommand() -> clap::Command {
