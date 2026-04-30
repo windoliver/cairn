@@ -132,11 +132,25 @@ pub struct PolicyTraceEntry {
 /// PR2 only — per-record exclusion for caller-visible records filtered by
 /// rank-and-filter. Tier-1 invisible records are filtered before this list
 /// is built; their ids never appear here.
+///
+/// Fields are private. The only constructor is `RecordExclusion::new`,
+/// which rejects non-`ReadFilter*` gates. External callers cannot use a
+/// struct-literal `RecordExclusion { gate: ScopeCheck, … }` to bypass
+/// the Tier-2-only invariant. Read-only accessors expose the data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordExclusion {
-    pub target_id: TargetId,
-    pub gate: PolicyGate,            // must be one of `ReadFilter*`
-    pub detail: PolicyDetail,
+    target_id: TargetId,
+    gate: PolicyGate,            // must be one of `ReadFilter*` (constructor enforced)
+    detail: PolicyDetail,
+}
+
+impl RecordExclusion {
+    /// Construct an exclusion. Panics on a non-`ReadFilter*` gate
+    /// (programmer error / fail-closed against Tier-1 leaks).
+    pub fn new(target_id: TargetId, gate: PolicyGate, detail: PolicyDetail) -> Self;
+    pub fn target_id(&self) -> &TargetId;
+    pub fn gate(&self) -> PolicyGate;
+    pub fn detail(&self) -> &PolicyDetail;
 }
 
 /// Pure exhaustive mapping. Cannot fail.

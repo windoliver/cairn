@@ -22,6 +22,21 @@ use super::{PolicyDetail, PolicyGate};
 /// callers cannot bypass it via `RecordExclusion { gate: ScopeCheck, … }`
 /// because the field-literal form is unavailable outside the module.
 /// Read-only accessors expose the data after construction.
+///
+/// Compile-fail proof — the field-literal bypass MUST NOT compile from
+/// outside the module. If a future change makes any field `pub`, this
+/// doctest succeeds and `cargo test --doc` fails, signalling the
+/// regression that codex flagged in PR #237 round 5.
+///
+/// ```compile_fail
+/// use cairn_core::domain::TargetId;
+/// use cairn_core::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion};
+/// let _ = RecordExclusion {
+///     target_id: TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
+///     gate: PolicyGate::ScopeCheck,
+///     detail: PolicyDetail::None,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordExclusion {
     target_id: TargetId,

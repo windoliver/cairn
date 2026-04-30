@@ -1427,11 +1427,15 @@ use crate::domain::TargetId;
 
 use super::{PolicyDetail, PolicyGate};
 
+/// Fields are PRIVATE — the constructor is the only path. External
+/// callers cannot bypass the ReadFilter*-only check via
+/// `RecordExclusion { gate: ScopeCheck, … }` struct literal. Read-only
+/// accessors `target_id()`, `gate()`, `detail()` expose the data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordExclusion {
-    pub target_id: TargetId,
-    pub gate: PolicyGate,
-    pub detail: PolicyDetail,
+    target_id: TargetId,
+    gate: PolicyGate,
+    detail: PolicyDetail,
 }
 
 impl RecordExclusion {
@@ -1451,6 +1455,10 @@ impl RecordExclusion {
         );
         Self { target_id, gate, detail }
     }
+
+    pub fn target_id(&self) -> &TargetId { &self.target_id }
+    pub const fn gate(&self) -> PolicyGate { self.gate }
+    pub const fn detail(&self) -> &PolicyDetail { &self.detail }
 }
 ```
 
