@@ -106,10 +106,7 @@ pub trait LLMProvider: Send + Sync {
     /// When `req.schema` is `Some`, the adapter MUST enforce JSON-schema
     /// validation before returning `CompletionOutput::Json`. Invalid output
     /// returns `LlmError::InvalidJsonOutput` — never reaches the store.
-    async fn complete(
-        &self,
-        req: &CompletionRequest,
-    ) -> Result<CompletionOutput, LlmError>;
+    async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError>;
 }
 
 /// Static identity descriptor for a [`LLMProvider`] plugin (§4.1).
@@ -146,10 +143,7 @@ mod tests {
         fn supported_contract_versions(&self) -> VersionRange {
             Self::SUPPORTED_VERSIONS
         }
-        async fn complete(
-            &self,
-            _req: &CompletionRequest,
-        ) -> Result<CompletionOutput, LlmError> {
+        async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
             Ok(CompletionOutput::Text("stub".into()))
         }
     }
