@@ -151,6 +151,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // above; index name unchanged. Adds the empty-string guards.)
     ("trigger", "sessions_project_root_no_empty_insert"),
     ("trigger", "sessions_project_root_no_empty_update"),
+    // 0020_record_vectors (brief §3.0: sqlite-vec ANN + embedding backfill)
+    ("table", "record_vectors"),
+    ("table", "pending_embeddings"),
+    ("index", "pending_embeddings_enqueued_idx"),
+    ("trigger", "records_vector_cleanup"),
 ];
 
 fn hash_hex(content: &str) -> String {
@@ -213,6 +218,7 @@ pub(crate) fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreEr
          WHERE name NOT LIKE 'sqlite_%' \
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;
@@ -304,6 +310,9 @@ fn finalize_hex(digest: Sha256) -> String {
 /// claims, derived from the compiled-in SQL without hand-maintained tables.
 fn expected_ddl_digest() -> Result<String, StoreError> {
     use rusqlite::Connection;
+    // Register sqlite-vec before opening the connection so migration 0020
+    // (CREATE VIRTUAL TABLE USING vec0) can succeed on the digest-path.
+    crate::vec_ext::register_vec0();
     let mut conn = Connection::open_in_memory()?;
     crate::migrations::migrations().to_latest(&mut conn)?;
 
@@ -312,6 +321,7 @@ fn expected_ddl_digest() -> Result<String, StoreError> {
          WHERE name NOT LIKE 'sqlite_%' \
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;

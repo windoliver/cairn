@@ -12,6 +12,7 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 
 [dependencies]
 cairn-core = { workspace = true }
+cairn-embeddings-local = { path = "../cairn-embeddings-local" }
 async-trait = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
@@ -22,6 +23,9 @@ tokio = { workspace = true, features = ["time"] }
 tokio_rusqlite = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
+# sqlite-vec ANN extension — statically compiled; the crate's own build.rs
+# handles compilation. We load it per-connection via register_auto_extension.
+sqlite-vec = { workspace = true }
 
 [features]
 default = []
@@ -38,5 +42,17 @@ serde = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-[lints]
-workspace = true
+[lints.rust]
+# Inherits all workspace lints except unsafe_code (lowered to deny so
+# vec_ext::register_vec0() can use #[allow(unsafe_code)] to isolate the
+# single narrow unsafe call needed to register the statically-linked
+# sqlite-vec C extension via rusqlite::ffi::sqlite3_auto_extension).
+unsafe_code = "deny"
+missing_docs = "warn"
+rust_2024_compatibility = { level = "deny", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

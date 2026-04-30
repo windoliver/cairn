@@ -12,6 +12,7 @@ pub mod error;
 pub mod migrations;
 pub mod open;
 pub mod store;
+pub mod vec_ext;
 mod verify;
 
 pub use error::StoreError;

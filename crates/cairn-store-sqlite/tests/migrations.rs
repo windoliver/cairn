@@ -2,6 +2,7 @@
 
 use cairn_store_sqlite::{
     migrations::migrations, open_in_memory_sync as open_in_memory, open_sync as open,
+    vec_ext::register_vec0,
 };
 use rusqlite::params;
 use tempfile::tempdir;
@@ -14,7 +15,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 19);
+    assert_eq!(head, 20);
 }
 
 #[test]
@@ -30,7 +31,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 19);
+    assert_eq!(head, 20);
 }
 
 #[test]
@@ -52,6 +53,9 @@ fn pragmas_applied() {
 
 #[test]
 fn migrations_validate() {
+    // Migration 0020 uses vec0; register it before validate() creates an
+    // in-memory connection to run the migrations against.
+    register_vec0();
     migrations()
         .validate()
         .expect("migrations validate against schema");
@@ -1100,6 +1104,41 @@ fn consent_journal_event_metadata_domain_enforced() {
     assert!(
         format!("{err}").contains("event metadata out of domain class"),
         "free-text op_id must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn migration_0020_creates_pending_embeddings() {
+    let conn = open_in_memory().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type='table' AND name='pending_embeddings'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "pending_embeddings table must exist after migration 0020"
+    );
+}
+
+#[test]
+fn migration_0020_creates_record_vectors_virtual_table() {
+    let conn = open_in_memory().unwrap();
+    // vec0 virtual table appears in sqlite_master as type='table'
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE name='record_vectors'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "record_vectors virtual table must exist after migration 0020"
     );
 }
 

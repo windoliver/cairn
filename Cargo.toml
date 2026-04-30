@@ -49,6 +49,11 @@ bon = "3.7"
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
 walkdir = "2"
+# sqlite-vec ANN extension — statically compiled; the crate's build.rs
+# compiles sqlite-vec.c with -DSQLITE_CORE so the vec0 module is always
+# linked. Version pinned at 0.1.9 (last stable; 0.1.10-alpha series broke
+# on macOS aarch64 during compilation).
+sqlite-vec = "0.1.9"
 
 # Embedding runtime — cairn-embeddings-local only
 candle-core = { version = "0.10", default-features = false }

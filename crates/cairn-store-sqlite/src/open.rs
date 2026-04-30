@@ -9,6 +9,7 @@ use tokio_rusqlite::Connection as AsyncConn;
 use crate::error::StoreError;
 use crate::migrations::migrations;
 use crate::store::SqliteMemoryStore;
+use crate::vec_ext::register_vec0;
 use crate::verify::{verify_migration_history, verify_schema_fingerprint};
 
 /// Default capability flags. `fts` is enabled by the FTS5 search path
@@ -33,6 +34,9 @@ const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
 /// Returns [`StoreError`] if the directory cannot be created, the
 /// connection cannot be opened, pragmas fail, or migrations fail.
 pub async fn open(path: impl AsRef<Path>) -> Result<SqliteMemoryStore, StoreError> {
+    // Register the sqlite-vec vec0 module globally before opening any
+    // connection so migration 0020 (CREATE VIRTUAL TABLE USING vec0) succeeds.
+    register_vec0();
     let path = path.as_ref();
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -51,6 +55,7 @@ pub async fn open(path: impl AsRef<Path>) -> Result<SqliteMemoryStore, StoreErro
 /// # Errors
 /// Returns [`StoreError`] if pragmas or migrations fail.
 pub async fn open_in_memory() -> Result<SqliteMemoryStore, StoreError> {
+    register_vec0();
     let conn = AsyncConn::open_in_memory().await?;
     bootstrap(&conn).await?;
     Ok(SqliteMemoryStore {
@@ -81,6 +86,7 @@ async fn bootstrap(conn: &AsyncConn) -> Result<(), StoreError> {
 /// connection cannot be opened, pragmas fail, or migrations fail.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn open_sync(path: impl AsRef<Path>) -> Result<rusqlite::Connection, StoreError> {
+    register_vec0();
     let path = path.as_ref();
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -103,6 +109,7 @@ pub fn open_sync(path: impl AsRef<Path>) -> Result<rusqlite::Connection, StoreEr
 /// Returns [`StoreError`] if pragmas or migrations fail.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn open_in_memory_sync() -> Result<rusqlite::Connection, StoreError> {
+    register_vec0();
     let mut conn = rusqlite::Connection::open_in_memory()?;
     conn.execute_batch(PRAGMAS)?;
     migrations().to_latest(&mut conn)?;
