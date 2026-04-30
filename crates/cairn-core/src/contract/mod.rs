@@ -19,6 +19,7 @@
 pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
+pub mod job_store;
 pub mod llm_provider;
 pub mod manifest;
 pub mod mcp_server;
@@ -40,6 +41,10 @@ pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
+pub use job_store::{
+    EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
+    LeaseToken, LeasedJob, RetryPolicy,
+};
 pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
