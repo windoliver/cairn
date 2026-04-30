@@ -1,19 +1,23 @@
 # Policy gates
 
-Cairn populates `policy_trace` on every mutating verb response and on read
-verbs when `--explain` is set (brief §8.0.b, §14, §5.1, §5.2). Each entry
-names a **gate**, a **result** (`pass`, `deny`, `error`), and an optional
-short metadata `detail`. Gate names are stable; the closed producer-side
-vocabulary is enumerated below.
+Cairn populates `policy_trace` on every mutating verb response and on
+`search --explain` (brief §8.0.b, §14, §5.1, §5.2). Each entry names a
+**gate**, a **result** (`pass`, `deny`, `error`), and an optional short
+metadata `detail`. Gate names are stable; the closed producer-side
+vocabulary is enumerated below. `retrieve --explain` is reserved for a
+later increment and is not part of this contract today.
 
 ## Negotiation
 
-Servers advertise `cairn.mcp.v1.policy_trace` on `status.capabilities`
-when they emit traces with this vocabulary. Vocabulary breaks (renames,
-semantic shifts) travel with the MCP contract version
-(`cairn.mcp.v2.*`) — a fresh closed `Capabilities` enum at that point —
-rather than as a `.v2` suffix on this capability, matching the existing
-sibling pattern.
+The `cairn.mcp.v1.policy_trace` capability is **declared** in the IDL
+and reserved on the wire so future servers can advertise it on
+`status.capabilities` once verb runtime emits non-empty traces (#9 /
+#61 / #62). P0 servers do **not** advertise it: the gate vocabulary is
+fixed, but the runtime does not yet populate trace entries, so the
+capability would be misleading. Vocabulary breaks (renames, semantic
+shifts) travel with the MCP contract version (`cairn.mcp.v2.*`) — a
+fresh closed `Capabilities` enum at that point — rather than as a `.v2`
+suffix on this capability, matching the existing sibling pattern.
 
 ## Gate vocabulary
 
@@ -26,9 +30,9 @@ sibling pattern.
 | `scope_check`                | §4.2          | every verb       | `pass` / `deny`  | `scope_required:<tier>` on deny                  |
 | `forget_capability`          | §8            | `forget`         | `pass` / `deny`  | absent / capability code                         |
 | `consent_journal_append`     | §14, §5.6     | every mutation   | `pass` / `error` | `error:<code>` on error                          |
-| `read_filter_relevance`      | §5.1          | `search` / `retrieve` `--explain` | `pass`  | (per-record entries in `excluded`)               |
-| `read_filter_staleness`      | §5.1          | `search` / `retrieve` `--explain` | `pass`  | (per-record entries in `excluded`)               |
-| `read_filter_dedup`          | §5.1          | `search` / `retrieve` `--explain` | `pass`  | (per-record entries in `excluded`)               |
+| `read_filter_relevance`      | §5.1          | `search --explain` | `pass`         | (per-record entries in `excluded`)               |
+| `read_filter_staleness`      | §5.1          | `search --explain` | `pass`         | (per-record entries in `excluded`)               |
+| `read_filter_dedup`          | §5.1          | `search --explain` | `pass`         | (per-record entries in `excluded`)               |
 
 ## `detail` shape
 

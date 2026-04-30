@@ -73,7 +73,13 @@ fn forget_record_returns_aborted_internal() {
 }
 
 #[test]
-fn status_advertises_policy_trace_capability() {
+fn status_advertises_no_capabilities_until_runtime_lands() {
+    // P0 advertises no capabilities — verb runtime returns the
+    // unimplemented stub, so promising capability support would mislead
+    // negotiating clients (#9 / #61 / #62). `cairn.mcp.v1.policy_trace`
+    // (#95) and the store-driven search / retrieve / forget mode
+    // capabilities are exercised at the type level only until runtime
+    // emits traces and honors the modes.
     let out = {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
         cmd.args(["status", "--json"]);
@@ -89,10 +95,9 @@ fn status_advertises_policy_trace_capability() {
     let v: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("status JSON parse failed: {e}\nstdout: {stdout:?}"));
     let caps = v["capabilities"].as_array().expect("capabilities array");
-    let strs: Vec<&str> = caps.iter().filter_map(serde_json::Value::as_str).collect();
     assert!(
-        strs.contains(&"cairn.mcp.v1.policy_trace"),
-        "status must advertise cairn.mcp.v1.policy_trace; got {strs:?}"
+        caps.is_empty(),
+        "P0 status must advertise an empty capabilities list; got {caps:?}"
     );
 }
 

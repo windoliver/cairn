@@ -3,12 +3,13 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! P0 advertises `cairn.mcp.v1.policy_trace` (#95) as a vocabulary-only
-//! capability: it pins the closed `PolicyGate` enum and the body-free
-//! `policy_trace[]` envelope shape. Runtime emission from the verb path
-//! lands with #9 / #61 / #62 — until then `policy_trace[]` may be empty.
-//! Store-driven capabilities (search modes, retrieve targets, forget
-//! modes) also land with #9.
+//! P0 advertises **no** capabilities: the IDL declares
+//! `cairn.mcp.v1.policy_trace` (#95) and the store-driven search /
+//! retrieve / forget mode capabilities, but verb runtime does not yet
+//! emit traces or honor those modes (work tracked in #9 / #61 / #62).
+//! Advertising a capability the runtime cannot back would mislead
+//! clients that negotiate from `status.capabilities`, so this list stays
+//! empty until each capability is honored end-to-end.
 
 use std::process::ExitCode;
 
@@ -56,17 +57,16 @@ pub fn run(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Advertised P0 capabilities.
+/// Advertised P0 capabilities — currently empty.
 ///
-/// `cairn.mcp.v1.policy_trace` is **vocabulary-only**: it pins the closed
-/// `PolicyGate` set and the body-free `policy_trace[]` envelope shape
-/// per `docs/site/src/reference/policy-gates.md` (#95). It does **not**
-/// promise that every response carries a non-empty trace today — verb
-/// runtime wiring lands with #9 / #61 / #62. Other store-driven
-/// capabilities (search modes, retrieve targets, forget modes) also land
-/// with #9.
+/// Negotiable capabilities are advertised only when the runtime can honor
+/// them end-to-end. P0 verbs return the unimplemented stub envelope, so
+/// no capability is advertised yet. `cairn.mcp.v1.policy_trace` (#95)
+/// and the store-driven search / retrieve / forget mode capabilities
+/// land here as their respective verb-runtime issues close (#9 / #61 /
+/// #62).
 fn p0_capabilities() -> Vec<Capabilities> {
-    vec![Capabilities::CairnMcpV1PolicyTrace]
+    vec![]
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
@@ -219,11 +219,11 @@ mod tests {
     }
 
     #[test]
-    fn p0_capabilities_includes_policy_trace() {
+    fn p0_capabilities_is_empty_until_runtime_honors_them() {
         let caps = p0_capabilities();
         assert!(
-            caps.contains(&Capabilities::CairnMcpV1PolicyTrace),
-            "P0 must advertise cairn.mcp.v1.policy_trace; got {caps:?}"
+            caps.is_empty(),
+            "P0 advertises no capabilities until verb runtime can honor them; got {caps:?}"
         );
     }
 }

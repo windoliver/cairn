@@ -159,15 +159,16 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 }
 
 #[test]
-fn status_advertises_policy_trace_in_p0() {
-    use cairn_core::generated::common::Capabilities;
+fn status_advertises_no_capabilities_in_p0() {
     let resp = sdk().status();
-    // Mirrors `cairn status` — advertises the policy_trace gate
-    // vocabulary (#95). Store-driven capabilities land with #9.
+    // Mirrors `cairn status` — P0 advertises no capabilities until verb
+    // runtime can honor them (#9 / #61 / #62). The IDL declares
+    // `cairn.mcp.v1.policy_trace` (#95) and the store-driven mode
+    // capabilities; advertising them before they are honored would
+    // mislead negotiating clients.
     assert!(
-        resp.capabilities
-            .contains(&Capabilities::CairnMcpV1PolicyTrace),
-        "P0 must advertise cairn.mcp.v1.policy_trace; got {:?}",
+        resp.capabilities.is_empty(),
+        "P0 SDK status must advertise an empty capabilities list; got {:?}",
         resp.capabilities
     );
     assert!(resp.extensions.is_empty());
