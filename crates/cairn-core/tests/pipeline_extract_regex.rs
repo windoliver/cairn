@@ -53,9 +53,8 @@ fn cli_event() -> CaptureEvent {
 }
 
 fn body_input<'a>(event: &'a CaptureEvent, body: &'a str) -> ExtractInput<'a> {
-    let resolved =
-        ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
-            .expect("matching variant");
+    let resolved = ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+        .expect("matching variant");
     ExtractInput {
         event,
         body: BodyResolution::Resolved(resolved),
@@ -176,7 +175,11 @@ async fn trigger_after_closing_paren_fires() {
     let event = cli_event();
     let input = body_input(&event, "(see below). remember that I prefer cash");
     let res = extractor.extract(&input).await.expect("ok");
-    assert_eq!(res.outputs.len(), 1, "expected remember after closing paren");
+    assert_eq!(
+        res.outputs.len(),
+        1,
+        "expected remember after closing paren"
+    );
     assert!(matches!(res.outputs[0], ExtractOutput::Draft(_)));
 }
 
@@ -202,10 +205,7 @@ async fn quoted_punctuation_does_not_truncate_window() {
     // window, otherwise the stored draft body is cut off mid-clause.
     let extractor = RegexExtractor::builtin();
     let event = cli_event();
-    let input = body_input(
-        &event,
-        r#"remember that she shouted "go!" and prefers tea"#,
-    );
+    let input = body_input(&event, r#"remember that she shouted "go!" and prefers tea"#);
     let res = extractor.extract(&input).await.expect("ok");
     assert_eq!(res.outputs.len(), 1);
     let ExtractOutput::Draft(d) = &res.outputs[0] else {
@@ -226,7 +226,6 @@ async fn quoted_remember_is_not_extracted() {
     let res = extractor.extract(&input).await.expect("ok");
     assert!(res.outputs.is_empty());
 }
-
 
 #[tokio::test]
 async fn apostrophes_in_contractions_do_not_swallow_trigger() {

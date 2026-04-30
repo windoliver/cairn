@@ -76,7 +76,12 @@ pub(crate) async fn dispatch(
     let baseline_pre_user_a = outputs.len();
     let user_a_cap = baseline_pre_user_a + max_user_drafts;
     if run_hook_rules(&rules.user_hook, event, &mut outputs, Some(user_a_cap))
-        || run_tool_frame_rules(&rules.user_tool_frame, event, &mut outputs, Some(user_a_cap))
+        || run_tool_frame_rules(
+            &rules.user_tool_frame,
+            event,
+            &mut outputs,
+            Some(user_a_cap),
+        )
     {
         truncated = TruncationReason::MaxDrafts;
     }
@@ -545,8 +550,7 @@ fn normalize_target(s: &str) -> String {
     // whitespace. Without this, windows like `forget my old address,`
     // emit `my old address,` and miss the stored record on exact
     // selectors.
-    let trimmed = out
-        .trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
+    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == ',' || c == ';');
     // Strip a single balanced outer quote pair so `forget "my old address"`
     // emits `my old address`, not `"my old address"`. Without this the
     // resolver compares a quoted selector against unquoted record bodies
@@ -765,8 +769,9 @@ mod tests {
             tool_name: None,
         });
         let body_text = "remember that I prefer dark mode";
-        let resolved = ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
-            .expect("matching hook");
+        let resolved =
+            ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
+                .expect("matching hook");
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
@@ -921,8 +926,9 @@ mod tests {
             tool_name: None,
         });
         let body_text = "this is noteworthy. also noteworthy. and noteworthy too.";
-        let resolved = ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
-            .expect("matching hook");
+        let resolved =
+            ResolvedBody::from_hook_utterance(body_text, &event.payload, "UserPromptSubmit")
+                .expect("matching hook");
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),

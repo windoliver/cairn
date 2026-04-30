@@ -342,10 +342,7 @@ fn find_window_stop(
     while i < hard_stop {
         // Skip past any quote span that contains `i`; punctuation
         // inside quoted substrings must not terminate the window.
-        if let Some(&(_, qe)) = quote_spans
-            .iter()
-            .find(|(qs, qe)| *qs <= i && i < *qe)
-        {
+        if let Some(&(_, qe)) = quote_spans.iter().find(|(qs, qe)| *qs <= i && i < *qe) {
             i = qe;
             continue;
         }

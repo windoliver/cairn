@@ -257,7 +257,10 @@ mod tests {
         };
         let err = ResolvedBody::from_user_ingest("hello", &payload, UserIngestPayloadKind::Cli)
             .unwrap_err();
-        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
+        assert!(matches!(
+            err,
+            BodyResolutionError::PayloadVariantMismatch { .. }
+        ));
     }
 
     #[test]
@@ -281,7 +284,10 @@ mod tests {
             tool_name: None,
         };
         let err = ResolvedBody::from_hook_utterance("hi", &payload, "PostToolUse").unwrap_err();
-        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
+        assert!(matches!(
+            err,
+            BodyResolutionError::PayloadVariantMismatch { .. }
+        ));
     }
 
     #[test]
@@ -290,9 +296,12 @@ mod tests {
             hook_name: "PostToolUse".into(),
             tool_name: None,
         };
-        let err = ResolvedBody::from_hook_utterance("hi", &payload, "UserPromptSubmit")
-            .unwrap_err();
-        assert!(matches!(err, BodyResolutionError::PayloadVariantMismatch { .. }));
+        let err =
+            ResolvedBody::from_hook_utterance("hi", &payload, "UserPromptSubmit").unwrap_err();
+        assert!(matches!(
+            err,
+            BodyResolutionError::PayloadVariantMismatch { .. }
+        ));
     }
 
     #[test]
