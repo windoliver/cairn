@@ -17,11 +17,7 @@ pub(crate) fn map_openai_error(e: &OpenAIError) -> LlmError {
         // ApiError: check the message and code fields for auth indicators.
         OpenAIError::ApiError(api_err) => {
             let msg_lower = api_err.message.to_lowercase();
-            let code_lower = api_err
-                .code
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase();
+            let code_lower = api_err.code.as_deref().unwrap_or("").to_lowercase();
             if msg_lower.contains("unauthorized")
                 || msg_lower.contains("forbidden")
                 || msg_lower.contains("invalid_api_key")

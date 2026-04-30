@@ -113,7 +113,9 @@ impl LLMProvider for OpenAiCompatProvider {
         builder.model(model).messages([user_msg.into()]);
 
         // Apply token budget when set.
-        if let Some(budget) = &req.budget && let Some(max_tok) = budget.max_tokens {
+        if let Some(budget) = &req.budget
+            && let Some(max_tok) = budget.max_tokens
+        {
             builder.max_completion_tokens(max_tok);
         }
 
@@ -180,13 +182,21 @@ mod tests {
 
     #[test]
     fn lm_error_display_snapshots() {
-        insta::assert_snapshot!("not_configured", LlmError::NotConfigured {
-            remediation: "cairn config set llm.provider ollama".into(),
-        }.to_string());
+        insta::assert_snapshot!(
+            "not_configured",
+            LlmError::NotConfigured {
+                remediation: "cairn config set llm.provider ollama".into(),
+            }
+            .to_string()
+        );
         insta::assert_snapshot!("auth_denied", LlmError::AuthDenied.to_string());
         insta::assert_snapshot!("budget_exceeded", LlmError::BudgetExceeded.to_string());
-        insta::assert_snapshot!("capability_missing", LlmError::CapabilityMissing {
-            capability: "json_mode".into(),
-        }.to_string());
+        insta::assert_snapshot!(
+            "capability_missing",
+            LlmError::CapabilityMissing {
+                capability: "json_mode".into(),
+            }
+            .to_string()
+        );
     }
 }

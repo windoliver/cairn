@@ -2,13 +2,15 @@
 
 use cairn_core::{
     config::{LlmConfig, LlmProvider},
-    contract::{CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError},
+    contract::{
+        CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
+    },
 };
 use cairn_llm_openai_compat::OpenAiCompatProvider;
 use cairn_llm_openai_compat::build_llm_provider;
 use wiremock::{
-    matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
 };
 
 /// Minimal valid `OpenAI` chat completion response body for `content`.
@@ -92,8 +94,7 @@ async fn json_completion_schema_mismatch() {
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(chat_response(r#"{"kind":"feedback"}"#)),
+            ResponseTemplate::new(200).set_body_json(chat_response(r#"{"kind":"feedback"}"#)),
         )
         .mount(&server)
         .await;
@@ -165,7 +166,9 @@ async fn endpoint_returns_401() {
         api_key: Some("bad-key".into()),
     };
     let provider = build_llm_provider(&config).unwrap();
-    let req = CompletionRequest::builder().prompt("hi".to_string()).build();
+    let req = CompletionRequest::builder()
+        .prompt("hi".to_string())
+        .build();
     let err = provider.complete(&req).await.unwrap_err();
     assert!(
         matches!(err, LlmError::AuthDenied),

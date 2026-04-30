@@ -371,6 +371,7 @@ dependencies = [
  "blake3",
  "bon",
  "insta",
+ "jsonschema",
  "proptest",
  "regex",
  "rusqlite",
@@ -395,7 +396,6 @@ dependencies = [
  "jsonschema",
  "proptest",
  "referencing",
- "regex",
  "rstest",
  "serde",
  "serde_json",
@@ -415,9 +415,7 @@ dependencies = [
  "insta",
  "jsonschema",
  "serde_json",
- "thiserror",
  "tokio",
- "tracing",
  "wiremock",
 ]
 
@@ -512,7 +510,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing",
  "ulid",
 ]
 
