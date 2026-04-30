@@ -83,6 +83,18 @@ impl SqliteMemoryStore {
     }
 }
 
+impl SqliteMemoryStore {
+    /// Expose the underlying async connection for integration tests that need
+    /// to insert raw rows (e.g., to seed `record_vectors` before Task 8 lands
+    /// embed-on-write). Gated behind `test-helpers` so this surface never
+    /// appears in production builds.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn raw_conn(&self) -> Option<&Arc<AsyncConn>> {
+        self.conn.as_ref()
+    }
+}
+
 impl std::fmt::Debug for SqliteMemoryStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SqliteMemoryStore")

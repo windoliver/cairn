@@ -34,7 +34,8 @@
 //! [`compile_filter`]: cairn_core::domain::filter::compile_filter
 
 use cairn_core::contract::memory_store::{
-    KeywordCursor, KeywordSearchArgs, KeywordSearchPage, SearchCandidate,
+    KeywordCursor, KeywordSearchArgs, KeywordSearchPage, SearchCandidate, SemanticSearchArgs,
+    SemanticSearchPage,
 };
 use cairn_core::domain::filter::compile_filter;
 use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
@@ -443,21 +444,255 @@ fn is_fts_message(msg: &str, stage: FtsErrorStage) -> bool {
 }
 
 impl SqliteMemoryStore {
-    /// Semantic ANN search stub.
+    /// Semantic ANN search over the `record_vectors` sqlite-vec table (brief §5.1, §8.0.d).
     ///
-    /// Returns [`StoreError::CapabilityUnavailable`] unconditionally. The
-    /// real implementation arrives in Task 7; this stub keeps Task 6 and
-    /// the trait dispatch compiling in the interim.
+    /// Pipeline:
     ///
-    /// Note: `&self` is unused in this stub but required by the method
-    /// signature that Task 7 will fully implement with DB access.
-    #[allow(clippy::unused_self, reason = "Task 7 will use self.require_conn(...)")]
-    pub(crate) fn do_search_semantic(
+    /// 1. Capability gate — returns [`StoreError::CapabilityUnavailable`] when
+    ///    `caps.vector` is false or no embedder is wired.
+    /// 2. Embed the query string via `embedder.embed_query` on a blocking thread.
+    /// 3. Convert the embedding to a little-endian byte blob and pass it to
+    ///    the sqlite-vec `MATCH` clause. `k = limit * 2` over-fetches to buffer
+    ///    against post-filter row drops.
+    /// 4. Join back to `records` for hot columns; filter by
+    ///    `active = 1 AND tombstoned = 0`, plus the caller's visibility allowlist
+    ///    and optional [`compile_filter`]-produced SQL.
+    /// 5. Apply model filter in Rust (see [`run_ann_query`] for why SQL is not used).
+    /// 6. Project each row into a [`SearchCandidate`] with `semantic_distance`
+    ///    set and `bm25 = 0.0` / `snippet = ""` (not applicable on this path).
+    ///
+    /// [`compile_filter`]: cairn_core::domain::filter::compile_filter
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::CapabilityUnavailable`] when vector capability is absent.
+    /// - [`StoreError::Sqlite`] / [`StoreError::Worker`] for SQL or worker failures.
+    /// - [`StoreError::Codec`] when projecting a row to a typed enum fails.
+    /// - [`StoreError::Invariant`] when a stored id or scope cannot be parsed.
+    #[instrument(
+        skip(self, args),
+        err,
+        fields(verb = "search_semantic", limit = args.limit),
+    )]
+    pub(crate) async fn do_search_semantic(
         &self,
-        _args: &cairn_core::contract::memory_store::SemanticSearchArgs<'_>,
-    ) -> Result<cairn_core::contract::memory_store::SemanticSearchPage, StoreError> {
-        Err(StoreError::CapabilityUnavailable { what: "vector" })
+        args: &SemanticSearchArgs<'_>,
+    ) -> Result<SemanticSearchPage, StoreError> {
+        if !self.caps.vector {
+            return Err(StoreError::CapabilityUnavailable { what: "vector" });
+        }
+        let embedder = self
+            .embedder
+            .as_ref()
+            .ok_or(StoreError::CapabilityUnavailable { what: "vector" })?
+            .clone();
+
+        // Embed the query on a blocking thread — model inference is CPU-bound.
+        let query_text = args.query.clone();
+        let query_vec: Vec<f32> =
+            tokio::task::spawn_blocking(move || embedder.embed_query(&query_text))
+                .await
+                .map_err(|e| StoreError::Invariant {
+                    what: format!("embedding task panicked: {e}"),
+                })?
+                .map_err(|e| StoreError::Invariant {
+                    what: format!("embed_query failed: {e}"),
+                })?;
+
+        let query_bytes: Vec<u8> =
+            query_vec.iter().flat_map(|&f| f.to_le_bytes()).collect();
+        let limit = args.limit.clamp(1, SEARCH_LIMIT_MAX);
+        let visibilities: Vec<String> = args
+            .visibility_allowlist
+            .iter()
+            .map(|v| v.as_str().to_owned())
+            .collect();
+        let compiled = args.filter.map(compile_filter);
+        let now_ms = current_unix_ms();
+        let conn = self.require_conn("search_semantic")?.clone();
+
+        let rows = run_ann_query(conn, query_bytes, visibilities, compiled, limit, now_ms)
+            .await
+            .map_err(unpack_worker_err)?;
+
+        // Model filter applied in Rust — see `run_ann_query` doc for rationale.
+        let model_label = args.model_label.as_str();
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| r.vec_model == model_label)
+            .take(limit)
+            .collect();
+
+        project_semantic_page(rows, now_ms)
     }
+}
+
+/// Single row projected from the `record_vectors JOIN records` ANN query.
+struct SemanticRawRow {
+    record_id: String,
+    target_id: String,
+    scope_json: String,
+    kind: String,
+    class: String,
+    visibility: String,
+    /// L2 distance returned by sqlite-vec.
+    distance: f64,
+    /// Model label stored alongside the vector (`+model` auxiliary column).
+    /// Compared against `args.model_label` in Rust to skip stale-model rows —
+    /// sqlite-vec forbids WHERE predicates on auxiliary columns in KNN queries.
+    vec_model: String,
+    /// `now_ms - r.updated_at` (milliseconds).
+    recency_ms: i64,
+    confidence: f64,
+    salience: f64,
+    /// `now_ms - r.updated_at` (milliseconds) — same column, kept distinct
+    /// so future recency/staleness divergence is straightforward.
+    staleness_ms: i64,
+    record_json: String,
+}
+
+/// Drive the sqlite-vec ANN query on the DB worker thread.
+///
+/// ## Why model filtering is done in Rust, not SQL
+///
+/// sqlite-vec rejects any WHERE predicate on an auxiliary (`+col`) column
+/// when a MATCH clause is active — even if the predicate is in an outer
+/// query joined to the vec0 subquery. `SQLite`'s query planner pushes the
+/// predicate down into the virtual table's `xBestIndex`, which then errors.
+/// The workaround is to SELECT the auxiliary column (`model`) and filter in
+/// Rust after the rows are returned.
+async fn run_ann_query(
+    conn: std::sync::Arc<tokio_rusqlite::Connection>,
+    query_bytes: Vec<u8>,
+    visibilities: Vec<String>,
+    compiled: Option<cairn_core::domain::filter::CompiledFilter>,
+    limit: usize,
+    now_ms: i64,
+) -> Result<Vec<SemanticRawRow>, tokio_rusqlite::Error> {
+    // Over-fetch 2× so the model post-filter still delivers `limit` results
+    // in the common case where all rows share the active model.
+    let k = i64::try_from((limit * 2).max(1)).unwrap_or(i64::MAX);
+
+    conn.call(move |c| {
+        let vis_clause = if visibilities.is_empty() {
+            String::new()
+        } else {
+            let placeholders = vec!["?"; visibilities.len()].join(", ");
+            format!("AND r.visibility IN ({placeholders})")
+        };
+        let filter_clause = compiled
+            .as_ref()
+            .map(|cf| format!("AND ({})", cf.sql))
+            .unwrap_or_default();
+
+        let sql = format!(
+            "SELECT r.record_id, r.target_id, r.scope, r.kind, r.class,
+                    r.visibility, ann.distance, ann.model AS vec_model,
+                    (? - r.updated_at) AS recency_ms,
+                    r.confidence, r.salience,
+                    (? - r.updated_at) AS staleness_ms,
+                    r.record_json
+             FROM (
+                 SELECT record_id, distance, model
+                   FROM record_vectors
+                  WHERE embedding MATCH ?
+                  LIMIT {k}
+             ) ann
+             JOIN   records r ON r.record_id = ann.record_id
+             WHERE  r.active = 1 AND r.tombstoned = 0
+               {vis_clause}
+               {filter_clause}
+             ORDER BY ann.distance ASC"
+        );
+
+        let mut params: Vec<SqlVal> = Vec::new();
+        params.push(SqlVal::Integer(now_ms));
+        params.push(SqlVal::Integer(now_ms));
+        params.push(SqlVal::Blob(query_bytes.clone()));
+        for v in &visibilities {
+            params.push(SqlVal::Text(v.clone()));
+        }
+        if let Some(cf) = compiled.as_ref() {
+            for p in &cf.params {
+                params.push(json_to_sql(p));
+            }
+        }
+
+        let mut stmt = c
+            .prepare_cached(&sql)
+            .map_err(tokio_rusqlite::Error::Rusqlite)?;
+        let raw: Vec<_> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok(SemanticRawRow {
+                    record_id: row.get::<_, String>(0)?,
+                    target_id: row.get::<_, String>(1)?,
+                    scope_json: row.get::<_, String>(2)?,
+                    kind: row.get::<_, String>(3)?,
+                    class: row.get::<_, String>(4)?,
+                    visibility: row.get::<_, String>(5)?,
+                    distance: row.get::<_, f64>(6)?,
+                    vec_model: row.get::<_, String>(7)?,
+                    recency_ms: row.get::<_, i64>(8)?,
+                    confidence: row.get::<_, f64>(9)?,
+                    salience: row.get::<_, f64>(10)?,
+                    staleness_ms: row.get::<_, i64>(11)?,
+                    record_json: row.get::<_, String>(12)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok::<_, tokio_rusqlite::Error>(raw)
+    })
+    .await
+}
+
+/// Project a set of [`SemanticRawRow`]s into a [`SemanticSearchPage`].
+fn project_semantic_page(
+    rows: Vec<SemanticRawRow>,
+    _now_ms: i64,
+) -> Result<SemanticSearchPage, StoreError> {
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        candidates.push(project_semantic_row(&row)?);
+    }
+    Ok(SemanticSearchPage { candidates })
+}
+
+/// Project a single [`SemanticRawRow`] into a [`SearchCandidate`].
+fn project_semantic_row(row: &SemanticRawRow) -> Result<SearchCandidate, StoreError> {
+    let record_id = record_id_from_str(&row.record_id)?;
+    let target_id = target_id_from_str(&row.target_id)?;
+    let scope: ScopeTuple = serde_json::from_str(&row.scope_json)?;
+    let kind = MemoryKind::parse(&row.kind).map_err(|e| StoreError::Invariant {
+        what: format!("invalid kind `{}`: {e}", row.kind),
+    })?;
+    let class = MemoryClass::parse(&row.class).map_err(|e| StoreError::Invariant {
+        what: format!("invalid class `{}`: {e}", row.class),
+    })?;
+    let visibility = MemoryVisibility::parse(&row.visibility).map_err(|e| StoreError::Invariant {
+        what: format!("invalid visibility `{}`: {e}", row.visibility),
+    })?;
+    Ok(SearchCandidate {
+        record_id,
+        target_id,
+        scope,
+        kind,
+        class,
+        visibility,
+        bm25: 0.0,
+        snippet: String::new(),
+        #[allow(clippy::cast_possible_truncation, reason = "REAL→f32 narrow")]
+        semantic_distance: Some(row.distance as f32),
+        // `row.recency_ms` = `now_ms - r.updated_at`. Convert ms → s and
+        // clamp at zero to guard against minor clock-skew misreads.
+        recency_seconds: row.recency_ms.max(0) / 1000,
+        #[allow(clippy::cast_possible_truncation, reason = "REAL→f32 narrow")]
+        confidence: row.confidence as f32,
+        #[allow(clippy::cast_possible_truncation, reason = "REAL→f32 narrow")]
+        salience: row.salience as f32,
+        staleness_seconds: row.staleness_ms.max(0) / 1000,
+        record_json: row.record_json.clone(),
+    })
 }
 
 /// Helper trait so the worker callback can map a `StoreError` into a

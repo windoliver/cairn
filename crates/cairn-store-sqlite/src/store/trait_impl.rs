@@ -108,6 +108,6 @@ impl MemoryStore for SqliteMemoryStore {
         if self.conn.is_none() {
             return not_initialized("search_semantic");
         }
-        self.do_search_semantic(args).map_err(Into::into)
+        self.do_search_semantic(args).await.map_err(Into::into)
     }
 }
