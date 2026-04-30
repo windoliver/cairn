@@ -12,8 +12,8 @@ use crate::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion};
 /// visibility filtering.
 ///
 /// `Candidate` is a sealed type: fields are private, the only
-/// constructor [`Self::from_scope_filter`] is `pub(crate)`, and
-/// [`explain_filter`] is `pub(crate)`. Together this means a candidate
+/// constructor `from_scope_filter` is `pub(crate)`, and
+/// `explain_filter` is `pub(crate)`. Together this means a candidate
 /// can only be produced from inside `cairn-core`, on the verb-runtime
 /// path that has already applied scope/visibility predicates. External
 /// callers cannot synthesize a `Candidate`, so `explain_filter` cannot
