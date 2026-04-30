@@ -1,8 +1,8 @@
 # Design: `cairn bootstrap` vault initialization
 
-**Date:** 2026-04-26  
-**Issue:** [#41](https://github.com/windoliver/cairn/issues/41)  
-**Brief sections:** §3 Vault Layout, §3.1 Layout template, §19.a v0.1 subset  
+**Date:** 2026-04-26
+**Issue:** [#41](https://github.com/windoliver/cairn/issues/41)
+**Brief sections:** §3 Vault Layout, §3.1 Layout template, §19.a v0.1 subset
 **Status:** Approved
 
 ---

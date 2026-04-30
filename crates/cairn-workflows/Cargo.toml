@@ -27,7 +27,6 @@ sha2 = { workspace = true }
 ulid = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
-tracing = { workspace = true }
 
 [dev-dependencies]
 cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }

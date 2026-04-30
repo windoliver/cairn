@@ -31,7 +31,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
 rusqlite = { workspace = true }
-figment = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,8 +41,6 @@ toml = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
-ed25519-dalek = { workspace = true }
-unicode-normalization = { workspace = true }
 fs2 = { workspace = true }
 rand_core = { workspace = true }
 whoami = { workspace = true }

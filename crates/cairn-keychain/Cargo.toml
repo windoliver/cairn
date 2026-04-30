@@ -22,10 +22,7 @@ integration = []
 [dependencies]
 cairn-core = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 keyring = { workspace = true }
-ed25519-dalek = { workspace = true }
-zeroize = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]

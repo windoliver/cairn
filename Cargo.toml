@@ -35,7 +35,6 @@ rstest = "0.23"
 tempfile = "3"
 sha2 = { version = "0.10", default-features = false }
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
-figment = { version = "0.10", features = ["yaml", "env"] }
 regex = { version = "1", default-features = false, features = ["std"] }
 serde_yaml = "0.9"
 unicode-normalization = "0.1"

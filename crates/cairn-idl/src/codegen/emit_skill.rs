@@ -513,7 +513,6 @@ fn emit_conventions(doc: &Document) -> GeneratedFile {
     for (kind, desc) in kinds {
         let _ = writeln!(s, "- `{kind}` — {desc}");
     }
-    s.push('\n');
     GeneratedFile {
         path: PathBuf::from("skills/cairn/conventions.md"),
         bytes: s.into_bytes(),

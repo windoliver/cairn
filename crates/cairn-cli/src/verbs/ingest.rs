@@ -11,7 +11,7 @@
 //!
 //! `ingest` is an issuer-dependent verb: it will sign records on behalf of an
 //! identity once the store is wired (#9).  The guard call below invokes
-//! [`cairn_cli::identity::guard::refuse_if_degraded`] to enforce the
+//! [`crate::identity::guard::refuse_if_degraded`] to enforce the
 //! `VaultDegraded → EX_TEMPFAIL=75` contract even in the stub path.
 //!
 //! **Deferred**: full async wiring (calling [`open_for_signed_verb`] against the

@@ -34,7 +34,8 @@ use super::lock::VaultBindingLock;
 /// 1. Namespace probe via `keystore.load_secret(&SecretHandle::for_witness(vault_id))`.
 ///    - `NotFound` → unclaimed, proceed.
 ///    - `Ok(_)` → return [`IdentityServiceError::VaultNamespaceClaimed`].
-///    - `Locked | PermissionDenied` → return [`IdentityServiceError::Keystore(Locked)`].
+///    - `Locked | PermissionDenied` → return [`IdentityServiceError::Keystore`]
+///      with [`KeystoreError::Locked`].
 ///    - Other errors → propagate.
 /// 2. Generate 32 random witness bytes via `OsRng`. Write to
 ///    `<vault>/.cairn/vault.binding.pending`. fsync.
