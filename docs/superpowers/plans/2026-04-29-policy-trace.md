@@ -1392,8 +1392,11 @@ const FIXTURE_ID: &str = "01HQZX9F5N0000000000000000";
 fn exclusion_holds_target_gate_detail() {
     let id = TargetId::parse(FIXTURE_ID).unwrap();
     let e = RecordExclusion::new(id.clone(), PolicyGate::ReadFilterStaleness, PolicyDetail::None);
-    assert_eq!(e.target_id, id);
-    assert_eq!(e.gate, PolicyGate::ReadFilterStaleness);
+    // Fields are private; use the `target_id()`, `gate()`, `detail()`
+    // accessors. Direct field access (`e.target_id`) does not compile.
+    assert_eq!(e.target_id(), &id);
+    assert_eq!(e.gate(), PolicyGate::ReadFilterStaleness);
+    assert_eq!(e.detail(), &PolicyDetail::None);
 }
 
 #[test]
@@ -1405,6 +1408,12 @@ fn exclusion_rejects_non_read_filter_gate() {
     let _ = RecordExclusion::new(id, PolicyGate::ScopeCheck, PolicyDetail::None);
 }
 ```
+
+A `compile_fail` rustdoc test on `RecordExclusion` itself locks the
+field-privacy invariant — the field-literal bypass (`RecordExclusion {
+gate: ScopeCheck, … }`) MUST fail to compile. If a future change makes
+any field `pub`, the doctest succeeds and `cargo test --doc` fails.
+That guard is the regression contract for round 5/6 of PR #237.
 
 - [ ] **Step 2: Run the failing test**
 
@@ -1500,103 +1509,80 @@ git commit -m "feat(core): RecordExclusion with ReadFilter*-only invariant (#95)
 ### Task 12: `explain_filter` pure function
 
 **Files:**
-- Create: `crates/cairn-core/src/pipeline/explain.rs`
+- Create: `crates/cairn-core/src/pipeline/explain.rs` (with inline `#[cfg(test)] mod tests`)
 - Modify: `crates/cairn-core/src/pipeline/mod.rs`
-- Create: `crates/cairn-core/tests/explain_filter.rs`
 
-- [ ] **Step 1: Write the failing test**
+`Candidate` and `explain_filter` are sealed to `cairn-core`:
+`Candidate`'s fields are private, the only constructor
+`Candidate::from_scope_filter` is `pub(crate)`, and `explain_filter` is
+`pub(crate)`. Together this means a candidate can only be produced
+inside `cairn-core` on the verb-runtime path that has already applied
+scope/visibility predicates, so `explain_filter` cannot be invoked
+with unfiltered store rows. Tests live inline so they can call the
+`pub(crate)` constructor; there is no external integration test file.
 
-Create `crates/cairn-core/tests/explain_filter.rs`:
+- [ ] **Step 1: Write the failing tests (inline)**
+
+In `crates/cairn-core/src/pipeline/explain.rs`, add the inline
+`#[cfg(test)] mod tests` block alongside the implementation:
 
 ```rust
-//! `explain_filter` partitions visible candidates into kept and
-//! excluded sets, attaching a `RecordExclusion` to each filtered
-//! record. Tier-1-invisible records must already be absent from the
-//! candidate set — this function does not see them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy_trace::{PolicyDetail, PolicyGate};
 
-use cairn_core::domain::TargetId;
-use cairn_core::pipeline::explain::{Candidate, ExplainConfig, ReadFilterReason, explain_filter};
-use cairn_core::policy_trace::{PolicyDetail, PolicyGate};
-
-// Build a valid 26-char ULID-shaped TargetId. Crockford base32 (no I L O U),
-// leading char 0..=7. Trailing char(s) replaced by `suffix` for uniqueness.
-fn id(suffix: char) -> TargetId {
-    // Base: 25 zeros after a leading '0'.
-    let mut s = String::from("01HQZX9F5N0000000000000000");
-    s.pop();
-    s.push(suffix);
-    TargetId::parse(s).unwrap()
-}
-
-#[test]
-fn empty_candidates_yields_empty_kept_and_excluded() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
-    let (kept, excluded) = explain_filter(Vec::<Candidate>::new(), &cfg);
-    assert!(kept.is_empty());
-    assert!(excluded.is_empty());
-}
-
-#[test]
-fn stale_candidate_is_excluded_with_staleness_gate() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
-    let candidates = vec![Candidate {
-        target_id: id('A'),
-        age_days: 90,
-        relevance_score: 0.8,
-        content_hash: "h1".to_owned(),
-    }];
-    let (kept, excluded) = explain_filter(candidates, &cfg);
-    assert!(kept.is_empty());
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0].gate, PolicyGate::ReadFilterStaleness);
-    assert_eq!(excluded[0].detail, PolicyDetail::None);
-}
-
-#[test]
-fn duplicate_content_hash_excluded_by_dedup() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
-    let candidates = vec![
-        Candidate { target_id: id('A'), age_days: 1, relevance_score: 0.9, content_hash: "h".to_owned() },
-        Candidate { target_id: id('B'), age_days: 1, relevance_score: 0.8, content_hash: "h".to_owned() },
-    ];
-    let (kept, excluded) = explain_filter(candidates, &cfg);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].target_id, id('A')); // higher relevance wins
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0].target_id, id('B'));
-    assert_eq!(excluded[0].gate, PolicyGate::ReadFilterDedup);
-}
-
-#[test]
-fn stale_takes_precedence_over_dedup() {
-    let cfg = ExplainConfig { staleness_threshold_days: 30, dedup_window: 5 };
-    let candidates = vec![
-        Candidate { target_id: id('A'), age_days: 90, relevance_score: 0.9, content_hash: "h".to_owned() },
-        Candidate { target_id: id('B'), age_days: 1,  relevance_score: 0.5, content_hash: "h".to_owned() },
-    ];
-    let (kept, excluded) = explain_filter(candidates, &cfg);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].target_id, id('B'));
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0].gate, PolicyGate::ReadFilterStaleness);
-}
-
-#[test]
-fn read_filter_reason_round_trips() {
-    let cases = [
-        (ReadFilterReason::Staleness, PolicyGate::ReadFilterStaleness),
-        (ReadFilterReason::Dedup, PolicyGate::ReadFilterDedup),
-        (ReadFilterReason::Relevance, PolicyGate::ReadFilterRelevance),
-    ];
-    for (reason, expected_gate) in cases {
-        assert_eq!(reason.as_gate(), expected_gate);
+    fn id(suffix: char) -> TargetId {
+        let mut s = String::from("01HQZX9F5N0000000000000000");
+        s.pop();
+        s.push(suffix);
+        TargetId::parse(s).unwrap()
     }
+
+    #[test]
+    fn empty_candidates_yields_empty_kept_and_excluded() {
+        let cfg = ExplainConfig { staleness_threshold_days: 30 };
+        let (kept, excluded) = explain_filter(Vec::<Candidate>::new(), cfg);
+        assert!(kept.is_empty());
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn stale_candidate_is_excluded_with_staleness_gate() {
+        let cfg = ExplainConfig { staleness_threshold_days: 30 };
+        let candidates = vec![
+            Candidate::from_scope_filter(id('A'), 90, 0.8, "h1".to_owned()),
+        ];
+        let (kept, excluded) = explain_filter(candidates, cfg);
+        assert!(kept.is_empty());
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterStaleness);
+        assert_eq!(excluded[0].detail(), &PolicyDetail::None);
+    }
+
+    #[test]
+    fn duplicate_content_hash_excluded_by_dedup() {
+        let cfg = ExplainConfig { staleness_threshold_days: 30 };
+        let candidates = vec![
+            Candidate::from_scope_filter(id('A'), 1, 0.9, "h".to_owned()),
+            Candidate::from_scope_filter(id('B'), 1, 0.8, "h".to_owned()),
+        ];
+        let (kept, excluded) = explain_filter(candidates, cfg);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].target_id(), &id('A')); // higher relevance wins
+        assert_eq!(excluded[0].target_id(), &id('B'));
+        assert_eq!(excluded[0].gate(), PolicyGate::ReadFilterDedup);
+    }
+
+    // Plus NaN coverage and ReadFilterReason round-trip tests — see the
+    // shipped file for the full set.
 }
 ```
 
 - [ ] **Step 2: Run the failing test**
 
-Run: `cargo nextest run -p cairn-core --test explain_filter`
+Run: `cargo nextest run -p cairn-core` and look for the `explain`
+inline tests.
 Expected: FAIL — `pipeline::explain` not found.
 
 - [ ] **Step 3: Implement the explain module**
@@ -1608,36 +1594,47 @@ Create `crates/cairn-core/src/pipeline/explain.rs`:
 //! kept and excluded subsets (brief §5.1). Tier-1-invisible records
 //! are filtered upstream and must not appear in the input.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use crate::domain::TargetId;
 use crate::policy_trace::{PolicyDetail, PolicyGate, RecordExclusion};
 
+/// Sealed type: fields private; only constructor `from_scope_filter`
+/// is `pub(crate)`. External crates cannot synthesize a candidate.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    pub target_id: TargetId,
-    pub age_days: u32,
-    pub relevance_score: f32,
-    pub content_hash: String,
+    target_id: TargetId,
+    age_days: u32,
+    relevance_score: f32,
+    content_hash: String,
+}
+
+impl Candidate {
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn from_scope_filter(
+        target_id: TargetId,
+        age_days: u32,
+        relevance_score: f32,
+        content_hash: String,
+    ) -> Self {
+        Self { target_id, age_days, relevance_score, content_hash }
+    }
+    pub fn target_id(&self) -> &TargetId { &self.target_id }
+    pub const fn age_days(&self) -> u32 { self.age_days }
+    pub const fn relevance_score(&self) -> f32 { self.relevance_score }
+    pub fn content_hash(&self) -> &str { &self.content_hash }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ExplainConfig {
     pub staleness_threshold_days: u32,
-    /// Number of recent records to consult for dedup-window comparison.
-    pub dedup_window: usize,
 }
 
-/// Reason a candidate was filtered. `as_gate` maps to the producer
-/// `PolicyGate` variant — closed because per-record exclusions are
-/// limited to Tier-2 read filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum ReadFilterReason {
-    Relevance,
-    Staleness,
-    Dedup,
-}
+pub enum ReadFilterReason { Relevance, Staleness, Dedup }
 
 impl ReadFilterReason {
     #[must_use]
@@ -1650,22 +1647,17 @@ impl ReadFilterReason {
     }
 }
 
-/// Partition `candidates` into kept and excluded sets. Order:
-/// 1. Staleness — exclude any candidate older than the threshold.
-/// 2. Dedup — within the dedup window, keep the highest-relevance
-///    candidate per `content_hash`; exclude the rest.
-///
-/// Relevance pruning is not applied here — callers that want a
-/// top-N cut compose this with their own ranker.
+/// Sealed to cairn-core. `cfg` taken by value (it's `Copy` and small).
+/// NaN scores lose to non-NaN; two NaNs resolve to first-seen.
+#[allow(dead_code)]
 #[must_use]
-pub fn explain_filter(
+pub(crate) fn explain_filter(
     candidates: Vec<Candidate>,
-    cfg: &ExplainConfig,
+    cfg: ExplainConfig,
 ) -> (Vec<Candidate>, Vec<RecordExclusion>) {
-    let mut kept: Vec<Candidate> = Vec::with_capacity(candidates.len());
     let mut excluded: Vec<RecordExclusion> = Vec::new();
 
-    // 1. Staleness pass.
+    // 1. Staleness pass — preserve original order.
     let mut after_stale: Vec<Candidate> = Vec::with_capacity(candidates.len());
     for c in candidates {
         if c.age_days > cfg.staleness_threshold_days {
@@ -1679,28 +1671,34 @@ pub fn explain_filter(
         }
     }
 
-    // 2. Dedup by content_hash within window — highest relevance wins.
-    let window = cfg.dedup_window.max(1);
-    let mut seen: HashSet<String> = HashSet::new();
-    // Sort by (content_hash, -relevance) so the first occurrence per hash is the winner.
-    let mut sorted = after_stale;
-    sorted.sort_by(|a, b| {
-        a.content_hash
-            .cmp(&b.content_hash)
-            .then_with(|| b.relevance_score.partial_cmp(&a.relevance_score).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    for c in sorted {
-        if !seen.insert(c.content_hash.clone()) {
+    // 2. Dedup by content_hash — keep highest-relevance per hash.
+    //    Non-NaN beats NaN; two NaNs resolve to first-seen.
+    let mut best: HashMap<String, usize> = HashMap::new();
+    for (idx, c) in after_stale.iter().enumerate() {
+        match best.get(&c.content_hash) {
+            None => { best.insert(c.content_hash.clone(), idx); }
+            Some(&prev) => {
+                let prev_score = after_stale[prev].relevance_score;
+                let cur_score = c.relevance_score;
+                let cur_wins = !cur_score.is_nan()
+                    && (prev_score.is_nan() || cur_score > prev_score);
+                if cur_wins {
+                    best.insert(c.content_hash.clone(), idx);
+                }
+            }
+        }
+    }
+    let kept_indices: HashSet<usize> = best.values().copied().collect();
+    let mut kept: Vec<Candidate> = Vec::with_capacity(kept_indices.len());
+    for (idx, c) in after_stale.into_iter().enumerate() {
+        if kept_indices.contains(&idx) {
+            kept.push(c);
+        } else {
             excluded.push(RecordExclusion::new(
                 c.target_id,
                 PolicyGate::ReadFilterDedup,
                 PolicyDetail::None,
             ));
-        } else if seen.len() <= window || kept.len() < window {
-            kept.push(c);
-        } else {
-            // Outside the dedup window — keep without dedup attribution
-            kept.push(c);
         }
     }
 
