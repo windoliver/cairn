@@ -12,7 +12,7 @@ use crate::generated::verbs::lint::{
 
 pub mod checks;
 
-/// One linted record + the per-row consent_model gate from the records
+/// One linted record + the per-row `consent_model` gate from the records
 /// table. PR-1 always carries `LegacyEvent` because the migration that
 /// adds the column is part of #253; lint behavior in PR-1 is independent
 /// of this value (the §6.5 deferred-info finding is emitted unconditionally).
@@ -162,6 +162,8 @@ pub(crate) fn target_record(id: &RecordId) -> Target {
 }
 
 /// Build a `Target` pointing at a vault path or table name.
+// Allow dead_code: used by forthcoming check stubs (index_drift, schema, etc.); scaffolded here so all checks share one helper.
+#[allow(dead_code)]
 pub(crate) fn target_path(path: impl Into<String>) -> Target {
     Target {
         record_id: None,
