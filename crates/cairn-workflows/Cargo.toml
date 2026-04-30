@@ -12,24 +12,28 @@ description = "Background workflows host (consolidate, promote, expire, evaluate
 
 [dependencies]
 cairn-core = { workspace = true }
+# Required for the canonical migration-0020 SQL constant — the
+# constructor hashes it to detect drift in the on-disk
+# `schema_migrations.sql_hash` row for the `workflow_jobs` table.
+# Pulling it through the package API keeps this crate self-contained
+# when packaged for publish.
 cairn-store-sqlite = { workspace = true }
 async-trait = { workspace = true }
 fs4 = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+ulid = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
 cairn-store-sqlite = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true
-
-# Forward-declared scaffold deps. Drop entries as their first call site lands.
-[package.metadata.cargo-machete]
-ignored = ["tokio", "tracing"]
