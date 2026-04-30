@@ -33,9 +33,9 @@ Acceptance (from #96):
 - Re-deriving embeddings or FTS5 content (counts-only, see §6.7).
 - Running `assemble_hot` to size the hot prefix (static estimate, see §6.6).
 - Cross-vault / federation checks (P3+).
-- New consent storage model — that lives in follow-up issue A (§11).
+- New consent storage model — that lives in follow-up #253 (§11).
 - Concurrency-safe coordination with `--fix-*` and WAL apply — follow-up
-  issue B (§11). PR-1 documents the race window and accepts that lint may
+  #254 (§11). PR-1 documents the race window and accepts that lint may
   produce transient false findings under concurrent rewrites; this is
   consistent with lint's role as a canary, not a transactional invariant.
 
@@ -203,14 +203,14 @@ implemented; finding is the canary).
 
 This check requires the consent receipt timeline (`ConsentLookup` +
 `covering_grant`), the per-record `consent_model` gate, and migrations
-that touch ingest. That work is **follow-up issue A** (§11).
+that touch ingest. That work is **follow-up #253** (§11).
 
-PR-1 emits exactly one `info` finding pointing at issue A:
+PR-1 emits exactly one `info` finding pointing at #253:
 - `kind = deferred_check`
 - `severity = info`
 - `message = "sensor-consent enforcement requires the receipt timeline
-  introduced in #<A>"`
-- `tracking_issue = <issue-A-number>`
+  introduced in #253"`
+- `tracking_issue = 253`
 
 The check engine therefore has full coverage of its advertised checks;
 the deferred surface is honest in lint output.
@@ -275,7 +275,7 @@ data); concurrent ingest/fix-markdown can in theory cause a transient
 `index_drift` warning if a write commits between counts. Documented in
 the `lint` man page entry as: *"run lint when no other writers are
 active for byte-stable output; transient findings are safe to re-run."*
-Follow-up issue B introduces the advisory lock that closes this.
+Follow-up #254 introduces the advisory lock that closes this.
 
 **Live store dependency.** Wiring depends on #46 (SQLite store wired
 into CLI dispatch). If #46 has not landed by the time this PR is ready,
@@ -318,24 +318,23 @@ Per CLAUDE.md §8 — full checklist before pushing. Critical items:
 
 ## 11. Follow-up issues (file alongside this PR)
 
-**Issue A — Consent receipt timeline + per-record gate.** Adds the
+**#253 — Consent receipt timeline + per-record gate.** Adds the
 `consent_timeline` table + ordered events keyed by `(consent_ref,
 seq)`, the `ConsentLookup` trait with `timeline()` / `covering_grant()`,
 the per-row `records.consent_model` column, and the ingest path changes
 that populate them. Wires §6.5 of this spec — at issue completion the
 deferred-check info finding is replaced with the full sub-check matrix
 (sensor binding, scope binding, issuance / expiry / revoke window,
-state-at-issue) under the per-record gate. Brief §14 amendment likely;
-flag on the issue.
+state-at-issue) under the per-record gate. Brief §14 amendment likely.
 
-**Issue B — Lint / fix / WAL advisory lock + projection drift check.**
+**#254 — Lint / fix / WAL advisory lock + projection drift check.**
 Adds `.cairn/lint.lock`, makes `--fix-markdown`, `--fix-folders`, and
 WAL apply cooperate on it. Adds the on-disk projection drift check as a
 new `index_drift` warning sub-classification (parse-failure path stays
 in `malformed_record` error). Closes the transient-finding window
 documented in §7 above.
 
-**Issue C — Phase-B consent enforcement.** Once issue A has been
+**#255 — Phase-B consent enforcement.** Once #253 has been
 deployed broadly, flips the `consent_model` default for new inserts to
 `receipt_timeline`, adds the schema check constraint that rejects
 mismatched ingests, and gates Phase B on a `cairn.writer.min_version`
