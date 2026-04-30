@@ -61,4 +61,7 @@ pipeline:
         max_tokens: null
         max_wall_ms: null
         max_turns: null
+search:
+  local_embeddings: true
+  embedding_model: bge-small-en-v1.5
 ```

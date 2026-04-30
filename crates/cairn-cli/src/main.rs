@@ -44,7 +44,10 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("CAIRN_VAULT").ok());
 
     let active_subcommand = matches.subcommand_name().unwrap_or("");
-    let needs_vault_guard = !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp");
+    // admin verbs resolve their own vault path from CAIRN_VAULT / CWD; the
+    // registry guard here would reject them when no vault is registered.
+    let needs_vault_guard =
+        !matches!(active_subcommand, "vault" | "bootstrap" | "plugins" | "mcp" | "admin");
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -98,12 +101,47 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("admin", sub)) => run_admin(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
             eprintln!("cairn: unknown subcommand '{verb}'");
             ExitCode::from(64)
         }
+    }
+}
+
+fn run_admin(matches: &ArgMatches) -> ExitCode {
+    // Admin verbs need the vault root and config. Resolve from CAIRN_VAULT
+    // env or current directory (same fallback as the search verb).
+    let vault_root = if let Ok(p) = std::env::var("CAIRN_VAULT") {
+        std::path::PathBuf::from(p)
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    };
+
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn admin: config error — {e:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
+
+    match matches.subcommand() {
+        Some(("model", sub)) => match sub.subcommand() {
+            Some(("fetch", fetch_sub)) => {
+                verbs::admin_model_fetch::run(fetch_sub, &vault_root, &config)
+            }
+            _ => unreachable!(
+                "clap subcommand_required(true) on admin model ensures a subcommand is always present"
+            ),
+        },
+        Some(("reindex", sub)) => verbs::admin_reindex::run(sub, &vault_root, &config),
+        _ => unreachable!(
+            "clap subcommand_required(true) on admin ensures a subcommand is always present"
+        ),
     }
 }
 
@@ -116,26 +154,68 @@ fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
     let force = matches.get_flag("force");
 
-    let opts = cairn_cli::vault::BootstrapOpts { vault_path, force };
+    let opts = cairn_cli::vault::BootstrapOpts {
+        vault_path: vault_path.clone(),
+        force,
+    };
 
-    match cairn_cli::vault::bootstrap(&opts) {
-        Ok(receipt) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&receipt)
-                        .expect("invariant: BootstrapReceipt is always serializable")
-                );
-            } else {
-                println!("{}", cairn_cli::vault::render_human(&receipt));
-            }
-            ExitCode::SUCCESS
-        }
+    let receipt = match cairn_cli::vault::bootstrap(&opts) {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("cairn bootstrap: {e:#}");
-            ExitCode::from(74) // EX_IOERR
+            return ExitCode::from(74); // EX_IOERR
+        }
+    };
+
+    // After vault layout creation, load config and optionally fetch the
+    // embedding model (search.local_embeddings: true and model not present).
+    let config =
+        cairn_cli::config::load(&vault_path, &cairn_cli::config::CliOverrides::default())
+            .unwrap_or_default();
+
+    if config.search.local_embeddings {
+        let models_root = vault_path.join(".cairn").join("models");
+        let kind = config.search.embedding_model;
+        let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+        if !cache.is_present(kind) {
+            eprintln!(
+                "cairn bootstrap: fetching embedding model '{}' (~25 MB)…",
+                kind.as_str()
+            );
+            match cache.fetch(kind) {
+                Ok(report) => {
+                    eprintln!(
+                        "cairn bootstrap: model '{}' fetched ({} bytes, integrity: {})",
+                        kind.as_str(),
+                        report.bytes_downloaded,
+                        &report.integrity[..report.integrity.len().min(12)]
+                    );
+                }
+                Err(e) => {
+                    // Non-fatal: warn but continue. The vault layout is already
+                    // set up; the user can run `cairn admin model fetch` later.
+                    eprintln!(
+                        "cairn bootstrap: warning — could not fetch embedding model '{}': {e:#}",
+                        kind.as_str()
+                    );
+                    eprintln!(
+                        "cairn bootstrap: run `cairn admin model fetch` when network is available"
+                    );
+                }
+            }
         }
     }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&receipt)
+                .expect("invariant: BootstrapReceipt is always serializable")
+        );
+    } else {
+        println!("{}", cairn_cli::vault::render_human(&receipt));
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_skill(matches: &ArgMatches) -> ExitCode {

@@ -3,6 +3,11 @@ audience = "user"
 page = "usage/cli.md"
 generated_reference = "reference/generated/cli.md"
 
+[packages.cairn-embeddings-local]
+audience = "internal"
+page = ""
+generated_reference = ""
+
 [packages.cairn-core]
 audience = "sdk-author"
 page = "reference/rust-api.md"

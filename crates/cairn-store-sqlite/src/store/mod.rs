@@ -92,6 +92,17 @@ impl SqliteMemoryStore {
     pub fn raw_conn(&self) -> Option<&Arc<AsyncConn>> {
         self.conn.as_ref()
     }
+
+    /// Borrow the underlying async connection for admin verbs (e.g.
+    /// `cairn admin reindex`) that need to call `drain_once` directly.
+    ///
+    /// Returns `None` when the store was constructed via `Default::default`
+    /// (registry stub — no connection). Production callers should treat
+    /// `None` as an internal error.
+    #[must_use]
+    pub fn raw_conn_for_admin(&self) -> Option<&Arc<AsyncConn>> {
+        self.conn.as_ref()
+    }
 }
 
 impl std::fmt::Debug for SqliteMemoryStore {

@@ -1,5 +1,7 @@
 //! Verb handler dispatch — one submodule per verb.
 
+pub mod admin_model_fetch;
+pub mod admin_reindex;
 pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;

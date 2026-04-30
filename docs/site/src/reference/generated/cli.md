@@ -28,6 +28,7 @@ Commands:
                  cairn verbs, writes responses to stdout. Blocks until stdin closes.
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
+  admin          Administrative operations (model management, reindex)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -58,3 +59,4 @@ Options:
 - [`cairn mcp`](commands/mcp.md) - Start an MCP stdio server. Reads MCP frames from stdin, dispatches to the eight cairn verbs, writes responses to stdout. Blocks until stdin closes.
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
+- [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex)
