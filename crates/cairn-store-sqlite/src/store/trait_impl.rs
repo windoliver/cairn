@@ -7,13 +7,13 @@
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
     Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
-    MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason, UpsertOutcome,
+    MemoryStoreCapabilities, RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError,
+    TombstoneReason, UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 
 use crate::error::StoreError as ConcreteError;
-use crate::open::CAPS;
 use crate::store::SqliteMemoryStore;
 use crate::{ACCEPTED_RANGE, PLUGIN_NAME};
 
@@ -28,7 +28,7 @@ impl MemoryStore for SqliteMemoryStore {
     }
 
     fn capabilities(&self) -> &MemoryStoreCapabilities {
-        &CAPS
+        &self.caps
     }
 
     fn supported_contract_versions(&self) -> VersionRange {
@@ -99,5 +99,15 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("search_keyword");
         }
         self.do_search_keyword(args).await.map_err(Into::into)
+    }
+
+    async fn search_semantic(
+        &self,
+        args: &SemanticSearchArgs<'_>,
+    ) -> Result<SemanticSearchPage, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("search_semantic");
+        }
+        self.do_search_semantic(args).map_err(Into::into)
     }
 }

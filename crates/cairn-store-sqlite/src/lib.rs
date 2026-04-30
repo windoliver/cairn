@@ -16,12 +16,13 @@ pub mod vec_ext;
 mod verify;
 
 pub use error::StoreError;
-pub use open::{open, open_in_memory};
+pub use open::{open, open_in_memory, open_in_memory_with_embedder, open_with_embedder};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use open::{open_in_memory_sync, open_sync};
-pub use store::SqliteMemoryStore;
+pub use store::reindex::{DrainStats, drain_once};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
+pub use store::SqliteMemoryStore;
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};

@@ -3,6 +3,7 @@
 pub(crate) mod edges;
 pub(crate) mod projection;
 pub(crate) mod read;
+pub(crate) mod reindex;
 pub(crate) mod search;
 pub mod sessions;
 pub(crate) mod tombstone;
@@ -12,7 +13,10 @@ pub(crate) mod upsert;
 
 use std::sync::Arc;
 
+use cairn_core::contract::memory_store::MemoryStoreCapabilities;
+use cairn_embeddings_local::EmbeddingModel;
 use tokio_rusqlite::Connection as AsyncConn;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::StoreError;
 
@@ -23,15 +27,43 @@ use crate::error::StoreError;
 /// - [`SqliteMemoryStore::default`] — unconnected registry stub used by
 ///   the `register_plugin!` macro for identity/capability advertisement.
 ///   Trait verb methods return a "not initialized" error.
-/// - [`crate::open()`] / [`crate::open_in_memory()`] — connected store with
-///   pragmas + migrations applied. Trait verb methods route through the
-///   wrapped `tokio_rusqlite::Connection` on a dedicated DB thread.
+/// - [`crate::open()`] / [`crate::open_in_memory()`] / [`crate::open_with_embedder()`] —
+///   connected store with pragmas + migrations applied. Trait verb methods
+///   route through the wrapped `tokio_rusqlite::Connection` on a dedicated
+///   DB thread. When an embedder is supplied, the `vector` capability is
+///   enabled and a background drain loop is spawned.
 ///
 /// Construction is side-effect free per brief §4.1; the `open` path is
 /// the only side-effecting one.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SqliteMemoryStore {
     pub(crate) conn: Option<Arc<AsyncConn>>,
+    /// Optional local embedding model. Presence enables `caps.vector`.
+    /// Used by Task 7 (`do_search_semantic`) and Task 8 (embed-on-write).
+    #[allow(dead_code, reason = "consumed in Tasks 7 and 8 (do_search_semantic, upsert)")]
+    pub(crate) embedder: Option<Arc<dyn EmbeddingModel>>,
+    /// Dynamic capability advertisement. Set at open time based on whether
+    /// an embedder was supplied.
+    pub(crate) caps: MemoryStoreCapabilities,
+    /// Cancellation token for the background reindex drain loop. Dropped when
+    /// the store is dropped, signalling the drain task to exit gracefully.
+    pub(crate) _cancel: Option<CancellationToken>,
+}
+
+impl Default for SqliteMemoryStore {
+    fn default() -> Self {
+        Self {
+            conn: None,
+            embedder: None,
+            caps: MemoryStoreCapabilities {
+                fts: true,
+                vector: false,
+                graph_edges: true,
+                transactions: true,
+            },
+            _cancel: None,
+        }
+    }
 }
 
 impl SqliteMemoryStore {

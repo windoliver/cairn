@@ -442,6 +442,24 @@ fn is_fts_message(msg: &str, stage: FtsErrorStage) -> bool {
     stage == FtsErrorStage::Runtime && lower_starts_with("no such column")
 }
 
+impl SqliteMemoryStore {
+    /// Semantic ANN search stub.
+    ///
+    /// Returns [`StoreError::CapabilityUnavailable`] unconditionally. The
+    /// real implementation arrives in Task 7; this stub keeps Task 6 and
+    /// the trait dispatch compiling in the interim.
+    ///
+    /// Note: `&self` is unused in this stub but required by the method
+    /// signature that Task 7 will fully implement with DB access.
+    #[allow(clippy::unused_self, reason = "Task 7 will use self.require_conn(...)")]
+    pub(crate) fn do_search_semantic(
+        &self,
+        _args: &cairn_core::contract::memory_store::SemanticSearchArgs<'_>,
+    ) -> Result<cairn_core::contract::memory_store::SemanticSearchPage, StoreError> {
+        Err(StoreError::CapabilityUnavailable { what: "vector" })
+    }
+}
+
 /// Helper trait so the worker callback can map a `StoreError` into a
 /// `tokio_rusqlite::Error::Other` without naming the wrapper type at
 /// every call site.
