@@ -440,12 +440,14 @@ pub enum CapturePayload {
         /// reproduces the same routing decision the dispatch driver
         /// took at capture time.
         ///
-        /// Forward-compat at the serde layer: events serialized before
-        /// this field existed deserialize with `None`. Strictness lives
-        /// at the envelope-validation boundary —
-        /// [`CapturePayload::validate`] rejects `None` so legacy data
-        /// fails loudly during validation rather than silently routing
-        /// through a different pipeline path.
+        /// Forward-compat: events serialized before this field existed
+        /// deserialize with `None` and still pass
+        /// [`CapturePayload::validate`] so replay / WAL recovery /
+        /// re-ingest do not strand historical data. The squash boundary
+        /// (`UnstructuredTextBytes::try_from_terminal_event`) handles
+        /// `None` with a distinct `LegacyMissingContext` error so
+        /// callers see "needs migration" rather than mistaking legacy
+        /// data for a deliberately structured payload.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<TerminalContext>,
     },
@@ -608,25 +610,20 @@ impl CapturePayload {
                 require_non_empty("file_path", file_path)?;
                 require_non_empty("event_kind", event_kind)?;
             }
-            Self::Terminal {
-                command, context, ..
-            } => {
+            Self::Terminal { command, .. } => {
                 require_non_empty("command", command)?;
-                // #218: every terminal event reaching `validate` must
-                // carry a context — sensors set this at capture time
-                // and the dispatch driver (#217) reads it back. A
-                // missing field means the event was authored by a
-                // pre-#218 writer; treating that as a silent
-                // squash-bypass would mask wire-format drift, so we
-                // surface it as a validation failure here. Forward-
-                // compat at the serde layer is preserved
-                // (`Option<TerminalContext>` + `serde(default)`); the
-                // strictness lives at the envelope-validation boundary
-                // so legacy data fails loudly instead of silently
-                // routing through a different pipeline path.
-                if context.is_none() {
-                    return Err(DomainError::EmptyField { field: "context" });
-                }
+                // #218: `context` is intentionally NOT validated as
+                // required here. Pre-#218 events deserialize with
+                // `context: None` and must remain readable across
+                // upgrade so replay / WAL recovery / re-ingest do not
+                // strand historical data. The squash boundary
+                // (`UnstructuredTextBytes::try_from_terminal_event`)
+                // refuses to silently route `None` as a structured
+                // bypass — it returns a distinct
+                // `LegacyMissingContext` error instead, so callers
+                // surface the migration-needed signal without losing
+                // the ability to deserialize the event at the
+                // envelope boundary.
             }
             Self::Clipboard { mime_type, .. } => {
                 require_non_empty("mime_type", mime_type)?;

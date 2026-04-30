@@ -250,13 +250,13 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// payload as interactive.
     ///
     /// # Errors
-    /// `NotTerminalPayload`, `HashMismatch`, or
-    /// `StructuredContextRejected` per the spec's caller contract. A
-    /// pre-#218 `Terminal` payload whose `context` is `None` fails at
-    /// the envelope-validation step ahead of squash routing and is
-    /// returned as `EventValidationFailed` — see
-    /// [`CapturePayload::validate`] for why legacy `None` is rejected
-    /// loudly rather than treated as a silent bypass.
+    /// `NotTerminalPayload`, `HashMismatch`, `StructuredContextRejected`
+    /// per the spec's caller contract, or `LegacyMissingContext` for a
+    /// pre-#218 `Terminal` payload whose `context` field is `None`.
+    /// `LegacyMissingContext` is distinct from
+    /// `StructuredContextRejected` so callers can distinguish "needs
+    /// migration" from "deliberately structured / squash-bypass" —
+    /// see [`UnstructuredBindError::LegacyMissingContext`].
     // Only reachable from #[cfg(test)] modules until #217 wires the
     // dispatch driver; default-feature non-test builds legitimately
     // leave it dead.
@@ -277,8 +277,12 @@ impl<'a> UnstructuredTextBytes<'a> {
         let CapturePayload::Terminal { context, .. } = &event.payload else {
             return Err(UnstructuredBindError::NotTerminalPayload);
         };
-        if *context != Some(TerminalContext::InteractiveTty) {
-            return Err(UnstructuredBindError::StructuredContextRejected);
+        match context {
+            Some(TerminalContext::InteractiveTty) => {}
+            Some(TerminalContext::NonInteractiveOrStructured) => {
+                return Err(UnstructuredBindError::StructuredContextRejected);
+            }
+            None => return Err(UnstructuredBindError::LegacyMissingContext),
         }
         let digest = Sha256::digest(raw);
         let computed = PayloadHash::parse(format!("sha256:{digest:x}"))
@@ -322,6 +326,16 @@ pub enum UnstructuredBindError {
          dispatch driver must bypass squash for this context"
     )]
     StructuredContextRejected,
+    /// The event is from a pre-#218 writer and carries no `context`
+    /// field. Distinct from `StructuredContextRejected` so callers do
+    /// not mistake legacy data for a deliberately structured payload —
+    /// surfacing this lets the dispatch driver / replay path either
+    /// migrate the event or surface a "needs migration" signal.
+    #[error(
+        "Terminal capture is missing the #218 `context` field; \
+         legacy event needs migration before squash routing"
+    )]
+    LegacyMissingContext,
     /// The supplied `CaptureEvent` failed envelope validation
     /// ([`CaptureEvent::validate`]). The wrapper refuses to operate on
     /// malformed events to avoid lossy compaction of unintended bytes.
@@ -488,26 +502,24 @@ mod wrapper_tests {
     }
 
     /// A pre-#218 (legacy) terminal event has no `context` field
-    /// (`None` after `serde(default)`). To prevent silent squash-bypass
-    /// drift on legacy data, [`CapturePayload::validate`] rejects
-    /// `None` for terminal payloads — the squash constructor surfaces
-    /// it as `EventValidationFailed`, not `StructuredContextRejected`,
-    /// so callers cannot mistake legacy data for a deliberately
-    /// non-interactive payload.
+    /// (`None` after `serde(default)`). The squash constructor returns
+    /// a distinct `LegacyMissingContext` error — distinct from
+    /// `StructuredContextRejected` — so callers can distinguish
+    /// "needs migration" from "deliberately structured payload".
+    /// `validate()` still passes so the event remains readable across
+    /// upgrade (replay / WAL recovery / re-ingest).
     #[test]
-    fn rejects_missing_context_via_validate() {
+    fn rejects_legacy_missing_context() {
         let bytes = b"hello\n";
         let mut evt = terminal_event(bytes);
         if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
             *context = None;
         }
+        // `validate()` accepts legacy events so deserialize / replay
+        // stays unbroken across upgrade.
+        evt.payload.validate().expect("legacy event must validate");
         let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
-        match err {
-            UnstructuredBindError::EventValidationFailed(
-                crate::domain::DomainError::EmptyField { field },
-            ) => assert_eq!(field, "context"),
-            other => panic!("expected EventValidationFailed(EmptyField{{context}}), got {other:?}"),
-        }
+        assert!(matches!(err, UnstructuredBindError::LegacyMissingContext));
     }
 
     #[test]
@@ -3764,11 +3776,36 @@ pub fn fuzz_entrypoint(raw: &[u8], cfg: &SquashConfig) -> Option<SquashOutput> {
         payload: CapturePayload::Terminal {
             command: "fuzz".into(),
             exit_code: Some(0),
+            // #218: required for the squash boundary to accept the
+            // event. Without this, every fuzz input would short-circuit
+            // at `try_from_terminal_event` and the harness would stop
+            // exercising squash invariants.
+            context: Some(TerminalContext::InteractiveTty),
         },
         source_family: SourceFamily::Terminal,
     };
     let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw).ok()?;
     Some(squash(wrapper, cfg))
+}
+
+#[cfg(all(test, feature = "fuzz"))]
+mod fuzz_entrypoint_smoke {
+    use super::*;
+
+    /// Regression for #218 review-loop round 2: ensure the fuzz harness
+    /// fixture still constructs a valid `UnstructuredTextBytes` so the
+    /// squash invariants stay covered by fuzzing. If `fuzz_entrypoint`
+    /// returns `None` for a basic input, every libFuzzer iteration would
+    /// short-circuit and silently disable the harness.
+    #[test]
+    fn fuzz_entrypoint_returns_some_for_basic_input() {
+        let cfg = SquashConfig::default();
+        let out = fuzz_entrypoint(b"hello fuzz\n", &cfg);
+        assert!(
+            out.is_some(),
+            "fuzz_entrypoint short-circuited — squash fuzz harness would emit no coverage"
+        );
+    }
 }
 
 // Invariant: Sha256::digest produces a fixed 32-byte output that always
