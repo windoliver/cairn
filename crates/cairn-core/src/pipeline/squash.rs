@@ -1252,6 +1252,77 @@ mod wrapper_tests {
         );
     }
 
+    /// Round-9 (newer loop) regression: oversize bypass must NOT count
+    /// CRLF (`\r\n`) and CRCRLF (`\r\r\n`) line endings as bare-CR
+    /// hazards — stage 2 normalizes those to `\n`, and the bypass-side
+    /// audit count must mirror that or it will misclassify every
+    /// Windows-encoded large log as a CR-bearing capture and drive
+    /// false warning/fallback behavior. Built around a CRLF-only
+    /// payload large enough to trip `ByteCeiling` so it lands on the
+    /// bypass path.
+    #[test]
+    fn oversize_bypass_crlf_only_does_not_inflate_cr_bearing_lines() {
+        let mut raw: Vec<u8> = Vec::new();
+        // 200 KB of CRLF-terminated lines — well past MAX_INPUT_BYTES.
+        for i in 0..10_000 {
+            raw.extend_from_slice(format!("windows-style-line-{i:05}\r\n").as_bytes());
+        }
+        // Sprinkle a CRCRLF to ensure stage 2's CRCRLF→LF collapse rule
+        // is mirrored too (those must also not count).
+        raw.extend_from_slice(b"crcrlf-line\r\r\n");
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert_eq!(
+            out.stats.cr_bearing_lines, 0,
+            "CRLF-only payload must not register as CR-bearing on bypass"
+        );
+    }
+
+    /// Round-9 sibling: a payload with ONE bare CR mixed into otherwise
+    /// CRLF-encoded content must report exactly that one line as
+    /// CR-bearing. Asserts the CRLF-stripping logic does not also strip
+    /// genuine bare-CR signals.
+    #[test]
+    fn oversize_bypass_bare_cr_counted_amid_crlf() {
+        let mut raw: Vec<u8> = Vec::new();
+        for i in 0..5_000 {
+            raw.extend_from_slice(format!("clean-{i:05}\r\n").as_bytes());
+        }
+        // One genuine progress-bar line with bare CR (no terminating LF
+        // immediately after the CR).
+        raw.extend_from_slice(b"download 50%\rdownload 100%\r\n");
+        for i in 0..5_000 {
+            raw.extend_from_slice(format!("more-{i:05}\r\n").as_bytes());
+        }
+        let raw_byte_len = raw.len();
+        let raw_hash = super::sha256_payload_hash(&raw);
+        let cfg = SquashConfig::default();
+        let stats = SquashStats::default();
+        let out = super::oversize_bypass(
+            &raw,
+            raw_hash,
+            raw_byte_len,
+            &cfg,
+            stats,
+            super::BypassReason::ByteCeiling,
+        );
+        assert_eq!(
+            out.stats.cr_bearing_lines, 1,
+            "exactly one bare-CR line should register; got {}",
+            out.stats.cr_bearing_lines,
+        );
+    }
+
     /// Round-1 (newer loop) regression: bypass `lines_dropped_truncate`
     /// must reflect raw lines actually omitted from the middle, and
     /// `bytes_dropped_truncate` must exclude ANSI bytes stripped during
@@ -3811,22 +3882,51 @@ fn oversize_bypass(
         }
         BypassReason::ByteCeiling | BypassReason::DecodeExpansion => 0, // not rendered for these branches
     };
-    // Audit signal: count CR-bearing lines from the FULL raw input rather
-    // than accumulating per-window inside the bypass. The bypass only
-    // sanitizes head/tail/suffix slices, so a huge payload with CR-bearing
-    // progress lines concentrated in the dropped middle would otherwise
-    // report cr_bearing_lines == 0 and hide a source-capture hazard
-    // exactly on the captures most likely to hit it (round-8 finding).
-    // Bare `\r` (0x0D) survives stage 1 (lossy UTF-8 keeps ASCII) and
-    // stage 2 (ANSI strip does not touch CR), so a raw-byte split-on-`\n`
-    // count matches what the staged path computes on stage2 output.
-    // Computing once at the top also avoids double-counting when the
-    // giant-final-line suffix branch reprocesses a source range that the
-    // head-window has already scanned.
-    stats.cr_bearing_lines = raw_bytes
-        .split(|&b| b == b'\n')
-        .filter(|line| line.contains(&b'\r'))
-        .count();
+    // Audit signal: count BARE-CR-bearing lines from the FULL raw input
+    // rather than accumulating per-window inside the bypass. The bypass
+    // only sanitizes head/tail/suffix slices, so a huge payload with
+    // CR-bearing progress lines concentrated in the dropped middle
+    // would otherwise report cr_bearing_lines == 0 and hide a source-
+    // capture hazard exactly on the captures most likely to hit it
+    // (round-8 finding).
+    //
+    // CRLF normalization parity (round-9 finding): the staged path's
+    // stage 2 collapses `\r\n` (and any preceding `\r` run, i.e.,
+    // `\r\r\n`) to `\n` before computing this counter. A naive raw-byte
+    // split-on-`\n` would mis-count every Windows-style line as
+    // CR-bearing, breaking staged-vs-bypass equivalence on the most
+    // common large-log shape. Walk lines manually and strip the
+    // trailing-`\r` run from each `\n`-terminated line before checking
+    // for `\r`. An unterminated final line keeps its trailing `\r`
+    // (stage 2 preserves it as bare CR there).
+    //
+    // Residual gap: `\r` bytes appearing INSIDE an unterminated control
+    // string that stage 2's OSC recovery would discard remain counted
+    // here — the bypass cannot affordably re-run the escape-sequence
+    // parser over the full input. This is acknowledged over-count, not
+    // an under-count, and only fires on captures whose dropped middle
+    // contains an unterminated `ESC ]` body — vanishingly rare and
+    // strictly safer than the under-count it replaces.
+    stats.cr_bearing_lines = {
+        let mut count = 0usize;
+        let mut start = 0usize;
+        for (i, &b) in raw_bytes.iter().enumerate() {
+            if b == b'\n' {
+                let mut end = i;
+                while end > start && raw_bytes[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                if raw_bytes[start..end].contains(&b'\r') {
+                    count += 1;
+                }
+                start = i + 1;
+            }
+        }
+        if start < raw_bytes.len() && raw_bytes[start..].contains(&b'\r') {
+            count += 1;
+        }
+        count
+    };
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
