@@ -200,8 +200,20 @@ fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
     while i < bytes.len() {
         let b = bytes[i];
         if matches!(b, b'"' | b'\'' | b'`') {
+            // Skip apostrophes that look like contraction or possessive
+            // markers — i.e. an alphabetic byte on each side. Without
+            // this, `don't forget John's address` would treat the
+            // apostrophes as a quote pair and silently drop `forget`.
+            if b == b'\'' && is_word_internal_apostrophe(bytes, i) {
+                i += 1;
+                continue;
+            }
             let mut j = i + 1;
             while j < bytes.len() && bytes[j] != b {
+                if b == b'\'' && bytes[j] == b'\'' && is_word_internal_apostrophe(bytes, j) {
+                    j += 1;
+                    continue;
+                }
                 j += 1;
             }
             if j < bytes.len() {
@@ -213,6 +225,13 @@ fn collect_quote_spans(body: &str) -> Vec<(usize, usize)> {
         i += 1;
     }
     spans
+}
+
+fn is_word_internal_apostrophe(bytes: &[u8], pos: usize) -> bool {
+    if pos == 0 || pos + 1 >= bytes.len() {
+        return false;
+    }
+    bytes[pos - 1].is_ascii_alphabetic() && bytes[pos + 1].is_ascii_alphabetic()
 }
 
 /// Phrase window: a slice of the body anchored at a prefilter hit, ending

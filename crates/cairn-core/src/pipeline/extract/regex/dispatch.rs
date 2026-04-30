@@ -113,7 +113,6 @@ pub(crate) async fn dispatch(
             // against `max_user_drafts`. Phase B continues consuming the
             // user-output budget that hook/tool-frame already partially
             // drew from.
-            let phase_b_baseline = outputs.len();
             let mut user_count = user_count_after_a;
             let wall_b = Instant::now();
             'phase_b: for window in &windows {
@@ -124,7 +123,12 @@ pub(crate) async fn dispatch(
                 for rule in &rules.user_text {
                     let elapsed_ms = wall_b.elapsed().as_millis() as u32;
                     if elapsed_ms > budget.max_wall_ms {
-                        if outputs.len() == phase_b_baseline {
+                        // Preserve any earlier outputs (Phase A built-ins,
+                        // user hook/tool-frame, prior Phase B matches).
+                        // Only return a hard error when no extractor
+                        // output exists at all — built-in triggers must
+                        // never be silently dropped under back-pressure.
+                        if outputs.is_empty() {
                             return Err(ExtractError::BudgetExceeded {
                                 worker: "regex",
                                 elapsed_ms,

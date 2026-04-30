@@ -190,6 +190,22 @@ async fn oversize_body_still_extracts_trigger() {
 }
 
 #[tokio::test]
+async fn apostrophes_in_contractions_do_not_swallow_trigger() {
+    // `don't forget John's address` must extract the forget intent —
+    // contraction/possessive apostrophes must not be paired as a
+    // quote span around the trigger.
+    let extractor = RegexExtractor::builtin();
+    let event = cli_event();
+    let input = body_input(&event, "don't worry. forget John's address");
+    let res = extractor.extract(&input).await.expect("ok");
+    assert_eq!(res.outputs.len(), 1, "expected forget output");
+    let ExtractOutput::Forget(intent) = &res.outputs[0] else {
+        panic!("expected forget");
+    };
+    assert!(intent.target_text_normalized.contains("john's address"));
+}
+
+#[tokio::test]
 async fn quoted_forget_target_strips_outer_quotes() {
     // `forget "my old address"` must emit `my old address`, not
     // `"my old address"`, so the resolver matches the stored record.
