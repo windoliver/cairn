@@ -96,6 +96,10 @@ pub async fn commit_first_identity(
     File::open(&pending_path)
         .and_then(|f| f.sync_all())
         .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    // fsync the parent directory so the new dirent itself is durable —
+    // file-content fsync alone doesn't guarantee the directory entry survives
+    // a power loss on POSIX.
+    fsync_dir(&cairn_dir)?;
 
     let witness_hash = WitnessHash::from_witness(&witness);
 
@@ -122,8 +126,10 @@ pub async fn commit_first_identity(
     File::open(&binding_path)
         .and_then(|f| f.sync_all())
         .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fsync_dir(&cairn_dir)?;
     fs::remove_file(&pending_path)
         .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))?;
+    fsync_dir(&cairn_dir)?;
 
     // ── Step 5: store the identity keypair ────────────────────────────────────
     keystore
@@ -136,4 +142,15 @@ pub async fn commit_first_identity(
         .await?;
 
     Ok(())
+}
+
+/// fsync the directory at `dir` so its dirent changes (file creates, removes,
+/// renames) are durable across crashes. POSIX file-content fsync does NOT
+/// imply directory metadata durability; without this, a crash between two
+/// sentinel transitions can leave neither file present.
+fn fsync_dir(dir: &std::path::Path) -> Result<(), IdentityServiceError> {
+    use std::fs::File;
+    File::open(dir)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| IdentityServiceError::Keystore(KeystoreError::Backend(Box::new(e))))
 }
