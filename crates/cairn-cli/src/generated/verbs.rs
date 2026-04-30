@@ -27,6 +27,7 @@ pub fn search_subcommand() -> clap::Command {
         .arg(clap::Arg::new("filters").long("filters").value_name("JSON"))
         .arg(clap::Arg::new("citations").long("citations").value_name("ENUM").value_parser(["on", "compact", "off"]))
         .arg(clap::Arg::new("cursor").long("cursor").value_name("STRING"))
+        .arg(clap::Arg::new("explain").long("explain").action(clap::ArgAction::SetTrue))
         .arg(clap::Arg::new("query").help("Free-text query string.").required(false))
 }
 

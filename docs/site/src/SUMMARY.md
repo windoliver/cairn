@@ -52,6 +52,7 @@
 - [Bundled Plugins](reference/generated/plugins.md)
 - [IDL](reference/idl.md)
 - [Rust API](reference/rust-api.md)
+- [Policy Gates](reference/policy-gates.md)
 
 # Maintainers
 

@@ -14,4 +14,5 @@ pub mod domain;
 pub mod error;
 pub mod generated;
 pub mod pipeline;
+pub mod policy_trace;
 pub mod verifier;

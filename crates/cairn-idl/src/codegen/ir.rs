@@ -1424,6 +1424,18 @@ fn collect_capability_overrides(
                     capability: cap.to_string(),
                 });
             }
+            // Boolean-level — `x-cairn-capability-when-true` on a `type: boolean`
+            // property (e.g. `search.explain`). Emits `path: "<property>=true"` so
+            // the MCP transport can gate `explain: true` without special-casing it.
+            if let Some(cap) = prop
+                .get("x-cairn-capability-when-true")
+                .and_then(Value::as_str)
+            {
+                out.push(CapabilityOverride {
+                    path: format!("{k}=true"),
+                    capability: cap.to_string(),
+                });
+            }
             // Const-level — `oneOf` of `{const: <wire>, x-cairn-capability: <cap>}`
             // entries (search.mode pattern). Each const becomes its own override
             // keyed by `<property>=<wire>` so the MCP layer can reason about the
