@@ -110,9 +110,19 @@ impl Keystore for OsKeystore {
 
     async fn delete_keypair(&self, handle: &SecretHandle) -> Result<(), KeystoreError> {
         let entry = self.entry(handle)?;
-        tokio::task::spawn_blocking(move || entry.delete_credential().map_err(map_keyring_err))
-            .await
-            .map_err(|e| KeystoreError::Backend(Box::new(e)))?
+        // Contract: deleting a missing handle is a success. The eldest-key
+        // eviction step in rotation runs after the registry has already
+        // committed, so a `NoEntry` from the underlying keyring (e.g. the
+        // entry was already removed by a concurrent operator) MUST NOT
+        // surface as a post-commit failure.
+        let res: Result<(), KeystoreError> =
+            tokio::task::spawn_blocking(move || entry.delete_credential().map_err(map_keyring_err))
+                .await
+                .map_err(|e| KeystoreError::Backend(Box::new(e)))?;
+        match res {
+            Ok(()) | Err(KeystoreError::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     async fn store_secret(&self, handle: &SecretHandle, bytes: &[u8]) -> Result<(), KeystoreError> {
