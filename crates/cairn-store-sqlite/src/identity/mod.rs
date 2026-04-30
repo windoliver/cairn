@@ -78,6 +78,7 @@ impl SqliteIdentityRegistry {
     /// Returns [`RegistryError::Backend`] if the connection or migration fails.
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory().map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Self::configure_connection(&conn)?;
         Self::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -91,10 +92,30 @@ impl SqliteIdentityRegistry {
     /// Returns [`RegistryError::Backend`] if the connection or migration fails.
     pub fn open(db_path: &Path) -> Result<Self, RegistryError> {
         let conn = Connection::open(db_path).map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        Self::configure_connection(&conn)?;
         Self::run_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    /// Apply per-connection pragmas. `SQLite` enforces foreign keys per
+    /// connection and they default to OFF; the schema's `ON DELETE CASCADE`
+    /// rules and composite receipt FKs are only honored when this pragma
+    /// is on. Fail closed if it cannot be enabled — silently running with
+    /// FK enforcement off would mask integrity bugs.
+    fn configure_connection(conn: &Connection) -> Result<(), RegistryError> {
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .map_err(|e| RegistryError::Backend(Box::new(e)))?;
+        if on != 1 {
+            return Err(RegistryError::Backend(
+                "PRAGMA foreign_keys did not stick — FK enforcement off".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Apply [`MIGRATION_0002`] to `conn` if it has not already been applied.
