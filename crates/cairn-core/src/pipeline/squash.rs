@@ -1809,7 +1809,13 @@ pub struct SquashOutput {
 pub struct SquashStats {
     /// Whether stage 2 stripped any ANSI escape sequence.
     pub ansi_stripped: bool,
-    /// Number of lines containing at least one bare `\r` after CRLF normalize.
+    /// Number of `\n`-delimited lines containing at least one bare `\r`
+    /// after CRLF normalize. Source-capture audit signal: counted on the
+    /// FULL input (post-stage-2 ANSI strip on the staged path; directly
+    /// from raw bytes on the oversize-bypass path, which is equivalent
+    /// since CR survives stage 1 and stage 2). Stable across the
+    /// staged-vs-bypass gate so audit/warning logic sees the same hazard
+    /// count regardless of which path the input took.
     pub cr_bearing_lines: usize,
     /// Number of dedup runs collapsed in stage 4.
     pub dedup_runs_collapsed: usize,
@@ -1853,7 +1859,13 @@ pub struct SquashStats {
     pub utf8_replacement: bool,
     /// Number of `\n`-delimited lines that contained at least one bare
     /// `\r` and were rewritten by stage 2b (progress-frame collapse).
-    /// Counted per source line, not per `\r`.
+    /// Counted per source line, not per `\r`. Reflects WORK PERFORMED
+    /// on stage 2b's input: on the staged path that is the entire
+    /// stage-2 output; on the oversize-bypass path that is only the
+    /// retained head/tail/suffix windows (the dropped middle is never
+    /// rendered, so no rewrites are counted from it). For a source-level
+    /// CR-bearing-line count that is stable across the bypass gate, use
+    /// `cr_bearing_lines`.
     pub progress_frames_coalesced: usize,
     /// Source bytes dropped by stage 2b: original line bytes minus
     /// rendered line bytes, summed across coalesced lines. Saturating-
@@ -1861,7 +1873,10 @@ pub struct SquashStats {
     /// These bytes never reach stages 4/5/6, so they are NOT included
     /// in `bytes_dropped_truncate`. This counter reflects only stage 2b;
     /// other lossy stages have their own counters (or, for dedup and
-    /// stage 5 cap, only line-count counters).
+    /// stage 5 cap, only line-count counters). Like
+    /// `progress_frames_coalesced`, this is a WORK counter scoped to
+    /// the bytes stage 2b actually rendered: on the oversize-bypass
+    /// path it covers only the retained head/tail/suffix windows.
     pub progress_bytes_saved: usize,
 }
 
@@ -3796,6 +3811,22 @@ fn oversize_bypass(
         }
         BypassReason::ByteCeiling | BypassReason::DecodeExpansion => 0, // not rendered for these branches
     };
+    // Audit signal: count CR-bearing lines from the FULL raw input rather
+    // than accumulating per-window inside the bypass. The bypass only
+    // sanitizes head/tail/suffix slices, so a huge payload with CR-bearing
+    // progress lines concentrated in the dropped middle would otherwise
+    // report cr_bearing_lines == 0 and hide a source-capture hazard
+    // exactly on the captures most likely to hit it (round-8 finding).
+    // Bare `\r` (0x0D) survives stage 1 (lossy UTF-8 keeps ASCII) and
+    // stage 2 (ANSI strip does not touch CR), so a raw-byte split-on-`\n`
+    // count matches what the staged path computes on stage2 output.
+    // Computing once at the top also avoids double-counting when the
+    // giant-final-line suffix branch reprocesses a source range that the
+    // head-window has already scanned.
+    stats.cr_bearing_lines = raw_bytes
+        .split(|&b| b == b'\n')
+        .filter(|line| line.contains(&b'\r'))
+        .count();
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
@@ -3826,16 +3857,13 @@ fn oversize_bypass(
     // Renders before trimming so the trim sees the rendered (typically
     // shorter) text and we do not waste budget on stale CR frames.
     //
-    // /review-loop round 7 finding 2: tally CR-bearing-line counts and
-    // stage 2b counters into LOCAL accumulators first; fold into `stats`
-    // only after we know the head actually contributes output. Otherwise
-    // a giant single-line payload would have its head dropped (no `\n`
-    // boundary) AND get re-counted in the giant-final-line suffix branch
-    // below, double-counting one source line into the audit signals.
-    let head_cr_bearing_local: usize = head_sanitized
-        .split('\n')
-        .filter(|l| l.contains('\r'))
-        .count();
+    // /review-loop round 7 finding 2: tally stage 2b counters into LOCAL
+    // accumulators first; fold into `stats` only after we know the head
+    // actually contributes output. Otherwise a giant single-line payload
+    // would have its head dropped (no `\n` boundary) AND get re-counted
+    // in the giant-final-line suffix branch below. cr_bearing_lines is
+    // not affected: it is computed once from the full raw input above,
+    // so per-window accumulation is unnecessary.
     let mut head_progress_frames_local: usize = 0;
     let mut head_progress_bytes_local: usize = 0;
     let head_rendered: Cow<'_, str> =
@@ -3863,7 +3891,6 @@ fn oversize_bypass(
     // contributed bytes; otherwise drop them so the suffix branch (which
     // reprocesses the same source range) does not see them counted twice.
     if !head.is_empty() {
-        stats.cr_bearing_lines += head_cr_bearing_local;
         stats.progress_frames_coalesced += head_progress_frames_local;
         stats.progress_bytes_saved = stats
             .progress_bytes_saved
@@ -3904,10 +3931,6 @@ fn oversize_bypass(
             &mut tail_stripped,
             &mut stats.osc_recovery_bytes_dropped,
         );
-        stats.cr_bearing_lines += tail_sanitized
-            .split('\n')
-            .filter(|l| l.contains('\r'))
-            .count();
         stats.ansi_stripped |= tail_stripped;
         // Stage 2b on the tail window for the same reason as the head:
         // honor `progress_frame_collapse_enabled` even on the bypass path.
@@ -4078,10 +4101,6 @@ fn oversize_bypass(
                 &mut suf_stripped,
                 &mut stats.osc_recovery_bytes_dropped,
             );
-            stats.cr_bearing_lines += suffix_sanitized
-                .split('\n')
-                .filter(|l| l.contains('\r'))
-                .count();
             stats.ansi_stripped |= suf_stripped;
             // Stage 2b on the giant-final-line suffix: render the full
             // suffix BEFORE trimming so the trim sees only the final
@@ -4671,16 +4690,72 @@ mod proptest_squash {
     }
 
     fn arb_cfg() -> impl Strategy<Value = SquashConfig> {
+        // Toggles `progress_frame_collapse_enabled` so every invariant
+        // below (deterministic, byte ceiling, UTF-8 validity, no-ESC,
+        // drop counts, idempotence, hash agreement) runs against the
+        // stage-2b path AND its three oversize-bypass branches, not just
+        // the legacy default-off pipeline (round-8 finding 2).
         (
             MIN_MAX_BYTES..32_768usize,
             0..50usize,
             MIN_TAIL_LINES..50usize,
             0..5usize,
             MIN_MAX_LINE_BYTES..2_048usize,
+            any::<bool>(),
         )
-            .prop_filter_map("normalize", |(mb, h, t, dr, ml)| {
-                SquashConfig::new(mb, h, t, dr, ml).ok()
+            .prop_filter_map("normalize", |(mb, h, t, dr, ml, progress_collapse)| {
+                SquashConfig::new(mb, h, t, dr, ml)
+                    .ok()
+                    .map(|c| c.with_progress_frame_collapse_enabled(progress_collapse))
             })
+    }
+
+    /// Generator biased toward inputs that exercise the new stage-2b
+    /// path and its oversize-bypass branches: CR-heavy progress-frame
+    /// rewrites, ANSI-bearing fragments, and large enough payloads to
+    /// trip the byte-ceiling / line-cardinality gates. Mixed with raw
+    /// random bytes via `prop_oneof` so existing invariants still see
+    /// adversarial random input.
+    fn arb_raw_cr_heavy() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            // CR-heavy progress frames separated by `\n`. Sized to flirt
+            // with the byte-ceiling and line-cardinality bypass gates.
+            (1usize..=200, 1usize..=400, any::<bool>()).prop_map(
+                |(line_count, frames_per_line, with_ansi)| {
+                    let mut out: Vec<u8> = Vec::new();
+                    for line in 0..line_count {
+                        for frame in 0..frames_per_line {
+                            if with_ansi && frame == 0 {
+                                out.extend_from_slice(b"\x1b[33m");
+                            }
+                            out.extend_from_slice(format!("progress {line}:{frame}").as_bytes());
+                            if with_ansi && frame == 0 {
+                                out.extend_from_slice(b"\x1b[0m");
+                            }
+                            if frame + 1 < frames_per_line {
+                                out.push(b'\r');
+                            }
+                        }
+                        out.push(b'\n');
+                    }
+                    out
+                },
+            ),
+            // Single oversized CR-heavy line with no `\n` (giant-final-
+            // line / bypass head-drop territory).
+            (4_000usize..=20_000usize).prop_map(|frame_count| {
+                let mut out: Vec<u8> = Vec::new();
+                for i in 0..frame_count {
+                    out.extend_from_slice(format!("frame{i}").as_bytes());
+                    out.push(b'\r');
+                }
+                out.extend_from_slice(b"final\n");
+                out
+            }),
+            // Plain random bytes — keeps coverage on the existing
+            // invariants without losing the random fuzz dimension.
+            proptest::collection::vec(any::<u8>(), 0..16_384),
+        ]
     }
 
     proptest! {
@@ -4796,6 +4871,47 @@ mod proptest_squash {
             // ≤ max_bytes (which they are by `compacted_always_fits`).
             // So second.compacted_bytes == first.compacted_bytes.
             prop_assert_eq!(&second.compacted_bytes, &first.compacted_bytes);
+        }
+
+        /// Round-8 finding 2: dedicated coverage for CR-heavy inputs
+        /// with `progress_frame_collapse_enabled = true`. Exercises
+        /// stage 2b on the staged path AND the three oversize-bypass
+        /// branches (head, tail-aligned, giant-final-line suffix).
+        /// Re-asserts the load-bearing invariants on this slice of
+        /// the input space so a regression in stage 2b or its bypass
+        /// integration cannot ship without tripping a property test.
+        #[test]
+        fn cr_heavy_collapse_on_invariants(
+            raw in arb_raw_cr_heavy(),
+            cfg in arb_cfg(),
+        ) {
+            // Force the flag on regardless of arb_cfg's draw so this
+            // test always exercises stage 2b. The other proptests
+            // already cover the random-toggle case.
+            let cfg = cfg.with_progress_frame_collapse_enabled(true);
+            let out = run_squash_for_proptest(&raw, &cfg);
+            prop_assert!(
+                out.compacted_byte_len <= cfg.max_bytes(),
+                "compacted={} > max_bytes={}",
+                out.compacted_byte_len, cfg.max_bytes(),
+            );
+            prop_assert!(std::str::from_utf8(&out.compacted_bytes).is_ok());
+            prop_assert!(
+                !out.compacted_bytes.contains(&0x1B),
+                "ESC leaked through stage 2b / bypass on CR-heavy input"
+            );
+            // Determinism on this slice.
+            let again = run_squash_for_proptest(&raw, &cfg);
+            prop_assert_eq!(&again.compacted_bytes, &out.compacted_bytes);
+            prop_assert_eq!(again.stats, out.stats);
+            // Stage 2b actually firing (frames > 0) MUST flip the
+            // truncated bit — that is the load-bearing audit signal.
+            if out.stats.progress_frames_coalesced > 0 {
+                prop_assert!(
+                    out.stats.truncated,
+                    "stage 2b rewrite without truncated=true"
+                );
+            }
         }
     }
 }
@@ -5030,13 +5146,13 @@ mod corner_case_tests {
             stats,
             super::BypassReason::ByteCeiling,
         );
-        // Tail had no `\r`, head was dropped → all CR/progress counters
-        // must remain at zero. Pre-fix, the head's CR-bearing line
-        // (1) and stage 2b counters (1 frame, ~14 KB saved) leaked.
-        assert_eq!(
-            out.stats.cr_bearing_lines, 0,
-            "dropped head must not leak cr_bearing_lines"
-        );
+        // Stage-2b WORK counters (frames coalesced, bytes saved) reflect
+        // rewrites actually performed on retained windows. Since the head
+        // was dropped, no rewrite reached compacted_bytes — those counters
+        // must stay zero. cr_bearing_lines is a source-capture audit
+        // signal computed from the FULL raw input (round-8 finding); the
+        // dropped head IS one CR-bearing line in the source, so the
+        // signal correctly reflects that hazard.
         assert_eq!(
             out.stats.progress_frames_coalesced, 0,
             "dropped head must not leak progress_frames_coalesced"
@@ -5044,6 +5160,10 @@ mod corner_case_tests {
         assert_eq!(
             out.stats.progress_bytes_saved, 0,
             "dropped head must not leak progress_bytes_saved"
+        );
+        assert_eq!(
+            out.stats.cr_bearing_lines, 1,
+            "source-level CR audit signal must reflect the dropped head's CR-bearing line"
         );
         // Sanity: tail content survived.
         let body = String::from_utf8_lossy(&out.compacted_bytes);
