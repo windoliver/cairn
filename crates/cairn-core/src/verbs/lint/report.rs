@@ -6,9 +6,15 @@
 
 use std::fmt::Write as _;
 
-use crate::generated::verbs::lint::{LintData, Severity};
+use crate::generated::verbs::lint::{Kind, LintData, Severity};
 
 /// Render `data` as the canonical lint-report markdown body.
+///
+/// Output is structured so a clean exit code does not read as "every
+/// invariant was checked": the **Coverage** section above the findings
+/// list explicitly counts how many `deferred_check` findings are present
+/// — i.e. how many advertised checks did not run against record data
+/// because the underlying infrastructure has not yet shipped.
 #[must_use]
 pub fn render(data: &LintData) -> String {
     // `write!` to a `String` is infallible; the `Err` variant of
@@ -19,6 +25,21 @@ pub fn render(data: &LintData) -> String {
     let _ = writeln!(out, "- error: {}", data.summary.by_severity.error);
     let _ = writeln!(out, "- warning: {}", data.summary.by_severity.warning);
     let _ = writeln!(out, "- info: {}\n", data.summary.by_severity.info);
+
+    let deferred = data
+        .findings
+        .iter()
+        .filter(|f| matches!(f.kind, Kind::DeferredCheck))
+        .count();
+    if deferred > 0 {
+        out.push_str("## coverage\n\n");
+        let _ = writeln!(
+            out,
+            "- {deferred} check categor{ies} not yet enforced — see `deferred_check` finding(s) below for tracking issues. A clean exit code does not imply these invariants were verified.",
+            ies = if deferred == 1 { "y" } else { "ies" },
+        );
+        out.push('\n');
+    }
 
     if data.findings.is_empty() {
         out.push_str("_no findings_\n");

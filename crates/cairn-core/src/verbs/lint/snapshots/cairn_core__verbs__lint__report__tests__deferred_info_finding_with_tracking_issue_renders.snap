@@ -1,6 +1,6 @@
 ---
 source: crates/cairn-core/src/verbs/lint/report.rs
-assertion_line: 134
+assertion_line: 159
 expression: s
 ---
 # Lint report
@@ -9,6 +9,10 @@ expression: s
 - error: 0
 - warning: 0
 - info: 1
+
+## coverage
+
+- 1 check category not yet enforced — see `deferred_check` finding(s) below for tracking issues. A clean exit code does not imply these invariants were verified.
 
 ## findings
 

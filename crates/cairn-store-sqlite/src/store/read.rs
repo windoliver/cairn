@@ -240,9 +240,10 @@ impl SqliteMemoryStore {
     /// Inherent `index_stats` implementation; the trait method
     /// [`MemoryStore::index_stats`] guards `self.conn` then delegates here.
     ///
-    /// Runs two `COUNT(*)` queries inside one `conn.call` closure so they
-    /// share a single connection checkout. Transient skew between the two
-    /// counts is acceptable per spec (no transaction needed).
+    /// Runs two `COUNT(*)` queries inside a single deferred read transaction
+    /// so both counts observe the same `SQLite` snapshot. Without the
+    /// transaction, an ingest landing between the two `query_row` calls can
+    /// surface as a phantom `index_drift` finding.
     ///
     /// [`MemoryStore::index_stats`]: cairn_core::contract::memory_store::MemoryStore::index_stats
     ///
@@ -255,7 +256,8 @@ impl SqliteMemoryStore {
         let conn = self.require_conn("index_stats")?.clone();
         let stats = conn
             .call(move |c| {
-                let records_active: u64 = c
+                let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+                let records_active: u64 = tx
                     .query_row(
                         "SELECT COUNT(*) FROM records WHERE active = 1 AND tombstoned = 0",
                         [],
@@ -264,13 +266,14 @@ impl SqliteMemoryStore {
                     .and_then(|v| {
                         u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, v))
                     })?;
-                let fts5_rows: u64 = c
+                let fts5_rows: u64 = tx
                     .query_row("SELECT COUNT(*) FROM records_fts", [], |row| {
                         row.get::<_, i64>(0)
                     })
                     .and_then(|v| {
                         u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, v))
                     })?;
+                tx.commit()?;
                 Ok::<_, tokio_rusqlite::Error>(IndexStats::new(records_active, fts5_rows))
             })
             .await?;

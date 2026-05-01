@@ -390,11 +390,20 @@ pub async fn lint_handler(
         .map_err(|e| anyhow::anyhow!("store: list_active_stored: {e}"))
         .context("lint: list_active_stored")?;
 
-    let index_stats = store
-        .index_stats()
-        .await
-        .map_err(|e| anyhow::anyhow!("store: index_stats: {e}"))
-        .context("lint: index_stats")?;
+    // `index_stats` is opt-in for adapters (default impl returns
+    // `unsupported`). When unavailable, fall back to a self-consistent
+    // pair derived from `stored.len()` so the §6.7 `index_drift` check is
+    // a no-op rather than aborting the whole lint run. The deferred-info
+    // is surfaced via an explicit lint finding below so operators see
+    // that drift coverage was skipped on this adapter.
+    let stored_count = u64::try_from(stored.len()).unwrap_or(u64::MAX);
+    let (index_stats, index_stats_skipped) = match store.index_stats().await {
+        Ok(s) => (s, false),
+        Err(_) => (
+            cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
+            true,
+        ),
+    };
 
     // PR-1: every row carries LegacyEvent. Per-record gating lands in #253.
     let lint_records: Vec<LintRecord> = stored
@@ -412,6 +421,25 @@ pub async fn lint_handler(
         schema_version,
     };
     let mut data = run_checks(&inputs);
+
+    if index_stats_skipped {
+        let f = cairn_core::generated::verbs::lint::Finding {
+            kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+            message: "store adapter does not implement index_stats; §6.7 index_drift skipped"
+                .to_owned(),
+            severity: cairn_core::generated::verbs::lint::Severity::Info,
+            suggested_fix: Some(
+                "ship MemoryStore::index_stats on this adapter to enable index_drift coverage"
+                    .to_owned(),
+            ),
+            target: None,
+            tracking_issue: None,
+        };
+        // Append at the end so existing snapshot ordering is preserved.
+        data.findings.push(f);
+        data.summary.total += 1;
+        data.summary.by_severity.info += 1;
+    }
 
     let has_error = data.findings.iter().any(|f| {
         matches!(
