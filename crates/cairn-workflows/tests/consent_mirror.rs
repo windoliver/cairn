@@ -364,14 +364,11 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     append(&conn, &forget_event("c-1", &h(1))).expect("a1");
     append(&conn, &forget_event("c-2", &h(2))).expect("a2");
 
-    // Open mirror, mark the migration-0021 reset row consumed (so the
-    // first tick processes normally), then tick to advance the cursor
-    // past every existing row.
-    conn.execute(
-        "UPDATE consent_mirror_resets SET consumed = 1 WHERE migration_id = 21",
-        [],
-    )
-    .expect("consume initial reset");
+    // Pre-mark the migration-0021 reset row as consumed in this
+    // mirror's per-mirror sidecar (Phase-B finding 2 moved consumption
+    // tracking out of the DB), so the first tick processes normally.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, "21\n").expect("seed sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("first tick");
@@ -379,16 +376,13 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     let cursor_before_reset = mirror.cursor();
     assert!(cursor_before_reset > 0);
 
-    // Now corrupt the on-disk log to a smaller-than-all-events form and
-    // re-arm the reset marker. The reset path must rebuild from the DB
+    // Now wipe the log and the sidecar to re-arm the reset for THIS
+    // mirror. The DB row is unchanged — it's still the source of truth
+    // for "a reset was needed." The reset path must rebuild from the DB
     // — even though the in-memory cursor is already past every row —
     // and re-mirror everything.
     std::fs::write(mirror.log_path(), "").expect("truncate");
-    conn.execute(
-        "UPDATE consent_mirror_resets SET consumed = 0 WHERE migration_id = 21",
-        [],
-    )
-    .expect("re-arm reset");
+    std::fs::remove_file(&resets_consumed).expect("re-arm sidecar");
 
     let n = mirror.tick(&conn).expect("reset tick");
     assert_eq!(n, 2, "reset must replay every row from rowid 0");
@@ -396,18 +390,135 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     let lines = mirror.read_lines().expect("lines");
     assert_eq!(lines.len(), 2);
 
-    // The reset row must now be consumed; another tick is a no-op.
-    let consumed: i64 = conn
-        .query_row(
-            "SELECT consumed FROM consent_mirror_resets WHERE migration_id = 21",
-            [],
-            |r| r.get(0),
-        )
-        .expect("consumed");
-    assert_eq!(consumed, 1, "reset must be marked consumed after replay");
+    // The reset row must now be in this mirror's sidecar; another tick
+    // is a no-op.
+    let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
+    assert!(
+        sidecar.lines().any(|l| l.trim() == "21"),
+        "sidecar must record migration_id 21 as consumed: {sidecar:?}"
+    );
 
     let n = mirror.tick(&conn).expect("idempotent tick");
     assert_eq!(n, 0, "no further work once reset is consumed");
+}
+
+#[test]
+fn tick_surfaces_log_corrupt_when_reset_pending_and_log_damaged() {
+    // Phase-B finding 1: if the consent.log is corrupt and a 0021-style
+    // reset is pending, tick() must still surface MirrorError::LogCorrupt
+    // — the reset auto-replay is reserved for a known-good log so the
+    // operator sees corruption at exactly the moment it matters. The
+    // damaged log must be left untouched on disk (no silent overwrite).
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Seed a healthy mirror first.
+    {
+        let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+        // Pre-consume the migration-0021 reset so the initial tick
+        // processes normally.
+        std::fs::write(dir.path().join("consent.mirror_resets_consumed"), "21\n")
+            .expect("seed sidecar");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+        mirror.tick(&conn).expect("seed tick");
+    }
+
+    // Now reopen, corrupt the on-disk log behind the materializer's
+    // back, AND re-arm the reset marker by clearing the sidecar.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    let corrupt_bytes = b"not even close to a json envelope, no newline either";
+    std::fs::write(dir.path().join("consent.log"), &corrupt_bytes[..]).expect("corrupt");
+    std::fs::remove_file(dir.path().join("consent.mirror_resets_consumed"))
+        .expect("re-arm sidecar");
+
+    let err = mirror
+        .tick(&conn)
+        .expect_err("tick must fail closed on corrupt log even with reset pending");
+    assert!(
+        matches!(err, MirrorError::LogCorrupt),
+        "expected LogCorrupt, got {err:?}"
+    );
+
+    // The damaged log must be unchanged — no silent rebuild.
+    let on_disk = std::fs::read(dir.path().join("consent.log")).expect("read log");
+    assert_eq!(
+        on_disk,
+        &corrupt_bytes[..],
+        "tick must not overwrite a corrupt log when it fails closed"
+    );
+}
+
+#[test]
+fn tick_replays_reset_when_log_intact() {
+    // Phase-B finding 1 sibling test: the corruption-first reorder
+    // must not regress the happy path. With a healthy log AND a pending
+    // reset marker, tick() still rebuilds from rowid 0.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Note: no sidecar yet → the migration-0021 marker is pending for
+    // this mirror.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(n, 2, "reset path must replay every row from rowid 0");
+
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 2);
+
+    let sidecar = std::fs::read_to_string(dir.path().join("consent.mirror_resets_consumed"))
+        .expect("sidecar written");
+    assert!(sidecar.lines().any(|l| l.trim() == "21"));
+
+    let n = mirror.tick(&conn).expect("idempotent");
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn reset_marker_consumed_per_mirror_not_per_db() {
+    // Phase-B finding 2: two mirrors at different vault_dirs sharing
+    // one DB must each replay the migration-0021 reset independently.
+    // Consuming on mirror A must not silence the marker for mirror B.
+    let conn = open_in_memory().expect("open store");
+    let dir_a = tempdir().expect("tempdir a");
+    let dir_b = tempdir().expect("tempdir b");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Mirror A: pending reset → replays everything, then writes its
+    // sidecar.
+    let mut mirror_a = ConsentLogMaterializer::open(dir_a.path()).expect("open a");
+    let n_a = mirror_a.tick(&conn).expect("tick a");
+    assert_eq!(n_a, 2);
+    assert!(
+        std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
+            .expect("a sidecar")
+            .lines()
+            .any(|l| l.trim() == "21"),
+        "mirror A must record consumption locally"
+    );
+
+    // Mirror B has its own (empty) sidecar, so the marker is still
+    // pending for B even though A consumed it. B must replay every row
+    // independently.
+    let mut mirror_b = ConsentLogMaterializer::open(dir_b.path()).expect("open b");
+    let n_b = mirror_b.tick(&conn).expect("tick b");
+    assert_eq!(
+        n_b, 2,
+        "mirror B must still see the reset marker after A consumed it"
+    );
+    assert_eq!(mirror_b.read_lines().expect("b lines").len(), 2);
+    assert!(
+        std::fs::read_to_string(dir_b.path().join("consent.mirror_resets_consumed"))
+            .expect("b sidecar")
+            .lines()
+            .any(|l| l.trim() == "21"),
+        "mirror B must also record consumption locally"
+    );
 }
 
 #[test]

@@ -951,10 +951,18 @@ CREATE INDEX consent_journal_kind_idx
 --    concurrent mirror processes (the mirror holds the consent.lock
 --    advisory file lock during the rebuild).
 --
---    `consumed` is an INTEGER (0/1) rather than BOOLEAN because SQLite
---    stores booleans as integers anyway and the column-affinity rules
---    are clearer. UPDATEs on this table are unconstrained — the
---    append-only triggers attach to consent_journal only.
+--    `consumed` is RESERVED-FOR-NO-USE as of Phase-B finding 2: the DB
+--    row is keyed only on `migration_id`, so multiple mirrors (different
+--    vault_dirs sharing one DB) would race for the marker — first
+--    consumer wins, peers stay stale. Consumption tracking moved to a
+--    per-mirror sidecar at `.cairn/consent.mirror_resets_consumed`. The
+--    column stays in the schema for fingerprint stability (verify.rs
+--    enumerates table columns); the workflow code no longer reads or
+--    writes it. Originally `consumed` was an INTEGER (0/1) rather than
+--    BOOLEAN because SQLite stores booleans as integers anyway and the
+--    column-affinity rules are clearer. UPDATEs on this table are
+--    unconstrained — the append-only triggers attach to consent_journal
+--    only.
 CREATE TABLE IF NOT EXISTS consent_mirror_resets (
   migration_id INTEGER NOT NULL PRIMARY KEY,
   applied_at   INTEGER NOT NULL,
