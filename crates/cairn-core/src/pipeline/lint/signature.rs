@@ -84,23 +84,24 @@ pub struct SignatureFinding {
 /// Check a record's at-rest signature state given the **pre-fetched**
 /// author lifecycle state from `IdentityRegistry`.
 ///
-/// Returns `Some(SignatureFinding)` for:
+/// Returns `Some(SignatureFinding)` for every non-`Active` author
+/// state. Mapping:
 ///
 /// - `actor_chain` without an `Author` entry — emits `Malformed`.
 /// - Author identity in `Revoked`, `RevokePending`, `Purged`, or
 ///   `PurgePending` — emits `Revoked`.
+/// - Author identity is `Pending` — emits `Malformed`. A pending
+///   identity cannot sign at the trust boundary, so a stored record
+///   carrying a pending author is a provisioning anomaly: the chain
+///   says "this was signed by X" but X never had authoritative signing
+///   right. Surfacing it under `Malformed` keeps the operator-visible
+///   semantics ("issuer cannot be authoritatively established") aligned
+///   with the missing-Author and missing-from-registry cases without
+///   conflating it with `Revoked` (post-active withdrawal).
 /// - Author identity not present in the registry — emits `Malformed`
 ///   (fail-closed per brief invariant 6).
 ///
-/// Returns `None` for:
-///
-/// - Author identity is `Active`.
-/// - Author identity is `Pending`. A pending identity should never be
-///   able to sign at the trust boundary, so a stored record carrying a
-///   pending author is a provisioning anomaly distinct from revocation;
-///   surfacing it as `KeyRevoked` would mis-direct operators. A
-///   dedicated provisioning-anomaly lint check is tracked as a
-///   follow-up to #256 and #96.
+/// Returns `None` only when the author identity is `Active`.
 #[must_use]
 pub fn check_signature(
     record: &MemoryRecord,
@@ -122,14 +123,14 @@ pub fn check_signature(
     };
 
     let (status, message) = match author_state {
-        // Active → ok. Pending → also no finding here: a stored record
-        // signed by a non-`Active` identity is a provisioning anomaly,
-        // not a revocation. Surfacing it as `KeyRevoked` would
-        // mis-direct operators; a dedicated provisioning-anomaly lint
-        // check is tracked as a follow-up to #256.
-        AuthorState::Resolved(ProvisioningState::Active | ProvisioningState::Pending) => {
-            return None;
-        }
+        AuthorState::Resolved(ProvisioningState::Active) => return None,
+        AuthorState::Resolved(ProvisioningState::Pending) => (
+            ChainStatus::Malformed,
+            format!(
+                "author identity `{}` is in lifecycle state `Pending` — provisioning never completed, so the issuer never had authoritative signing right",
+                author.as_str()
+            ),
+        ),
         AuthorState::Resolved(state) => (
             ChainStatus::Revoked,
             format!(
@@ -174,15 +175,17 @@ mod tests {
     }
 
     #[test]
-    fn pending_author_emits_no_finding_at_p0() {
-        // Pending is a provisioning anomaly, not a revocation. Returning
-        // None keeps the operator-facing finding free of misdirection;
-        // a dedicated provisioning-anomaly lint check is the follow-up.
+    fn pending_author_is_flagged_as_malformed() {
+        // A stored record signed by a Pending identity is a provisioning
+        // anomaly — the issuer never had authoritative signing right.
+        // Mapping to Malformed keeps it visible without conflating it
+        // with post-active revocation.
         let record = record_with_active_author();
-        assert_eq!(
-            check_signature(&record, AuthorState::Resolved(ProvisioningState::Pending)),
-            None
-        );
+        let finding = check_signature(&record, AuthorState::Resolved(ProvisioningState::Pending))
+            .expect("pending issuer must be flagged");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert!(finding.author.is_some());
+        assert!(finding.message.contains("Pending"));
     }
 
     #[test]
