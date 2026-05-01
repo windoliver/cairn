@@ -16,7 +16,32 @@
       "properties": {
         "findings": {
           "items": {
-            "$ref": "#/$defs/Finding"
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "contradiction",
+                  "orphan",
+                  "stale",
+                  "missing_concept",
+                  "data_gap",
+                  "key_revoked"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "record_id": {
+                "$ref": "../common/primitives.json#/$defs/Ulid"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "type": "object"
           },
           "type": "array"
         },
@@ -27,35 +52,17 @@
         "summary": {
           "additionalProperties": false,
           "properties": {
-            "by_kind": {
-              "additionalProperties": {
-                "minimum": 0,
-                "type": "integer"
-              },
-              "type": "object"
+            "contradictions": {
+              "minimum": 0,
+              "type": "integer"
             },
-            "by_severity": {
-              "additionalProperties": false,
-              "properties": {
-                "error": {
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "info": {
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "warning": {
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "error",
-                "warning",
-                "info"
-              ],
-              "type": "object"
+            "orphans": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stale": {
+              "minimum": 0,
+              "type": "integer"
             },
             "total": {
               "minimum": 0,
@@ -63,9 +70,7 @@
             }
           },
           "required": [
-            "total",
-            "by_severity",
-            "by_kind"
+            "total"
           ],
           "type": "object"
         }
@@ -74,80 +79,6 @@
         "summary",
         "findings"
       ],
-      "type": "object"
-    },
-    "Finding": {
-      "additionalProperties": false,
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/Kind"
-        },
-        "message": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "severity": {
-          "$ref": "#/$defs/Severity"
-        },
-        "suggested_fix": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "target": {
-          "$ref": "#/$defs/Target"
-        },
-        "tracking_issue": {
-          "minimum": 1,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "kind",
-        "severity",
-        "message"
-      ],
-      "type": "object"
-    },
-    "Kind": {
-      "enum": [
-        "contradiction",
-        "orphan",
-        "stale",
-        "missing_concept",
-        "data_gap",
-        "malformed_record",
-        "broken_actor_chain",
-        "missing_provenance",
-        "stale_schema",
-        "hot_memory_over_budget",
-        "index_drift",
-        "deferred_check"
-      ],
-      "type": "string"
-    },
-    "Severity": {
-      "enum": [
-        "error",
-        "warning",
-        "info"
-      ],
-      "type": "string"
-    },
-    "Target": {
-      "additionalProperties": false,
-      "description": "At most one field SHOULD be set; consumers may treat multiple as the most-specific available.",
-      "properties": {
-        "operation_id": {
-          "$ref": "../common/primitives.json#/$defs/Ulid"
-        },
-        "path": {
-          "minLength": 1,
-          "type": "string"
-        },
-        "record_id": {
-          "$ref": "../common/primitives.json#/$defs/Ulid"
-        }
-      },
       "type": "object"
     }
   },
