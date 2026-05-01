@@ -87,12 +87,18 @@ fn deferred_with_chain_shape(inputs: &LintInputs<'_>) -> Vec<Finding> {
             out.push(f);
         }
     }
+    // Fail closed on missing capability (brief invariant 6): without
+    // the IdentityRegistry plumbed, the §6.2 lifecycle check is silently
+    // a no-op against revoked / unknown / pending issuers. Surface as
+    // Error so the lint exit code trips and operators wire the
+    // dispatch layer instead of mistaking a green run for coverage.
     let mut deferred = finding(
         Kind::DeferredCheck,
-        Severity::Info,
+        Severity::Error,
         format!(
             "author-lifecycle slice of #{TRACKING_ISSUE} skipped — \
-             dispatch did not plumb IdentityRegistry into LintInputs"
+             dispatch did not plumb IdentityRegistry into LintInputs; \
+             revoked / unknown / pending issuers will not be detected"
         ),
     );
     deferred.tracking_issue = Some(TRACKING_ISSUE);
@@ -114,15 +120,23 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 }
 
 fn severity_for(status: ChainStatus) -> Severity {
+    // Each arm encodes a distinct semantic verdict (terminal vs
+    // in-flight vs structural); they happen to share an Error severity
+    // today but have independently authored remediation in
+    // `suggested_fix_for`. Collapsing arms would couple them.
+    #[allow(clippy::match_same_arms)]
     match status {
-        // Revoked authors don't *prove* a bad record — historical
-        // signatures still verify per ProvisioningState::is_operational.
-        // Without persisted key_version or real Ed25519 re-verify (P1),
-        // this leaf can't tell whether a record was signed pre- or
-        // post-revocation, so it must not block on routine revocation.
-        // Surface as Warning so operators see the audit trail but don't
-        // get destructive remediation advice for valid history.
+        // Terminal revocation: historical signatures still verify per
+        // ProvisioningState::is_operational. Without persisted
+        // key_version or real Ed25519 re-verify (P1), this leaf can't
+        // tell whether a record was signed pre- or post-revocation, so
+        // it must not block on routine completed revocation. Warning
+        // surfaces the audit trail without destructive remediation.
         ChainStatus::Revoked => Severity::Warning,
+        // In-flight revocation/purge: a record landing during a
+        // withdrawal-in-motion is the suspicious-write case — bypassed
+        // gate, race, or tamper. Block.
+        ChainStatus::RevocationInFlight => Severity::Error,
         // Chain-shape and unknown-issuer cases are real corruption /
         // missing-truth-source — block.
         ChainStatus::Malformed => Severity::Error,
@@ -132,9 +146,14 @@ fn severity_for(status: ChainStatus) -> Severity {
 fn suggested_fix_for(status: ChainStatus) -> &'static str {
     match status {
         ChainStatus::Revoked => {
-            "audit the affected records — author identity is currently revoked, but historical \
+            "audit the affected records — author identity is terminally revoked, but historical \
              signatures may still be valid; do NOT auto-tombstone until P1 ships real signature \
              verification + key_version persistence (records signed pre-revocation remain valid)"
+        }
+        ChainStatus::RevocationInFlight => {
+            "investigate the affected records — author identity was undergoing revocation/purge \
+             when this record was written; treat as a candidate bypassed-gate or race-against-\
+             withdrawal incident and quarantine before re-ingest"
         }
         ChainStatus::Malformed => {
             "investigate at-rest tampering, partial migration, or a bypassed write path; \
@@ -188,7 +207,11 @@ mod tests {
             "deferred-info finding only when no states + clean chains"
         );
         assert_eq!(f[0].kind, Kind::DeferredCheck);
-        assert_eq!(f[0].severity, Severity::Info);
+        assert_eq!(
+            f[0].severity,
+            Severity::Error,
+            "missing IdentityRegistry must fail closed (brief invariant 6)"
+        );
         assert_eq!(f[0].tracking_issue, Some(256));
     }
 
@@ -209,7 +232,7 @@ mod tests {
         assert_eq!(
             findings.len(),
             2,
-            "expect one BrokenActorChain (duplicate Author) + one DeferredCheck info"
+            "expect one BrokenActorChain (duplicate Author) + one DeferredCheck error"
         );
         let chain_finding = findings
             .iter()

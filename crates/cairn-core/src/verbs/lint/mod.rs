@@ -216,11 +216,12 @@ mod tests {
         };
         let data = run_checks(&inputs);
         // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
-        // each emit one deferred-check info finding; all other stubs return empty.
+        // each emit one deferred-check finding. #256 is Severity::Error
+        // (fail-closed when IdentityRegistry not plumbed, brief
+        // invariant 6); the other four are Severity::Info.
         assert_eq!(data.summary.total, data.findings.len() as u64);
-        assert_eq!(data.summary.by_severity.error, 0);
+        assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
@@ -228,7 +229,7 @@ mod tests {
                 .count(),
             5
         );
-        assert_eq!(data.summary.by_severity.info, 5);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 
     #[test]
@@ -299,10 +300,11 @@ mod tests {
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);
         // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
-        // each emit one deferred-check info finding; all other stubs return empty.
-        assert_eq!(data.summary.by_severity.error, 0);
+        // each emit one deferred-check finding. #256 is Severity::Error
+        // (fail-closed when IdentityRegistry not plumbed, brief
+        // invariant 6); the other four are Severity::Info.
+        assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
@@ -310,6 +312,6 @@ mod tests {
                 .count(),
             5
         );
-        assert_eq!(data.summary.by_severity.info, 5);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 }

@@ -685,7 +685,10 @@ mod tests {
         .await
         .expect("handler");
 
-        // The five deferred-info findings must be present even on a clean vault.
+        // Deferred findings are present even on a clean vault: four
+        // remain Info (provenance/schema/consent/hot_memory) and one is
+        // Error (#256 fails closed when no IdentityRegistry is wired
+        // through this handler signature, brief invariant 6).
         let info_count = result
             .data
             .findings
@@ -697,10 +700,28 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(info_count, 5);
+        assert_eq!(info_count, 4);
+        let deferred_error_count = result
+            .data
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    cairn_core::generated::verbs::lint::Kind::DeferredCheck
+                ) && matches!(
+                    f.severity,
+                    cairn_core::generated::verbs::lint::Severity::Error
+                )
+            })
+            .count();
+        assert_eq!(
+            deferred_error_count, 1,
+            "missing IdentityRegistry must surface as a fail-closed error"
+        );
         assert!(
-            !result.has_error,
-            "clean vault must not raise error findings"
+            result.has_error,
+            "missing IdentityRegistry plumbing must trip has_error"
         );
         assert_eq!(
             result.report_path.as_deref(),

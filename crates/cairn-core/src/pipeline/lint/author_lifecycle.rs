@@ -24,8 +24,13 @@
 //! persisted chain has lost shape. Two `chain_status` values from
 //! §1223 are emitted today:
 //!
-//! - `revoked` — author is `Revoked` / `RevokePending` / `Purged` /
-//!   `PurgePending`.
+//! - `revoked` (terminal) — author is `Revoked` or `Purged`. Surfaces
+//!   as a non-blocking `Warning` because historical signatures may
+//!   pre-date the revocation.
+//! - `revoked` (in-flight) — author is `RevokePending` or
+//!   `PurgePending`. Surfaces as a blocking `Error`: the record landed
+//!   while a withdrawal was already in motion, which is the
+//!   suspicious-write case (bypassed gate / race / tamper).
 //! - `broken` — chain itself is malformed (no `Author`, duplicate
 //!   `Author`, role-ordering violation), the issuer is not in the
 //!   registry, or the issuer's lifecycle state is `Pending` (issuer
@@ -59,17 +64,30 @@ use crate::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChainStatus {
-    /// Author identity is currently in a non-`Active` revocation /
-    /// purge transition. Per `ProvisioningState::is_operational`,
+    /// Author identity is in a *terminal* revocation / purge state
+    /// (`Revoked` or `Purged`). Per `ProvisioningState::is_operational`,
     /// `Revoked` keys still verify history for audit, so a stored
     /// record signed *before* revocation may still be valid; without
     /// persisted `key_version` or real Ed25519 re-verify (P1), this
     /// check cannot tell pre- from post-revocation. The dispatch leaf
     /// emits this finding at `Severity::Warning`, not `Error`, so a
-    /// routine revocation does not poison every historical record by
-    /// the same author with a blocking verdict. Maps to brief §1223
-    /// `revoked`.
+    /// routine completed revocation does not poison every historical
+    /// record by the same author with a blocking verdict. Maps to
+    /// brief §1223 `revoked`.
     Revoked,
+    /// Author identity is in an *in-flight* revocation / purge
+    /// transition (`RevokePending` or `PurgePending`). A record
+    /// surfacing under one of these states means the write happened
+    /// while a withdrawal was already in motion — that is **not** the
+    /// "old historical record under a now-revoked key" case the
+    /// terminal `Revoked` variant covers. The dispatch leaf emits
+    /// this finding at `Severity::Error` because the simplest
+    /// explanation is a write that should never have landed: a
+    /// bypassed trust gate, a race against revocation, or a tampered
+    /// chain. Maps to brief §1223 `revoked` but is split out from
+    /// terminal revocation so the operator-blocking signal is not
+    /// diluted.
+    RevocationInFlight,
     /// At-rest verification cannot establish the issuer:
     ///
     /// - the `actor_chain` lacks an `Author` entry, has more than one,
@@ -134,8 +152,10 @@ pub struct AuthorLifecycleFinding {
 /// - Author identity is `Pending` — emits `Malformed` (provisioning
 ///   never completed, so the issuer never had authoritative signing
 ///   right).
-/// - Author identity in `Revoked`, `RevokePending`, `Purged`, or
-///   `PurgePending` — emits `Revoked`.
+/// - Author identity in `Revoked` or `Purged` — emits `Revoked`
+///   (terminal; non-blocking warning).
+/// - Author identity in `RevokePending` or `PurgePending` — emits
+///   `RevocationInFlight` (blocking error).
 /// - Author identity not present in the registry — emits `Malformed`
 ///   (fail-closed per brief invariant 6).
 ///
@@ -187,13 +207,24 @@ pub fn check_author_lifecycle(
                 author.as_str()
             ),
         ),
-        AuthorState::Resolved(state) => (
-            ChainStatus::Revoked,
+        AuthorState::Resolved(
+            state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending),
+        ) => (
+            ChainStatus::RevocationInFlight,
             format!(
-                "author identity `{}` is in lifecycle state `{state:?}` — signing right is withdrawn or pending withdrawal",
+                "author identity `{}` is in lifecycle state `{state:?}` — record landed while a withdrawal was in motion; suspicious write",
                 author.as_str()
             ),
         ),
+        AuthorState::Resolved(state @ (ProvisioningState::Revoked | ProvisioningState::Purged)) => {
+            (
+                ChainStatus::Revoked,
+                format!(
+                    "author identity `{}` is in lifecycle state `{state:?}` — signing right is terminally withdrawn",
+                    author.as_str()
+                ),
+            )
+        }
         AuthorState::MissingFromRegistry => (
             ChainStatus::Malformed,
             format!(
@@ -250,14 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn revoke_pending_author_is_flagged_as_revoked() {
+    fn revoke_pending_author_is_flagged_as_revocation_in_flight() {
         let record = record_with_active_author();
         let finding = check_author_lifecycle(
             &record,
             AuthorState::Resolved(ProvisioningState::RevokePending),
         )
         .expect("revoke-pending issuer must be flagged");
-        assert_eq!(finding.status, ChainStatus::Revoked);
+        assert_eq!(finding.status, ChainStatus::RevocationInFlight);
         assert!(finding.author.is_some());
         assert!(finding.message.contains("RevokePending"));
     }
@@ -273,14 +304,14 @@ mod tests {
     }
 
     #[test]
-    fn purge_pending_author_is_flagged_as_revoked() {
+    fn purge_pending_author_is_flagged_as_revocation_in_flight() {
         let record = record_with_active_author();
         let finding = check_author_lifecycle(
             &record,
             AuthorState::Resolved(ProvisioningState::PurgePending),
         )
         .expect("purge-pending issuer must be flagged");
-        assert_eq!(finding.status, ChainStatus::Revoked);
+        assert_eq!(finding.status, ChainStatus::RevocationInFlight);
         assert!(finding.message.contains("PurgePending"));
     }
 
