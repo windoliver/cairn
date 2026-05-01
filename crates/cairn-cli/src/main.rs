@@ -427,11 +427,19 @@ fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
         }
     };
 
-    // Load schema file if provided.
+    // Load schema file if provided. Compile it now (before any network
+    // call) so an invalid schema fails fast as a config error and never
+    // reaches the provider.
     let schema: Option<serde_json::Value> = match schema_file {
         Some(path) => match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str(&raw) {
-                Ok(v) => Some(v),
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => {
+                    if let Err(e) = jsonschema::validator_for(&v) {
+                        eprintln!("cairn llm probe: invalid JSON schema in {path}: {e}");
+                        return ExitCode::from(78); // EX_CONFIG
+                    }
+                    Some(v)
+                }
                 Err(e) => {
                     eprintln!("cairn llm probe: schema parse error in {path}: {e}");
                     return ExitCode::from(78); // EX_CONFIG

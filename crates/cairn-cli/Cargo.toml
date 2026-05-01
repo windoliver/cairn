@@ -28,6 +28,7 @@ cairn-sensors-local = { workspace = true }
 cairn-workflows = { workspace = true }
 cairn-llm-openai-compat = { workspace = true }
 anyhow = { workspace = true }
+jsonschema = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
 figment = { workspace = true }

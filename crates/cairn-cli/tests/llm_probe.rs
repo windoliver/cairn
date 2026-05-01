@@ -391,3 +391,133 @@ async fn probe_succeeds_on_schema_match() {
     assert!(stdout.contains("feedback"), "stdout: {stdout}");
     assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
 }
+
+/// Empty-body 401: async-openai surfaces this as
+/// `JSONDeserialize(_, "")` with no preserved status. We classify it
+/// transient, retry until the bounded budget is exhausted, then return
+/// `ProviderUnreachable` rather than misclaiming `AuthDenied`.
+#[tokio::test]
+async fn probe_exits_69_on_empty_body_401() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let vault = tempfile::tempdir().expect("tempdir");
+    write_config(vault.path(), &server.uri());
+
+    let vault_path = vault.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("cairn")
+            .expect("cargo bin cairn")
+            .current_dir(&vault_path)
+            .args(["llm", "probe", "--json"])
+            .env_remove("CAIRN_VAULT")
+            .env_remove("CAIRN_REGISTRY")
+            .output()
+            .expect("run cairn")
+    })
+    .await
+    .expect("blocking task");
+
+    assert_eq!(
+        output.status.code(),
+        Some(69),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("llm.provider_unreachable"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Empty-body 429: must be retried (transient classification) and then
+/// surface as `ProviderUnreachable` after retries exhaust.
+#[tokio::test]
+async fn probe_exits_69_on_empty_body_429() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(429))
+        .mount(&server)
+        .await;
+
+    let vault = tempfile::tempdir().expect("tempdir");
+    write_config(vault.path(), &server.uri());
+
+    let vault_path = vault.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("cairn")
+            .expect("cargo bin cairn")
+            .current_dir(&vault_path)
+            .args(["llm", "probe", "--json"])
+            .env_remove("CAIRN_VAULT")
+            .env_remove("CAIRN_REGISTRY")
+            .output()
+            .expect("run cairn")
+    })
+    .await
+    .expect("blocking task");
+
+    assert_eq!(
+        output.status.code(),
+        Some(69),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An invalid JSON schema must be rejected as a config error before
+/// any HTTP request is attempted. Pointing at a non-listening URL would
+/// otherwise produce `ProviderUnreachable` — this test asserts we exit
+/// 78 (`EX_CONFIG`) instead.
+#[tokio::test]
+async fn probe_rejects_invalid_schema_without_network() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    // Point at a port that nothing listens on so any request would fail.
+    write_config(vault.path(), "http://127.0.0.1:1");
+
+    let schema_file = vault.path().join("schema.json");
+    // `type: 42` is invalid — JSON Schema requires a string or array of strings.
+    fs::write(&schema_file, r#"{"type": 42}"#).expect("write schema");
+
+    let vault_path = vault.path().to_path_buf();
+    let schema_path = schema_file.to_string_lossy().to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("cairn")
+            .expect("cargo bin cairn")
+            .current_dir(&vault_path)
+            .args([
+                "llm",
+                "probe",
+                "--json",
+                "--schema-file",
+                schema_path.as_str(),
+            ])
+            .env_remove("CAIRN_VAULT")
+            .env_remove("CAIRN_REGISTRY")
+            .output()
+            .expect("run cairn")
+    })
+    .await
+    .expect("blocking task");
+
+    assert_eq!(
+        output.status.code(),
+        Some(78),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid JSON schema"), "stderr: {stderr}");
+}

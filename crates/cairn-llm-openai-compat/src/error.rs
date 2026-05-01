@@ -64,13 +64,25 @@ pub(crate) fn map_openai_error(e: &OpenAIError) -> LlmError {
 /// `async-openai` may wrap a 429/5xx in either `Reqwest` (when the status
 /// can be inspected directly) or `JSONDeserialize` (when the error body
 /// can't be parsed as `WrappedError`). Both paths are checked.
+///
+/// # Empty bodies
+/// When `async-openai` cannot deserialize and the body is empty, the
+/// underlying HTTP status is lost. We classify that case as transient
+/// — better to retry a few times (the bounded [`RetryPolicy`] caps the
+/// cost) than to give up on what might be a 429/5xx, and after retry
+/// exhaustion it falls through to [`LlmError::ProviderUnreachable`]
+/// rather than mis-claiming auth.
+///
+/// [`RetryPolicy`]: crate::retry::RetryPolicy
 pub(crate) fn is_rate_limit_or_server_error(e: &OpenAIError) -> bool {
     match e {
         OpenAIError::Reqwest(req_err) => req_err.status().is_some_and(|s| {
             let code = s.as_u16();
             code == 429 || (500..600).contains(&code)
         }),
-        OpenAIError::JSONDeserialize(_, content) => looks_like_transient_error(content),
+        OpenAIError::JSONDeserialize(_, content) => {
+            content.is_empty() || looks_like_transient_error(content)
+        }
         OpenAIError::ApiError(api_err) => {
             let code_lower = api_err.code.as_deref().unwrap_or("").to_lowercase();
             let msg_lower = api_err.message.to_lowercase();

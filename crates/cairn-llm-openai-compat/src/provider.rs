@@ -1,5 +1,7 @@
 //! [`OpenAiCompatProvider`] — implements [`LLMProvider`] over `async-openai`.
 
+use std::time::Duration;
+
 use async_openai::{
     Client,
     config::OpenAIConfig,
@@ -8,6 +10,7 @@ use async_openai::{
         ResponseFormat, ResponseFormatJsonSchema,
     },
 };
+use backoff::ExponentialBackoffBuilder;
 use cairn_core::{
     config::LlmConfig,
     contract::version::{ContractVersion, VersionRange},
@@ -30,13 +33,21 @@ pub struct OpenAiCompatProvider {
     capabilities: LLMProviderCapabilities,
 }
 
+/// Backoff with `max_elapsed_time = 0` so async-openai's internal retry
+/// loop returns immediately — our `RetryPolicy` is the sole retry layer.
+fn no_inner_backoff() -> backoff::ExponentialBackoff {
+    ExponentialBackoffBuilder::new()
+        .with_max_elapsed_time(Some(Duration::from_millis(0)))
+        .build()
+}
+
 impl OpenAiCompatProvider {
     /// Construct from a resolved [`LlmConfig`].
     pub fn from_config(config: &LlmConfig) -> Result<Self, LlmError> {
         let openai_cfg = to_openai_config(config);
         let model = config.model.clone().unwrap_or_else(|| "gpt-4o-mini".into());
         Ok(Self {
-            client: Client::with_config(openai_cfg),
+            client: Client::with_config(openai_cfg).with_backoff(no_inner_backoff()),
             model,
             capabilities: LLMProviderCapabilities {
                 json_mode: true,
@@ -62,7 +73,7 @@ impl OpenAiCompatProvider {
             .with_api_base(base_url)
             .with_api_key("test-key");
         Self {
-            client: Client::with_config(openai_cfg),
+            client: Client::with_config(openai_cfg).with_backoff(no_inner_backoff()),
             model: model.into(),
             capabilities,
         }
