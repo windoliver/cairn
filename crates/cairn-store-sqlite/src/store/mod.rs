@@ -47,6 +47,13 @@ pub struct SqliteMemoryStore {
     /// Cancellation token for the background reindex drain loop. Dropped when
     /// the store is dropped, signalling the drain task to exit gracefully.
     pub(crate) _cancel: Option<CancellationToken>,
+    /// Per-column BM25 weights for `records_fts` `(kind, class, scope, body)`.
+    /// Threaded into the `bm25(records_fts, w0, w1, w2, w3)` SQL call inside
+    /// `do_search_keyword`. Defaults to `[10.0, 10.0, 5.0, 1.0]` — kind/class
+    /// dominate, scope is mid-tier, body anchors the long-prose match.
+    /// Set at open time via `open_with_embedder_and_config`; the registry
+    /// stub built by `Default::default` carries the defaults.
+    pub(crate) fts_column_weights: [f64; 4],
 }
 
 impl Default for SqliteMemoryStore {
@@ -61,6 +68,7 @@ impl Default for SqliteMemoryStore {
                 transactions: true,
             },
             _cancel: None,
+            fts_column_weights: [10.0, 10.0, 5.0, 1.0],
         }
     }
 }

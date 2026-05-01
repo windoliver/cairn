@@ -79,6 +79,28 @@ const SNIPPET_CLOSE: &str = "</mark>";
 const SNIPPET_ELLIPSIS: &str = "…";
 const SNIPPET_MAX_TOKENS: i32 = 16;
 
+/// Column index, inside `records_fts`, that the `snippet()` SQL function
+/// should highlight. Migration 0030 reshaped `records_fts` from
+/// `(body)` to `(kind, class, scope, body)`; column index 3 is `body`,
+/// the only column carrying long-prose text worth showing as a snippet.
+const SNIPPET_COLUMN: i32 = 3;
+
+/// Validate that every per-column BM25 weight is finite and non-negative.
+/// FTS5 accepts arbitrary `REAL`s into `bm25(...)`, but a NaN or negative
+/// weight collapses ranking into garbage; reject early with a typed
+/// invariant error so the misconfiguration surfaces at the verb layer
+/// instead of poisoning the result page.
+fn assert_finite_weights(w: &[f64; 4]) -> Result<(), StoreError> {
+    for v in w {
+        if !v.is_finite() || *v < 0.0 {
+            return Err(StoreError::Invariant {
+                what: format!("fts_column_weights must be finite and non-negative, got {v}"),
+            });
+        }
+    }
+    Ok(())
+}
+
 impl SqliteMemoryStore {
     /// Inherent `search_keyword` implementation; the trait method
     /// [`MemoryStore::search_keyword`] guards `self.conn` then delegates here.
@@ -103,6 +125,12 @@ impl SqliteMemoryStore {
         &self,
         args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError> {
+        // Validate weights up-front so a misconfigured store fails before
+        // we burn a worker round-trip. The check is cheap (4 floats) and
+        // surfaces the bug as `Invariant` rather than as an FTS5 runtime
+        // error from inside the worker callback.
+        assert_finite_weights(&self.fts_column_weights)?;
+        let weights = self.fts_column_weights;
         let conn = self.require_conn("search_keyword")?.clone();
         let limit = args.limit.clamp(1, SEARCH_LIMIT_MAX);
         let query = args.query.clone();
@@ -123,6 +151,7 @@ impl SqliteMemoryStore {
                     compiled.as_ref(),
                     cursor.as_ref(),
                     limit,
+                    &weights,
                 )
                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
 
@@ -296,9 +325,19 @@ fn build_search_query(
     compiled: Option<&cairn_core::domain::filter::CompiledFilter>,
     cursor: Option<&KeywordCursor>,
     limit: usize,
+    fts_column_weights: &[f64; 4],
 ) -> Result<(String, Vec<SqlVal>), StoreError> {
+    use std::fmt::Write as _;
+
     let mut params: Vec<SqlVal> = Vec::new();
     let mut sql = String::with_capacity(512);
+
+    // Format the per-column BM25 call from the (already-validated) weights.
+    // Values come from store-construction-time config, never from user
+    // input, so direct interpolation is safe — `assert_finite_weights`
+    // gated NaN/Inf/negative values, and `{:.6}` produces a stable decimal.
+    let [w0, w1, w2, w3] = *fts_column_weights;
+    let bm25_call = format!("bm25(records_fts, {w0:.6}, {w1:.6}, {w2:.6}, {w3:.6})");
 
     // The supersession predicate matches the `records_latest` view in
     // migration 0001 (brief §3 lines ~417-426): a record version is
@@ -307,6 +346,10 @@ fn build_search_query(
     // keyword search must respect the same exclusion as graph traversal —
     // otherwise a body match against an `updates`.dst can resurface a
     // fact the consolidator already retired.
+    //
+    // `snippet(records_fts, 3, ...)` targets column 3 (`body`) — migration
+    // 0030 made column 0 = `kind`, which is single-token and useless to
+    // highlight. Snippets continue to come from rich-prose body text.
     sql.push_str(
         "SELECT \
             r.record_id, r.target_id, r.scope, r.kind, r.class, r.visibility, \
@@ -315,8 +358,18 @@ fn build_search_query(
          FROM records r \
          JOIN ( \
             SELECT rowid, \
-                   bm25(records_fts) AS bm25_score, \
-                   snippet(records_fts, 0, ?, ?, ?, ?) AS snippet \
+                   ",
+    );
+    sql.push_str(&bm25_call);
+    sql.push_str(
+        " AS bm25_score, \
+                   snippet(records_fts, ",
+    );
+    write!(&mut sql, "{SNIPPET_COLUMN}").map_err(|e| StoreError::Invariant {
+        what: format!("format snippet column index: {e}"),
+    })?;
+    sql.push_str(
+        ", ?, ?, ?, ?) AS snippet \
               FROM records_fts \
              WHERE records_fts MATCH ? \
          ) fts ON fts.rowid = r.rowid \
@@ -789,7 +842,8 @@ mod tests {
         // If a future edit inlines a different predicate string, this
         // fails before the more expensive EXPLAIN check below.
         let (sql, params) =
-            build_search_query("anything", &[], None, None, 10).expect("build search SQL");
+            build_search_query("anything", &[], None, None, 10, &[10.0, 10.0, 5.0, 1.0])
+                .expect("build search SQL");
         assert!(
             sql.contains(SUPERSESSION_NOT_EXISTS_CLAUSE),
             "build_search_query must continue to emit SUPERSESSION_NOT_EXISTS_CLAUSE \
@@ -864,6 +918,92 @@ mod tests {
              a rewrite to e.g. `kind IN ('updates')` or parameterised \
              `kind = ?` would lose proof equivalence and surface here. \
              Full plan:\n{joined}",
+        );
+    }
+
+    /// Guards `assert_finite_weights`: NaN, +Inf, and a negative coefficient
+    /// must all surface as `StoreError::Invariant` so a misconfigured store
+    /// fails with an actionable error rather than poisoning ranking output.
+    #[test]
+    fn assert_finite_weights_rejects_nan_inf_negative() {
+        use super::assert_finite_weights;
+
+        assert!(assert_finite_weights(&[10.0, 10.0, 5.0, 1.0]).is_ok());
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let weights = [bad, 10.0, 5.0, 1.0];
+            let err =
+                assert_finite_weights(&weights).expect_err("NaN/Inf/negative weights must error");
+            assert!(
+                matches!(err, crate::error::StoreError::Invariant { .. }),
+                "expected Invariant variant, got {err:?}",
+            );
+        }
+    }
+
+    /// End-to-end check that `do_search_keyword` honors the weights
+    /// supplied at open time: a single-token match against the `kind`
+    /// column (weight 100) outranks a token-only match against the
+    /// `body` column (weight 1) when the table is loaded with both rows.
+    /// This exercises the full SQL path — `bm25(records_fts, w0..w3)`,
+    /// the join, the visibility allowlist, and projection — rather than
+    /// the SQL builder in isolation.
+    #[tokio::test]
+    async fn weighted_bm25_kind_match_outranks_body_match_via_search_keyword() {
+        use cairn_core::contract::memory_store::{KeywordSearchArgs, MemoryStore};
+        use cairn_core::domain::record::tests_export::sample_record;
+        use cairn_core::domain::taxonomy::{MemoryKind, MemoryVisibility};
+        use cairn_core::domain::{RecordId, TargetId};
+
+        // Lopsided weights make the column attribution unambiguous: a
+        // body-only hit at weight 1 cannot outrank a kind-only hit at
+        // weight 100, regardless of token-frequency / row-length effects.
+        let store = crate::open_in_memory_with_embedder_and_config(None, [100.0, 1.0, 1.0, 1.0])
+            .await
+            .expect("open store with weighted bm25");
+
+        // Record A: 'feedback' lands in the `kind` column (weight 100).
+        // The body intentionally excludes the token so the only match
+        // path is the kind column. Confidence/salience/tags inherited
+        // from `sample_record`.
+        let mut a = sample_record();
+        "unrelated body content".clone_into(&mut a.body);
+        a.kind = MemoryKind::Feedback;
+
+        // Record B: 'feedback' lands in the `body` column (weight 1).
+        // Use a fresh record_id and target_id so both rows persist.
+        let mut b = sample_record();
+        b.id = RecordId::parse("01HQZX9F5N00000000000000B1".to_owned()).expect("valid id");
+        b.target_id =
+            TargetId::parse("01HQZX9F5N00000000000000B2".to_owned()).expect("valid target");
+        "feedback was clear and helpful".clone_into(&mut b.body);
+        // Keep b.kind from sample_record (User) so the body is the only
+        // place 'feedback' appears for this row.
+
+        store.upsert(&a).await.expect("upsert a");
+        store.upsert(&b).await.expect("upsert b");
+
+        let args = KeywordSearchArgs {
+            query: "feedback".into(),
+            filter: None,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 5,
+            cursor: None,
+        };
+        let page = store.search_keyword(&args).await.expect("search");
+        assert!(
+            !page.candidates.is_empty(),
+            "search returned 0 results — both seeded rows should match",
+        );
+        assert_eq!(
+            page.candidates[0].record_id,
+            a.id,
+            "kind-column hit (weight 100) must outrank body-column hit \
+             (weight 1) at weights [100, 1, 1, 1]; got order {:?}",
+            page.candidates
+                .iter()
+                .map(|c| c.record_id.as_str())
+                .collect::<Vec<_>>(),
         );
     }
 }

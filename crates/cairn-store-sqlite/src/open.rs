@@ -31,10 +31,19 @@ fn base_caps(vector: bool) -> MemoryStoreCapabilities {
     }
 }
 
+/// Default per-column BM25 weights for `records_fts` `(kind, class, scope, body)`.
+/// Used by every open-path that does not explicitly thread a config through.
+/// Mirrored in `SqliteMemoryStore::default()` so the registry stub agrees.
+const DEFAULT_FTS_COLUMN_WEIGHTS: [f64; 4] = [10.0, 10.0, 5.0, 1.0];
+
 /// Finish constructing a [`SqliteMemoryStore`] from an open connection and
 /// optional embedder. Spawns the background drain loop when an embedder is
 /// provided.
-fn build_store(conn: AsyncConn, embedder: Option<Arc<dyn EmbeddingModel>>) -> SqliteMemoryStore {
+fn build_store(
+    conn: AsyncConn,
+    embedder: Option<Arc<dyn EmbeddingModel>>,
+    fts_column_weights: [f64; 4],
+) -> SqliteMemoryStore {
     let conn = Arc::new(conn);
     let vector = embedder.is_some();
     let caps = base_caps(vector);
@@ -52,6 +61,7 @@ fn build_store(conn: AsyncConn, embedder: Option<Arc<dyn EmbeddingModel>>) -> Sq
         embedder,
         caps,
         _cancel: cancel,
+        fts_column_weights,
     }
 }
 
@@ -68,12 +78,31 @@ pub async fn open(path: impl AsRef<Path>) -> Result<SqliteMemoryStore, StoreErro
 /// embedding model. When `embedder` is `Some`, the `vector` capability is
 /// enabled and a background drain loop is spawned to embed queued records.
 ///
+/// Equivalent to [`open_with_embedder_and_config`] with the default
+/// per-column BM25 weights `[10.0, 10.0, 5.0, 1.0]`.
+///
 /// # Errors
 /// Returns [`StoreError`] if the directory cannot be created, the
 /// connection cannot be opened, pragmas fail, or migrations fail.
 pub async fn open_with_embedder(
     path: impl AsRef<Path>,
     embedder: Option<Arc<dyn EmbeddingModel>>,
+) -> Result<SqliteMemoryStore, StoreError> {
+    open_with_embedder_and_config(path, embedder, DEFAULT_FTS_COLUMN_WEIGHTS).await
+}
+
+/// Open (or create) the Cairn store at `path` with an optional local
+/// embedding model and an explicit per-column BM25 weight tuple. The four
+/// weights map to `records_fts` columns `(kind, class, scope, body)` —
+/// same order as migration 0030.
+///
+/// # Errors
+/// Returns [`StoreError`] if the directory cannot be created, the
+/// connection cannot be opened, pragmas fail, or migrations fail.
+pub async fn open_with_embedder_and_config(
+    path: impl AsRef<Path>,
+    embedder: Option<Arc<dyn EmbeddingModel>>,
+    fts_column_weights: [f64; 4],
 ) -> Result<SqliteMemoryStore, StoreError> {
     // Register the sqlite-vec vec0 module globally before opening any
     // connection so migration 0020 (CREATE VIRTUAL TABLE USING vec0) succeeds.
@@ -86,7 +115,7 @@ pub async fn open_with_embedder(
     }
     let conn = AsyncConn::open(path).await?;
     bootstrap(&conn).await?;
-    Ok(build_store(conn, embedder))
+    Ok(build_store(conn, embedder, fts_column_weights))
 }
 
 /// In-memory store at schema head. For tests.
@@ -100,15 +129,31 @@ pub async fn open_in_memory() -> Result<SqliteMemoryStore, StoreError> {
 /// In-memory store at schema head with an optional local embedding model.
 /// For tests that exercise the vector search path.
 ///
+/// Equivalent to [`open_in_memory_with_embedder_and_config`] with the
+/// default per-column BM25 weights `[10.0, 10.0, 5.0, 1.0]`.
+///
 /// # Errors
 /// Returns [`StoreError`] if pragmas or migrations fail.
 pub async fn open_in_memory_with_embedder(
     embedder: Option<Arc<dyn EmbeddingModel>>,
 ) -> Result<SqliteMemoryStore, StoreError> {
+    open_in_memory_with_embedder_and_config(embedder, DEFAULT_FTS_COLUMN_WEIGHTS).await
+}
+
+/// In-memory store at schema head with an optional local embedding model
+/// and an explicit per-column BM25 weight tuple. For tests that need to
+/// exercise weight-driven ranking against `records_fts`.
+///
+/// # Errors
+/// Returns [`StoreError`] if pragmas or migrations fail.
+pub async fn open_in_memory_with_embedder_and_config(
+    embedder: Option<Arc<dyn EmbeddingModel>>,
+    fts_column_weights: [f64; 4],
+) -> Result<SqliteMemoryStore, StoreError> {
     register_vec0();
     let conn = AsyncConn::open_in_memory().await?;
     bootstrap(&conn).await?;
-    Ok(build_store(conn, embedder))
+    Ok(build_store(conn, embedder, fts_column_weights))
 }
 
 async fn bootstrap(conn: &AsyncConn) -> Result<(), StoreError> {
