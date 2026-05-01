@@ -765,5 +765,34 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal sensor_id out of domain class');
 END;
 
+-- 10. Mirror cursor reset marker (round-5 review follow-up). Existing
+--     vaults' .cairn/consent.cursor sidecar may already point ABOVE the
+--     legacy `kind IS NULL` rowids that this migration just promoted to
+--     event-shape rows (the async mirror in cairn-workflows tailed only
+--     event-kind rows pre-0021, so legacy rowids were silently skipped).
+--     Without intervention, the next mirror tick would still skip them
+--     because `WHERE rowid > cursor` filters them out.
+--
+--     Rather than reach across crate boundaries to delete the sidecar
+--     file, we leave a marker in the DB. The mirror's tick() reads the
+--     unconsumed markers, calls rebuild_from_db() (which atomically
+--     replaces the on-disk log by replaying from rowid 0), then marks
+--     the row consumed. Idempotent under repeated ticks; safe under
+--     concurrent mirror processes (the mirror holds the consent.lock
+--     advisory file lock during the rebuild).
+--
+--     `consumed` is an INTEGER (0/1) rather than BOOLEAN because SQLite
+--     stores booleans as integers anyway and the column-affinity rules
+--     are clearer. UPDATEs on this table are unconstrained — the
+--     append-only triggers attach to consent_journal only.
+CREATE TABLE IF NOT EXISTS consent_mirror_resets (
+  migration_id INTEGER NOT NULL PRIMARY KEY,
+  applied_at   INTEGER NOT NULL,
+  consumed     INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT INTO consent_mirror_resets (migration_id, applied_at, consumed)
+  VALUES (21, strftime('%s','now') * 1000, 0);
+
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (21, '0021_consent_kind_not_null', '', strftime('%s','now') * 1000);

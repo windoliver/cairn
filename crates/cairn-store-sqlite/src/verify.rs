@@ -153,6 +153,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // above; index name unchanged. Adds the empty-string guards.)
     ("trigger", "sessions_project_root_no_empty_insert"),
     ("trigger", "sessions_project_root_no_empty_update"),
+    // 0021_consent_kind_not_null (mirror cursor reset marker — round-5
+    // review follow-up; consumed by cairn-workflows::ConsentLogMaterializer
+    // on first tick after upgrade so legacy promoted rows get replayed).
+    ("table", "consent_mirror_resets"),
     // 0020_workflow_jobs
     ("table", "workflow_jobs"),
     ("index", "workflow_jobs_ready_idx"),

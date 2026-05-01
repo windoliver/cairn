@@ -343,6 +343,74 @@ fn cursor_survives_missing_sidecar() {
 }
 
 #[test]
+fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
+    // Round-5 review hardening: migration 0021 promotes legacy
+    // `kind IS NULL` rows to event-shape rows preserving their original
+    // rowid. Existing vaults' .cairn/consent.cursor sidecar may already
+    // point ABOVE those legacy rowids (the mirror tailed only event-kind
+    // rows pre-0021), so a plain tick() would skip them. Migration 0021
+    // inserts a row into `consent_mirror_resets` to instruct the mirror
+    // to replay from rowid 0 once after upgrade.
+    //
+    // This test simulates the post-upgrade state: events already exist
+    // in the journal AND a cursor that's already past them, AND a
+    // pending reset marker. The next tick must rebuild the log from
+    // rowid 0 (re-mirroring everything), then mark the reset consumed
+    // so subsequent ticks behave normally.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-existing journal rows.
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Open mirror, mark the migration-0021 reset row consumed (so the
+    // first tick processes normally), then tick to advance the cursor
+    // past every existing row.
+    conn.execute(
+        "UPDATE consent_mirror_resets SET consumed = 1 WHERE migration_id = 21",
+        [],
+    )
+    .expect("consume initial reset");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+    let cursor_before_reset = mirror.cursor();
+    assert!(cursor_before_reset > 0);
+
+    // Now corrupt the on-disk log to a smaller-than-all-events form and
+    // re-arm the reset marker. The reset path must rebuild from the DB
+    // — even though the in-memory cursor is already past every row —
+    // and re-mirror everything.
+    std::fs::write(mirror.log_path(), "").expect("truncate");
+    conn.execute(
+        "UPDATE consent_mirror_resets SET consumed = 0 WHERE migration_id = 21",
+        [],
+    )
+    .expect("re-arm reset");
+
+    let n = mirror.tick(&conn).expect("reset tick");
+    assert_eq!(n, 2, "reset must replay every row from rowid 0");
+
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 2);
+
+    // The reset row must now be consumed; another tick is a no-op.
+    let consumed: i64 = conn
+        .query_row(
+            "SELECT consumed FROM consent_mirror_resets WHERE migration_id = 21",
+            [],
+            |r| r.get(0),
+        )
+        .expect("consumed");
+    assert_eq!(consumed, 1, "reset must be marked consumed after replay");
+
+    let n = mirror.tick(&conn).expect("idempotent tick");
+    assert_eq!(n, 0, "no further work once reset is consumed");
+}
+
+#[test]
 fn rebuild_is_authoritative_over_db_only() {
     // The database remains the source of truth: rebuilding from a vault
     // with a deleted log produces a log identical to the one constructed

@@ -198,6 +198,32 @@ impl ConsentLogMaterializer {
     /// committed; the next call re-reads from the log's last envelope.
     pub fn tick(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
+
+        // Migration 0021 promoted legacy `kind IS NULL` rows in the
+        // consent_journal to event-shape rows preserving their original
+        // rowid. Existing vaults' cursor sidecar may already point ABOVE
+        // those legacy rowids (the mirror tailed only event-kind rows
+        // pre-0021 via the `kind IS NOT NULL` predicate in
+        // `read_since_rowid`), so a plain `tick()` would silently skip
+        // every newly-visible legacy row and brick brief §14 "no gaps".
+        //
+        // Migration 0021 inserts a `(migration_id, applied_at,
+        // consumed=0)` row into `consent_mirror_resets`. Here we look
+        // for any unconsumed reset rows; on finding one we replay from
+        // rowid 0 via `rebuild_log_to` (the same atomic
+        // truncate-and-replay path `rebuild_from_db` uses), update the
+        // in-memory cursor to the rebuild's high-water mark, and mark
+        // the reset row consumed. The lock guard above serializes us
+        // against any peer mirror.
+        let pending_resets = read_pending_mirror_resets(conn)?;
+        if !pending_resets.is_empty() {
+            let rebuild = rebuild_log_to(&self.log_path, conn)?;
+            self.cursor = rebuild.high_water;
+            let _ = write_cursor_hint(&self.cursor_path, self.cursor);
+            mark_mirror_resets_consumed(conn, &pending_resets)?;
+            return Ok(rebuild.written);
+        }
+
         // Re-read the authoritative cursor under the lock — a peer
         // process may have advanced past us since `open`. Fail closed
         // on the same conditions `open()` does:
@@ -293,6 +319,14 @@ impl ConsentLogMaterializer {
         let cursor = rebuild.high_water;
         let _ = write_cursor_hint(&cursor_path, cursor);
 
+        // Consume any pending mirror-reset markers — `rebuild_at` is the
+        // operator-driven recovery path and supersedes any pending
+        // 0021-style instruction to replay from zero.
+        let pending = read_pending_mirror_resets(conn)?;
+        if !pending.is_empty() {
+            mark_mirror_resets_consumed(conn, &pending)?;
+        }
+
         Ok(Self {
             log_path,
             cursor_path,
@@ -320,6 +354,12 @@ impl ConsentLogMaterializer {
         // replay query and would create an audit gap.
         self.cursor = rebuild.high_water;
         let _ = write_cursor_hint(&self.cursor_path, self.cursor);
+        // Consume any pending mirror-reset markers — an explicit rebuild
+        // supersedes any pending 0021-style replay instruction.
+        let pending = read_pending_mirror_resets(conn)?;
+        if !pending.is_empty() {
+            mark_mirror_resets_consumed(conn, &pending)?;
+        }
         Ok(rebuild.written)
     }
 
@@ -408,6 +448,53 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
     }
     std::fs::rename(&tmp, path)?;
     fsync_parent(path)?;
+    Ok(())
+}
+
+/// Read every unconsumed mirror-reset marker. Migration 0021 inserts
+/// one such row to instruct any vault that already has a tail-cursor
+/// past pre-0021 legacy rowids to replay the journal from rowid 0 once
+/// after upgrade. Returns the `migration_id`s so the caller can mark them
+/// consumed after a successful rebuild.
+fn read_pending_mirror_resets(conn: &Connection) -> Result<Vec<i64>, MirrorError> {
+    // Tolerate the table being absent (e.g., a legacy connection that
+    // somehow never ran 0021): no resets to honor.
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'consent_mirror_resets'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from)?;
+    if exists == 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT migration_id FROM consent_mirror_resets WHERE consumed = 0")
+        .map_err(StoreError::from)?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(StoreError::from)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(StoreError::from)?);
+    }
+    Ok(out)
+}
+
+/// Mark the given `migration_id`s as consumed so subsequent ticks don't
+/// rebuild again. `UPDATE` on this table is unconstrained — the
+/// `consent_journal` append-only triggers attach to `consent_journal`
+/// only.
+fn mark_mirror_resets_consumed(conn: &Connection, ids: &[i64]) -> Result<(), MirrorError> {
+    for id in ids {
+        conn.execute(
+            "UPDATE consent_mirror_resets SET consumed = 1 WHERE migration_id = ?",
+            rusqlite::params![id],
+        )
+        .map_err(StoreError::from)?;
+    }
     Ok(())
 }
 
