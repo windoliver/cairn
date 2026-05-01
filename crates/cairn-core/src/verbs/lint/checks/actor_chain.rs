@@ -187,7 +187,9 @@ mod tests {
             author_id,
             AuthorLifecycle {
                 state: ProvisioningState::Active,
-                activated_at: None,
+                // Far-past activation so the chain timestamp ordering
+                // check trivially holds for the sample record.
+                activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
                 revoked_at: None,
             },
         );
@@ -222,7 +224,9 @@ mod tests {
             author_id,
             AuthorLifecycle {
                 state: ProvisioningState::Revoked,
-                activated_at: None,
+                activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
+                // No revoked_at → falls through to legitimate-history
+                // case (Warning), per the round-9 timestamp policy.
                 revoked_at: None,
             },
         );
@@ -262,7 +266,10 @@ mod tests {
             author_id,
             AuthorLifecycle {
                 state: ProvisioningState::RevokePending,
-                activated_at: None,
+                activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
+                // No revoked_at → falls through to RevocationInFlight
+                // (Error). With timestamps the legitimate-history
+                // case for in-flight is exercised by a separate test.
                 revoked_at: None,
             },
         );

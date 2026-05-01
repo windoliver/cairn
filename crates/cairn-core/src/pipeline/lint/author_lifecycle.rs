@@ -296,11 +296,28 @@ fn classify_resolved(
     use std::cmp::Ordering;
     match lc.state {
         ProvisioningState::Active => {
+            // Active + missing `activated_at` is a corrupted /
+            // partially-migrated registry row, not a clean state. The
+            // registry's activation path always writes
+            // `activated_at` when flipping to Active, so a missing
+            // value means the row's invariants are broken; failing
+            // open here would silently drop the only ordering check
+            // that catches pre-activation tampering. Fail closed
+            // (brief invariant 6) — round-10 finding.
+            let Some(activated_at) = lc.activated_at.as_ref() else {
+                return Some((
+                    ChainStatus::Malformed,
+                    format!(
+                        "author identity `{}` is `Active` but the registry row has no `activated_at` — corrupted lifecycle metadata; fail-closed",
+                        author.as_str()
+                    ),
+                ));
+            };
             // Pre-activation tamper: the chain author timestamp is
             // *before* the identity acquired authoritative signing
             // right. Even though current state is Active, the write
             // itself was unsigned-by-design at the moment it landed.
-            if let (Some(chain_at), Some(activated_at)) = (chain_at, lc.activated_at.as_ref())
+            if let Some(chain_at) = chain_at
                 && chain_at.cmp_chronological(activated_at) == Ordering::Less
             {
                 return Some((
@@ -322,13 +339,34 @@ fn classify_resolved(
                 author.as_str()
             ),
         )),
-        state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending) => Some((
-            ChainStatus::RevocationInFlight,
-            format!(
-                "author identity `{}` is in lifecycle state `{state:?}` — record landed while a withdrawal was in motion; suspicious write",
-                author.as_str()
-            ),
-        )),
+        state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending) => {
+            // Round-10 fix: parallel the terminal Revoked branch. Use
+            // `revoked_at` as transition evidence — the registry
+            // writes `revoked_at` when flipping to RevokePending. If
+            // chain `at` < `revoked_at`, the record predates the
+            // transition and is legitimate history; only a write at
+            // or after the transition is the suspicious-write case.
+            if let (Some(chain_at), Some(revoked_at)) = (chain_at, lc.revoked_at.as_ref())
+                && chain_at.cmp_chronological(revoked_at) == Ordering::Less
+            {
+                return Some((
+                    ChainStatus::Revoked,
+                    format!(
+                        "author identity `{}` is `{state:?}` but the chain author timestamp ({}) predates `revoked_at` ({}) — pre-revocation history; non-blocking",
+                        author.as_str(),
+                        chain_at,
+                        revoked_at,
+                    ),
+                ));
+            }
+            Some((
+                ChainStatus::RevocationInFlight,
+                format!(
+                    "author identity `{}` is in lifecycle state `{state:?}` — record landed at or after withdrawal began; suspicious write",
+                    author.as_str()
+                ),
+            ))
+        }
         state @ (ProvisioningState::Revoked | ProvisioningState::Purged) => {
             // Post-revocation write: the chain author timestamp is at
             // or after `revoked_at`. The signing right had already
@@ -381,14 +419,16 @@ mod tests {
         }
     }
 
-    /// Build an `AuthorState::Resolved` with no transition timestamps —
-    /// covers the pre-timestamp legacy scenarios where the lifecycle
-    /// state alone drives the verdict (registry rows lacking
-    /// `activated_at` / `revoked_at` for whatever reason).
+    /// Build an `AuthorState::Resolved` for tests where the lifecycle
+    /// *state* drives the verdict and timestamp comparisons are not
+    /// the focus. Stamps a far-past `activated_at` so `Active` rows
+    /// pass the activation-ordering check trivially (any realistic
+    /// chain `at` will be after it). Tests that need to exercise the
+    /// timestamp branches use `resolved_with` instead.
     fn resolved(state: ProvisioningState) -> AuthorState {
         AuthorState::Resolved(AuthorLifecycle {
             state,
-            activated_at: None,
+            activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
             revoked_at: None,
         })
     }
@@ -507,6 +547,60 @@ mod tests {
         .expect("pre-activation write must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert!(finding.message.contains("pre-activation"));
+    }
+
+    #[test]
+    fn active_without_activated_at_is_flagged_as_malformed() {
+        // Round-10 fix: Active + activated_at == None is corrupted
+        // registry state, not a clean row. Fail closed.
+        let record = record_with_active_author();
+        let finding = check_author_lifecycle(
+            &record,
+            AuthorState::Resolved(AuthorLifecycle {
+                state: ProvisioningState::Active,
+                activated_at: None,
+                revoked_at: None,
+            }),
+        )
+        .expect("corrupted Active row must surface");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert!(finding.message.contains("no `activated_at`"));
+    }
+
+    #[test]
+    fn revoke_pending_with_chain_before_revoked_at_is_warning() {
+        // Round-10 fix: a record predating the revoke transition is
+        // legitimate history even when the registry is now
+        // RevokePending. Falls back to ChainStatus::Revoked so the
+        // dispatch leaf maps it to Warning.
+        let record = record_with_active_author(); // chain.at = 2026-04-22T14:02:11Z
+        let finding = check_author_lifecycle(
+            &record,
+            resolved_with(
+                ProvisioningState::RevokePending,
+                Some("2025-01-01T00:00:00Z"),
+                Some("2026-12-31T23:59:59Z"), // revoked_at AFTER chain.at
+            ),
+        )
+        .expect("flagged");
+        assert_eq!(finding.status, ChainStatus::Revoked);
+    }
+
+    #[test]
+    fn revoke_pending_with_chain_at_or_after_revoked_at_is_error() {
+        // Complementary: chain `at` >= revoked_at → suspicious-write
+        // case stands.
+        let record = record_with_active_author(); // chain.at = 2026-04-22T14:02:11Z
+        let finding = check_author_lifecycle(
+            &record,
+            resolved_with(
+                ProvisioningState::RevokePending,
+                Some("2025-01-01T00:00:00Z"),
+                Some("2026-04-22T14:02:11Z"), // revoked_at == chain.at
+            ),
+        )
+        .expect("flagged");
+        assert_eq!(finding.status, ChainStatus::RevocationInFlight);
     }
 
     #[test]
