@@ -351,6 +351,46 @@ mod tests {
     }
 
     #[test]
+    fn finding_message_never_leaks_record_body() {
+        // Brief invariant 9 (privacy-by-construction): findings render
+        // into lint-report.md and must never contain raw record body
+        // content. Seed every flag-eligible state with a body marker
+        // and assert the marker does not appear in the message.
+        const MARKER: &str = "SECRET-MARKER-PRIVACY-9";
+        let cases = [
+            AuthorState::Resolved(ProvisioningState::Pending),
+            AuthorState::Resolved(ProvisioningState::RevokePending),
+            AuthorState::Resolved(ProvisioningState::Revoked),
+            AuthorState::Resolved(ProvisioningState::PurgePending),
+            AuthorState::Resolved(ProvisioningState::Purged),
+            AuthorState::MissingFromRegistry,
+        ];
+        for state in cases {
+            let mut record = record_with_active_author();
+            record.body = format!("benign prefix {MARKER} benign suffix");
+            let finding = check_author_lifecycle(&record, state)
+                .expect("non-Active state must produce a finding");
+            assert!(
+                !finding.message.contains(MARKER),
+                "finding message leaked record body for state {state:?}: {}",
+                finding.message
+            );
+        }
+        // Same for the malformed-chain path.
+        let mut malformed = record_with_active_author();
+        malformed.body = format!("benign prefix {MARKER} benign suffix");
+        malformed
+            .actor_chain
+            .retain(|e| e.role != ChainRole::Author);
+        malformed
+            .actor_chain
+            .push(entry(ChainRole::Sensor, "snr:local:hook:cc-session:v1"));
+        let finding = check_author_lifecycle(&malformed, AuthorState::MissingFromRegistry)
+            .expect("malformed-chain finding");
+        assert!(!finding.message.contains(MARKER));
+    }
+
+    #[test]
     fn malformed_chain_is_independent_of_author_state() {
         // The chain-shape branch fires regardless of what state the
         // dispatch layer prefetched — there is no unambiguous author to
