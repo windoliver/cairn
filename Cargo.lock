@@ -267,10 +267,16 @@ name = "cairn-bench"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "cairn-core",
+ "cairn-embeddings-local",
  "cairn-embeddings-openai",
+ "cairn-store-sqlite",
  "clap",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
 ]
 

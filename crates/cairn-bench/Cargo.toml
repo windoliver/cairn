@@ -21,23 +21,25 @@ default = []
 openai = ["dep:cairn-embeddings-openai"]
 
 [dependencies]
-# Task 10 scaffolds fixture loading + IR metrics only. Adapter dispatch
-# (cairn-core, cairn-embeddings-local, cairn-store-sqlite, tracing) lands
-# with Task 11; the optional openai dep stays declared so the feature
-# surface is stable across the task boundary.
+# Adapter dispatch (Task 11) wires cairn-core, cairn-embeddings-local, and
+# cairn-store-sqlite into the binary. cairn-core is pulled with the
+# `test-fixtures` feature: cairn-bench is developer/eval tooling (parallel
+# to `cargo bench`), not a user-facing CLI, and reusing `sample_record`
+# avoids hand-cloning a schema-drift-fragile MemoryRecord literal.
+cairn-core = { workspace = true, features = ["test-fixtures"] }
+cairn-embeddings-local = { workspace = true }
 cairn-embeddings-openai = { workspace = true, optional = true }
+cairn-store-sqlite = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
-
-# cairn-embeddings-openai is wired through the optional `openai` feature
-# but isn't imported in Task 10's scaffold (adapter dispatch lands in
-# Task 11). Keep the optional dep declared so the feature surface stays
-# stable across tasks; tell cargo-machete it's intentional.
-[package.metadata.cargo-machete]
-ignored = ["cairn-embeddings-openai"]
