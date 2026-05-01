@@ -1858,6 +1858,221 @@ fn consent_journal_rebuild_aborts_on_event_row_invalid_metadata() {
 }
 
 #[test]
+fn consent_journal_rebuild_aborts_on_event_row_invalid_grant_subject() {
+    // Phase-B (#255, brief §14): round-8 High finding. Pre-0011 schema did
+    // not enforce the subject domain class on grant/revoke rows — the
+    // `consent_journal_subject_domain_for_non_hash_kinds` trigger landed
+    // in 0011. A pre-0011 row could carry a subject with uppercase /
+    // spaces / other out-of-domain chars. Step 0d must FAIL CLOSED so
+    // `ConsentEvent::validate()` does not subsequently fail at decode.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "DROP TRIGGER consent_journal_subject_domain_for_non_hash_kinds",
+        [],
+    )
+    .expect("drop pre-0021 subject-domain trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('grant-bad-subject', 'Has Caps', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with out-of-domain subject");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with bad grant subject");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row")
+            || msg.contains("subject/sensor_id")
+            || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / subject/sensor_id / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'grant-bad-subject'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "grant-bad-subject");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_sensor_kind_missing_sensor_id() {
+    // Phase-B (#255, brief §14): round-8 High finding. The 0011 trigger
+    // `consent_journal_sensor_kind_requires_sensor_id` enforces that
+    // sensor_enable/sensor_disable rows carry a non-NULL `sensor_id`.
+    // Pre-0011 schema did not enforce this; step 0d must FAIL CLOSED.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "DROP TRIGGER consent_journal_sensor_kind_requires_sensor_id",
+        [],
+    )
+    .expect("drop pre-0021 sensor-requires-sensor_id trigger to simulate v9-era write");
+    // Also drop the matching-payload + matching-subject triggers since the
+    // payload here doesn't reference a sensor_id and the subject is a
+    // hand-rolled string — those triggers would otherwise block the seed.
+    conn.execute("DROP TRIGGER consent_journal_sensor_id_matches_payload", [])
+        .ok();
+    conn.execute(
+        "DROP TRIGGER consent_journal_sensor_subject_matches_sensor_id",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "DROP TRIGGER consent_journal_payload_shape_matches_kind",
+        [],
+    )
+    .ok();
+    conn.execute("DROP TRIGGER consent_journal_payload_required_fields", [])
+        .ok();
+    conn.execute(
+        "DROP TRIGGER consent_journal_subject_domain_for_non_hash_kinds",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso, sensor_id) \
+         VALUES ('sensor-no-id', 'snr:foo', 'private', 'GRANT', 'hmn:t', 0, \
+                 'sensor_enable', 'hmn:t', \
+                 '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"foo\"}', \
+                 '1970-01-01T00:00:00Z', NULL)",
+        [],
+    )
+    .expect("legacy sensor-kind insert with NULL sensor_id");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on sensor row missing sensor_id");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row")
+            || msg.contains("subject/sensor_id")
+            || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / subject/sensor_id / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'sensor-no-id'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "sensor-no-id");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_non_sensor_kind_with_sensor_id() {
+    // Phase-B (#255, brief §14): round-8 High finding. The 0011 trigger
+    // `consent_journal_non_sensor_kind_forbids_sensor_id` rejects any
+    // non-sensor row that carries a `sensor_id`. Pre-0011 schema did not
+    // enforce this; step 0d must FAIL CLOSED.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "DROP TRIGGER consent_journal_non_sensor_kind_forbids_sensor_id",
+        [],
+    )
+    .expect("drop pre-0021 forbids-sensor_id trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso, sensor_id) \
+         VALUES ('grant-with-sensor-id', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z', 'snr:bar')",
+        [],
+    )
+    .expect("legacy grant-kind insert with stray sensor_id");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on non-sensor row with sensor_id");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row")
+            || msg.contains("subject/sensor_id")
+            || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / subject/sensor_id / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'grant-with-sensor-id'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "grant-with-sensor-id");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_invalid_hash_subject() {
+    // Phase-B (#255, brief §14): round-8 High finding. Hash-kind rows
+    // (forget_intent/remember_intent/promote_receipt) must carry a
+    // subject of shape `sha256:<64hex>` or `hash:<32..=128 hex>`. The
+    // 0011 trigger `consent_journal_hash_kind_subject_shape` enforces
+    // this going forward; pre-0011 schema did not. Step 0d must FAIL
+    // CLOSED on a hash-kind row whose subject does not match.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_hash_kind_subject_shape", [])
+        .expect("drop pre-0021 hash-subject trigger to simulate v9-era write");
+    // The hash-kind payloads have their own shape; drop the related
+    // payload-shape and subject-domain triggers so the seed insert lands.
+    conn.execute(
+        "DROP TRIGGER consent_journal_payload_shape_matches_kind",
+        [],
+    )
+    .ok();
+    conn.execute("DROP TRIGGER consent_journal_payload_required_fields", [])
+        .ok();
+    conn.execute(
+        "DROP TRIGGER consent_journal_subject_domain_for_non_hash_kinds",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('forget-bad-subj', 'not-a-hash', 'private', 'GRANT', 'hmn:t', 0, \
+                 'forget_intent', 'hmn:t', \
+                 '{\"shape\":\"intent_receipt\",\"target_id_hash\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy hash-kind insert with malformed subject");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on hash-kind row with malformed subject");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row")
+            || msg.contains("subject/sensor_id")
+            || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / subject/sensor_id / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'forget-bad-subj'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "forget-bad-subj");
+}
+
+#[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
     conn.execute(

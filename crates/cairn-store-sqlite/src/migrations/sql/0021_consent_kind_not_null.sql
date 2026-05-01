@@ -224,8 +224,13 @@ DROP TABLE __cairn_assert_legacy_metadata;
 --     the metadata domain classes were added in 0011. A vault migrated
 --     through the 0009/0010 era could carry event-kind rows with NULL
 --     actor / NULL payload / NULL decided_at_iso / out-of-domain
---     metadata that the 0011 hardening triggers blocked going forward
---     but did NOT retroactively repair. The 0021 rebuild copies those
+--     metadata, or with malformed `subject`/`sensor_id` (kind-specific
+--     invariants — sensor subject `snr:` prefix, hash subject sha256/
+--     hash shape, grant/revoke and policy_change subject domains, and
+--     the sensor-id-only-on-sensor-kinds rule) that the 0011 hardening
+--     triggers blocked going forward but did NOT retroactively repair.
+--     `ConsentEvent::validate()` (round-6 defense-in-depth) re-checks
+--     these invariants at decode time. The 0021 rebuild copies those
 --     rows verbatim through the `ELSE <existing-column>` arm in step 4,
 --     and `decode_event_inner` (round-6 defense-in-depth) then surfaces
 --     them as permanent mirror tail/rebuild errors.
@@ -242,7 +247,7 @@ CREATE TEMP TRIGGER __cairn_assert_event_rows_trg
   BEFORE INSERT ON __cairn_assert_event_rows
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains event-kind row(s) (kind IS NOT NULL) missing required fields or with invalid metadata; pre-0011 schema allowed this. Resolve manually before re-running migration (issue #267).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains event-kind row(s) (kind IS NOT NULL) missing required fields, with invalid metadata, or with malformed subject/sensor_id; pre-0011 schema allowed this. Resolve manually before re-running migration (issue #267).');
 END;
 INSERT INTO __cairn_assert_event_rows (n)
   SELECT COUNT(*) FROM consent_journal
@@ -264,6 +269,47 @@ INSERT INTO __cairn_assert_event_rows (n)
             AND (length(op_id) < 1
                  OR length(op_id) > 128
                  OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
+       -- non-sensor kind with sensor_id is invalid (0011 trigger
+       -- `non_sensor_kind_forbids_sensor_id`).
+       OR (kind NOT IN ('sensor_enable','sensor_disable')
+            AND sensor_id IS NOT NULL)
+       -- sensor kind missing/malformed sensor_id (0011 triggers
+       -- `sensor_kind_requires_sensor_id` + `sensor_id_domain`).
+       OR (kind IN ('sensor_enable','sensor_disable')
+            AND (sensor_id IS NULL
+                 OR length(sensor_id) < 1
+                 OR length(sensor_id) > 128
+                 OR sensor_id GLOB '*[^A-Za-z0-9._:-]*'))
+       -- sensor kind subject must equal 'snr:' || sensor_id (0011 trigger
+       -- `sensor_subject_matches_sensor_id`).
+       OR (kind IN ('sensor_enable','sensor_disable')
+            AND sensor_id IS NOT NULL
+            AND (subject IS NULL OR subject IS NOT ('snr:' || sensor_id)))
+       -- hash kind subject must match sha256:<64hex> or hash:<32..=128 hex>
+       -- (0011 trigger `hash_kind_subject_shape`).
+       OR (kind IN ('forget_intent','remember_intent','promote_receipt')
+            AND (subject IS NULL
+                 OR NOT (
+                       (substr(subject, 1, 7) = 'sha256:'
+                         AND length(subject) = 71
+                         AND substr(subject, 8) NOT GLOB '*[^0-9a-f]*')
+                    OR (substr(subject, 1, 5) = 'hash:'
+                         AND length(subject) BETWEEN 37 AND 133
+                         AND substr(subject, 6) NOT GLOB '*[^0-9a-f]*')
+                 )))
+       -- grant/revoke subject domain (0011 trigger
+       -- `subject_domain_for_non_hash_kinds`).
+       OR (kind IN ('grant','revoke')
+            AND (subject IS NULL
+                 OR length(subject) < 1 OR length(subject) > 128
+                 OR subject GLOB '*[^a-z0-9._:-]*'
+                 OR substr(subject, 1, 1) NOT GLOB '[a-z]'))
+       -- policy_change subject domain (0011 trigger
+       -- `subject_domain_for_non_hash_kinds`).
+       OR (kind = 'policy_change'
+            AND (subject IS NULL
+                 OR length(subject) < 1 OR length(subject) > 128
+                 OR subject GLOB '*[^a-z0-9._-]*'))
      );
 DROP TRIGGER __cairn_assert_event_rows_trg;
 DROP TABLE __cairn_assert_event_rows;
