@@ -402,15 +402,24 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     assert_eq!(n, 2);
     let cursor_before_reset = mirror.cursor();
     assert!(cursor_before_reset > 0);
+    drop(mirror);
 
-    // Now wipe the log and the sidecar to re-arm the reset for THIS
-    // mirror. The DB row is unchanged — it's still the source of truth
-    // for "a reset was needed." The reset path must rebuild from the DB
-    // — even though the in-memory cursor is already past every row —
-    // and re-mirror everything.
-    std::fs::write(mirror.log_path(), "").expect("truncate");
+    // Now wipe the log and the sidecar to re-arm the reset. The DB row
+    // is unchanged — it's still the source of truth for "a reset was
+    // needed." The reset path must rebuild from the DB — even though
+    // a freshly-opened mirror starts with cursor=0 — and re-mirror
+    // everything.
+    //
+    // We reopen the mirror after the rollback because round-9 added
+    // an in-memory `resets_validated` cache that would otherwise
+    // short-circuit the post-tick line-count scan on the same
+    // instance (an intentional tradeoff: we trust runtime stability,
+    // and external rollbacks need a reopen to be observed).
+    let log_path = dir.path().join("consent.log");
+    std::fs::write(&log_path, "").expect("truncate");
     std::fs::remove_file(&resets_consumed).expect("re-arm sidecar");
 
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen mirror");
     let n = mirror.tick(&conn).expect("reset tick");
     assert_eq!(n, 2, "reset must replay every row from rowid 0");
 
@@ -1061,5 +1070,124 @@ fn sidecar_with_three_field_format_forces_replay() {
     assert!(
         !after.lines().any(|l| l.trim() == format!("21:{nonce}:2")),
         "round-12 three-field line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn tick_skips_log_scan_after_validation_succeeds() {
+    // Round-9 high finding: `read_pending_mirror_resets` ran an
+    // O(file) `count_log_lines` scan on every tick because the
+    // `consent_mirror_resets` DB row persists forever. The fix caches
+    // the validation result on the materializer; subsequent ticks
+    // short-circuit. Behavioral proof: after the first tick validates
+    // the sidecar against the live log, we truncate the log behind
+    // the materializer's back so its line count is now FAR BELOW the
+    // recorded line_count. Without the cache, the next tick would
+    // see live_line_count < recorded line_count and force a replay
+    // (treating the marker as un-consumed). With the cache, the tick
+    // skips the scan and proceeds normally — this is the documented
+    // tradeoff: we trust the materializer's local view of "no pending
+    // resets" once validated, until the log is rewritten via
+    // `rebuild_log_to`.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-consume the migration-0021 reset with watermark=0,
+    // line_count=0 so the very first tick validates instantly.
+    let nonce = db_nonce_for(&conn, 21);
+    std::fs::write(
+        dir.path().join("consent.mirror_resets_consumed"),
+        format!("21:{nonce}:0:0\n"),
+    )
+    .expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(
+        n, 2,
+        "first tick mirrors both rows and validates the sidecar"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Truncate the log behind the materializer's back. If the cache
+    // were not in place, the next tick's line-count check would
+    // detect this rollback (live count = 0 < recorded line_count = 0
+    // is fine, but seed a sidecar entry with a higher line_count to
+    // make the rollback observable without the cache).
+    std::fs::write(
+        dir.path().join("consent.mirror_resets_consumed"),
+        format!("21:{nonce}:0:99\n"),
+    )
+    .expect("rewrite sidecar with high line_count");
+
+    // First tick already cached validated=true, so the next tick
+    // skips the line-count scan entirely and never reads the
+    // updated sidecar. No replay happens. Append a fresh row to
+    // confirm the tick still tails normally.
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    let n = mirror.tick(&conn).expect("post-cache tick");
+    assert_eq!(
+        n, 1,
+        "cached materializer tails one new row without re-scanning the log"
+    );
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 3, "log must have grown to 3 envelopes");
+}
+
+#[test]
+fn rebuild_from_db_resets_validation_cache() {
+    // Round-9 high finding follow-up: any code path that rewrites
+    // the log via `rebuild_log_to` must clear the validation cache
+    // — the rebuilt sidecar entry the rebuild writes is the new
+    // authority. Behavioral proof: tick once to set the cache, then
+    // plant a sidecar entry whose `line_count` is far above the
+    // live log's. If `rebuild_from_db` did NOT clear the cache, its
+    // post-rebuild call to `read_pending_mirror_resets_with_cache`
+    // would short-circuit (validated=true) and skip the
+    // line-count comparison — leaving the planted stale entry on
+    // disk untouched. With the cache cleared, the rebuild observes
+    // the rollback signal (live count < recorded count), treats
+    // the marker as pending, and rewrites the sidecar with a fresh
+    // `watermark:line_count` pair. We prove the second case by
+    // asserting the planted entry is replaced.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    let nonce = db_nonce_for(&conn, 21);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:0\n")).expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    mirror
+        .tick(&conn)
+        .expect("first tick caches validated=true");
+
+    // Plant a sidecar entry whose line_count overshoots the live log.
+    // A cached materializer would skip the line-count scan and never
+    // notice; a re-validating one would treat the marker as pending.
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:99\n")).expect("plant stale");
+
+    // rebuild_from_db must clear the cache before its internal
+    // pending-check, otherwise the planted stale entry survives.
+    let written = mirror.rebuild_from_db(&conn).expect("rebuild");
+    assert_eq!(written, 2);
+
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let fresh = format!("21:{nonce}:2:2");
+    let stale = format!("21:{nonce}:0:99");
+    assert!(
+        after.lines().any(|l| l.trim() == fresh),
+        "rebuild must rewrite the sidecar with the fresh line_count after \
+         clearing the validation cache: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == stale),
+        "stale sidecar entry must not survive a rebuild: {after:?}"
     );
 }

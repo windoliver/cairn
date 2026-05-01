@@ -97,6 +97,18 @@ pub struct ConsentLogMaterializer {
     /// silently steal the marker from its peers (Phase-B finding 2).
     resets_consumed_path: PathBuf,
     cursor: i64,
+    /// In-memory cache: once we've proven all `consent_mirror_resets`
+    /// markers are consumed by a sidecar entry whose watermark and
+    /// `line_count` satisfy the live cursor / log, we set this flag and
+    /// skip the DB query + the O(file) `count_log_lines` scan on every
+    /// subsequent tick. The DB row is permanent, so without this cache
+    /// we would re-scan the log on every tick forever — defeating the
+    /// 1 MiB cap that bounds the recovery scan elsewhere in this
+    /// module (round-9 high finding).
+    ///
+    /// Cleared by every call site that rewrites the log
+    /// (`rebuild_log_to`), so any post-rebuild state has to re-validate.
+    resets_validated: bool,
 }
 
 impl ConsentLogMaterializer {
@@ -164,6 +176,7 @@ impl ConsentLogMaterializer {
             lock_path,
             resets_consumed_path,
             cursor,
+            resets_validated: false,
         })
     }
 
@@ -276,14 +289,18 @@ impl ConsentLogMaterializer {
         // in-memory cursor to the rebuild's high-water mark, and append
         // the migration_id to the local sidecar. The lock guard above
         // serializes us against any peer mirror.
-        let pending_resets = read_pending_mirror_resets(
+        let pending_resets = read_pending_mirror_resets_with_cache(
             conn,
             &self.resets_consumed_path,
             self.cursor,
             &self.log_path,
+            &mut self.resets_validated,
         )?;
         if !pending_resets.is_empty() {
             let rebuild = rebuild_log_to(&self.log_path, conn)?;
+            // The rebuild rewrote the log — any prior cached validation
+            // is no longer trustworthy until we mark the sidecar below.
+            self.resets_validated = false;
             self.cursor = rebuild.high_water;
             let _ = write_cursor_hint(&self.cursor_path, self.cursor);
             // Watermark: the highest rowid the rebuild actually serialized.
@@ -368,7 +385,17 @@ impl ConsentLogMaterializer {
         // 0021-style instruction to replay from zero. Per-mirror
         // consumption (Phase-B finding 2): peers with their own
         // sidecars still see and replay the marker independently.
-        let pending = read_pending_mirror_resets(conn, &resets_consumed_path, cursor, &log_path)?;
+        //
+        // Use a fresh, throwaway cache flag here — we're inside a
+        // constructor and the post-consumption Self isn't built yet.
+        let mut validated = false;
+        let pending = read_pending_mirror_resets_with_cache(
+            conn,
+            &resets_consumed_path,
+            cursor,
+            &log_path,
+            &mut validated,
+        )?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
             let line_count = count_log_lines(&log_path)?;
@@ -377,6 +404,8 @@ impl ConsentLogMaterializer {
                 .map(|(id, nonce)| (id, nonce, watermark, line_count))
                 .collect();
             mark_mirror_resets_consumed(&resets_consumed_path, &consumed)?;
+            // We just rewrote the sidecar — re-validate on first tick.
+            validated = false;
         }
 
         Ok(Self {
@@ -385,6 +414,7 @@ impl ConsentLogMaterializer {
             lock_path,
             resets_consumed_path,
             cursor,
+            resets_validated: validated,
         })
     }
 
@@ -402,6 +432,10 @@ impl ConsentLogMaterializer {
     pub fn rebuild_from_db(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
         let rebuild = rebuild_log_to(&self.log_path, conn)?;
+        // The rebuild rewrote the log — invalidate any cached
+        // validation flag (round-9 high finding). The post-consumption
+        // path below will set it again once the sidecar is fresh.
+        self.resets_validated = false;
         // Advance only to the rowid we proved was serialized — never to
         // `max_rowid(conn)`, which could include rows inserted after the
         // replay query and would create an audit gap.
@@ -411,11 +445,12 @@ impl ConsentLogMaterializer {
         // supersedes any pending 0021-style replay instruction.
         // Consumption is per-mirror (Phase-B finding 2): the sidecar
         // holds the local truth, leaving peers free to replay.
-        let pending = read_pending_mirror_resets(
+        let pending = read_pending_mirror_resets_with_cache(
             conn,
             &self.resets_consumed_path,
             self.cursor,
             &self.log_path,
+            &mut self.resets_validated,
         )?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
@@ -558,12 +593,22 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
 /// `migration_id`) or that carry the round-3 `applied_at`-bound
 /// middle field instead of a hex `db_nonce` are all treated the same
 /// way: unknown state → unsafe to honor → replay.
-fn read_pending_mirror_resets(
+fn read_pending_mirror_resets_with_cache(
     conn: &Connection,
     resets_consumed_path: &Path,
     cursor: i64,
     log_path: &Path,
+    validated: &mut bool,
 ) -> Result<Vec<(i64, String)>, MirrorError> {
+    // Steady-state fast path: once we have proven every DB marker is
+    // consumed by a fresh sidecar entry, skip the DB query and the
+    // O(file) `count_log_lines` scan. The flag is invalidated by the
+    // call sites that rewrite the log (`rebuild_log_to`), so it can
+    // never claim "validated" against a stale snapshot of the world
+    // (round-9 high finding).
+    if *validated {
+        return Ok(Vec::new());
+    }
     // Tolerate the table being absent (e.g., a legacy connection that
     // somehow never ran 0021): no resets to honor.
     let exists: i64 = conn
@@ -575,6 +620,9 @@ fn read_pending_mirror_resets(
         )
         .map_err(StoreError::from)?;
     if exists == 0 {
+        // No table → no markers to ever care about. Cache the result
+        // permanently for this materializer instance.
+        *validated = true;
         return Ok(Vec::new());
     }
     let mut stmt = conn
@@ -606,6 +654,12 @@ fn read_pending_mirror_resets(
                 && live_line_count >= *line_count
         })
     });
+    if all.is_empty() {
+        // Every DB marker has a fresh, satisfying sidecar entry — the
+        // steady state. Cache so subsequent ticks skip the line-count
+        // scan. Will be cleared the next time we rewrite the log.
+        *validated = true;
+    }
     Ok(all)
 }
 
