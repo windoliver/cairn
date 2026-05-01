@@ -1191,3 +1191,72 @@ fn rebuild_from_db_resets_validation_cache() {
         "stale sidecar entry must not survive a rebuild: {after:?}"
     );
 }
+
+#[test]
+fn tick_replays_when_new_reset_added_after_validation() {
+    // Round-10 high finding: the in-memory validation cache must be
+    // keyed on a DB-state fingerprint, not a permanent bool. Otherwise
+    // a long-lived materializer that validates once will silently miss
+    // any new `consent_mirror_resets` row inserted by a peer process
+    // (e.g., a future reset migration applied while the mirror is
+    // running) — the original instance would never re-check the table.
+    //
+    // We simulate the cross-process migration by inserting a new row
+    // with a fresh `migration_id` directly into `consent_mirror_resets`.
+    // This is exactly what a future reset migration would do.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-consume migration 21 so the first tick validates cleanly and
+    // caches the fingerprint.
+    let nonce_21 = db_nonce_for(&conn, 21);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{nonce_21}:0:0\n")).expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick validates and caches");
+    assert_eq!(n, 2);
+    let cursor_before = mirror.cursor();
+    assert!(cursor_before > 0);
+
+    // Simulate a peer process applying a new reset migration. The new
+    // row bumps both COUNT and MAX(migration_id), so the fingerprint
+    // changes and the next tick MUST re-check.
+    let new_nonce = "deadbeefdeadbeefdeadbeefdeadbeef";
+    conn.execute(
+        "INSERT INTO consent_mirror_resets (migration_id, applied_at, consumed, db_nonce) \
+         VALUES (?1, ?2, 0, ?3)",
+        rusqlite::params![99i64, 1_700_000_000_000i64, new_nonce],
+    )
+    .expect("simulate peer reset migration");
+
+    // Tick again on the SAME materializer. With the round-10 fix the
+    // fingerprint shift forces a re-validation, the unconsumed marker
+    // for migration 99 is observed, and the mirror replays from rowid 0
+    // via `rebuild_log_to`. Without the fix the bare bool would still
+    // claim "validated" and we'd silently skip the replay.
+    let n = mirror.tick(&conn).expect("second tick must replay");
+    assert!(
+        n >= 2,
+        "tick must rebuild from DB when a new reset marker appears \
+         (round-10 fingerprint check); got n={n}"
+    );
+
+    // Sidecar must now record the new (migration_id=99, db_nonce)
+    // entry, proving the replay actually consumed the new marker.
+    let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
+    assert!(
+        sidecar
+            .lines()
+            .any(|l| l.starts_with(&format!("99:{new_nonce}:"))),
+        "post-replay sidecar must record the new marker (99,{new_nonce}): {sidecar:?}"
+    );
+
+    // A subsequent tick is a no-op: the fingerprint (now (2, 99)) is
+    // cached after the successful consumption.
+    let n = mirror.tick(&conn).expect("third tick");
+    assert_eq!(n, 0, "no further work once the new reset is consumed");
+}

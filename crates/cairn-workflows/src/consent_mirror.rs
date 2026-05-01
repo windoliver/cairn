@@ -99,16 +99,34 @@ pub struct ConsentLogMaterializer {
     cursor: i64,
     /// In-memory cache: once we've proven all `consent_mirror_resets`
     /// markers are consumed by a sidecar entry whose watermark and
-    /// `line_count` satisfy the live cursor / log, we set this flag and
-    /// skip the DB query + the O(file) `count_log_lines` scan on every
-    /// subsequent tick. The DB row is permanent, so without this cache
-    /// we would re-scan the log on every tick forever — defeating the
-    /// 1 MiB cap that bounds the recovery scan elsewhere in this
+    /// `line_count` satisfy the live cursor / log, we record the DB
+    /// state fingerprint that we validated against, and skip the
+    /// sidecar/`count_log_lines` work on subsequent ticks while the
+    /// fingerprint matches. The DB row is permanent, so without this
+    /// cache we would re-scan the log on every tick forever — defeating
+    /// the 1 MiB cap that bounds the recovery scan elsewhere in this
     /// module (round-9 high finding).
+    ///
+    /// Keyed on a fingerprint instead of a bare bool (round-10 high
+    /// finding): a bare bool latches "validated" for the materializer's
+    /// lifetime even if a peer process applies a new reset migration in
+    /// between, so the original mirror would silently miss the replay.
+    /// The fingerprint is `(count, max(migration_id))` over
+    /// `consent_mirror_resets`; a new marker bumps both fields, so the
+    /// cache invalidates automatically. Computing the fingerprint is a
+    /// single indexed aggregate — much cheaper than `count_log_lines`.
     ///
     /// Cleared by every call site that rewrites the log
     /// (`rebuild_log_to`), so any post-rebuild state has to re-validate.
-    resets_validated: bool,
+    resets_validated_fingerprint: Option<ResetsFingerprint>,
+}
+
+/// Fingerprint of the `consent_mirror_resets` DB state used to key the
+/// in-memory validation cache. See `resets_validated_fingerprint`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResetsFingerprint {
+    count: i64,
+    max_migration_id: Option<i64>,
 }
 
 impl ConsentLogMaterializer {
@@ -176,7 +194,7 @@ impl ConsentLogMaterializer {
             lock_path,
             resets_consumed_path,
             cursor,
-            resets_validated: false,
+            resets_validated_fingerprint: None,
         })
     }
 
@@ -294,13 +312,13 @@ impl ConsentLogMaterializer {
             &self.resets_consumed_path,
             self.cursor,
             &self.log_path,
-            &mut self.resets_validated,
+            &mut self.resets_validated_fingerprint,
         )?;
         if !pending_resets.is_empty() {
             let rebuild = rebuild_log_to(&self.log_path, conn)?;
             // The rebuild rewrote the log — any prior cached validation
             // is no longer trustworthy until we mark the sidecar below.
-            self.resets_validated = false;
+            self.resets_validated_fingerprint = None;
             self.cursor = rebuild.high_water;
             let _ = write_cursor_hint(&self.cursor_path, self.cursor);
             // Watermark: the highest rowid the rebuild actually serialized.
@@ -386,15 +404,15 @@ impl ConsentLogMaterializer {
         // consumption (Phase-B finding 2): peers with their own
         // sidecars still see and replay the marker independently.
         //
-        // Use a fresh, throwaway cache flag here — we're inside a
-        // constructor and the post-consumption Self isn't built yet.
-        let mut validated = false;
+        // Use a fresh, throwaway cache fingerprint here — we're inside
+        // a constructor and the post-consumption Self isn't built yet.
+        let mut validated_fingerprint: Option<ResetsFingerprint> = None;
         let pending = read_pending_mirror_resets_with_cache(
             conn,
             &resets_consumed_path,
             cursor,
             &log_path,
-            &mut validated,
+            &mut validated_fingerprint,
         )?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
@@ -405,7 +423,7 @@ impl ConsentLogMaterializer {
                 .collect();
             mark_mirror_resets_consumed(&resets_consumed_path, &consumed)?;
             // We just rewrote the sidecar — re-validate on first tick.
-            validated = false;
+            validated_fingerprint = None;
         }
 
         Ok(Self {
@@ -414,7 +432,7 @@ impl ConsentLogMaterializer {
             lock_path,
             resets_consumed_path,
             cursor,
-            resets_validated: validated,
+            resets_validated_fingerprint: validated_fingerprint,
         })
     }
 
@@ -433,9 +451,10 @@ impl ConsentLogMaterializer {
         let _guard = LockGuard::acquire(&self.lock_path)?;
         let rebuild = rebuild_log_to(&self.log_path, conn)?;
         // The rebuild rewrote the log — invalidate any cached
-        // validation flag (round-9 high finding). The post-consumption
-        // path below will set it again once the sidecar is fresh.
-        self.resets_validated = false;
+        // validation fingerprint (round-9 high finding). The
+        // post-consumption path below will set it again once the
+        // sidecar is fresh.
+        self.resets_validated_fingerprint = None;
         // Advance only to the rowid we proved was serialized — never to
         // `max_rowid(conn)`, which could include rows inserted after the
         // replay query and would create an audit gap.
@@ -450,7 +469,7 @@ impl ConsentLogMaterializer {
             &self.resets_consumed_path,
             self.cursor,
             &self.log_path,
-            &mut self.resets_validated,
+            &mut self.resets_validated_fingerprint,
         )?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
@@ -598,31 +617,30 @@ fn read_pending_mirror_resets_with_cache(
     resets_consumed_path: &Path,
     cursor: i64,
     log_path: &Path,
-    validated: &mut bool,
+    validated: &mut Option<ResetsFingerprint>,
 ) -> Result<Vec<(i64, String)>, MirrorError> {
     // Steady-state fast path: once we have proven every DB marker is
-    // consumed by a fresh sidecar entry, skip the DB query and the
-    // O(file) `count_log_lines` scan. The flag is invalidated by the
-    // call sites that rewrite the log (`rebuild_log_to`), so it can
-    // never claim "validated" against a stale snapshot of the world
-    // (round-9 high finding).
-    if *validated {
+    // consumed by a fresh sidecar entry, cache the DB-state fingerprint
+    // we validated against and skip the sidecar read + the O(file)
+    // `count_log_lines` scan on subsequent ticks while the fingerprint
+    // is unchanged.
+    //
+    // Round-10 high finding: a bare bool would latch "validated" for
+    // the materializer's lifetime, so a peer process applying a new
+    // reset migration after our first tick would never be observed.
+    // The fingerprint is `(count, max(migration_id))` over
+    // `consent_mirror_resets` — a single indexed aggregate, much
+    // cheaper than `count_log_lines`. A new marker bumps both fields,
+    // so the cache invalidates automatically on cross-process change.
+    let fingerprint = db_resets_fingerprint(conn)?;
+    if *validated == Some(fingerprint) {
         return Ok(Vec::new());
     }
-    // Tolerate the table being absent (e.g., a legacy connection that
-    // somehow never ran 0021): no resets to honor.
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema \
-             WHERE type = 'table' AND name = 'consent_mirror_resets'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(StoreError::from)?;
-    if exists == 0 {
-        // No table → no markers to ever care about. Cache the result
-        // permanently for this materializer instance.
-        *validated = true;
+    if fingerprint.count == 0 {
+        // No markers (table absent or empty) — nothing to honor. Cache
+        // the empty fingerprint; it will invalidate the moment a peer
+        // applies the reset migration.
+        *validated = Some(fingerprint);
         return Ok(Vec::new());
     }
     let mut stmt = conn
@@ -656,11 +674,52 @@ fn read_pending_mirror_resets_with_cache(
     });
     if all.is_empty() {
         // Every DB marker has a fresh, satisfying sidecar entry — the
-        // steady state. Cache so subsequent ticks skip the line-count
-        // scan. Will be cleared the next time we rewrite the log.
-        *validated = true;
+        // steady state. Cache the fingerprint so subsequent ticks skip
+        // the sidecar read and line-count scan; a peer process that
+        // adds a marker afterwards will bump the fingerprint and force
+        // a re-validate. Cleared the next time we rewrite the log.
+        *validated = Some(fingerprint);
+    } else {
+        // Pending markers — leave the cache untouched (or stale) so
+        // we revisit on the next tick.
+        *validated = None;
     }
     Ok(all)
+}
+
+/// Cheap DB-state fingerprint over `consent_mirror_resets` used to
+/// invalidate `resets_validated_fingerprint` on cross-process changes.
+///
+/// A new reset marker (e.g., applying migration 0022 in a peer
+/// process) bumps `count` and typically `max_migration_id`, so a cache
+/// keyed on this tuple flips automatically. A missing table (legacy
+/// connection that never ran 0021) yields `(0, None)`.
+fn db_resets_fingerprint(conn: &Connection) -> Result<ResetsFingerprint, MirrorError> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'consent_mirror_resets'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from)?;
+    if exists == 0 {
+        return Ok(ResetsFingerprint {
+            count: 0,
+            max_migration_id: None,
+        });
+    }
+    let (count, max_migration_id): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(migration_id) FROM consent_mirror_resets",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(StoreError::from)?;
+    Ok(ResetsFingerprint {
+        count,
+        max_migration_id,
+    })
 }
 
 /// Count newline-terminated lines in the log. Returns 0 if the file is
