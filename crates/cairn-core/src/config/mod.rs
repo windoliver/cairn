@@ -235,7 +235,7 @@ string_enum! {
 /// Variant strings are kebab-case to match the brief's model identifiers.
 /// Lives in `cairn-core` (not in `cairn-embeddings-local`) so `CairnConfig`
 /// can reference it without a workspace-dep direction violation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub enum EmbeddingModelKind {
     /// BGE-small-en-v1.5, 384-dim, MIT license. Default.
@@ -246,6 +246,13 @@ pub enum EmbeddingModelKind {
     /// all-MiniLM-L6-v2, 384-dim, Apache 2.0.
     #[serde(rename = "all-MiniLM-L6-v2")]
     AllMiniLmL6V2,
+    /// `OpenAI` `text-embedding-3-large` (1536 dim). Requires the `openai`
+    /// embedding provider; cannot be loaded by `ModelCache`.
+    #[serde(rename = "openai-text-embedding-3-large")]
+    OpenAiTextEmbedding3Large,
+    /// `OpenAI` `text-embedding-3-small` (1536 dim).
+    #[serde(rename = "openai-text-embedding-3-small")]
+    OpenAiTextEmbedding3Small,
 }
 
 impl EmbeddingModelKind {
@@ -255,15 +262,18 @@ impl EmbeddingModelKind {
         match self {
             Self::BgeSmallEnV1_5 => "bge-small-en-v1.5",
             Self::AllMiniLmL6V2 => "all-MiniLM-L6-v2",
+            Self::OpenAiTextEmbedding3Large => "openai-text-embedding-3-large",
+            Self::OpenAiTextEmbedding3Small => "openai-text-embedding-3-small",
         }
     }
 
-    /// `HuggingFace` repo id for model download.
+    /// `HuggingFace` repo id for fetchable models. `None` for cloud providers.
     #[must_use]
-    pub fn hf_repo(self) -> &'static str {
+    pub fn hf_repo(self) -> Option<&'static str> {
         match self {
-            Self::BgeSmallEnV1_5 => "BAAI/bge-small-en-v1.5",
-            Self::AllMiniLmL6V2 => "sentence-transformers/all-MiniLM-L6-v2",
+            Self::BgeSmallEnV1_5 => Some("BAAI/bge-small-en-v1.5"),
+            Self::AllMiniLmL6V2 => Some("sentence-transformers/all-MiniLM-L6-v2"),
+            Self::OpenAiTextEmbedding3Large | Self::OpenAiTextEmbedding3Small => None,
         }
     }
 
@@ -275,10 +285,38 @@ impl EmbeddingModelKind {
     #[allow(clippy::match_same_arms)] // intentional: exhaustive match forces updates on new variants
     pub fn dim(self) -> usize {
         match self {
-            Self::BgeSmallEnV1_5 => 384,
-            Self::AllMiniLmL6V2 => 384,
+            Self::BgeSmallEnV1_5 | Self::AllMiniLmL6V2 => 384,
+            Self::OpenAiTextEmbedding3Large | Self::OpenAiTextEmbedding3Small => 1536,
         }
     }
+}
+
+/// Retrieval mode selected at search time (CLI flag, config default, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SearchMode {
+    /// Keyword-only retrieval via FTS5 BM25.
+    Bm25,
+    /// Vector-only retrieval via sqlite-vec ANN.
+    Vector,
+    /// FTS5 + vector + RRF fusion + cosine re-rank.
+    #[default]
+    Hybrid,
+}
+
+/// Source of embedding vectors at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum EmbeddingProvider {
+    /// Local candle inference (BGE / `MiniLM`).
+    #[default]
+    Local,
+    /// `OpenAI` HTTP embedding endpoint. Requires the `openai` Cargo feature
+    /// in `cairn-cli` and an `OPENAI_API_KEY` resolvable at runtime.
+    #[serde(rename = "openai")]
+    OpenAi,
 }
 
 /// Local semantic search configuration (brief §3.0).
@@ -286,13 +324,28 @@ impl EmbeddingModelKind {
 /// `local_embeddings: false` drops `cairn.mcp.v1.search.semantic` and
 /// `cairn.mcp.v1.search.hybrid` from `status.capabilities`. Those modes
 /// return `CapabilityUnavailable` — no silent fallback (brief §3.0 fail-closed).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
     /// Enable local embedding runtime. Default `true`.
     pub local_embeddings: bool,
     /// Which embedding model to use. Default `bge-small-en-v1.5`.
     pub embedding_model: EmbeddingModelKind,
+    /// Default retrieval mode when no `--mode` flag is supplied. Default `hybrid`.
+    pub default_mode: SearchMode,
+    /// Default embedding provider for query-time vectorization. Default `local`.
+    pub default_provider: EmbeddingProvider,
+    /// Blend coefficient α for cosine re-rank: final = α * rrf + (1-α) * cos.
+    /// Range `[0.0, 1.0]`. Default `0.7`.
+    pub rerank_blend: f32,
+    /// Weights passed to FTS5 `bm25(records_fts, w0, w1, w2, w3)` over the
+    /// four indexed columns: `[kind, class, scope, body]`. Default
+    /// `[10.0, 10.0, 5.0, 1.0]`.
+    pub fts_column_weights: [f64; 4],
+    /// RRF constant `k`. Default `60`.
+    pub rrf_k: usize,
+    /// Number of top RRF candidates to second-pass cosine re-rank. Default `20`.
+    pub rerank_topk: usize,
 }
 
 impl Default for SearchConfig {
@@ -300,6 +353,12 @@ impl Default for SearchConfig {
         Self {
             local_embeddings: true,
             embedding_model: EmbeddingModelKind::default(),
+            default_mode: SearchMode::default(),
+            default_provider: EmbeddingProvider::default(),
+            rerank_blend: 0.7,
+            fts_column_weights: [10.0, 10.0, 5.0, 1.0],
+            rrf_k: 60,
+            rerank_topk: 20,
         }
     }
 }
@@ -1116,6 +1175,91 @@ mod tests {
         // Also verify BgeSmallEnV1_5
         let json2 = serde_json::to_string(&EmbeddingModelKind::BgeSmallEnV1_5).unwrap();
         assert_eq!(json2, r#""bge-small-en-v1.5""#);
+    }
+
+    #[test]
+    fn search_mode_default_is_hybrid() {
+        assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn search_mode_serde_kebab() {
+        let modes = [SearchMode::Bm25, SearchMode::Vector, SearchMode::Hybrid];
+        let strs = ["bm25", "vector", "hybrid"];
+        for (m, s) in modes.iter().zip(strs.iter()) {
+            let yaml = serde_yaml::to_string(m).unwrap();
+            assert!(yaml.trim() == *s, "mode {m:?} serialized to {yaml:?}");
+            let back: SearchMode = serde_yaml::from_str(s).unwrap();
+            assert_eq!(*m, back);
+        }
+    }
+
+    #[test]
+    fn embedding_provider_default_is_local() {
+        assert_eq!(EmbeddingProvider::default(), EmbeddingProvider::Local);
+    }
+
+    #[test]
+    fn embedding_provider_serde_kebab() {
+        let yaml = serde_yaml::to_string(&EmbeddingProvider::OpenAi).unwrap();
+        assert_eq!(yaml.trim(), "openai");
+        let back: EmbeddingProvider = serde_yaml::from_str("openai").unwrap();
+        assert_eq!(back, EmbeddingProvider::OpenAi);
+    }
+
+    #[test]
+    fn openai_embedding_model_kinds_have_dim_1536() {
+        assert_eq!(EmbeddingModelKind::OpenAiTextEmbedding3Large.dim(), 1536);
+        assert_eq!(EmbeddingModelKind::OpenAiTextEmbedding3Small.dim(), 1536);
+    }
+
+    #[test]
+    fn openai_embedding_model_kinds_have_no_hf_repo() {
+        assert_eq!(
+            EmbeddingModelKind::OpenAiTextEmbedding3Large.hf_repo(),
+            None
+        );
+        assert_eq!(
+            EmbeddingModelKind::OpenAiTextEmbedding3Small.hf_repo(),
+            None
+        );
+        assert_eq!(
+            EmbeddingModelKind::BgeSmallEnV1_5.hf_repo(),
+            Some("BAAI/bge-small-en-v1.5"),
+        );
+    }
+
+    #[test]
+    fn search_config_default_includes_new_fields() {
+        let c = SearchConfig::default();
+        assert_eq!(c.default_mode, SearchMode::Hybrid);
+        assert_eq!(c.default_provider, EmbeddingProvider::Local);
+        assert!((c.rerank_blend - 0.7).abs() < 1e-6);
+        // Compare element-wise with epsilon to avoid clippy::float_cmp on arrays.
+        let expected = [10.0_f64, 10.0, 5.0, 1.0];
+        for (got, want) in c.fts_column_weights.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+        }
+        assert_eq!(c.rrf_k, 60);
+        assert_eq!(c.rerank_topk, 20);
+    }
+
+    #[test]
+    fn search_config_yaml_round_trip() {
+        let yaml = "
+local_embeddings: true
+embedding_model: bge-small-en-v1.5
+default_mode: hybrid
+default_provider: local
+rerank_blend: 0.7
+fts_column_weights: [10.0, 10.0, 5.0, 1.0]
+rrf_k: 60
+rerank_topk: 20
+";
+        let c: SearchConfig = serde_yaml::from_str(yaml).unwrap();
+        let back = serde_yaml::to_string(&c).unwrap();
+        let again: SearchConfig = serde_yaml::from_str(&back).unwrap();
+        assert_eq!(c, again);
     }
 
     proptest! {

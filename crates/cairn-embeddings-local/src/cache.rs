@@ -76,6 +76,11 @@ impl ModelCache {
                 let m = crate::minilm::MiniLm::load(&dir)?;
                 Ok(Arc::new(m))
             }
+            // Cloud-provider variants are not loadable by ModelCache.
+            EmbeddingModelKind::OpenAiTextEmbedding3Large
+            | EmbeddingModelKind::OpenAiTextEmbedding3Small => {
+                Err(EmbeddingError::ModelNotFetched { kind })
+            }
             // Safety valve for future variants; fail at runtime rather than silently
             // returning a wrong model.
             _ => Err(EmbeddingError::ModelNotFetched { kind }),
@@ -112,7 +117,10 @@ impl ModelCache {
 
         let api =
             hf_hub::api::sync::Api::new().map_err(|e| EmbeddingError::Network(e.to_string()))?;
-        let repo = api.model(kind.hf_repo().to_owned());
+        let repo_id = kind
+            .hf_repo()
+            .ok_or(EmbeddingError::ModelNotFetched { kind })?;
+        let repo = api.model(repo_id.to_owned());
 
         let mut bytes_downloaded: u64 = 0;
         for filename in ["config.json", "tokenizer.json", "model.safetensors"] {
