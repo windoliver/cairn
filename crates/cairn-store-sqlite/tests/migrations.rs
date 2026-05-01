@@ -1764,8 +1764,8 @@ fn consent_journal_rebuild_aborts_on_event_row_missing_actor() {
         .expect_err("migration 0021 must abort on event-kind row missing actor");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("event-kind row") || msg.contains("pre-0011 schema"),
-        "abort message must cite event-kind / pre-0011 schema; got: {msg}"
+        msg.contains("require actor") || msg.contains("consent_journal"),
+        "abort message must cite actor / consent_journal; got: {msg}"
     );
 
     let consent_id: String = conn
@@ -2074,21 +2074,17 @@ fn consent_journal_rebuild_aborts_on_event_row_invalid_hash_subject() {
 
 #[test]
 fn consent_journal_rebuild_aborts_on_event_row_unparseable_actor() {
-    // Phase-B (#255, brief §14): round-9 High finding. The structural
-    // fix attaches the 0011 hardening triggers to consent_journal_v2
-    // BEFORE the data move, so they gate the INSERT…SELECT row-by-row.
-    // Pre-0011 the actor column existed (since 0009) but was not domain-
-    // gated; a row with `actor='not-an-identity'` could be written under
-    // 0009 and would brick `Identity::parse` at decode. The 0011
-    // `consent_journal_event_requires_actor` trigger only checks for
-    // NULL, but the broader §14 contract surfaces the malformed actor
-    // via decode. We don't have a single trigger that domain-checks
-    // actor shape today, but the trigger gating still surfaces this
-    // class via the metadata trigger if the row is otherwise malformed.
-    // The narrower assertion here is that a row whose actor is NULL
-    // (the simplest unparseable actor) aborts via the trigger gating
-    // with a "consent_journal" error message — confirming step 0d
-    // removal didn't lose coverage.
+    // Phase-B (#255, brief §14): round-10 High finding. Pre-0011 the
+    // actor column existed (since 0009) but was not domain-gated; the
+    // 0011 `consent_journal_event_requires_actor` trigger only checks
+    // NULL, so a v9-era row with `actor='not-an-identity'` (non-NULL
+    // but malformed) would survive into v2 and brick
+    // `Identity::parse` in `decode_event_inner` after the cursor
+    // reset. Step 0c (event half) preflights actor against the
+    // Identity wire format `<prefix>:<body>` where prefix ∈ {hmn,
+    // agt, snr} and body ⊆ [A-Za-z0-9._:-]. Drop the actor non-NULL
+    // trigger first to simulate the historical reality where actor
+    // shape was unconstrained pre-0011.
     let mut conn = open_at_version(20);
     conn.execute("DROP TRIGGER consent_journal_event_requires_actor", [])
         .expect("drop pre-0021 actor trigger to simulate v9-era write");
@@ -2096,30 +2092,31 @@ fn consent_journal_rebuild_aborts_on_event_row_unparseable_actor() {
         "INSERT INTO consent_journal \
           (consent_id, subject, scope, decision, granted_by, decided_at, \
            kind, actor, payload_json, decided_at_iso) \
-         VALUES ('event-actor-null', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
-                 'grant', NULL, '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+         VALUES ('event-actor-malformed', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'not-an-identity', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
                  '1970-01-01T00:00:00Z')",
         [],
     )
-    .expect("legacy event-kind insert with NULL actor");
+    .expect("legacy event-kind insert with malformed actor");
 
     let err = migrations()
         .to_version(&mut conn, 21)
-        .expect_err("migration 0021 must abort on event-kind row with NULL actor");
+        .expect_err("migration 0021 must abort on event-kind row with malformed actor");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("consent_journal"),
-        "abort message must mention consent_journal (trigger gating); got: {msg}"
+        msg.contains("actor") || msg.contains("Identity") || msg.contains("issue #267"),
+        "abort message must cite actor / Identity / issue #267; got: {msg}"
     );
 
     let consent_id: String = conn
         .query_row(
-            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-actor-null'",
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-actor-malformed'",
             [],
             |r| r.get(0),
         )
         .expect("event-kind row must survive aborted migration");
-    assert_eq!(consent_id, "event-actor-null");
+    assert_eq!(consent_id, "event-actor-malformed");
 }
 
 #[test]
@@ -2162,6 +2159,47 @@ fn consent_journal_rebuild_aborts_on_event_row_invalid_iso_text() {
         )
         .expect("event-kind row must survive aborted migration");
     assert_eq!(consent_id, "event-bad-iso");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_impossible_iso() {
+    // Phase-B (#255, brief §14): round-10 High finding. The structural
+    // RFC3339 sniff in step 0c (length 20..=35 + separator positions)
+    // admits values like '2026-99-99T99:99:99Z' that look RFC3339 but
+    // can't represent a real instant. `Rfc3339Timestamp::parse` would
+    // surface SchemaDrift at decode time after the cursor reset.
+    // Step 0c now layers a semantic check via SQLite's `datetime()`,
+    // which returns NULL on unparseable input. The 0009 iso trigger
+    // only checks non-null, so this passes at v20.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-impossible-iso', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '2026-99-99T99:99:99Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with structurally-shaped but impossible iso");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with impossible iso");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("RFC3339") || msg.contains("decided_at_iso") || msg.contains("issue #267"),
+        "abort message must cite RFC3339 / decided_at_iso / issue #267; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-impossible-iso'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-impossible-iso");
 }
 
 #[test]

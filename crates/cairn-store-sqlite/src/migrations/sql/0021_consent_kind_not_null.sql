@@ -197,20 +197,32 @@ DROP TABLE __cairn_assert_legacy_iso;
 --       op_id      : 1..=128, [A-Za-z0-9._:-] (NULL allowed)
 --       subject    : 1..=128, [a-z0-9._:-], first char [a-z]
 --
---     (event half) Event-kind rows' decided_at_iso text shape sniff —
---     the 0011 iso trigger only checks non-null; SQL has no portable
---     RFC3339 parse. We do a structural sniff (length 20..=35,
---     separators at the canonical positions) to catch gross failures
---     like `'not-an-rfc3339'`. `decode_event_inner`'s round-6 validate
---     calls `Rfc3339Timestamp::parse` and would surface drift, but
---     that's at decode time — failing closed at migration time gives
---     the operator a clearer signal.
+--     (event half) Event-kind rows' decided_at_iso must parse as a
+--     real datetime (semantic check via SQLite's `datetime()` —
+--     returns NULL on unparseable input, so e.g.
+--     '2026-99-99T99:99:99Z' is correctly rejected even though it's
+--     structurally RFC3339-shaped). A structural sniff (length 20..=35
+--     + separator positions) is layered in front for clearer error
+--     messages on gross failures like `'not-an-rfc3339'`. Round-10
+--     High finding: structural-only sniff admitted impossible-date
+--     values that later bricked `Rfc3339Timestamp::parse` at decode.
+--
+--     (event half, actor) Event-kind rows' actor must match the
+--     Identity wire format `<prefix>:<body>` where prefix ∈
+--     {hmn, agt, snr} (see cairn-core/src/domain/identity/mod.rs)
+--     and body ⊆ [A-Za-z0-9._:-]. Pre-0011 the actor column existed
+--     (since 0009) but was domain-unchecked; the 0011
+--     `consent_journal_event_requires_actor` trigger only catches
+--     NULL. Round-10 High finding: a row with
+--     `actor='not-an-identity'` would survive the rebuild and brick
+--     `Identity::parse` in `decode_event_inner` after the cursor
+--     reset.
 CREATE TEMP TABLE __cairn_assert_metadata (n INTEGER);
 CREATE TEMP TRIGGER __cairn_assert_metadata_trg
   BEFORE INSERT ON __cairn_assert_metadata
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes, or event-kind row(s) whose decided_at_iso is not RFC3339-shaped; cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes, or event-kind row(s) whose decided_at_iso is not RFC3339 (parsed via SQLite datetime()) or whose actor is not a valid Identity wire form (hmn:|agt:|snr: + [A-Za-z0-9._:-]); cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
 END;
 INSERT INTO __cairn_assert_metadata (n)
   SELECT COUNT(*) FROM consent_journal
@@ -238,6 +250,11 @@ INSERT INTO __cairn_assert_metadata (n)
       ))
   OR
      -- event half: decided_at_iso must be plausibly RFC3339-shaped
+     -- (structural sniff for clear errors on gross failures) AND
+     -- semantically parseable as a real datetime (round-10: catches
+     -- impossible dates like '2026-99-99T99:99:99Z' that the
+     -- structural sniff admits). datetime() returns NULL on
+     -- unparseable input.
      (kind IS NOT NULL
       AND decided_at_iso IS NOT NULL
       AND (length(decided_at_iso) < 20
@@ -246,7 +263,25 @@ INSERT INTO __cairn_assert_metadata (n)
            OR substr(decided_at_iso, 8, 1) NOT GLOB '-'
            OR substr(decided_at_iso, 11, 1) NOT GLOB 'T'
            OR substr(decided_at_iso, 14, 1) NOT GLOB ':'
-           OR substr(decided_at_iso, 17, 1) NOT GLOB ':'));
+           OR substr(decided_at_iso, 17, 1) NOT GLOB ':'
+           OR datetime(decided_at_iso) IS NULL))
+  OR
+     -- event half: actor must match the Identity wire format
+     -- (round-10): <prefix>:<body> where prefix ∈ {hmn, agt, snr}
+     -- and body is non-empty in [A-Za-z0-9._:-]. The 0011
+     -- requires-actor trigger only catches NULL; pre-0011 a row
+     -- with a non-NULL but malformed actor would survive into v2
+     -- and brick Identity::parse at decode.
+     (kind IS NOT NULL
+      AND actor IS NOT NULL
+      AND NOT (
+           (substr(actor, 1, 4) = 'hmn:' AND length(actor) > 4
+              AND substr(actor, 5) NOT GLOB '*[^A-Za-z0-9._:-]*')
+        OR (substr(actor, 1, 4) = 'agt:' AND length(actor) > 4
+              AND substr(actor, 5) NOT GLOB '*[^A-Za-z0-9._:-]*')
+        OR (substr(actor, 1, 4) = 'snr:' AND length(actor) > 4
+              AND substr(actor, 5) NOT GLOB '*[^A-Za-z0-9._:-]*')
+      ));
 DROP TRIGGER __cairn_assert_metadata_trg;
 DROP TABLE __cairn_assert_metadata;
 
