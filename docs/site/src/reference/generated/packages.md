@@ -6,9 +6,11 @@ Generated from workspace package metadata and `docs-coverage.toml`.
 
 | Package | Audience | Human Page | Generated Reference |
 |---|---|---|---|
+| `cairn-bench` | `internal` | - | - |
 | `cairn-cli` | `user` | `usage/cli.md` | `reference/generated/cli.md` |
 | `cairn-core` | `sdk-author` | `reference/rust-api.md` | - |
 | `cairn-embeddings-local` | `internal` | - | - |
+| `cairn-embeddings-openai` | `internal` | - | - |
 | `cairn-idl` | `maintainer` | `reference/idl.md` | `reference/generated/contract-verbs.md` |
 | `cairn-mcp` | `integration-author` | `usage/mcp.md` | `reference/generated/mcp-tools.md` |
 | `cairn-sdk` | `sdk-author` | `reference/rust-api.md` | - |

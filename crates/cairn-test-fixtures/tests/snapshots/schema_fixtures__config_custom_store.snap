@@ -86,6 +86,17 @@ expression: "&c"
   },
   "search": {
     "local_embeddings": true,
-    "embedding_model": "bge-small-en-v1.5"
+    "embedding_model": "bge-small-en-v1.5",
+    "default_mode": "hybrid",
+    "default_provider": "local",
+    "rerank_blend": 0.7,
+    "fts_column_weights": [
+      10.0,
+      10.0,
+      5.0,
+      1.0
+    ],
+    "rrf_k": 60,
+    "rerank_topk": 20
   }
 }

@@ -218,8 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // each upsert produces a row in `record_vectors`.
     let kind = EmbeddingModelKind::BgeSmallEnV1_5;
     let cache_root = std::env::var_os("CAIRN_GBRAIN_MODEL_CACHE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join("target/gbrain-models"));
+        .map_or_else(|| repo_root.join("target/gbrain-models"), PathBuf::from);
     std::fs::create_dir_all(&cache_root)?;
     println!(
         "semantic regime: model={} cache_root={}",

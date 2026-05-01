@@ -47,3 +47,13 @@ generated_reference = ""
 audience = "operator"
 page = "usage/plugins.md"
 generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-bench]
+audience = "internal"
+page = ""
+generated_reference = ""
+
+[packages.cairn-embeddings-openai]
+audience = "internal"
+page = ""
+generated_reference = ""
