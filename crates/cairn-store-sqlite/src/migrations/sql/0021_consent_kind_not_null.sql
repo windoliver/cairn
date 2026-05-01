@@ -12,13 +12,49 @@
 -- reads `sqlite_master`).
 --
 -- Legacy back-compat: rows written by migration 0005's pure GRANT/REVOKE
--- path have `kind IS NULL`. The rebuild backfills them from the existing
--- `decision` column: 'GRANT' -> 'grant', 'REVOKE' -> 'revoke'. The
--- broader 0011 hardening triggers gate INSERTs into the new table, but
--- they only fire when columns they require are populated. Backfilled
--- legacy rows lack `actor`/`payload_json`/`decided_at_iso` — those
--- triggers would fire and abort the rebuild. We therefore drop the
--- 0011 hardening triggers BEFORE the data move and re-attach them
+-- path have `kind IS NULL` and may also have NULL `actor`,
+-- `payload_json`, `decided_at_iso` — none of which existed pre-0009.
+-- The rebuild SYNTHESIZES every missing event-shape field at migration
+-- time so that post-0021 readers can decode every row fail-closed,
+-- without a structural NULL filter that would also hide ANY future
+-- malformed row (and silently break the §14 audit invariant).
+--
+-- Synthesis rules (per legacy 0005 row):
+--   * `kind`            ← COALESCE(kind, decision -> grant/revoke).
+--   * `actor`           ← COALESCE(actor, granted_by). The 0005 schema
+--                         requires `granted_by` NOT NULL, and live rows
+--                         carry an Identity-shaped value (`hmn:`/`agt:`
+--                         /`snr:` prefix), so this round-trips through
+--                         `Identity::parse` cleanly.
+--   * `payload_json`    ← COALESCE with a body-free, decision-shape
+--                         sentinel `{"shape":"decision",
+--                         "subject_code":"legacy"}`. The shape pairs with
+--                         the synthesized `grant`/`revoke` kind; keys
+--                         match shape; subject_code is lower-snake; no
+--                         body keys; no unknown top-level keys — i.e.
+--                         every 0011 hardening trigger would accept it
+--                         (although triggers do NOT fire on this rebuild
+--                         INSERT — they are dropped + re-attached around
+--                         the data move per the next paragraph).
+--   * `decided_at_iso`  ← COALESCE with the legacy UNIX-millis integer
+--                         rendered as RFC3339 via strftime; e.g. `0` →
+--                         `1970-01-01T00:00:00Z`. Seconds resolution is
+--                         fine — nothing in the schema requires sub-sec
+--                         precision and 0005 only stored UNIX millis.
+--   * `rowid`           ← preserved 1:1 for any healthy `rowid > 0` row
+--                         (mirror cursor stability). Pathological
+--                         `rowid <= 0` rows (only reachable on legacy
+--                         pre-0011 paths, since the 0011 trigger
+--                         rejects them but does not fire on null-kind
+--                         rows) are renumbered: `NULL` lets SQLite
+--                         auto-assign a positive rowid above MAX(rowid),
+--                         so the post-0021 `consent_journal_event_
+--                         requires_positive_rowid` invariant holds for
+--                         every row.
+--
+-- The broader 0011 hardening triggers gate INSERTs into the new table,
+-- but they only fire when columns they require are populated. We drop
+-- the 0011 hardening triggers BEFORE the data move and re-attach them
 -- AFTER, so backfilled legacy rows survive while every future INSERT
 -- is gated normally.
 --
@@ -99,10 +135,11 @@ CREATE TABLE consent_journal_v2 (
   expires_at_iso  TEXT
 );
 
--- 4. Move data, preserving rowid. Backfill kind from decision for any
---    legacy null-kind rows (decision is already CHECK-constrained to
---    'GRANT'/'REVOKE'). The CASE here is total over the legal decision
---    domain.
+-- 4. Move data. Synthesize every event-shape field for legacy 0005 rows
+--    so every post-0021 row decodes as a fully-formed ConsentEvent. See
+--    the head-of-file synthesis-rules comment for justification of each
+--    COALESCE expression and for why this is preferable to a structural
+--    NULL filter in the readers (which would also hide future drift).
 INSERT INTO consent_journal_v2 (
   rowid,
   consent_id, subject, scope, decision, reason, granted_by,
@@ -110,15 +147,24 @@ INSERT INTO consent_journal_v2 (
   payload_json, decided_at_iso, expires_at_iso
 )
 SELECT
-  rowid,
+  CASE WHEN rowid > 0 THEN rowid ELSE NULL END AS rowid,
   consent_id, subject, scope, decision, reason, granted_by,
   decided_at, expires_at, op_id,
   COALESCE(
     kind,
     CASE decision WHEN 'GRANT' THEN 'grant' WHEN 'REVOKE' THEN 'revoke' END
   ) AS kind,
-  sensor_id, actor,
-  payload_json, decided_at_iso, expires_at_iso
+  sensor_id,
+  COALESCE(actor, granted_by) AS actor,
+  COALESCE(
+    payload_json,
+    '{"shape":"decision","subject_code":"legacy"}'
+  ) AS payload_json,
+  COALESCE(
+    decided_at_iso,
+    strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
+  ) AS decided_at_iso,
+  expires_at_iso
 FROM consent_journal;
 
 -- 5. Drop old, rename new.

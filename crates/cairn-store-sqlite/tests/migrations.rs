@@ -1248,7 +1248,8 @@ fn consent_journal_rebuild_preserves_rowid_and_backfills_revoke() {
     // tails consent_journal by rowid. Migration 0021 rebuilds the table to
     // promote `kind` to NOT NULL; the rebuild must preserve rowid 1:1 (so
     // existing mirror cursors are not silently invalidated) and must
-    // backfill legacy `kind IS NULL` rows from the `decision` column.
+    // backfill every event-shape field for legacy `kind IS NULL` rows so
+    // that post-0021 readers can decode them fail-closed.
     let mut conn = open_at_version(20);
     conn.execute(
         "INSERT INTO consent_journal \
@@ -1267,11 +1268,18 @@ fn consent_journal_rebuild_preserves_rowid_and_backfills_revoke() {
 
     migrations().to_version(&mut conn, 21).expect("apply 0021");
 
-    let (rowid_after, kind_after): (i64, String) = conn
+    let (rowid_after, kind_after, actor_after, payload_after, iso_after): (
+        i64,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
         .query_row(
-            "SELECT rowid, kind FROM consent_journal WHERE consent_id = 'legacy-revoke'",
+            "SELECT rowid, kind, actor, payload_json, decided_at_iso \
+             FROM consent_journal WHERE consent_id = 'legacy-revoke'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .expect("row after");
     assert_eq!(
@@ -1282,13 +1290,26 @@ fn consent_journal_rebuild_preserves_rowid_and_backfills_revoke() {
         kind_after, "revoke",
         "REVOKE decision must backfill kind = 'revoke'"
     );
+    assert_eq!(
+        actor_after, "hmn:t",
+        "actor must be synthesized from granted_by"
+    );
+    assert_eq!(
+        payload_after, "{\"shape\":\"decision\",\"subject_code\":\"legacy\"}",
+        "payload_json must be synthesized to body-free decision sentinel"
+    );
+    assert_eq!(
+        iso_after, "1970-01-01T00:00:00Z",
+        "decided_at_iso must be synthesized from decided_at unix-millis"
+    );
 }
 
 #[test]
 fn consent_journal_rebuild_backfills_grant_kind() {
     // Phase-B (#255, brief §14): symmetric coverage of the GRANT arm of the
-    // 0021 backfill CASE/COALESCE. Pinned separately so a future refactor
-    // that drops the GRANT branch surfaces immediately.
+    // 0021 backfill CASE/COALESCE plus the surrounding event-field
+    // synthesis. Pinned separately so a future refactor that drops the
+    // GRANT branch or weakens synthesis surfaces immediately.
     let mut conn = open_at_version(20);
     conn.execute(
         "INSERT INTO consent_journal \
@@ -1300,32 +1321,43 @@ fn consent_journal_rebuild_backfills_grant_kind() {
 
     migrations().to_version(&mut conn, 21).expect("apply 0021");
 
-    let kind_after: String = conn
-        .query_row(
-            "SELECT kind FROM consent_journal WHERE consent_id = 'legacy-grant'",
+    let (kind_after, actor_after, payload_after, iso_after): (String, String, String, String) =
+        conn.query_row(
+            "SELECT kind, actor, payload_json, decided_at_iso \
+             FROM consent_journal WHERE consent_id = 'legacy-grant'",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .expect("row after");
     assert_eq!(
         kind_after, "grant",
         "GRANT decision must backfill kind = 'grant'"
     );
+    assert_eq!(
+        actor_after, "hmn:t",
+        "actor must be synthesized from granted_by"
+    );
+    assert_eq!(
+        payload_after, "{\"shape\":\"decision\",\"subject_code\":\"legacy\"}",
+        "payload_json must be synthesized to body-free decision sentinel"
+    );
+    assert_eq!(
+        iso_after, "1970-01-01T00:00:00Z",
+        "decided_at_iso must be synthesized from decided_at unix-millis"
+    );
 }
 
 #[test]
-fn consent_journal_post_rebuild_legacy_rows_excluded_from_event_readers() {
-    // Phase-B (#255, brief §14): the 0021 rebuild backfills `kind` for legacy
-    // rows from `decision`, but leaves the structural event fields
-    // (`actor`, `payload_json`, `decided_at_iso`) NULL. Event-reader gates
-    // must therefore ignore such rows — otherwise `decode_event_inner`
-    // would hard-fail with `SchemaDrift` on the missing fields, bricking
-    // the consent.log mirror and erroring out consent queries. This test
-    // pins the gate against accidental relaxation.
-    use cairn_core::domain::Identity;
-    use cairn_store_sqlite::consent::{
-        max_rowid, query_by_actor, query_by_op, query_by_scope, read_since_rowid,
-    };
+fn consent_journal_rebuild_synthesizes_legacy_event_fields_for_decode() {
+    // Phase-B (#255, brief §14): the 0021 rebuild promotes legacy null-kind
+    // rows into fully event-shaped rows so post-0021 readers can fail
+    // closed on decode without needing a structural NULL filter that would
+    // also hide future malformed rows. This test pins the end-to-end:
+    // a legacy row inserted at v20 must, after 0021, be visible to the
+    // mirror cursor AND decode cleanly into a `ConsentEvent` whose actor,
+    // payload, and decided_at match the synthesis rules.
+    use cairn_core::domain::{ConsentKind, ConsentPayload};
+    use cairn_store_sqlite::consent::read_since_rowid;
 
     let mut conn = open_at_version(20);
     conn.execute(
@@ -1338,39 +1370,92 @@ fn consent_journal_post_rebuild_legacy_rows_excluded_from_event_readers() {
 
     migrations().to_version(&mut conn, 21).expect("apply 0021");
 
-    // Sanity: kind is backfilled (existing 0021 invariant).
-    let kind_after: String = conn
+    let events = read_since_rowid(&conn, 0).expect("read_since_rowid");
+    assert_eq!(
+        events.len(),
+        1,
+        "synthesized legacy row must be visible to mirror cursor: {events:?}"
+    );
+    let (_rowid, event) = &events[0];
+    assert_eq!(event.consent_id, "legacy-grant");
+    assert_eq!(event.kind, ConsentKind::Grant);
+    assert_eq!(
+        event.actor.as_str(),
+        "hmn:t",
+        "decoded actor must match synthesized value (== granted_by)"
+    );
+    assert_eq!(
+        event.decided_at.as_str(),
+        "1970-01-01T00:00:00Z",
+        "decoded decided_at must match synthesized RFC3339 from unix-millis"
+    );
+    match &event.payload {
+        ConsentPayload::Decision {
+            subject_code,
+            policy_code,
+        } => {
+            assert_eq!(subject_code, "legacy", "synthesized decision subject_code");
+            assert!(
+                policy_code.is_none(),
+                "synthesized decision payload must omit policy_code"
+            );
+        }
+        other => panic!("expected synthesized decision payload, got {other:?}"),
+    }
+}
+
+#[test]
+fn consent_journal_rebuild_renumbers_nonpositive_rowid() {
+    // Phase-B (#255, brief §14): pathological legacy rows at `rowid <= 0`
+    // (only reachable via the pre-0011 null-kind path that the
+    // `consent_journal_event_requires_positive_rowid` trigger does not
+    // gate) must be renumbered into positive rowids by the 0021 rebuild,
+    // so the post-0021 invariant `rowid > 0 for every row` holds and the
+    // mirror cursor can advance past them monotonically.
+    use cairn_store_sqlite::consent::read_since_rowid;
+
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (rowid, consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES (0, 'rowid-zero', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert at rowid=0");
+    // Sanity: legacy null-kind path actually let us land on rowid 0.
+    let rowid_before: i64 = conn
         .query_row(
-            "SELECT kind FROM consent_journal WHERE consent_id = 'legacy-grant'",
+            "SELECT rowid FROM consent_journal WHERE consent_id = 'rowid-zero'",
             [],
             |r| r.get(0),
         )
-        .expect("kind backfilled");
-    assert_eq!(kind_after, "grant");
-
-    // The legacy row has `actor`/`payload_json`/`decided_at_iso` NULL —
-    // event readers must skip it.
-    let since_zero = read_since_rowid(&conn, 0).expect("read_since_rowid");
-    assert!(
-        since_zero.is_empty(),
-        "legacy rebuilt row must be invisible to mirror cursor (got {since_zero:?})"
-    );
-
-    let by_op = query_by_op(&conn, "op-legacy").expect("query_by_op");
-    assert!(by_op.is_empty(), "query_by_op must skip legacy row");
-
-    let by_scope = query_by_scope(&conn, "private").expect("query_by_scope");
-    assert!(by_scope.is_empty(), "query_by_scope must skip legacy row");
-
-    let actor = Identity::parse("hmn:t").expect("identity parse");
-    let by_actor = query_by_actor(&conn, &actor).expect("query_by_actor");
-    assert!(by_actor.is_empty(), "query_by_actor must skip legacy row");
-
-    let max = max_rowid(&conn).expect("max_rowid");
+        .expect("rowid before");
     assert_eq!(
-        max, 0,
-        "max_rowid must skip legacy rows lacking event shape"
+        rowid_before, 0,
+        "test premise: legacy v20 path admits rowid = 0 for null-kind rows"
     );
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    let rowid_after: i64 = conn
+        .query_row(
+            "SELECT rowid FROM consent_journal WHERE consent_id = 'rowid-zero'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("rowid after");
+    assert!(
+        rowid_after > 0,
+        "rebuild must renumber pathological rowid <= 0 to a positive value (got {rowid_after})"
+    );
+
+    let events = read_since_rowid(&conn, 0).expect("read_since_rowid");
+    assert_eq!(
+        events.len(),
+        1,
+        "renumbered legacy row must surface to the mirror cursor: {events:?}"
+    );
+    assert_eq!(events[0].1.consent_id, "rowid-zero");
 }
 
 #[test]

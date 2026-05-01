@@ -70,11 +70,7 @@ pub fn append(conn: &Connection, event: &ConsentEvent) -> Result<i64, StoreError
 /// # Errors
 /// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
 pub fn query_by_op(conn: &Connection, op_id: &str) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(
-        conn,
-        "actor IS NOT NULL AND payload_json IS NOT NULL AND decided_at_iso IS NOT NULL AND op_id = ?",
-        params![op_id],
-    )
+    query_where(conn, "kind IS NOT NULL AND op_id = ?", params![op_id])
 }
 
 /// All event-kind rows authored by `actor`.
@@ -87,7 +83,7 @@ pub fn query_by_actor(
 ) -> Result<Vec<ConsentEvent>, StoreError> {
     query_where(
         conn,
-        "actor IS NOT NULL AND payload_json IS NOT NULL AND decided_at_iso IS NOT NULL AND actor = ?",
+        "kind IS NOT NULL AND actor = ?",
         params![actor.as_str()],
     )
 }
@@ -102,7 +98,7 @@ pub fn query_by_sensor(
 ) -> Result<Vec<ConsentEvent>, StoreError> {
     query_where(
         conn,
-        "actor IS NOT NULL AND payload_json IS NOT NULL AND decided_at_iso IS NOT NULL AND sensor_id = ?",
+        "kind IS NOT NULL AND sensor_id = ?",
         params![sensor.as_str()],
     )
 }
@@ -112,11 +108,7 @@ pub fn query_by_sensor(
 /// # Errors
 /// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
 pub fn query_by_scope(conn: &Connection, scope: &str) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(
-        conn,
-        "actor IS NOT NULL AND payload_json IS NOT NULL AND decided_at_iso IS NOT NULL AND scope = ?",
-        params![scope],
-    )
+    query_where(conn, "kind IS NOT NULL AND scope = ?", params![scope])
 }
 
 /// Mirror cursor primitive: every event-kind row with `rowid > since`,
@@ -134,9 +126,7 @@ pub fn read_since_rowid(
                 payload_json, decided_at_iso, expires_at_iso \
          FROM consent_journal \
          WHERE rowid > ? \
-           AND actor IS NOT NULL \
-           AND payload_json IS NOT NULL \
-           AND decided_at_iso IS NOT NULL \
+           AND kind IS NOT NULL \
          ORDER BY rowid ASC",
     )?;
     let rows = stmt.query_map(params![since], |row| {
@@ -160,9 +150,7 @@ pub fn max_rowid(conn: &Connection) -> Result<i64, StoreError> {
     let value: Option<i64> = conn
         .query_row(
             "SELECT MAX(rowid) FROM consent_journal \
-             WHERE actor IS NOT NULL \
-               AND payload_json IS NOT NULL \
-               AND decided_at_iso IS NOT NULL",
+             WHERE kind IS NOT NULL",
             [],
             |r| r.get(0),
         )
