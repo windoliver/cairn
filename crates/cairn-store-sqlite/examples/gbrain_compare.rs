@@ -25,24 +25,35 @@
 //! cargo run --release -p cairn-store-sqlite --example gbrain_compare
 //! ```
 //!
-//! ## Fairness caveat
+//! ## Regimes compared
 //!
 //! gbrain runs hybrid retrieval (pgvector cosine + Postgres FTS, fused
-//! via reciprocal-rank fusion). Cairn at this branch implements only
-//! the FTS5 keyword leg — vector search lands in a later issue. Treat
-//! these numbers as the keyword-only baseline; gbrain's hybrid stack
-//! will outperform on semantic queries (q03 "climate tech investing",
-//! q12 "AI replacing designers"). On entity / lexical queries (q01
-//! "Who is Alice Chen?", q07 "Alice Chen NovaPay") the two should be
-//! roughly comparable.
+//! via reciprocal-rank fusion). Cairn now implements both legs (issue
+//! #48), so this example reports three regimes:
+//!
+//!   * `AND`      — implicit-AND raw FTS5 keyword search
+//!   * `OR`       — term-OR rewrite over FTS5 keyword search
+//!   * `Semantic` — BGE-small-en-v1.5 embeddings + sqlite-vec ANN
+//!
+//! Hybrid (RRF) fusion is a follow-up issue.
+//!
+//! ## First-run cost
+//!
+//! The semantic regime downloads `BAAI/bge-small-en-v1.5` (~25 MB) from
+//! the HuggingFace Hub on first run, into
+//! `<repo-root>/target/gbrain-models/`. Subsequent runs are offline.
+//! Override the cache directory via `CAIRN_GBRAIN_MODEL_CACHE`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use cairn_core::contract::memory_store::{KeywordSearchArgs, MemoryStore};
+use cairn_core::config::EmbeddingModelKind;
+use cairn_core::contract::memory_store::{KeywordSearchArgs, MemoryStore, SemanticSearchArgs};
 use cairn_core::domain::taxonomy::MemoryVisibility;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
-use cairn_store_sqlite::open_in_memory;
+use cairn_embeddings_local::{EmbeddingModel, ModelCache};
+use cairn_store_sqlite::{open_in_memory, open_in_memory_with_embedder};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -172,7 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         fixture_path.display(),
     );
 
-    // Index every page.
+    // ---------------- KEYWORD STORE ----------------
+    // Index every page. The keyword store has no embedder so all writes
+    // are pure FTS5/row inserts.
     let store = open_in_memory().await?;
     let mut id_to_slug: HashMap<String, String> = HashMap::new();
     for (idx, page) in fixture.pages.iter().enumerate() {
@@ -198,14 +211,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // verb layer without changing the store at all.
     let runs_and = run_queries(&store, &fixture.queries, &id_to_slug, RewriteMode::And).await?;
     let runs_or = run_queries(&store, &fixture.queries, &id_to_slug, RewriteMode::Or).await?;
+    drop(store);
 
-    print_table("AND (implicit-AND, raw FTS5)", &runs_and);
+    // ---------------- SEMANTIC STORE ----------------
+    // Build a fresh in-memory store with the BGE embedder attached so
+    // each upsert produces a row in `record_vectors`.
+    let kind = EmbeddingModelKind::BgeSmallEnV1_5;
+    let cache_root = std::env::var_os("CAIRN_GBRAIN_MODEL_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("target/gbrain-models"));
+    std::fs::create_dir_all(&cache_root)?;
+    println!(
+        "semantic regime: model={} cache_root={}",
+        kind.as_str(),
+        cache_root.display()
+    );
+
+    let cache = ModelCache::new(&cache_root);
+    let cache_for_fetch = ModelCache::new(&cache_root);
+    let report = tokio::task::spawn_blocking(move || cache_for_fetch.fetch(kind)).await??;
+    println!(
+        "  fetched: bytes={} already_cached={} integrity={}",
+        report.bytes_downloaded,
+        report.already_cached,
+        &report.integrity[..16],
+    );
+    let cache_for_load = ModelCache::new(&cache_root);
+    let embedder: Arc<dyn EmbeddingModel> =
+        tokio::task::spawn_blocking(move || cache_for_load.ensure(kind)).await??;
+    let _ = cache; // keep `cache` available for symmetry with cli/admin path
+    println!("  loaded: dim={}", embedder.dim());
+
+    let sem_store = open_in_memory_with_embedder(Some(Arc::clone(&embedder))).await?;
+    for (idx, page) in fixture.pages.iter().enumerate() {
+        let rec = build_record(idx, &page.body);
+        sem_store.upsert(&rec).await?;
+    }
+    let runs_sem = run_semantic(&sem_store, &fixture.queries, &id_to_slug, kind.as_str()).await?;
+
+    print_table("AND      (implicit-AND, raw FTS5)", &runs_and);
     println!();
-    print_table("OR  (term-OR rewrite)", &runs_or);
+    print_table("OR       (term-OR rewrite, FTS5)", &runs_or);
+    println!();
+    print_table("Semantic (BGE-small-en-v1.5 + sqlite-vec)", &runs_sem);
 
     println!();
-    println!("query-level details (OR mode):");
-    for run in &runs_or {
+    println!("query-level details (Semantic):");
+    for run in &runs_sem {
         let rel_in_top5 = run
             .hits
             .iter()
@@ -325,6 +377,38 @@ async fn run_queries(
                 .filter_map(|c| id_to_slug.get(c.record_id.as_str()).cloned())
                 .collect()
         };
+        runs.push(QueryRun {
+            id: q.id.clone(),
+            query: q.query.clone(),
+            expected_relevant: q.relevant.iter().cloned().collect(),
+            grades: q.grades.clone(),
+            hits,
+        });
+    }
+    Ok(runs)
+}
+
+async fn run_semantic(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    queries: &[Query],
+    id_to_slug: &HashMap<String, String>,
+    model_label: &str,
+) -> Result<Vec<QueryRun>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut runs = Vec::with_capacity(queries.len());
+    for q in queries {
+        let args = SemanticSearchArgs {
+            query: q.query.clone(),
+            filter: None,
+            visibility_allowlist: vec![MemoryVisibility::Private],
+            limit: 10,
+            model_label: model_label.to_owned(),
+        };
+        let page = store.search_semantic(&args).await?;
+        let hits: Vec<String> = page
+            .candidates
+            .iter()
+            .filter_map(|c| id_to_slug.get(c.record_id.as_str()).cloned())
+            .collect();
         runs.push(QueryRun {
             id: q.id.clone(),
             query: q.query.clone(),
