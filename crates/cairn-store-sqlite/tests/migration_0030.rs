@@ -78,6 +78,55 @@ fn weighted_bm25_returns_results() {
 }
 
 #[test]
+fn weighted_bm25_kind_match_outranks_body_match() {
+    // Pins that the positional weights actually drive ordering, not just
+    // that the query runs. Without column-aware weighting, a body match
+    // would tie or beat a kind match by virtue of higher term frequency.
+    let conn = open_in_memory_sync().expect("open_in_memory_sync");
+    let mut stmt = conn.prepare(INSERT_SQL).expect("prepare insert");
+    // Record A: "alice" lives in `kind` (column 0, weight 10.0).
+    stmt.execute(params![
+        "rec_a",
+        "tgt_a",
+        "p/a",
+        "alice",
+        "person",
+        "unrelated body content here",
+    ])
+    .expect("insert A");
+    // Record B: "alice" lives in `body` (column 3, weight 1.0).
+    stmt.execute(params![
+        "rec_b",
+        "tgt_b",
+        "p/b",
+        "note",
+        "casual",
+        "alice mentioned in body text only",
+    ])
+    .expect("insert B");
+
+    let mut q = conn
+        .prepare(
+            "SELECT record_id FROM records_fts \
+             JOIN records ON records.rowid = records_fts.rowid \
+             WHERE records_fts MATCH 'alice' \
+             ORDER BY bm25(records_fts, 10.0, 10.0, 5.0, 1.0) \
+             LIMIT 10",
+        )
+        .expect("prepare query");
+    let ids: Vec<String> = q
+        .query_map(params![], |r| r.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(
+        ids[0], "rec_a",
+        "kind-column hit should outrank body-column hit at weights [10,10,5,1]",
+    );
+}
+
+#[test]
 fn fts_trigger_resyncs_on_kind_change() {
     let conn = open_in_memory_sync().expect("open_in_memory_sync");
     conn.prepare(INSERT_SQL)
