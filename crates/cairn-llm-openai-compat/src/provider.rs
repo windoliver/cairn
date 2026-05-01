@@ -146,9 +146,19 @@ impl OpenAiCompatProvider {
         };
 
         let status = response.status();
+        let code = status.as_u16();
+
+        // 401/403: status is authoritative. Don't wait on the body — a
+        // provider that sends auth-denied headers then stalls the body
+        // must not delay our terminal mapping.
+        if code == 401 || code == 403 {
+            return Err(Retryable {
+                err: LlmError::AuthDenied,
+                retryable: false,
+            });
+        }
 
         if !status.is_success() {
-            let code = status.as_u16();
             // Bound the preview read so a stalled/huge body cannot delay
             // status-driven mapping. Status is authoritative either way.
             let body_preview = tokio::time::timeout(ERROR_BODY_TIMEOUT, collect_preview(response))
@@ -156,17 +166,18 @@ impl OpenAiCompatProvider {
                 .ok()
                 .flatten()
                 .unwrap_or_default();
-            return Err(map_error_status(code, &body_preview));
+            return Err(map_non_auth_error_status(code, &body_preview));
         }
 
-        // Success: parse the typed body. Body read inherits the
-        // request-level timeout configured on the client.
+        // Success: parse the typed body. Body-read transport failures
+        // (mid-body reset, premature EOF, decode errors) are plausibly
+        // transient and retried; only a successful read followed by a
+        // bad JSON parse is terminal.
         let bytes = response.bytes().await.map_err(|e| Retryable {
             err: LlmError::ProviderUnreachable {
                 detail: format!("response body: {e}"),
             },
-            // A timeout/reset mid-body is plausibly transient.
-            retryable: e.is_timeout() || e.is_connect(),
+            retryable: true,
         })?;
         serde_json::from_slice::<CreateChatCompletionResponse>(&bytes).map_err(|e| Retryable {
             err: LlmError::ProviderUnreachable {
@@ -198,14 +209,10 @@ fn classify_send_error(e: &reqwest::Error) -> Retryable {
     }
 }
 
-/// Map a non-success HTTP status to an [`LlmError`].
-fn map_error_status(code: u16, body_preview: &str) -> Retryable {
-    if code == 401 || code == 403 {
-        return Retryable {
-            err: LlmError::AuthDenied,
-            retryable: false,
-        };
-    }
+/// Map a non-success, non-auth HTTP status to an [`LlmError`].
+///
+/// 401/403 are short-circuited in `post_chat` and never reach here.
+fn map_non_auth_error_status(code: u16, body_preview: &str) -> Retryable {
     let detail = if body_preview.is_empty() {
         format!("HTTP {code}")
     } else {
