@@ -53,13 +53,11 @@
 --                         `revoke` kind; keys match shape; subject_code
 --                         is lower-snake; no body keys; no unknown
 --                         top-level keys — i.e. every 0011 hardening
---                         trigger would accept it (although triggers do
---                         NOT fire on this rebuild INSERT — they are
---                         dropped + re-attached around the data move per
---                         the next paragraph). For event-kind rows,
---                         payload_json was written by `consent::append`
---                         under the 0011 hardening triggers, so we keep
---                         it as-is.
+--                         trigger accepts it. Post-rebuild the trigger
+--                         gating fires on this synthesized row (see the
+--                         "trigger-gated data move" paragraph below) and
+--                         must accept it; the sentinel is engineered to
+--                         pass every 0011 trigger.
 --   * `decided_at_iso`  ← CASE WHEN kind IS NULL THEN strftime(...) ELSE
 --                         decided_at_iso END. The legacy UNIX-millis
 --                         integer (0 or any value) is rendered as
@@ -81,36 +79,50 @@
 --                         readers' `WHERE rowid > cursor ORDER BY rowid`
 --                         tail. Rather than silently reorder events, we
 --                         FAIL CLOSED: a pre-rebuild SQL assert (see
---                         step 0 below) ABORTs the migration when any
+--                         step 0a below) ABORTs the migration when any
 --                         legacy `rowid <= 0` row exists, leaving the
 --                         operator to clean such rows manually before
 --                         re-running the upgrade.
 --
--- Pre-rebuild fail-closed asserts (step 0): two invariants on the
--- legacy data must hold before the rebuild proceeds, because the
--- rebuild SELECT cannot repair them without changing observable
--- semantics:
---   1. No legacy row may have `rowid <= 0` — see the rowid synthesis
---      rule above for why renumbering is unsafe.
---   2. Every legacy row's `decided_at` must be representable as RFC3339
---      via `strftime`. SQLite's strftime returns NULL for out-of-range
---      UNIX seconds (e.g. UNIX millis values past year 9999). A NULL
---      result would silently insert a row with `kind != NULL` AND
---      `decided_at_iso = NULL`; the event readers gate on
---      `kind IS NOT NULL` and would surface it; decode would then fail
---      on the missing iso field, bricking the consent mirror.
--- Both asserts use the temp-table-with-trigger idiom: a TEMP TABLE
--- guarded by a BEFORE INSERT trigger that RAISE(ABORT)s when a
--- non-zero count is inserted. Aborting before any DROP/CREATE/data-
--- move runs leaves the existing schema untouched (the migration
--- transaction rolls back). Operators must resolve the offending rows
--- manually before re-running the migration.
+-- TRIGGER-GATED DATA MOVE (round-9 structural fix). Earlier rounds of
+-- this migration tried to enumerate every 0011 invariant in an explicit
+-- preflight (step 0d) so that pre-0011 event-kind rows violating any of
+-- them would abort the migration cleanly. That approach kept finding new
+-- gaps each review round (round-7: actor/payload/iso; round-8: subject
+-- domains, sensor_id presence, hash-subject shape; round-9: payload
+-- required-fields, payload shape-match) because step 0d was duplicating
+-- 0011 trigger logic and falling out of sync. The structural fix is to
+-- ATTACH the 0011 hardening triggers (and the 0009 iso/body-free + 0005
+-- immutable/no_delete triggers) to `consent_journal_v2` BEFORE the
+-- INSERT…SELECT data move, and let them gate the data move row-by-row.
+-- Any pre-0011 event-kind row that violates ANY 0011 invariant aborts
+-- the migration with the trigger's own error message — no enumeration
+-- in this migration. After the rename, SQLite re-targets the triggers
+-- onto the renamed table automatically, so they continue to gate
+-- post-migration writes to `consent_journal` exactly as before.
 --
--- The broader 0011 hardening triggers gate INSERTs into the new table,
--- but they only fire when columns they require are populated. We drop
--- the 0011 hardening triggers BEFORE the data move and re-attach them
--- AFTER, so backfilled legacy rows survive while every future INSERT
--- is gated normally.
+-- Pre-rebuild fail-closed asserts (steps 0a–0c) STAY for the cases the
+-- trigger gating cannot catch with a friendly message:
+--   1. Legacy `rowid <= 0` (step 0a). The AFTER INSERT positive-rowid
+--      trigger would fire on the data move, but renumbering would be
+--      silent and reorder historical events. A friendly preflight
+--      message points the operator at issue #267 instead.
+--   2. Legacy unrenderable `decided_at` (step 0b). strftime returns
+--      NULL, which would then trip the iso-required trigger with a
+--      generic message. The preflight points at the data-shape issue
+--      directly.
+--   3. Legacy metadata domain (step 0c, legacy half). The metadata-
+--      domain trigger would catch these, but legacy detection (`kind
+--      IS NULL`) lets us route the operator to a legacy-data-repair
+--      message instead of the generic trigger one.
+--   4. Event-kind `decided_at_iso` text shape (step 0c, event half).
+--      The 0011 iso trigger only checks non-null; SQL has no portable
+--      RFC3339 parse. We do a structural sniff (length + separator
+--      positions) to catch the gross-failure cases like
+--      `'not-an-rfc3339'`. `consent::append` validates iso content via
+--      `Rfc3339Timestamp::parse` for any post-0009 event write, so
+--      this only matters for hand-rolled rows in test fixtures or
+--      external tooling.
 --
 -- ROWID PRESERVATION: the async mirror in cairn-workflows tails
 -- `consent_journal` by `rowid`. The rebuild preserves rowid 1:1 via
@@ -119,7 +131,9 @@
 -- point at the right row after upgrade.
 --
 -- Append-only triggers (0005's consent_journal_immutable +
--- consent_journal_no_delete) are dropped + re-attached unchanged.
+-- consent_journal_no_delete) are dropped + re-attached unchanged. They
+-- block UPDATE/DELETE, not INSERT, so they do not interfere with the
+-- INSERT…SELECT data move.
 --
 -- The 0009 `consent_journal_kind_domain` trigger is dropped permanently:
 -- the new column-level CHECK supersedes it. Other 0009/0011 triggers
@@ -133,7 +147,7 @@
 --    trigger fires on the INSERT, sees a non-zero count, and RAISEs
 --    ABORT with a stable message that the migration test asserts on.
 --    TEMP objects are scoped to the connection and dropped at the end
---    of step 0 so subsequent migrations see a clean namespace.
+--    of each step so subsequent migrations see a clean namespace.
 
 -- 0a. Abort if any legacy row has rowid <= 0 (Finding 1).
 CREATE TEMP TABLE __cairn_assert_legacy_rowid (n INTEGER);
@@ -164,17 +178,14 @@ INSERT INTO __cairn_assert_legacy_iso (n)
 DROP TRIGGER __cairn_assert_legacy_iso_trg;
 DROP TABLE __cairn_assert_legacy_iso;
 
--- 0c. Abort if any legacy row's metadata violates the 0011 domain classes
---     (Finding: round-6 high). Pre-0011 schema didn't enforce closed
---     character classes on consent_id / subject / scope / op_id, so
---     historical rows can carry free-form text. Without this assert, the
---     rebuild would copy unsanitized values into the new table and the
---     async mirror (which now resets its cursor at 0021 per round 5) would
---     replay them into `consent.log`. `decode_event_inner` checks event
---     shape but not the metadata domain, so out-of-domain values reach
---     consumers. We FAIL CLOSED here so the operator repairs the data
---     manually before re-running migration (issue #267 tracks the repair
---     tool).
+-- 0c. Two-part metadata preflight:
+--     (legacy half) Legacy rows' consent_id / scope / op_id / subject
+--     domain classes — see the round-6 high finding. Pre-0011 schema
+--     didn't enforce closed character classes; without this assert the
+--     rebuild would copy unsanitized values into the new table. The
+--     metadata-domain trigger we attach below would catch them too,
+--     but its message is generic. We FAIL CLOSED with a legacy-aware
+--     message so the operator routes to issue #267.
 --
 --     Domain classes (mirror of 0011's
 --     consent_journal_event_metadata_domains and
@@ -185,137 +196,66 @@ DROP TABLE __cairn_assert_legacy_iso;
 --       scope      : 1..=256, [a-z0-9._:=,-]
 --       op_id      : 1..=128, [A-Za-z0-9._:-] (NULL allowed)
 --       subject    : 1..=128, [a-z0-9._:-], first char [a-z]
-CREATE TEMP TABLE __cairn_assert_legacy_metadata (n INTEGER);
-CREATE TEMP TRIGGER __cairn_assert_legacy_metadata_trg
-  BEFORE INSERT ON __cairn_assert_legacy_metadata
-  FOR EACH ROW WHEN NEW.n > 0
-BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes; cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
-END;
-INSERT INTO __cairn_assert_legacy_metadata (n)
-  SELECT COUNT(*) FROM consent_journal
-   WHERE kind IS NULL
-     AND (
-          consent_id IS NULL
-       OR length(consent_id) < 1
-       OR length(consent_id) > 64
-       OR consent_id GLOB '*[^A-Za-z0-9._:-]*'
-       OR scope IS NULL
-       OR length(scope) < 1
-       OR length(scope) > 256
-       OR scope GLOB '*[^a-z0-9._:=,-]*'
-       OR (op_id IS NOT NULL
-            AND (length(op_id) < 1
-                 OR length(op_id) > 128
-                 OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
-       OR subject IS NULL
-       OR length(subject) < 1
-       OR length(subject) > 128
-       OR subject GLOB '*[^a-z0-9._:-]*'
-       OR substr(subject, 1, 1) NOT GLOB '[a-z]'
-     );
-DROP TRIGGER __cairn_assert_legacy_metadata_trg;
-DROP TABLE __cairn_assert_legacy_metadata;
-
--- 0d. Abort if any EVENT-KIND row (kind IS NOT NULL) violates the
---     decode contract (Finding: round-7 high). Steps 0a/0b/0c only
---     guard `kind IS NULL` legacy rows. But pre-0011 schema enforced
---     only `kind` and `decided_at_iso` — `actor`, `payload_json`, and
---     the metadata domain classes were added in 0011. A vault migrated
---     through the 0009/0010 era could carry event-kind rows with NULL
---     actor / NULL payload / NULL decided_at_iso / out-of-domain
---     metadata, or with malformed `subject`/`sensor_id` (kind-specific
---     invariants — sensor subject `snr:` prefix, hash subject sha256/
---     hash shape, grant/revoke and policy_change subject domains, and
---     the sensor-id-only-on-sensor-kinds rule) that the 0011 hardening
---     triggers blocked going forward but did NOT retroactively repair.
---     `ConsentEvent::validate()` (round-6 defense-in-depth) re-checks
---     these invariants at decode time. The 0021 rebuild copies those
---     rows verbatim through the `ELSE <existing-column>` arm in step 4,
---     and `decode_event_inner` (round-6 defense-in-depth) then surfaces
---     them as permanent mirror tail/rebuild errors.
 --
---     We FAIL CLOSED here so the operator repairs the data manually
---     before re-running migration (issue #267 tracks the repair tool).
---     SQL cannot easily verify RFC3339 parse on `decided_at_iso`
---     content for non-legacy rows; we rely on `consent::append`'s
---     pre-write `Rfc3339Timestamp::parse` for any iso written via the
---     event path post-0009. NULL-iso for event-kind rows is what step
---     0d catches.
-CREATE TEMP TABLE __cairn_assert_event_rows (n INTEGER);
-CREATE TEMP TRIGGER __cairn_assert_event_rows_trg
-  BEFORE INSERT ON __cairn_assert_event_rows
+--     (event half) Event-kind rows' decided_at_iso text shape sniff —
+--     the 0011 iso trigger only checks non-null; SQL has no portable
+--     RFC3339 parse. We do a structural sniff (length 20..=35,
+--     separators at the canonical positions) to catch gross failures
+--     like `'not-an-rfc3339'`. `decode_event_inner`'s round-6 validate
+--     calls `Rfc3339Timestamp::parse` and would surface drift, but
+--     that's at decode time — failing closed at migration time gives
+--     the operator a clearer signal.
+CREATE TEMP TABLE __cairn_assert_metadata (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_metadata_trg
+  BEFORE INSERT ON __cairn_assert_metadata
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains event-kind row(s) (kind IS NOT NULL) missing required fields, with invalid metadata, or with malformed subject/sensor_id; pre-0011 schema allowed this. Resolve manually before re-running migration (issue #267).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes, or event-kind row(s) whose decided_at_iso is not RFC3339-shaped; cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
 END;
-INSERT INTO __cairn_assert_event_rows (n)
+INSERT INTO __cairn_assert_metadata (n)
   SELECT COUNT(*) FROM consent_journal
-   WHERE kind IS NOT NULL
-     AND (
-          actor IS NULL
-       OR payload_json IS NULL
-       OR json_valid(payload_json) = 0
-       OR decided_at_iso IS NULL
-       OR consent_id IS NULL
-       OR length(consent_id) < 1
-       OR length(consent_id) > 64
-       OR consent_id GLOB '*[^A-Za-z0-9._:-]*'
-       OR scope IS NULL
-       OR length(scope) < 1
-       OR length(scope) > 256
-       OR scope GLOB '*[^a-z0-9._:=,-]*'
-       OR (op_id IS NOT NULL
-            AND (length(op_id) < 1
-                 OR length(op_id) > 128
-                 OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
-       -- non-sensor kind with sensor_id is invalid (0011 trigger
-       -- `non_sensor_kind_forbids_sensor_id`).
-       OR (kind NOT IN ('sensor_enable','sensor_disable')
-            AND sensor_id IS NOT NULL)
-       -- sensor kind missing/malformed sensor_id (0011 triggers
-       -- `sensor_kind_requires_sensor_id` + `sensor_id_domain`).
-       OR (kind IN ('sensor_enable','sensor_disable')
-            AND (sensor_id IS NULL
-                 OR length(sensor_id) < 1
-                 OR length(sensor_id) > 128
-                 OR sensor_id GLOB '*[^A-Za-z0-9._:-]*'))
-       -- sensor kind subject must equal 'snr:' || sensor_id (0011 trigger
-       -- `sensor_subject_matches_sensor_id`).
-       OR (kind IN ('sensor_enable','sensor_disable')
-            AND sensor_id IS NOT NULL
-            AND (subject IS NULL OR subject IS NOT ('snr:' || sensor_id)))
-       -- hash kind subject must match sha256:<64hex> or hash:<32..=128 hex>
-       -- (0011 trigger `hash_kind_subject_shape`).
-       OR (kind IN ('forget_intent','remember_intent','promote_receipt')
-            AND (subject IS NULL
-                 OR NOT (
-                       (substr(subject, 1, 7) = 'sha256:'
-                         AND length(subject) = 71
-                         AND substr(subject, 8) NOT GLOB '*[^0-9a-f]*')
-                    OR (substr(subject, 1, 5) = 'hash:'
-                         AND length(subject) BETWEEN 37 AND 133
-                         AND substr(subject, 6) NOT GLOB '*[^0-9a-f]*')
-                 )))
-       -- grant/revoke subject domain (0011 trigger
-       -- `subject_domain_for_non_hash_kinds`).
-       OR (kind IN ('grant','revoke')
-            AND (subject IS NULL
-                 OR length(subject) < 1 OR length(subject) > 128
-                 OR subject GLOB '*[^a-z0-9._:-]*'
-                 OR substr(subject, 1, 1) NOT GLOB '[a-z]'))
-       -- policy_change subject domain (0011 trigger
-       -- `subject_domain_for_non_hash_kinds`).
-       OR (kind = 'policy_change'
-            AND (subject IS NULL
-                 OR length(subject) < 1 OR length(subject) > 128
-                 OR subject GLOB '*[^a-z0-9._-]*'))
-     );
-DROP TRIGGER __cairn_assert_event_rows_trg;
-DROP TABLE __cairn_assert_event_rows;
+   WHERE
+     -- legacy half
+     (kind IS NULL
+      AND (
+           consent_id IS NULL
+        OR length(consent_id) < 1
+        OR length(consent_id) > 64
+        OR consent_id GLOB '*[^A-Za-z0-9._:-]*'
+        OR scope IS NULL
+        OR length(scope) < 1
+        OR length(scope) > 256
+        OR scope GLOB '*[^a-z0-9._:=,-]*'
+        OR (op_id IS NOT NULL
+             AND (length(op_id) < 1
+                  OR length(op_id) > 128
+                  OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
+        OR subject IS NULL
+        OR length(subject) < 1
+        OR length(subject) > 128
+        OR subject GLOB '*[^a-z0-9._:-]*'
+        OR substr(subject, 1, 1) NOT GLOB '[a-z]'
+      ))
+  OR
+     -- event half: decided_at_iso must be plausibly RFC3339-shaped
+     (kind IS NOT NULL
+      AND decided_at_iso IS NOT NULL
+      AND (length(decided_at_iso) < 20
+           OR length(decided_at_iso) > 35
+           OR substr(decided_at_iso, 5, 1) NOT GLOB '-'
+           OR substr(decided_at_iso, 8, 1) NOT GLOB '-'
+           OR substr(decided_at_iso, 11, 1) NOT GLOB 'T'
+           OR substr(decided_at_iso, 14, 1) NOT GLOB ':'
+           OR substr(decided_at_iso, 17, 1) NOT GLOB ':'));
+DROP TRIGGER __cairn_assert_metadata_trg;
+DROP TABLE __cairn_assert_metadata;
 
--- 1. Drop ALL triggers attached to the old consent_journal. They are
---    re-created at the end of this migration against the renamed table.
+-- 1. Drop ALL triggers attached to the old consent_journal. The
+--    immutable + no_delete + 0009 iso/body-free + 0011 hardening
+--    triggers will be re-created against `consent_journal_v2` BEFORE
+--    the data move (so they gate it row-by-row). The 0009
+--    `consent_journal_kind_domain` trigger is permanently retired —
+--    the new column CHECK supersedes it.
 DROP TRIGGER IF EXISTS consent_journal_immutable;
 DROP TRIGGER IF EXISTS consent_journal_no_delete;
 DROP TRIGGER IF EXISTS consent_journal_kind_domain;
@@ -377,96 +317,36 @@ CREATE TABLE consent_journal_v2 (
   expires_at_iso  TEXT
 );
 
--- 4. Move data. Synthesize every event-shape field for legacy 0005 rows
---    so every post-0021 row decodes as a fully-formed ConsentEvent. See
---    the head-of-file synthesis-rules comment for justification of each
---    expression and for why this is preferable to a structural NULL
---    filter in the readers (which would also hide future drift).
+-- 4. Attach all triggers to consent_journal_v2 BEFORE the data move so
+--    they gate the INSERT…SELECT row-by-row. After the rename in step
+--    6, SQLite automatically re-targets these triggers onto the renamed
+--    `consent_journal` table; the trigger names stay stable and match
+--    the verify.rs schema fingerprint.
 --
---    Legacy detection: `kind IS NULL` (the 0009 additive column is the
---    only NULL-allowing column populated for every post-0009 event row).
---    For legacy rows we use `CASE WHEN kind IS NULL THEN <sentinel> ELSE
---    <existing-column> END` to UNCONDITIONALLY override pre-existing
---    nullable columns with sentinels — NOT `COALESCE(<existing>,
---    <sentinel>)`, because COALESCE would trust whatever non-NULL value
---    sits in the column and pre-0009/pre-0011 there were no domain
---    checks to gate those values. `kind` itself is the one exception:
---    `COALESCE(kind, decision -> grant/revoke)` is safe because
---    `decision` is gated by 0005's column CHECK to GRANT|REVOKE.
-INSERT INTO consent_journal_v2 (
-  rowid,
-  consent_id, subject, scope, decision, reason, granted_by,
-  decided_at, expires_at, op_id, kind, sensor_id, actor,
-  payload_json, decided_at_iso, expires_at_iso
-)
-SELECT
-  rowid,
-  consent_id, subject, scope, decision, reason, granted_by,
-  decided_at, expires_at, op_id,
-  COALESCE(
-    kind,
-    CASE decision WHEN 'GRANT' THEN 'grant' WHEN 'REVOKE' THEN 'revoke' END
-  ) AS kind,
-  sensor_id,
-  CASE WHEN kind IS NULL THEN 'hmn:legacy' ELSE actor END AS actor,
-  CASE
-    WHEN kind IS NULL
-      THEN '{"shape":"decision","subject_code":"legacy"}'
-    ELSE payload_json
-  END AS payload_json,
-  CASE
-    WHEN kind IS NULL
-      THEN strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
-    ELSE decided_at_iso
-  END AS decided_at_iso,
-  expires_at_iso
-FROM consent_journal;
+--    The 0005 immutable + no_delete triggers gate UPDATE / DELETE only
+--    (not INSERT), so they do not interfere with the data move.
 
--- 5. Drop old, rename new.
-DROP TABLE consent_journal;
-ALTER TABLE consent_journal_v2 RENAME TO consent_journal;
-
--- 6. Recreate indexes (identical to 0005 + 0009, except kind_idx no
---    longer needs the `WHERE kind IS NOT NULL` partial-index predicate).
-CREATE INDEX consent_journal_subject_scope_idx
-  ON consent_journal(subject, scope, decided_at);
-
-CREATE INDEX consent_journal_op_idx
-  ON consent_journal(op_id)
-  WHERE op_id IS NOT NULL;
-
-CREATE INDEX consent_journal_actor_idx
-  ON consent_journal(actor, decided_at)
-  WHERE actor IS NOT NULL;
-
-CREATE INDEX consent_journal_sensor_idx
-  ON consent_journal(sensor_id, decided_at)
-  WHERE sensor_id IS NOT NULL;
-
-CREATE INDEX consent_journal_kind_idx
-  ON consent_journal(kind, decided_at);
-
--- 7. Re-attach 0005 append-only triggers verbatim.
+-- 4a. 0005 append-only triggers verbatim.
 CREATE TRIGGER consent_journal_immutable
-  BEFORE UPDATE ON consent_journal
+  BEFORE UPDATE ON consent_journal_v2
   FOR EACH ROW
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal rows are immutable');
 END;
 
 CREATE TRIGGER consent_journal_no_delete
-  BEFORE DELETE ON consent_journal
+  BEFORE DELETE ON consent_journal_v2
   FOR EACH ROW
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal is append-only');
 END;
 
--- 8. Re-attach 0009 event-shape triggers (kind-domain trigger is now
---    redundant with the column CHECK; permanently dropped above).
---    `WHEN NEW.kind IS NOT NULL AND …` guards are stripped — kind is
---    NOT NULL by column constraint.
+-- 4b. 0009 event-shape triggers (kind-domain trigger is now redundant
+--     with the column CHECK; permanently dropped above). `WHEN NEW.kind
+--     IS NOT NULL AND …` guards are stripped — kind is NOT NULL by
+--     column constraint.
 CREATE TRIGGER consent_journal_event_requires_iso
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.decided_at_iso IS NULL
 BEGIN
@@ -474,7 +354,7 @@ BEGIN
 END;
 
 CREATE TRIGGER consent_journal_forget_receipt_body_free
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind = 'forget_intent'
    AND NEW.payload_json IS NOT NULL
@@ -494,32 +374,28 @@ BEGIN
   SELECT RAISE(ABORT, 'forget_intent payload must be body-free (§14)');
 END;
 
--- 9. Re-attach 0011 hardening triggers (verbatim except for stripped
---    `WHEN NEW.kind IS NOT NULL AND …` guards, which became tautological
---    once the column went NOT NULL). Each trigger keeps its
---    `DROP TRIGGER IF EXISTS` prelude defensively.
+-- 4c. 0011 hardening triggers (verbatim except for stripped
+--     `WHEN NEW.kind IS NOT NULL AND …` guards, which became
+--     tautological once the column went NOT NULL).
 
-DROP TRIGGER IF EXISTS consent_journal_event_requires_actor;
 CREATE TRIGGER consent_journal_event_requires_actor
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.actor IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal event rows require actor');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_event_requires_payload;
 CREATE TRIGGER consent_journal_event_requires_payload
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN (NEW.payload_json IS NULL OR json_valid(NEW.payload_json) = 0)
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal event rows require valid JSON payload');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_shape_matches_kind;
 CREATE TRIGGER consent_journal_payload_shape_matches_kind
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN (
         'sensor_enable',
@@ -552,9 +428,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload shape must match kind');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_body_free;
 CREATE TRIGGER consent_journal_payload_body_free
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -570,9 +445,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload must be body-free (§14)');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_sensor_kind_requires_sensor_id;
 CREATE TRIGGER consent_journal_sensor_kind_requires_sensor_id
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
    AND NEW.sensor_id IS NULL
@@ -580,9 +454,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal sensor kinds require sensor_id');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_sensor_id_matches_payload;
 CREATE TRIGGER consent_journal_sensor_id_matches_payload
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
    AND NEW.sensor_id IS NOT NULL
@@ -597,9 +470,8 @@ BEGIN
     'consent_journal sensor_id must equal payload.sensor_label (and payload.sensor_label must be text)');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_sensor_subject_matches_sensor_id;
 CREATE TRIGGER consent_journal_sensor_subject_matches_sensor_id
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
    AND NEW.sensor_id IS NOT NULL
@@ -608,9 +480,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal sensor subject must be `snr:` + sensor_id');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_non_sensor_kind_forbids_sensor_id;
 CREATE TRIGGER consent_journal_non_sensor_kind_forbids_sensor_id
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind NOT IN ('sensor_enable', 'sensor_disable')
    AND NEW.sensor_id IS NOT NULL
@@ -618,9 +489,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal non-sensor kinds must not carry sensor_id');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_hash_kind_subject_shape;
 CREATE TRIGGER consent_journal_hash_kind_subject_shape
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
    AND NEW.subject IS NOT NULL
@@ -636,9 +506,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal hash-kind subject must be sha256:64hex or hash:32..128hex');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_hash_kind_target_id_hash_shape;
 CREATE TRIGGER consent_journal_hash_kind_target_id_hash_shape
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('forget_intent', 'remember_intent', 'promote_receipt')
    AND NEW.payload_json IS NOT NULL
@@ -661,9 +530,8 @@ BEGIN
     'consent_journal hash-kind payload.target_id_hash must be sha256:64hex or hash:32..128hex (text)');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_required_fields;
 CREATE TRIGGER consent_journal_payload_required_fields
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -706,9 +574,8 @@ BEGIN
     'consent_journal payload missing or malformed required field for its shape');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_unknown_top_level_keys;
 CREATE TRIGGER consent_journal_payload_unknown_top_level_keys
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -733,9 +600,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload has unknown top-level key');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_no_duplicate_keys;
 CREATE TRIGGER consent_journal_payload_no_duplicate_keys
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -749,9 +615,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload has duplicate top-level keys');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_subject_domain_for_non_hash_kinds;
 CREATE TRIGGER consent_journal_subject_domain_for_non_hash_kinds
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.subject IS NOT NULL
    AND (
@@ -773,18 +638,16 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal subject out of domain class for its kind');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_event_requires_positive_rowid;
 CREATE TRIGGER consent_journal_event_requires_positive_rowid
-  AFTER INSERT ON consent_journal
+  AFTER INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.rowid <= 0
 BEGIN
   SELECT RAISE(ABORT, 'consent_journal event rows require positive rowid');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_keys_match_shape;
 CREATE TRIGGER consent_journal_payload_keys_match_shape
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -814,9 +677,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload key not allowed for its shape');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_payload_scalar_domains;
 CREATE TRIGGER consent_journal_payload_scalar_domains
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.payload_json IS NOT NULL
    AND json_valid(NEW.payload_json) = 1
@@ -880,9 +742,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal payload scalar out of domain class');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_event_metadata_domains;
 CREATE TRIGGER consent_journal_event_metadata_domains
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN (NEW.consent_id IS NULL
            OR length(NEW.consent_id) < 1
@@ -900,9 +761,8 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal event metadata out of domain class');
 END;
 
-DROP TRIGGER IF EXISTS consent_journal_sensor_id_domain;
 CREATE TRIGGER consent_journal_sensor_id_domain
-  BEFORE INSERT ON consent_journal
+  BEFORE INSERT ON consent_journal_v2
   FOR EACH ROW
   WHEN NEW.kind IN ('sensor_enable', 'sensor_disable')
    AND NEW.sensor_id IS NOT NULL
@@ -915,26 +775,102 @@ BEGIN
   SELECT RAISE(ABORT, 'consent_journal sensor_id out of domain class');
 END;
 
--- 10. Mirror cursor reset marker (round-5 review follow-up). Existing
---     vaults' .cairn/consent.cursor sidecar may already point ABOVE the
---     legacy `kind IS NULL` rowids that this migration just promoted to
---     event-shape rows (the async mirror in cairn-workflows tailed only
---     event-kind rows pre-0021, so legacy rowids were silently skipped).
---     Without intervention, the next mirror tick would still skip them
---     because `WHERE rowid > cursor` filters them out.
+-- 5. Move data. Synthesize every event-shape field for legacy 0005 rows
+--    so every post-0021 row decodes as a fully-formed ConsentEvent. See
+--    the head-of-file synthesis-rules comment for justification of each
+--    expression and for why this is preferable to a structural NULL
+--    filter in the readers (which would also hide future drift).
 --
---     Rather than reach across crate boundaries to delete the sidecar
---     file, we leave a marker in the DB. The mirror's tick() reads the
---     unconsumed markers, calls rebuild_from_db() (which atomically
---     replaces the on-disk log by replaying from rowid 0), then marks
---     the row consumed. Idempotent under repeated ticks; safe under
---     concurrent mirror processes (the mirror holds the consent.lock
---     advisory file lock during the rebuild).
+--    Legacy detection: `kind IS NULL` (the 0009 additive column is the
+--    only NULL-allowing column populated for every post-0009 event row).
+--    For legacy rows we use `CASE WHEN kind IS NULL THEN <sentinel> ELSE
+--    <existing-column> END` to UNCONDITIONALLY override pre-existing
+--    nullable columns with sentinels — NOT `COALESCE(<existing>,
+--    <sentinel>)`, because COALESCE would trust whatever non-NULL value
+--    sits in the column and pre-0009/pre-0011 there were no domain
+--    checks to gate those values. `kind` itself is the one exception:
+--    `COALESCE(kind, decision -> grant/revoke)` is safe because
+--    `decision` is gated by 0005's column CHECK to GRANT|REVOKE.
 --
---     `consumed` is an INTEGER (0/1) rather than BOOLEAN because SQLite
---     stores booleans as integers anyway and the column-affinity rules
---     are clearer. UPDATEs on this table are unconstrained — the
---     append-only triggers attach to consent_journal only.
+--    This INSERT is gated by every trigger attached in step 4 — any
+--    pre-0011 event-kind row violating any 0011 invariant aborts the
+--    migration with the trigger's own RAISE message, no enumeration in
+--    this migration.
+INSERT INTO consent_journal_v2 (
+  rowid,
+  consent_id, subject, scope, decision, reason, granted_by,
+  decided_at, expires_at, op_id, kind, sensor_id, actor,
+  payload_json, decided_at_iso, expires_at_iso
+)
+SELECT
+  rowid,
+  consent_id, subject, scope, decision, reason, granted_by,
+  decided_at, expires_at, op_id,
+  COALESCE(
+    kind,
+    CASE decision WHEN 'GRANT' THEN 'grant' WHEN 'REVOKE' THEN 'revoke' END
+  ) AS kind,
+  sensor_id,
+  CASE WHEN kind IS NULL THEN 'hmn:legacy' ELSE actor END AS actor,
+  CASE
+    WHEN kind IS NULL
+      THEN '{"shape":"decision","subject_code":"legacy"}'
+    ELSE payload_json
+  END AS payload_json,
+  CASE
+    WHEN kind IS NULL
+      THEN strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
+    ELSE decided_at_iso
+  END AS decided_at_iso,
+  expires_at_iso
+FROM consent_journal;
+
+-- 6. Drop old, rename new. SQLite re-targets the triggers attached to
+--    consent_journal_v2 onto the renamed `consent_journal` table; the
+--    trigger names stay stable (matches verify.rs schema fingerprint).
+DROP TABLE consent_journal;
+ALTER TABLE consent_journal_v2 RENAME TO consent_journal;
+
+-- 7. Recreate indexes (identical to 0005 + 0009, except kind_idx no
+--    longer needs the `WHERE kind IS NOT NULL` partial-index predicate).
+CREATE INDEX consent_journal_subject_scope_idx
+  ON consent_journal(subject, scope, decided_at);
+
+CREATE INDEX consent_journal_op_idx
+  ON consent_journal(op_id)
+  WHERE op_id IS NOT NULL;
+
+CREATE INDEX consent_journal_actor_idx
+  ON consent_journal(actor, decided_at)
+  WHERE actor IS NOT NULL;
+
+CREATE INDEX consent_journal_sensor_idx
+  ON consent_journal(sensor_id, decided_at)
+  WHERE sensor_id IS NOT NULL;
+
+CREATE INDEX consent_journal_kind_idx
+  ON consent_journal(kind, decided_at);
+
+-- 8. Mirror cursor reset marker (round-5 review follow-up). Existing
+--    vaults' .cairn/consent.cursor sidecar may already point ABOVE the
+--    legacy `kind IS NULL` rowids that this migration just promoted to
+--    event-shape rows (the async mirror in cairn-workflows tailed only
+--    event-kind rows pre-0021, so legacy rowids were silently skipped).
+--    Without intervention, the next mirror tick would still skip them
+--    because `WHERE rowid > cursor` filters them out.
+--
+--    Rather than reach across crate boundaries to delete the sidecar
+--    file, we leave a marker in the DB. The mirror's tick() reads the
+--    unconsumed markers, calls rebuild_from_db() (which atomically
+--    replaces the on-disk log by replaying from rowid 0), then marks
+--    the row consumed. Idempotent under repeated ticks; safe under
+--    concurrent mirror processes (the mirror holds the consent.lock
+--    advisory file lock during the rebuild).
+--
+--    `consumed` is an INTEGER (0/1) rather than BOOLEAN because SQLite
+--    stores booleans as integers anyway and the column-affinity rules
+--    are clearer. UPDATEs on this table are unconstrained — the
+--    append-only triggers attach to consent_journal only.
 CREATE TABLE IF NOT EXISTS consent_mirror_resets (
   migration_id INTEGER NOT NULL PRIMARY KEY,
   applied_at   INTEGER NOT NULL,

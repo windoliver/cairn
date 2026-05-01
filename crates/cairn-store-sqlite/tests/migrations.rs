@@ -2073,6 +2073,200 @@ fn consent_journal_rebuild_aborts_on_event_row_invalid_hash_subject() {
 }
 
 #[test]
+fn consent_journal_rebuild_aborts_on_event_row_unparseable_actor() {
+    // Phase-B (#255, brief §14): round-9 High finding. The structural
+    // fix attaches the 0011 hardening triggers to consent_journal_v2
+    // BEFORE the data move, so they gate the INSERT…SELECT row-by-row.
+    // Pre-0011 the actor column existed (since 0009) but was not domain-
+    // gated; a row with `actor='not-an-identity'` could be written under
+    // 0009 and would brick `Identity::parse` at decode. The 0011
+    // `consent_journal_event_requires_actor` trigger only checks for
+    // NULL, but the broader §14 contract surfaces the malformed actor
+    // via decode. We don't have a single trigger that domain-checks
+    // actor shape today, but the trigger gating still surfaces this
+    // class via the metadata trigger if the row is otherwise malformed.
+    // The narrower assertion here is that a row whose actor is NULL
+    // (the simplest unparseable actor) aborts via the trigger gating
+    // with a "consent_journal" error message — confirming step 0d
+    // removal didn't lose coverage.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_event_requires_actor", [])
+        .expect("drop pre-0021 actor trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-actor-null', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', NULL, '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with NULL actor");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with NULL actor");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("consent_journal"),
+        "abort message must mention consent_journal (trigger gating); got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-actor-null'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-actor-null");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_invalid_iso_text() {
+    // Phase-B (#255, brief §14): round-9 High finding. The 0011 iso
+    // trigger (`consent_journal_event_requires_iso`) only checks
+    // non-null; SQL has no portable RFC3339 parse. Step 0c's event
+    // half does a structural sniff on the iso text to catch the
+    // gross-failure cases like `'not-an-rfc3339'`. Drop the iso
+    // non-null trigger first to simulate the historical reality
+    // where iso content was unconstrained pre-0011.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_event_requires_iso", [])
+        .expect("drop pre-0021 iso non-null trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-bad-iso', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 'not-an-rfc3339')",
+        [],
+    )
+    .expect("legacy event-kind insert with malformed decided_at_iso");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with malformed iso");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("RFC3339") || msg.contains("decided_at_iso") || msg.contains("issue #267"),
+        "abort message must cite RFC3339 / decided_at_iso / issue #267; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-bad-iso'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-bad-iso");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_payload_missing_required_fields() {
+    // Phase-B (#255, brief §14): round-9 High finding. The 0011
+    // `consent_journal_payload_required_fields` trigger gates that each
+    // shape carries the keys its kind requires (e.g. `grant` requires
+    // `subject_code`). Pre-0011 no such gate existed; a row written
+    // then with payload `{"shape":"decision"}` (missing subject_code)
+    // would survive. The structural fix attaches the trigger to v2
+    // before the data move, so the rebuild aborts on such a row.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_payload_required_fields", [])
+        .expect("drop pre-0021 required-fields trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-no-subjcode', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with payload missing required field");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row missing payload required field");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("consent_journal"),
+        "abort message must mention consent_journal (trigger gating); got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-no-subjcode'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-no-subjcode");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_payload_shape_kind_mismatch() {
+    // Phase-B (#255, brief §14): round-9 High finding. The 0011
+    // `consent_journal_payload_shape_matches_kind` trigger gates that
+    // a `grant` row's payload is shape `decision` (not e.g.
+    // `sensor_toggle`). Pre-0011 this gate did not exist; the
+    // structural fix attaches the trigger to v2 before the data move,
+    // so the rebuild aborts.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "DROP TRIGGER consent_journal_payload_shape_matches_kind",
+        [],
+    )
+    .expect("drop pre-0021 shape-matches-kind trigger to simulate v9-era write");
+    // Drop the required-fields + body-free + keys-match-shape +
+    // unknown-top-level-keys + scalar-domains triggers since the
+    // sensor_toggle payload here doesn't match a grant kind's
+    // required fields and would otherwise be the abort reason.
+    conn.execute("DROP TRIGGER consent_journal_payload_required_fields", [])
+        .ok();
+    conn.execute("DROP TRIGGER consent_journal_payload_keys_match_shape", [])
+        .ok();
+    conn.execute(
+        "DROP TRIGGER consent_journal_payload_unknown_top_level_keys",
+        [],
+    )
+    .ok();
+    conn.execute("DROP TRIGGER consent_journal_payload_scalar_domains", [])
+        .ok();
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-shape-mismatch', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', \
+                 '{\"shape\":\"sensor_toggle\",\"sensor_label\":\"x\",\"reason_code\":\"y\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with payload shape mismatched to kind");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with shape/kind mismatch");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("consent_journal"),
+        "abort message must mention consent_journal (trigger gating); got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-shape-mismatch'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-shape-mismatch");
+}
+
+#[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
     conn.execute(
