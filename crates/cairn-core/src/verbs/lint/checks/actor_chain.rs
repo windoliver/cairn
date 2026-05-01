@@ -8,8 +8,13 @@
 //! 1. **Author states plumbed (`LintInputs.author_states.is_some()`):**
 //!    run the real per-record check. Chain-shape violations (no
 //!    `Author`, duplicate `Author`, role-order violation) and
-//!    non-`Active` author lifecycle states surface as
-//!    `Kind::BrokenActorChain` findings at `Severity::Error`.
+//!    missing-from-registry authors surface as `Kind::BrokenActorChain`
+//!    at `Severity::Error` (real corruption / unknown issuer).
+//!    Currently-revoked authors surface at `Severity::Warning` —
+//!    historical signatures may still be valid until P1 ships real
+//!    Ed25519 + key-version persistence, so blocking on routine
+//!    revocation would mis-direct operators toward destructive
+//!    remediation.
 //! 2. **Author states absent (`None`):** the dispatch layer did not
 //!    wire the `IdentityRegistry`. Chain-shape is still cheap — run
 //!    `validate_chain` per record and emit `BrokenActorChain` for any
@@ -110,14 +115,26 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 
 fn severity_for(status: ChainStatus) -> Severity {
     match status {
-        ChainStatus::Revoked | ChainStatus::Malformed => Severity::Error,
+        // Revoked authors don't *prove* a bad record — historical
+        // signatures still verify per ProvisioningState::is_operational.
+        // Without persisted key_version or real Ed25519 re-verify (P1),
+        // this leaf can't tell whether a record was signed pre- or
+        // post-revocation, so it must not block on routine revocation.
+        // Surface as Warning so operators see the audit trail but don't
+        // get destructive remediation advice for valid history.
+        ChainStatus::Revoked => Severity::Warning,
+        // Chain-shape and unknown-issuer cases are real corruption /
+        // missing-truth-source — block.
+        ChainStatus::Malformed => Severity::Error,
     }
 }
 
 fn suggested_fix_for(status: ChainStatus) -> &'static str {
     match status {
         ChainStatus::Revoked => {
-            "tombstone or re-author the affected records — the issuer's signing right has been withdrawn"
+            "audit the affected records — author identity is currently revoked, but historical \
+             signatures may still be valid; do NOT auto-tombstone until P1 ships real signature \
+             verification + key_version persistence (records signed pre-revocation remain valid)"
         }
         ChainStatus::Malformed => {
             "investigate at-rest tampering, partial migration, or a bypassed write path; \
@@ -223,7 +240,12 @@ mod tests {
     }
 
     #[test]
-    fn revoked_author_with_states_emits_error() {
+    fn revoked_author_with_states_emits_warning_not_error() {
+        // Routine revocation must not poison historical records with
+        // blocking errors — without persisted key_version / real
+        // Ed25519 re-verify, this leaf cannot prove the record is
+        // post-revocation. Warning surfaces the audit trail without
+        // demanding destructive remediation.
         let cfg = CairnConfig::default();
         let r = sample_record();
         let author_id = r
@@ -239,8 +261,16 @@ mod tests {
         let findings = run(&inp);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::BrokenActorChain);
-        assert_eq!(findings[0].severity, Severity::Error);
+        assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0].target.is_some());
+        assert!(
+            findings[0]
+                .suggested_fix
+                .as_deref()
+                .unwrap_or("")
+                .contains("do NOT auto-tombstone"),
+            "remediation must not advise destructive cleanup"
+        );
     }
 
     #[test]

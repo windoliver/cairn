@@ -51,7 +51,7 @@
 
 use crate::domain::actor_chain::validate_chain;
 use crate::domain::identity::ProvisioningState;
-use crate::domain::{ChainRole, Identity, MemoryRecord, RecordId};
+use crate::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId};
 
 /// Subset of brief §1223 `chain_status` values that this P0 check can
 /// emit. Grows as follow-up checks (body integrity, key-version ring,
@@ -59,10 +59,15 @@ use crate::domain::{ChainRole, Identity, MemoryRecord, RecordId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChainStatus {
-    /// Author identity has been revoked or purged (or one of those
-    /// transitions is in flight). Historical signatures still verify
-    /// for audit, but the record should not be treated as
-    /// authoritatively-signed going forward. Maps to brief §1223
+    /// Author identity is currently in a non-`Active` revocation /
+    /// purge transition. Per `ProvisioningState::is_operational`,
+    /// `Revoked` keys still verify history for audit, so a stored
+    /// record signed *before* revocation may still be valid; without
+    /// persisted `key_version` or real Ed25519 re-verify (P1), this
+    /// check cannot tell pre- from post-revocation. The dispatch leaf
+    /// emits this finding at `Severity::Warning`, not `Error`, so a
+    /// routine revocation does not poison every historical record by
+    /// the same author with a blocking verdict. Maps to brief §1223
     /// `revoked`.
     Revoked,
     /// At-rest verification cannot establish the issuer:
@@ -160,6 +165,18 @@ pub fn check_author_lifecycle(
         .iter()
         .find(|e| e.role == ChainRole::Author)
         .map(|e| e.identity.clone())?;
+
+    // Sensor identities (`snr:`) are not subject to the human/agent
+    // lifecycle state machine — sensors are commonly machine-derived
+    // (`snr:local:hook:cc-session:v1` and friends) and are not
+    // necessarily provisioned in `IdentityRegistry`. A sensor-authored
+    // `sensor_observation` record is legitimate, so checking its
+    // author against the registry would mis-flag every captured event
+    // as `Malformed`. Skip the lifecycle branch entirely; chain-shape
+    // already validated above.
+    if author.kind() == IdentityKind::Sensor {
+        return None;
+    }
 
     let (status, message) = match author_state {
         AuthorState::Resolved(ProvisioningState::Active) => return None,
@@ -388,6 +405,48 @@ mod tests {
         let finding = check_author_lifecycle(&malformed, AuthorState::MissingFromRegistry)
             .expect("malformed-chain finding");
         assert!(!finding.message.contains(MARKER));
+    }
+
+    #[test]
+    fn sensor_authored_record_is_skipped_regardless_of_state() {
+        // Sensor identities aren't subject to the human/agent
+        // lifecycle state machine. Sensors are commonly machine-derived
+        // and may not be provisioned in IdentityRegistry. A
+        // sensor-authored sensor_observation record is legitimate
+        // captured data, not corruption.
+        use crate::domain::{Identity, MemoryClass, MemoryKind};
+        let mut record = record_with_active_author();
+        // Make this a sensor_observation record authored by the source
+        // sensor — the chain validator + record validator both accept
+        // this when author == provenance.source_sensor.
+        record.kind = MemoryKind::SensorObservation;
+        record.class = MemoryClass::Episodic;
+        let sensor_id = Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor id");
+        let author = record
+            .actor_chain
+            .iter_mut()
+            .find(|e| e.role == ChainRole::Author)
+            .expect("sample chain has author");
+        author.identity = sensor_id.clone();
+        record.provenance.source_sensor = sensor_id.clone();
+
+        // Every state — including MissingFromRegistry which would
+        // otherwise emit Malformed — must be a no-op for sensor
+        // authors.
+        let cases = [
+            AuthorState::MissingFromRegistry,
+            AuthorState::Resolved(ProvisioningState::Active),
+            AuthorState::Resolved(ProvisioningState::Pending),
+            AuthorState::Resolved(ProvisioningState::Revoked),
+            AuthorState::Resolved(ProvisioningState::Purged),
+        ];
+        for state in cases {
+            assert_eq!(
+                check_author_lifecycle(&record, state),
+                None,
+                "sensor-authored record must not be flagged for state {state:?}"
+            );
+        }
     }
 
     #[test]
