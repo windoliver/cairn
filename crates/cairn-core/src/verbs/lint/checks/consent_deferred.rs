@@ -7,7 +7,7 @@
 //! removes this stub.
 
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
-use crate::verbs::lint::{finding, LintInputs};
+use crate::verbs::lint::{LintInputs, finding};
 
 const TRACKING_ISSUE: i64 = 253;
 

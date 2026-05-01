@@ -382,7 +382,7 @@ pub async fn lint_handler(
     vault_root: &Path,
 ) -> anyhow::Result<LintHandlerResult> {
     use cairn_core::contract::memory_store::ListArgs;
-    use cairn_core::verbs::lint::{run_checks, ConsentModel, LintInputs, LintRecord};
+    use cairn_core::verbs::lint::{ConsentModel, LintInputs, LintRecord, run_checks};
 
     let stored = store
         .list_active_stored(&ListArgs::default())
@@ -554,7 +554,7 @@ mod tests {
     async fn lint_handler_writes_report_when_requested() {
         use cairn_core::config::CairnConfig;
         use cairn_core::verbs::lint::SchemaVersion;
-        use cairn_test_fixtures::store::{sample_record, FixtureStore};
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
         let r = sample_record();
@@ -585,7 +585,10 @@ mod tests {
             })
             .count();
         assert_eq!(info_count, 5);
-        assert!(!result.has_error, "clean vault must not raise error findings");
+        assert!(
+            !result.has_error,
+            "clean vault must not raise error findings"
+        );
         assert_eq!(
             result.report_path.as_deref(),
             Some(std::path::Path::new(".cairn/lint-report.md"))
@@ -601,7 +604,7 @@ mod tests {
         use cairn_core::config::CairnConfig;
         use cairn_core::contract::memory_store::IndexStats;
         use cairn_core::verbs::lint::SchemaVersion;
-        use cairn_test_fixtures::store::{sample_record, FixtureStore};
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
         store.upsert(&sample_record()).await.expect("upsert");
@@ -625,12 +628,7 @@ mod tests {
             .data
             .findings
             .iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    cairn_core::generated::verbs::lint::Kind::IndexDrift,
-                )
-            })
+            .filter(|f| matches!(f.kind, cairn_core::generated::verbs::lint::Kind::IndexDrift,))
             .collect();
         assert_eq!(drifts.len(), 1);
     }

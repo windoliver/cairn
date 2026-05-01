@@ -234,7 +234,10 @@ mod tests {
             let mut r = sample_record();
             r.tags = vec![label.to_owned()];
             LintRecord {
-                stored: StoredRecord { record: r, version: 1 },
+                stored: StoredRecord {
+                    record: r,
+                    version: 1,
+                },
                 consent_model: ConsentModel::LegacyEvent,
             }
         };

@@ -7,7 +7,7 @@
 //! the projection-drift work in #254.
 
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
-use crate::verbs::lint::{finding, target_path, LintInputs};
+use crate::verbs::lint::{LintInputs, finding, target_path};
 
 /// Emit one error finding per drifted derived index. Today there is only
 /// one derived index in the stack (FTS5); future indexes (sqlite-vec)
@@ -28,8 +28,7 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
         );
         f.target = Some(target_path("records_fts"));
         f.suggested_fix = Some(
-            "rebuild the FTS5 mirror; transient drift will resolve on the next ingest"
-                .to_owned(),
+            "rebuild the FTS5 mirror; transient drift will resolve on the next ingest".to_owned(),
         );
         out.push(f);
     }
