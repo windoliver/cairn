@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
-    Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
-    MemoryStoreCapabilities, RecordVersion, SemanticSearchArgs, SemanticSearchPage, StoreError,
-    TombstoneReason, UpsertOutcome,
+    Edge, EdgeDir, EdgeKey, HybridSearchArgs, HybridSearchPage, KeywordSearchArgs,
+    KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion,
+    SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason, UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
@@ -109,5 +109,15 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("search_semantic");
         }
         self.do_search_semantic(args).await.map_err(Into::into)
+    }
+
+    async fn search_hybrid(
+        &self,
+        args: &HybridSearchArgs<'_>,
+    ) -> Result<HybridSearchPage, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("search_hybrid");
+        }
+        self.do_search_hybrid(args).await.map_err(Into::into)
     }
 }
