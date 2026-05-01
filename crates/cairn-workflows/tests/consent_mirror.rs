@@ -390,7 +390,12 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     // normally.
     let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
     let nonce = db_nonce_for(&conn, 21);
-    std::fs::write(&resets_consumed, format!("21:{nonce}:0\n")).expect("seed sidecar");
+    // Seed the round-13 four-field bound format with watermark=0,
+    // line_count=0 so the initial cursor (also 0) and empty log
+    // (also 0 lines) satisfy `cursor >= watermark` AND
+    // `live_line_count >= line_count` and the first tick processes
+    // normally (no reset replay).
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:0\n")).expect("seed sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("first tick");
@@ -413,12 +418,13 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     assert_eq!(lines.len(), 2);
 
     // The reset row must now be in this mirror's sidecar; another tick
-    // is a no-op. Watermark = high_water of the replay = 2 (rowids 1,2).
+    // is a no-op. Watermark = high_water of the replay = 2 (rowids 1,2);
+    // line_count = 2 (one envelope per replayed rowid, round-13 finding).
     let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(
         sidecar.lines().any(|l| l.trim() == expected),
-        "sidecar must record (21,{nonce},watermark=2) as consumed: {sidecar:?}"
+        "sidecar must record (21,{nonce},watermark=2,line_count=2) as consumed: {sidecar:?}"
     );
 
     let n = mirror.tick(&conn).expect("idempotent tick");
@@ -443,7 +449,7 @@ fn tick_surfaces_log_corrupt_when_reset_pending_and_log_damaged() {
         let nonce = db_nonce_for(&conn, 21);
         std::fs::write(
             dir.path().join("consent.mirror_resets_consumed"),
-            format!("21:{nonce}:0\n"),
+            format!("21:{nonce}:0:0\n"),
         )
         .expect("seed sidecar");
         append(&conn, &forget_event("c-1", &h(1))).expect("a1");
@@ -499,7 +505,7 @@ fn tick_replays_reset_when_log_intact() {
     let sidecar = std::fs::read_to_string(dir.path().join("consent.mirror_resets_consumed"))
         .expect("sidecar written");
     let nonce = db_nonce_for(&conn, 21);
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(sidecar.lines().any(|l| l.trim() == expected));
 
     let n = mirror.tick(&conn).expect("idempotent");
@@ -524,7 +530,7 @@ fn reset_marker_consumed_per_mirror_not_per_db() {
     let n_a = mirror_a.tick(&conn).expect("tick a");
     assert_eq!(n_a, 2);
     let nonce = db_nonce_for(&conn, 21);
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(
         std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
             .expect("a sidecar")
@@ -566,7 +572,7 @@ fn reset_marker_replays_when_cursor_regresses_below_watermark() {
     append(&conn, &forget_event("c-1", &h(1))).expect("a1");
     append(&conn, &forget_event("c-2", &h(2))).expect("a2");
 
-    // First tick replays the reset and writes sidecar `21:T:2`.
+    // First tick replays the reset and writes sidecar `21:T:2:2`.
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
     let n = mirror.tick(&conn).expect("first tick");
     assert_eq!(n, 2);
@@ -577,8 +583,8 @@ fn reset_marker_replays_when_cursor_regresses_below_watermark() {
     assert!(
         after_first
             .lines()
-            .any(|l| l.trim() == format!("21:{nonce}:2")),
-        "watermark must be the high_water of the replay (2): {after_first:?}"
+            .any(|l| l.trim() == format!("21:{nonce}:2:2")),
+        "watermark+line_count must be (2,2) after replay: {after_first:?}"
     );
 
     // Roll the log back: keep only the first envelope. The sidecar
@@ -663,10 +669,10 @@ fn sidecar_with_two_field_legacy_format_forces_replay() {
 
     // Sidecar is rewritten in the new bound format.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
-        "post-replay sidecar must include watermark: {after:?}"
+        "post-replay sidecar must include watermark and line_count: {after:?}"
     );
     assert!(
         !after.lines().any(|l| l.trim() == format!("21:{nonce}")),
@@ -707,10 +713,10 @@ fn sidecar_with_applied_at_format_forces_replay() {
     // Sidecar is rewritten in the round-12 nonce-bound format.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
     let nonce = db_nonce_for(&conn, 21);
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
-        "post-replay sidecar must be in nonce-bound form: {after:?}"
+        "post-replay sidecar must be in nonce-bound form with line_count: {after:?}"
     );
     assert!(
         !after
@@ -851,11 +857,13 @@ fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
     };
     assert_ne!(real_nonce, stale_nonce);
     let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
-    // Seed in the round-12 three-field nonce format with a watermark
-    // high enough to satisfy `cursor >= watermark` on its own — that
-    // way the replay is forced specifically by the nonce mismatch,
-    // not by a missing watermark or a stale one.
-    std::fs::write(&resets_consumed, format!("21:{stale_nonce}:0\n")).expect("seed stale sidecar");
+    // Seed in the round-13 four-field bound format with a watermark
+    // and line_count low enough to satisfy `cursor >= watermark` and
+    // `live_line_count >= line_count` on their own — that way the
+    // replay is forced specifically by the nonce mismatch, not by a
+    // missing watermark, line_count, or a stale one.
+    std::fs::write(&resets_consumed, format!("21:{stale_nonce}:0:0\n"))
+        .expect("seed stale sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("tick");
@@ -866,9 +874,10 @@ fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
     assert_eq!(mirror.read_lines().expect("lines").len(), 2);
 
     // Sidecar must now record the *real* (migration_id, db_nonce,
-    // watermark). Watermark = high_water of the replay = 2.
+    // watermark, line_count). Watermark = high_water of the replay = 2,
+    // line_count = 2.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
-    let expected = format!("21:{real_nonce}:2");
+    let expected = format!("21:{real_nonce}:2:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
         "post-replay sidecar must bind to the live DB's nonce: {after:?}"
@@ -930,10 +939,10 @@ fn sidecar_with_legacy_format_forces_replay() {
     assert_eq!(mirror.read_lines().expect("lines").len(), 2);
 
     // Sidecar is rewritten in the new
-    // `migration_id:db_nonce:watermark_rowid` form.
+    // `migration_id:db_nonce:watermark_rowid:line_count` form.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
     let nonce = db_nonce_for(&conn, 21);
-    let expected = format!("21:{nonce}:2");
+    let expected = format!("21:{nonce}:2:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
         "sidecar must be rewritten in bound format: {after:?}"
@@ -941,5 +950,116 @@ fn sidecar_with_legacy_format_forces_replay() {
     assert!(
         !after.lines().any(|l| l.trim() == "21"),
         "legacy bare `21` line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn reset_marker_replays_when_log_truncated_below_recorded_count() {
+    // Round-13 medium finding: `cursor >= watermark` is too weak as
+    // proof the replay is intact. `recover_cursor_from_log` only
+    // recovers the LAST well-formed envelope in a bounded scan
+    // window, so a log truncated to keep only the watermark envelope
+    // (or any tail-only rewrite that preserves the watermark line)
+    // would falsely satisfy `cursor >= watermark` while erasing the
+    // earlier rows the replay had committed. Binding consumption to
+    // the live log's line count too defeats this: a tick-time count
+    // below the recorded count proves a rollback the watermark
+    // alone cannot see.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+
+    // First tick replays the reset and writes sidecar
+    // `21:nonce:3:3` (watermark=3, line_count=3).
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 3);
+
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    let after_first = std::fs::read_to_string(&resets_consumed).expect("after first");
+    assert!(
+        after_first
+            .lines()
+            .any(|l| l.trim() == format!("21:{nonce}:3:3")),
+        "post-replay sidecar must record (watermark=3, line_count=3): {after_first:?}"
+    );
+
+    // Truncate the log to keep ONLY the last (watermark) envelope.
+    // `recover_cursor_from_log` will still find the watermark envelope
+    // and report cursor=3 → `cursor >= watermark` holds. But the log
+    // has been gutted from 3 lines to 1; line_count check must catch
+    // the rollback and force a replay.
+    let lines = mirror.read_lines().expect("read lines");
+    let truncated = format!("{}\n", lines[2]);
+    std::fs::write(dir.path().join("consent.log"), &truncated).expect("rollback log");
+    drop(mirror);
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    assert_eq!(
+        mirror.cursor(),
+        3,
+        "recovered cursor still satisfies cursor >= watermark"
+    );
+
+    let n = mirror
+        .tick(&conn)
+        .expect("re-tick after tail-only truncation");
+    assert_eq!(
+        n, 3,
+        "live line_count below recorded count must force replay even though cursor >= watermark"
+    );
+    assert_eq!(mirror.read_lines().expect("after replay").len(), 3);
+
+    // Sidecar is rewritten with the freshly-measured line_count=3.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    assert!(
+        after.lines().any(|l| l.trim() == format!("21:{nonce}:3:3")),
+        "post-replay sidecar must re-bind to (watermark=3, line_count=3): {after:?}"
+    );
+}
+
+#[test]
+fn sidecar_with_three_field_format_forces_replay() {
+    // Round-13 medium finding: round-12 sidecar entries used the
+    // three-field `migration_id:db_nonce:watermark` format with no
+    // `line_count`. Such lines cannot prove the log still reflects
+    // the replay (watermark alone is satisfied by a tail-only
+    // truncation that preserves only the watermark envelope). The
+    // sidecar parser treats any non-four-field line as unknown state
+    // and the next tick force-replays.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the round-12 three-field nonce-bound format.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    std::fs::write(&resets_consumed, format!("21:{nonce}:2\n"))
+        .expect("seed round-12 three-field sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "round-12 three-field sidecar (no line_count) must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the round-13 four-field bound format.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must include line_count: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == format!("21:{nonce}:2")),
+        "round-12 three-field line must not survive: {after:?}"
     );
 }

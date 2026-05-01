@@ -179,15 +179,22 @@ DROP TRIGGER __cairn_assert_legacy_iso_trg;
 DROP TABLE __cairn_assert_legacy_iso;
 
 -- 0a-bis. Abort if any kind-NULL row carries populated post-0009 event
---    fields (round-12 high finding). True 0005-era legacy rows are
---    kind-NULL AND have all of (actor, payload_json, decided_at_iso)
---    NULL. The 0009 event-shape trigger only gated on `kind IS NOT NULL`,
---    so a direct-SQL caller could insert a row with kind=NULL but the
---    other event fields populated; the synthesis step below (`CASE WHEN
---    kind IS NULL THEN <sentinel> ELSE <existing> END`) would silently
---    overwrite the real authorship/payload/iso with sentinels. Fail
---    closed instead so the operator can repair the drift manually
---    rather than losing audit data.
+--    fields (round-12 high finding, extended round-13). True 0005-era
+--    legacy rows are kind-NULL AND have all of (actor, payload_json,
+--    decided_at_iso, expires_at_iso, op_id, sensor_id) NULL — pre-0009
+--    schema didn't have any of those columns. The 0009 event-shape
+--    trigger only gated on `kind IS NOT NULL`, so a direct-SQL caller
+--    could insert a row with kind=NULL but the other event fields
+--    populated; the synthesis step below (`CASE WHEN kind IS NULL THEN
+--    <sentinel> ELSE <existing> END`) would silently overwrite the real
+--    authorship/payload/iso with sentinels while preserving any
+--    orphaned expires_at_iso/op_id/sensor_id (which the synthesis
+--    leaves untouched), yielding a structurally-corrupted row. Fail
+--    closed on ANY non-NULL event-shape field instead so the operator
+--    can repair the drift manually rather than losing audit data.
+--    Round-13 high finding: the original guard missed expires_at_iso /
+--    op_id / sensor_id; a kind-NULL row populated only with one of
+--    those would slip past and produce a frankenrow.
 CREATE TEMP TABLE __cairn_assert_legacy_drift (n INTEGER);
 CREATE TEMP TRIGGER __cairn_assert_legacy_drift_trg
   BEFORE INSERT ON __cairn_assert_legacy_drift
@@ -201,7 +208,10 @@ INSERT INTO __cairn_assert_legacy_drift (n)
    WHERE kind IS NULL
      AND (actor IS NOT NULL
        OR payload_json IS NOT NULL
-       OR decided_at_iso IS NOT NULL);
+       OR decided_at_iso IS NOT NULL
+       OR expires_at_iso IS NOT NULL
+       OR op_id IS NOT NULL
+       OR sensor_id IS NOT NULL);
 DROP TRIGGER __cairn_assert_legacy_drift_trg;
 DROP TABLE __cairn_assert_legacy_drift;
 

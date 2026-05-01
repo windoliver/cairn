@@ -1414,10 +1414,15 @@ fn consent_journal_rebuild_synthesizes_legacy_event_fields_for_decode() {
     use cairn_store_sqlite::consent::read_since_rowid;
 
     let mut conn = open_at_version(20);
+    // op_id / sensor_id / actor / payload_json / decided_at_iso /
+    // expires_at_iso are all post-0009 columns; the round-13 drift
+    // preflight (step 0a-bis) aborts the migration on any kind-NULL
+    // row carrying a non-NULL value in any of them. Insert a true
+    // 0005-era legacy row (only the pre-0009 columns populated).
     conn.execute(
         "INSERT INTO consent_journal \
-          (consent_id, subject, scope, decision, granted_by, decided_at, op_id) \
-         VALUES ('legacy-grant', 'sub', 'private', 'GRANT', 'hmn:t', 0, 'op-legacy')",
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('legacy-grant', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
         [],
     )
     .expect("legacy insert");
@@ -1651,11 +1656,14 @@ fn consent_journal_rebuild_aborts_on_invalid_legacy_scope() {
 
 #[test]
 fn consent_journal_rebuild_aborts_on_invalid_legacy_op_id() {
-    // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
-    // not enforce closed character classes on `op_id`. The 0011 domain is
-    // length 1..=128, [A-Za-z0-9._:-]. NULL op_id remains allowed (other
-    // legacy tests already exercise NULL op_id paths); a non-NULL op_id
-    // with spaces must abort.
+    // Phase-B (#255, brief §14): round-6 High finding, restated in
+    // round-13. The original concern was a kind-NULL legacy row whose
+    // pre-0011 op_id violated the 0011 domain class. Round-13 reframes
+    // this more broadly: op_id is a post-0009 column (added by 0009),
+    // so ANY non-NULL value on a kind-NULL row is post-0009 direct-SQL
+    // drift, regardless of whether the value is in-domain. The
+    // round-13 drift preflight (step 0a-bis) catches it first with a
+    // drift-specific message — the operator sees a clearer reason.
     let mut conn = open_at_version(20);
     conn.execute(
         "INSERT INTO consent_journal \
@@ -1664,15 +1672,15 @@ fn consent_journal_rebuild_aborts_on_invalid_legacy_op_id() {
                  'has spaces')",
         [],
     )
-    .expect("legacy insert with out-of-domain op_id");
+    .expect("legacy insert with non-NULL op_id");
 
     let err = migrations()
         .to_version(&mut conn, 21)
-        .expect_err("migration 0021 must abort on invalid legacy op_id");
+        .expect_err("migration 0021 must abort on kind-NULL row with non-NULL op_id");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("0011 domain classes"),
-        "abort message must cite the 0011 domain classes; got: {msg}"
+        msg.contains("populated event fields") || msg.contains("post-0009 direct-SQL drift"),
+        "abort message must cite the round-13 drift preflight; got: {msg}"
     );
 
     let consent_id: String = conn
@@ -2437,6 +2445,52 @@ fn consent_journal_rebuild_aborts_on_kind_null_with_populated_event_fields() {
     assert_eq!(
         actor, "hmn:realauthor",
         "drift row's real authorship must NOT have been overwritten with `hmn:legacy`"
+    );
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_kind_null_with_orphan_expires_at_iso() {
+    // Phase-B (#255, brief §14): round-13 High finding. The round-12
+    // drift preflight only gated on (actor, payload_json,
+    // decided_at_iso). A kind-NULL row with ONLY `expires_at_iso`
+    // populated (and no other event field) would slip past the guard,
+    // and the synthesis path would then mint legacy sentinels for
+    // actor / payload_json / decided_at_iso while leaving the
+    // orphaned expires_at_iso untouched — yielding a structurally-
+    // corrupted row in v2. The round-13 preflight extension catches
+    // expires_at_iso (and op_id / sensor_id) too.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, expires_at_iso) \
+         VALUES ('drift-orphan-expires', 'sub', 'private', 'GRANT', 'hmn:t', 1, \
+                 NULL, '2026-04-30T00:00:00Z')",
+        [],
+    )
+    .expect("legacy direct-SQL insert: kind NULL, only expires_at_iso populated");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on kind-NULL row with orphan expires_at_iso");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("populated event fields") || msg.contains("post-0009 direct-SQL drift"),
+        "abort message must cite drift; got: {msg}"
+    );
+
+    // Drift row survives the aborted migration — operator can repair.
+    let expires: Option<String> = conn
+        .query_row(
+            "SELECT expires_at_iso FROM consent_journal WHERE consent_id = 'drift-orphan-expires'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("drift row must survive aborted migration");
+    assert_eq!(
+        expires.as_deref(),
+        Some("2026-04-30T00:00:00Z"),
+        "drift row's expires_at_iso must NOT have been silently dropped"
     );
 }
 
