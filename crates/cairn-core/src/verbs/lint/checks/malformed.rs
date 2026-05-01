@@ -1,6 +1,6 @@
 //! §6.1 — `malformed_record` check.
 //!
-//! Re-runs [`MemoryRecord::validate`] over each record. Any failure
+//! Re-runs [`MemoryRecord::validate`](crate::domain::record::MemoryRecord::validate) over each record. Any failure
 //! produces an error-severity finding pointing at the record id. PR-1
 //! covers in-record invariants only; on-disk projection round-trip is
 //! deferred to #254 (lint-fix-WAL advisory lock + projection drift).
@@ -11,7 +11,7 @@ use crate::verbs::lint::{LintInputs, finding, target_record};
 /// Run the `malformed_record` check (§6.1).
 ///
 /// Returns one error-severity [`Finding`] per record that fails
-/// [`MemoryRecord::validate`], targeting the offending record id.
+/// [`MemoryRecord::validate`](crate::domain::record::MemoryRecord::validate), targeting the offending record id.
 #[must_use]
 pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
     let mut out = Vec::new();
