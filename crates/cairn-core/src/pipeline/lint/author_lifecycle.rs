@@ -56,7 +56,7 @@
 
 use crate::domain::actor_chain::validate_chain;
 use crate::domain::identity::ProvisioningState;
-use crate::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId};
+use crate::domain::{ChainRole, Identity, IdentityKind, MemoryKind, MemoryRecord, RecordId};
 
 /// Subset of brief §1223 `chain_status` values that this P0 check can
 /// emit. Grows as follow-up checks (body integrity, key-version ring,
@@ -65,15 +65,16 @@ use crate::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId};
 #[non_exhaustive]
 pub enum ChainStatus {
     /// Author identity is in a *terminal* revocation / purge state
-    /// (`Revoked` or `Purged`). Per `ProvisioningState::is_operational`,
-    /// `Revoked` keys still verify history for audit, so a stored
-    /// record signed *before* revocation may still be valid; without
-    /// persisted `key_version` or real Ed25519 re-verify (P1), this
-    /// check cannot tell pre- from post-revocation. The dispatch leaf
-    /// emits this finding at `Severity::Warning`, not `Error`, so a
-    /// routine completed revocation does not poison every historical
-    /// record by the same author with a blocking verdict. Maps to
-    /// brief §1223 `revoked`.
+    /// (`Revoked` or `Purged`). The dispatch leaf emits this finding
+    /// at `Severity::Error` per brief invariant 6 (fail-closed on
+    /// capability): without persisted `key_version` or real Ed25519
+    /// re-verify (P1), this check cannot prove a record was signed
+    /// *before* revocation, so it cannot distinguish benign history
+    /// from post-revocation writes. Treating ambiguity as non-blocking
+    /// would let post-revocation writes slip through automation that
+    /// keys off `has_error`; the suggested fix is audit-then-resolve,
+    /// **not** destructive auto-remediation. Maps to brief §1223
+    /// `revoked`.
     Revoked,
     /// Author identity is in an *in-flight* revocation / purge
     /// transition (`RevokePending` or `PurgePending`). A record
@@ -186,16 +187,31 @@ pub fn check_author_lifecycle(
         .find(|e| e.role == ChainRole::Author)
         .map(|e| e.identity.clone())?;
 
-    // Sensor identities (`snr:`) are not subject to the human/agent
-    // lifecycle state machine — sensors are commonly machine-derived
-    // (`snr:local:hook:cc-session:v1` and friends) and are not
-    // necessarily provisioned in `IdentityRegistry`. A sensor-authored
-    // `sensor_observation` record is legitimate, so checking its
-    // author against the registry would mis-flag every captured event
-    // as `Malformed`. Skip the lifecycle branch entirely; chain-shape
-    // already validated above.
+    // Sensor-authored records are only legal under tight invariants
+    // (`MemoryRecord::validate`, §4.2): `kind == sensor_observation`
+    // **and** `author.identity == provenance.source_sensor`. A sensor
+    // identity outside that envelope — e.g., a tampered higher-trust
+    // record whose author was swapped to `snr:*` — must surface as
+    // `Malformed`, not silently skipped. This is exactly the bypass
+    // the at-rest audit exists to catch.
     if author.kind() == IdentityKind::Sensor {
-        return None;
+        let valid_sensor_authoring = record.kind == MemoryKind::SensorObservation
+            && author == record.provenance.source_sensor;
+        if valid_sensor_authoring {
+            // Legitimately sensor-authored; sensors aren't in the
+            // human/agent lifecycle state machine and aren't required
+            // to be in `IdentityRegistry`.
+            return None;
+        }
+        return Some(AuthorLifecycleFinding {
+            record_id: record.id.clone(),
+            author: Some(author),
+            status: ChainStatus::Malformed,
+            message: format!(
+                "sensor identity authored a `{:?}` record (or did not match provenance.source_sensor) — sensor authors are only legal for sensor_observation records bound to provenance.source_sensor",
+                record.kind
+            ),
+        });
     }
 
     let (status, message) = match author_state {
@@ -478,6 +494,60 @@ mod tests {
                 "sensor-authored record must not be flagged for state {state:?}"
             );
         }
+    }
+
+    #[test]
+    fn sensor_author_on_non_observation_kind_is_flagged_as_malformed() {
+        // A tampered higher-trust record whose author was swapped to a
+        // sensor identity is exactly the bypass the at-rest check
+        // exists to catch. A blanket "skip all sensor authors" would
+        // be a fail-open — the sensor carve-out only applies to
+        // sensor_observation records bound to provenance.source_sensor.
+        use crate::domain::{Identity, MemoryKind};
+        let mut record = record_with_active_author();
+        // Leave kind as the sample's default (non-sensor_observation)
+        // but swap the author to a sensor identity.
+        assert_ne!(record.kind, MemoryKind::SensorObservation);
+        let sensor_id = Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor id");
+        let author = record
+            .actor_chain
+            .iter_mut()
+            .find(|e| e.role == ChainRole::Author)
+            .expect("sample chain has author");
+        author.identity = sensor_id.clone();
+        let finding =
+            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
+                .expect("sensor author on non-observation record must be flagged");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert_eq!(finding.author, Some(sensor_id));
+    }
+
+    #[test]
+    fn sensor_author_not_matching_source_sensor_is_flagged_as_malformed() {
+        // A sensor_observation record whose author is a *different*
+        // sensor than provenance.source_sensor violates the
+        // single-source invariant. Must surface as Malformed, not
+        // silently skipped.
+        use crate::domain::{Identity, MemoryClass, MemoryKind};
+        let mut record = record_with_active_author();
+        record.kind = MemoryKind::SensorObservation;
+        record.class = MemoryClass::Episodic;
+        let author_sensor =
+            Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor id");
+        let other_sensor =
+            Identity::parse("snr:local:hook:other-session:v1").expect("valid sensor id");
+        let author = record
+            .actor_chain
+            .iter_mut()
+            .find(|e| e.role == ChainRole::Author)
+            .expect("sample chain has author");
+        author.identity = author_sensor.clone();
+        record.provenance.source_sensor = other_sensor;
+        let finding =
+            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
+                .expect("sensor mismatch must surface");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert_eq!(finding.author, Some(author_sensor));
     }
 
     #[test]

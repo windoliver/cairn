@@ -120,25 +120,20 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 }
 
 fn severity_for(status: ChainStatus) -> Severity {
-    // Each arm encodes a distinct semantic verdict (terminal vs
-    // in-flight vs structural); they happen to share an Error severity
-    // today but have independently authored remediation in
-    // `suggested_fix_for`. Collapsing arms would couple them.
-    #[allow(clippy::match_same_arms)]
+    // All three statuses block per brief invariant 6 (fail-closed on
+    // capability). Without persisted `key_version` or real Ed25519
+    // re-verify (P1), this leaf cannot prove a record by a revoked
+    // author was written *before* revocation; treating that ambiguity
+    // as a non-blocking warning would let post-revocation writes slip
+    // through any automation that keys off `has_error`. Operators
+    // resolve the false-positive via audit (the suggested fix
+    // explicitly forbids destructive auto-remediation); they cannot
+    // recover from a false-negative once a tampered record has been
+    // accepted as clean.
+    #[allow(clippy::match_same_arms)] // distinct semantic verdicts; remediation differs
     match status {
-        // Terminal revocation: historical signatures still verify per
-        // ProvisioningState::is_operational. Without persisted
-        // key_version or real Ed25519 re-verify (P1), this leaf can't
-        // tell whether a record was signed pre- or post-revocation, so
-        // it must not block on routine completed revocation. Warning
-        // surfaces the audit trail without destructive remediation.
-        ChainStatus::Revoked => Severity::Warning,
-        // In-flight revocation/purge: a record landing during a
-        // withdrawal-in-motion is the suspicious-write case — bypassed
-        // gate, race, or tamper. Block.
+        ChainStatus::Revoked => Severity::Error,
         ChainStatus::RevocationInFlight => Severity::Error,
-        // Chain-shape and unknown-issuer cases are real corruption /
-        // missing-truth-source — block.
         ChainStatus::Malformed => Severity::Error,
     }
 }
@@ -263,12 +258,14 @@ mod tests {
     }
 
     #[test]
-    fn revoked_author_with_states_emits_warning_not_error() {
-        // Routine revocation must not poison historical records with
-        // blocking errors — without persisted key_version / real
-        // Ed25519 re-verify, this leaf cannot prove the record is
-        // post-revocation. Warning surfaces the audit trail without
-        // demanding destructive remediation.
+    fn revoked_author_with_states_emits_error_failing_closed() {
+        // Brief invariant 6: without persisted key_version or real
+        // Ed25519 re-verify (P1), the leaf cannot prove a record by a
+        // revoked author was written *pre-revocation*; it must fail
+        // closed so post-revocation writes do not slip through any
+        // automation that keys off has_error. Audit-then-resolve is
+        // the right remediation; the suggested_fix message explicitly
+        // forbids destructive auto-tombstoning.
         let cfg = CairnConfig::default();
         let r = sample_record();
         let author_id = r
@@ -284,7 +281,7 @@ mod tests {
         let findings = run(&inp);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::BrokenActorChain);
-        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].severity, Severity::Error);
         assert!(findings[0].target.is_some());
         assert!(
             findings[0]
@@ -292,7 +289,7 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .contains("do NOT auto-tombstone"),
-            "remediation must not advise destructive cleanup"
+            "remediation must still steer operators away from destructive cleanup"
         );
     }
 
