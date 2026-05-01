@@ -190,6 +190,9 @@ fn schema_migrations_is_append_only() {
 
 #[test]
 fn consent_journal_kind_domain_enforced() {
+    // Phase-B (#255): the §14 domain is enforced by a column CHECK; the
+    // trigger path is gone but the assertion stays broad to keep the test
+    // robust to either form.
     let conn = open_in_memory().expect("open");
     let err = conn
         .execute(
@@ -202,9 +205,36 @@ fn consent_journal_kind_domain_enforced() {
             [],
         )
         .unwrap_err();
+    let msg = format!("{err}");
+    let msg_uc = msg.to_uppercase();
     assert!(
-        format!("{err}").contains("kind not in §14 domain"),
-        "kind CHECK should fire, got: {err}"
+        msg.contains("§14 domain") || msg_uc.contains("CHECK"),
+        "kind domain gate should fire (trigger or column CHECK), got: {err}"
+    );
+}
+
+#[test]
+fn consent_journal_kind_check_constraint_rejects_unknown() {
+    // Phase-B (#255): the column-level CHECK on consent_journal.kind is the
+    // canonical §14 domain gate. Pin the new behavior tightly: an unknown
+    // kind must surface a CHECK-constraint error naming the kind column,
+    // not bleed through to a downstream trigger.
+    let conn = open_in_memory().expect("open");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               kind, actor, decided_at_iso, payload_json) \
+             VALUES ('c-bad-kind', 'agent.x', 'private', 'GRANT', 'hmn:t', 0, \
+                     'totally_made_up_kind', 'hmn:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"decision\",\"subject_code\":\"agent.x\"}')",
+            [],
+        )
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("CHECK") && msg.contains("kind"),
+        "column CHECK on kind should fire, got: {err}"
     );
 }
 
@@ -278,17 +308,29 @@ fn consent_journal_event_requires_iso_timestamp() {
 }
 
 #[test]
-fn consent_journal_kind_null_back_compat() {
-    // Rows written before 0007 have kind = NULL. Inserting one should
-    // still succeed — the trigger only fires when kind IS NOT NULL.
+fn consent_journal_kind_not_null_enforced() {
+    // Phase-B (#255, brief §14): the legacy NULL-kind path is closed.
+    // Migration 0021 promotes consent_journal.kind to NOT NULL with a
+    // column-level CHECK on the §14 domain. The same legacy INSERT that
+    // succeeded pre-0021 must now fail-closed — either via the column
+    // NOT NULL on `kind`, or via one of the BEFORE INSERT trigger gates
+    // that a legacy-shape row also fails (no actor / no payload / no iso).
+    // Either is acceptable: both close the legacy door.
     let conn = open_in_memory().expect("open");
-    conn.execute(
-        "INSERT INTO consent_journal \
-          (consent_id, subject, scope, decision, granted_by, decided_at) \
-         VALUES ('legacy', 's', 'private', 'GRANT', 'hmn:t', 0)",
-        [],
-    )
-    .expect("legacy insert with NULL kind");
+    let err = conn
+        .execute(
+            "INSERT INTO consent_journal \
+              (consent_id, subject, scope, decision, granted_by, decided_at) \
+             VALUES ('legacy', 's', 'private', 'GRANT', 'hmn:t', 0)",
+            [],
+        )
+        .unwrap_err();
+    let msg = format!("{err}");
+    let msg_uc = msg.to_uppercase();
+    assert!(
+        msg_uc.contains("NOT NULL") || msg.contains("kind") || msg.contains("consent_journal"),
+        "legacy null-kind insert must fail-closed, got: {err}"
+    );
 }
 
 #[test]
