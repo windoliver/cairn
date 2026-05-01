@@ -348,6 +348,118 @@ fn is_hidden_dir(entry: &walkdir::DirEntry) -> bool {
             .is_some_and(|s| s.starts_with('.') && s != ".")
 }
 
+/// Result of a `lint` default-path run.
+#[derive(Debug)]
+pub struct LintHandlerResult {
+    /// The structured findings + summary (ready for JSON serialization).
+    pub data: cairn_core::generated::verbs::lint::LintData,
+    /// Path of the written report (vault-relative), if `--write-report` was set.
+    pub report_path: Option<PathBuf>,
+    /// Whether any error-severity finding was emitted (drives exit code).
+    pub has_error: bool,
+}
+
+/// Run `cairn lint` (default path — no `--fix-*`).
+///
+/// Builds a `LintInputs` snapshot from the store, runs the pure check
+/// engine, and (when `write_report` is true) atomically writes
+/// `.cairn/lint-report.md` under `vault_root`.
+///
+/// `schema_version` is the runtime's contract major.minor pair. Today
+/// every record runs through the legacy `consent_model` gate (see
+/// `cairn-core::verbs::lint::ConsentModel::LegacyEvent`); per-row gating
+/// arrives with #253.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be queried or if writing the
+/// report fails.
+pub async fn lint_handler(
+    store: &dyn cairn_core::contract::memory_store::MemoryStore,
+    config: &cairn_core::config::CairnConfig,
+    schema_version: cairn_core::verbs::lint::SchemaVersion,
+    write_report: bool,
+    vault_root: &Path,
+) -> anyhow::Result<LintHandlerResult> {
+    use cairn_core::contract::memory_store::ListArgs;
+    use cairn_core::verbs::lint::{run_checks, ConsentModel, LintInputs, LintRecord};
+
+    let stored = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("store: list_active_stored: {e}"))
+        .context("lint: list_active_stored")?;
+
+    let index_stats = store
+        .index_stats()
+        .await
+        .map_err(|e| anyhow::anyhow!("store: index_stats: {e}"))
+        .context("lint: index_stats")?;
+
+    // PR-1: every row carries LegacyEvent. Per-record gating lands in #253.
+    let lint_records: Vec<LintRecord> = stored
+        .into_iter()
+        .map(|s| LintRecord {
+            stored: s,
+            consent_model: ConsentModel::LegacyEvent,
+        })
+        .collect();
+
+    let inputs = LintInputs {
+        records: &lint_records,
+        config,
+        index_stats,
+        schema_version,
+    };
+    let mut data = run_checks(&inputs);
+
+    let has_error = data.findings.iter().any(|f| {
+        matches!(
+            f.severity,
+            cairn_core::generated::verbs::lint::Severity::Error,
+        )
+    });
+
+    let report_path = if write_report {
+        let body = cairn_core::verbs::lint::report::render(&data);
+        let rel = PathBuf::from(".cairn/lint-report.md");
+        let abs = vault_root.join(&rel);
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+        let parent = abs
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let dest = abs.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::io::Write as _;
+            let mut tmp = tempfile::Builder::new()
+                .suffix(".md.tmp")
+                .tempfile_in(&parent)
+                .with_context(|| format!("create temp file in {}", parent.display()))?;
+            tmp.write_all(body.as_bytes())
+                .with_context(|| format!("write temp {}", tmp.path().display()))?;
+            tmp.persist(&dest)
+                .map_err(|e| anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error))?;
+            Ok(())
+        })
+        .await
+        .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
+        data.report_path = Some(rel.display().to_string());
+        Some(rel)
+    } else {
+        None
+    };
+
+    Ok(LintHandlerResult {
+        data,
+        report_path,
+        has_error,
+    })
+}
+
 /// Run `cairn lint`.
 #[must_use]
 pub fn run(sub: &ArgMatches) -> ExitCode {
@@ -436,5 +548,90 @@ mod tests {
             .unwrap();
         assert_eq!(result2.written.len(), 0);
         assert_eq!(result2.already_current, 1);
+    }
+
+    #[tokio::test]
+    async fn lint_handler_writes_report_when_requested() {
+        use cairn_core::config::CairnConfig;
+        use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_test_fixtures::store::{sample_record, FixtureStore};
+
+        let store = FixtureStore::default();
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert");
+
+        let cfg = CairnConfig::default();
+        let vault = tempfile::tempdir().expect("tempdir");
+        let result = lint_handler(
+            &store,
+            &cfg,
+            SchemaVersion { major: 0, minor: 1 },
+            true,
+            vault.path(),
+        )
+        .await
+        .expect("handler");
+
+        // The five deferred-info findings must be present even on a clean vault.
+        let info_count = result
+            .data
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.severity,
+                    cairn_core::generated::verbs::lint::Severity::Info,
+                )
+            })
+            .count();
+        assert_eq!(info_count, 5);
+        assert!(!result.has_error, "clean vault must not raise error findings");
+        assert_eq!(
+            result.report_path.as_deref(),
+            Some(std::path::Path::new(".cairn/lint-report.md"))
+        );
+        let body = tokio::fs::read_to_string(vault.path().join(".cairn/lint-report.md"))
+            .await
+            .expect("read lint-report.md");
+        assert!(body.contains("# Lint report"));
+    }
+
+    #[tokio::test]
+    async fn lint_handler_flags_index_drift_with_error_severity() {
+        use cairn_core::config::CairnConfig;
+        use cairn_core::contract::memory_store::IndexStats;
+        use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_test_fixtures::store::{sample_record, FixtureStore};
+
+        let store = FixtureStore::default();
+        store.upsert(&sample_record()).await.expect("upsert");
+        // Force a drift fixture: 5 active records but FTS reports 4.
+        store.set_index_stats_override(IndexStats::new(5, 4));
+
+        let cfg = CairnConfig::default();
+        let vault = tempfile::tempdir().expect("tempdir");
+        let result = lint_handler(
+            &store,
+            &cfg,
+            SchemaVersion { major: 0, minor: 1 },
+            false,
+            vault.path(),
+        )
+        .await
+        .expect("handler");
+
+        assert!(result.has_error);
+        let drifts: Vec<_> = result
+            .data
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    cairn_core::generated::verbs::lint::Kind::IndexDrift,
+                )
+            })
+            .collect();
+        assert_eq!(drifts.len(), 1);
     }
 }
