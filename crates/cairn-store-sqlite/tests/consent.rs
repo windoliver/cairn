@@ -198,6 +198,137 @@ fn append_rejects_body_bearing_payload_via_serializer() {
 }
 
 #[test]
+fn read_since_rowid_surfaces_schema_drift_on_invalid_consent_id() {
+    // Phase-B (#255, brief §14): round-6 High finding (defense in depth).
+    // `consent::append` calls `ConsentEvent::validate()` and the
+    // `consent_journal_event_metadata_domains` trigger gates direct SQL
+    // writes — but a future migration that lifts the trigger, a direct-SQL
+    // writer that runs before the trigger fires (e.g. inside a migration),
+    // or a legacy promotion that misses sanitization could still seat a
+    // row whose `consent_id` violates the §14 closed character class.
+    // `decode_event_inner` now calls `ConsentEvent::validate()` on every
+    // read so such drift surfaces as `StoreError::SchemaDrift` rather than
+    // silently flowing into the consent.log mirror.
+    //
+    // To exercise that path we temporarily drop the metadata-domain trigger
+    // and write a row with a malformed consent_id, then read it back.
+    let conn = open_in_memory().expect("open");
+    conn.execute("DROP TRIGGER consent_journal_event_metadata_domains", [])
+        .expect("drop metadata trigger");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('has@bad!', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:tafeng', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"sub\"}')",
+        [],
+    )
+    .expect("direct SQL insert bypassing append validation");
+
+    let err = read_since_rowid(&conn, 0)
+        .expect_err("decode must surface SchemaDrift when consent_id violates §14 domain");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("failed validate") || msg.contains("consent_id"),
+        "error must indicate the validate failure / consent_id; got: {msg}"
+    );
+}
+
+#[test]
+fn read_since_rowid_surfaces_drift_on_null_kind() {
+    // Phase-B (#255, brief §14): round-5 (new loop) High finding. The
+    // rowid readers used to gate on `kind IS NOT NULL`. Post-0021 the
+    // column is NOT NULL with a CHECK, so the filter was tautological in
+    // normal operation — but if drift occurs (direct SQL via PRAGMA,
+    // schema-fingerprint bypass, etc.), a NULL-kind row would be
+    // silently SKIPPED from the mirror tail, breaking the §14 audit
+    // invariant. With the filter dropped, `decode_event_inner` fires
+    // `SchemaDrift` on missing kind via `parse_kind` → returns None.
+    //
+    // To exercise that path we rebuild `consent_journal` without the
+    // kind NOT NULL / CHECK, then direct-SQL-insert a NULL-kind row and
+    // assert the reader surfaces SchemaDrift mentioning the kind.
+    let conn = open_in_memory().expect("open");
+
+    // Drop every trigger + index + the table so we can rebuild without
+    // the kind constraints. The append-only triggers gate UPDATE/DELETE
+    // but not DROP TABLE in SQLite.
+    let trigger_names: [&str; 22] = [
+        "consent_journal_immutable",
+        "consent_journal_no_delete",
+        "consent_journal_event_requires_iso",
+        "consent_journal_forget_receipt_body_free",
+        "consent_journal_event_requires_actor",
+        "consent_journal_event_requires_payload",
+        "consent_journal_payload_shape_matches_kind",
+        "consent_journal_payload_body_free",
+        "consent_journal_sensor_kind_requires_sensor_id",
+        "consent_journal_sensor_id_matches_payload",
+        "consent_journal_sensor_subject_matches_sensor_id",
+        "consent_journal_non_sensor_kind_forbids_sensor_id",
+        "consent_journal_hash_kind_subject_shape",
+        "consent_journal_hash_kind_target_id_hash_shape",
+        "consent_journal_payload_required_fields",
+        "consent_journal_payload_unknown_top_level_keys",
+        "consent_journal_payload_no_duplicate_keys",
+        "consent_journal_subject_domain_for_non_hash_kinds",
+        "consent_journal_event_requires_positive_rowid",
+        "consent_journal_payload_keys_match_shape",
+        "consent_journal_payload_scalar_domains",
+        "consent_journal_event_metadata_domains",
+    ];
+    for t in trigger_names {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {t}"), [])
+            .expect("drop trigger");
+    }
+    conn.execute("DROP TABLE consent_journal", [])
+        .expect("drop table");
+
+    // Recreate WITHOUT the `kind NOT NULL CHECK` constraint — a minimal
+    // shape sufficient to insert a row that decode_event will read.
+    conn.execute(
+        "CREATE TABLE consent_journal (\
+           consent_id      TEXT NOT NULL PRIMARY KEY,\
+           subject         TEXT NOT NULL,\
+           scope           TEXT NOT NULL,\
+           decision        TEXT NOT NULL,\
+           reason          TEXT,\
+           granted_by      TEXT NOT NULL,\
+           decided_at      INTEGER NOT NULL,\
+           expires_at      INTEGER,\
+           op_id           TEXT,\
+           kind            TEXT,\
+           sensor_id       TEXT,\
+           actor           TEXT,\
+           payload_json    TEXT,\
+           decided_at_iso  TEXT,\
+           expires_at_iso  TEXT\
+         )",
+        [],
+    )
+    .expect("recreate without kind constraints");
+
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('c-drift', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 NULL, 'hmn:tafeng', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"sub\"}')",
+        [],
+    )
+    .expect("direct SQL insert with NULL kind");
+
+    let err = read_since_rowid(&conn, 0).expect_err("decode must surface SchemaDrift on NULL kind");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("missing kind") || msg.contains("kind"),
+        "error must mention missing kind; got: {msg}"
+    );
+}
+
+#[test]
 fn round_trip_preserves_every_kind() {
     let conn = open_in_memory().expect("open");
     let kinds: &[ConsentKind] = &[

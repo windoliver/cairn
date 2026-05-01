@@ -70,7 +70,7 @@ pub fn append(conn: &Connection, event: &ConsentEvent) -> Result<i64, StoreError
 /// # Errors
 /// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
 pub fn query_by_op(conn: &Connection, op_id: &str) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(conn, "kind IS NOT NULL AND op_id = ?", params![op_id])
+    query_where(conn, "op_id = ?", params![op_id])
 }
 
 /// All event-kind rows authored by `actor`.
@@ -81,11 +81,7 @@ pub fn query_by_actor(
     conn: &Connection,
     actor: &Identity,
 ) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(
-        conn,
-        "kind IS NOT NULL AND actor = ?",
-        params![actor.as_str()],
-    )
+    query_where(conn, "actor = ?", params![actor.as_str()])
 }
 
 /// All event-kind rows for a given sensor.
@@ -96,11 +92,7 @@ pub fn query_by_sensor(
     conn: &Connection,
     sensor: &SensorLabel,
 ) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(
-        conn,
-        "kind IS NOT NULL AND sensor_id = ?",
-        params![sensor.as_str()],
-    )
+    query_where(conn, "sensor_id = ?", params![sensor.as_str()])
 }
 
 /// All event-kind rows for a given scope tuple wire form.
@@ -108,7 +100,7 @@ pub fn query_by_sensor(
 /// # Errors
 /// Returns [`StoreError`] on `SQLite` failures or row-decode errors.
 pub fn query_by_scope(conn: &Connection, scope: &str) -> Result<Vec<ConsentEvent>, StoreError> {
-    query_where(conn, "kind IS NOT NULL AND scope = ?", params![scope])
+    query_where(conn, "scope = ?", params![scope])
 }
 
 /// Mirror cursor primitive: every event-kind row with `rowid > since`,
@@ -125,7 +117,7 @@ pub fn read_since_rowid(
         "SELECT rowid, consent_id, kind, actor, subject, scope, op_id, sensor_id, \
                 payload_json, decided_at_iso, expires_at_iso \
          FROM consent_journal \
-         WHERE rowid > ? AND kind IS NOT NULL \
+         WHERE rowid > ? \
          ORDER BY rowid ASC",
     )?;
     let rows = stmt.query_map(params![since], |row| {
@@ -147,11 +139,7 @@ pub fn read_since_rowid(
 /// Returns [`StoreError`] on `SQLite` failures.
 pub fn max_rowid(conn: &Connection) -> Result<i64, StoreError> {
     let value: Option<i64> = conn
-        .query_row(
-            "SELECT MAX(rowid) FROM consent_journal WHERE kind IS NOT NULL",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT MAX(rowid) FROM consent_journal", [], |r| r.get(0))
         .optional()?
         .flatten();
     Ok(value.unwrap_or(0))
@@ -242,7 +230,7 @@ fn decode_event_inner(
         .map(|s| SensorLabel::parse(s).map_err(|e| StoreError::SchemaDrift(e.to_string())))
         .transpose()?;
 
-    Ok(ConsentEvent {
+    let event = ConsentEvent {
         consent_id,
         kind,
         actor,
@@ -253,7 +241,22 @@ fn decode_event_inner(
         payload,
         decided_at,
         expires_at,
-    })
+    };
+    // Defense in depth: ConsentEvent::validate() asserts the §14 metadata
+    // domain (consent_id / scope / op_id / subject / payload / sensor_id)
+    // on every read. Pre-0011 schema didn't enforce closed character classes
+    // on those columns; legacy rows promoted by migration 0021 (after the
+    // mirror cursor reset added in round 5) replay through this decode path
+    // from rowid 0. Migration 0021 itself aborts on out-of-domain legacy
+    // metadata, but we re-check here so any drift from a future schema
+    // regression or direct-SQL writer fails closed at decode time.
+    event.validate().map_err(|e| {
+        StoreError::SchemaDrift(format!(
+            "consent_journal row {consent_id} failed validate: {e}",
+            consent_id = event.consent_id
+        ))
+    })?;
+    Ok(event)
 }
 
 const fn kind_wire(kind: ConsentKind) -> &'static str {

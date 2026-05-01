@@ -104,7 +104,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_actor_idx"),
     ("index", "consent_journal_sensor_idx"),
     ("index", "consent_journal_kind_idx"),
-    ("trigger", "consent_journal_kind_domain"),
+    // 0021_consent_kind_not_null replaced the 0009 `consent_journal_kind_domain`
+    // trigger with a column-level CHECK on `kind`. The trigger is gone; the
+    // CHECK lives in the table definition (verified by the migration hash).
     ("trigger", "consent_journal_event_requires_iso"),
     ("trigger", "consent_journal_forget_receipt_body_free"),
     // 0010_ranking_indexes
@@ -151,6 +153,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // above; index name unchanged. Adds the empty-string guards.)
     ("trigger", "sessions_project_root_no_empty_insert"),
     ("trigger", "sessions_project_root_no_empty_update"),
+    // 0021_consent_kind_not_null (mirror cursor reset marker — round-5
+    // review follow-up; consumed by cairn-workflows::ConsentLogMaterializer
+    // on first tick after upgrade so legacy promoted rows get replayed).
+    ("table", "consent_mirror_resets"),
     // 0020_workflow_jobs
     ("table", "workflow_jobs"),
     ("index", "workflow_jobs_ready_idx"),
@@ -212,8 +218,59 @@ pub(crate) fn verify_migration_history(conn: &Connection) -> Result<(), StoreErr
     Ok(())
 }
 
+/// Round-3 adversarial-review (Medium) follow-up for #255: `EXPECTED_OBJECTS`
+/// only enumerates *named* schema objects (tables, indexes, triggers, views).
+/// Migration 0021 replaced the named `consent_journal_kind_domain` trigger
+/// with a column-level CHECK on `consent_journal.kind` — a constraint that
+/// lives inside the table's CREATE TABLE text, not under its own name.
+/// `verify_schema_fingerprint`'s DDL-digest does cover the CREATE TABLE text
+/// transitively, but a digest-mismatch error message would not point at the
+/// CHECK; a future schema modification that drops the CHECK would surface
+/// only as opaque drift. This explicit substring check pins the
+/// load-bearing §14 invariant — `kind TEXT NOT NULL` plus the closed-set
+/// `CHECK (kind IN (...))` — and reports it by name.
+///
+/// Returns [`StoreError::SchemaDrift`] if either substring is missing.
+fn verify_consent_journal_kind_check(conn: &Connection) -> Result<(), StoreError> {
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'consent_journal'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // Whitespace-tolerant: SQLite preserves the original CREATE TABLE
+    // text (including line breaks + indentation) so a contains() on the
+    // exact substring our migration emits is robust enough. If the
+    // migration text ever reformats either substring (e.g. `kind\nTEXT`
+    // or `CHECK(kind IN`), update both this check AND the migration
+    // together — they are co-load-bearing.
+    let normalized = canonicalize_ddl(&sql);
+    if !normalized.contains("kind TEXT NOT NULL") {
+        return Err(StoreError::SchemaDrift(
+            "consent_journal.kind NOT NULL constraint missing or modified \
+             (expected `kind TEXT NOT NULL` in CREATE TABLE)"
+                .to_owned(),
+        ));
+    }
+    if !normalized.contains("CHECK (kind IN (") {
+        return Err(StoreError::SchemaDrift(
+            "consent_journal kind CHECK constraint missing or modified \
+             (expected `CHECK (kind IN (...))` in CREATE TABLE)"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Verify that the set of app-owned schema objects matches `EXPECTED_OBJECTS`.
 pub(crate) fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreError> {
+    // Run the named-substring check for `consent_journal.kind` BEFORE
+    // the EXPECTED_OBJECTS / DDL-digest sweep so that a missing CHECK
+    // surfaces under its specific error message rather than as part of
+    // an opaque digest mismatch. (Round-3 review follow-up; #255.)
+    verify_consent_journal_kind_check(conn)?;
+
     // Exclude SQLite-internal objects, the rusqlite_migration meta table,
     // and FTS5 shadow tables/indexes. The shadow set is identified by
     // (type IN ('table','index') AND name LIKE 'records_fts_%') — our

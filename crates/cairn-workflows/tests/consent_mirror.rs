@@ -14,6 +14,21 @@ fn h(seed: u32) -> String {
     format!("hash:{seed:0>32x}")
 }
 
+/// Read the `db_nonce` the migration minted for the
+/// `consent_mirror_resets` row at `migration_id`. Used by tests that
+/// seed the per-mirror sidecar in the bound
+/// `migration_id:db_nonce:watermark` format (round-12 finding:
+/// consumption is keyed to the DB schema instance via a per-DB UUID,
+/// not by the second-resolution `applied_at`).
+fn db_nonce_for(conn: &rusqlite::Connection, migration_id: i64) -> String {
+    conn.query_row(
+        "SELECT db_nonce FROM consent_mirror_resets WHERE migration_id = ?1",
+        rusqlite::params![migration_id],
+        |r| r.get::<_, String>(0),
+    )
+    .expect("read db_nonce")
+}
+
 fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
@@ -343,6 +358,463 @@ fn cursor_survives_missing_sidecar() {
 }
 
 #[test]
+fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
+    // Round-5 review hardening: migration 0021 promotes legacy
+    // `kind IS NULL` rows to event-shape rows preserving their original
+    // rowid. Existing vaults' .cairn/consent.cursor sidecar may already
+    // point ABOVE those legacy rowids (the mirror tailed only event-kind
+    // rows pre-0021), so a plain tick() would skip them. Migration 0021
+    // inserts a row into `consent_mirror_resets` to instruct the mirror
+    // to replay from rowid 0 once after upgrade.
+    //
+    // This test simulates the post-upgrade state: events already exist
+    // in the journal AND a cursor that's already past them, AND a
+    // pending reset marker. The next tick must rebuild the log from
+    // rowid 0 (re-mirroring everything), then mark the reset consumed
+    // so subsequent ticks behave normally.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-existing journal rows.
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Pre-mark the migration-0021 reset row as consumed in this
+    // mirror's per-mirror sidecar (Phase-B finding 2 moved consumption
+    // tracking out of the DB; round-12 finding binds the entry to the
+    // DB instance via `db_nonce` (a per-DB UUID minted at migration
+    // time, supersedes the second-resolution `applied_at`); round-4
+    // finding adds a `watermark_rowid` so a cursor below that rowid
+    // forces replay). Seed watermark=0 so the initial cursor (also 0)
+    // satisfies `cursor >= watermark` and the first tick processes
+    // normally.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    // Seed the round-13 four-field bound format with watermark=0,
+    // line_count=0 so the initial cursor (also 0) and empty log
+    // (also 0 lines) satisfy `cursor >= watermark` AND
+    // `live_line_count >= line_count` and the first tick processes
+    // normally (no reset replay).
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:0\n")).expect("seed sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+    let cursor_before_reset = mirror.cursor();
+    assert!(cursor_before_reset > 0);
+    drop(mirror);
+
+    // Now wipe the log and the sidecar to re-arm the reset. The DB row
+    // is unchanged — it's still the source of truth for "a reset was
+    // needed." The reset path must rebuild from the DB — even though
+    // a freshly-opened mirror starts with cursor=0 — and re-mirror
+    // everything.
+    //
+    // We reopen the mirror after the rollback because round-9 added
+    // an in-memory `resets_validated` cache that would otherwise
+    // short-circuit the post-tick line-count scan on the same
+    // instance (an intentional tradeoff: we trust runtime stability,
+    // and external rollbacks need a reopen to be observed).
+    let log_path = dir.path().join("consent.log");
+    std::fs::write(&log_path, "").expect("truncate");
+    std::fs::remove_file(&resets_consumed).expect("re-arm sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen mirror");
+    let n = mirror.tick(&conn).expect("reset tick");
+    assert_eq!(n, 2, "reset must replay every row from rowid 0");
+
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 2);
+
+    // The reset row must now be in this mirror's sidecar; another tick
+    // is a no-op. Watermark = high_water of the replay = 2 (rowids 1,2);
+    // line_count = 2 (one envelope per replayed rowid, round-13 finding).
+    let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        sidecar.lines().any(|l| l.trim() == expected),
+        "sidecar must record (21,{nonce},watermark=2,line_count=2) as consumed: {sidecar:?}"
+    );
+
+    let n = mirror.tick(&conn).expect("idempotent tick");
+    assert_eq!(n, 0, "no further work once reset is consumed");
+}
+
+#[test]
+fn tick_surfaces_log_corrupt_when_reset_pending_and_log_damaged() {
+    // Phase-B finding 1: if the consent.log is corrupt and a 0021-style
+    // reset is pending, tick() must still surface MirrorError::LogCorrupt
+    // — the reset auto-replay is reserved for a known-good log so the
+    // operator sees corruption at exactly the moment it matters. The
+    // damaged log must be left untouched on disk (no silent overwrite).
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Seed a healthy mirror first.
+    {
+        let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+        // Pre-consume the migration-0021 reset so the initial tick
+        // processes normally.
+        let nonce = db_nonce_for(&conn, 21);
+        std::fs::write(
+            dir.path().join("consent.mirror_resets_consumed"),
+            format!("21:{nonce}:0:0\n"),
+        )
+        .expect("seed sidecar");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+        mirror.tick(&conn).expect("seed tick");
+    }
+
+    // Now reopen, corrupt the on-disk log behind the materializer's
+    // back, AND re-arm the reset marker by clearing the sidecar.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    let corrupt_bytes = b"not even close to a json envelope, no newline either";
+    std::fs::write(dir.path().join("consent.log"), &corrupt_bytes[..]).expect("corrupt");
+    std::fs::remove_file(dir.path().join("consent.mirror_resets_consumed"))
+        .expect("re-arm sidecar");
+
+    let err = mirror
+        .tick(&conn)
+        .expect_err("tick must fail closed on corrupt log even with reset pending");
+    assert!(
+        matches!(err, MirrorError::LogCorrupt),
+        "expected LogCorrupt, got {err:?}"
+    );
+
+    // The damaged log must be unchanged — no silent rebuild.
+    let on_disk = std::fs::read(dir.path().join("consent.log")).expect("read log");
+    assert_eq!(
+        on_disk,
+        &corrupt_bytes[..],
+        "tick must not overwrite a corrupt log when it fails closed"
+    );
+}
+
+#[test]
+fn tick_replays_reset_when_log_intact() {
+    // Phase-B finding 1 sibling test: the corruption-first reorder
+    // must not regress the happy path. With a healthy log AND a pending
+    // reset marker, tick() still rebuilds from rowid 0.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Note: no sidecar yet → the migration-0021 marker is pending for
+    // this mirror.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(n, 2, "reset path must replay every row from rowid 0");
+
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 2);
+
+    let sidecar = std::fs::read_to_string(dir.path().join("consent.mirror_resets_consumed"))
+        .expect("sidecar written");
+    let nonce = db_nonce_for(&conn, 21);
+    let expected = format!("21:{nonce}:2:2");
+    assert!(sidecar.lines().any(|l| l.trim() == expected));
+
+    let n = mirror.tick(&conn).expect("idempotent");
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn reset_marker_consumed_per_mirror_not_per_db() {
+    // Phase-B finding 2: two mirrors at different vault_dirs sharing
+    // one DB must each replay the migration-0021 reset independently.
+    // Consuming on mirror A must not silence the marker for mirror B.
+    let conn = open_in_memory().expect("open store");
+    let dir_a = tempdir().expect("tempdir a");
+    let dir_b = tempdir().expect("tempdir b");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Mirror A: pending reset → replays everything, then writes its
+    // sidecar.
+    let mut mirror_a = ConsentLogMaterializer::open(dir_a.path()).expect("open a");
+    let n_a = mirror_a.tick(&conn).expect("tick a");
+    assert_eq!(n_a, 2);
+    let nonce = db_nonce_for(&conn, 21);
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
+            .expect("a sidecar")
+            .lines()
+            .any(|l| l.trim() == expected),
+        "mirror A must record consumption locally"
+    );
+
+    // Mirror B has its own (empty) sidecar, so the marker is still
+    // pending for B even though A consumed it. B must replay every row
+    // independently.
+    let mut mirror_b = ConsentLogMaterializer::open(dir_b.path()).expect("open b");
+    let n_b = mirror_b.tick(&conn).expect("tick b");
+    assert_eq!(
+        n_b, 2,
+        "mirror B must still see the reset marker after A consumed it"
+    );
+    assert_eq!(mirror_b.read_lines().expect("b lines").len(), 2);
+    assert!(
+        std::fs::read_to_string(dir_b.path().join("consent.mirror_resets_consumed"))
+            .expect("b sidecar")
+            .lines()
+            .any(|l| l.trim() == expected),
+        "mirror B must also record consumption locally"
+    );
+}
+
+#[test]
+fn reset_marker_replays_when_cursor_regresses_below_watermark() {
+    // Round-4 medium finding: the consumption sidecar is bound to the
+    // log state via a `watermark_rowid`. If the on-disk log is rolled
+    // back below that watermark (e.g., vault restored from a backup
+    // without the DB), the sidecar still claims "consumed" but the
+    // audit no longer covers the migrated rows. The next tick must
+    // replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // First tick replays the reset and writes sidecar `21:T:2:2`.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    let after_first = std::fs::read_to_string(&resets_consumed).expect("after first");
+    assert!(
+        after_first
+            .lines()
+            .any(|l| l.trim() == format!("21:{nonce}:2:2")),
+        "watermark+line_count must be (2,2) after replay: {after_first:?}"
+    );
+
+    // Roll the log back: keep only the first envelope. The sidecar
+    // still claims watermark=2 but the on-disk audit only goes to
+    // rowid 1.
+    let lines = mirror.read_lines().expect("read lines");
+    let truncated = format!("{}\n", lines[0]);
+    std::fs::write(dir.path().join("consent.log"), &truncated).expect("rollback log");
+    // Drop the materializer so the next tick reopens against the
+    // rolled-back log and recovers cursor=1.
+    drop(mirror);
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    assert_eq!(mirror.cursor(), 1, "recovered cursor must reflect rollback");
+
+    let n = mirror.tick(&conn).expect("re-tick after rollback");
+    assert_eq!(
+        n, 2,
+        "cursor below watermark must force replay even though sidecar claims consumed"
+    );
+    assert_eq!(mirror.read_lines().expect("after replay").len(), 2);
+}
+
+#[test]
+fn reset_marker_consumption_survives_normal_cursor_advance() {
+    // Round-4 medium finding companion: when the cursor advances
+    // *past* the watermark via normal appends, the sidecar entry must
+    // continue to suppress replays. Watermark forces replay on
+    // regression, not on growth.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+    let watermark_after = mirror.cursor();
+    assert_eq!(watermark_after, 2);
+
+    // Normal append advances cursor past the watermark.
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    let n = mirror.tick(&conn).expect("normal tick");
+    assert_eq!(n, 1, "normal append, no replay");
+    assert!(mirror.cursor() > watermark_after);
+
+    // Idempotent — sidecar still suppresses replay.
+    let n = mirror.tick(&conn).expect("idempotent tick");
+    assert_eq!(n, 0);
+    assert_eq!(mirror.read_lines().expect("lines").len(), 3);
+}
+
+#[test]
+fn sidecar_with_two_field_legacy_format_forces_replay() {
+    // Round-4 forward-compat: lines that don't carry a watermark
+    // (legacy bare `migration_id` and round-3 `migration_id:applied_at`
+    // formats) cannot prove the log still reflects the replay. They
+    // must be treated as unknown state and skipped, forcing the next
+    // tick to replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the round-3 two-field format (no watermark).
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    // The middle field doesn't matter here — any string would work for
+    // the legacy two-field shape — but using the live nonce keeps the
+    // negative assertion below tight.
+    std::fs::write(&resets_consumed, format!("21:{nonce}\n")).expect("seed two-field sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "two-field sidecar with no watermark must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the new bound format.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must include watermark and line_count: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == format!("21:{nonce}")),
+        "two-field legacy line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn sidecar_with_applied_at_format_forces_replay() {
+    // Round-12 finding: round-4 sidecar entries used a decimal
+    // `applied_at` integer in the middle field instead of a hex
+    // `db_nonce`. Such lines cannot match the (migration_id, db_nonce)
+    // tuple the DB now exposes, but more importantly we *defensively*
+    // skip any three-field line whose middle field decimal-parses as
+    // an i64 — round-4 millis-since-epoch values are always decimal,
+    // hex nonces never are. The next tick forces a replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the round-4 three-field `applied_at`-bound format. Use a
+    // value high enough that it won't collide with any plausible nonce.
+    let applied_at: i64 = 1_761_600_000_000;
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{applied_at}:2\n"))
+        .expect("seed round-4 applied_at sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "round-4 applied_at-bound sidecar must not suppress replay under round-12 nonce binding"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the round-12 nonce-bound format.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let nonce = db_nonce_for(&conn, 21);
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must be in nonce-bound form with line_count: {after:?}"
+    );
+    assert!(
+        !after
+            .lines()
+            .any(|l| l.trim() == format!("21:{applied_at}:2")),
+        "round-4 applied_at-bound line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn reset_marker_replays_after_db_clone_with_same_applied_at() {
+    // Round-12 finding: `applied_at` is second-resolution and DB copies
+    // preserve it. Two distinct DBs migrated in the same wall-clock
+    // second (or one DB restored from a backup that preserved the
+    // original applied_at) collide on (migration_id, applied_at). The
+    // `db_nonce` minted via `randomblob(16)` is fresh on every
+    // migration apply, so two distinct DBs always hold distinct nonces
+    // even under same-second collisions — and a sidecar bound to one
+    // DB's nonce cannot suppress replay against another DB.
+    let conn_a = open_in_memory().expect("open a");
+    let conn_b = open_in_memory().expect("open b");
+
+    append(&conn_a, &forget_event("c-a1", &h(1))).expect("a1");
+    append(&conn_b, &forget_event("c-b1", &h(2))).expect("b1");
+
+    // Force the (otherwise-random) applied_at to be identical on both
+    // DBs — simulates the same-second migration race AND the
+    // backup-restore-preserves-applied_at case in one stroke.
+    let shared_applied: i64 = 1_761_600_000_000;
+    conn_a
+        .execute(
+            "UPDATE consent_mirror_resets SET applied_at = ?1 WHERE migration_id = 21",
+            rusqlite::params![shared_applied],
+        )
+        .expect("force a applied_at");
+    conn_b
+        .execute(
+            "UPDATE consent_mirror_resets SET applied_at = ?1 WHERE migration_id = 21",
+            rusqlite::params![shared_applied],
+        )
+        .expect("force b applied_at");
+
+    // Confirm the nonces ARE different — this is the round-12 fix.
+    let nonce_a = db_nonce_for(&conn_a, 21);
+    let nonce_b = db_nonce_for(&conn_b, 21);
+    assert_ne!(
+        nonce_a, nonce_b,
+        "randomblob(16) must mint distinct nonces per DB"
+    );
+
+    let dir_a = tempdir().expect("dir a");
+    let dir_b = tempdir().expect("dir b");
+
+    // Mirror A consumes the marker against DB-A and writes its sidecar.
+    let mut mirror_a = ConsentLogMaterializer::open(dir_a.path()).expect("open a");
+    assert_eq!(mirror_a.tick(&conn_a).expect("tick a"), 1);
+    let sidecar_a = std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
+        .expect("a sidecar");
+    assert!(
+        sidecar_a.contains(&nonce_a),
+        "mirror A sidecar must record DB-A's nonce: {sidecar_a:?}"
+    );
+
+    // Now copy mirror A's sidecar into mirror B's vault — this models
+    // the failure mode where same applied_at would have falsely
+    // matched. Under nonce binding, the entry cannot match DB-B's
+    // marker (different nonce), so mirror B must still replay.
+    std::fs::copy(
+        dir_a.path().join("consent.mirror_resets_consumed"),
+        dir_b.path().join("consent.mirror_resets_consumed"),
+    )
+    .expect("copy sidecar");
+
+    let mut mirror_b = ConsentLogMaterializer::open(dir_b.path()).expect("open b");
+    let n_b = mirror_b.tick(&conn_b).expect("tick b");
+    assert_eq!(
+        n_b, 1,
+        "mirror B must replay against DB-B even though same-applied_at sidecar from DB-A is present"
+    );
+
+    let sidecar_b = std::fs::read_to_string(dir_b.path().join("consent.mirror_resets_consumed"))
+        .expect("b sidecar");
+    assert!(
+        sidecar_b.contains(&nonce_b),
+        "mirror B sidecar must now record DB-B's nonce: {sidecar_b:?}"
+    );
+}
+
+#[test]
 fn rebuild_is_authoritative_over_db_only() {
     // The database remains the source of truth: rebuilding from a vault
     // with a deleted log produces a log identical to the one constructed
@@ -363,4 +835,747 @@ fn rebuild_is_authoritative_over_db_only() {
     let a = mirror_a.read_lines().expect("a lines");
     let b = mirror_b.read_lines().expect("b lines");
     assert_eq!(a, b);
+}
+
+#[test]
+fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
+    // Round-12 finding: a sidecar that records only `migration_id`
+    // cannot distinguish DB instances. If a vault_dir is reused against
+    // a different SQLite file (restore from backup, copy between
+    // environments), a stale sidecar entry would silently suppress the
+    // replay even though the new DB has freshly promoted legacy rows
+    // that were never mirrored. Binding consumption to
+    // `(migration_id, db_nonce)` defeats this: a different DB instance
+    // has a different `db_nonce` (minted via randomblob(16) at
+    // migration time) for the same migration_id, so the sidecar entry
+    // no longer matches and tick() must replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Simulate a stale sidecar from a *different* DB-instance: the
+    // migration_id matches the live DB row, but the nonce does not. We
+    // pick a fresh hex string that cannot collide with the real one.
+    let real_nonce = db_nonce_for(&conn, 21);
+    let stale_nonce = if real_nonce == "0".repeat(32) {
+        "1".repeat(32)
+    } else {
+        "0".repeat(32)
+    };
+    assert_ne!(real_nonce, stale_nonce);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    // Seed in the round-13 four-field bound format with a watermark
+    // and line_count low enough to satisfy `cursor >= watermark` and
+    // `live_line_count >= line_count` on their own — that way the
+    // replay is forced specifically by the nonce mismatch, not by a
+    // missing watermark, line_count, or a stale one.
+    std::fs::write(&resets_consumed, format!("21:{stale_nonce}:0:0\n"))
+        .expect("seed stale sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "stale sidecar from a different DB instance must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar must now record the *real* (migration_id, db_nonce,
+    // watermark, line_count). Watermark = high_water of the replay = 2,
+    // line_count = 2.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{real_nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must bind to the live DB's nonce: {after:?}"
+    );
+}
+
+#[test]
+fn reset_marker_does_not_replay_on_same_db() {
+    // Companion to the swap test: when the DB instance is unchanged,
+    // consumption recorded in `(migration_id, db_nonce)` form must
+    // suppress further replays across tick() calls.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 1, "first tick replays the marker");
+
+    // Subsequent ticks must be no-ops — the sidecar entry now matches
+    // the live DB's (21, db_nonce).
+    let n2 = mirror.tick(&conn).expect("second tick");
+    assert_eq!(n2, 0, "second tick must not replay on the same DB");
+
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    let n3 = mirror.tick(&conn).expect("third tick");
+    assert_eq!(
+        n3, 1,
+        "third tick mirrors the new row only, no reset replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+}
+
+#[test]
+fn sidecar_with_legacy_format_forces_replay() {
+    // Round-3 finding: bare `migration_id` lines (the format from this
+    // PR's earlier commit, before consumption was bound to a DB
+    // identifier) must be treated as "unknown DB instance" and skipped.
+    // They cannot match any (migration_id, db_nonce) tuple, so the next
+    // tick forces a replay and the sidecar is rewritten in the new
+    // bound format.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the legacy format the earlier commit produced.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, "21\n").expect("seed legacy sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "legacy-format sidecar must not suppress replay (no db_nonce to match)"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the new
+    // `migration_id:db_nonce:watermark_rowid:line_count` form.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let nonce = db_nonce_for(&conn, 21);
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "sidecar must be rewritten in bound format: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == "21"),
+        "legacy bare `21` line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn reset_marker_replays_when_log_truncated_below_recorded_count() {
+    // Round-13 medium finding: `cursor >= watermark` is too weak as
+    // proof the replay is intact. `recover_cursor_from_log` only
+    // recovers the LAST well-formed envelope in a bounded scan
+    // window, so a log truncated to keep only the watermark envelope
+    // (or any tail-only rewrite that preserves the watermark line)
+    // would falsely satisfy `cursor >= watermark` while erasing the
+    // earlier rows the replay had committed. Binding consumption to
+    // the live log's line count too defeats this: a tick-time count
+    // below the recorded count proves a rollback the watermark
+    // alone cannot see.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+
+    // First tick replays the reset and writes sidecar
+    // `21:nonce:3:3` (watermark=3, line_count=3).
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 3);
+
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    let after_first = std::fs::read_to_string(&resets_consumed).expect("after first");
+    assert!(
+        after_first
+            .lines()
+            .any(|l| l.trim() == format!("21:{nonce}:3:3")),
+        "post-replay sidecar must record (watermark=3, line_count=3): {after_first:?}"
+    );
+
+    // Truncate the log to keep ONLY the last (watermark) envelope.
+    // `recover_cursor_from_log` will still find the watermark envelope
+    // and report cursor=3 → `cursor >= watermark` holds. But the log
+    // has been gutted from 3 lines to 1; line_count check must catch
+    // the rollback and force a replay.
+    let lines = mirror.read_lines().expect("read lines");
+    let truncated = format!("{}\n", lines[2]);
+    std::fs::write(dir.path().join("consent.log"), &truncated).expect("rollback log");
+    drop(mirror);
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    assert_eq!(
+        mirror.cursor(),
+        3,
+        "recovered cursor still satisfies cursor >= watermark"
+    );
+
+    let n = mirror
+        .tick(&conn)
+        .expect("re-tick after tail-only truncation");
+    assert_eq!(
+        n, 3,
+        "live line_count below recorded count must force replay even though cursor >= watermark"
+    );
+    assert_eq!(mirror.read_lines().expect("after replay").len(), 3);
+
+    // Sidecar is rewritten with the freshly-measured line_count=3.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    assert!(
+        after.lines().any(|l| l.trim() == format!("21:{nonce}:3:3")),
+        "post-replay sidecar must re-bind to (watermark=3, line_count=3): {after:?}"
+    );
+}
+
+#[test]
+fn sidecar_with_three_field_format_forces_replay() {
+    // Round-13 medium finding: round-12 sidecar entries used the
+    // three-field `migration_id:db_nonce:watermark` format with no
+    // `line_count`. Such lines cannot prove the log still reflects
+    // the replay (watermark alone is satisfied by a tail-only
+    // truncation that preserves only the watermark envelope). The
+    // sidecar parser treats any non-four-field line as unknown state
+    // and the next tick force-replays.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the round-12 three-field nonce-bound format.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let nonce = db_nonce_for(&conn, 21);
+    std::fs::write(&resets_consumed, format!("21:{nonce}:2\n"))
+        .expect("seed round-12 three-field sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "round-12 three-field sidecar (no line_count) must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the round-13 four-field bound format.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{nonce}:2:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must include line_count: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == format!("21:{nonce}:2")),
+        "round-12 three-field line must not survive: {after:?}"
+    );
+}
+
+#[test]
+fn tick_skips_log_scan_after_validation_succeeds() {
+    // Round-9 high finding: `read_pending_mirror_resets` ran an
+    // O(file) `count_log_lines` scan on every tick because the
+    // `consent_mirror_resets` DB row persists forever. The fix caches
+    // the validation result on the materializer; subsequent ticks
+    // short-circuit. Behavioral proof: after the first tick validates
+    // the sidecar against the live log, we truncate the log behind
+    // the materializer's back so its line count is now FAR BELOW the
+    // recorded line_count. Without the cache, the next tick would
+    // see live_line_count < recorded line_count and force a replay
+    // (treating the marker as un-consumed). With the cache, the tick
+    // skips the scan and proceeds normally — this is the documented
+    // tradeoff: we trust the materializer's local view of "no pending
+    // resets" once validated, until the log is rewritten via
+    // `rebuild_log_to`.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-consume the migration-0021 reset with watermark=0,
+    // line_count=0 so the very first tick validates instantly.
+    let nonce = db_nonce_for(&conn, 21);
+    std::fs::write(
+        dir.path().join("consent.mirror_resets_consumed"),
+        format!("21:{nonce}:0:0\n"),
+    )
+    .expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(
+        n, 2,
+        "first tick mirrors both rows and validates the sidecar"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Truncate the log behind the materializer's back. If the cache
+    // were not in place, the next tick's line-count check would
+    // detect this rollback (live count = 0 < recorded line_count = 0
+    // is fine, but seed a sidecar entry with a higher line_count to
+    // make the rollback observable without the cache).
+    std::fs::write(
+        dir.path().join("consent.mirror_resets_consumed"),
+        format!("21:{nonce}:0:99\n"),
+    )
+    .expect("rewrite sidecar with high line_count");
+
+    // First tick already cached validated=true, so the next tick
+    // skips the line-count scan entirely and never reads the
+    // updated sidecar. No replay happens. Append a fresh row to
+    // confirm the tick still tails normally.
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    let n = mirror.tick(&conn).expect("post-cache tick");
+    assert_eq!(
+        n, 1,
+        "cached materializer tails one new row without re-scanning the log"
+    );
+    let lines = mirror.read_lines().expect("lines");
+    assert_eq!(lines.len(), 3, "log must have grown to 3 envelopes");
+}
+
+#[test]
+fn rebuild_from_db_resets_validation_cache() {
+    // Round-9 high finding follow-up: any code path that rewrites
+    // the log via `rebuild_log_to` must clear the validation cache
+    // — the rebuilt sidecar entry the rebuild writes is the new
+    // authority. Behavioral proof: tick once to set the cache, then
+    // plant a sidecar entry whose `line_count` is far above the
+    // live log's. If `rebuild_from_db` did NOT clear the cache, its
+    // post-rebuild call to `read_pending_mirror_resets_with_cache`
+    // would short-circuit (validated=true) and skip the
+    // line-count comparison — leaving the planted stale entry on
+    // disk untouched. With the cache cleared, the rebuild observes
+    // the rollback signal (live count < recorded count), treats
+    // the marker as pending, and rewrites the sidecar with a fresh
+    // `watermark:line_count` pair. We prove the second case by
+    // asserting the planted entry is replaced.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    let nonce = db_nonce_for(&conn, 21);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:0\n")).expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    mirror
+        .tick(&conn)
+        .expect("first tick caches validated=true");
+
+    // Plant a sidecar entry whose line_count overshoots the live log.
+    // A cached materializer would skip the line-count scan and never
+    // notice; a re-validating one would treat the marker as pending.
+    std::fs::write(&resets_consumed, format!("21:{nonce}:0:99\n")).expect("plant stale");
+
+    // rebuild_from_db must clear the cache before its internal
+    // pending-check, otherwise the planted stale entry survives.
+    let written = mirror.rebuild_from_db(&conn).expect("rebuild");
+    assert_eq!(written, 2);
+
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let fresh = format!("21:{nonce}:2:2");
+    let stale = format!("21:{nonce}:0:99");
+    assert!(
+        after.lines().any(|l| l.trim() == fresh),
+        "rebuild must rewrite the sidecar with the fresh line_count after \
+         clearing the validation cache: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == stale),
+        "stale sidecar entry must not survive a rebuild: {after:?}"
+    );
+}
+
+#[test]
+fn tick_replays_when_new_reset_added_after_validation() {
+    // Round-10 high finding: the in-memory validation cache must be
+    // keyed on a DB-state fingerprint, not a permanent bool. Otherwise
+    // a long-lived materializer that validates once will silently miss
+    // any new `consent_mirror_resets` row inserted by a peer process
+    // (e.g., a future reset migration applied while the mirror is
+    // running) — the original instance would never re-check the table.
+    //
+    // We simulate the cross-process migration by inserting a new row
+    // with a fresh `migration_id` directly into `consent_mirror_resets`.
+    // This is exactly what a future reset migration would do.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-consume migration 21 so the first tick validates cleanly and
+    // caches the fingerprint.
+    let nonce_21 = db_nonce_for(&conn, 21);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{nonce_21}:0:0\n")).expect("seed sidecar");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("first tick validates and caches");
+    assert_eq!(n, 2);
+    let cursor_before = mirror.cursor();
+    assert!(cursor_before > 0);
+
+    // Simulate a peer process applying a new reset migration. The new
+    // row bumps both COUNT and MAX(migration_id), so the fingerprint
+    // changes and the next tick MUST re-check.
+    let new_nonce = "deadbeefdeadbeefdeadbeefdeadbeef";
+    conn.execute(
+        "INSERT INTO consent_mirror_resets (migration_id, applied_at, consumed, db_nonce) \
+         VALUES (?1, ?2, 0, ?3)",
+        rusqlite::params![99i64, 1_700_000_000_000i64, new_nonce],
+    )
+    .expect("simulate peer reset migration");
+
+    // Tick again on the SAME materializer. With the round-10 fix the
+    // fingerprint shift forces a re-validation, the unconsumed marker
+    // for migration 99 is observed, and the mirror replays from rowid 0
+    // via `rebuild_log_to`. Without the fix the bare bool would still
+    // claim "validated" and we'd silently skip the replay.
+    let n = mirror.tick(&conn).expect("second tick must replay");
+    assert!(
+        n >= 2,
+        "tick must rebuild from DB when a new reset marker appears \
+         (round-10 fingerprint check); got n={n}"
+    );
+
+    // Sidecar must now record the new (migration_id=99, db_nonce)
+    // entry, proving the replay actually consumed the new marker.
+    let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
+    assert!(
+        sidecar
+            .lines()
+            .any(|l| l.starts_with(&format!("99:{new_nonce}:"))),
+        "post-replay sidecar must record the new marker (99,{new_nonce}): {sidecar:?}"
+    );
+
+    // A subsequent tick is a no-op: the fingerprint (now (2, 99)) is
+    // cached after the successful consumption.
+    let n = mirror.tick(&conn).expect("third tick");
+    assert_eq!(n, 0, "no further work once the new reset is consumed");
+}
+
+// ---------------------------------------------------------------------------
+// E2E gap-fill tests added in the round-13 review (Phase-B (#255, brief §14)).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_upgrade_v20_to_v21_replays_legacy_through_mirror() {
+    // Test 1: in-process operator-style upgrade. Open DB at v20, seed a
+    // mix of legacy GRANT/REVOKE rows (varied decided_at and bounded
+    // expires_at) AND a normal event-kind row through `consent::append`,
+    // then apply migration 21 and run `tick()`. The reset replay must
+    // surface every row — synthesized legacy + native event — and every
+    // resulting JSONL line must decode cleanly via the materializer's
+    // event reader (which calls `ConsentEvent::validate` internally).
+    use cairn_store_sqlite::migrations::migrations;
+
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    migrations()
+        .to_version(&mut conn, 20)
+        .expect("apply migrations to v20");
+
+    // Seed three legacy rows. Pre-0009 columns only — drift preflight
+    // (step 0a-bis) aborts on any populated post-0009 column.
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, expires_at) \
+         VALUES ('legacy-g1', 'sub-1', 'private', 'GRANT', 'hmn:ada', 0, 1000)",
+        [],
+    )
+    .expect("legacy grant 1");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, expires_at) \
+         VALUES ('legacy-r1', 'sub-2', 'shared', 'REVOKE', 'hmn:bob', \
+                 1_700_000_000_000, NULL)",
+        [],
+    )
+    .expect("legacy revoke");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, expires_at) \
+         VALUES ('legacy-g2', 'sub-3', 'public', 'GRANT', 'hmn:cy', \
+                 1_600_000_000_000, 2_000_000_000_000)",
+        [],
+    )
+    .expect("legacy grant 2");
+
+    // Seed one native event-kind row through the normal append path.
+    let native = forget_event("c-native", &h(0xfeed));
+    append(&conn, &native).expect("native event append");
+
+    // Apply migration 21.
+    migrations()
+        .to_version(&mut conn, 21)
+        .expect("apply migration 21");
+
+    // Run the materializer — pending reset marker triggers replay.
+    let dir = tempdir().expect("tempdir");
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("reset replay tick");
+    assert_eq!(
+        n, 4,
+        "reset replay must surface 3 synthesized legacy rows + 1 native event"
+    );
+
+    // Decode-clean check: read_events validates every line.
+    let events = mirror.read_events().expect("read_events decodes all lines");
+    assert_eq!(events.len(), 4);
+    let ids: Vec<&str> = events.iter().map(|e| e.consent_id.as_str()).collect();
+    assert!(ids.contains(&"legacy-g1"));
+    assert!(ids.contains(&"legacy-r1"));
+    assert!(ids.contains(&"legacy-g2"));
+    assert!(ids.contains(&"c-native"));
+
+    // Spot-check synthesis on a legacy row: the bounded grant must
+    // surface its decoded expires_at, and its actor must be the fixed
+    // `hmn:legacy` sentinel (round-12 finding: pre-0009 `granted_by`
+    // is not trusted).
+    let legacy_g1 = events
+        .iter()
+        .find(|e| e.consent_id == "legacy-g1")
+        .expect("legacy-g1 present");
+    assert_eq!(legacy_g1.actor.as_str(), "hmn:legacy");
+    assert!(
+        legacy_g1.expires_at.is_some(),
+        "bounded legacy GRANT must decode with Some(expires_at)"
+    );
+
+    // The native event must round-trip with its real actor/payload —
+    // synthesis must not touch event-kind rows.
+    let native_event = events
+        .iter()
+        .find(|e| e.consent_id == "c-native")
+        .expect("native present");
+    assert_eq!(native_event.actor.as_str(), "hmn:tafeng");
+}
+
+#[test]
+fn reset_consumption_survives_consistent_full_vault_restore() {
+    // Test 2: snapshot DB *and* sidecar+log together, advance both with
+    // a normal append, then restore both consistently. The materializer
+    // must NOT replay — the sidecar still matches the DB's nonce, the
+    // watermark still matches the log's recovered cursor, and the line
+    // count still matches the live log. This is the legitimate
+    // disaster-recovery path that nonce/watermark/line_count binding
+    // must NOT break.
+    use cairn_store_sqlite::open_sync;
+
+    let dir_db = tempdir().expect("db tempdir");
+    let dir_vault = tempdir().expect("vault tempdir");
+    let db_path = dir_db.path().join("cairn.db");
+
+    // Open file-backed DB at head; seed two events.
+    {
+        let conn = open_sync(&db_path).expect("open file-backed");
+        append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+        append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+        // First tick consumes the migration-0021 reset.
+        let mut mirror = ConsentLogMaterializer::open(dir_vault.path()).expect("open mirror");
+        let n = mirror.tick(&conn).expect("first tick");
+        assert_eq!(n, 2);
+    }
+
+    // Snapshot DB + the entire vault dir (consent.log + consent.cursor +
+    // consent.mirror_resets_consumed) into a second tempdir.
+    let snap_db_dir = tempdir().expect("snap db dir");
+    let snap_vault_dir = tempdir().expect("snap vault dir");
+    let snap_db_path = snap_db_dir.path().join("cairn.db");
+    std::fs::copy(&db_path, &snap_db_path).expect("snapshot db");
+    for entry in std::fs::read_dir(dir_vault.path()).expect("read vault") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name();
+        std::fs::copy(entry.path(), snap_vault_dir.path().join(&name)).expect("snap vault file");
+    }
+
+    // Advance both DB and log with a third event.
+    {
+        let conn = open_sync(&db_path).expect("reopen for advance");
+        append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+        let mut mirror = ConsentLogMaterializer::open(dir_vault.path()).expect("reopen mirror");
+        let n = mirror.tick(&conn).expect("advance tick");
+        assert_eq!(n, 1);
+        assert_eq!(mirror.read_lines().expect("lines").len(), 3);
+    }
+
+    // Restore BOTH DB and vault from the snapshot. Use a fresh
+    // destination dir so we know nothing leaks from the live state.
+    let restored_db_dir = tempdir().expect("restored db dir");
+    let restored_vault_dir = tempdir().expect("restored vault dir");
+    let restored_db_path = restored_db_dir.path().join("cairn.db");
+    std::fs::copy(&snap_db_path, &restored_db_path).expect("restore db");
+    for entry in std::fs::read_dir(snap_vault_dir.path()).expect("read snap vault") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name();
+        std::fs::copy(entry.path(), restored_vault_dir.path().join(&name))
+            .expect("restore vault file");
+    }
+
+    // Reopen materializer (fresh process state) against the restored
+    // pair. Consistent restore → no replay, no new rows.
+    let conn = open_sync(&restored_db_path).expect("open restored db");
+    let mut mirror =
+        ConsentLogMaterializer::open(restored_vault_dir.path()).expect("open restored mirror");
+    let n = mirror.tick(&conn).expect("post-restore tick");
+    assert_eq!(
+        n, 0,
+        "consistent vault+DB restore must not trigger replay (no new rows)"
+    );
+    assert_eq!(
+        mirror.read_lines().expect("restored lines").len(),
+        2,
+        "restored log must contain exactly the snapshot's two rows"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick_runs_concurrently_with_no_pending_migration() {
+    // Test 3: concurrent tick + read on separate connections must not
+    // deadlock or surface SQLite locking errors. `rusqlite::Connection`
+    // is `!Sync`, so we use one connection per task. The reset marker
+    // is consumed up front so neither side hits the rebuild path
+    // (whose file lock would serialize the two sides anyway).
+    use cairn_store_sqlite::consent::read_since_rowid;
+    use cairn_store_sqlite::open_sync;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let db_dir = tempdir().expect("db dir");
+    let db_path = db_dir.path().join("cairn.db");
+    let vault = tempdir().expect("vault");
+    let vault_path = vault.path().to_path_buf();
+
+    // Seed the DB and consume the reset on the main thread so the
+    // tick task hits the steady-state path.
+    {
+        let conn = open_sync(&db_path).expect("seed open");
+        for i in 0..16 {
+            append(&conn, &forget_event(&format!("c-{i}"), &h(i))).expect("seed append");
+        }
+        let mut mirror = ConsentLogMaterializer::open(&vault_path).expect("seed mirror");
+        let n = mirror.tick(&conn).expect("seed tick");
+        assert_eq!(n, 16);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_tick = stop.clone();
+    let vault_tick = vault_path.clone();
+    let db_tick = db_path.clone();
+    let tick_handle = tokio::task::spawn_blocking(move || {
+        let conn = open_sync(&db_tick).expect("tick open");
+        let mut mirror = ConsentLogMaterializer::open(&vault_tick).expect("tick mirror");
+        let mut iters = 0u64;
+        while !stop_tick.load(Ordering::Relaxed) {
+            mirror
+                .tick(&conn)
+                .expect("tick must not surface lock errors");
+            iters += 1;
+        }
+        iters
+    });
+
+    let stop_read = stop.clone();
+    let db_read = db_path.clone();
+    let read_handle = tokio::task::spawn_blocking(move || {
+        let conn = open_sync(&db_read).expect("read open");
+        let mut iters = 0u64;
+        while !stop_read.load(Ordering::Relaxed) {
+            let _ = read_since_rowid(&conn, 0).expect("read must not surface lock errors");
+            iters += 1;
+        }
+        iters
+    });
+
+    // Generous wait — `open_sync` re-applies the migration set on each
+    // task's connection (~tens of ms), then we want both loops to spin
+    // long enough that any locking interference would surface.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    stop.store(true, Ordering::Relaxed);
+
+    let tick_iters = tick_handle.await.expect("tick task joined cleanly");
+    let read_iters = read_handle.await.expect("read task joined cleanly");
+    assert!(
+        tick_iters > 0 && read_iters > 0,
+        "both tasks must complete at least one iteration without lock errors \
+         (tick={tick_iters}, read={read_iters})"
+    );
+}
+
+#[test]
+fn tick_steady_state_under_loose_budget_after_validation() {
+    // Test 5: round-9 cache must keep steady-state tick latency
+    // bounded. With 1000 envelopes already mirrored and the validation
+    // cache primed, subsequent ticks should NOT re-scan the log per
+    // call. We assert a generously loose budget (1ms mean per tick) —
+    // a regression that drops the cache and re-scans the file would
+    // blow well past it on a 1000-line log; the goal here is regression
+    // detection, not absolute perf.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    // Pre-consume the migration-0021 reset with the canonical bound
+    // form (watermark=0, line_count=0) so the very first tick
+    // validates instantly without a replay.
+    let nonce = db_nonce_for(&conn, 21);
+    std::fs::write(
+        dir.path().join("consent.mirror_resets_consumed"),
+        format!("21:{nonce}:0:0\n"),
+    )
+    .expect("seed sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    for i in 0..1000u32 {
+        append(&conn, &forget_event(&format!("c-{i}"), &h(i))).expect("seed append");
+    }
+    let n = mirror.tick(&conn).expect("seed tick mirrors all 1000");
+    assert_eq!(n, 1000);
+    // Prime cache.
+    mirror.tick(&conn).expect("prime cache");
+
+    // Ratio-based regression check: a steady-state tick (cached
+    // validation, no new rows, no log scan) must be substantially
+    // cheaper than one that re-scans the 1000-line log. We measure
+    // both arms inside this same test process to neutralize
+    // CI-host noise.
+    //
+    // Cached arm: 100 plain ticks on the primed materializer.
+    let cached_iters = 100u32;
+    let start = std::time::Instant::now();
+    for _ in 0..cached_iters {
+        mirror.tick(&conn).expect("cached steady-state tick");
+    }
+    let cached_total = start.elapsed();
+
+    // Uncached arm: each tick rebuilds a fresh materializer (no
+    // validation cache), forcing the line-count scan path.
+    let uncached_iters = 100u32;
+    let start = std::time::Instant::now();
+    for _ in 0..uncached_iters {
+        let mut fresh = ConsentLogMaterializer::open(dir.path()).expect("fresh open");
+        fresh.tick(&conn).expect("uncached tick");
+    }
+    let uncached_total = start.elapsed();
+
+    // The cached path must be measurably faster. We use a 1.1x floor —
+    // earlier thresholds (2x, then 1.3x) were flaky on shared CI runners
+    // where measured ratios drift with load. 1.1x still fails if a
+    // regression drops the cache entirely (which would collapse the
+    // ratio toward 1.0x) but absorbs the noise observed in practice
+    // (cached=2.05s vs uncached=2.64s, ratio 1.28x, on ubuntu-latest).
+    let cached_ns = u128::max(cached_total.as_nanos(), 1);
+    let uncached_ns = uncached_total.as_nanos();
+    assert!(
+        uncached_ns * 10 > cached_ns * 11,
+        "round-9 validation cache regression: cached ticks ({cached_total:?}) \
+         must be measurably cheaper than uncached ticks ({uncached_total:?}); \
+         expected uncached/cached >= 1.1"
+    );
 }
