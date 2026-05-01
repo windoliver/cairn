@@ -324,6 +324,10 @@ pub enum EmbeddingProvider {
 /// `local_embeddings: false` drops `cairn.mcp.v1.search.semantic` and
 /// `cairn.mcp.v1.search.hybrid` from `status.capabilities`. Those modes
 /// return `CapabilityUnavailable` — no silent fallback (brief §3.0 fail-closed).
+//
+// Note: `Eq` was intentionally dropped from the derive list when `f32`/`f64`
+// retrieval-tuning fields landed in Task 3 of the hybrid-retrieval branch.
+// Floats can't be `Eq`. Pre-1.0 codebase, no external SDK consumers yet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
@@ -334,6 +338,12 @@ pub struct SearchConfig {
     /// Default retrieval mode when no `--mode` flag is supplied. Default `hybrid`.
     pub default_mode: SearchMode,
     /// Default embedding provider for query-time vectorization. Default `local`.
+    //
+    // TODO(task 8): when `cairn search` flag dispatch lands, validate at
+    // verb-time that `default_provider == Local` is consistent with
+    // `local_embeddings == true`, and `default_provider == OpenAi` requires
+    // the `openai` Cargo feature + `OPENAI_API_KEY`. Fail-closed per
+    // CLAUDE.md §4 invariant 6.
     pub default_provider: EmbeddingProvider,
     /// Blend coefficient α for cosine re-rank: final = α * rrf + (1-α) * cos.
     /// Range `[0.0, 1.0]`. Default `0.7`.
