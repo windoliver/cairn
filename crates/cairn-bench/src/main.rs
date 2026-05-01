@@ -43,8 +43,7 @@ async fn main() -> anyhow::Result<()> {
         fixture.queries.len(),
         args.fixture.display()
     );
-    // Cache + skip_openai are wired in Task 11; reference them here so
-    // unused-variable lints stay quiet without a leading underscore.
+    // TODO(task 11): plumb cache + skip_openai into adapter dispatch.
     let _ = (&args.cache, args.skip_openai);
 
     // Adapters + report wiring lands in Tasks 11–12.

@@ -126,6 +126,12 @@ pub fn load(root: &Path) -> Result<Fixture> {
             serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
         pages.push(page);
     }
+    if pages.is_empty() {
+        anyhow::bail!(
+            "no pages found in {} — fixture appears empty or misconfigured",
+            pages_dir.display()
+        );
+    }
     pages.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     // Queries.
