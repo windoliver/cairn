@@ -2387,6 +2387,60 @@ fn consent_journal_rebuild_aborts_on_event_row_payload_shape_kind_mismatch() {
 }
 
 #[test]
+fn consent_journal_rebuild_aborts_on_kind_null_with_populated_event_fields() {
+    // Phase-B (#255, brief §14): round-12 High finding. The legacy-row
+    // synthesis path (`CASE WHEN kind IS NULL THEN <sentinel> ELSE
+    // <existing> END`) treats every kind-NULL row as a true 0005-era
+    // legacy and unconditionally overwrites actor / payload_json /
+    // decided_at_iso with sentinels. But the 0009 event-shape trigger
+    // only gated on `kind IS NOT NULL`, so a direct-SQL caller (or
+    // bug) could insert a row with kind=NULL but other event fields
+    // populated; that real authorship/payload/iso would be silently
+    // destroyed. The new pre-rebuild assert (step 0a-bis) FAILS
+    // CLOSED on any kind-NULL row carrying any non-NULL event field
+    // so the operator can repair the drift manually.
+    let mut conn = open_at_version(20);
+    // Drop the kind-domain trigger so we can insert kind=NULL — the
+    // 0009 trigger only gates kinds in the closed set, but its WHEN
+    // clause is `kind IS NOT NULL`, so kind=NULL was always allowed.
+    // The trigger we drop is unrelated; we just need to insert with a
+    // populated `actor` field that 0009 didn't gate when kind=NULL.
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('drift-kind-null', 'sub', 'private', 'GRANT', 'hmn:t', 1, \
+                 NULL, 'hmn:realauthor', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"realsubj\"}', \
+                 '2026-04-30T00:00:00Z')",
+        [],
+    )
+    .expect("legacy direct-SQL insert: kind NULL, event fields populated");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on kind-NULL row with populated event fields");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("populated event fields") || msg.contains("post-0009 direct-SQL drift"),
+        "abort message must cite drift; got: {msg}"
+    );
+
+    // Drift row survives the aborted migration — operator can repair.
+    let actor: String = conn
+        .query_row(
+            "SELECT actor FROM consent_journal WHERE consent_id = 'drift-kind-null'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("drift row must survive aborted migration");
+    assert_eq!(
+        actor, "hmn:realauthor",
+        "drift row's real authorship must NOT have been overwritten with `hmn:legacy`"
+    );
+}
+
+#[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
     conn.execute(

@@ -264,7 +264,10 @@ impl ConsentLogMaterializer {
         // every newly-visible legacy row and brick brief §14 "no gaps".
         //
         // Migration 0021 inserts a `(migration_id, applied_at,
-        // consumed=0)` row into `consent_mirror_resets`. Here we look
+        // consumed=0, db_nonce)` row into `consent_mirror_resets`.
+        // Sidecar consumption is bound to `db_nonce` (round-12 finding;
+        // applied_at is second-resolution and DB copies preserve it).
+        // Here we look
         // for any reset rows this mirror has not yet consumed (the
         // sidecar at `consent.mirror_resets_consumed` is the per-mirror
         // source of truth — see Phase-B finding 2); on finding one we
@@ -285,9 +288,9 @@ impl ConsentLogMaterializer {
             // backup restore without DB) forces a replay even though the
             // sidecar still claims "consumed" — see round-4 medium finding.
             let watermark = rebuild.high_water;
-            let consumed: Vec<(i64, i64, i64)> = pending_resets
+            let consumed: Vec<(i64, String, i64)> = pending_resets
                 .into_iter()
-                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .map(|(id, nonce)| (id, nonce, watermark))
                 .collect();
             mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
             return Ok(rebuild.written);
@@ -359,9 +362,9 @@ impl ConsentLogMaterializer {
         let pending = read_pending_mirror_resets(conn, &resets_consumed_path, cursor)?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
-            let consumed: Vec<(i64, i64, i64)> = pending
+            let consumed: Vec<(i64, String, i64)> = pending
                 .into_iter()
-                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .map(|(id, nonce)| (id, nonce, watermark))
                 .collect();
             mark_mirror_resets_consumed(&resets_consumed_path, &consumed)?;
         }
@@ -401,9 +404,9 @@ impl ConsentLogMaterializer {
         let pending = read_pending_mirror_resets(conn, &self.resets_consumed_path, self.cursor)?;
         if !pending.is_empty() {
             let watermark = rebuild.high_water;
-            let consumed: Vec<(i64, i64, i64)> = pending
+            let consumed: Vec<(i64, String, i64)> = pending
                 .into_iter()
-                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .map(|(id, nonce)| (id, nonce, watermark))
                 .collect();
             mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
         }
@@ -511,14 +514,15 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
 /// reserved-for-no-use — schema 0021 still defines it (changing the
 /// schema would break verifier fingerprints), but we ignore it.
 ///
-/// DB-instance binding (round-3 finding): consumption is keyed by the
-/// `(migration_id, applied_at)` tuple, not by `migration_id` alone.
-/// `applied_at` is the millis-since-epoch INTEGER set by the migration
-/// at apply time, so two distinct DB instances (e.g., a backup restore
-/// or a copy from another environment) have different `applied_at`
-/// values for the same `migration_id`. A stale sidecar that records
-/// only the `migration_id` therefore cannot suppress a replay against a
-/// fresh DB whose marker has a different `applied_at`.
+/// DB-instance binding (round-12 finding): consumption is keyed by the
+/// `(migration_id, db_nonce)` tuple. `db_nonce` is a 32-char hex string
+/// minted by `lower(hex(randomblob(16)))` at migration apply time, so
+/// two distinct DB schema instances (e.g., a backup restore vs. the
+/// original, or two DBs migrated in the same wall-clock second) hold
+/// different nonces for the same `migration_id`. `applied_at` (round-3)
+/// proved insufficient: it is second-resolution and DB copies preserve
+/// it verbatim. A stale sidecar that records the source DB's nonce
+/// therefore cannot match the freshly-minted nonce of a separate DB.
 ///
 /// Log-state binding (round-4 finding): each sidecar entry also carries
 /// the `watermark_rowid` — the highest rowid the previous replay
@@ -528,13 +532,15 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
 /// also restoring the DB, or the log was truncated to a valid prefix),
 /// the sidecar still claims consumption but the on-disk audit no longer
 /// covers the migrated rows — force a replay. Sidecar lines that lack
-/// a watermark (legacy two-field or bare-`migration_id` formats) are
-/// treated the same way: unknown state → unsafe to honor → replay.
+/// a watermark (legacy two-field or bare-`migration_id` formats), or
+/// that carry the round-3 `applied_at`-bound format instead of the
+/// round-12 `db_nonce`-bound format, are treated the same way: unknown
+/// state → unsafe to honor → replay.
 fn read_pending_mirror_resets(
     conn: &Connection,
     resets_consumed_path: &Path,
     cursor: i64,
-) -> Result<Vec<(i64, i64)>, MirrorError> {
+) -> Result<Vec<(i64, String)>, MirrorError> {
     // Tolerate the table being absent (e.g., a legacy connection that
     // somehow never ran 0021): no resets to honor.
     let exists: i64 = conn
@@ -549,10 +555,10 @@ fn read_pending_mirror_resets(
         return Ok(Vec::new());
     }
     let mut stmt = conn
-        .prepare("SELECT migration_id, applied_at FROM consent_mirror_resets")
+        .prepare("SELECT migration_id, db_nonce FROM consent_mirror_resets")
         .map_err(StoreError::from)?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
         .map_err(StoreError::from)?;
     let mut all = Vec::new();
     for row in rows {
@@ -561,18 +567,18 @@ fn read_pending_mirror_resets(
     let consumed = read_resets_consumed_sidecar(resets_consumed_path)?;
     all.retain(|tuple| {
         // A DB row is considered consumed only when there's a sidecar
-        // entry for the matching (migration_id, applied_at) AND the
+        // entry for the matching (migration_id, db_nonce) AND the
         // recorded watermark is still <= the live cursor. A cursor
         // below the watermark means the log was rolled back behind the
         // sidecar's claim — force replay.
-        !consumed
-            .iter()
-            .any(|(id, applied, watermark)| (*id, *applied) == *tuple && cursor >= *watermark)
+        !consumed.iter().any(|(id, nonce, watermark)| {
+            (*id, nonce.as_str()) == (tuple.0, tuple.1.as_str()) && cursor >= *watermark
+        })
     });
     Ok(all)
 }
 
-/// Mark the given `(migration_id, applied_at, watermark)` tuples as
+/// Mark the given `(migration_id, db_nonce, watermark)` tuples as
 /// consumed by this mirror. Persists to the per-mirror sidecar (atomic
 /// tmp+rename, fsynced, parent dir fsynced) — the DB row is
 /// intentionally untouched so peer mirrors can still observe and
@@ -582,11 +588,11 @@ fn read_pending_mirror_resets(
 /// consumption actually serialized. Subsequent ticks compare the live
 /// cursor against this value to detect post-consumption rollbacks
 /// (round-4 medium finding). A new entry replaces any older entry for
-/// the same `(migration_id, applied_at)` so the watermark always
+/// the same `(migration_id, db_nonce)` so the watermark always
 /// reflects the most recent successful replay.
 fn mark_mirror_resets_consumed(
     resets_consumed_path: &Path,
-    entries: &[(i64, i64, i64)],
+    entries: &[(i64, String, i64)],
 ) -> Result<(), MirrorError> {
     if entries.is_empty() {
         return Ok(());
@@ -594,10 +600,10 @@ fn mark_mirror_resets_consumed(
     let mut existing = read_resets_consumed_sidecar(resets_consumed_path)?;
     for entry in entries {
         // Replace any prior entry for the same (migration_id,
-        // applied_at) — keep one row per DB-bound marker, with the
+        // db_nonce) — keep one row per DB-bound marker, with the
         // newest watermark winning.
-        existing.retain(|(id, applied, _)| (*id, *applied) != (entry.0, entry.1));
-        existing.push(*entry);
+        existing.retain(|(id, nonce, _)| (*id, nonce.as_str()) != (entry.0, entry.1.as_str()));
+        existing.push(entry.clone());
     }
     write_resets_consumed_sidecar(resets_consumed_path, &existing)
 }
@@ -606,19 +612,23 @@ fn mark_mirror_resets_consumed(
 /// vec (no resets consumed yet).
 ///
 /// Format: each non-empty line is
-/// `migration_id:applied_at:watermark_rowid`, all parsed as `i64`.
+/// `migration_id:db_nonce:watermark_rowid`, where `migration_id` and
+/// `watermark_rowid` parse as `i64` and `db_nonce` is a 32-char lower
+/// hex string (minted by migration 0021 via `randomblob(16)`).
 /// `watermark_rowid` is the highest rowid the replay that produced
 /// this entry serialized; the caller compares it against the live
 /// cursor to detect post-consumption log rollbacks (round-4 finding).
 ///
 /// Tolerance: lines that don't match the expected three-field shape
-/// — including the legacy bare-`migration_id` format and the round-3
-/// two-field `migration_id:applied_at` format — are silently skipped.
-/// A skipped line cannot match any DB tuple, which forces the next
-/// tick to replay (the safe default; the DB is still the source of
-/// truth for "a reset was needed"). I/O errors propagate; parse
-/// errors do not.
-fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64, i64)>, MirrorError> {
+/// — including the legacy bare-`migration_id` format (round 1), the
+/// round-3 two-field `migration_id:applied_at` format, and the
+/// round-4 three-field `migration_id:applied_at:watermark` format
+/// (where the middle field decimal-parses as an integer instead of
+/// being a hex nonce) — are silently skipped. A skipped line cannot
+/// match any DB tuple, which forces the next tick to replay (the safe
+/// default; the DB is still the source of truth for "a reset was
+/// needed"). I/O errors propagate; parse errors do not.
+fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, String, i64)>, MirrorError> {
     match File::open(path) {
         Ok(file) => {
             let reader = BufReader::new(file);
@@ -637,12 +647,20 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64, i64)>, Mir
                     // so the next tick force-replays.
                     continue;
                 }
-                if let (Ok(id), Ok(applied), Ok(watermark)) = (
+                let nonce = parts[1].trim();
+                // Reject the round-4 `applied_at`-bound format: its
+                // middle field is a decimal integer (millis-since-epoch),
+                // never a hex nonce. A 32-char lowercase hex string
+                // never parses cleanly as i64, so an i64::parse success
+                // on the middle field is a reliable round-4 signal.
+                if nonce.parse::<i64>().is_ok() {
+                    continue;
+                }
+                if let (Ok(id), Ok(watermark)) = (
                     parts[0].trim().parse::<i64>(),
-                    parts[1].trim().parse::<i64>(),
                     parts[2].trim().parse::<i64>(),
                 ) {
-                    out.push((id, applied, watermark));
+                    out.push((id, nonce.to_owned(), watermark));
                 }
             }
             Ok(out)
@@ -654,17 +672,17 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64, i64)>, Mir
 
 /// Write the consumed sidecar atomically. Same pattern as
 /// `write_cursor_hint`: write tmp, fsync, rename, fsync parent. Each
-/// entry is serialized as `migration_id:applied_at:watermark_rowid`
-/// on its own line.
+/// entry is serialized as `migration_id:db_nonce:watermark_rowid` on
+/// its own line.
 fn write_resets_consumed_sidecar(
     path: &Path,
-    entries: &[(i64, i64, i64)],
+    entries: &[(i64, String, i64)],
 ) -> Result<(), MirrorError> {
     let tmp = path.with_extension("mirror_resets_consumed.tmp");
     {
         let mut f = File::create(&tmp)?;
-        for (id, applied, watermark) in entries {
-            writeln!(f, "{id}:{applied}:{watermark}")?;
+        for (id, nonce, watermark) in entries {
+            writeln!(f, "{id}:{nonce}:{watermark}")?;
         }
         f.sync_all()?;
     }

@@ -178,6 +178,33 @@ INSERT INTO __cairn_assert_legacy_iso (n)
 DROP TRIGGER __cairn_assert_legacy_iso_trg;
 DROP TABLE __cairn_assert_legacy_iso;
 
+-- 0a-bis. Abort if any kind-NULL row carries populated post-0009 event
+--    fields (round-12 high finding). True 0005-era legacy rows are
+--    kind-NULL AND have all of (actor, payload_json, decided_at_iso)
+--    NULL. The 0009 event-shape trigger only gated on `kind IS NOT NULL`,
+--    so a direct-SQL caller could insert a row with kind=NULL but the
+--    other event fields populated; the synthesis step below (`CASE WHEN
+--    kind IS NULL THEN <sentinel> ELSE <existing> END`) would silently
+--    overwrite the real authorship/payload/iso with sentinels. Fail
+--    closed instead so the operator can repair the drift manually
+--    rather than losing audit data.
+CREATE TEMP TABLE __cairn_assert_legacy_drift (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_legacy_drift_trg
+  BEFORE INSERT ON __cairn_assert_legacy_drift
+  FOR EACH ROW WHEN NEW.n > 0
+BEGIN
+  SELECT RAISE(ABORT,
+    'migration 0021: consent_journal contains kind-NULL row(s) with populated event fields (post-0009 direct-SQL drift); blanket-synthesizing legacy sentinels would destroy authorship/payload data. Resolve manually before re-running migration (issue #267).');
+END;
+INSERT INTO __cairn_assert_legacy_drift (n)
+  SELECT COUNT(*) FROM consent_journal
+   WHERE kind IS NULL
+     AND (actor IS NOT NULL
+       OR payload_json IS NOT NULL
+       OR decided_at_iso IS NOT NULL);
+DROP TRIGGER __cairn_assert_legacy_drift_trg;
+DROP TABLE __cairn_assert_legacy_drift;
+
 -- 0c. Two-part metadata preflight:
 --     (legacy half) Legacy rows' consent_id / scope / op_id / subject
 --     domain classes — see the round-6 high finding. Pre-0011 schema
@@ -963,14 +990,30 @@ CREATE INDEX consent_journal_kind_idx
 --    column-affinity rules are clearer. UPDATEs on this table are
 --    unconstrained — the append-only triggers attach to consent_journal
 --    only.
+--    Round-12 medium finding: `applied_at = strftime('%s','now') * 1000`
+--    is second-resolution and is preserved verbatim by DB copies. Two
+--    DBs migrated in the same second collide on (migration_id,
+--    applied_at), and a backup restore preserves the original
+--    applied_at — so a stale sidecar from the source DB would silently
+--    suppress replay against the restored DB. We add a per-DB UUID
+--    column `db_nonce` (32 hex chars from `randomblob(16)`) and bind
+--    sidecar consumption to that instead of (in addition to)
+--    applied_at. randomblob() produces fresh bytes on every INSERT so
+--    two DBs migrated in the same instant get different nonces, and a
+--    backup restore preserves the source nonce so that a sidecar
+--    written against the source still matches — that's intentional:
+--    the nonce identifies the DB schema instance, and the audit log
+--    rebuilt against the restored DB is identical to the source's by
+--    construction (rebuild from rowid 0 is deterministic).
 CREATE TABLE IF NOT EXISTS consent_mirror_resets (
   migration_id INTEGER NOT NULL PRIMARY KEY,
   applied_at   INTEGER NOT NULL,
-  consumed     INTEGER NOT NULL DEFAULT 0
+  consumed     INTEGER NOT NULL DEFAULT 0,
+  db_nonce     TEXT NOT NULL
 );
 
-INSERT INTO consent_mirror_resets (migration_id, applied_at, consumed)
-  VALUES (21, strftime('%s','now') * 1000, 0);
+INSERT INTO consent_mirror_resets (migration_id, applied_at, consumed, db_nonce)
+  VALUES (21, strftime('%s','now') * 1000, 0, lower(hex(randomblob(16))));
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (21, '0021_consent_kind_not_null', '', strftime('%s','now') * 1000);
