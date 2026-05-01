@@ -111,13 +111,18 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
     writeln!(md, "Corpus: {} pages", fixture.pages.len())?;
     writeln!(md, "Queries: {} (graded)", fixture.queries.len())?;
     writeln!(md)?;
-    writeln!(md, "| Adapter | P@5 | R@5 | MRR | nDCG@5 |")?;
-    writeln!(md, "|---|---|---|---|---|")?;
+    writeln!(md, "| Adapter | P@5 | R@5 | MRR | nDCG@5 | n |")?;
+    writeln!(md, "|---|---|---|---|---|---|")?;
     for row in &all_rows {
         writeln!(
             md,
-            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} |",
-            row.adapter, row.p_at_5, row.r_at_5, row.mrr, row.ndcg_at_5
+            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {} |",
+            row.adapter,
+            row.p_at_5,
+            row.r_at_5,
+            row.mrr,
+            row.ndcg_at_5,
+            row.graded_queries,
         )?;
     }
     writeln!(md)?;
