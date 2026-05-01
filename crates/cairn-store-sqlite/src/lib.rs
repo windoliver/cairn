@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
@@ -17,7 +18,7 @@ use cairn_core::session::{
     SessionResolutionSource,
 };
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
@@ -29,7 +30,7 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// the compile-time guard below so the manifest range and the trait surface
 /// derive from one binding.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
+    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0));
 
 /// Errors raised while opening or initializing the `SQLite` store.
 #[derive(Debug, thiserror::Error)]
@@ -59,6 +60,7 @@ impl SqliteMemoryStore {
     /// Returns any `SQLite` error from opening the database or creating schema.
     pub fn open_in_memory() -> Result<Self, SqliteStoreError> {
         let conn = Connection::open_in_memory()?;
+        configure_connection(&conn)?;
         initialize_schema(&conn)?;
         Ok(Self {
             conn: Some(Mutex::new(conn)),
@@ -74,6 +76,7 @@ impl SqliteMemoryStore {
     /// Returns any `SQLite` error from opening the database or creating schema.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, SqliteStoreError> {
         let conn = Connection::open(db_path)?;
+        configure_connection(&conn)?;
         initialize_schema(&conn)?;
         Ok(Self {
             conn: Some(Mutex::new(conn)),
@@ -128,7 +131,9 @@ impl MemoryStore for SqliteMemoryStore {
         request.validate()?;
 
         let mut conn = self.connection()?;
-        let tx = conn.transaction().map_err(to_session_store_error)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(to_session_store_error)?;
 
         let resolved = if let Some(selected) = request.candidates.select_direct()? {
             resolve_direct(&tx, request, &selected)?
@@ -155,6 +160,10 @@ register_plugin!(
     "cairn-store-sqlite",
     MANIFEST_TOML
 );
+
+fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))
+}
 
 fn initialize_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(

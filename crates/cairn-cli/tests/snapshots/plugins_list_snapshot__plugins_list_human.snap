@@ -5,5 +5,5 @@ expression: text
 NAME                  CONTRACT              VERSION-RANGE     SOURCE
 cairn-mcp             MCPServer             [0.1.0, 0.2.0)    bundled:cairn-mcp
 cairn-sensors-local   SensorIngress         [0.1.0, 0.2.0)    bundled:cairn-sensors-local
-cairn-store-sqlite    MemoryStore           [0.1.0, 0.2.0)    bundled:cairn-store-sqlite
+cairn-store-sqlite    MemoryStore           [0.2.0, 0.3.0)    bundled:cairn-store-sqlite
 cairn-workflows       WorkflowOrchestrator  [0.1.0, 0.2.0)    bundled:cairn-workflows

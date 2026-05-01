@@ -1,13 +1,14 @@
 //! `MemoryStore` contract (brief §4 row 1).
 //!
 //! P0 scaffold: surface only — `name`, `capabilities`,
-//! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
+//! `supported_contract_versions`, and session resolution. CRUD/FTS/ANN/graph
+//! methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
 use crate::session::{ResolveSessionRequest, ResolvedSession, SessionError};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 2, 0);
 
 /// Static capability declaration for a `MemoryStore` impl.
 ///
@@ -78,7 +79,7 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 3, 0))
         }
     }
 

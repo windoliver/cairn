@@ -1,5 +1,8 @@
 //! SQLite-backed session lifecycle tests.
 
+use std::sync::{Arc, Barrier};
+use std::thread;
+
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::session::{
     DEFAULT_IDLE_WINDOW_MILLIS, ResolveSessionRequest, SessionContext, SessionError,
@@ -59,6 +62,42 @@ fn repeated_call_in_same_context_reuses_active_session() {
     assert_eq!(second.source, SessionResolutionSource::AutoDiscovery);
     assert_eq!(second.session_id, first.session_id);
     assert_eq!(second.record.last_activity_at_unix_millis, 2_000);
+}
+
+#[test]
+fn concurrent_auto_create_reuses_single_session() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("cairn-session-resolution-{}", ulid::Ulid::new()));
+    std::fs::create_dir(&temp_dir).expect("temp dir");
+    let db_path = temp_dir.join("sessions.sqlite3");
+
+    let thread_count = 8;
+    let barrier = Arc::new(Barrier::new(thread_count));
+    let mut handles = Vec::with_capacity(thread_count);
+    for _ in 0..thread_count {
+        let barrier = Arc::clone(&barrier);
+        let db_path = db_path.clone();
+        handles.push(thread::spawn(move || {
+            let store = SqliteMemoryStore::open(&db_path).expect("file sqlite store");
+            barrier.wait();
+            store
+                .resolve_session(&request(Some("project-concurrent"), 5_000))
+                .expect("session resolution should serialize")
+        }));
+    }
+
+    let resolved: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread should not panic"))
+        .collect();
+
+    let session_id = &resolved[0].session_id;
+    assert_eq!(resolved.iter().filter(|session| session.created).count(), 1);
+    for session in &resolved {
+        assert_eq!(&session.session_id, session_id);
+    }
+
+    std::fs::remove_dir_all(&temp_dir).expect("remove temp dir");
 }
 
 #[test]
