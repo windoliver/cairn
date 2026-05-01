@@ -71,16 +71,40 @@
 --                         decided_at_iso is gated by the 0009
 --                         `consent_journal_event_requires_iso` trigger,
 --                         so we keep it as-is.
---   * `rowid`           ← preserved 1:1 for any healthy `rowid > 0` row
---                         (mirror cursor stability). Pathological
---                         `rowid <= 0` rows (only reachable on legacy
---                         pre-0011 paths, since the 0011 trigger
---                         rejects them but does not fire on null-kind
---                         rows) are renumbered: `NULL` lets SQLite
---                         auto-assign a positive rowid above MAX(rowid),
---                         so the post-0021 `consent_journal_event_
---                         requires_positive_rowid` invariant holds for
---                         every row.
+--   * `rowid`           ← preserved 1:1 unconditionally (mirror cursor
+--                         stability AND replay-order preservation).
+--                         Pathological `rowid <= 0` rows (only reachable
+--                         on legacy pre-0011 paths) would have to be
+--                         renumbered to satisfy the post-0021 positive-
+--                         rowid invariant — but renumbering reorders
+--                         historical events relative to the consent
+--                         readers' `WHERE rowid > cursor ORDER BY rowid`
+--                         tail. Rather than silently reorder events, we
+--                         FAIL CLOSED: a pre-rebuild SQL assert (see
+--                         step 0 below) ABORTs the migration when any
+--                         legacy `rowid <= 0` row exists, leaving the
+--                         operator to clean such rows manually before
+--                         re-running the upgrade.
+--
+-- Pre-rebuild fail-closed asserts (step 0): two invariants on the
+-- legacy data must hold before the rebuild proceeds, because the
+-- rebuild SELECT cannot repair them without changing observable
+-- semantics:
+--   1. No legacy row may have `rowid <= 0` — see the rowid synthesis
+--      rule above for why renumbering is unsafe.
+--   2. Every legacy row's `decided_at` must be representable as RFC3339
+--      via `strftime`. SQLite's strftime returns NULL for out-of-range
+--      UNIX seconds (e.g. UNIX millis values past year 9999). A NULL
+--      result would silently insert a row with `kind != NULL` AND
+--      `decided_at_iso = NULL`; the event readers gate on
+--      `kind IS NOT NULL` and would surface it; decode would then fail
+--      on the missing iso field, bricking the consent mirror.
+-- Both asserts use the temp-table-with-trigger idiom: a TEMP TABLE
+-- guarded by a BEFORE INSERT trigger that RAISE(ABORT)s when a
+-- non-zero count is inserted. Aborting before any DROP/CREATE/data-
+-- move runs leaves the existing schema untouched (the migration
+-- transaction rolls back). Operators must resolve the offending rows
+-- manually before re-running the migration.
 --
 -- The broader 0011 hardening triggers gate INSERTs into the new table,
 -- but they only fire when columns they require are populated. We drop
@@ -101,6 +125,44 @@
 -- the new column-level CHECK supersedes it. Other 0009/0011 triggers
 -- have their `WHEN NEW.kind IS NOT NULL AND …` guard stripped (kind is
 -- now NOT NULL by column constraint, so the guard is tautological).
+
+-- 0. Pre-rebuild fail-closed asserts. MUST run before any DROP /
+--    CREATE / data-move SQL so an aborted assert leaves the existing
+--    schema fully intact (SQLite rolls back the migration transaction).
+--    The temp-table + BEFORE INSERT trigger pattern is pure SQL: the
+--    trigger fires on the INSERT, sees a non-zero count, and RAISEs
+--    ABORT with a stable message that the migration test asserts on.
+--    TEMP objects are scoped to the connection and dropped at the end
+--    of step 0 so subsequent migrations see a clean namespace.
+
+-- 0a. Abort if any legacy row has rowid <= 0 (Finding 1).
+CREATE TEMP TABLE __cairn_assert_legacy_rowid (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_legacy_rowid_trg
+  BEFORE INSERT ON __cairn_assert_legacy_rowid
+  FOR EACH ROW WHEN NEW.n > 0
+BEGIN
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) with rowid <= 0; cannot promote without changing replay order. Resolve manually before re-running migration (issue #255).');
+END;
+INSERT INTO __cairn_assert_legacy_rowid (n)
+  SELECT COUNT(*) FROM consent_journal WHERE kind IS NULL AND rowid <= 0;
+DROP TRIGGER __cairn_assert_legacy_rowid_trg;
+DROP TABLE __cairn_assert_legacy_rowid;
+
+-- 0b. Abort if any legacy row's decided_at can't render as RFC3339
+--     (Finding 2). strftime returns NULL for out-of-range UNIX seconds.
+CREATE TEMP TABLE __cairn_assert_legacy_iso (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_legacy_iso_trg
+  BEFORE INSERT ON __cairn_assert_legacy_iso
+  FOR EACH ROW WHEN NEW.n > 0
+BEGIN
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose decided_at cannot be rendered as RFC3339 (out-of-range UNIX millis). Resolve manually before re-running migration (issue #255).');
+END;
+INSERT INTO __cairn_assert_legacy_iso (n)
+  SELECT COUNT(*) FROM consent_journal
+   WHERE kind IS NULL
+     AND strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch') IS NULL;
+DROP TRIGGER __cairn_assert_legacy_iso_trg;
+DROP TABLE __cairn_assert_legacy_iso;
 
 -- 1. Drop ALL triggers attached to the old consent_journal. They are
 --    re-created at the end of this migration against the renamed table.
@@ -188,7 +250,7 @@ INSERT INTO consent_journal_v2 (
   payload_json, decided_at_iso, expires_at_iso
 )
 SELECT
-  CASE WHEN rowid > 0 THEN rowid ELSE NULL END AS rowid,
+  rowid,
   consent_id, subject, scope, decision, reason, granted_by,
   decided_at, expires_at, op_id,
   COALESCE(

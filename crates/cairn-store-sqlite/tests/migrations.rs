@@ -1460,15 +1460,16 @@ fn consent_journal_rebuild_synthesizes_legacy_event_fields_for_decode() {
 }
 
 #[test]
-fn consent_journal_rebuild_renumbers_nonpositive_rowid() {
-    // Phase-B (#255, brief §14): pathological legacy rows at `rowid <= 0`
-    // (only reachable via the pre-0011 null-kind path that the
-    // `consent_journal_event_requires_positive_rowid` trigger does not
-    // gate) must be renumbered into positive rowids by the 0021 rebuild,
-    // so the post-0021 invariant `rowid > 0 for every row` holds and the
-    // mirror cursor can advance past them monotonically.
-    use cairn_store_sqlite::consent::read_since_rowid;
-
+fn consent_journal_rebuild_aborts_on_nonpositive_rowid() {
+    // Phase-B (#255, brief §14): round-4 High finding. An earlier draft
+    // of 0021 silently renumbered legacy `rowid <= 0` rows by passing
+    // `NULL` as the rowid in the rebuild SELECT, letting SQLite assign a
+    // fresh rowid above MAX. That moved the offending row AFTER newer
+    // events in the mirror's `WHERE rowid > cursor ORDER BY rowid` tail
+    // — i.e. silently reordered history. The fix: a pre-rebuild SQL
+    // assert ABORTs the migration so the operator can clean the row
+    // manually before re-running. The migration transaction rolls back,
+    // leaving the original schema intact.
     let mut conn = open_at_version(20);
     conn.execute(
         "INSERT INTO consent_journal \
@@ -1477,45 +1478,68 @@ fn consent_journal_rebuild_renumbers_nonpositive_rowid() {
         [],
     )
     .expect("legacy insert at rowid=0");
-    // Sanity: legacy null-kind path actually let us land on rowid 0.
-    let rowid_before: i64 = conn
-        .query_row(
-            "SELECT rowid FROM consent_journal WHERE consent_id = 'rowid-zero'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("rowid before");
-    assert_eq!(
-        rowid_before, 0,
-        "test premise: legacy v20 path admits rowid = 0 for null-kind rows"
-    );
 
-    migrations().to_version(&mut conn, 21).expect("apply 0021");
-
-    let rowid_after: i64 = conn
-        .query_row(
-            "SELECT rowid FROM consent_journal WHERE consent_id = 'rowid-zero'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("rowid after");
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on legacy rowid <= 0");
+    let msg = format!("{err:#}");
     assert!(
-        rowid_after > 0,
-        "rebuild must renumber pathological rowid <= 0 to a positive value (got {rowid_after})"
+        msg.contains("rowid <= 0"),
+        "abort message must mention `rowid <= 0` so operators can grep \
+         the migration source for the cause; got: {msg}"
     );
 
-    let events = read_since_rowid(&conn, 0).expect("read_since_rowid");
-    assert_eq!(
-        events.len(),
-        1,
-        "renumbered legacy row must surface to the mirror cursor: {events:?}"
+    // Original row still present — rollback intact, no partial rebuild.
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'rowid-zero'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "rowid-zero");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_unrenderable_decided_at() {
+    // Phase-B (#255, brief §14): round-4 Medium finding. SQLite's
+    // `strftime('%Y-%m-%dT%H:%M:%SZ', n, 'unixepoch')` returns NULL for
+    // out-of-range UNIX seconds (e.g. UNIX millis past year 9999). An
+    // earlier draft of 0021 used that strftime to synthesize
+    // `decided_at_iso` for legacy rows; a NULL result would silently
+    // produce a row with `kind != NULL` AND `decided_at_iso = NULL`,
+    // which the event readers would surface (gating only on
+    // `kind IS NOT NULL`) but decode would then fail on the missing iso
+    // field, bricking the consent mirror. The fix: a pre-rebuild SQL
+    // assert ABORTs the migration. Operator must clean the row first.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('out-of-range', 'sub', 'private', 'GRANT', 'hmn:t', \
+                 253402300800000000)",
+        [],
+    )
+    .expect("legacy insert with out-of-range decided_at");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on unrenderable decided_at");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cannot be rendered as RFC3339") || msg.contains("out-of-range UNIX millis"),
+        "abort message must mention RFC3339 / out-of-range UNIX millis; got: {msg}"
     );
-    assert_eq!(events[0].1.consent_id, "rowid-zero");
-    assert_eq!(
-        events[0].1.actor.as_str(),
-        "hmn:legacy",
-        "renumbered legacy row also gets the fixed `hmn:legacy` sentinel actor"
-    );
+
+    // Original row still present — rollback intact, no partial rebuild.
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'out-of-range'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "out-of-range");
 }
 
 #[test]
