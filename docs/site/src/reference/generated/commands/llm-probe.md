@@ -17,6 +17,10 @@ Options:
       --prompt <TEXT>
           Prompt to send (default: "Reply with the single word: ping")
 
+      --schema-file <PATH>
+          Path to a JSON Schema file. When set, the probe requests JSON output and validates the
+          response against the schema (exits 1 on validation failure).
+
       --json
           Emit JSON receipt instead of human-readable output
 

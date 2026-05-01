@@ -13,7 +13,7 @@ use cairn_core::domain::session::{
 use cairn_store_sqlite::{NewSessionMetadata, ResolveOutcome, open, open_in_memory};
 
 fn user() -> Identity {
-    Identity::parse("usr:alice").expect("valid")
+    Identity::parse("hmn:alice").expect("valid")
 }
 
 fn agent() -> Identity {
@@ -357,7 +357,7 @@ async fn migration_dedupes_preexisting_active_null_project_duplicates() {
                 "INSERT INTO sessions \
                    (session_id, user_id, agent_id, project_root, title, \
                     created_at, last_activity_at, ended_at) \
-                 VALUES (?1, 'usr:alice', 'agt:cli:x:y:v1', NULL, '', ?2, ?2, NULL)",
+                 VALUES (?1, 'hmn:alice', 'agt:cli:x:y:v1', NULL, '', ?2, ?2, NULL)",
                 rusqlite::params![sid, last],
             )
             .expect("insert");
@@ -371,7 +371,7 @@ async fn migration_dedupes_preexisting_active_null_project_duplicates() {
     // The newer row (S_NEW, last_activity=200) wins; the older (S_OLD,
     // last_activity=100) is ended.
     let id = SessionIdentity::new(
-        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("hmn:alice").expect("user"),
         Identity::parse("agt:cli:x:y:v1").expect("agent"),
         None,
     )
@@ -570,7 +570,7 @@ async fn empty_project_root_is_rejected_at_db_layer() {
     let res = conn.execute(
         "INSERT INTO sessions (session_id, user_id, agent_id, project_root, title, \
                               created_at, last_activity_at, ended_at) \
-         VALUES ('S1', 'usr:alice', 'agt:foo:bar:baz:v1', '', '', 0, 0, NULL)",
+         VALUES ('S1', 'hmn:alice', 'agt:foo:bar:baz:v1', '', '', 0, 0, NULL)",
         [],
     );
     let err = res.expect_err("empty project_root must be rejected by trigger");
@@ -651,20 +651,20 @@ async fn concurrent_resolve_or_create_yields_one_session() {
 
 #[tokio::test]
 async fn explicit_session_resolution_rejects_foreign_identity() {
-    // Alice creates a session under /repo. Bob (different usr:) hands over
+    // Alice creates a session under /repo. Bob (different hmn:) hands over
     // alice's session id — perhaps copied from the env, leaked through a
     // hostile harness, or just a dangling CAIRN_SESSION_ID. The store
     // must refuse to operate on alice's row under bob's identity.
     let store = open_in_memory().await.expect("open");
 
     let alice = SessionIdentity::new(
-        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("hmn:alice").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )
     .expect("alice identity");
     let bob = SessionIdentity::new(
-        Identity::parse("usr:bob").expect("user"),
+        Identity::parse("hmn:bob").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )
@@ -707,7 +707,7 @@ async fn explicit_session_resolution_fails_closed_for_missing() {
     let store = open_in_memory().await.expect("open");
 
     let alice = SessionIdentity::new(
-        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("hmn:alice").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )
@@ -794,16 +794,16 @@ async fn migration_ends_active_rows_with_relative_project_root() {
         // Each gets its own (user, agent, project_root) so the unique
         // index doesn't reject the seed itself.
         for (sid, user, agent, root) in [
-            ("S_REL", "usr:legacy", "agt:cli:x:y:v1", Some("subdir/repo")),
-            ("S_POSIX", "usr:abs1", "agt:cli:x:y:v1", Some("/abs/repo")),
-            ("S_WIN", "usr:abs2", "agt:cli:x:y:v1", Some(r"C:\repo")),
-            ("S_UNC", "usr:abs3", "agt:cli:x:y:v1", Some(r"\\srv\share")),
-            ("S_WINFWD", "usr:abs5", "agt:cli:x:y:v1", Some("C:/repo")),
+            ("S_REL", "hmn:legacy", "agt:cli:x:y:v1", Some("subdir/repo")),
+            ("S_POSIX", "hmn:abs1", "agt:cli:x:y:v1", Some("/abs/repo")),
+            ("S_WIN", "hmn:abs2", "agt:cli:x:y:v1", Some(r"C:\repo")),
+            ("S_UNC", "hmn:abs3", "agt:cli:x:y:v1", Some(r"\\srv\share")),
+            ("S_WINFWD", "hmn:abs5", "agt:cli:x:y:v1", Some("C:/repo")),
             // Single leading backslash is *not* UNC and *not* absolute on
             // any platform — POSIX treats `\` as a filename character, and
             // Windows requires `\\server\share` for UNC. Must be ended.
-            ("S_BS_REL", "usr:legacy2", "agt:cli:x:y:v1", Some(r"\repo")),
-            ("S_NULL", "usr:abs4", "agt:cli:x:y:v1", None),
+            ("S_BS_REL", "hmn:legacy2", "agt:cli:x:y:v1", Some(r"\repo")),
+            ("S_NULL", "hmn:abs4", "agt:cli:x:y:v1", None),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -820,17 +820,17 @@ async fn migration_ends_active_rows_with_relative_project_root() {
     let store = open(&db_path).await.expect("open after 0017");
 
     for (sid, user, root, expect_ended) in [
-        ("S_REL", "usr:legacy", Some("subdir/repo"), true),
-        ("S_POSIX", "usr:abs1", Some("/abs/repo"), false),
+        ("S_REL", "hmn:legacy", Some("subdir/repo"), true),
+        ("S_POSIX", "hmn:abs1", Some("/abs/repo"), false),
         // 0016 case-folds Windows-shape rows to match the runtime
         // ASCII-lowercase canonical (`SessionIdentity::new`).
-        ("S_WIN", "usr:abs2", Some(r"c:\repo"), false),
-        ("S_UNC", "usr:abs3", Some(r"\\srv\share"), false),
+        ("S_WIN", "hmn:abs2", Some(r"c:\repo"), false),
+        ("S_UNC", "hmn:abs3", Some(r"\\srv\share"), false),
         // 0014 leaves C:/repo active; 0015 canonicalizes slashes; 0016
         // lowercases.
-        ("S_WINFWD", "usr:abs5", Some(r"c:\repo"), false),
-        ("S_BS_REL", "usr:legacy2", Some(r"\repo"), true),
-        ("S_NULL", "usr:abs4", None, false),
+        ("S_WINFWD", "hmn:abs5", Some(r"c:\repo"), false),
+        ("S_BS_REL", "hmn:legacy2", Some(r"\repo"), true),
+        ("S_NULL", "hmn:abs4", None, false),
     ] {
         let sess = store
             .get_session_unchecked(
@@ -923,29 +923,29 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
         // not be touched, and a POSIX path containing `/` that must
         // also not be corrupted into `\`.
         for (sid, user, root) in [
-            ("S_DRV_FWD", "usr:win1", "C:/repo"),
+            ("S_DRV_FWD", "hmn:win1", "C:/repo"),
             // `//srv/share` is treated as POSIX, not UNC, so it
             // passes through migration 0015 unchanged.
-            ("S_POSIX_DBL", "usr:win2", "//srv/share"),
-            ("S_DRV_OK", "usr:win3", r"D:\repo"),
-            ("S_POSIX_OK", "usr:nix1", "/abs/repo"),
+            ("S_POSIX_DBL", "hmn:win2", "//srv/share"),
+            ("S_DRV_OK", "hmn:win3", r"D:\repo"),
+            ("S_POSIX_OK", "hmn:nix1", "/abs/repo"),
             // Mixed-slash variants — a drive path that starts canonical
             // (`E:\`) but has internal `/`, and a UNC that starts
             // canonical (`\\srv\`) but has `/` deeper in the path.
             // These survive dedup and must still be rewritten to fully
             // canonical backslash form by the rewrite step.
-            ("S_DRV_MIX", "usr:win4", r"E:\foo/bar"),
-            ("S_UNC_MIX", "usr:win5", r"\\srv\share/sub"),
+            ("S_DRV_MIX", "hmn:win4", r"E:\foo/bar"),
+            ("S_UNC_MIX", "hmn:win5", r"\\srv\share/sub"),
             // Trailing-separator variants — runtime
             // `normalize_project_root` trims these, so the migration
             // must too or upgrade splits the session.
-            ("S_DRV_TRAIL", "usr:win6", "F:/repo/"),
-            ("S_UNC_TRAIL", "usr:win7", r"\\srv\share\"),
+            ("S_DRV_TRAIL", "hmn:win6", "F:/repo/"),
+            ("S_UNC_TRAIL", "hmn:win7", r"\\srv\share\"),
             // Drive-root case: `G:\` must NOT be trimmed to `G:` (which
             // would be drive-relative on Windows and rejected by the
             // runtime classifier). Slash variant `G:/` must collapse to
             // `G:\` and stay there.
-            ("S_DRV_ROOT", "usr:win8", "G:/"),
+            ("S_DRV_ROOT", "hmn:win8", "G:/"),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -993,7 +993,7 @@ async fn migration_canonicalizes_legacy_windows_slash_project_roots() {
     // A post-upgrade caller using the canonical write-path identity
     // (`C:\repo`) finds the legacy `C:/repo` row by the same id.
     let canonical_id = SessionIdentity::new(
-        Identity::parse("usr:win1").expect("user"),
+        Identity::parse("hmn:win1").expect("user"),
         Identity::parse("agt:cli:x:y:v1").expect("agent"),
         Some(r"C:\repo".into()),
     )
@@ -1075,7 +1075,7 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
             "INSERT INTO sessions \
                (session_id, user_id, agent_id, project_root, title, \
                 created_at, last_activity_at, ended_at) \
-             VALUES ('S_ENDED_LEG', 'usr:winx', 'agt:cli:x:y:v1', \
+             VALUES ('S_ENDED_LEG', 'hmn:winx', 'agt:cli:x:y:v1', \
                      'C:/repo/', '', 100, 100, 200)",
             [],
         )
@@ -1086,7 +1086,7 @@ async fn migration_canonicalizes_ended_legacy_windows_rows_for_explicit_resolve(
 
     // Caller's canonical identity for the same project.
     let canonical = SessionIdentity::new(
-        Identity::parse("usr:winx").expect("user"),
+        Identity::parse("hmn:winx").expect("user"),
         Identity::parse("agt:cli:x:y:v1").expect("agent"),
         Some(r"C:\repo".into()),
     )
@@ -1178,8 +1178,8 @@ async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolv
         // separator) and UNC. Both must surface SessionEnded after
         // 0016 strips + lowercases ended rows too.
         for (sid, user, root) in [
-            ("S_ENDED_VRB_DRV", "usr:vrb1", r"\\?\C:\Repo\"),
-            ("S_ENDED_VRB_UNC", "usr:vrb2", r"\\?\UNC\Srv\Share"),
+            ("S_ENDED_VRB_DRV", "hmn:vrb1", r"\\?\C:\Repo\"),
+            ("S_ENDED_VRB_UNC", "hmn:vrb2", r"\\?\UNC\Srv\Share"),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -1195,8 +1195,8 @@ async fn migration_canonicalizes_ended_verbatim_windows_rows_for_explicit_resolv
     let store = open(&db_path).await.expect("open after 0019");
 
     for (sid, user, raw_caller_root) in [
-        ("S_ENDED_VRB_DRV", "usr:vrb1", r"C:\Repo"),
-        ("S_ENDED_VRB_UNC", "usr:vrb2", r"\\Srv\Share"),
+        ("S_ENDED_VRB_DRV", "hmn:vrb1", r"C:\Repo"),
+        ("S_ENDED_VRB_UNC", "hmn:vrb2", r"\\Srv\Share"),
     ] {
         let canonical = SessionIdentity::new(
             Identity::parse(user).expect("user"),
@@ -1297,24 +1297,24 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
         // wins per the dedup partition.
         for (sid, user, root, last_act) in [
             // Pair A: verbatim drive + plain canonical, same identity.
-            ("S_VRB_DRV", "usr:dup1", r"\\?\C:\Repo", 200_i64),
-            ("S_PLN_DRV", "usr:dup1", r"c:\repo", 100_i64),
+            ("S_VRB_DRV", "hmn:dup1", r"\\?\C:\Repo", 200_i64),
+            ("S_PLN_DRV", "hmn:dup1", r"c:\repo", 100_i64),
             // Pair B: verbatim UNC + plain UNC mixed-case, same identity.
-            ("S_VRB_UNC", "usr:dup2", r"\\?\UNC\Srv\Share", 100_i64),
-            ("S_PLN_UNC", "usr:dup2", r"\\Srv\Share", 200_i64),
+            ("S_VRB_UNC", "hmn:dup2", r"\\?\UNC\Srv\Share", 100_i64),
+            ("S_PLN_UNC", "hmn:dup2", r"\\Srv\Share", 200_i64),
             // Standalone case-only legacy: must be lowercased in place.
-            ("S_MIX_DRV", "usr:solo1", r"H:\MixedCase\Path", 100_i64),
+            ("S_MIX_DRV", "hmn:solo1", r"H:\MixedCase\Path", 100_i64),
             // Standalone verbatim drive: must be stripped + lowercased.
-            ("S_VRB_SOLO", "usr:solo2", r"\\?\K:\Solo", 100_i64),
+            ("S_VRB_SOLO", "hmn:solo2", r"\\?\K:\Solo", 100_i64),
             // Verbatim drive ROOT: `\\?\C:\` must become `c:\` — NOT
             // `c:`. Trimming trailing `\` here would yield a
             // drive-relative path that the runtime classifier rejects,
             // forking the session on the next discovery.
-            ("S_VRB_ROOT", "usr:solo3", r"\\?\C:\", 100_i64),
+            ("S_VRB_ROOT", "hmn:solo3", r"\\?\C:\", 100_i64),
             // Same risk for the slash-spelling: `\\?\D:/` → `d:\`.
-            ("S_VRB_ROOT_FWD", "usr:solo4", r"\\?\D:/", 100_i64),
+            ("S_VRB_ROOT_FWD", "hmn:solo4", r"\\?\D:/", 100_i64),
             // POSIX must remain untouched (case + slashes).
-            ("S_POSIX_KEEP", "usr:nix", "/Abs/Repo", 100_i64),
+            ("S_POSIX_KEEP", "hmn:nix", "/Abs/Repo", 100_i64),
         ] {
             conn.execute(
                 "INSERT INTO sessions \
@@ -1457,7 +1457,7 @@ async fn migration_strips_verbatim_prefixes_and_case_folds() {
     // Post-upgrade caller using the runtime canonical (lowercase) form
     // resolves the migrated row.
     let canonical = SessionIdentity::new(
-        Identity::parse("usr:dup1").expect("user"),
+        Identity::parse("hmn:dup1").expect("user"),
         Identity::parse("agt:cli:x:y:v1").expect("agent"),
         Some(r"C:\Repo".into()),
     )
@@ -1479,13 +1479,13 @@ async fn touch_and_end_reject_cross_identity_session_ids() {
     let store = open_in_memory().await.expect("open");
 
     let alice = SessionIdentity::new(
-        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("hmn:alice").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )
     .expect("alice identity");
     let bob = SessionIdentity::new(
-        Identity::parse("usr:bob").expect("user"),
+        Identity::parse("hmn:bob").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )
@@ -1537,7 +1537,7 @@ async fn explicit_session_resolution_fails_closed_for_ended() {
     let store = open_in_memory().await.expect("open");
 
     let alice = SessionIdentity::new(
-        Identity::parse("usr:alice").expect("user"),
+        Identity::parse("hmn:alice").expect("user"),
         Identity::parse("agt:claude-code:opus-4-7:main:v1").expect("agent"),
         Some("/repo".into()),
     )

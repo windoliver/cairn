@@ -298,12 +298,12 @@ async fn cross_scope_records_isolate_via_scope_user_filter() {
     // because the filter DSL had no `scope_*` predicates.
     let mut alice = record_with('A', "shared body keyword needle", MemoryKind::User);
     alice.scope = ScopeTuple {
-        user: Some("usr:alice".to_owned()),
+        user: Some("hmn:alice".to_owned()),
         ..ScopeTuple::default()
     };
     let mut bob = record_with('B', "shared body keyword needle", MemoryKind::User);
     bob.scope = ScopeTuple {
-        user: Some("usr:bob".to_owned()),
+        user: Some("hmn:bob".to_owned()),
         ..ScopeTuple::default()
     };
     store.upsert(&alice).await.expect("alice");
@@ -313,7 +313,7 @@ async fn cross_scope_records_isolate_via_scope_user_filter() {
     let raw = serde_json::json!({
         "field": "scope_user",
         "op": "eq",
-        "value": "usr:alice",
+        "value": "hmn:alice",
     });
     let parsed: SearchArgsFilters = serde_json::from_value(raw).expect("filter parse");
     let validated = validate_filter(&parsed).expect("filter valid");
@@ -322,7 +322,7 @@ async fn cross_scope_records_isolate_via_scope_user_filter() {
     let page = store.search_keyword(&a).await.expect("search");
     assert_eq!(page.candidates.len(), 1, "scope_user filter must isolate");
     let scope = &page.candidates[0].scope;
-    assert_eq!(scope.user.as_deref(), Some("usr:alice"));
+    assert_eq!(scope.user.as_deref(), Some("hmn:alice"));
 }
 
 #[tokio::test]
@@ -335,12 +335,12 @@ async fn omitting_scope_filter_returns_every_scope() {
     let store = open_in_memory().await.expect("open");
     let mut alice = record_with('A', "shared body keyword needle", MemoryKind::User);
     alice.scope = ScopeTuple {
-        user: Some("usr:alice".to_owned()),
+        user: Some("hmn:alice".to_owned()),
         ..ScopeTuple::default()
     };
     let mut bob = record_with('B', "shared body keyword needle", MemoryKind::User);
     bob.scope = ScopeTuple {
-        user: Some("usr:bob".to_owned()),
+        user: Some("hmn:bob".to_owned()),
         ..ScopeTuple::default()
     };
     store.upsert(&alice).await.expect("alice");

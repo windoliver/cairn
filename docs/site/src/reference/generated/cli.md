@@ -29,6 +29,7 @@ Commands:
   vault          Manage the vault registry (brief §3.3)
   skill          Manage the Cairn skill bundle
   llm            LLM provider diagnostics (ADR 0001)
+  identity       Manage vault identities (§3.5 / §4.1)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -60,3 +61,4 @@ Options:
 - [`cairn vault`](commands/vault.md) - Manage the vault registry (brief §3.3)
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
+- [`cairn identity`](commands/identity.md) - Manage vault identities (§3.5 / §4.1)

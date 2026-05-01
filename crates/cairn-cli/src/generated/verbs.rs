@@ -61,7 +61,7 @@ pub fn summarize_subcommand() -> clap::Command {
         .arg(clap::Arg::new("persist").long("persist").action(clap::ArgAction::SetTrue))
         .arg(clap::Arg::new("kind").long("kind").value_name("STRING"))
         .arg(clap::Arg::new("citations").long("citations").value_name("ENUM").value_parser(["on", "compact", "off"]))
-        .arg(clap::Arg::new("record_ids").help("One or more record ULIDs.").required(false).num_args(1..))
+        .arg(clap::Arg::new("record_ids").help("One or more record ULIDs.").required(true).num_args(1..))
 }
 
 /// `cairn assemble_hot` subcommand builder.

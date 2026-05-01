@@ -75,14 +75,15 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
+    for args in [
+        &["search"][..],
+        &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"],
+        &["assemble_hot"],
+        &["capture_trace"],
+        &["lint"],
     ] {
-        let out = cli().arg(verb).output().expect("cairn <verb>");
+        let verb = args[0];
+        let out = cli().args(args).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
             "verb {verb} exited OK — should fail with Internal"

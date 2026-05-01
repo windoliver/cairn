@@ -22,6 +22,7 @@ path = "src/bin/cairn-docgen.rs"
 [dependencies]
 cairn-core = { workspace = true }
 cairn-idl = { workspace = true }
+cairn-keychain = { workspace = true }
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
 cairn-sensors-local = { workspace = true }
@@ -31,7 +32,7 @@ anyhow = { workspace = true }
 jsonschema = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs", "io-util"] }
-figment = { workspace = true }
+rusqlite = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -42,18 +43,26 @@ toml = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+fs2 = { workspace = true }
+rand_core = { workspace = true }
+whoami = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 cairn-sdk = { workspace = true }
+cairn-core = { workspace = true, features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+cairn-store-sqlite = { workspace = true }
 insta = { workspace = true }
 async-trait = { workspace = true }
 proptest = { workspace = true }
+rusqlite = { workspace = true }
 temp-env = { workspace = true }
 tempfile = { workspace = true }
 wiremock = { workspace = true }
 assert_cmd = "2"
 predicates = "3"
+tokio = { workspace = true }
 
 [lints]
 workspace = true

@@ -98,6 +98,31 @@ fn explicit_name_resolves_via_registry() {
 }
 
 #[test]
+fn explicit_dot_resolves_as_path_not_registry_name() {
+    // `--vault .` and `--vault ..` must resolve to the cwd / parent without
+    // hitting the registry — otherwise they'd error with `NotFound { name: "." }`.
+    let reg_dir = tempfile::tempdir().unwrap();
+    let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));
+    store.save(&VaultRegistry::default()).unwrap();
+
+    let resolved = resolve_vault(ResolveOpts {
+        explicit: Some(".".into()),
+        cwd: None,
+        store: &store,
+    })
+    .unwrap();
+    assert_eq!(resolved, PathBuf::from("."));
+
+    let resolved = resolve_vault(ResolveOpts {
+        explicit: Some("..".into()),
+        cwd: None,
+        store: &store,
+    })
+    .unwrap();
+    assert_eq!(resolved, PathBuf::from(".."));
+}
+
+#[test]
 fn explicit_unknown_name_errors() {
     let reg_dir = tempfile::tempdir().unwrap();
     let store = VaultRegistryStore::new(reg_dir.path().join("vaults.toml"));

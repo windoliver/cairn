@@ -1419,7 +1419,7 @@ mod tests {
 
     #[test]
     fn sensor_label_rejects_non_sensor_identity() {
-        let usr = Identity::parse("usr:tafeng").expect("valid");
+        let usr = Identity::parse("hmn:tafeng").expect("valid");
         let err = SensorLabel::from_identity(&usr).unwrap_err();
         assert!(matches!(err, DomainError::MalformedCapture { .. }));
     }

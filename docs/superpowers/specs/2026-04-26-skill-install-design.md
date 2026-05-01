@@ -1,8 +1,8 @@
 # Design: `cairn skill install` — directory writer and registration hints
 
-**Issue:** [#68](https://github.com/windoliver/cairn/issues/68)  
-**Design source:** §8.0.a-bis, §18.d  
-**Date:** 2026-04-26  
+**Issue:** [#68](https://github.com/windoliver/cairn/issues/68)
+**Design source:** §8.0.a-bis, §18.d
+**Date:** 2026-04-26
 **Status:** approved
 
 ---

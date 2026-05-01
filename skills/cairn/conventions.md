@@ -24,4 +24,3 @@ These kinds are sourced from the IDL taxonomy (§6 of the design brief). The aut
 - `playbook` — reusable procedures with decision trees
 - `strategy_success` — an ad-hoc procedure that worked
 - `trace` — reasoning trajectories (auto-captured; don't call directly)
-

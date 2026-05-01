@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// One entry in the vault registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct VaultEntry {
     /// Short human identifier, e.g. `"work"` or `"personal"`.
@@ -48,6 +49,7 @@ impl VaultEntry {
 /// label = "day job"
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct VaultRegistry {
     /// Name of the active default vault.

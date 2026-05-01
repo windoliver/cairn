@@ -1,8 +1,8 @@
 # SQLite → Markdown Projection & Resync
 
-**Issue:** #43 — [P0] Project SQLite records to markdown and rebuild from markdown safely  
-**Brief sections:** §3, §13.5.a, §13.5.c  
-**Dependencies:** #37 (MemoryRecord schema), #42 (vault registry)  
+**Issue:** #43 — [P0] Project SQLite records to markdown and rebuild from markdown safely
+**Brief sections:** §3, §13.5.a, §13.5.c
+**Dependencies:** #37 (MemoryRecord schema), #42 (vault registry)
 **Date:** 2026-04-27
 
 ---

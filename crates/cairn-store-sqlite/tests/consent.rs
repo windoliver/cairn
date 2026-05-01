@@ -20,7 +20,7 @@ fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
         kind: ConsentKind::ForgetIntent,
-        actor: Identity::parse("usr:tafeng").expect("identity"),
+        actor: Identity::parse("hmn:tafeng").expect("identity"),
         subject: target_hash.to_owned(),
         scope: "private".to_owned(),
         op_id: Some(format!("op-{consent_id}")),
@@ -40,7 +40,7 @@ fn sensor_event(consent_id: &str, label: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
         kind: ConsentKind::SensorEnable,
-        actor: Identity::parse("usr:tafeng").expect("identity"),
+        actor: Identity::parse("hmn:tafeng").expect("identity"),
         subject: format!("snr:{label}"),
         scope: "global".to_owned(),
         op_id: None,
@@ -70,16 +70,16 @@ fn append_round_trips_through_query_by_op() {
 fn query_by_actor_filters_to_principal() {
     let conn = open_in_memory().expect("open");
     let mut alice = forget_event("c-a", &h(0xa));
-    alice.actor = Identity::parse("usr:alice").expect("id");
+    alice.actor = Identity::parse("hmn:alice").expect("id");
     let mut bob = forget_event("c-b", &h(0xb));
-    bob.actor = Identity::parse("usr:bob").expect("id");
+    bob.actor = Identity::parse("hmn:bob").expect("id");
     bob.op_id = Some("op-bob".to_owned());
 
     append(&conn, &alice).expect("a");
     append(&conn, &bob).expect("b");
 
     let by_alice =
-        query_by_actor(&conn, &Identity::parse("usr:alice").expect("id")).expect("actor query");
+        query_by_actor(&conn, &Identity::parse("hmn:alice").expect("id")).expect("actor query");
     assert_eq!(by_alice.len(), 1);
     assert_eq!(by_alice[0].consent_id, "c-a");
 }
@@ -189,8 +189,8 @@ fn append_rejects_body_bearing_payload_via_serializer() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-bypass', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-bypass', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             rusqlite::params![hash, payload],
         )
         .unwrap_err();
@@ -222,7 +222,7 @@ fn round_trip_preserves_every_kind() {
             ConsentKind::PolicyChange => ConsentEvent {
                 consent_id: id.clone(),
                 kind: *kind,
-                actor: Identity::parse("usr:tafeng").expect("id"),
+                actor: Identity::parse("hmn:tafeng").expect("id"),
                 subject: "sensors.screen.enabled".to_owned(),
                 scope: "global".to_owned(),
                 op_id: None,
@@ -238,7 +238,7 @@ fn round_trip_preserves_every_kind() {
             ConsentKind::Grant | ConsentKind::Revoke => ConsentEvent {
                 consent_id: id.clone(),
                 kind: *kind,
-                actor: Identity::parse("usr:tafeng").expect("id"),
+                actor: Identity::parse("hmn:tafeng").expect("id"),
                 subject: "share_link:abcd".to_owned(),
                 scope: "team:platform".to_owned(),
                 op_id: None,
@@ -255,7 +255,7 @@ fn round_trip_preserves_every_kind() {
                 ConsentEvent {
                     consent_id: id.clone(),
                     kind: *kind,
-                    actor: Identity::parse("usr:tafeng").expect("id"),
+                    actor: Identity::parse("hmn:tafeng").expect("id"),
                     subject: promoted.clone(),
                     scope: "team:platform".to_owned(),
                     op_id: Some(format!("op-{id}")),
