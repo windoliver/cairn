@@ -45,6 +45,9 @@ expression: "&c"
     "model": "${CAIRN_MODEL}",
     "api_key": "${OPENAI_API_KEY}"
   },
+  "search": {
+    "local_embeddings": true
+  },
   "sensors": {
     "hooks": {
       "enabled": true

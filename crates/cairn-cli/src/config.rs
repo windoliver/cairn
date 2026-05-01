@@ -65,23 +65,30 @@ pub fn interpolate_env(src: &str) -> Result<String, ConfigError> {
 /// rejects the resulting config.
 pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
     use figment::Figment;
-    use figment::providers::{Env, Format, Serialized, Yaml};
+    use figment::providers::{Env, Serialized};
 
     let config_path = vault_path.join(".cairn/config.yaml");
 
-    let yaml_content: String = if config_path.exists() {
+    let file_config: Option<CairnConfig> = if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)
             .with_context(|| format!("reading {}", config_path.display()))?;
-        interpolate_env(&raw)
+        let yaml_content = interpolate_env(&raw)
             .map_err(anyhow::Error::from)
-            .with_context(|| "resolving ${VAR} placeholders in config")?
+            .with_context(|| "resolving ${VAR} placeholders in config")?;
+        Some(
+            serde_yml::from_str(&yaml_content)
+                .with_context(|| format!("parsing {}", config_path.display()))?,
+        )
     } else {
-        String::new()
+        None
     };
 
-    let config: CairnConfig = Figment::new()
-        .merge(Serialized::defaults(CairnConfig::default()))
-        .merge(Yaml::string(&yaml_content))
+    let mut figment = Figment::new().merge(Serialized::defaults(CairnConfig::default()));
+    if let Some(file_config) = file_config {
+        figment = figment.merge(Serialized::defaults(file_config));
+    }
+
+    let config: CairnConfig = figment
         .merge(Env::prefixed("CAIRN_").split("__"))
         .merge(Serialized::globals(cli))
         .extract()
@@ -116,7 +123,7 @@ pub fn write_default(vault_path: &Path) -> Result<()> {
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("creating {}", config_dir.display()))?;
 
-    let yaml = serde_yaml::to_string(&CairnConfig::default())
+    let yaml = serde_yml::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
 
     std::fs::write(&config_path, yaml)
