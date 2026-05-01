@@ -7,4 +7,4 @@
 //! pure preserves `cairn-core`'s no-I/O invariant — async lookups against
 //! `IdentityRegistry`, `MemoryStore`, etc. live one layer up.
 
-pub mod signature;
+pub mod author_lifecycle;
