@@ -28,7 +28,8 @@ expression: json
         },
         {
           "id": "initialize_and_list_tools",
-          "status": "ok",
+          "reason": "protocol-level initialize + tools/list check must run in cairn-mcp",
+          "status": "pending",
           "tier": 2
         }
       ],
@@ -146,7 +147,7 @@ expression: json
   ],
   "summary": {
     "failed": 0,
-    "ok": 17,
-    "pending": 5
+    "ok": 16,
+    "pending": 6
   }
 }
