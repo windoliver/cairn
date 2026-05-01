@@ -7,4 +7,5 @@
 
 pub mod config;
 pub mod plugins;
+pub mod session;
 pub mod verbs;

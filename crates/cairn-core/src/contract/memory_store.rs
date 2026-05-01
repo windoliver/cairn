@@ -4,6 +4,7 @@
 //! `supported_contract_versions`. CRUD/FTS/ANN/graph methods land in #46.
 
 use crate::contract::version::{ContractVersion, VersionRange};
+use crate::session::{ResolveSessionRequest, ResolvedSession, SessionError};
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 1, 0);
@@ -42,6 +43,18 @@ pub trait MemoryStore: Send + Sync {
 
     /// Range of `MemoryStore::CONTRACT_VERSION` values this impl accepts.
     fn supported_contract_versions(&self) -> VersionRange;
+
+    /// Resolve the active session for a caller or create one when absent
+    /// (§8.1).
+    fn resolve_session(
+        &self,
+        request: &ResolveSessionRequest,
+    ) -> Result<ResolvedSession, SessionError> {
+        let _ = request;
+        Err(SessionError::StoreUnavailable {
+            store: self.name().to_owned(),
+        })
+    }
 }
 
 #[cfg(test)]
