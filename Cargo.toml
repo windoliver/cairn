@@ -64,6 +64,12 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
 safetensors = { version = "0.7", default-features = false }
 
+# HTTP client — cairn-embeddings-openai only. Pinned at the workspace root so
+# the optional `openai` feature in cairn-cli pulls a single coherent version.
+# Heavy default features (default-tls, cookies, gzip) stay off; the openai
+# crate enables `json` + `rustls-tls` locally.
+reqwest = { version = "0.12", default-features = false }
+
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
 # tracks `[workspace.package].version`; bump them together.
@@ -76,6 +82,7 @@ cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
 cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
 cairn-embeddings-local = { path = "crates/cairn-embeddings-local", version = "0.0.1" }
+cairn-embeddings-openai = { path = "crates/cairn-embeddings-openai", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

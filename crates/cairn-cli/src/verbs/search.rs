@@ -7,12 +7,14 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use cairn_core::config::EmbeddingProvider;
 use cairn_core::contract::memory_store::{
     HybridSearchArgs, HybridSearchPage, MemoryStore as _, SemanticSearchArgs,
 };
 use cairn_core::domain::taxonomy::MemoryVisibility;
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::generated::verbs::search::SearchArgsMode;
+use cairn_embeddings_local::EmbeddingModel;
 use clap::ArgMatches;
 
 use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
@@ -116,8 +118,18 @@ fn run_semantic(sub: &ArgMatches, json: bool) -> ExitCode {
     let kind = config.search.embedding_model;
     let model_present = cache.is_present(kind);
     let caps = config.capabilities(model_present);
+    let provider = config.search.default_provider;
 
-    if caps.semantic_search {
+    // Fail-closed if OpenAi is requested but the `openai` feature is not
+    // compiled in. CLAUDE.md §4 invariant 6: never silently downgrade.
+    if let Some(rc) = openai_feature_gate(provider, json) {
+        return rc;
+    }
+
+    // For OpenAi we don't need a local model on disk, so the local
+    // capability gate doesn't apply. The local case still requires the
+    // weights to be present.
+    if provider == EmbeddingProvider::OpenAi || caps.semantic_search {
         // Run async dispatch on a single-thread runtime (short-lived CLI verb).
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -142,7 +154,7 @@ fn run_semantic(sub: &ArgMatches, json: bool) -> ExitCode {
         };
 
         rt.block_on(async move {
-            run_semantic_async(&vault_root, &db_path, query, limit, json, kind).await
+            run_semantic_async(&vault_root, &db_path, query, limit, json, kind, provider).await
         })
     } else {
         let op_id = new_operation_id();
@@ -169,6 +181,7 @@ fn run_semantic(sub: &ArgMatches, json: bool) -> ExitCode {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn run_semantic_async(
     vault_root: &Path,
     db_path: &Path,
@@ -176,33 +189,11 @@ async fn run_semantic_async(
     limit: usize,
     json: bool,
     kind: cairn_core::config::EmbeddingModelKind,
+    provider: EmbeddingProvider,
 ) -> ExitCode {
-    use anyhow::Context as _;
-
-    // Load model (CPU-bound).
-    let models_root = vault_root.join(".cairn").join("models");
-    let cache = cairn_embeddings_local::ModelCache::new(&models_root);
-    let embedder = match tokio::task::spawn_blocking(move || cache.ensure(kind))
-        .await
-        .context("join error")
-        .and_then(|r| r.context("model load failed"))
-    {
+    let embedder = match resolve_embedder(vault_root, kind, provider).await {
         Ok(e) => e,
-        Err(e) => {
-            let op_id = new_operation_id();
-            let msg = format!("{e:#}");
-            if json {
-                emit_json(&serde_json::json!({
-                    "operation_id": op_id.0,
-                    "verb": "search",
-                    "status": "error",
-                    "error": { "code": "Internal", "message": msg }
-                }));
-            } else {
-                human_error("search", "Internal", &msg, &op_id);
-            }
-            return ExitCode::FAILURE;
-        }
+        Err(rc) => return rc.emit(json),
     };
 
     // Open store with embedder.
@@ -347,8 +338,13 @@ fn run_hybrid(sub: &ArgMatches, json: bool) -> ExitCode {
     let kind = config.search.embedding_model;
     let model_present = cache.is_present(kind);
     let caps = config.capabilities(model_present);
+    let provider = config.search.default_provider;
 
-    if caps.semantic_search {
+    if let Some(rc) = openai_feature_gate(provider, json) {
+        return rc;
+    }
+
+    if provider == EmbeddingProvider::OpenAi || caps.semantic_search {
         // Run async dispatch on a single-thread runtime (short-lived CLI verb).
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -385,6 +381,7 @@ fn run_hybrid(sub: &ArgMatches, json: bool) -> ExitCode {
                 limit,
                 json,
                 kind,
+                provider,
                 fts_weights,
                 blend,
                 rrf_k,
@@ -425,37 +422,15 @@ async fn run_hybrid_async(
     limit: usize,
     json: bool,
     kind: cairn_core::config::EmbeddingModelKind,
+    provider: EmbeddingProvider,
     fts_column_weights: [f64; 4],
     blend: f32,
     rrf_k: usize,
     rerank_topk: usize,
 ) -> ExitCode {
-    use anyhow::Context as _;
-
-    // Load model (CPU-bound).
-    let models_root = vault_root.join(".cairn").join("models");
-    let cache = cairn_embeddings_local::ModelCache::new(&models_root);
-    let embedder = match tokio::task::spawn_blocking(move || cache.ensure(kind))
-        .await
-        .context("join error")
-        .and_then(|r| r.context("model load failed"))
-    {
+    let embedder = match resolve_embedder(vault_root, kind, provider).await {
         Ok(e) => e,
-        Err(e) => {
-            let op_id = new_operation_id();
-            let msg = format!("{e:#}");
-            if json {
-                emit_json(&serde_json::json!({
-                    "operation_id": op_id.0,
-                    "verb": "search",
-                    "status": "error",
-                    "error": { "code": "Internal", "message": msg }
-                }));
-            } else {
-                human_error("search", "Internal", &msg, &op_id);
-            }
-            return ExitCode::FAILURE;
-        }
+        Err(rc) => return rc.emit(json),
     };
 
     // Open store with embedder + configured FTS column weights.
@@ -561,4 +536,131 @@ fn render_hybrid_results(page: &HybridSearchPage, json: bool) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+// ── Embedder resolution ─────────────────────────────────────────────────────
+
+/// Pre-flight gate for the `openai` provider. Returns `Some(ExitCode)` when
+/// the caller selected `EmbeddingProvider::OpenAi` but the `openai` Cargo
+/// feature was not compiled in. Otherwise returns `None` and the caller
+/// continues into normal dispatch.
+fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCode> {
+    if provider != EmbeddingProvider::OpenAi {
+        return None;
+    }
+    #[cfg(feature = "openai")]
+    {
+        let _ = json; // intentionally unused on this branch
+        None
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let op_id = new_operation_id();
+        let msg = "search.default_provider = openai requires the `openai` cargo feature; \
+                   rebuild cairn-cli with `--features openai`"
+            .to_owned();
+        if json {
+            emit_json(&serde_json::json!({
+                "operation_id": op_id.0,
+                "verb": "search",
+                "status": "error",
+                "error": { "code": "CapabilityUnavailable", "message": msg }
+            }));
+        } else {
+            human_error("search", "CapabilityUnavailable", &msg, &op_id);
+        }
+        Some(ExitCode::from(69)) // EX_UNAVAILABLE
+    }
+}
+
+/// Reason an embedder could not be constructed. Carries enough context to
+/// emit an envelope error and an exit code at the verb boundary.
+struct EmbedderInitError {
+    code: &'static str,
+    msg: String,
+    exit: ExitCode,
+}
+
+impl EmbedderInitError {
+    fn emit(self, json: bool) -> ExitCode {
+        let op_id = new_operation_id();
+        if json {
+            emit_json(&serde_json::json!({
+                "operation_id": op_id.0,
+                "verb": "search",
+                "status": "error",
+                "error": { "code": self.code, "message": self.msg }
+            }));
+        } else {
+            human_error("search", self.code, &self.msg, &op_id);
+        }
+        self.exit
+    }
+}
+
+/// Build the embedder selected by `provider`.
+///
+/// - `Local`: load weights from `.cairn/models/<kind>` via `ModelCache`.
+/// - `OpenAi`: construct an `OpenAiEmbedder` from `OPENAI_API_KEY`.
+async fn resolve_embedder(
+    vault_root: &Path,
+    kind: cairn_core::config::EmbeddingModelKind,
+    provider: EmbeddingProvider,
+) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
+    match provider {
+        EmbeddingProvider::Local => resolve_local_embedder(vault_root, kind).await,
+        EmbeddingProvider::OpenAi => resolve_openai_embedder(kind),
+        // EmbeddingProvider is #[non_exhaustive]; future providers must opt in.
+        other => Err(EmbedderInitError {
+            code: "Internal",
+            msg: format!("unknown embedding provider: {other:?}"),
+            exit: ExitCode::FAILURE,
+        }),
+    }
+}
+
+async fn resolve_local_embedder(
+    vault_root: &Path,
+    kind: cairn_core::config::EmbeddingModelKind,
+) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
+    use anyhow::Context as _;
+
+    let models_root = vault_root.join(".cairn").join("models");
+    let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+    tokio::task::spawn_blocking(move || cache.ensure(kind))
+        .await
+        .context("join error")
+        .and_then(|r| r.context("model load failed"))
+        .map_err(|e| EmbedderInitError {
+            code: "Internal",
+            msg: format!("{e:#}"),
+            exit: ExitCode::FAILURE,
+        })
+}
+
+#[cfg(feature = "openai")]
+fn resolve_openai_embedder(
+    kind: cairn_core::config::EmbeddingModelKind,
+) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
+    use cairn_embeddings_openai::OpenAiEmbedder;
+    let embedder = OpenAiEmbedder::from_env(kind).map_err(|e| EmbedderInitError {
+        code: "CapabilityUnavailable",
+        msg: format!("OpenAI embedder init: {e}"),
+        exit: ExitCode::from(69),
+    })?;
+    Ok(Arc::new(embedder))
+}
+
+#[cfg(not(feature = "openai"))]
+fn resolve_openai_embedder(
+    _kind: cairn_core::config::EmbeddingModelKind,
+) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
+    // Unreachable in practice: the synchronous `openai_feature_gate` short-
+    // circuits before we ever get here. Keep this as a defensive fallback
+    // that fails closed instead of panicking.
+    Err(EmbedderInitError {
+        code: "CapabilityUnavailable",
+        msg: "openai feature not compiled in; rebuild with `--features openai`".to_owned(),
+        exit: ExitCode::from(69),
+    })
 }

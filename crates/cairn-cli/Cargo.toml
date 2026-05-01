@@ -11,6 +11,13 @@ readme.workspace = true
 description = "Cairn terminal entry point. Wires adapters into the verb layer."
 default-run = "cairn"
 
+[features]
+default = []
+# Opt-in: pulls cairn-embeddings-openai. When enabled, `cairn search` may
+# resolve `search.default_provider = openai` to OpenAi's HTTP embedding
+# endpoint (requires OPENAI_API_KEY). Default builds stay offline / local-only.
+openai = ["dep:cairn-embeddings-openai"]
+
 [[bin]]
 name = "cairn"
 path = "src/main.rs"
@@ -22,6 +29,7 @@ path = "src/bin/cairn-docgen.rs"
 [dependencies]
 cairn-core = { workspace = true }
 cairn-embeddings-local = { workspace = true }
+cairn-embeddings-openai = { workspace = true, optional = true }
 cairn-idl = { workspace = true }
 cairn-mcp = { workspace = true }
 cairn-store-sqlite = { workspace = true }
