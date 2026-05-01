@@ -19,28 +19,58 @@
 -- without a structural NULL filter that would also hide ANY future
 -- malformed row (and silently break the §14 audit invariant).
 --
--- Synthesis rules (per legacy 0005 row):
---   * `kind`            ← COALESCE(kind, decision -> grant/revoke).
---   * `actor`           ← COALESCE(actor, granted_by). The 0005 schema
---                         requires `granted_by` NOT NULL, and live rows
---                         carry an Identity-shaped value (`hmn:`/`agt:`
---                         /`snr:` prefix), so this round-trips through
---                         `Identity::parse` cleanly.
---   * `payload_json`    ← COALESCE with a body-free, decision-shape
---                         sentinel `{"shape":"decision",
---                         "subject_code":"legacy"}`. The shape pairs with
---                         the synthesized `grant`/`revoke` kind; keys
---                         match shape; subject_code is lower-snake; no
---                         body keys; no unknown top-level keys — i.e.
---                         every 0011 hardening trigger would accept it
---                         (although triggers do NOT fire on this rebuild
---                         INSERT — they are dropped + re-attached around
---                         the data move per the next paragraph).
---   * `decided_at_iso`  ← COALESCE with the legacy UNIX-millis integer
---                         rendered as RFC3339 via strftime; e.g. `0` →
---                         `1970-01-01T00:00:00Z`. Seconds resolution is
---                         fine — nothing in the schema requires sub-sec
---                         precision and 0005 only stored UNIX millis.
+-- Legacy rows are NOT trusted on any nullable field — they get fixed
+-- sentinel values regardless of what's in the column, because pre-0009
+-- there were no domain checks on `granted_by` and pre-0011 there was no
+-- shape gating on `payload_json` or `decided_at_iso`. Free-form pre-0009
+-- values like `granted_by = 'tafeng'` (no `hmn:` prefix) would otherwise
+-- survive the rebuild and brick `Identity::parse` at decode time. We
+-- detect a "legacy row" structurally as `kind IS NULL` (the 0009
+-- additive column is the only NULL-allowing column populated for every
+-- post-0009 event row via the §14 append path).
+--
+-- Synthesis rules:
+--   * `kind`            ← COALESCE(kind, decision -> grant/revoke). The
+--                         only nullable field where COALESCE is safe:
+--                         `decision` is gated by 0005's column CHECK,
+--                         so it round-trips through the 0021 CHECK.
+--   * `actor`           ← CASE WHEN kind IS NULL THEN 'hmn:legacy' ELSE
+--                         actor END. Pre-0009 there was no `actor`
+--                         column at all, so legacy rows have NULL there;
+--                         we IGNORE `granted_by` (which is unconstrained
+--                         pre-0009 and may carry free-form values like
+--                         'tafeng'). `hmn:legacy` parses cleanly through
+--                         `Identity::parse` (`hmn:` is one of the three
+--                         §14 identity prefixes; body is non-empty).
+--                         For event-kind rows (kind NOT NULL pre-0021),
+--                         actor was written via `consent::append` which
+--                         validates Identity shape, so we keep it as-is.
+--   * `payload_json`    ← CASE WHEN kind IS NULL THEN body-free
+--                         decision-shape sentinel ELSE payload_json END.
+--                         Sentinel:
+--                         `{"shape":"decision","subject_code":"legacy"}`.
+--                         Shape pairs with the synthesized `grant`/
+--                         `revoke` kind; keys match shape; subject_code
+--                         is lower-snake; no body keys; no unknown
+--                         top-level keys — i.e. every 0011 hardening
+--                         trigger would accept it (although triggers do
+--                         NOT fire on this rebuild INSERT — they are
+--                         dropped + re-attached around the data move per
+--                         the next paragraph). For event-kind rows,
+--                         payload_json was written by `consent::append`
+--                         under the 0011 hardening triggers, so we keep
+--                         it as-is.
+--   * `decided_at_iso`  ← CASE WHEN kind IS NULL THEN strftime(...) ELSE
+--                         decided_at_iso END. The legacy UNIX-millis
+--                         integer (0 or any value) is rendered as
+--                         RFC3339 via strftime deterministically; e.g.
+--                         `0` → `1970-01-01T00:00:00Z`. Seconds
+--                         resolution is fine — nothing in the schema
+--                         requires sub-sec precision and 0005 only
+--                         stored UNIX millis. For event-kind rows,
+--                         decided_at_iso is gated by the 0009
+--                         `consent_journal_event_requires_iso` trigger,
+--                         so we keep it as-is.
 --   * `rowid`           ← preserved 1:1 for any healthy `rowid > 0` row
 --                         (mirror cursor stability). Pathological
 --                         `rowid <= 0` rows (only reachable on legacy
@@ -138,8 +168,19 @@ CREATE TABLE consent_journal_v2 (
 -- 4. Move data. Synthesize every event-shape field for legacy 0005 rows
 --    so every post-0021 row decodes as a fully-formed ConsentEvent. See
 --    the head-of-file synthesis-rules comment for justification of each
---    COALESCE expression and for why this is preferable to a structural
---    NULL filter in the readers (which would also hide future drift).
+--    expression and for why this is preferable to a structural NULL
+--    filter in the readers (which would also hide future drift).
+--
+--    Legacy detection: `kind IS NULL` (the 0009 additive column is the
+--    only NULL-allowing column populated for every post-0009 event row).
+--    For legacy rows we use `CASE WHEN kind IS NULL THEN <sentinel> ELSE
+--    <existing-column> END` to UNCONDITIONALLY override pre-existing
+--    nullable columns with sentinels — NOT `COALESCE(<existing>,
+--    <sentinel>)`, because COALESCE would trust whatever non-NULL value
+--    sits in the column and pre-0009/pre-0011 there were no domain
+--    checks to gate those values. `kind` itself is the one exception:
+--    `COALESCE(kind, decision -> grant/revoke)` is safe because
+--    `decision` is gated by 0005's column CHECK to GRANT|REVOKE.
 INSERT INTO consent_journal_v2 (
   rowid,
   consent_id, subject, scope, decision, reason, granted_by,
@@ -155,15 +196,17 @@ SELECT
     CASE decision WHEN 'GRANT' THEN 'grant' WHEN 'REVOKE' THEN 'revoke' END
   ) AS kind,
   sensor_id,
-  COALESCE(actor, granted_by) AS actor,
-  COALESCE(
-    payload_json,
-    '{"shape":"decision","subject_code":"legacy"}'
-  ) AS payload_json,
-  COALESCE(
-    decided_at_iso,
-    strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
-  ) AS decided_at_iso,
+  CASE WHEN kind IS NULL THEN 'hmn:legacy' ELSE actor END AS actor,
+  CASE
+    WHEN kind IS NULL
+      THEN '{"shape":"decision","subject_code":"legacy"}'
+    ELSE payload_json
+  END AS payload_json,
+  CASE
+    WHEN kind IS NULL
+      THEN strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
+    ELSE decided_at_iso
+  END AS decided_at_iso,
   expires_at_iso
 FROM consent_journal;
 

@@ -1291,8 +1291,9 @@ fn consent_journal_rebuild_preserves_rowid_and_backfills_revoke() {
         "REVOKE decision must backfill kind = 'revoke'"
     );
     assert_eq!(
-        actor_after, "hmn:t",
-        "actor must be synthesized from granted_by"
+        actor_after, "hmn:legacy",
+        "legacy rows must get the fixed `hmn:legacy` sentinel actor — \
+         pre-0009 `granted_by` had no domain check and is NOT trusted"
     );
     assert_eq!(
         payload_after, "{\"shape\":\"decision\",\"subject_code\":\"legacy\"}",
@@ -1334,8 +1335,9 @@ fn consent_journal_rebuild_backfills_grant_kind() {
         "GRANT decision must backfill kind = 'grant'"
     );
     assert_eq!(
-        actor_after, "hmn:t",
-        "actor must be synthesized from granted_by"
+        actor_after, "hmn:legacy",
+        "legacy rows must get the fixed `hmn:legacy` sentinel actor — \
+         pre-0009 `granted_by` had no domain check and is NOT trusted"
     );
     assert_eq!(
         payload_after, "{\"shape\":\"decision\",\"subject_code\":\"legacy\"}",
@@ -1381,8 +1383,9 @@ fn consent_journal_rebuild_synthesizes_legacy_event_fields_for_decode() {
     assert_eq!(event.kind, ConsentKind::Grant);
     assert_eq!(
         event.actor.as_str(),
-        "hmn:t",
-        "decoded actor must match synthesized value (== granted_by)"
+        "hmn:legacy",
+        "decoded actor must match the fixed `hmn:legacy` sentinel — \
+         legacy rows do NOT trust pre-0009 `granted_by` values"
     );
     assert_eq!(
         event.decided_at.as_str(),
@@ -1456,6 +1459,58 @@ fn consent_journal_rebuild_renumbers_nonpositive_rowid() {
         "renumbered legacy row must surface to the mirror cursor: {events:?}"
     );
     assert_eq!(events[0].1.consent_id, "rowid-zero");
+    assert_eq!(
+        events[0].1.actor.as_str(),
+        "hmn:legacy",
+        "renumbered legacy row also gets the fixed `hmn:legacy` sentinel actor"
+    );
+}
+
+#[test]
+fn consent_journal_rebuild_overrides_free_form_legacy_granted_by() {
+    // Phase-B (#255, brief §14): regression for the round-3 High finding.
+    // Pre-0009 `granted_by` had no domain CHECK — a historical row could
+    // carry a free-form value like `'tafeng'` (no `hmn:` / `agt:` / `snr:`
+    // prefix). An earlier version of 0021 used `COALESCE(actor,
+    // granted_by)` which would have promoted that free-form value into
+    // `actor`, then bricked decode at `Identity::parse(actor)` time.
+    // The fix: legacy rows (kind IS NULL) get the fixed `'hmn:legacy'`
+    // sentinel UNCONDITIONALLY, regardless of `granted_by`.
+    use cairn_store_sqlite::consent::read_since_rowid;
+
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('legacy-freeform', 'sub', 'private', 'GRANT', \
+                 'tafeng', 0)",
+        [],
+    )
+    .expect("legacy insert with free-form granted_by");
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    let actor: String = conn
+        .query_row(
+            "SELECT actor FROM consent_journal WHERE consent_id = 'legacy-freeform'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("actor after");
+    assert_eq!(
+        actor, "hmn:legacy",
+        "legacy actor must be the fixed sentinel — the unsafe pre-0009 \
+         `granted_by` value MUST NOT be promoted into `actor`"
+    );
+
+    // End-to-end: decode must succeed (Identity::parse accepts hmn:legacy).
+    let events = read_since_rowid(&conn, 0).expect("read_since_rowid");
+    let event = events
+        .iter()
+        .find(|(_, e)| e.consent_id == "legacy-freeform")
+        .map(|(_, e)| e)
+        .expect("legacy-freeform must decode");
+    assert_eq!(event.actor.as_str(), "hmn:legacy");
 }
 
 #[test]
