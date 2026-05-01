@@ -198,6 +198,44 @@ fn append_rejects_body_bearing_payload_via_serializer() {
 }
 
 #[test]
+fn read_since_rowid_surfaces_schema_drift_on_invalid_consent_id() {
+    // Phase-B (#255, brief §14): round-6 High finding (defense in depth).
+    // `consent::append` calls `ConsentEvent::validate()` and the
+    // `consent_journal_event_metadata_domains` trigger gates direct SQL
+    // writes — but a future migration that lifts the trigger, a direct-SQL
+    // writer that runs before the trigger fires (e.g. inside a migration),
+    // or a legacy promotion that misses sanitization could still seat a
+    // row whose `consent_id` violates the §14 closed character class.
+    // `decode_event_inner` now calls `ConsentEvent::validate()` on every
+    // read so such drift surfaces as `StoreError::SchemaDrift` rather than
+    // silently flowing into the consent.log mirror.
+    //
+    // To exercise that path we temporarily drop the metadata-domain trigger
+    // and write a row with a malformed consent_id, then read it back.
+    let conn = open_in_memory().expect("open");
+    conn.execute("DROP TRIGGER consent_journal_event_metadata_domains", [])
+        .expect("drop metadata trigger");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('has@bad!', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:tafeng', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"sub\"}')",
+        [],
+    )
+    .expect("direct SQL insert bypassing append validation");
+
+    let err = read_since_rowid(&conn, 0)
+        .expect_err("decode must surface SchemaDrift when consent_id violates §14 domain");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("failed validate") || msg.contains("consent_id"),
+        "error must indicate the validate failure / consent_id; got: {msg}"
+    );
+}
+
+#[test]
 fn round_trip_preserves_every_kind() {
     let conn = open_in_memory().expect("open");
     let kinds: &[ConsentKind] = &[

@@ -164,6 +164,59 @@ INSERT INTO __cairn_assert_legacy_iso (n)
 DROP TRIGGER __cairn_assert_legacy_iso_trg;
 DROP TABLE __cairn_assert_legacy_iso;
 
+-- 0c. Abort if any legacy row's metadata violates the 0011 domain classes
+--     (Finding: round-6 high). Pre-0011 schema didn't enforce closed
+--     character classes on consent_id / subject / scope / op_id, so
+--     historical rows can carry free-form text. Without this assert, the
+--     rebuild would copy unsanitized values into the new table and the
+--     async mirror (which now resets its cursor at 0021 per round 5) would
+--     replay them into `consent.log`. `decode_event_inner` checks event
+--     shape but not the metadata domain, so out-of-domain values reach
+--     consumers. We FAIL CLOSED here so the operator repairs the data
+--     manually before re-running migration (issue #267 tracks the repair
+--     tool).
+--
+--     Domain classes (mirror of 0011's
+--     consent_journal_event_metadata_domains and
+--     consent_journal_subject_domain_for_non_hash_kinds for grant/revoke,
+--     which is what every legacy row becomes via the kind-coalesce in
+--     step 4):
+--       consent_id : 1..=64,  [A-Za-z0-9._:-]
+--       scope      : 1..=256, [a-z0-9._:=,-]
+--       op_id      : 1..=128, [A-Za-z0-9._:-] (NULL allowed)
+--       subject    : 1..=128, [a-z0-9._:-], first char [a-z]
+CREATE TEMP TABLE __cairn_assert_legacy_metadata (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_legacy_metadata_trg
+  BEFORE INSERT ON __cairn_assert_legacy_metadata
+  FOR EACH ROW WHEN NEW.n > 0
+BEGIN
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes; cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
+END;
+INSERT INTO __cairn_assert_legacy_metadata (n)
+  SELECT COUNT(*) FROM consent_journal
+   WHERE kind IS NULL
+     AND (
+          consent_id IS NULL
+       OR length(consent_id) < 1
+       OR length(consent_id) > 64
+       OR consent_id GLOB '*[^A-Za-z0-9._:-]*'
+       OR scope IS NULL
+       OR length(scope) < 1
+       OR length(scope) > 256
+       OR scope GLOB '*[^a-z0-9._:=,-]*'
+       OR (op_id IS NOT NULL
+            AND (length(op_id) < 1
+                 OR length(op_id) > 128
+                 OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
+       OR subject IS NULL
+       OR length(subject) < 1
+       OR length(subject) > 128
+       OR subject GLOB '*[^a-z0-9._:-]*'
+       OR substr(subject, 1, 1) NOT GLOB '[a-z]'
+     );
+DROP TRIGGER __cairn_assert_legacy_metadata_trg;
+DROP TABLE __cairn_assert_legacy_metadata;
+
 -- 1. Drop ALL triggers attached to the old consent_journal. They are
 --    re-created at the end of this migration against the renamed table.
 DROP TRIGGER IF EXISTS consent_journal_immutable;

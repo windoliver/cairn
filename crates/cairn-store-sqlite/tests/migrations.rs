@@ -1543,6 +1543,149 @@ fn consent_journal_rebuild_aborts_on_unrenderable_decided_at() {
 }
 
 #[test]
+fn consent_journal_rebuild_aborts_on_invalid_legacy_subject() {
+    // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
+    // not enforce closed character classes on `subject`, so legacy rows can
+    // carry free-form text. After the round-5 mirror cursor reset, the
+    // mirror replays from rowid 0, so unsanitized values would reach the
+    // on-disk consent.log via decode. Migration 0021 now FAILS CLOSED on
+    // legacy rows whose subject violates the 0011 grant/revoke domain
+    // (length 1..=128, [a-z0-9._:-], first char [a-z]).
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('bad-subject', 'Has Spaces And Caps', 'private', 'GRANT', \
+                 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert with out-of-domain subject");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on invalid legacy subject");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("0011 domain classes"),
+        "abort message must cite the 0011 domain classes; got: {msg}"
+    );
+
+    // Original row still present — rollback intact, no partial rebuild.
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'bad-subject'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "bad-subject");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_invalid_legacy_consent_id() {
+    // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
+    // not enforce closed character classes on `consent_id`. The 0011 domain
+    // is length 1..=64, [A-Za-z0-9._:-]. Free-form values like
+    // `'has@badchars!'` must abort the migration.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('has@badchars!', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert with out-of-domain consent_id");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on invalid legacy consent_id");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("0011 domain classes"),
+        "abort message must cite the 0011 domain classes; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal \
+             WHERE consent_id = 'has@badchars!'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "has@badchars!");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_invalid_legacy_scope() {
+    // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
+    // not enforce closed character classes on `scope`. The 0011 domain is
+    // length 1..=256, [a-z0-9._:=,-]. Uppercase scope must abort.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('bad-scope', 'sub', 'UPPERCASE', 'GRANT', 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert with out-of-domain scope");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on invalid legacy scope");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("0011 domain classes"),
+        "abort message must cite the 0011 domain classes; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'bad-scope'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "bad-scope");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_invalid_legacy_op_id() {
+    // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
+    // not enforce closed character classes on `op_id`. The 0011 domain is
+    // length 1..=128, [A-Za-z0-9._:-]. NULL op_id remains allowed (other
+    // legacy tests already exercise NULL op_id paths); a non-NULL op_id
+    // with spaces must abort.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, op_id) \
+         VALUES ('bad-op-id', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'has spaces')",
+        [],
+    )
+    .expect("legacy insert with out-of-domain op_id");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on invalid legacy op_id");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("0011 domain classes"),
+        "abort message must cite the 0011 domain classes; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'bad-op-id'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "bad-op-id");
+}
+
+#[test]
 fn consent_journal_rebuild_overrides_free_form_legacy_granted_by() {
     // Phase-B (#255, brief §14): regression for the round-3 High finding.
     // Pre-0009 `granted_by` had no domain CHECK — a historical row could

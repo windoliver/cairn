@@ -244,7 +244,7 @@ fn decode_event_inner(
         .map(|s| SensorLabel::parse(s).map_err(|e| StoreError::SchemaDrift(e.to_string())))
         .transpose()?;
 
-    Ok(ConsentEvent {
+    let event = ConsentEvent {
         consent_id,
         kind,
         actor,
@@ -255,7 +255,22 @@ fn decode_event_inner(
         payload,
         decided_at,
         expires_at,
-    })
+    };
+    // Defense in depth: ConsentEvent::validate() asserts the §14 metadata
+    // domain (consent_id / scope / op_id / subject / payload / sensor_id)
+    // on every read. Pre-0011 schema didn't enforce closed character classes
+    // on those columns; legacy rows promoted by migration 0021 (after the
+    // mirror cursor reset added in round 5) replay through this decode path
+    // from rowid 0. Migration 0021 itself aborts on out-of-domain legacy
+    // metadata, but we re-check here so any drift from a future schema
+    // regression or direct-SQL writer fails closed at decode time.
+    event.validate().map_err(|e| {
+        StoreError::SchemaDrift(format!(
+            "consent_journal row {consent_id} failed validate: {e}",
+            consent_id = event.consent_id
+        ))
+    })?;
+    Ok(event)
 }
 
 const fn kind_wire(kind: ConsentKind) -> &'static str {
