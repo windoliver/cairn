@@ -66,15 +66,16 @@ use crate::domain::{ChainRole, Identity, IdentityKind, MemoryKind, MemoryRecord,
 pub enum ChainStatus {
     /// Author identity is in a *terminal* revocation / purge state
     /// (`Revoked` or `Purged`). The dispatch leaf emits this finding
-    /// at `Severity::Error` per brief invariant 6 (fail-closed on
-    /// capability): without persisted `key_version` or real Ed25519
-    /// re-verify (P1), this check cannot prove a record was signed
-    /// *before* revocation, so it cannot distinguish benign history
-    /// from post-revocation writes. Treating ambiguity as non-blocking
-    /// would let post-revocation writes slip through automation that
-    /// keys off `has_error`; the suggested fix is audit-then-resolve,
-    /// **not** destructive auto-remediation. Maps to brief §1223
-    /// `revoked`.
+    /// at `Severity::Warning`, not `Error`. Per
+    /// `ProvisioningState::is_operational`, `Revoked` keys still
+    /// verify history for audit, so a stored record signed *before*
+    /// revocation may legitimately remain valid; without persisted
+    /// `key_version` or real Ed25519 re-verify (P1), this leaf cannot
+    /// tell pre- from post-revocation, and blocking on routine
+    /// completed revocation would poison every historical record by
+    /// the same author. The post-revocation-write fail-open this
+    /// leaves is documented as a P1-resolvable gap (`key_version` +
+    /// Ed25519). Maps to brief §1223 `revoked`.
     Revoked,
     /// Author identity is in an *in-flight* revocation / purge
     /// transition (`RevokePending` or `PurgePending`). A record

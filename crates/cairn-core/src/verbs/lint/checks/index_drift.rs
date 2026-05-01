@@ -58,7 +58,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
-            author_states: None,
+            author_states: crate::verbs::lint::empty_author_states(),
         };
         assert!(run(&li).is_empty());
     }
@@ -71,7 +71,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
-            author_states: None,
+            author_states: crate::verbs::lint::empty_author_states(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -94,7 +94,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
-            author_states: None,
+            author_states: crate::verbs::lint::empty_author_states(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -109,7 +109,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
-            author_states: None,
+            author_states: crate::verbs::lint::empty_author_states(),
         };
         assert!(run(&li).is_empty());
     }

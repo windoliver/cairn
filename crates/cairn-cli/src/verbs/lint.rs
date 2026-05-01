@@ -376,7 +376,7 @@ pub struct LintHandlerResult {
 /// report fails.
 pub async fn lint_handler(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
-    identity_registry: Option<&dyn cairn_core::contract::identity_registry::IdentityRegistry>,
+    identity_registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
     config: &cairn_core::config::CairnConfig,
     schema_version: cairn_core::verbs::lint::SchemaVersion,
     write_report: bool,
@@ -391,14 +391,10 @@ pub async fn lint_handler(
         .map_err(|e| anyhow::anyhow!("store: list_active_stored: {e}"))
         .context("lint: list_active_stored")?;
 
-    // §6.2 author-lifecycle slice (issue #256). `None` here means the
-    // caller did not plumb a registry; the actor_chain leaf downgrades
-    // to a deferred-info finding so the gap stays visible in
-    // `lint-report.md`.
-    let author_states = match identity_registry {
-        Some(registry) => Some(prefetch_author_states(registry, &stored).await?),
-        None => None,
-    };
+    // §6.2 author-lifecycle slice (issue #256). The registry is required
+    // (no `Option`) so a caller cannot silently degrade lint into a
+    // no-op against revoked / unknown / pending issuers.
+    let author_states = prefetch_author_states(identity_registry, &stored).await?;
 
     // `index_stats` is opt-in for adapters: the default trait impl returns
     // an `Err` carrying the literal "not supported by this store adapter"
@@ -440,7 +436,7 @@ pub async fn lint_handler(
         config,
         index_stats,
         schema_version,
-        author_states: author_states.as_ref(),
+        author_states: &author_states,
     };
     let mut data = run_checks(&inputs);
 
@@ -666,17 +662,24 @@ mod tests {
     async fn lint_handler_writes_report_when_requested() {
         use cairn_core::config::CairnConfig;
         use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
         let r = sample_record();
         store.upsert(&r).await.expect("upsert");
 
+        // Empty registry — the sample record's author is not registered,
+        // so §6.2 emits a `BrokenActorChain` Error
+        // (`MissingFromRegistry`). This test scopes to report-rendering
+        // and the four §6.3–§6.6 deferred-info findings; the §6.2 Error
+        // path is exercised in detail by the integration tests.
+        let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
         let cfg = CairnConfig::default();
         let vault = tempfile::tempdir().expect("tempdir");
         let result = lint_handler(
             &store,
-            None,
+            &registry,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             true,
@@ -685,10 +688,6 @@ mod tests {
         .await
         .expect("handler");
 
-        // Deferred findings are present even on a clean vault: four
-        // remain Info (provenance/schema/consent/hot_memory) and one is
-        // Error (#256 fails closed when no IdentityRegistry is wired
-        // through this handler signature, brief invariant 6).
         let info_count = result
             .data
             .findings
@@ -700,28 +699,13 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(info_count, 4);
-        let deferred_error_count = result
-            .data
-            .findings
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.kind,
-                    cairn_core::generated::verbs::lint::Kind::DeferredCheck
-                ) && matches!(
-                    f.severity,
-                    cairn_core::generated::verbs::lint::Severity::Error
-                )
-            })
-            .count();
         assert_eq!(
-            deferred_error_count, 1,
-            "missing IdentityRegistry must surface as a fail-closed error"
+            info_count, 4,
+            "expect §6.3 + §6.4 + §6.5 + §6.6 deferred-info findings"
         );
         assert!(
             result.has_error,
-            "missing IdentityRegistry plumbing must trip has_error"
+            "missing-from-registry author must trip has_error"
         );
         assert_eq!(
             result.report_path.as_deref(),
@@ -738,6 +722,7 @@ mod tests {
         use cairn_core::config::CairnConfig;
         use cairn_core::contract::memory_store::IndexStats;
         use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         let store = FixtureStore::default();
@@ -745,11 +730,12 @@ mod tests {
         // Force a drift fixture: 5 active records but FTS reports 4.
         store.set_index_stats_override(IndexStats::new(5, 4));
 
+        let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
         let cfg = CairnConfig::default();
         let vault = tempfile::tempdir().expect("tempdir");
         let result = lint_handler(
             &store,
-            None,
+            &registry,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             false,

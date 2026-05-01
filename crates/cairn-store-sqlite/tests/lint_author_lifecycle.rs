@@ -399,7 +399,7 @@ async fn prefetch_author_states(
 }
 
 #[tokio::test]
-async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
+async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     use cairn_core::config::CairnConfig;
     use cairn_core::contract::memory_store::IndexStats;
     use cairn_core::generated::verbs::lint::{Kind, Severity};
@@ -433,11 +433,42 @@ async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
         config: &cfg,
         index_stats: IndexStats::new(lint_records.len() as u64, lint_records.len() as u64),
         schema_version: SchemaVersion { major: 0, minor: 1 },
-        author_states: Some(&states),
+        author_states: &states,
     };
 
     let data = run_checks(&inputs);
 
+    let chain_warnings: Vec<_> = data
+        .findings
+        .iter()
+        .filter(|f| {
+            matches!(f.kind, Kind::BrokenActorChain) && matches!(f.severity, Severity::Warning)
+        })
+        .collect();
+    assert_eq!(
+        chain_warnings.len(),
+        1,
+        "expected exactly one BrokenActorChain warning: {data:?}"
+    );
+    let f = chain_warnings[0];
+    assert!(f.target.is_some(), "finding must carry a record-id target");
+    assert_eq!(f.tracking_issue, Some(256));
+    assert!(f.suggested_fix.is_some());
+    // Privacy invariant 9: messages must not embed body content.
+    assert!(!f.message.contains(&r.body));
+    // Persistent-issue resolution (rounds 5/7/8): terminal Revoked is
+    // non-blocking; remediation steers away from destructive cleanup.
+    assert!(
+        f.suggested_fix
+            .as_deref()
+            .unwrap_or("")
+            .contains("do NOT auto-tombstone"),
+        "remediation must steer operators away from destructive cleanup",
+    );
+
+    // No BrokenActorChain Error severities for this scenario — terminal
+    // revocation must not surface as a blocking finding (legitimate
+    // pre-revocation history).
     let chain_errors: Vec<_> = data
         .findings
         .iter()
@@ -445,25 +476,9 @@ async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
             matches!(f.kind, Kind::BrokenActorChain) && matches!(f.severity, Severity::Error)
         })
         .collect();
-    assert_eq!(
-        chain_errors.len(),
-        1,
-        "expected exactly one BrokenActorChain error: {data:?}"
-    );
-    let f = chain_errors[0];
-    assert!(f.target.is_some(), "finding must carry a record-id target");
-    assert_eq!(f.tracking_issue, Some(256));
-    assert!(f.suggested_fix.is_some());
-    // Privacy invariant 9: messages must not embed body content.
-    assert!(!f.message.contains(&r.body));
-    // Suggested fix must still steer away from destructive cleanup —
-    // fail-closed severity does not change the remediation policy.
     assert!(
-        f.suggested_fix
-            .as_deref()
-            .unwrap_or("")
-            .contains("do NOT auto-tombstone"),
-        "remediation must steer operators away from destructive cleanup",
+        chain_errors.is_empty(),
+        "terminal revocation must not produce blocking errors: {chain_errors:?}"
     );
 
     // The deferred-info finding for #256 must NOT be present once

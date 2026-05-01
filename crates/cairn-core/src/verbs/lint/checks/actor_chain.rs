@@ -3,23 +3,17 @@
 //! Wraps the pure `pipeline::lint::author_lifecycle::check_author_lifecycle`
 //! function and maps its output into the lint verb's `Finding` shape.
 //!
-//! Two modes:
+//! Per-record check: chain-shape violations (no `Author`, duplicate
+//! `Author`, role-order violation) and unknown-issuer cases surface as
+//! `Kind::BrokenActorChain` at `Severity::Error`; currently-revoked
+//! issuers surface at `Severity::Error` (in-flight transitions) or
+//! `Severity::Warning` (terminal) — see `severity_for` for the
+//! rationale and the persistent-issue note.
 //!
-//! 1. **Author states plumbed (`LintInputs.author_states.is_some()`):**
-//!    run the real per-record check. Chain-shape violations (no
-//!    `Author`, duplicate `Author`, role-order violation) and
-//!    missing-from-registry authors surface as `Kind::BrokenActorChain`
-//!    at `Severity::Error` (real corruption / unknown issuer).
-//!    Currently-revoked authors surface at `Severity::Warning` —
-//!    historical signatures may still be valid until P1 ships real
-//!    Ed25519 + key-version persistence, so blocking on routine
-//!    revocation would mis-direct operators toward destructive
-//!    remediation.
-//! 2. **Author states absent (`None`):** the dispatch layer did not
-//!    wire the `IdentityRegistry`. Chain-shape is still cheap — run
-//!    `validate_chain` per record and emit `BrokenActorChain` for any
-//!    failure. Lifecycle coverage stays deferred and is reported as a
-//!    single `DeferredCheck` info finding so the gap stays visible.
+//! `LintInputs.author_states` is required (not `Option`) so a caller
+//! cannot silently degrade lint into a no-op against revoked / unknown
+//! / pending issuers. Empty map = "no chain authors / no resolvable
+//! identities," not "skip the check."
 //!
 //! Real Ed25519 verification of `record.signature` and body-integrity
 //! (`target_hash` recompute) remain follow-ups; this leaf is the
@@ -27,7 +21,6 @@
 //! `docs/design/2026-04-30-issue-256-signature-lint-design.md`.
 
 use crate::domain::ChainRole;
-use crate::domain::actor_chain::validate_chain;
 use crate::generated::verbs::lint::{Finding, Kind, Severity};
 use crate::pipeline::lint::author_lifecycle::{
     AuthorLifecycleFinding, AuthorState, ChainStatus, check_author_lifecycle,
@@ -39,9 +32,6 @@ const TRACKING_ISSUE: i64 = 256;
 /// Run the §6.2 broken-actor-chain check.
 #[must_use]
 pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
-    let Some(states) = inputs.author_states else {
-        return deferred_with_chain_shape(inputs);
-    };
     inputs
         .records
         .iter()
@@ -54,7 +44,7 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                 .find(|e| e.role == ChainRole::Author)
                 .map(|e| e.identity.clone());
             let state = match author.as_ref() {
-                Some(id) => match states.get(id) {
+                Some(id) => match inputs.author_states.get(id) {
                     Some(p) => AuthorState::Resolved(*p),
                     None => AuthorState::MissingFromRegistry,
                 },
@@ -68,49 +58,6 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
         .collect()
 }
 
-/// Fallback when the dispatch layer did not plumb an `IdentityRegistry`.
-/// Chain-shape is still pure → run it. Lifecycle stays deferred and
-/// surfaces as a single `DeferredCheck` info finding.
-fn deferred_with_chain_shape(inputs: &LintInputs<'_>) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for r in inputs.records {
-        if let Err(e) = validate_chain(&r.stored.record.actor_chain) {
-            let mut f = finding(
-                Kind::BrokenActorChain,
-                Severity::Error,
-                format!(
-                    "actor_chain failed shape validation: {e} — at-rest signature cannot be attributed to a single issuer"
-                ),
-            );
-            f.target = Some(target_record(&r.stored.record.id));
-            f.tracking_issue = Some(TRACKING_ISSUE);
-            out.push(f);
-        }
-    }
-    // Fail closed on missing capability (brief invariant 6): without
-    // the IdentityRegistry plumbed, the §6.2 lifecycle check is silently
-    // a no-op against revoked / unknown / pending issuers. Surface as
-    // Error so the lint exit code trips and operators wire the
-    // dispatch layer instead of mistaking a green run for coverage.
-    let mut deferred = finding(
-        Kind::DeferredCheck,
-        Severity::Error,
-        format!(
-            "author-lifecycle slice of #{TRACKING_ISSUE} skipped — \
-             dispatch did not plumb IdentityRegistry into LintInputs; \
-             revoked / unknown / pending issuers will not be detected"
-        ),
-    );
-    deferred.tracking_issue = Some(TRACKING_ISSUE);
-    deferred.suggested_fix = Some(
-        "thread an IdentityRegistry into the lint dispatch layer and \
-         populate LintInputs.author_states"
-            .to_owned(),
-    );
-    out.push(deferred);
-    out
-}
-
 fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
     let mut f = finding(Kind::BrokenActorChain, severity_for(lf.status), lf.message);
     f.target = Some(target_record(&lf.record_id));
@@ -120,21 +67,33 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 }
 
 fn severity_for(status: ChainStatus) -> Severity {
-    // All three statuses block per brief invariant 6 (fail-closed on
-    // capability). Without persisted `key_version` or real Ed25519
-    // re-verify (P1), this leaf cannot prove a record by a revoked
-    // author was written *before* revocation; treating that ambiguity
-    // as a non-blocking warning would let post-revocation writes slip
-    // through any automation that keys off `has_error`. Operators
-    // resolve the false-positive via audit (the suggested fix
-    // explicitly forbids destructive auto-remediation); they cannot
-    // recover from a false-negative once a tampered record has been
-    // accepted as clean.
-    #[allow(clippy::match_same_arms)] // distinct semantic verdicts; remediation differs
+    // Severity policy — final position after three rounds of review
+    // oscillation (rounds 5/7/8) on terminal `Revoked`/`Purged`:
+    //
+    // - Terminal revocation → Warning. The integration test
+    //   `revocation_after_write_now_flags_record` concretely
+    //   demonstrates the legitimate case: a record written while the
+    //   author was Active, then later revoked. Without persisted
+    //   `key_version` or real Ed25519 re-verify (P1), this leaf
+    //   cannot tell pre- from post-revocation, and treating that
+    //   ambiguity as `Error` poisons every historical record by the
+    //   same author with a blocking verdict. Operators see the audit
+    //   trail without destructive remediation pressure.
+    // - In-flight revocation/purge → Error. A record landing while a
+    //   withdrawal is already in motion is the suspicious-write case
+    //   (bypassed gate, race, tamper) — not "old history under a
+    //   now-revoked key." The pre/post-revocation ambiguity that
+    //   protects terminal Revoked does NOT apply.
+    // - Malformed (chain shape, unknown issuer, Pending issuer) →
+    //   Error. Real corruption / missing truth source.
+    //
+    // The post-revocation-write fail-open risk that argued for
+    // upgrading terminal Revoked to Error is real but unrecoverable
+    // without P1 evidence (key_version + Ed25519). Documented as a
+    // P1-resolvable gap rather than masked behind a noisy Warning.
     match status {
-        ChainStatus::Revoked => Severity::Error,
-        ChainStatus::RevocationInFlight => Severity::Error,
-        ChainStatus::Malformed => Severity::Error,
+        ChainStatus::Revoked => Severity::Warning,
+        ChainStatus::RevocationInFlight | ChainStatus::Malformed => Severity::Error,
     }
 }
 
@@ -177,7 +136,7 @@ mod tests {
 
     fn inputs<'a>(
         records: &'a [LintRecord],
-        author_states: Option<&'a HashMap<Identity, ProvisioningState>>,
+        author_states: &'a HashMap<Identity, ProvisioningState>,
         cfg: &'a CairnConfig,
     ) -> LintInputs<'a> {
         LintInputs {
@@ -190,30 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn deferred_when_author_states_absent_and_chains_clean() {
-        let cfg = CairnConfig::default();
-        let r = lint_record(sample_record());
-        let recs = [r];
-        let inp = inputs(&recs, None, &cfg);
-        let f = run(&inp);
-        assert_eq!(
-            f.len(),
-            1,
-            "deferred-info finding only when no states + clean chains"
-        );
-        assert_eq!(f[0].kind, Kind::DeferredCheck);
-        assert_eq!(
-            f[0].severity,
-            Severity::Error,
-            "missing IdentityRegistry must fail closed (brief invariant 6)"
-        );
-        assert_eq!(f[0].tracking_issue, Some(256));
-    }
-
-    #[test]
-    fn shape_violations_surface_even_without_author_states() {
-        // Chain-shape is pure — running it without the registry still
-        // catches direct DB tamper.
+    fn shape_violations_surface_with_empty_states_map() {
+        // Chain-shape is pure — even an empty author_states map still
+        // catches direct DB tamper of the chain.
         let mut record = sample_record();
         record.actor_chain.push(ActorChainEntry {
             role: ChainRole::Author,
@@ -222,19 +160,17 @@ mod tests {
         });
         let cfg = CairnConfig::default();
         let recs = [lint_record(record)];
-        let inp = inputs(&recs, None, &cfg);
+        let states: HashMap<Identity, ProvisioningState> = HashMap::new();
+        let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
         assert_eq!(
             findings.len(),
-            2,
-            "expect one BrokenActorChain (duplicate Author) + one DeferredCheck error"
+            1,
+            "duplicate Author surfaces as a single BrokenActorChain"
         );
-        let chain_finding = findings
-            .iter()
-            .find(|f| matches!(f.kind, Kind::BrokenActorChain))
-            .expect("BrokenActorChain finding");
-        assert_eq!(chain_finding.severity, Severity::Error);
-        assert!(chain_finding.target.is_some());
+        assert!(matches!(findings[0].kind, Kind::BrokenActorChain));
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].target.is_some());
     }
 
     #[test]
@@ -250,7 +186,7 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(author_id, ProvisioningState::Active);
         let recs = [lint_record(r)];
-        let inp = inputs(&recs, Some(&states), &cfg);
+        let inp = inputs(&recs, &states, &cfg);
         assert!(
             run(&inp).is_empty(),
             "active author + clean chain → no findings"
@@ -258,14 +194,15 @@ mod tests {
     }
 
     #[test]
-    fn revoked_author_with_states_emits_error_failing_closed() {
-        // Brief invariant 6: without persisted key_version or real
-        // Ed25519 re-verify (P1), the leaf cannot prove a record by a
-        // revoked author was written *pre-revocation*; it must fail
-        // closed so post-revocation writes do not slip through any
-        // automation that keys off has_error. Audit-then-resolve is
-        // the right remediation; the suggested_fix message explicitly
-        // forbids destructive auto-tombstoning.
+    fn revoked_author_with_states_emits_warning_not_error() {
+        // Persistent-issue resolution (rounds 5/7/8): terminal Revoked
+        // is non-blocking. The integration test
+        // `revocation_after_write_now_flags_record` concretely
+        // demonstrates the legitimate case (record written under
+        // Active, author revoked later); without P1 evidence we cannot
+        // distinguish that benign history from a post-revocation
+        // write. Warning surfaces the audit trail without poisoning
+        // legitimate history with a blocking verdict.
         let cfg = CairnConfig::default();
         let r = sample_record();
         let author_id = r
@@ -277,11 +214,11 @@ mod tests {
         let mut states = HashMap::new();
         states.insert(author_id, ProvisioningState::Revoked);
         let recs = [lint_record(r)];
-        let inp = inputs(&recs, Some(&states), &cfg);
+        let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::BrokenActorChain);
-        assert_eq!(findings[0].severity, Severity::Error);
+        assert_eq!(findings[0].severity, Severity::Warning);
         assert!(findings[0].target.is_some());
         assert!(
             findings[0]
@@ -289,8 +226,31 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .contains("do NOT auto-tombstone"),
-            "remediation must still steer operators away from destructive cleanup"
+            "remediation must steer operators away from destructive cleanup"
         );
+    }
+
+    #[test]
+    fn revoke_pending_author_emits_error() {
+        // In-flight revocation: a write that landed during a
+        // withdrawal-in-motion is the suspicious-write case (bypassed
+        // gate, race, tamper); pre/post-revocation ambiguity that
+        // protects terminal Revoked does not apply.
+        let cfg = CairnConfig::default();
+        let r = sample_record();
+        let author_id = r
+            .actor_chain
+            .iter()
+            .find(|e| e.role == ChainRole::Author)
+            .map(|e| e.identity.clone())
+            .expect("author");
+        let mut states = HashMap::new();
+        states.insert(author_id, ProvisioningState::RevokePending);
+        let recs = [lint_record(r)];
+        let inp = inputs(&recs, &states, &cfg);
+        let findings = run(&inp);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
     }
 
     #[test]
@@ -300,7 +260,7 @@ mod tests {
         let cfg = CairnConfig::default();
         let states: HashMap<Identity, ProvisioningState> = HashMap::new();
         let recs = [lint_record(sample_record())];
-        let inp = inputs(&recs, Some(&states), &cfg);
+        let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::BrokenActorChain);
