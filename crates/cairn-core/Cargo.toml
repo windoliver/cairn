@@ -50,6 +50,7 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 regex = { workspace = true, features = ["unicode-perl", "unicode-case"] }
 unicode-normalization = { workspace = true }
+bon = { workspace = true }
 ulid = { workspace = true }
 zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -65,6 +66,7 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 rand_core = { workspace = true }
 rand = { workspace = true }
 tracing-test = "0.2"
+jsonschema = { workspace = true }
 
 [[bin]]
 name = "filter_smoke"

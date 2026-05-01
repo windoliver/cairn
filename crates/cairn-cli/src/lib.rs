@@ -10,6 +10,7 @@ pub mod config;
 pub mod docgen;
 pub(crate) mod generated;
 pub mod identity;
+pub mod llm;
 pub mod mcp;
 pub mod plugins;
 pub mod render;

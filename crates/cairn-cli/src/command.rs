@@ -43,7 +43,46 @@ pub fn build_command() -> clap::Command {
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
+        .subcommand(llm_subcommand())
         .subcommand(identity::cli::identity_subcommand())
+}
+
+fn llm_subcommand() -> clap::Command {
+    clap::Command::new("llm")
+        .about("LLM provider diagnostics (ADR 0001)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("probe")
+                .about(
+                    "Build the configured LLMProvider and issue one completion. \
+                     Exits 78 (EX_CONFIG) when no provider is configured, \
+                     69 (EX_UNAVAILABLE) when the endpoint is unreachable or lacks \
+                     a required capability, 77 (EX_NOPERM) on auth failure.",
+                )
+                .arg(
+                    clap::Arg::new("prompt")
+                        .long("prompt")
+                        .value_name("TEXT")
+                        .help("Prompt to send (default: \"Reply with the single word: ping\")"),
+                )
+                .arg(
+                    clap::Arg::new("schema-file")
+                        .long("schema-file")
+                        .value_name("PATH")
+                        .help(
+                            "Path to a JSON Schema file. When set, the probe \
+                             requests JSON output and validates the response \
+                             against the schema (exits 1 on validation failure).",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON receipt instead of human-readable output"),
+                ),
+        )
 }
 
 fn bootstrap_subcommand() -> clap::Command {

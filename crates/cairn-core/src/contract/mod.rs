@@ -55,7 +55,10 @@ pub use job_store::{
     LeaseToken, LeasedJob, RetryPolicy,
 };
 pub use keystore::{Keystore, KeystoreError};
-pub use llm_provider::{LLMProvider, LLMProviderCapabilities, LLMProviderPlugin};
+pub use llm_provider::{
+    CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LLMProviderPlugin,
+    LlmError,
+};
 pub use mcp_server::{MCPServer, MCPServerCapabilities, MCPServerPlugin};
 pub use memory_store::{MemoryStore, MemoryStoreCapabilities, MemoryStorePlugin};
 pub use sensor_ingress::{SensorIngress, SensorIngressCapabilities, SensorIngressPlugin};

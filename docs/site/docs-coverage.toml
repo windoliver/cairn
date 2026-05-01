@@ -18,6 +18,11 @@ audience = "operator"
 page = "usage/cli.md"
 generated_reference = ""
 
+[packages.cairn-llm-openai-compat]
+audience = "operator"
+page = "usage/plugins.md"
+generated_reference = "reference/generated/plugins.md"
+
 [packages.cairn-mcp]
 audience = "integration-author"
 page = "usage/mcp.md"

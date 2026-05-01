@@ -18,6 +18,11 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "Zlib",
+    # CDLA-Permissive-2.0 = Community Data License Agreement Permissive 2.0.
+    # Used by webpki-root-certs (Mozilla CA certificate data) pulled in
+    # transitively via reqwest → rustls-platform-verifier → async-openai.
+    # Permissive data license; no copyleft restrictions on use or distribution.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
@@ -26,6 +31,12 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
+# RUSTSEC-2024-0384: `instant` crate is unmaintained, no safe upgrade available.
+# RUSTSEC-2025-0012: `backoff` crate is unmaintained, no safe upgrade available.
+# Both are transitive deps via: async-openai → cairn-llm-openai-compat.
+# `async-openai` is the only consumer; tracked for replacement when async-openai
+# migrates away from these deps.
+ignore = ["RUSTSEC-2024-0384", "RUSTSEC-2025-0012"]
 
 # Deny-by-default for dependency sources. Without this, the
 # `cargo-deny check sources` step in supply-chain.yml only warns on
