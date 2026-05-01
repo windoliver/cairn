@@ -1,0 +1,43 @@
+[package]
+name = "cairn-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "BrainBench retrieval-quality scorecard runner for Cairn."
+
+[[bin]]
+name = "cairn-bench"
+path = "src/main.rs"
+
+[features]
+default = []
+# Opt-in: enables the OpenAI embedding adapter column in the scorecard.
+# Requires OPENAI_API_KEY at runtime. Default builds stay offline.
+openai = ["dep:cairn-embeddings-openai"]
+
+[dependencies]
+# Task 10 scaffolds fixture loading + IR metrics only. Adapter dispatch
+# (cairn-core, cairn-embeddings-local, cairn-store-sqlite, tracing) lands
+# with Task 11; the optional openai dep stays declared so the feature
+# surface is stable across the task boundary.
+cairn-embeddings-openai = { workspace = true, optional = true }
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
+
+# cairn-embeddings-openai is wired through the optional `openai` feature
+# but isn't imported in Task 10's scaffold (adapter dispatch lands in
+# Task 11). Keep the optional dep declared so the feature surface stays
+# stable across tasks; tell cargo-machete it's intentional.
+[package.metadata.cargo-machete]
+ignored = ["cairn-embeddings-openai"]
