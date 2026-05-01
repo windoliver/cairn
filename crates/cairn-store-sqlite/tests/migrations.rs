@@ -2621,3 +2621,145 @@ fn wal_ops_terminal_immutable() {
         .unwrap_err();
     assert!(format!("{err}").contains("terminal-state"));
 }
+
+// ---------------------------------------------------------------------------
+// Property tests for migration 0021's legacy synthesis (Phase-B (#255)).
+// ---------------------------------------------------------------------------
+//
+// Test 4 of the E2E review gap fill: the existing per-case tests cover the
+// canonical `decided_at = 0`, fixed `expires_at = 1000`, and a single
+// out-of-range value. Property-based coverage shotguns the synthesis
+// CASE/COALESCE chain with random `(decided_at, expires_at, granted_by,
+// subject, scope, consent_id, decision)` tuples drawn from the renderable
+// domain, asserts that every input that survives the v20 INSERT also
+// survives migration 0021 AND decodes via `read_since_rowid` into a
+// well-formed `ConsentEvent`. This catches regressions in the strftime
+// expressions, the kind synthesis branches, the actor/payload sentinels,
+// and any future tightening of the post-0021 decode path that would
+// silently invalidate legacy rows.
+mod legacy_synthesis_proptest {
+    use super::{migrations, open_at_version};
+    use cairn_core::domain::{ConsentKind, ConsentPayload};
+    use cairn_store_sqlite::consent::read_since_rowid;
+    use proptest::prelude::*;
+    use proptest::test_runner::Config;
+
+    /// strftime %Y-%m-%dT%H:%M:%SZ renders cleanly for the open epoch
+    /// range up through year 2100 (~4.10e12 ms). Stay safely inside it.
+    const RENDERABLE_MAX_MS: i64 = 4_102_444_800_000;
+
+    fn arb_decision() -> impl Strategy<Value = String> {
+        prop_oneof![Just("GRANT".to_owned()), Just("REVOKE".to_owned())]
+    }
+
+    fn arb_granted_by() -> impl Strategy<Value = String> {
+        // Round-12 finding: synthesis overwrites `granted_by` with the
+        // `hmn:legacy` sentinel regardless of input, so every shape
+        // here is just a v20 insert smoke test. Keep within `[a-z]`
+        // tail to avoid SQL escaping concerns.
+        prop_oneof![
+            "hmn:[a-z]{1,8}".prop_map(String::from),
+            "agt:[a-z]{1,8}".prop_map(String::from),
+            "snr:[a-z]{1,6}:[a-z]{1,6}".prop_map(String::from),
+        ]
+    }
+
+    fn arb_short_token() -> impl Strategy<Value = String> {
+        // Closed-class identifier: alphanumeric + hyphen, no quotes,
+        // no whitespace — keeps both v20 INSERT and post-0021 decode
+        // away from quoting / class-validation edge cases.
+        "[a-z][a-z0-9-]{0,15}".prop_map(String::from)
+    }
+
+    fn arb_scope() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("private".to_owned()),
+            Just("shared".to_owned()),
+            Just("public".to_owned()),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(Config { cases: 64, .. Config::default() })]
+
+        #[test]
+        fn legacy_synthesis_round_trips_through_decode(
+            decided_at in 0i64..=RENDERABLE_MAX_MS,
+            // 50/50 mix of bounded and indefinite consents.
+            expires_at in proptest::option::of(0i64..=RENDERABLE_MAX_MS),
+            granted_by in arb_granted_by(),
+            subject in arb_short_token(),
+            scope in arb_scope(),
+            consent_id in arb_short_token(),
+            decision in arb_decision(),
+        ) {
+            let mut conn = open_at_version(20);
+
+            // Insert as a true 0005-era legacy row: only the pre-0009
+            // columns populated. Step 0a-bis preflight aborts on any
+            // post-0009 column drift.
+            match expires_at {
+                Some(exp) => {
+                    conn.execute(
+                        "INSERT INTO consent_journal \
+                          (consent_id, subject, scope, decision, granted_by, \
+                           decided_at, expires_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        rusqlite::params![
+                            consent_id, subject, scope, decision,
+                            granted_by, decided_at, exp,
+                        ],
+                    ).expect("v20 legacy insert (bounded)");
+                }
+                None => {
+                    conn.execute(
+                        "INSERT INTO consent_journal \
+                          (consent_id, subject, scope, decision, granted_by, \
+                           decided_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![
+                            consent_id, subject, scope, decision,
+                            granted_by, decided_at,
+                        ],
+                    ).expect("v20 legacy insert (indefinite)");
+                }
+            }
+
+            migrations()
+                .to_version(&mut conn, 21)
+                .expect("apply 0021 to renderable legacy row");
+
+            let events = read_since_rowid(&conn, 0)
+                .expect("read_since_rowid on synthesized legacy row");
+            prop_assert_eq!(
+                events.len(), 1,
+                "exactly one legacy row must decode after 0021"
+            );
+            let (_rowid, event) = &events[0];
+            prop_assert_eq!(&event.consent_id, &consent_id);
+            prop_assert_eq!(event.actor.as_str(), "hmn:legacy");
+            // Synthesized payload is the body-free decision sentinel.
+            match &event.payload {
+                ConsentPayload::Decision { subject_code, policy_code } => {
+                    prop_assert_eq!(subject_code.as_str(), "legacy");
+                    prop_assert!(policy_code.is_none());
+                }
+                other => prop_assert!(
+                    false,
+                    "expected synthesized decision payload, got {:?}",
+                    other,
+                ),
+            }
+            // Kind matches the legacy decision letter.
+            let want_kind = match decision.as_str() {
+                "GRANT" => ConsentKind::Grant,
+                "REVOKE" => ConsentKind::Revoke,
+                _ => unreachable!(),
+            };
+            prop_assert_eq!(event.kind, want_kind);
+            // expires_at flows through synthesis when present, stays
+            // None when absent.
+            prop_assert_eq!(event.expires_at.is_some(), expires_at.is_some());
+        }
+    }
+}
