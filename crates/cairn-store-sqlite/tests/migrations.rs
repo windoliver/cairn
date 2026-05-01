@@ -134,6 +134,58 @@ fn schema_drift_detected_on_weakened_trigger() {
 }
 
 #[test]
+fn schema_drift_detected_on_relaxed_consent_journal_kind_check() {
+    // Round-3 adversarial-review (Medium) follow-up for #255: the kind
+    // CHECK introduced in 0021 is a column-level constraint, not a named
+    // schema object — `EXPECTED_OBJECTS` cannot enumerate it. The
+    // verifier's named-substring check (`verify_consent_journal_kind_check`)
+    // pins the §14 invariant by inspecting the live CREATE TABLE text.
+    // Drop + recreate without the CHECK; verifier must surface the named
+    // drift.
+    use tempfile::tempdir;
+    let dir = tempdir().expect("tempdir");
+    let db = dir.path().join("cairn.db");
+    {
+        let _ = open(&db).expect("first open");
+    }
+    {
+        let conn = rusqlite::Connection::open(&db).expect("raw open");
+        // Drop the append-only triggers so we can DROP TABLE, then
+        // recreate consent_journal WITHOUT the kind CHECK clause.
+        // Mirrors the columns of the post-0021 table exactly otherwise.
+        conn.execute_batch(
+            "DROP TRIGGER consent_journal_immutable; \
+             DROP TRIGGER consent_journal_no_delete; \
+             DROP TABLE consent_journal; \
+             CREATE TABLE consent_journal ( \
+               consent_id      TEXT NOT NULL PRIMARY KEY, \
+               subject         TEXT NOT NULL, \
+               scope           TEXT NOT NULL, \
+               decision        TEXT NOT NULL CHECK (decision IN ('GRANT','REVOKE')), \
+               reason          TEXT, \
+               granted_by      TEXT NOT NULL, \
+               decided_at      INTEGER NOT NULL, \
+               expires_at      INTEGER, \
+               op_id           TEXT, \
+               kind            TEXT NOT NULL, \
+               sensor_id       TEXT, \
+               actor           TEXT, \
+               payload_json    TEXT, \
+               decided_at_iso  TEXT, \
+               expires_at_iso  TEXT \
+             );",
+        )
+        .expect("recreate consent_journal without kind CHECK");
+    }
+    let err = open(&db).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("consent_journal kind CHECK") || msg.contains("DDL digest mismatch"),
+        "kind CHECK drift should be detected by name, got: {err}"
+    );
+}
+
+#[test]
 fn schema_drift_detected_on_dropped_trigger() {
     use tempfile::tempdir;
     let dir = tempdir().expect("tempdir");
