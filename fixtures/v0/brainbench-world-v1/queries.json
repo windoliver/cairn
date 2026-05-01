@@ -1,0 +1,14 @@
+[
+  {
+    "id": "stub-q1",
+    "query": "Who is Adam Lee?",
+    "relevant": ["people/adam-lee-19"],
+    "grades": { "people/adam-lee-19": 3 }
+  },
+  {
+    "id": "stub-q2",
+    "query": "What does Nimbus do?",
+    "relevant": ["companies/nimbus-5"],
+    "grades": { "companies/nimbus-5": 3 }
+  }
+]

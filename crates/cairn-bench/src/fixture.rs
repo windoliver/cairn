@@ -22,7 +22,10 @@ pub struct Page {
     pub slug: String,
     /// Page title.
     pub title: String,
-    /// Page body (raw text).
+    /// Page body (raw text). Upstream gbrain-evals fixtures spell this
+    /// `compiled_truth`; the alias lets us load them verbatim without a
+    /// rewrite step.
+    #[serde(alias = "compiled_truth")]
     pub body: String,
     /// Free-form metadata used by upstream's query-derivation logic.
     /// Treated as opaque here.
@@ -116,7 +119,12 @@ pub fn load(root: &Path) -> Result<Fixture> {
         .with_context(|| format!("read pages dir at {}", pages_dir.display()))?;
     for entry in read_dir {
         let entry = entry.with_context(|| format!("iterate {}", pages_dir.display()))?;
-        if !entry.file_name().to_string_lossy().ends_with(".json") {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.ends_with(".json") || name_str.starts_with('_') || name_str.starts_with('.') {
+            // Skip non-pages: dotfiles (`.DS_Store`, `.gitkeep`) and
+            // upstream meta-files like `_ledger.json` that share the dir
+            // with real pages.
             continue;
         }
         let path = entry.path();
