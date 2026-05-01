@@ -104,7 +104,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "consent_journal_actor_idx"),
     ("index", "consent_journal_sensor_idx"),
     ("index", "consent_journal_kind_idx"),
-    ("trigger", "consent_journal_kind_domain"),
+    // 0021_consent_kind_not_null replaced the 0009 `consent_journal_kind_domain`
+    // trigger with a column-level CHECK on `kind`. The trigger is gone; the
+    // CHECK lives in the table definition (verified by the migration hash).
     ("trigger", "consent_journal_event_requires_iso"),
     ("trigger", "consent_journal_forget_receipt_body_free"),
     // 0010_ranking_indexes
