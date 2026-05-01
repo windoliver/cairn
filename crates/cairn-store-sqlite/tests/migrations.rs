@@ -1314,6 +1314,66 @@ fn consent_journal_rebuild_backfills_grant_kind() {
 }
 
 #[test]
+fn consent_journal_post_rebuild_legacy_rows_excluded_from_event_readers() {
+    // Phase-B (#255, brief §14): the 0021 rebuild backfills `kind` for legacy
+    // rows from `decision`, but leaves the structural event fields
+    // (`actor`, `payload_json`, `decided_at_iso`) NULL. Event-reader gates
+    // must therefore ignore such rows — otherwise `decode_event_inner`
+    // would hard-fail with `SchemaDrift` on the missing fields, bricking
+    // the consent.log mirror and erroring out consent queries. This test
+    // pins the gate against accidental relaxation.
+    use cairn_core::domain::Identity;
+    use cairn_store_sqlite::consent::{
+        max_rowid, query_by_actor, query_by_op, query_by_scope, read_since_rowid,
+    };
+
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, op_id) \
+         VALUES ('legacy-grant', 'sub', 'private', 'GRANT', 'hmn:t', 0, 'op-legacy')",
+        [],
+    )
+    .expect("legacy insert");
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    // Sanity: kind is backfilled (existing 0021 invariant).
+    let kind_after: String = conn
+        .query_row(
+            "SELECT kind FROM consent_journal WHERE consent_id = 'legacy-grant'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("kind backfilled");
+    assert_eq!(kind_after, "grant");
+
+    // The legacy row has `actor`/`payload_json`/`decided_at_iso` NULL —
+    // event readers must skip it.
+    let since_zero = read_since_rowid(&conn, 0).expect("read_since_rowid");
+    assert!(
+        since_zero.is_empty(),
+        "legacy rebuilt row must be invisible to mirror cursor (got {since_zero:?})"
+    );
+
+    let by_op = query_by_op(&conn, "op-legacy").expect("query_by_op");
+    assert!(by_op.is_empty(), "query_by_op must skip legacy row");
+
+    let by_scope = query_by_scope(&conn, "private").expect("query_by_scope");
+    assert!(by_scope.is_empty(), "query_by_scope must skip legacy row");
+
+    let actor = Identity::parse("hmn:t").expect("identity parse");
+    let by_actor = query_by_actor(&conn, &actor).expect("query_by_actor");
+    assert!(by_actor.is_empty(), "query_by_actor must skip legacy row");
+
+    let max = max_rowid(&conn).expect("max_rowid");
+    assert_eq!(
+        max, 0,
+        "max_rowid must skip legacy rows lacking event shape"
+    );
+}
+
+#[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
     conn.execute(
