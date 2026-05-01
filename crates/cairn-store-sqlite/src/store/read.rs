@@ -18,7 +18,7 @@
 //! re-stating the wire spelling in the `SQLite` adapter.
 
 use cairn_core::contract::memory_store::{
-    ListArgs, ListCursor, ListPage, RecordVersion, TombstoneReason,
+    IndexStats, ListArgs, ListCursor, ListPage, RecordVersion, TombstoneReason,
 };
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 use rusqlite::params;
@@ -235,6 +235,49 @@ impl SqliteMemoryStore {
             })
             .await?;
         Ok(history)
+    }
+
+    /// Inherent `index_stats` implementation; the trait method
+    /// [`MemoryStore::index_stats`] guards `self.conn` then delegates here.
+    ///
+    /// Runs two `COUNT(*)` queries inside a single deferred read transaction
+    /// so both counts observe the same `SQLite` snapshot. Without the
+    /// transaction, an ingest landing between the two `query_row` calls can
+    /// surface as a phantom `index_drift` finding.
+    ///
+    /// [`MemoryStore::index_stats`]: cairn_core::contract::memory_store::MemoryStore::index_stats
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Worker`] when the background `tokio_rusqlite`
+    /// worker fails, or [`StoreError::Sqlite`] for SQL errors.
+    #[instrument(skip(self), err, fields(verb = "index_stats"))]
+    pub(crate) async fn do_index_stats(&self) -> Result<IndexStats, StoreError> {
+        let conn = self.require_conn("index_stats")?.clone();
+        let stats = conn
+            .call(move |c| {
+                let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+                let records_active: u64 = tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM records WHERE active = 1 AND tombstoned = 0",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .and_then(|v| {
+                        u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, v))
+                    })?;
+                let fts5_rows: u64 = tx
+                    .query_row("SELECT COUNT(*) FROM records_fts", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .and_then(|v| {
+                        u64::try_from(v).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, v))
+                    })?;
+                tx.commit()?;
+                Ok::<_, tokio_rusqlite::Error>(IndexStats::new(records_active, fts5_rows))
+            })
+            .await?;
+        Ok(stats)
     }
 }
 
