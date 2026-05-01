@@ -56,7 +56,9 @@
 
 use crate::domain::actor_chain::validate_chain;
 use crate::domain::identity::ProvisioningState;
-use crate::domain::{ChainRole, Identity, IdentityKind, MemoryKind, MemoryRecord, RecordId};
+use crate::domain::{
+    ChainRole, Identity, IdentityKind, MemoryKind, MemoryRecord, RecordId, Rfc3339Timestamp,
+};
 
 /// Subset of brief §1223 `chain_status` values that this P0 check can
 /// emit. Grows as follow-up checks (body integrity, key-version ring,
@@ -65,18 +67,21 @@ use crate::domain::{ChainRole, Identity, IdentityKind, MemoryKind, MemoryRecord,
 #[non_exhaustive]
 pub enum ChainStatus {
     /// Author identity is in a *terminal* revocation / purge state
-    /// (`Revoked` or `Purged`). The dispatch leaf emits this finding
-    /// at `Severity::Warning`, not `Error`. Per
-    /// `ProvisioningState::is_operational`, `Revoked` keys still
-    /// verify history for audit, so a stored record signed *before*
-    /// revocation may legitimately remain valid; without persisted
-    /// `key_version` or real Ed25519 re-verify (P1), this leaf cannot
-    /// tell pre- from post-revocation, and blocking on routine
-    /// completed revocation would poison every historical record by
-    /// the same author. The post-revocation-write fail-open this
-    /// leaves is documented as a P1-resolvable gap (`key_version` +
-    /// Ed25519). Maps to brief §1223 `revoked`.
+    /// (`Revoked` or `Purged`) **and** the chain author timestamp is
+    /// at-or-before `revoked_at` (or `revoked_at` is unknown). This is
+    /// the legitimate-history case: the record was signed while the
+    /// identity was still operational, then the identity was revoked
+    /// later. Surfaces at `Severity::Warning` with non-destructive
+    /// remediation. Maps to brief §1223 `revoked`.
     Revoked,
+    /// Author identity is in a *terminal* revocation / purge state
+    /// **and** the chain author timestamp is at-or-after `revoked_at`.
+    /// The record was signed under a key whose signing right had
+    /// already been withdrawn — a real trust violation. Surfaces at
+    /// `Severity::Error`. Maps to brief §1223 `revoked` but split out
+    /// from the legitimate-history case so the operator-blocking
+    /// signal is not diluted.
+    PostRevocationWrite,
     /// Author identity is in an *in-flight* revocation / purge
     /// transition (`RevokePending` or `PurgePending`). A record
     /// surfacing under one of these states means the write happened
@@ -97,7 +102,11 @@ pub enum ChainStatus {
     ///   ordering;
     /// - the author identity is `Pending` (provisioning never
     ///   completed, so the issuer never had authoritative signing
-    ///   right); or
+    ///   right);
+    /// - the author identity is `Active` but the chain author
+    ///   timestamp is *before* `activated_at` — a write that landed
+    ///   while the identity had no authoritative signing right, the
+    ///   pre-activation tamper case; or
     /// - the author identity is not in the `IdentityRegistry`.
     ///
     /// Maps to brief §1223 `broken`. Failing closed here keeps tampered
@@ -106,15 +115,38 @@ pub enum ChainStatus {
     Malformed,
 }
 
+/// Pre-fetched lifecycle snapshot of one author identity. Carries the
+/// transition timestamps the check needs to compare against the chain
+/// author's `at` so it can distinguish:
+///
+/// - pre-activation writes (chain `at` < `activated_at`) from clean
+///   writes;
+/// - legitimate pre-revocation history (chain `at` < `revoked_at`)
+///   from post-revocation writes (chain `at` >= `revoked_at`).
+///
+/// Timestamps are passed as `Rfc3339Timestamp` so this stays in
+/// `cairn-core` without pulling in `chrono`. The dispatch layer
+/// converts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorLifecycle {
+    /// Current lifecycle state.
+    pub state: ProvisioningState,
+    /// When the identity transitioned to `Active`. `None` until the
+    /// identity has activated (i.e., `state == Pending`).
+    pub activated_at: Option<Rfc3339Timestamp>,
+    /// When the identity was revoked. `None` until revoked.
+    pub revoked_at: Option<Rfc3339Timestamp>,
+}
+
 /// Outcome of looking up the record's author identity in the
 /// `IdentityRegistry`. Forces the dispatch layer to handle the missing
 /// row case explicitly so it cannot silently collapse with a registry
 /// backend error (see module docs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthorState {
     /// The registry returned a row for the author identity.
-    Resolved(ProvisioningState),
+    Resolved(AuthorLifecycle),
     /// The registry returned `Ok(None)` — the author identity has no
     /// row at any visibility level. Treat as a `Malformed` finding.
     MissingFromRegistry,
@@ -138,31 +170,39 @@ pub struct AuthorLifecycleFinding {
 }
 
 /// Check a record's at-rest author-lifecycle and chain-shape state
-/// given the **pre-fetched** author lifecycle state from
+/// given the **pre-fetched** author lifecycle snapshot from
 /// `IdentityRegistry`.
 ///
 /// Re-runs `actor_chain` shape validation on every call so persisted
 /// records that drifted from domain invariants (direct DB tamper,
 /// partial migration, schema-drifted import) cannot pass by relying on
-/// ingest-time validation having held.
+/// ingest-time validation having held. Also compares the chain author
+/// entry's `at` against `activated_at` / `revoked_at` so writes that
+/// landed *before* the identity had signing right or *after* it was
+/// withdrawn surface as blocking findings even though the current
+/// lifecycle state alone would let them slip.
 ///
 /// Returns `Some(AuthorLifecycleFinding)` for every non-clean state.
 /// Mapping:
 ///
 /// - `actor_chain` shape violation (no `Author`, duplicate `Author`,
 ///   role-ordering violation per §4.2) — emits `Malformed`.
-/// - Author identity is `Pending` — emits `Malformed` (provisioning
-///   never completed, so the issuer never had authoritative signing
-///   right).
-/// - Author identity in `Revoked` or `Purged` — emits `Revoked`
-///   (terminal; non-blocking warning).
+/// - Author identity is `Pending` — emits `Malformed`.
+/// - Author identity is `Active` but chain `at` < `activated_at` —
+///   emits `Malformed` (pre-activation tamper).
 /// - Author identity in `RevokePending` or `PurgePending` — emits
 ///   `RevocationInFlight` (blocking error).
+/// - Author identity in `Revoked` or `Purged`:
+///   - chain `at` >= `revoked_at` — emits `PostRevocationWrite`
+///     (blocking error: written under withdrawn signing right);
+///   - otherwise — emits `Revoked` (legitimate pre-revocation
+///     history; non-blocking warning).
 /// - Author identity not present in the registry — emits `Malformed`
 ///   (fail-closed per brief invariant 6).
 ///
-/// Returns `None` only when the `actor_chain` is well-formed *and* the
-/// author identity is `Active`. **`None` does not certify the
+/// Returns `None` only when the `actor_chain` is well-formed, the
+/// author identity is `Active`, *and* (when known) the chain timestamp
+/// is at-or-after `activated_at`. **`None` does not certify the
 /// signature**; see module docs.
 #[must_use]
 pub fn check_author_lifecycle(
@@ -215,33 +255,18 @@ pub fn check_author_lifecycle(
         });
     }
 
+    // Chain author entry's `at` — the timestamp captured when the
+    // entry was attached to the record. Compared against lifecycle
+    // transition timestamps to catch writes that landed before
+    // activation or after revocation.
+    let chain_author_at = record
+        .actor_chain
+        .iter()
+        .find(|e| e.role == ChainRole::Author)
+        .map(|e| e.at.clone());
+
     let (status, message) = match author_state {
-        AuthorState::Resolved(ProvisioningState::Active) => return None,
-        AuthorState::Resolved(ProvisioningState::Pending) => (
-            ChainStatus::Malformed,
-            format!(
-                "author identity `{}` is in lifecycle state `Pending` — provisioning never completed, so the issuer never had authoritative signing right",
-                author.as_str()
-            ),
-        ),
-        AuthorState::Resolved(
-            state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending),
-        ) => (
-            ChainStatus::RevocationInFlight,
-            format!(
-                "author identity `{}` is in lifecycle state `{state:?}` — record landed while a withdrawal was in motion; suspicious write",
-                author.as_str()
-            ),
-        ),
-        AuthorState::Resolved(state @ (ProvisioningState::Revoked | ProvisioningState::Purged)) => {
-            (
-                ChainStatus::Revoked,
-                format!(
-                    "author identity `{}` is in lifecycle state `{state:?}` — signing right is terminally withdrawn",
-                    author.as_str()
-                ),
-            )
-        }
+        AuthorState::Resolved(lc) => classify_resolved(&author, chain_author_at.as_ref(), &lc)?,
         AuthorState::MissingFromRegistry => (
             ChainStatus::Malformed,
             format!(
@@ -257,6 +282,85 @@ pub fn check_author_lifecycle(
         status,
         message,
     })
+}
+
+/// Classify a resolved author against its lifecycle snapshot.
+/// Returns `None` when the record is clean (Active and on/after
+/// activation), otherwise the `(status, message)` pair the caller
+/// wraps into an `AuthorLifecycleFinding`.
+fn classify_resolved(
+    author: &Identity,
+    chain_at: Option<&Rfc3339Timestamp>,
+    lc: &AuthorLifecycle,
+) -> Option<(ChainStatus, String)> {
+    use std::cmp::Ordering;
+    match lc.state {
+        ProvisioningState::Active => {
+            // Pre-activation tamper: the chain author timestamp is
+            // *before* the identity acquired authoritative signing
+            // right. Even though current state is Active, the write
+            // itself was unsigned-by-design at the moment it landed.
+            if let (Some(chain_at), Some(activated_at)) = (chain_at, lc.activated_at.as_ref())
+                && chain_at.cmp_chronological(activated_at) == Ordering::Less
+            {
+                return Some((
+                    ChainStatus::Malformed,
+                    format!(
+                        "author identity `{}` is `Active` now but the chain author timestamp ({}) is before `activated_at` ({}) — pre-activation write under an issuer that did not yet have authoritative signing right",
+                        author.as_str(),
+                        chain_at,
+                        activated_at,
+                    ),
+                ));
+            }
+            None
+        }
+        ProvisioningState::Pending => Some((
+            ChainStatus::Malformed,
+            format!(
+                "author identity `{}` is in lifecycle state `Pending` — provisioning never completed, so the issuer never had authoritative signing right",
+                author.as_str()
+            ),
+        )),
+        state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending) => Some((
+            ChainStatus::RevocationInFlight,
+            format!(
+                "author identity `{}` is in lifecycle state `{state:?}` — record landed while a withdrawal was in motion; suspicious write",
+                author.as_str()
+            ),
+        )),
+        state @ (ProvisioningState::Revoked | ProvisioningState::Purged) => {
+            // Post-revocation write: the chain author timestamp is at
+            // or after `revoked_at`. The signing right had already
+            // been withdrawn — a real trust violation, not legitimate
+            // history.
+            if let (Some(chain_at), Some(revoked_at)) = (chain_at, lc.revoked_at.as_ref())
+                && chain_at.cmp_chronological(revoked_at) != Ordering::Less
+            {
+                return Some((
+                    ChainStatus::PostRevocationWrite,
+                    format!(
+                        "author identity `{}` is `{state:?}` and the chain author timestamp ({}) is at-or-after `revoked_at` ({}) — record was signed under withdrawn signing right",
+                        author.as_str(),
+                        chain_at,
+                        revoked_at,
+                    ),
+                ));
+            }
+            // Either chain `at` < `revoked_at` (legitimate
+            // pre-revocation history) or `revoked_at` is unknown
+            // (cannot prove post-revocation; default to the
+            // legitimate-history case so routine revocations don't
+            // poison historical records). Non-blocking warning.
+            Some((
+                ChainStatus::Revoked,
+                format!(
+                    "author identity `{}` is `{state:?}` — signing right is terminally withdrawn (pre-revocation history; review for audit)",
+                    author.as_str()
+                ),
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,11 +381,37 @@ mod tests {
         }
     }
 
+    /// Build an `AuthorState::Resolved` with no transition timestamps —
+    /// covers the pre-timestamp legacy scenarios where the lifecycle
+    /// state alone drives the verdict (registry rows lacking
+    /// `activated_at` / `revoked_at` for whatever reason).
+    fn resolved(state: ProvisioningState) -> AuthorState {
+        AuthorState::Resolved(AuthorLifecycle {
+            state,
+            activated_at: None,
+            revoked_at: None,
+        })
+    }
+
+    /// Build an `AuthorState::Resolved` with explicit transition
+    /// timestamps so tests can pin the timestamp-comparison branches.
+    fn resolved_with(
+        state: ProvisioningState,
+        activated_at: Option<&str>,
+        revoked_at: Option<&str>,
+    ) -> AuthorState {
+        AuthorState::Resolved(AuthorLifecycle {
+            state,
+            activated_at: activated_at.map(|s| Rfc3339Timestamp::parse(s).expect("valid")),
+            revoked_at: revoked_at.map(|s| Rfc3339Timestamp::parse(s).expect("valid")),
+        })
+    }
+
     #[test]
     fn active_author_emits_no_finding() {
         let record = record_with_active_author();
         assert_eq!(
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active)),
+            check_author_lifecycle(&record, resolved(ProvisioningState::Active)),
             None
         );
     }
@@ -289,9 +419,8 @@ mod tests {
     #[test]
     fn pending_author_is_flagged_as_malformed() {
         let record = record_with_active_author();
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Pending))
-                .expect("pending issuer must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Pending))
+            .expect("pending issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert!(finding.author.is_some());
         assert!(finding.message.contains("Pending"));
@@ -300,11 +429,8 @@ mod tests {
     #[test]
     fn revoke_pending_author_is_flagged_as_revocation_in_flight() {
         let record = record_with_active_author();
-        let finding = check_author_lifecycle(
-            &record,
-            AuthorState::Resolved(ProvisioningState::RevokePending),
-        )
-        .expect("revoke-pending issuer must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::RevokePending))
+            .expect("revoke-pending issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::RevocationInFlight);
         assert!(finding.author.is_some());
         assert!(finding.message.contains("RevokePending"));
@@ -313,9 +439,8 @@ mod tests {
     #[test]
     fn revoked_author_is_flagged_as_revoked() {
         let record = record_with_active_author();
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Revoked))
-                .expect("revoked issuer must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Revoked))
+            .expect("revoked issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::Revoked);
         assert!(finding.message.contains("Revoked"));
     }
@@ -323,11 +448,8 @@ mod tests {
     #[test]
     fn purge_pending_author_is_flagged_as_revocation_in_flight() {
         let record = record_with_active_author();
-        let finding = check_author_lifecycle(
-            &record,
-            AuthorState::Resolved(ProvisioningState::PurgePending),
-        )
-        .expect("purge-pending issuer must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::PurgePending))
+            .expect("purge-pending issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::RevocationInFlight);
         assert!(finding.message.contains("PurgePending"));
     }
@@ -335,9 +457,8 @@ mod tests {
     #[test]
     fn purged_author_is_flagged_as_revoked() {
         let record = record_with_active_author();
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Purged))
-                .expect("purged issuer must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Purged))
+            .expect("purged issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::Revoked);
         assert!(finding.message.contains("Purged"));
     }
@@ -363,10 +484,88 @@ mod tests {
             .map(|e| e.identity.clone())
             .expect("sample record has author");
         let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Revoked))
-                .expect("flagged");
+            check_author_lifecycle(&record, resolved(ProvisioningState::Revoked)).expect("flagged");
         assert_eq!(finding.record_id, expected_id);
         assert_eq!(finding.author, Some(expected_author));
+    }
+
+    #[test]
+    fn pre_activation_write_under_active_identity_is_flagged_as_malformed() {
+        // Round-9 fix: even when current state is Active, a chain
+        // author timestamp before `activated_at` proves the write
+        // landed while the issuer had no authoritative signing right.
+        // This is the "becomes clean once activated" gap.
+        let record = record_with_active_author(); // chain `at` = 2026-04-22T14:02:11Z
+        let finding = check_author_lifecycle(
+            &record,
+            resolved_with(
+                ProvisioningState::Active,
+                Some("2026-05-01T00:00:00Z"), // activated_at AFTER chain.at
+                None,
+            ),
+        )
+        .expect("pre-activation write must surface");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert!(finding.message.contains("pre-activation"));
+    }
+
+    #[test]
+    fn active_with_chain_at_or_after_activation_is_clean() {
+        // The complementary case: chain `at` >= activated_at → clean.
+        let record = record_with_active_author();
+        assert_eq!(
+            check_author_lifecycle(
+                &record,
+                resolved_with(
+                    ProvisioningState::Active,
+                    Some("2026-04-01T00:00:00Z"), // activated_at BEFORE chain.at
+                    None,
+                ),
+            ),
+            None,
+            "chain at-or-after activation must be clean"
+        );
+    }
+
+    #[test]
+    fn post_revocation_write_is_flagged_with_timestamp_evidence() {
+        // Round-9 fix: chain `at` >= revoked_at proves the write
+        // landed under withdrawn signing right. Surfaces under the
+        // dedicated `PostRevocationWrite` variant so the dispatch
+        // leaf can route it to Severity::Error rather than collapsing
+        // it with legitimate pre-revocation history.
+        let record = record_with_active_author(); // chain `at` = 2026-04-22T14:02:11Z
+        let finding = check_author_lifecycle(
+            &record,
+            resolved_with(
+                ProvisioningState::Revoked,
+                Some("2025-01-01T00:00:00Z"),
+                Some("2026-04-22T14:02:11Z"), // revoked_at == chain.at
+            ),
+        )
+        .expect("post-revocation write must surface");
+        assert_eq!(finding.status, ChainStatus::PostRevocationWrite);
+        assert!(finding.message.contains("at-or-after"));
+    }
+
+    #[test]
+    fn pre_revocation_history_under_revoked_author_stays_warning_class() {
+        // Complementary: chain `at` < revoked_at → legitimate
+        // historical record signed before revocation. Stays
+        // `ChainStatus::Revoked` (the dispatch leaf maps that to
+        // Severity::Warning so routine revocation doesn't poison
+        // history).
+        let record = record_with_active_author(); // chain `at` = 2026-04-22T14:02:11Z
+        let finding = check_author_lifecycle(
+            &record,
+            resolved_with(
+                ProvisioningState::Revoked,
+                Some("2025-01-01T00:00:00Z"),
+                Some("2026-12-31T23:59:59Z"), // revoked AFTER chain.at
+            ),
+        )
+        .expect("flagged");
+        assert_eq!(finding.status, ChainStatus::Revoked);
     }
 
     #[test]
@@ -393,9 +592,8 @@ mod tests {
         record
             .actor_chain
             .push(entry(ChainRole::Author, "hmn:other"));
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
-                .expect("duplicate author must surface");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Active))
+            .expect("duplicate author must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert_eq!(finding.author, None);
     }
@@ -408,9 +606,8 @@ mod tests {
         record
             .actor_chain
             .insert(0, entry(ChainRole::Sensor, "snr:local:hook:cc-session:v1"));
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
-                .expect("misordered chain must surface");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Active))
+            .expect("misordered chain must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert_eq!(finding.author, None);
     }
@@ -423,21 +620,22 @@ mod tests {
         // and assert the marker does not appear in the message.
         const MARKER: &str = "SECRET-MARKER-PRIVACY-9";
         let cases = [
-            AuthorState::Resolved(ProvisioningState::Pending),
-            AuthorState::Resolved(ProvisioningState::RevokePending),
-            AuthorState::Resolved(ProvisioningState::Revoked),
-            AuthorState::Resolved(ProvisioningState::PurgePending),
-            AuthorState::Resolved(ProvisioningState::Purged),
+            resolved(ProvisioningState::Pending),
+            resolved(ProvisioningState::RevokePending),
+            resolved(ProvisioningState::Revoked),
+            resolved(ProvisioningState::PurgePending),
+            resolved(ProvisioningState::Purged),
             AuthorState::MissingFromRegistry,
         ];
         for state in cases {
             let mut record = record_with_active_author();
             record.body = format!("benign prefix {MARKER} benign suffix");
+            let label = format!("{state:?}");
             let finding = check_author_lifecycle(&record, state)
                 .expect("non-Active state must produce a finding");
             assert!(
                 !finding.message.contains(MARKER),
-                "finding message leaked record body for state {state:?}: {}",
+                "finding message leaked record body for state {label}: {}",
                 finding.message
             );
         }
@@ -483,16 +681,17 @@ mod tests {
         // authors.
         let cases = [
             AuthorState::MissingFromRegistry,
-            AuthorState::Resolved(ProvisioningState::Active),
-            AuthorState::Resolved(ProvisioningState::Pending),
-            AuthorState::Resolved(ProvisioningState::Revoked),
-            AuthorState::Resolved(ProvisioningState::Purged),
+            resolved(ProvisioningState::Active),
+            resolved(ProvisioningState::Pending),
+            resolved(ProvisioningState::Revoked),
+            resolved(ProvisioningState::Purged),
         ];
         for state in cases {
+            let label = format!("{state:?}");
             assert_eq!(
                 check_author_lifecycle(&record, state),
                 None,
-                "sensor-authored record must not be flagged for state {state:?}"
+                "sensor-authored record must not be flagged for state {label}"
             );
         }
     }
@@ -516,9 +715,8 @@ mod tests {
             .find(|e| e.role == ChainRole::Author)
             .expect("sample chain has author");
         author.identity = sensor_id.clone();
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
-                .expect("sensor author on non-observation record must be flagged");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Active))
+            .expect("sensor author on non-observation record must be flagged");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert_eq!(finding.author, Some(sensor_id));
     }
@@ -544,9 +742,8 @@ mod tests {
             .expect("sample chain has author");
         author.identity = author_sensor.clone();
         record.provenance.source_sensor = other_sensor;
-        let finding =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
-                .expect("sensor mismatch must surface");
+        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Active))
+            .expect("sensor mismatch must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert_eq!(finding.author, Some(author_sensor));
     }
@@ -561,9 +758,8 @@ mod tests {
         record
             .actor_chain
             .push(entry(ChainRole::Sensor, "snr:local:hook:cc-session:v1"));
-        let resolved =
-            check_author_lifecycle(&record, AuthorState::Resolved(ProvisioningState::Active))
-                .expect("active state does not rescue a malformed chain");
+        let resolved = check_author_lifecycle(&record, resolved(ProvisioningState::Active))
+            .expect("active state does not rescue a malformed chain");
         assert_eq!(resolved.status, ChainStatus::Malformed);
     }
 }

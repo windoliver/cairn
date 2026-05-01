@@ -8,11 +8,11 @@ use std::collections::HashMap;
 use crate::config::CairnConfig;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
 use crate::domain::Identity;
-use crate::domain::identity::ProvisioningState;
 use crate::domain::record::RecordId;
 use crate::generated::verbs::lint::{
     Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
 };
+use crate::pipeline::lint::author_lifecycle::AuthorLifecycle;
 
 pub mod checks;
 pub mod report;
@@ -64,7 +64,7 @@ pub struct LintInputs<'a> {
     pub schema_version: SchemaVersion,
     /// Pre-fetched author identity → lifecycle state map. See struct
     /// docs.
-    pub author_states: &'a HashMap<Identity, ProvisioningState>,
+    pub author_states: &'a HashMap<Identity, AuthorLifecycle>,
 }
 
 /// Major.minor schema version for the §6.4 staleness check. Patch is
@@ -93,9 +93,9 @@ impl SchemaVersion {
 /// of checks that don't exercise §6.2. Avoids repeating
 /// `let states = HashMap::new();` in every test fixture.
 #[cfg(test)]
-pub(crate) fn empty_author_states() -> &'static HashMap<Identity, ProvisioningState> {
+pub(crate) fn empty_author_states() -> &'static HashMap<Identity, AuthorLifecycle> {
     use std::sync::OnceLock;
-    static M: OnceLock<HashMap<Identity, ProvisioningState>> = OnceLock::new();
+    static M: OnceLock<HashMap<Identity, AuthorLifecycle>> = OnceLock::new();
     M.get_or_init(HashMap::new)
 }
 

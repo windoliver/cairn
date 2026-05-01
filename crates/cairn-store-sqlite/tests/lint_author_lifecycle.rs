@@ -31,6 +31,7 @@
 
 use cairn_core::contract::identity_registry::{IdentityRegistry, IdentityVisibility};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
+use cairn_core::domain::Rfc3339Timestamp;
 use cairn_core::domain::identity::keys::{
     IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash,
 };
@@ -40,7 +41,7 @@ use cairn_core::domain::identity::records::{
 };
 use cairn_core::domain::{ChainRole, Identity, IdentityKind, MemoryRecord, RecordId, TargetId};
 use cairn_core::pipeline::lint::author_lifecycle::{
-    AuthorLifecycleFinding, AuthorState, ChainStatus, check_author_lifecycle,
+    AuthorLifecycle, AuthorLifecycleFinding, AuthorState, ChainStatus, check_author_lifecycle,
 };
 use cairn_store_sqlite::{SqliteIdentityRegistry, SqliteMemoryStore, open_in_memory};
 
@@ -155,12 +156,21 @@ fn record_authored_by(author_id: &Identity, ulid: &str) -> MemoryRecord {
     r.target_id = TargetId::parse(ulid).expect("valid target id");
     r.scope.user = Some(author_id.as_str().to_owned());
     r.provenance.originating_agent_id = author_id.clone();
-    let author_entry = r
-        .actor_chain
-        .iter_mut()
-        .find(|e| e.role == ChainRole::Author)
-        .expect("sample chain has author");
-    author_entry.identity = author_id.clone();
+    // Stamp every chain entry + record updated_at "now" so the §6.2
+    // timestamp comparison against `activated_at` doesn't mis-flag the
+    // record as a pre-activation write — the test setup activates the
+    // identity immediately before calling this helper, so "now" is
+    // reliably after `activated_at`. Record validators also require
+    // chain `at` <= updated_at, so both move together.
+    let now = Rfc3339Timestamp::parse(chrono::Utc::now().to_rfc3339()).expect("now");
+    r.provenance.created_at = now.clone();
+    r.updated_at = now.clone();
+    for entry in &mut r.actor_chain {
+        if entry.role == ChainRole::Author {
+            entry.identity = author_id.clone();
+        }
+        entry.at = now.clone();
+    }
     r.validate()
         .expect("record_authored_by must build a valid record");
     r
@@ -196,7 +206,15 @@ async fn scan_vault(
                 .await
                 .expect("registry")
             {
-                Some(rec) => AuthorState::Resolved(rec.provisioning_state),
+                Some(rec) => AuthorState::Resolved(AuthorLifecycle {
+                    state: rec.provisioning_state,
+                    activated_at: rec
+                        .activated_at
+                        .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+                    revoked_at: rec
+                        .revoked_at
+                        .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+                }),
                 None => AuthorState::MissingFromRegistry,
             },
             // No author entry in the chain — pass any state; the check
@@ -268,11 +286,16 @@ async fn mixed_lifecycle_states_in_one_vault() {
         "expected bob + mallory only: {findings:?}"
     );
 
+    // Bob's record is written *after* his revocation (the revoke
+    // happens above before record_authored_by stamps "now"), so the
+    // chain timestamp is at-or-after `revoked_at` → the timestamp
+    // comparison upgrades this from legitimate-history to a real
+    // trust violation.
     let bob_finding = findings
         .iter()
         .find(|f| f.record_id == r_bob.id)
         .expect("bob flagged");
-    assert_eq!(bob_finding.status, ChainStatus::Revoked);
+    assert_eq!(bob_finding.status, ChainStatus::PostRevocationWrite);
 
     let mallory_finding = findings
         .iter()
@@ -360,6 +383,30 @@ async fn revocation_after_write_now_flags_record() {
     assert_eq!(post[0].status, ChainStatus::Revoked);
 }
 
+#[tokio::test]
+async fn post_revocation_write_emits_post_revocation_write_status() {
+    // Round-9 fix (timestamp evidence): a record whose chain author
+    // timestamp is at-or-after `revoked_at` is the suspicious-write
+    // case. The check must escalate from `Revoked` (Warning) to
+    // `PostRevocationWrite` (Error) so timestamp evidence does NOT
+    // get downgraded to advisory output.
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let alice_sk = provision_active(&registry, &alice).await;
+    revoke(&registry, &alice, &alice_sk).await;
+    // Now write a record under the (already-revoked) identity. The
+    // chain timestamp will be "now" (after `revoked_at`), so the
+    // check has the evidence it needs to escalate.
+    let r = record_authored_by(&alice, "01HQZX9F5N0000000000000060");
+    store.upsert(&r).await.expect("upsert");
+
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0].record_id, r.id);
+    assert_eq!(findings[0].status, ChainStatus::PostRevocationWrite);
+}
+
 // ── Dispatch-layer coverage (post-#96) ────────────────────────────
 
 /// Prototype of the cairn-cli `lint_handler` registry-prefetch step:
@@ -369,7 +416,7 @@ async fn revocation_after_write_now_flags_record() {
 async fn prefetch_author_states(
     store: &SqliteMemoryStore,
     registry: &SqliteIdentityRegistry,
-) -> std::collections::HashMap<Identity, ProvisioningState> {
+) -> std::collections::HashMap<Identity, AuthorLifecycle> {
     let stored = store
         .list_active_stored(&ListArgs::default())
         .await
@@ -392,7 +439,16 @@ async fn prefetch_author_states(
             .await
             .expect("get_identity")
         {
-            map.insert(id, rec.provisioning_state);
+            let lc = AuthorLifecycle {
+                state: rec.provisioning_state,
+                activated_at: rec
+                    .activated_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+                revoked_at: rec
+                    .revoked_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+            };
+            map.insert(id, lc);
         }
     }
     map

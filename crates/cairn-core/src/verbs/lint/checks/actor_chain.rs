@@ -45,7 +45,7 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                 .map(|e| e.identity.clone());
             let state = match author.as_ref() {
                 Some(id) => match inputs.author_states.get(id) {
-                    Some(p) => AuthorState::Resolved(*p),
+                    Some(lc) => AuthorState::Resolved(lc.clone()),
                     None => AuthorState::MissingFromRegistry,
                 },
                 // No author entry → check_author_lifecycle reaches
@@ -67,42 +67,40 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 }
 
 fn severity_for(status: ChainStatus) -> Severity {
-    // Severity policy — final position after three rounds of review
-    // oscillation (rounds 5/7/8) on terminal `Revoked`/`Purged`:
-    //
-    // - Terminal revocation → Warning. The integration test
-    //   `revocation_after_write_now_flags_record` concretely
-    //   demonstrates the legitimate case: a record written while the
-    //   author was Active, then later revoked. Without persisted
-    //   `key_version` or real Ed25519 re-verify (P1), this leaf
-    //   cannot tell pre- from post-revocation, and treating that
-    //   ambiguity as `Error` poisons every historical record by the
-    //   same author with a blocking verdict. Operators see the audit
-    //   trail without destructive remediation pressure.
-    // - In-flight revocation/purge → Error. A record landing while a
-    //   withdrawal is already in motion is the suspicious-write case
-    //   (bypassed gate, race, tamper) — not "old history under a
-    //   now-revoked key." The pre/post-revocation ambiguity that
-    //   protects terminal Revoked does NOT apply.
-    // - Malformed (chain shape, unknown issuer, Pending issuer) →
-    //   Error. Real corruption / missing truth source.
-    //
-    // The post-revocation-write fail-open risk that argued for
-    // upgrading terminal Revoked to Error is real but unrecoverable
-    // without P1 evidence (key_version + Ed25519). Documented as a
-    // P1-resolvable gap rather than masked behind a noisy Warning.
+    // Severity policy:
+    // - Terminal `Revoked` (chain `at` < `revoked_at`, or `revoked_at`
+    //   unknown) — Warning. Legitimate pre-revocation history; routine
+    //   revocation must not poison every historical record by the same
+    //   author with a blocking verdict.
+    // - `PostRevocationWrite` (chain `at` >= `revoked_at`) — Error.
+    //   Timestamp evidence proves the write landed under withdrawn
+    //   signing right; this is no longer the ambiguous case.
+    // - `RevocationInFlight` (`RevokePending` / `PurgePending`) —
+    //   Error. Suspicious-write case (bypassed gate, race, tamper).
+    // - `Malformed` (chain shape, unknown issuer, `Pending` issuer,
+    //   pre-activation tamper) — Error. Real corruption / missing
+    //   truth source.
     match status {
         ChainStatus::Revoked => Severity::Warning,
-        ChainStatus::RevocationInFlight | ChainStatus::Malformed => Severity::Error,
+        ChainStatus::PostRevocationWrite
+        | ChainStatus::RevocationInFlight
+        | ChainStatus::Malformed => Severity::Error,
     }
 }
 
 fn suggested_fix_for(status: ChainStatus) -> &'static str {
     match status {
         ChainStatus::Revoked => {
-            "audit the affected records — author identity is terminally revoked, but historical \
-             signatures may still be valid; do NOT auto-tombstone until P1 ships real signature \
-             verification + key_version persistence (records signed pre-revocation remain valid)"
+            "audit the affected records — author identity is terminally revoked, but the chain \
+             timestamp shows the write predates revocation; do NOT auto-tombstone until P1 ships \
+             real signature verification + key_version persistence (records signed pre-revocation \
+             remain valid)"
+        }
+        ChainStatus::PostRevocationWrite => {
+            "investigate as a suspected trust-boundary breach — the chain author timestamp is \
+             at-or-after the identity's revoked_at, so the record was signed under withdrawn \
+             signing right; quarantine the affected records and trace the write path before \
+             re-ingest or tombstone"
         }
         ChainStatus::RevocationInFlight => {
             "investigate the affected records — author identity was undergoing revocation/purge \
@@ -124,6 +122,7 @@ mod tests {
     use crate::domain::identity::ProvisioningState;
     use crate::domain::record::tests_export::sample_record;
     use crate::domain::{ActorChainEntry, ChainRole, Identity, Rfc3339Timestamp};
+    use crate::pipeline::lint::author_lifecycle::AuthorLifecycle;
     use crate::verbs::lint::{ConsentModel, LintRecord, SchemaVersion};
     use std::collections::HashMap;
 
@@ -136,7 +135,7 @@ mod tests {
 
     fn inputs<'a>(
         records: &'a [LintRecord],
-        author_states: &'a HashMap<Identity, ProvisioningState>,
+        author_states: &'a HashMap<Identity, AuthorLifecycle>,
         cfg: &'a CairnConfig,
     ) -> LintInputs<'a> {
         LintInputs {
@@ -160,7 +159,7 @@ mod tests {
         });
         let cfg = CairnConfig::default();
         let recs = [lint_record(record)];
-        let states: HashMap<Identity, ProvisioningState> = HashMap::new();
+        let states: HashMap<Identity, AuthorLifecycle> = HashMap::new();
         let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
         assert_eq!(
@@ -184,7 +183,14 @@ mod tests {
             .map(|e| e.identity.clone())
             .expect("author");
         let mut states = HashMap::new();
-        states.insert(author_id, ProvisioningState::Active);
+        states.insert(
+            author_id,
+            AuthorLifecycle {
+                state: ProvisioningState::Active,
+                activated_at: None,
+                revoked_at: None,
+            },
+        );
         let recs = [lint_record(r)];
         let inp = inputs(&recs, &states, &cfg);
         assert!(
@@ -212,7 +218,14 @@ mod tests {
             .map(|e| e.identity.clone())
             .expect("author");
         let mut states = HashMap::new();
-        states.insert(author_id, ProvisioningState::Revoked);
+        states.insert(
+            author_id,
+            AuthorLifecycle {
+                state: ProvisioningState::Revoked,
+                activated_at: None,
+                revoked_at: None,
+            },
+        );
         let recs = [lint_record(r)];
         let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
@@ -245,7 +258,14 @@ mod tests {
             .map(|e| e.identity.clone())
             .expect("author");
         let mut states = HashMap::new();
-        states.insert(author_id, ProvisioningState::RevokePending);
+        states.insert(
+            author_id,
+            AuthorLifecycle {
+                state: ProvisioningState::RevokePending,
+                activated_at: None,
+                revoked_at: None,
+            },
+        );
         let recs = [lint_record(r)];
         let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);
@@ -258,7 +278,7 @@ mod tests {
         // Author identity not in map → AuthorState::MissingFromRegistry
         // → ChainStatus::Malformed → Severity::Error.
         let cfg = CairnConfig::default();
-        let states: HashMap<Identity, ProvisioningState> = HashMap::new();
+        let states: HashMap<Identity, AuthorLifecycle> = HashMap::new();
         let recs = [lint_record(sample_record())];
         let inp = inputs(&recs, &states, &cfg);
         let findings = run(&inp);

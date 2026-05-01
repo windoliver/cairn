@@ -505,13 +505,14 @@ async fn prefetch_author_states(
 ) -> anyhow::Result<
     std::collections::HashMap<
         cairn_core::domain::Identity,
-        cairn_core::domain::identity::ProvisioningState,
+        cairn_core::pipeline::lint::author_lifecycle::AuthorLifecycle,
     >,
 > {
     use cairn_core::contract::identity_registry::IdentityVisibility;
     use cairn_core::domain::ChainRole;
     use cairn_core::domain::Identity;
-    use cairn_core::domain::identity::ProvisioningState;
+    use cairn_core::domain::Rfc3339Timestamp;
+    use cairn_core::pipeline::lint::author_lifecycle::AuthorLifecycle;
     use std::collections::{HashMap, HashSet};
 
     let mut unique: HashSet<Identity> = HashSet::new();
@@ -525,7 +526,7 @@ async fn prefetch_author_states(
             unique.insert(e.identity.clone());
         }
     }
-    let mut map: HashMap<Identity, ProvisioningState> = HashMap::with_capacity(unique.len());
+    let mut map: HashMap<Identity, AuthorLifecycle> = HashMap::with_capacity(unique.len());
     for id in unique {
         let row = registry
             .get_identity(&id, IdentityVisibility::Audit)
@@ -533,7 +534,24 @@ async fn prefetch_author_states(
             .map_err(|e| anyhow::anyhow!("registry: get_identity({id:?}): {e}"))
             .context("lint: get_identity")?;
         if let Some(rec) = row {
-            map.insert(id, rec.provisioning_state);
+            // Convert chrono timestamps to the core's Rfc3339 newtype
+            // so the check stays in `cairn-core` without a chrono dep.
+            // `to_rfc3339` always emits a valid form so the parse
+            // cannot fail in practice; `.ok()` keeps lint defensive.
+            let activated_at = rec
+                .activated_at
+                .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+            let revoked_at = rec
+                .revoked_at
+                .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+            map.insert(
+                id,
+                AuthorLifecycle {
+                    state: rec.provisioning_state,
+                    activated_at,
+                    revoked_at,
+                },
+            );
         }
     }
     Ok(map)
