@@ -2203,6 +2203,88 @@ fn consent_journal_rebuild_aborts_on_event_row_impossible_iso() {
 }
 
 #[test]
+fn consent_journal_rebuild_accepts_event_row_lowercase_t_iso() {
+    // Phase-B (#255, brief §14): round-11 High finding. The earlier
+    // step 0c structural sniff used `GLOB 'T'` for the date/time
+    // separator and called `datetime(decided_at_iso)` directly, both
+    // of which are case-strict. But `Rfc3339Timestamp::parse` (in
+    // cairn-core/src/domain/timestamp.rs) explicitly accepts both
+    // `T`/`t` and `Z`/`z`, so a legitimate row written with a
+    // lowercase-t separator would be aborted unnecessarily. The fix
+    // case-normalizes via `[tT]` glob and `upper()` on the
+    // datetime() argument; this row is otherwise fully shaped and
+    // must migrate cleanly.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-lower-t', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '2026-04-22t14:02:11Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with lowercase-t iso");
+
+    migrations().to_version(&mut conn, 21).expect(
+        "migration 0021 must accept lowercase-t RFC3339 (matches Rfc3339Timestamp grammar)",
+    );
+
+    let iso: String = conn
+        .query_row(
+            "SELECT decided_at_iso FROM consent_journal WHERE consent_id = 'event-lower-t'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("row must survive migration");
+    assert_eq!(
+        iso, "2026-04-22t14:02:11Z",
+        "migration must preserve original iso text unchanged"
+    );
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_invalid_expires_at_iso() {
+    // Phase-B (#255, brief §14): round-11 High finding. Pre-0021 the
+    // preflight checked decided_at_iso but not expires_at_iso, even
+    // though both are nullable RFC3339 columns. A row with a valid
+    // decided_at_iso but an impossible expires_at_iso (e.g.
+    // '2026-99-99T99:99:99Z') would survive into v2 and brick
+    // `Rfc3339Timestamp::parse` at decode after the cursor reset.
+    // Step 0c now applies the same structural+semantic check to
+    // expires_at_iso, gated `WHEN expires_at_iso IS NOT NULL`.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso, expires_at_iso) \
+         VALUES ('event-bad-expires', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z', '2026-99-99T99:99:99Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with malformed expires_at_iso");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with malformed expires_at_iso");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("expires_at_iso"),
+        "abort message must cite expires_at_iso; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-bad-expires'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-bad-expires");
+}
+
+#[test]
 fn consent_journal_rebuild_aborts_on_event_row_payload_missing_required_fields() {
     // Phase-B (#255, brief §14): round-9 High finding. The 0011
     // `consent_journal_payload_required_fields` trigger gates that each

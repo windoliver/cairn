@@ -197,15 +197,26 @@ DROP TABLE __cairn_assert_legacy_iso;
 --       op_id      : 1..=128, [A-Za-z0-9._:-] (NULL allowed)
 --       subject    : 1..=128, [a-z0-9._:-], first char [a-z]
 --
---     (event half) Event-kind rows' decided_at_iso must parse as a
---     real datetime (semantic check via SQLite's `datetime()` —
---     returns NULL on unparseable input, so e.g.
---     '2026-99-99T99:99:99Z' is correctly rejected even though it's
---     structurally RFC3339-shaped). A structural sniff (length 20..=35
---     + separator positions) is layered in front for clearer error
---     messages on gross failures like `'not-an-rfc3339'`. Round-10
---     High finding: structural-only sniff admitted impossible-date
---     values that later bricked `Rfc3339Timestamp::parse` at decode.
+--     (event half) Event-kind rows' decided_at_iso AND expires_at_iso
+--     (when present) must parse as a real datetime (semantic check via
+--     SQLite's `datetime()` — returns NULL on unparseable input, so
+--     e.g. '2026-99-99T99:99:99Z' is correctly rejected even though
+--     it's structurally RFC3339-shaped). A structural sniff (length
+--     20..=35 + separator positions) is layered in front for clearer
+--     error messages on gross failures like `'not-an-rfc3339'`.
+--     Round-10 High finding: structural-only sniff admitted
+--     impossible-date values that later bricked
+--     `Rfc3339Timestamp::parse` at decode.
+--
+--     CASE-INSENSITIVE: `Rfc3339Timestamp::parse` (in
+--     cairn-core/src/domain/timestamp.rs) explicitly accepts both
+--     `T`/`t` separators and `Z`/`z` UTC offsets. SQLite's `datetime()`
+--     and naive `GLOB 'T'` are case-strict, so a legitimate row with
+--     `'2026-04-22t14:02:11Z'` (lowercase t) would be rejected here
+--     but accepted by `Rfc3339Timestamp::parse` post-migration. We
+--     case-normalize via `[tT]` GLOB on the structural separator and
+--     `upper()` on the `datetime()` argument to match the parser's
+--     grammar exactly. Round-11 High finding.
 --
 --     (event half, actor) Event-kind rows' actor must match the
 --     Identity wire format `<prefix>:<body>` where prefix ∈
@@ -222,7 +233,7 @@ CREATE TEMP TRIGGER __cairn_assert_metadata_trg
   BEFORE INSERT ON __cairn_assert_metadata
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes, or event-kind row(s) whose decided_at_iso is not RFC3339 (parsed via SQLite datetime()) or whose actor is not a valid Identity wire form (hmn:|agt:|snr: + [A-Za-z0-9._:-]); cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose consent_id/subject/scope/op_id violate the 0011 domain classes, or event-kind row(s) whose decided_at_iso/expires_at_iso is not RFC3339 (parsed via SQLite datetime() with case-normalized t/z) or whose actor is not a valid Identity wire form (hmn:|agt:|snr: + [A-Za-z0-9._:-]); cannot promote without sanitization. Resolve manually before re-running migration (issue #267).');
 END;
 INSERT INTO __cairn_assert_metadata (n)
   SELECT COUNT(*) FROM consent_journal
@@ -254,17 +265,55 @@ INSERT INTO __cairn_assert_metadata (n)
      -- semantically parseable as a real datetime (round-10: catches
      -- impossible dates like '2026-99-99T99:99:99Z' that the
      -- structural sniff admits). datetime() returns NULL on
-     -- unparseable input.
+     -- unparseable input. Round-11: case-normalize `t`/`z` to match
+     -- `Rfc3339Timestamp::parse` grammar (which accepts either case);
+     -- `[tT]` glob + `upper()` on the datetime() arg.
      (kind IS NOT NULL
       AND decided_at_iso IS NOT NULL
       AND (length(decided_at_iso) < 20
            OR length(decided_at_iso) > 35
            OR substr(decided_at_iso, 5, 1) NOT GLOB '-'
            OR substr(decided_at_iso, 8, 1) NOT GLOB '-'
-           OR substr(decided_at_iso, 11, 1) NOT GLOB 'T'
+           OR substr(decided_at_iso, 11, 1) NOT GLOB '[tT]'
            OR substr(decided_at_iso, 14, 1) NOT GLOB ':'
            OR substr(decided_at_iso, 17, 1) NOT GLOB ':'
-           OR datetime(decided_at_iso) IS NULL))
+           OR datetime(upper(decided_at_iso)) IS NULL))
+  OR
+     -- event half: expires_at_iso must be plausibly RFC3339-shaped
+     -- and semantically parseable when present (round-11 High
+     -- finding: pre-0021 expires_at_iso was nullable and unchecked,
+     -- so a malformed value like '2026-99-99T99:99:99Z' would
+     -- survive into v2 and brick `Rfc3339Timestamp::parse` at decode
+     -- after the cursor reset). Same case-insensitive grammar as
+     -- decided_at_iso. Apply on event-kind rows only — pre-0009
+     -- schema had no expires_at_iso column, so legacy rows always
+     -- have NULL there; we still gate by `expires_at_iso IS NOT NULL`
+     -- defensively so the predicate is well-defined under either kind.
+     (kind IS NOT NULL
+      AND expires_at_iso IS NOT NULL
+      AND (length(expires_at_iso) < 20
+           OR length(expires_at_iso) > 35
+           OR substr(expires_at_iso, 5, 1) NOT GLOB '-'
+           OR substr(expires_at_iso, 8, 1) NOT GLOB '-'
+           OR substr(expires_at_iso, 11, 1) NOT GLOB '[tT]'
+           OR substr(expires_at_iso, 14, 1) NOT GLOB ':'
+           OR substr(expires_at_iso, 17, 1) NOT GLOB ':'
+           OR datetime(upper(expires_at_iso)) IS NULL))
+  OR
+     -- legacy half: defensively gate expires_at_iso even on legacy
+     -- (kind IS NULL) rows. Pre-0009 the column didn't exist, so
+     -- legacy rows should always have NULL here, but we cover both
+     -- halves so the preflight is robust to schema drift.
+     (kind IS NULL
+      AND expires_at_iso IS NOT NULL
+      AND (length(expires_at_iso) < 20
+           OR length(expires_at_iso) > 35
+           OR substr(expires_at_iso, 5, 1) NOT GLOB '-'
+           OR substr(expires_at_iso, 8, 1) NOT GLOB '-'
+           OR substr(expires_at_iso, 11, 1) NOT GLOB '[tT]'
+           OR substr(expires_at_iso, 14, 1) NOT GLOB ':'
+           OR substr(expires_at_iso, 17, 1) NOT GLOB ':'
+           OR datetime(upper(expires_at_iso)) IS NULL))
   OR
      -- event half: actor must match the Identity wire format
      -- (round-10): <prefix>:<body> where prefix ∈ {hmn, agt, snr}
