@@ -489,10 +489,19 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
 /// replay independently. The `consumed` column on the DB row is now
 /// reserved-for-no-use — schema 0021 still defines it (changing the
 /// schema would break verifier fingerprints), but we ignore it.
+///
+/// DB-instance binding (round-3 finding): consumption is keyed by the
+/// `(migration_id, applied_at)` tuple, not by `migration_id` alone.
+/// `applied_at` is the millis-since-epoch INTEGER set by the migration
+/// at apply time, so two distinct DB instances (e.g., a backup restore
+/// or a copy from another environment) have different `applied_at`
+/// values for the same `migration_id`. A stale sidecar that records
+/// only the `migration_id` therefore cannot suppress a replay against a
+/// fresh DB whose marker has a different `applied_at`.
 fn read_pending_mirror_resets(
     conn: &Connection,
     resets_consumed_path: &Path,
-) -> Result<Vec<i64>, MirrorError> {
+) -> Result<Vec<(i64, i64)>, MirrorError> {
     // Tolerate the table being absent (e.g., a legacy connection that
     // somehow never ran 0021): no resets to honor.
     let exists: i64 = conn
@@ -507,45 +516,55 @@ fn read_pending_mirror_resets(
         return Ok(Vec::new());
     }
     let mut stmt = conn
-        .prepare("SELECT migration_id FROM consent_mirror_resets")
+        .prepare("SELECT migration_id, applied_at FROM consent_mirror_resets")
         .map_err(StoreError::from)?;
     let rows = stmt
-        .query_map([], |r| r.get::<_, i64>(0))
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
         .map_err(StoreError::from)?;
     let mut all = Vec::new();
     for row in rows {
         all.push(row.map_err(StoreError::from)?);
     }
     let consumed = read_resets_consumed_sidecar(resets_consumed_path)?;
-    all.retain(|id| !consumed.contains(id));
+    all.retain(|tuple| !consumed.contains(tuple));
     Ok(all)
 }
 
-/// Mark the given `migration_id`s as consumed by this mirror. Persists
-/// to the per-mirror sidecar (atomic tmp+rename, fsynced, parent dir
-/// fsynced) — the DB row is intentionally untouched so peer mirrors can
-/// still observe and replay it.
+/// Mark the given `(migration_id, applied_at)` tuples as consumed by
+/// this mirror. Persists to the per-mirror sidecar (atomic tmp+rename,
+/// fsynced, parent dir fsynced) — the DB row is intentionally untouched
+/// so peer mirrors can still observe and replay it.
 fn mark_mirror_resets_consumed(
     resets_consumed_path: &Path,
-    ids: &[i64],
+    entries: &[(i64, i64)],
 ) -> Result<(), MirrorError> {
-    if ids.is_empty() {
+    if entries.is_empty() {
         return Ok(());
     }
     let mut existing = read_resets_consumed_sidecar(resets_consumed_path)?;
-    for id in ids {
-        if !existing.contains(id) {
-            existing.push(*id);
+    for entry in entries {
+        if !existing.contains(entry) {
+            existing.push(*entry);
         }
     }
     write_resets_consumed_sidecar(resets_consumed_path, &existing)
 }
 
 /// Read the per-mirror reset-consumption sidecar. Missing file → empty
-/// vec (no resets consumed yet). Lines that don't parse as `i64` are
-/// skipped — the sidecar is a hint, not authoritative; the DB row is
-/// the source of truth for "a reset was needed."
-fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<i64>, MirrorError> {
+/// vec (no resets consumed yet).
+///
+/// Format: each non-empty line is `migration_id:applied_at`, both
+/// parsed as `i64`. The parser splits on the first `:` and treats the
+/// remainder as the opaque `applied_at` value, leaving room for future
+/// format extensions that append additional `:`-delimited fields.
+///
+/// Tolerance: lines that don't match the expected shape — including
+/// the legacy bare-`migration_id` format from earlier commits in this
+/// PR — are silently skipped. A skipped line cannot match any DB
+/// `(migration_id, applied_at)` tuple, which forces the next tick to
+/// replay (the safe default; the DB is still the source of truth for
+/// "a reset was needed"). I/O errors propagate; parse errors do not.
+fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64)>, MirrorError> {
     match File::open(path) {
         Ok(file) => {
             let reader = BufReader::new(file);
@@ -556,8 +575,18 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<i64>, MirrorError> {
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(id) = trimmed.parse::<i64>() {
-                    out.push(id);
+                let Some((id_str, applied_str)) = trimmed.split_once(':') else {
+                    // Legacy bare-`migration_id` lines (no colon) are
+                    // intentionally skipped so they cannot match any
+                    // (migration_id, applied_at) tuple → replay is
+                    // forced.
+                    continue;
+                };
+                if let (Ok(id), Ok(applied)) = (
+                    id_str.trim().parse::<i64>(),
+                    applied_str.trim().parse::<i64>(),
+                ) {
+                    out.push((id, applied));
                 }
             }
             Ok(out)
@@ -567,14 +596,15 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<i64>, MirrorError> {
     }
 }
 
-/// Write the consumed-ids sidecar atomically. Same pattern as
-/// `write_cursor_hint`: write tmp, fsync, rename, fsync parent.
-fn write_resets_consumed_sidecar(path: &Path, ids: &[i64]) -> Result<(), MirrorError> {
+/// Write the consumed sidecar atomically. Same pattern as
+/// `write_cursor_hint`: write tmp, fsync, rename, fsync parent. Each
+/// entry is serialized as `migration_id:applied_at` on its own line.
+fn write_resets_consumed_sidecar(path: &Path, entries: &[(i64, i64)]) -> Result<(), MirrorError> {
     let tmp = path.with_extension("mirror_resets_consumed.tmp");
     {
         let mut f = File::create(&tmp)?;
-        for id in ids {
-            writeln!(f, "{id}")?;
+        for (id, applied) in entries {
+            writeln!(f, "{id}:{applied}")?;
         }
         f.sync_all()?;
     }

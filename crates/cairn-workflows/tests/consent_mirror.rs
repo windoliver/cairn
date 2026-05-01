@@ -14,6 +14,19 @@ fn h(seed: u32) -> String {
     format!("hash:{seed:0>32x}")
 }
 
+/// Read the `applied_at` timestamp the migration recorded for the
+/// `consent_mirror_resets` row at `migration_id`. Used by tests that
+/// seed the per-mirror sidecar in the bound `migration_id:applied_at`
+/// format (round-3 finding: consumption is keyed to the DB instance).
+fn applied_at_for(conn: &rusqlite::Connection, migration_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT applied_at FROM consent_mirror_resets WHERE migration_id = ?1",
+        rusqlite::params![migration_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .expect("read applied_at")
+}
+
 fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
@@ -366,9 +379,12 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
 
     // Pre-mark the migration-0021 reset row as consumed in this
     // mirror's per-mirror sidecar (Phase-B finding 2 moved consumption
-    // tracking out of the DB), so the first tick processes normally.
+    // tracking out of the DB; round-3 finding binds the entry to the
+    // DB instance via `applied_at`), so the first tick processes
+    // normally.
     let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
-    std::fs::write(&resets_consumed, "21\n").expect("seed sidecar");
+    let applied_at = applied_at_for(&conn, 21);
+    std::fs::write(&resets_consumed, format!("21:{applied_at}\n")).expect("seed sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("first tick");
@@ -393,9 +409,10 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     // The reset row must now be in this mirror's sidecar; another tick
     // is a no-op.
     let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
+    let expected = format!("21:{applied_at}");
     assert!(
-        sidecar.lines().any(|l| l.trim() == "21"),
-        "sidecar must record migration_id 21 as consumed: {sidecar:?}"
+        sidecar.lines().any(|l| l.trim() == expected),
+        "sidecar must record (21,{applied_at}) as consumed: {sidecar:?}"
     );
 
     let n = mirror.tick(&conn).expect("idempotent tick");
@@ -417,8 +434,12 @@ fn tick_surfaces_log_corrupt_when_reset_pending_and_log_damaged() {
         let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
         // Pre-consume the migration-0021 reset so the initial tick
         // processes normally.
-        std::fs::write(dir.path().join("consent.mirror_resets_consumed"), "21\n")
-            .expect("seed sidecar");
+        let applied_at = applied_at_for(&conn, 21);
+        std::fs::write(
+            dir.path().join("consent.mirror_resets_consumed"),
+            format!("21:{applied_at}\n"),
+        )
+        .expect("seed sidecar");
         append(&conn, &forget_event("c-1", &h(1))).expect("a1");
         append(&conn, &forget_event("c-2", &h(2))).expect("a2");
         mirror.tick(&conn).expect("seed tick");
@@ -471,7 +492,9 @@ fn tick_replays_reset_when_log_intact() {
 
     let sidecar = std::fs::read_to_string(dir.path().join("consent.mirror_resets_consumed"))
         .expect("sidecar written");
-    assert!(sidecar.lines().any(|l| l.trim() == "21"));
+    let applied_at = applied_at_for(&conn, 21);
+    let expected = format!("21:{applied_at}");
+    assert!(sidecar.lines().any(|l| l.trim() == expected));
 
     let n = mirror.tick(&conn).expect("idempotent");
     assert_eq!(n, 0);
@@ -494,11 +517,13 @@ fn reset_marker_consumed_per_mirror_not_per_db() {
     let mut mirror_a = ConsentLogMaterializer::open(dir_a.path()).expect("open a");
     let n_a = mirror_a.tick(&conn).expect("tick a");
     assert_eq!(n_a, 2);
+    let applied_at = applied_at_for(&conn, 21);
+    let expected = format!("21:{applied_at}");
     assert!(
         std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
             .expect("a sidecar")
             .lines()
-            .any(|l| l.trim() == "21"),
+            .any(|l| l.trim() == expected),
         "mirror A must record consumption locally"
     );
 
@@ -516,7 +541,7 @@ fn reset_marker_consumed_per_mirror_not_per_db() {
         std::fs::read_to_string(dir_b.path().join("consent.mirror_resets_consumed"))
             .expect("b sidecar")
             .lines()
-            .any(|l| l.trim() == "21"),
+            .any(|l| l.trim() == expected),
         "mirror B must also record consumption locally"
     );
 }
@@ -542,4 +567,116 @@ fn rebuild_is_authoritative_over_db_only() {
     let a = mirror_a.read_lines().expect("a lines");
     let b = mirror_b.read_lines().expect("b lines");
     assert_eq!(a, b);
+}
+
+#[test]
+fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
+    // Round-3 finding: a sidecar that records only `migration_id`
+    // cannot distinguish DB instances. If a vault_dir is reused against
+    // a different SQLite file (restore from backup, copy between
+    // environments), a stale sidecar entry would silently suppress the
+    // replay even though the new DB has freshly promoted legacy rows
+    // that were never mirrored. Binding consumption to
+    // `(migration_id, applied_at)` defeats this: a different DB
+    // instance has a different `applied_at` for the same migration_id,
+    // so the sidecar entry no longer matches and tick() must replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Simulate a stale sidecar from a *different* DB-instance: the
+    // migration_id matches the live DB row, but the `applied_at` does
+    // not. We pick a value that cannot collide with the real
+    // strftime-derived value.
+    let real_applied = applied_at_for(&conn, 21);
+    let stale_applied = real_applied.wrapping_add(1);
+    assert_ne!(real_applied, stale_applied);
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, format!("21:{stale_applied}\n")).expect("seed stale sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "stale sidecar from a different DB instance must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar must now record the *real* (migration_id, applied_at).
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{real_applied}");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must bind to the live DB's applied_at: {after:?}"
+    );
+}
+
+#[test]
+fn reset_marker_does_not_replay_on_same_db() {
+    // Companion to the swap test: when the DB instance is unchanged,
+    // consumption recorded in `(migration_id, applied_at)` form must
+    // suppress further replays across tick() calls.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 1, "first tick replays the marker");
+
+    // Subsequent ticks must be no-ops — the sidecar entry now matches
+    // the live DB's (21, applied_at).
+    let n2 = mirror.tick(&conn).expect("second tick");
+    assert_eq!(n2, 0, "second tick must not replay on the same DB");
+
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+    let n3 = mirror.tick(&conn).expect("third tick");
+    assert_eq!(
+        n3, 1,
+        "third tick mirrors the new row only, no reset replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+}
+
+#[test]
+fn sidecar_with_legacy_format_forces_replay() {
+    // Round-3 finding: bare `migration_id` lines (the format from this
+    // PR's earlier commit, before consumption was bound to applied_at)
+    // must be treated as "unknown applied_at" and skipped. They cannot
+    // match any (migration_id, applied_at) tuple, so the next tick
+    // forces a replay and the sidecar is rewritten in the new bound
+    // format.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the legacy format the earlier commit produced.
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    std::fs::write(&resets_consumed, "21\n").expect("seed legacy sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "legacy-format sidecar must not suppress replay (no applied_at to match)"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the new `migration_id:applied_at` form.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let applied_at = applied_at_for(&conn, 21);
+    let expected = format!("21:{applied_at}");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "sidecar must be rewritten in bound format: {after:?}"
+    );
+    assert!(
+        !after.lines().any(|l| l.trim() == "21"),
+        "legacy bare `21` line must not survive: {after:?}"
+    );
 }
