@@ -13,4 +13,5 @@ pub mod contract;
 pub mod domain;
 pub mod generated;
 pub mod pipeline;
+pub mod search;
 pub mod verifier;
