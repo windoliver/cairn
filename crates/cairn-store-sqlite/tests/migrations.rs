@@ -208,8 +208,8 @@ fn consent_journal_kind_domain_enforced() {
     let msg = format!("{err}");
     let msg_uc = msg.to_uppercase();
     assert!(
-        msg.contains("§14 domain") || msg_uc.contains("CHECK"),
-        "kind domain gate should fire (trigger or column CHECK), got: {err}"
+        msg.contains("§14 domain") || (msg_uc.contains("CHECK") && msg.contains("kind")),
+        "kind domain gate should fire (trigger or column CHECK on kind), got: {err}"
     );
 }
 
