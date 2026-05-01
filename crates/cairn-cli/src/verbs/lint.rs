@@ -390,19 +390,26 @@ pub async fn lint_handler(
         .map_err(|e| anyhow::anyhow!("store: list_active_stored: {e}"))
         .context("lint: list_active_stored")?;
 
-    // `index_stats` is opt-in for adapters (default impl returns
-    // `unsupported`). When unavailable, fall back to a self-consistent
-    // pair derived from `stored.len()` so the §6.7 `index_drift` check is
-    // a no-op rather than aborting the whole lint run. The deferred-info
-    // is surfaced via an explicit lint finding below so operators see
-    // that drift coverage was skipped on this adapter.
+    // `index_stats` is opt-in for adapters: the default trait impl returns
+    // an `Err` carrying the literal "not supported by this store adapter"
+    // marker. We only swallow that exact case (so the §6.7 `index_drift`
+    // check downgrades to a deferred-info finding instead of aborting the
+    // whole lint run). Real operational failures from an adapter that
+    // *does* support `index_stats` (DB I/O, missing FTS table, worker
+    // crash) propagate, because hiding them would convert a real
+    // index-corruption signal into a falsely clean run — exactly the
+    // posture §6.7 is meant to expose.
     let stored_count = u64::try_from(stored.len()).unwrap_or(u64::MAX);
     let (index_stats, index_stats_skipped) = match store.index_stats().await {
         Ok(s) => (s, false),
-        Err(_) => (
+        Err(e) if e.to_string().contains("not supported by this store adapter") => (
             cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
             true,
         ),
+        Err(e) => {
+            return Err(anyhow::anyhow!("store: index_stats: {e}"))
+                .context("lint: index_stats");
+        }
     };
 
     // PR-1: every row carries LegacyEvent. Per-record gating lands in #253.
@@ -423,22 +430,7 @@ pub async fn lint_handler(
     let mut data = run_checks(&inputs);
 
     if index_stats_skipped {
-        let f = cairn_core::generated::verbs::lint::Finding {
-            kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
-            message: "store adapter does not implement index_stats; §6.7 index_drift skipped"
-                .to_owned(),
-            severity: cairn_core::generated::verbs::lint::Severity::Info,
-            suggested_fix: Some(
-                "ship MemoryStore::index_stats on this adapter to enable index_drift coverage"
-                    .to_owned(),
-            ),
-            target: None,
-            tracking_issue: None,
-        };
-        // Append at the end so existing snapshot ordering is preserved.
-        data.findings.push(f);
-        data.summary.total += 1;
-        data.summary.by_severity.info += 1;
+        push_index_stats_skipped(&mut data);
     }
 
     let has_error = data.findings.iter().any(|f| {
@@ -486,6 +478,35 @@ pub async fn lint_handler(
         report_path,
         has_error,
     })
+}
+
+/// Append a `deferred_check` info finding noting that `MemoryStore::index_stats`
+/// is unavailable on this adapter, and keep all summary aggregates
+/// (`total`, `by_severity.info`, `by_kind["deferred_check"]`) consistent.
+fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintData) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: "store adapter does not implement index_stats; §6.7 index_drift skipped"
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "ship MemoryStore::index_stats on this adapter to enable index_drift coverage"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: None,
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
 }
 
 /// Run `cairn lint`.
