@@ -4,9 +4,13 @@
 //! These tests pair the real `SqliteMemoryStore` with the real
 //! `SqliteIdentityRegistry` so the pure check fn in
 //! `cairn_core::pipeline::lint::author_lifecycle` is exercised against
-//! the same adapters production will use. They prototype the
-//! dispatch-shape harness #96 will own; once that PR lands, the
-//! `scan_vault` helper here folds into the verb's dispatch layer.
+//! the same adapters production will use. The `scan_vault` helper
+//! mirrors the registry-lookup the cli `lint_handler` does and feeds
+//! `check_author_lifecycle` directly — useful for fast unit-shape
+//! assertions on the pure fn. The end-of-file `run_checks_emits_*`
+//! tests instead drive `cairn_core::verbs::lint::run_checks` to prove
+//! the wired dispatch produces the right `BrokenActorChain` wire-shape
+//! findings.
 //!
 //! Corner cases covered:
 //!
@@ -354,6 +358,115 @@ async fn revocation_after_write_now_flags_record() {
     assert_eq!(post.len(), 1);
     assert_eq!(post[0].record_id, r.id);
     assert_eq!(post[0].status, ChainStatus::Revoked);
+}
+
+// ── Dispatch-layer coverage (post-#96) ────────────────────────────
+
+/// Prototype of the cairn-cli `lint_handler` registry-prefetch step:
+/// gather unique chain-author identities, look each up under
+/// `IdentityVisibility::Audit`, and assemble the
+/// `LintInputs.author_states` map.
+async fn prefetch_author_states(
+    store: &SqliteMemoryStore,
+    registry: &SqliteIdentityRegistry,
+) -> std::collections::HashMap<Identity, ProvisioningState> {
+    let stored = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .expect("list");
+    let mut unique: std::collections::HashSet<Identity> = std::collections::HashSet::new();
+    for s in &stored {
+        if let Some(e) = s
+            .record
+            .actor_chain
+            .iter()
+            .find(|e| e.role == ChainRole::Author)
+        {
+            unique.insert(e.identity.clone());
+        }
+    }
+    let mut map = std::collections::HashMap::with_capacity(unique.len());
+    for id in unique {
+        if let Some(rec) = registry
+            .get_identity(&id, IdentityVisibility::Audit)
+            .await
+            .expect("get_identity")
+        {
+            map.insert(id, rec.provisioning_state);
+        }
+    }
+    map
+}
+
+#[tokio::test]
+async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
+    use cairn_core::config::CairnConfig;
+    use cairn_core::contract::memory_store::IndexStats;
+    use cairn_core::generated::verbs::lint::{Kind, Severity};
+    use cairn_core::verbs::lint::{
+        ConsentModel, LintInputs, LintRecord, SchemaVersion, run_checks,
+    };
+
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let alice_sk = provision_active(&registry, &alice).await;
+    let r = record_authored_by(&alice, "01HQZX9F5N0000000000000050");
+    store.upsert(&r).await.expect("upsert");
+    revoke(&registry, &alice, &alice_sk).await;
+
+    let stored = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .expect("list");
+    let lint_records: Vec<LintRecord> = stored
+        .into_iter()
+        .map(|s| LintRecord {
+            stored: s,
+            consent_model: ConsentModel::LegacyEvent,
+        })
+        .collect();
+    let states = prefetch_author_states(&store, &registry).await;
+    let cfg = CairnConfig::default();
+    let inputs = LintInputs {
+        records: &lint_records,
+        config: &cfg,
+        index_stats: IndexStats::new(lint_records.len() as u64, lint_records.len() as u64),
+        schema_version: SchemaVersion { major: 0, minor: 1 },
+        author_states: Some(&states),
+    };
+
+    let data = run_checks(&inputs);
+
+    let chain_errors: Vec<_> = data
+        .findings
+        .iter()
+        .filter(|f| {
+            matches!(f.kind, Kind::BrokenActorChain) && matches!(f.severity, Severity::Error)
+        })
+        .collect();
+    assert_eq!(
+        chain_errors.len(),
+        1,
+        "expected exactly one BrokenActorChain error: {data:?}"
+    );
+    let f = chain_errors[0];
+    assert!(f.target.is_some(), "finding must carry a record-id target");
+    assert_eq!(f.tracking_issue, Some(256));
+    assert!(f.suggested_fix.is_some());
+    // Privacy invariant 9: messages must not embed body content.
+    assert!(!f.message.contains(&r.body));
+
+    // The deferred-info finding for #256 must NOT be present once
+    // author_states is populated — the leaf has run for real.
+    let deferred_for_256 = data
+        .findings
+        .iter()
+        .any(|f| matches!(f.kind, Kind::DeferredCheck) && f.tracking_issue == Some(256));
+    assert!(
+        !deferred_for_256,
+        "deferred-info finding must disappear once dispatch plumbs the registry"
+    );
 }
 
 #[tokio::test]

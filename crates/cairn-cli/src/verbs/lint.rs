@@ -376,6 +376,7 @@ pub struct LintHandlerResult {
 /// report fails.
 pub async fn lint_handler(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
+    identity_registry: Option<&dyn cairn_core::contract::identity_registry::IdentityRegistry>,
     config: &cairn_core::config::CairnConfig,
     schema_version: cairn_core::verbs::lint::SchemaVersion,
     write_report: bool,
@@ -389,6 +390,15 @@ pub async fn lint_handler(
         .await
         .map_err(|e| anyhow::anyhow!("store: list_active_stored: {e}"))
         .context("lint: list_active_stored")?;
+
+    // §6.2 author-lifecycle slice (issue #256). `None` here means the
+    // caller did not plumb a registry; the actor_chain leaf downgrades
+    // to a deferred-info finding so the gap stays visible in
+    // `lint-report.md`.
+    let author_states = match identity_registry {
+        Some(registry) => Some(prefetch_author_states(registry, &stored).await?),
+        None => None,
+    };
 
     // `index_stats` is opt-in for adapters: the default trait impl returns
     // an `Err` carrying the literal "not supported by this store adapter"
@@ -430,6 +440,7 @@ pub async fn lint_handler(
         config,
         index_stats,
         schema_version,
+        author_states: author_states.as_ref(),
     };
     let mut data = run_checks(&inputs);
 
@@ -482,6 +493,54 @@ pub async fn lint_handler(
         report_path,
         has_error,
     })
+}
+
+/// Pre-fetch the `ProvisioningState` of every distinct chain-author
+/// identity under `IdentityVisibility::Audit` so revoked / purged
+/// states surface. Registry backend errors propagate — the alternative
+/// (silent skip) would mis-flag every record as `MissingFromRegistry`
+/// once the registry hiccups. Identities not in the registry are
+/// omitted from the map; the actor-chain leaf treats absence as
+/// `MissingFromRegistry` and emits a `BrokenActorChain` finding (brief
+/// invariant 6, fail-closed).
+async fn prefetch_author_states(
+    registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
+    stored: &[cairn_core::contract::memory_store::StoredRecord],
+) -> anyhow::Result<
+    std::collections::HashMap<
+        cairn_core::domain::Identity,
+        cairn_core::domain::identity::ProvisioningState,
+    >,
+> {
+    use cairn_core::contract::identity_registry::IdentityVisibility;
+    use cairn_core::domain::ChainRole;
+    use cairn_core::domain::Identity;
+    use cairn_core::domain::identity::ProvisioningState;
+    use std::collections::{HashMap, HashSet};
+
+    let mut unique: HashSet<Identity> = HashSet::new();
+    for s in stored {
+        if let Some(e) = s
+            .record
+            .actor_chain
+            .iter()
+            .find(|e| e.role == ChainRole::Author)
+        {
+            unique.insert(e.identity.clone());
+        }
+    }
+    let mut map: HashMap<Identity, ProvisioningState> = HashMap::with_capacity(unique.len());
+    for id in unique {
+        let row = registry
+            .get_identity(&id, IdentityVisibility::Audit)
+            .await
+            .map_err(|e| anyhow::anyhow!("registry: get_identity({id:?}): {e}"))
+            .context("lint: get_identity")?;
+        if let Some(rec) = row {
+            map.insert(id, rec.provisioning_state);
+        }
+    }
+    Ok(map)
 }
 
 /// Append a `deferred_check` info finding noting that `MemoryStore::index_stats`
@@ -617,6 +676,7 @@ mod tests {
         let vault = tempfile::tempdir().expect("tempdir");
         let result = lint_handler(
             &store,
+            None,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             true,
@@ -668,6 +728,7 @@ mod tests {
         let vault = tempfile::tempdir().expect("tempdir");
         let result = lint_handler(
             &store,
+            None,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             false,

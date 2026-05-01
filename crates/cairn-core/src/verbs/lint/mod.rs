@@ -3,8 +3,12 @@
 //! Spec: `docs/superpowers/specs/2026-04-30-lint-checks-design.md`.
 //! Issue: <https://github.com/windoliver/cairn/issues/96>.
 
+use std::collections::HashMap;
+
 use crate::config::CairnConfig;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
+use crate::domain::Identity;
+use crate::domain::identity::ProvisioningState;
 use crate::domain::record::RecordId;
 use crate::generated::verbs::lint::{
     Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
@@ -37,6 +41,15 @@ pub enum ConsentModel {
 }
 
 /// Snapshot the check engine operates over. Pure inputs; no I/O.
+///
+/// `author_states` is the §6.2 author-lifecycle slice's pre-fetched
+/// payload. The dispatch layer (`cairn-cli`) is responsible for
+/// resolving every active record's chain author against the
+/// `IdentityRegistry` under `IdentityVisibility::Audit` and assembling
+/// the map. `None` means the registry was not plumbed into this run —
+/// the check downgrades to a deferred-info finding so the gap stays
+/// visible. An identity present on a record but absent from the map is
+/// treated as `MissingFromRegistry` (fail-closed, brief invariant 6).
 #[derive(Debug)]
 pub struct LintInputs<'a> {
     /// Active records under audit.
@@ -47,6 +60,9 @@ pub struct LintInputs<'a> {
     pub index_stats: IndexStats,
     /// Current contract version reported by the runtime — drives §6.4.
     pub schema_version: SchemaVersion,
+    /// Pre-fetched author identity → lifecycle state map. See struct
+    /// docs.
+    pub author_states: Option<&'a HashMap<Identity, ProvisioningState>>,
 }
 
 /// Major.minor schema version for the §6.4 staleness check. Patch is
@@ -196,6 +212,7 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         };
         let data = run_checks(&inputs);
         // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
@@ -253,12 +270,14 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(forward.len() as u64, forward.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         };
         let inputs_rev = LintInputs {
             records: &reversed,
             config: &cfg,
             index_stats: IndexStats::new(reversed.len() as u64, reversed.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).findings);
@@ -275,6 +294,7 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(1, 1),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);

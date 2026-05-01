@@ -44,6 +44,7 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         };
         let f = run(&inputs);
         assert_eq!(f.len(), 1);

@@ -58,6 +58,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
+            author_states: None,
         };
         assert!(run(&li).is_empty());
     }
@@ -70,6 +71,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
+            author_states: None,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -92,6 +94,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
+            author_states: None,
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -106,6 +109,7 @@ mod tests {
             config: &cfg,
             index_stats: stats,
             schema_version: ver,
+            author_states: None,
         };
         assert!(run(&li).is_empty());
     }

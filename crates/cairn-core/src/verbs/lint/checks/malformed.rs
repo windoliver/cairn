@@ -55,6 +55,7 @@ mod tests {
             config: cfg,
             index_stats: IndexStats::new(n, n),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: None,
         }
     }
 
