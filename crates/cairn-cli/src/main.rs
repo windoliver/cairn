@@ -37,7 +37,12 @@ fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
+        .subcommand(mcp_subcommand())
         .subcommand(bootstrap_subcommand())
+}
+
+fn mcp_subcommand() -> clap::Command {
+    clap::Command::new("mcp").about("Start the cairn.mcp.v1 server over stdio")
 }
 
 fn bootstrap_subcommand() -> clap::Command {
@@ -110,12 +115,34 @@ fn main() -> ExitCode {
         Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
+        Some(("mcp", _sub)) => run_mcp(),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
             eprintln!("cairn: unknown subcommand '{verb}'");
             ExitCode::from(64)
+        }
+    }
+}
+
+fn run_mcp() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("cairn mcp: failed to start async runtime: {e}");
+            return ExitCode::from(69);
+        }
+    };
+
+    match runtime.block_on(cairn_mcp::serve_stdio()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("cairn mcp: {e}");
+            ExitCode::from(69)
         }
     }
 }
