@@ -309,27 +309,31 @@ fn consent_journal_event_requires_iso_timestamp() {
 
 #[test]
 fn consent_journal_kind_not_null_enforced() {
-    // Phase-B (#255, brief §14): the legacy NULL-kind path is closed.
-    // Migration 0021 promotes consent_journal.kind to NOT NULL with a
-    // column-level CHECK on the §14 domain. The same legacy INSERT that
-    // succeeded pre-0021 must now fail-closed — either via the column
-    // NOT NULL on `kind`, or via one of the BEFORE INSERT trigger gates
-    // that a legacy-shape row also fails (no actor / no payload / no iso).
-    // Either is acceptable: both close the legacy door.
+    // Phase-B (#255, brief §14): pin the column-level NOT NULL constraint on
+    // consent_journal.kind as the canonical Phase-B gate. Migration 0021
+    // promotes `kind` to NOT NULL; this test isolates that constraint by
+    // inserting a fully event-shape compliant row — every required field
+    // (actor, decided_at_iso, well-formed payload_json, valid consent_id /
+    // scope / subject) is populated EXCEPT `kind`. With the row otherwise
+    // legal, every BEFORE INSERT trigger rebuilt by 0021 passes, leaving
+    // the column NOT NULL on `kind` as the only remaining gate.
     let conn = open_in_memory().expect("open");
     let err = conn
         .execute(
             "INSERT INTO consent_journal \
-              (consent_id, subject, scope, decision, granted_by, decided_at) \
-             VALUES ('legacy', 's', 'private', 'GRANT', 'hmn:t', 0)",
+              (consent_id, subject, scope, decision, granted_by, decided_at, \
+               actor, decided_at_iso, payload_json) \
+             VALUES ('c-no-kind', 'agent.x', 'private', 'GRANT', 'hmn:t', 0, \
+                     'hmn:t', '2026-04-28T12:00:00Z', \
+                     '{\"shape\":\"decision\",\"subject_code\":\"agent.x\"}')",
             [],
         )
         .unwrap_err();
     let msg = format!("{err}");
     let msg_uc = msg.to_uppercase();
     assert!(
-        msg_uc.contains("NOT NULL") || msg.contains("kind") || msg.contains("consent_journal"),
-        "legacy null-kind insert must fail-closed, got: {err}"
+        msg_uc.contains("NOT NULL") && msg.contains("kind"),
+        "column NOT NULL on kind should fire, got: {err}"
     );
 }
 
