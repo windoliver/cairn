@@ -65,3 +65,26 @@ async fn embed_query_returns_auth_error_on_401() {
         .expect("spawn_blocking joined");
     assert!(result.is_err(), "expected auth error, got {result:?}");
 }
+
+/// Privacy invariant: the Authorization header is marked sensitive in
+/// `OpenAiEmbedder::new`, so reqwest must redact the bearer token from the
+/// embedder's `Debug` output. Belt-and-suspenders smoke check on top of
+/// reqwest's documented `set_sensitive` behavior.
+#[tokio::test]
+async fn debug_does_not_leak_api_key() {
+    let embedder = OpenAiEmbedder::new(
+        "sk-super-secret-do-not-leak",
+        "https://example.invalid",
+        EmbeddingModelKind::OpenAiTextEmbedding3Large,
+    )
+    .expect("construct embedder");
+    let dbg = format!("{embedder:?}");
+    assert!(
+        !dbg.contains("sk-super-secret-do-not-leak"),
+        "Debug output leaked api key: {dbg}"
+    );
+    assert!(
+        !dbg.contains("Bearer "),
+        "Debug output leaked Bearer prefix: {dbg}"
+    );
+}

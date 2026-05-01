@@ -181,6 +181,7 @@ fn run_semantic(sub: &ArgMatches, json: bool) -> ExitCode {
 }
 
 #[allow(clippy::too_many_lines)]
+// reason: dispatcher fans CLI flags + config-derived weights into the flat verb call; splitting into a struct buys nothing here
 #[allow(clippy::too_many_arguments)]
 async fn run_semantic_async(
     vault_root: &Path,
@@ -414,6 +415,7 @@ fn run_hybrid(sub: &ArgMatches, json: bool) -> ExitCode {
 }
 
 #[allow(clippy::too_many_lines)]
+// reason: dispatcher fans CLI flags + config-derived weights into the flat verb call; splitting into a struct buys nothing here
 #[allow(clippy::too_many_arguments)]
 async fn run_hybrid_async(
     vault_root: &Path,

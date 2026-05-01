@@ -45,7 +45,7 @@ impl OpenAiEmbedder {
     pub fn from_env(kind: EmbeddingModelKind) -> Result<Self, OpenAiEmbeddingError> {
         let key = std::env::var("OPENAI_API_KEY")
             .ok()
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
             .ok_or(OpenAiEmbeddingError::MissingKey)?;
         let base = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE.to_owned());
         Self::new(&key, &base, kind)
@@ -73,11 +73,13 @@ impl OpenAiEmbedder {
             }
         };
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| OpenAiEmbeddingError::Network(e.to_string()))?,
-        );
+        // Mark the Authorization header as sensitive so reqwest's Debug impl
+        // redacts the bearer token (privacy invariant: never leak credentials
+        // in logs or panic dumps — see CLAUDE.md §4 invariant 9).
+        let mut auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|e| OpenAiEmbeddingError::Network(e.to_string()))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let http = reqwest::Client::builder()
             .default_headers(headers)
