@@ -230,6 +230,43 @@ async fn budget_exceeded_on_finish_reason_length() {
     );
 }
 
+/// A 401 with a deliberately-large body must not delay status mapping:
+/// the preview is bounded and authoritative status remains 401 regardless
+/// of how much body the provider streams.
+#[tokio::test]
+async fn auth_denied_when_status_set_with_large_body() {
+    let server = MockServer::start().await;
+    let huge_body = "x".repeat(64 * 1024);
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(huge_body))
+        .mount(&server)
+        .await;
+
+    let config = LlmConfig {
+        provider: Some(LlmProvider::OpenaiCompatible),
+        base_url: Some(server.uri()),
+        model: Some("gpt-4o-mini".into()),
+        api_key: Some("bad".into()),
+    };
+    let provider = build_llm_provider(&config).unwrap();
+    let req = CompletionRequest::builder()
+        .prompt("hi".to_string())
+        .build();
+    let start = std::time::Instant::now();
+    let err = provider.complete(&req).await.unwrap_err();
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, LlmError::AuthDenied),
+        "expected AuthDenied, got {err:?}"
+    );
+    // Bounded preview should not exceed a few hundred ms even with 64KiB body.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "auth mapping too slow: {elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn endpoint_unreachable() {
     // Port 1 is reserved and guaranteed to refuse connections.

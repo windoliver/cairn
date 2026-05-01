@@ -7,6 +7,8 @@
 //! structs only and own the transport so the `LlmError` mapping is
 //! status-driven.
 
+use std::time::Duration;
+
 use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
     CreateChatCompletionRequestArgs, CreateChatCompletionResponse, FinishReason, ResponseFormat,
@@ -26,6 +28,21 @@ use crate::retry::{RetryPolicy, Retryable, with_retries};
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_API_KEY: &str = "cairn"; // Some providers (Ollama) ignore the value but require non-empty.
+
+/// TCP connect timeout. A stalled DNS/connect should fail fast and
+/// surface as a `ProviderUnreachable` (retryable) within seconds, not
+/// hang the caller.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Total per-attempt timeout (connect + send + receive). Bounds the
+/// retry budget so the outer policy stays the source of pacing.
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
+/// Cap the body preview we inspect on a non-success status. A degraded
+/// provider can stream gigabytes with a 401 — the preview must never
+/// dominate the error path.
+const ERROR_BODY_PREVIEW: usize = 256;
+/// Time budget for collecting the error-body preview. Status mapping is
+/// authoritative; the preview is best-effort context.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// OpenAI-compatible [`LLMProvider`] adapter.
 pub struct OpenAiCompatProvider {
@@ -48,12 +65,13 @@ impl OpenAiCompatProvider {
     /// Returns [`LlmError::ProviderUnreachable`] only on `reqwest::Client`
     /// build failure (very unusual — OS-level TLS/dns init issue).
     pub fn from_config(config: &LlmConfig) -> Result<Self, LlmError> {
-        let http =
-            reqwest::Client::builder()
-                .build()
-                .map_err(|e| LlmError::ProviderUnreachable {
-                    detail: format!("http client init: {e}"),
-                })?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|e| LlmError::ProviderUnreachable {
+                detail: format!("http client init: {e}"),
+            })?;
         let base_url = config
             .base_url
             .as_deref()
@@ -90,8 +108,13 @@ impl OpenAiCompatProvider {
         model: &str,
         capabilities: LLMProviderCapabilities,
     ) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("invariant: reqwest client builder cannot fail with default config");
         Self {
-            http: reqwest::Client::new(),
+            http,
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key: "test-key".into(),
             model: model.into(),
@@ -101,6 +124,10 @@ impl OpenAiCompatProvider {
 
     /// Issue one POST to `/chat/completions`. The closure surface — returning
     /// [`Retryable`] — keeps the retry layer the sole source of pacing.
+    ///
+    /// Status is classified before the body is consumed: a degraded provider
+    /// that streams a huge or stalled body on a 401/429/5xx must not be able
+    /// to delay or hide the status mapping.
     async fn post_chat(
         &self,
         request: &CreateChatCompletionRequest,
@@ -115,79 +142,109 @@ impl OpenAiCompatProvider {
             .await
         {
             Ok(r) => r,
-            Err(e) => {
-                // Connection refused / DNS / TLS failures are not retried
-                // — they are stable terminal errors for this endpoint.
-                let retryable = e.is_timeout();
-                return Err(Retryable {
-                    err: LlmError::ProviderUnreachable {
-                        detail: e.to_string(),
-                    },
-                    retryable,
-                });
-            }
+            Err(e) => return Err(classify_send_error(&e)),
         };
 
         let status = response.status();
-        let bytes = match response.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(Retryable {
-                    err: LlmError::ProviderUnreachable {
-                        detail: format!("response body: {e}"),
-                    },
-                    retryable: true,
-                });
-            }
-        };
 
-        if status.is_success() {
-            return serde_json::from_slice::<CreateChatCompletionResponse>(&bytes).map_err(|e| {
-                Retryable {
-                    err: LlmError::ProviderUnreachable {
-                        detail: format!("response parse: {e}"),
-                    },
-                    retryable: false,
-                }
-            });
+        if !status.is_success() {
+            let code = status.as_u16();
+            // Bound the preview read so a stalled/huge body cannot delay
+            // status-driven mapping. Status is authoritative either way.
+            let body_preview = tokio::time::timeout(ERROR_BODY_TIMEOUT, collect_preview(response))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            return Err(map_error_status(code, &body_preview));
         }
 
-        let code = status.as_u16();
-        if code == 401 || code == 403 {
-            return Err(Retryable {
-                err: LlmError::AuthDenied,
-                retryable: false,
-            });
-        }
-
-        let body_preview = truncate_body(&bytes);
-        if code == 429 || (500..600).contains(&code) {
-            return Err(Retryable {
-                err: LlmError::ProviderUnreachable {
-                    detail: format!("HTTP {code}: {body_preview}"),
-                },
-                retryable: true,
-            });
-        }
-
-        Err(Retryable {
+        // Success: parse the typed body. Body read inherits the
+        // request-level timeout configured on the client.
+        let bytes = response.bytes().await.map_err(|e| Retryable {
             err: LlmError::ProviderUnreachable {
-                detail: format!("HTTP {code}: {body_preview}"),
+                detail: format!("response body: {e}"),
+            },
+            // A timeout/reset mid-body is plausibly transient.
+            retryable: e.is_timeout() || e.is_connect(),
+        })?;
+        serde_json::from_slice::<CreateChatCompletionResponse>(&bytes).map_err(|e| Retryable {
+            err: LlmError::ProviderUnreachable {
+                detail: format!("response parse: {e}"),
             },
             retryable: false,
         })
     }
 }
 
-/// Return up to 256 bytes of the response body as a UTF-8-lossy preview.
-fn truncate_body(bytes: &[u8]) -> String {
-    const MAX: usize = 256;
-    let slice = if bytes.len() > MAX {
-        &bytes[..MAX]
+/// Classify a send-side `reqwest::Error`.
+///
+/// - Timeouts and connection errors (DNS, refused, reset) → transient.
+///   Retried up to the policy's budget.
+/// - TLS verification / handshake errors → terminal. Repeating these
+///   never helps, and we prefer surfacing the misconfiguration quickly.
+/// - Anything else (request building, redirect loops, decode) → terminal.
+fn classify_send_error(e: &reqwest::Error) -> Retryable {
+    let msg = e.to_string();
+    let lower = msg.to_ascii_lowercase();
+    let looks_tls = lower.contains("certificate")
+        || lower.contains("invalid peer")
+        || lower.contains("tls")
+        || lower.contains("handshake");
+    let retryable = !looks_tls && (e.is_timeout() || e.is_connect());
+    Retryable {
+        err: LlmError::ProviderUnreachable { detail: msg },
+        retryable,
+    }
+}
+
+/// Map a non-success HTTP status to an [`LlmError`].
+fn map_error_status(code: u16, body_preview: &str) -> Retryable {
+    if code == 401 || code == 403 {
+        return Retryable {
+            err: LlmError::AuthDenied,
+            retryable: false,
+        };
+    }
+    let detail = if body_preview.is_empty() {
+        format!("HTTP {code}")
     } else {
-        bytes
+        format!("HTTP {code}: {body_preview}")
     };
-    String::from_utf8_lossy(slice).to_string()
+    if code == 429 || (500..600).contains(&code) {
+        return Retryable {
+            err: LlmError::ProviderUnreachable { detail },
+            retryable: true,
+        };
+    }
+    Retryable {
+        err: LlmError::ProviderUnreachable { detail },
+        retryable: false,
+    }
+}
+
+/// Read at most [`ERROR_BODY_PREVIEW`] bytes from the response and return
+/// a UTF-8-lossy preview. Returns `None` on stream error so the caller
+/// can fall back to a status-only message.
+async fn collect_preview(response: reqwest::Response) -> Option<String> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    let mut buf: Vec<u8> = Vec::with_capacity(ERROR_BODY_PREVIEW);
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                let take = ERROR_BODY_PREVIEW
+                    .saturating_sub(buf.len())
+                    .min(bytes.len());
+                buf.extend_from_slice(&bytes[..take]);
+                if buf.len() >= ERROR_BODY_PREVIEW {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 impl LLMProviderPlugin for OpenAiCompatProvider {

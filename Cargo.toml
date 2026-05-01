@@ -54,7 +54,8 @@ async-openai = { version = "0.36", default-features = false, features = ["rustls
 # Direct `reqwest` because `async-openai` discards HTTP status on
 # `JSONDeserialize` errors (e.g. empty bodies), which blocks accurate
 # 401/429/5xx disambiguation. We use `async-openai` for typed structs only.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+futures-util = { version = "0.3", default-features = false }
 wiremock = "0.6"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the

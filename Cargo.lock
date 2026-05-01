@@ -444,6 +444,7 @@ dependencies = [
  "cairn-core",
  "cairn-llm-openai-compat",
  "cairn-test-fixtures",
+ "futures-util",
  "insta",
  "jsonschema",
  "reqwest",
