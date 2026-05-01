@@ -66,6 +66,16 @@ fn llm_subcommand() -> clap::Command {
                         .help("Prompt to send (default: \"Reply with the single word: ping\")"),
                 )
                 .arg(
+                    clap::Arg::new("schema-file")
+                        .long("schema-file")
+                        .value_name("PATH")
+                        .help(
+                            "Path to a JSON Schema file. When set, the probe \
+                             requests JSON output and validates the response \
+                             against the schema (exits 1 on validation failure).",
+                        ),
+                )
+                .arg(
                     clap::Arg::new("json")
                         .long("json")
                         .action(clap::ArgAction::SetTrue)

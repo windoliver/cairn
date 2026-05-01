@@ -5,6 +5,7 @@
 mod config;
 mod error;
 mod provider;
+mod retry;
 
 pub use provider::OpenAiCompatProvider;
 

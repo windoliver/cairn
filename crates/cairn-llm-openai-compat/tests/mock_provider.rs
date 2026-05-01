@@ -153,9 +153,18 @@ async fn json_completion_unparseable() {
 #[tokio::test]
 async fn endpoint_returns_401() {
     let server = MockServer::start().await;
+    // Realistic OpenAI-shaped 401 body — async-openai parses it as
+    // OpenAIError::ApiError, which our mapper recognises by the code field.
+    let body = serde_json::json!({
+        "error": {
+            "message": "Incorrect API key provided",
+            "code": "invalid_api_key",
+            "type": "invalid_request_error"
+        }
+    });
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(401))
+        .respond_with(ResponseTemplate::new(401).set_body_json(body))
         .mount(&server)
         .await;
 

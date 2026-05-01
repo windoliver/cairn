@@ -43,13 +43,6 @@ pub(crate) fn map_openai_error(e: &OpenAIError) -> LlmError {
             LlmError::ProviderUnreachable { detail }
         }
 
-        // JSONDeserialize with empty body content: the server returned a
-        // non-success HTTP status with no JSON body.  401 is the most common
-        // case (auth rejection before routing), so we map it to AuthDenied.
-        OpenAIError::JSONDeserialize(_parse_err, content) if content.is_empty() => {
-            LlmError::AuthDenied
-        }
-
         // JSONDeserialize whose body content names an auth status. Some
         // providers (OpenRouter as of 2026-04) return the HTTP status as a
         // JSON integer rather than a string, breaking strict deserialisation,
@@ -64,6 +57,56 @@ pub(crate) fn map_openai_error(e: &OpenAIError) -> LlmError {
             LlmError::ProviderUnreachable { detail: msg }
         }
     }
+}
+
+/// Should the caller retry this error? True for 429 and 5xx.
+///
+/// `async-openai` may wrap a 429/5xx in either `Reqwest` (when the status
+/// can be inspected directly) or `JSONDeserialize` (when the error body
+/// can't be parsed as `WrappedError`). Both paths are checked.
+pub(crate) fn is_rate_limit_or_server_error(e: &OpenAIError) -> bool {
+    match e {
+        OpenAIError::Reqwest(req_err) => req_err.status().is_some_and(|s| {
+            let code = s.as_u16();
+            code == 429 || (500..600).contains(&code)
+        }),
+        OpenAIError::JSONDeserialize(_, content) => looks_like_transient_error(content),
+        OpenAIError::ApiError(api_err) => {
+            let code_lower = api_err.code.as_deref().unwrap_or("").to_lowercase();
+            let msg_lower = api_err.message.to_lowercase();
+            code_lower.contains("rate_limit")
+                || msg_lower.contains("rate limit")
+                || msg_lower.contains("too many requests")
+        }
+        _ => false,
+    }
+}
+
+/// Heuristic: does this raw body name a transient HTTP status (429 / 5xx)?
+fn looks_like_transient_error(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let markers = [
+        "\"code\":429",
+        "\"code\": 429",
+        "\"status\":429",
+        "\"status\": 429",
+        "\"code\":500",
+        "\"code\": 500",
+        "\"code\":502",
+        "\"code\": 502",
+        "\"code\":503",
+        "\"code\": 503",
+        "\"code\":504",
+        "\"code\": 504",
+    ];
+    if markers.iter().any(|m| lower.contains(m)) {
+        return true;
+    }
+    lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("service unavailable")
+        || lower.contains("bad gateway")
+        || lower.contains("gateway timeout")
 }
 
 /// Heuristic: does this raw body look like an HTTP-401/403 auth failure?

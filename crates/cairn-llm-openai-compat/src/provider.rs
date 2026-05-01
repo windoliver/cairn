@@ -18,7 +18,7 @@ use cairn_core::{
 };
 
 use crate::config::to_openai_config;
-use crate::error::map_openai_error;
+use crate::retry::{RetryPolicy, with_retries};
 
 /// OpenAI-compatible [`LLMProvider`] adapter.
 pub struct OpenAiCompatProvider {
@@ -139,12 +139,14 @@ impl LLMProvider for OpenAiCompatProvider {
             detail: e.to_string(),
         })?;
 
-        let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| map_openai_error(&e))?;
+        // Retry transient failures (429, 5xx). The `request` clone is cheap —
+        // it's `serde_json::Value` under the hood.
+        let response = with_retries(RetryPolicy::standard(), || {
+            let req = request.clone();
+            let client = &self.client;
+            async move { client.chat().create(req).await }
+        })
+        .await?;
 
         // Extract the first choice.
         let choice =

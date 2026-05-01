@@ -42,10 +42,13 @@ pub fn exit_code_for(err: &LlmError) -> u8 {
 ///
 /// `prompt_override` lets tests inject a fixed prompt; production passes
 /// `None` and a default ("Reply with the single word: ping") is used.
+/// `schema` is an optional pre-parsed JSON Schema; when `Some`, the request
+/// goes through the schema-validation path.
 pub async fn run_probe(
     config: &CairnConfig,
     json: bool,
     prompt_override: Option<&str>,
+    schema: Option<serde_json::Value>,
 ) -> ExitCode {
     let provider = match cairn_llm_openai_compat::build_llm_provider(&config.llm) {
         Ok(p) => p,
@@ -55,10 +58,21 @@ pub async fn run_probe(
         }
     };
 
-    let prompt = prompt_override
-        .unwrap_or("Reply with the single word: ping")
-        .to_owned();
-    let req = CompletionRequest::builder().prompt(prompt).build();
+    let default_prompt = if schema.is_some() {
+        "Return a JSON object matching the provided schema. Output only JSON."
+    } else {
+        "Reply with the single word: ping"
+    };
+    let prompt = prompt_override.unwrap_or(default_prompt).to_owned();
+    // `bon`'s typestate builder changes type once `.schema()` is called, so
+    // build through two separate paths.
+    let req = match schema {
+        Some(s) => CompletionRequest::builder()
+            .prompt(prompt)
+            .schema(s)
+            .build(),
+        None => CompletionRequest::builder().prompt(prompt).build(),
+    };
 
     match provider.complete(&req).await {
         Ok(CompletionOutput::Text(s)) => {

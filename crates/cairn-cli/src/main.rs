@@ -413,6 +413,7 @@ fn run_llm(matches: &ArgMatches) -> ExitCode {
 fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
     let json = matches.get_flag("json");
     let prompt = matches.get_one::<String>("prompt").cloned();
+    let schema_file = matches.get_one::<String>("schema-file").cloned();
 
     // Load config from cwd. The probe is a vault-agnostic diagnostic;
     // it reads `.cairn/config.yaml` from the current directory if present,
@@ -426,6 +427,24 @@ fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
         }
     };
 
+    // Load schema file if provided.
+    let schema: Option<serde_json::Value> = match schema_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("cairn llm probe: schema parse error in {path}: {e}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+            },
+            Err(e) => {
+                eprintln!("cairn llm probe: cannot read schema file {path}: {e}");
+                return ExitCode::from(78);
+            }
+        },
+        None => None,
+    };
+
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -437,5 +456,10 @@ fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
         }
     };
 
-    runtime.block_on(cairn_cli::llm::run_probe(&config, json, prompt.as_deref()))
+    runtime.block_on(cairn_cli::llm::run_probe(
+        &config,
+        json,
+        prompt.as_deref(),
+        schema,
+    ))
 }
