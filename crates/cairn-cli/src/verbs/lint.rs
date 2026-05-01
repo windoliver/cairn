@@ -402,13 +402,17 @@ pub async fn lint_handler(
     let stored_count = u64::try_from(stored.len()).unwrap_or(u64::MAX);
     let (index_stats, index_stats_skipped) = match store.index_stats().await {
         Ok(s) => (s, false),
-        Err(e) if e.to_string().contains("not supported by this store adapter") => (
-            cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
-            true,
-        ),
+        Err(e)
+            if e.to_string()
+                .contains("not supported by this store adapter") =>
+        {
+            (
+                cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
+                true,
+            )
+        }
         Err(e) => {
-            return Err(anyhow::anyhow!("store: index_stats: {e}"))
-                .context("lint: index_stats");
+            return Err(anyhow::anyhow!("store: index_stats: {e}")).context("lint: index_stats");
         }
     };
 
