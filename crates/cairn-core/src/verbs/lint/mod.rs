@@ -199,20 +199,20 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
         };
         let data = run_checks(&inputs);
-        // actor_chain (#256), provenance (#257), and schema (#258) each emit one
-        // deferred-check info finding; all other stubs return empty.
+        // actor_chain (#256), provenance (#257), schema (#258), and hot_memory (#259)
+        // each emit one deferred-check info finding; all other stubs return empty.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly three deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258.
+        // Exactly four deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            3
+            4
         );
-        assert_eq!(data.summary.by_severity.info, 3);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 
     #[test]
@@ -227,18 +227,18 @@ mod tests {
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);
-        // actor_chain (#256) and provenance (#257) each emit one deferred-check
-        // info finding; schema (#258) adds a third; all other stubs return empty.
+        // actor_chain (#256), provenance (#257), schema (#258), and hot_memory (#259)
+        // each emit one deferred-check info finding; all other stubs return empty.
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly three deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258.
+        // Exactly four deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            3
+            4
         );
-        assert_eq!(data.summary.by_severity.info, 3);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 }
