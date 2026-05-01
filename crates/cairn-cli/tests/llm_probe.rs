@@ -156,6 +156,51 @@ fn probe_exits_69_on_unreachable_endpoint() {
 }
 
 #[tokio::test]
+async fn probe_retries_on_503_then_succeeds() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // First two requests: 503. Third: 200. Status-driven retry must
+    // recognise 5xx independent of body content.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_response("ok")))
+        .mount(&server)
+        .await;
+
+    let vault = tempfile::tempdir().expect("tempdir");
+    write_config(vault.path(), &server.uri());
+
+    let vault_path = vault.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("cairn")
+            .expect("cargo bin cairn")
+            .current_dir(&vault_path)
+            .args(["llm", "probe"])
+            .env_remove("CAIRN_VAULT")
+            .env_remove("CAIRN_REGISTRY")
+            .output()
+            .expect("run cairn")
+    })
+    .await
+    .expect("blocking task");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
 async fn probe_retries_on_429_then_succeeds() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -392,12 +437,10 @@ async fn probe_succeeds_on_schema_match() {
     assert!(stdout.contains("\"ok\":true"), "stdout: {stdout}");
 }
 
-/// Empty-body 401: async-openai surfaces this as
-/// `JSONDeserialize(_, "")` with no preserved status. We classify it
-/// transient, retry until the bounded budget is exhausted, then return
-/// `ProviderUnreachable` rather than misclaiming `AuthDenied`.
+/// Empty-body 401: status is preserved via the direct `reqwest` path,
+/// so even an empty 401 cleanly maps to [`LlmError::AuthDenied`] (exit 77).
 #[tokio::test]
-async fn probe_exits_69_on_empty_body_401() {
+async fn probe_exits_77_on_empty_body_401() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -427,15 +470,12 @@ async fn probe_exits_69_on_empty_body_401() {
 
     assert_eq!(
         output.status.code(),
-        Some(69),
+        Some(77),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("llm.provider_unreachable"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("llm.auth_denied"), "stderr: {stderr}");
 }
 
 /// Empty-body 429: must be retried (transient classification) and then

@@ -441,12 +441,12 @@ version = "0.0.1"
 dependencies = [
  "async-openai",
  "async-trait",
- "backoff",
  "cairn-core",
  "cairn-llm-openai-compat",
  "cairn-test-fixtures",
  "insta",
  "jsonschema",
+ "reqwest",
  "serde_json",
  "tokio",
  "tracing",

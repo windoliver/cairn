@@ -1,16 +1,17 @@
-//! [`OpenAiCompatProvider`] — implements [`LLMProvider`] over `async-openai`.
+//! [`OpenAiCompatProvider`] — implements [`LLMProvider`] over a direct
+//! `reqwest` HTTP path.
+//!
+//! `async-openai` discards the HTTP status when its `WrappedError`
+//! deserialisation fails (e.g. empty bodies), which prevents accurate
+//! 401/429/5xx classification. We use it for typed request/response
+//! structs only and own the transport so the `LlmError` mapping is
+//! status-driven.
 
-use std::time::Duration;
-
-use async_openai::{
-    Client,
-    config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, FinishReason,
-        ResponseFormat, ResponseFormatJsonSchema,
-    },
+use async_openai::types::chat::{
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+    CreateChatCompletionRequestArgs, CreateChatCompletionResponse, FinishReason, ResponseFormat,
+    ResponseFormatJsonSchema,
 };
-use backoff::ExponentialBackoffBuilder;
 use cairn_core::{
     config::LlmConfig,
     contract::version::{ContractVersion, VersionRange},
@@ -20,34 +21,54 @@ use cairn_core::{
     },
 };
 
-use crate::config::to_openai_config;
-use crate::retry::{RetryPolicy, with_retries};
+use crate::retry::{RetryPolicy, Retryable, with_retries};
+
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_API_KEY: &str = "cairn"; // Some providers (Ollama) ignore the value but require non-empty.
 
 /// OpenAI-compatible [`LLMProvider`] adapter.
 pub struct OpenAiCompatProvider {
-    /// Underlying async-openai HTTP client.
-    client: Client<OpenAIConfig>,
+    /// HTTP client. Direct `reqwest` so we own status mapping.
+    http: reqwest::Client,
+    /// Endpoint base URL (e.g. `https://api.openai.com/v1`).
+    base_url: String,
+    /// Bearer-auth API key sent on every request.
+    api_key: String,
     /// Model name resolved at construction time.
     model: String,
     /// Static capability advertisement.
     capabilities: LLMProviderCapabilities,
 }
 
-/// Backoff with `max_elapsed_time = 0` so async-openai's internal retry
-/// loop returns immediately — our `RetryPolicy` is the sole retry layer.
-fn no_inner_backoff() -> backoff::ExponentialBackoff {
-    ExponentialBackoffBuilder::new()
-        .with_max_elapsed_time(Some(Duration::from_millis(0)))
-        .build()
-}
-
 impl OpenAiCompatProvider {
     /// Construct from a resolved [`LlmConfig`].
+    ///
+    /// # Errors
+    /// Returns [`LlmError::ProviderUnreachable`] only on `reqwest::Client`
+    /// build failure (very unusual — OS-level TLS/dns init issue).
     pub fn from_config(config: &LlmConfig) -> Result<Self, LlmError> {
-        let openai_cfg = to_openai_config(config);
-        let model = config.model.clone().unwrap_or_else(|| "gpt-4o-mini".into());
+        let http =
+            reqwest::Client::builder()
+                .build()
+                .map_err(|e| LlmError::ProviderUnreachable {
+                    detail: format!("http client init: {e}"),
+                })?;
+        let base_url = config
+            .base_url
+            .as_deref()
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/')
+            .to_owned();
+        let api_key = config
+            .api_key
+            .clone()
+            .unwrap_or_else(|| DEFAULT_API_KEY.into());
+        let model = config.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into());
         Ok(Self {
-            client: Client::with_config(openai_cfg).with_backoff(no_inner_backoff()),
+            http,
+            base_url,
+            api_key,
             model,
             capabilities: LLMProviderCapabilities {
                 json_mode: true,
@@ -69,15 +90,104 @@ impl OpenAiCompatProvider {
         model: &str,
         capabilities: LLMProviderCapabilities,
     ) -> Self {
-        let openai_cfg = OpenAIConfig::new()
-            .with_api_base(base_url)
-            .with_api_key("test-key");
         Self {
-            client: Client::with_config(openai_cfg).with_backoff(no_inner_backoff()),
+            http: reqwest::Client::new(),
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            api_key: "test-key".into(),
             model: model.into(),
             capabilities,
         }
     }
+
+    /// Issue one POST to `/chat/completions`. The closure surface — returning
+    /// [`Retryable`] — keeps the retry layer the sole source of pacing.
+    async fn post_chat(
+        &self,
+        request: &CreateChatCompletionRequest,
+    ) -> Result<CreateChatCompletionResponse, Retryable> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = match self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(request)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Connection refused / DNS / TLS failures are not retried
+                // — they are stable terminal errors for this endpoint.
+                let retryable = e.is_timeout();
+                return Err(Retryable {
+                    err: LlmError::ProviderUnreachable {
+                        detail: e.to_string(),
+                    },
+                    retryable,
+                });
+            }
+        };
+
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(Retryable {
+                    err: LlmError::ProviderUnreachable {
+                        detail: format!("response body: {e}"),
+                    },
+                    retryable: true,
+                });
+            }
+        };
+
+        if status.is_success() {
+            return serde_json::from_slice::<CreateChatCompletionResponse>(&bytes).map_err(|e| {
+                Retryable {
+                    err: LlmError::ProviderUnreachable {
+                        detail: format!("response parse: {e}"),
+                    },
+                    retryable: false,
+                }
+            });
+        }
+
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return Err(Retryable {
+                err: LlmError::AuthDenied,
+                retryable: false,
+            });
+        }
+
+        let body_preview = truncate_body(&bytes);
+        if code == 429 || (500..600).contains(&code) {
+            return Err(Retryable {
+                err: LlmError::ProviderUnreachable {
+                    detail: format!("HTTP {code}: {body_preview}"),
+                },
+                retryable: true,
+            });
+        }
+
+        Err(Retryable {
+            err: LlmError::ProviderUnreachable {
+                detail: format!("HTTP {code}: {body_preview}"),
+            },
+            retryable: false,
+        })
+    }
+}
+
+/// Return up to 256 bytes of the response body as a UTF-8-lossy preview.
+fn truncate_body(bytes: &[u8]) -> String {
+    const MAX: usize = 256;
+    let slice = if bytes.len() > MAX {
+        &bytes[..MAX]
+    } else {
+        bytes
+    };
+    String::from_utf8_lossy(slice).to_string()
 }
 
 impl LLMProviderPlugin for OpenAiCompatProvider {
@@ -102,13 +212,25 @@ impl LLMProvider for OpenAiCompatProvider {
 
     #[tracing::instrument(skip(self, req), err, fields(model, schema_mode = req.schema.is_some()))]
     async fn complete(&self, req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
-        // JSON schema path requires json_mode capability — guard it now,
-        // full validation wired in Task 7.
+        // JSON schema path requires json_mode capability — guard it now.
         if req.schema.is_some() && !self.capabilities.json_mode {
             return Err(LlmError::CapabilityMissing {
                 capability: "json_mode".into(),
             });
         }
+
+        // Validate the schema *before* any network call. The compiled
+        // validator is reused on the response.
+        let validator = if let Some(schema) = &req.schema {
+            Some(
+                jsonschema::validator_for(schema).map_err(|e| LlmError::InvalidJsonOutput {
+                    detail: format!("invalid schema: {e}"),
+                    raw: String::new(),
+                })?,
+            )
+        } else {
+            None
+        };
 
         // Choose the model: per-request override or the instance default.
         let model = req.model.as_deref().unwrap_or(&self.model);
@@ -150,14 +272,9 @@ impl LLMProvider for OpenAiCompatProvider {
             detail: e.to_string(),
         })?;
 
-        // Retry transient failures (429, 5xx). The `request` clone is cheap —
-        // it's `serde_json::Value` under the hood.
-        let response = with_retries(RetryPolicy::standard(), || {
-            let req = request.clone();
-            let client = &self.client;
-            async move { client.chat().create(req).await }
-        })
-        .await?;
+        // Retry transient failures (network timeout, 429, 5xx). The closure
+        // pre-classifies each error so retry/no-retry is keyed on HTTP status.
+        let response = with_retries(RetryPolicy::standard(), || self.post_chat(&request)).await?;
 
         // Extract the first choice.
         let choice =
@@ -181,29 +298,20 @@ impl LLMProvider for OpenAiCompatProvider {
                 detail: "provider returned null content".into(),
             })?;
 
-        // JSON schema path: parse and validate the response body.
-        if let Some(schema) = &req.schema {
-            // Parse the response as JSON.
+        // JSON schema path: parse and validate the response body with the
+        // compiled validator from the preflight.
+        if let Some(validator) = validator {
             let value: serde_json::Value =
                 serde_json::from_str(&content).map_err(|e| LlmError::InvalidJsonOutput {
                     detail: e.to_string(),
                     raw: content.clone(),
                 })?;
-
-            // Compile the schema and validate the parsed value.
-            let compiled =
-                jsonschema::validator_for(schema).map_err(|e| LlmError::InvalidJsonOutput {
-                    detail: format!("invalid schema: {e}"),
-                    raw: content.clone(),
-                })?;
-
-            compiled
+            validator
                 .validate(&value)
                 .map_err(|e| LlmError::InvalidJsonOutput {
                     detail: e.to_string(),
                     raw: content.clone(),
                 })?;
-
             return Ok(CompletionOutput::Json(value));
         }
 

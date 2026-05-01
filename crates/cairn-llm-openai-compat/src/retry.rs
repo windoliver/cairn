@@ -1,15 +1,17 @@
 //! Bounded exponential-backoff retry for transient HTTP errors.
 //!
-//! Triggers on HTTP 429 (rate-limited) and 5xx (server errors); maps every
-//! other error straight through. Caller stays in control of the budget by
-//! configuring [`RetryPolicy`].
+//! The closure pre-classifies each failure as transient or terminal via
+//! [`Retryable`]; this module is purely about pacing.
 
 use std::time::Duration;
 
-use async_openai::error::OpenAIError;
 use cairn_core::contract::LlmError;
 
-use crate::error::{is_rate_limit_or_server_error, map_openai_error};
+/// Outcome of a single attempt that did not succeed.
+pub(crate) struct Retryable {
+    pub err: LlmError,
+    pub retryable: bool,
+}
 
 /// Retry policy for transient endpoint errors.
 #[derive(Debug, Clone, Copy)]
@@ -46,21 +48,18 @@ impl RetryPolicy {
 }
 
 /// Run `op` with bounded retry on transient errors.
-///
-/// Maps the final `OpenAIError` via [`map_openai_error`] regardless of whether
-/// retries were attempted.
 pub(crate) async fn with_retries<F, Fut, T>(policy: RetryPolicy, mut op: F) -> Result<T, LlmError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, OpenAIError>>,
+    Fut: std::future::Future<Output = Result<T, Retryable>>,
 {
     let mut attempt: u32 = 0;
     loop {
         match op().await {
             Ok(value) => return Ok(value),
-            Err(e) => {
-                if attempt >= policy.max_retries || !is_rate_limit_or_server_error(&e) {
-                    return Err(map_openai_error(&e));
+            Err(c) => {
+                if attempt >= policy.max_retries || !c.retryable {
+                    return Err(c.err);
                 }
                 let delay = policy.delay_for(attempt);
                 let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);

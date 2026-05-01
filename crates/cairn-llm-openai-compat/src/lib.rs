@@ -2,8 +2,6 @@
 //!
 //! Entry point: [`build_llm_provider`].
 
-mod config;
-mod error;
 mod provider;
 mod retry;
 

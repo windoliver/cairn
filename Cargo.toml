@@ -51,9 +51,10 @@ fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
 walkdir = "2"
 async-openai = { version = "0.36", default-features = false, features = ["rustls", "chat-completion"] }
-# Pinned to async-openai 0.36's transitive backoff so we can disable its
-# internal retry loop and be the sole retry layer. See provider.rs.
-backoff = { version = "0.4", default-features = false }
+# Direct `reqwest` because `async-openai` discards HTTP status on
+# `JSONDeserialize` errors (e.g. empty bodies), which blocks accurate
+# 401/429/5xx disambiguation. We use `async-openai` for typed structs only.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 wiremock = "0.6"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
