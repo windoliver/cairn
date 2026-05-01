@@ -57,7 +57,7 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "key_revoked"] },
+              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "key_revoked", "chain_malformed"] },
               "message":   { "type": "string", "minLength": 1 },
               "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
             }

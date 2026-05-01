@@ -25,7 +25,8 @@
                   "stale",
                   "missing_concept",
                   "data_gap",
-                  "key_revoked"
+                  "key_revoked",
+                  "chain_malformed"
                 ],
                 "type": "string"
               },

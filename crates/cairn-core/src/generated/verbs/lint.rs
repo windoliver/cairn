@@ -23,6 +23,7 @@ pub enum LintDataFindingsKind {
     MissingConcept,
     DataGap,
     KeyRevoked,
+    ChainMalformed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
