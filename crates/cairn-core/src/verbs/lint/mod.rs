@@ -11,6 +11,7 @@ use crate::generated::verbs::lint::{
 };
 
 pub mod checks;
+pub mod report;
 
 /// One linted record + the per-row `consent_model` gate from the records
 /// table. PR-1 always carries `LegacyEvent` because the migration that
@@ -211,6 +212,55 @@ mod tests {
             5
         );
         assert_eq!(data.summary.by_severity.info, 5);
+    }
+
+    #[test]
+    fn run_checks_is_record_order_independent() {
+        fn canonicalize(findings: &[crate::generated::verbs::lint::Finding]) -> Vec<String> {
+            let mut keys: Vec<String> = findings
+                .iter()
+                .map(|f| {
+                    let kind = format!("{:?}", f.kind);
+                    let sev = format!("{:?}", f.severity);
+                    format!("{kind}|{sev}|{}", f.message)
+                })
+                .collect();
+            keys.sort();
+            keys
+        }
+
+        let cfg = CairnConfig::default();
+        let mk = |label: &str| -> LintRecord {
+            let mut r = sample_record();
+            r.tags = vec![label.to_owned()];
+            LintRecord {
+                stored: StoredRecord { record: r, version: 1 },
+                consent_model: ConsentModel::LegacyEvent,
+            }
+        };
+        let a = mk("first");
+        let b = mk("second");
+        let c = mk("third");
+
+        let forward = [a.clone(), b.clone(), c.clone()];
+        let reversed = [c, b, a];
+
+        let inputs_fwd = LintInputs {
+            records: &forward,
+            config: &cfg,
+            index_stats: IndexStats::new(forward.len() as u64, forward.len() as u64),
+            schema_version: SchemaVersion { major: 0, minor: 1 },
+        };
+        let inputs_rev = LintInputs {
+            records: &reversed,
+            config: &cfg,
+            index_stats: IndexStats::new(reversed.len() as u64, reversed.len() as u64),
+            schema_version: SchemaVersion { major: 0, minor: 1 },
+        };
+
+        let fwd = canonicalize(&run_checks(&inputs_fwd).findings);
+        let rev = canonicalize(&run_checks(&inputs_rev).findings);
+        assert_eq!(fwd, rev, "run_checks is record-order-dependent");
     }
 
     #[test]
