@@ -162,8 +162,6 @@ pub(crate) fn target_record(id: &RecordId) -> Target {
 }
 
 /// Build a `Target` pointing at a vault path or table name.
-// Allow dead_code: used by forthcoming check stubs (index_drift, schema, etc.); scaffolded here so all checks share one helper.
-#[allow(dead_code)]
 pub(crate) fn target_path(path: impl Into<String>) -> Target {
     Target {
         record_id: None,
@@ -199,20 +197,20 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
         };
         let data = run_checks(&inputs);
-        // actor_chain (#256), provenance (#257), schema (#258), and hot_memory (#259)
+        // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
         // each emit one deferred-check info finding; all other stubs return empty.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly four deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.6/#259.
+        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            4
+            5
         );
-        assert_eq!(data.summary.by_severity.info, 4);
+        assert_eq!(data.summary.by_severity.info, 5);
     }
 
     #[test]
@@ -227,18 +225,18 @@ mod tests {
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);
-        // actor_chain (#256), provenance (#257), schema (#258), and hot_memory (#259)
+        // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
         // each emit one deferred-check info finding; all other stubs return empty.
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly four deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.6/#259.
+        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            4
+            5
         );
-        assert_eq!(data.summary.by_severity.info, 4);
+        assert_eq!(data.summary.by_severity.info, 5);
     }
 }
