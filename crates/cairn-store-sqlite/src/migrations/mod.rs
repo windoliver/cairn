@@ -29,6 +29,7 @@ const M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS: &str =
 const M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
     include_str!("sql/0019_sessions_strip_verbatim_and_case_fold.sql");
 const M0020_RECORD_VECTORS: &str = include_str!("sql/0020_record_vectors.sql");
+const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
 
 /// Compile-time manifest of `(migration_id, name, source)` used by the
 /// `verify` module to compute and check content hashes.
@@ -81,6 +82,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD,
     ),
     (20, "0020_record_vectors", M0020_RECORD_VECTORS),
+    (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -108,5 +110,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0018_SESSIONS_CANONICALIZE_WINDOWS_PATHS),
         M::up(M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
         M::up(M0020_RECORD_VECTORS),
+        M::up(M0030_RECORDS_FTS_WEIGHTED),
     ])
 }
