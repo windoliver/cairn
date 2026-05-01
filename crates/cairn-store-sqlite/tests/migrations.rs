@@ -1733,6 +1733,131 @@ fn consent_journal_rebuild_overrides_free_form_legacy_granted_by() {
 }
 
 #[test]
+fn consent_journal_rebuild_aborts_on_event_row_missing_actor() {
+    // Phase-B (#255, brief §14): round-7 High finding. Pre-0011 schema did
+    // not require `actor` on event-kind rows — that NOT-NULL gate landed
+    // in 0011 as a BEFORE INSERT trigger. A vault that wrote event-kind
+    // rows under 0009/0010 could carry rows where `kind IS NOT NULL` but
+    // `actor IS NULL`. Steps 0a/0b/0c only check `kind IS NULL` legacy
+    // rows; without step 0d those rows would survive the rebuild and
+    // brick `decode_event_inner`'s post-round-6 validate(). The fix:
+    // step 0d FAILS CLOSED on any event-kind row missing actor/payload/
+    // iso or with out-of-domain metadata. Drop the 0011 trigger first to
+    // simulate the historical reality (v9: no trigger, row exists; v11:
+    // trigger added, blocks new inserts but pre-existing row survives).
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_event_requires_actor", [])
+        .expect("drop pre-0021 actor trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-no-actor', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', NULL, '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with NULL actor");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row missing actor");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row") || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-no-actor'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-no-actor");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_missing_payload() {
+    // Phase-B (#255, brief §14): round-7 High finding. Same shape as the
+    // missing-actor test, but for `payload_json`. The 0011 trigger
+    // `consent_journal_event_requires_payload` blocks NULL/invalid
+    // payload going forward — pre-0011 rows escape that gate.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_event_requires_payload", [])
+        .expect("drop pre-0021 payload trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('event-no-payload', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', NULL, '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with NULL payload");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row missing payload");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row") || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'event-no-payload'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "event-no-payload");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_event_row_invalid_metadata() {
+    // Phase-B (#255, brief §14): round-7 High finding. Pre-0011 schema
+    // did not enforce closed character classes on consent_id / scope /
+    // op_id for event-kind rows either; the 0011 trigger
+    // `consent_journal_event_metadata_domains` blocks them going forward
+    // but pre-existing rows survive. A `consent_id` containing `@` and
+    // `!` violates the [A-Za-z0-9._:-] domain.
+    let mut conn = open_at_version(20);
+    conn.execute("DROP TRIGGER consent_journal_event_metadata_domains", [])
+        .expect("drop pre-0021 metadata trigger to simulate v9-era write");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, payload_json, decided_at_iso) \
+         VALUES ('has@bad!chars', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:t', '{\"shape\":\"decision\",\"subject_code\":\"x\"}', \
+                 '1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("legacy event-kind insert with invalid consent_id");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on event-kind row with invalid metadata");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("event-kind row") || msg.contains("pre-0011 schema"),
+        "abort message must cite event-kind / pre-0011 schema; got: {msg}"
+    );
+
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal WHERE consent_id = 'has@bad!chars'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("event-kind row must survive aborted migration");
+    assert_eq!(consent_id, "has@bad!chars");
+}
+
+#[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
     conn.execute(

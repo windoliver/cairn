@@ -217,6 +217,57 @@ INSERT INTO __cairn_assert_legacy_metadata (n)
 DROP TRIGGER __cairn_assert_legacy_metadata_trg;
 DROP TABLE __cairn_assert_legacy_metadata;
 
+-- 0d. Abort if any EVENT-KIND row (kind IS NOT NULL) violates the
+--     decode contract (Finding: round-7 high). Steps 0a/0b/0c only
+--     guard `kind IS NULL` legacy rows. But pre-0011 schema enforced
+--     only `kind` and `decided_at_iso` — `actor`, `payload_json`, and
+--     the metadata domain classes were added in 0011. A vault migrated
+--     through the 0009/0010 era could carry event-kind rows with NULL
+--     actor / NULL payload / NULL decided_at_iso / out-of-domain
+--     metadata that the 0011 hardening triggers blocked going forward
+--     but did NOT retroactively repair. The 0021 rebuild copies those
+--     rows verbatim through the `ELSE <existing-column>` arm in step 4,
+--     and `decode_event_inner` (round-6 defense-in-depth) then surfaces
+--     them as permanent mirror tail/rebuild errors.
+--
+--     We FAIL CLOSED here so the operator repairs the data manually
+--     before re-running migration (issue #267 tracks the repair tool).
+--     SQL cannot easily verify RFC3339 parse on `decided_at_iso`
+--     content for non-legacy rows; we rely on `consent::append`'s
+--     pre-write `Rfc3339Timestamp::parse` for any iso written via the
+--     event path post-0009. NULL-iso for event-kind rows is what step
+--     0d catches.
+CREATE TEMP TABLE __cairn_assert_event_rows (n INTEGER);
+CREATE TEMP TRIGGER __cairn_assert_event_rows_trg
+  BEFORE INSERT ON __cairn_assert_event_rows
+  FOR EACH ROW WHEN NEW.n > 0
+BEGIN
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains event-kind row(s) (kind IS NOT NULL) missing required fields or with invalid metadata; pre-0011 schema allowed this. Resolve manually before re-running migration (issue #267).');
+END;
+INSERT INTO __cairn_assert_event_rows (n)
+  SELECT COUNT(*) FROM consent_journal
+   WHERE kind IS NOT NULL
+     AND (
+          actor IS NULL
+       OR payload_json IS NULL
+       OR json_valid(payload_json) = 0
+       OR decided_at_iso IS NULL
+       OR consent_id IS NULL
+       OR length(consent_id) < 1
+       OR length(consent_id) > 64
+       OR consent_id GLOB '*[^A-Za-z0-9._:-]*'
+       OR scope IS NULL
+       OR length(scope) < 1
+       OR length(scope) > 256
+       OR scope GLOB '*[^a-z0-9._:=,-]*'
+       OR (op_id IS NOT NULL
+            AND (length(op_id) < 1
+                 OR length(op_id) > 128
+                 OR op_id GLOB '*[^A-Za-z0-9._:-]*'))
+     );
+DROP TRIGGER __cairn_assert_event_rows_trg;
+DROP TABLE __cairn_assert_event_rows;
+
 -- 1. Drop ALL triggers attached to the old consent_journal. They are
 --    re-created at the end of this migration against the renamed table.
 DROP TRIGGER IF EXISTS consent_journal_immutable;
