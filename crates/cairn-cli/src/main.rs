@@ -47,7 +47,7 @@ fn main() -> ExitCode {
     // from the top-level vault registry guard (which requires a named vault).
     let needs_vault_guard = !matches!(
         active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "identity"
+        "vault" | "bootstrap" | "plugins" | "mcp" | "llm" | "identity"
     );
 
     if needs_vault_guard {
@@ -102,6 +102,7 @@ fn main() -> ExitCode {
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
+        Some(("llm", sub)) => run_llm(sub),
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
@@ -408,4 +409,73 @@ fn run_vault(matches: &ArgMatches) -> ExitCode {
         }
         _ => unreachable!("clap subcommand_required(true) on vault"),
     }
+}
+
+fn run_llm(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("probe", sub)) => run_llm_probe(sub),
+        _ => unreachable!("clap subcommand_required(true) on llm"),
+    }
+}
+
+fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
+    let json = matches.get_flag("json");
+    let prompt = matches.get_one::<String>("prompt").cloned();
+    let schema_file = matches.get_one::<String>("schema-file").cloned();
+
+    // Load config from cwd. The probe is a vault-agnostic diagnostic;
+    // it reads `.cairn/config.yaml` from the current directory if present,
+    // otherwise uses defaults (which produces NotConfigured).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = match cairn_cli::config::load(&cwd, &cairn_cli::config::CliOverrides::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cairn llm probe: config error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    // Load schema file if provided. Compile it now (before any network
+    // call) so an invalid schema fails fast as a config error and never
+    // reaches the provider.
+    let schema: Option<serde_json::Value> = match schema_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => {
+                    if let Err(e) = jsonschema::validator_for(&v) {
+                        eprintln!("cairn llm probe: invalid JSON schema in {path}: {e}");
+                        return ExitCode::from(78); // EX_CONFIG
+                    }
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("cairn llm probe: schema parse error in {path}: {e}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+            },
+            Err(e) => {
+                eprintln!("cairn llm probe: cannot read schema file {path}: {e}");
+                return ExitCode::from(78);
+            }
+        },
+        None => None,
+    };
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cairn llm probe: tokio init error — {e}");
+            return ExitCode::from(70); // EX_SOFTWARE
+        }
+    };
+
+    runtime.block_on(cairn_cli::llm::run_probe(
+        &config,
+        json,
+        prompt.as_deref(),
+        schema,
+    ))
 }

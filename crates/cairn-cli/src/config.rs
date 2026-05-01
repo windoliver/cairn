@@ -107,7 +107,7 @@ fn read_yaml_overlay(path: &Path) -> Result<Option<Value>> {
     let interpolated = interpolate_env(&raw)
         .map_err(anyhow::Error::from)
         .with_context(|| format!("resolving ${{VAR}} placeholders in {}", path.display()))?;
-    let value: Value = serde_yml::from_str(&interpolated)
+    let value: Value = yaml_serde::from_str(&interpolated)
         .with_context(|| format!("parsing {}", path.display()))?;
     if value.is_null() {
         Ok(None)
@@ -305,7 +305,7 @@ pub fn write_default(vault_path: &Path) -> Result<()> {
     std::fs::create_dir_all(&config_dir)
         .with_context(|| format!("creating {}", config_dir.display()))?;
 
-    let yaml = serde_yml::to_string(&CairnConfig::default())
+    let yaml = yaml_serde::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
 
     std::fs::write(&config_path, yaml)

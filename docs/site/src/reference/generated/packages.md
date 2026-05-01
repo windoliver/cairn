@@ -10,6 +10,7 @@ Generated from workspace package metadata and `docs-coverage.toml`.
 | `cairn-core` | `sdk-author` | `reference/rust-api.md` | - |
 | `cairn-idl` | `maintainer` | `reference/idl.md` | `reference/generated/contract-verbs.md` |
 | `cairn-keychain` | `operator` | `usage/cli.md` | - |
+| `cairn-llm-openai-compat` | `operator` | `usage/plugins.md` | `reference/generated/plugins.md` |
 | `cairn-mcp` | `integration-author` | `usage/mcp.md` | `reference/generated/mcp-tools.md` |
 | `cairn-sdk` | `sdk-author` | `reference/rust-api.md` | - |
 | `cairn-sensors-local` | `operator` | `usage/plugins.md` | `reference/generated/plugins.md` |

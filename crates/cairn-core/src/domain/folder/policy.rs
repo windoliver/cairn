@@ -117,7 +117,7 @@ pub fn parse_policy(yaml: &str) -> Result<FolderPolicy, FolderError> {
     if yaml.trim().is_empty() {
         return Ok(FolderPolicy::default());
     }
-    serde_yml::from_str(yaml).map_err(|source| FolderError::PolicyParse { source })
+    yaml_serde::from_str(yaml).map_err(|source| FolderError::PolicyParse { source })
 }
 
 /// Result of walking up `_policy.yaml` files and merging deepest-wins per key.
@@ -523,7 +523,7 @@ summary_max_tokens: 300
     proptest! {
         #[test]
         fn parse_serialize_round_trips(p in arb_policy()) {
-            let yaml = serde_yml::to_string(&p).expect("infallible — FolderPolicy always serializes");
+            let yaml = yaml_serde::to_string(&p).expect("infallible — FolderPolicy always serializes");
             let parsed = parse_policy(&yaml).expect("infallible — round-trip of valid policy");
             prop_assert_eq!(parsed, p);
         }

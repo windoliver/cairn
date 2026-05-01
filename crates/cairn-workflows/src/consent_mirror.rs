@@ -90,7 +90,43 @@ pub struct ConsentLogMaterializer {
     log_path: PathBuf,
     cursor_path: PathBuf,
     lock_path: PathBuf,
+    /// Per-mirror sidecar tracking which `consent_mirror_resets`
+    /// `migration_id`s this mirror has already replayed. Multiple mirrors
+    /// (different `vault_dir`s) sharing one DB must each replay
+    /// independently — DB-level consumption would let the first mirror
+    /// silently steal the marker from its peers (Phase-B finding 2).
+    resets_consumed_path: PathBuf,
     cursor: i64,
+    /// In-memory cache: once we've proven all `consent_mirror_resets`
+    /// markers are consumed by a sidecar entry whose watermark and
+    /// `line_count` satisfy the live cursor / log, we record the DB
+    /// state fingerprint that we validated against, and skip the
+    /// sidecar/`count_log_lines` work on subsequent ticks while the
+    /// fingerprint matches. The DB row is permanent, so without this
+    /// cache we would re-scan the log on every tick forever — defeating
+    /// the 1 MiB cap that bounds the recovery scan elsewhere in this
+    /// module (round-9 high finding).
+    ///
+    /// Keyed on a fingerprint instead of a bare bool (round-10 high
+    /// finding): a bare bool latches "validated" for the materializer's
+    /// lifetime even if a peer process applies a new reset migration in
+    /// between, so the original mirror would silently miss the replay.
+    /// The fingerprint is `(count, max(migration_id))` over
+    /// `consent_mirror_resets`; a new marker bumps both fields, so the
+    /// cache invalidates automatically. Computing the fingerprint is a
+    /// single indexed aggregate — much cheaper than `count_log_lines`.
+    ///
+    /// Cleared by every call site that rewrites the log
+    /// (`rebuild_log_to`), so any post-rebuild state has to re-validate.
+    resets_validated_fingerprint: Option<ResetsFingerprint>,
+}
+
+/// Fingerprint of the `consent_mirror_resets` DB state used to key the
+/// in-memory validation cache. See `resets_validated_fingerprint`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResetsFingerprint {
+    count: i64,
+    max_migration_id: Option<i64>,
 }
 
 impl ConsentLogMaterializer {
@@ -107,6 +143,7 @@ impl ConsentLogMaterializer {
         let log_path = dir.join("consent.log");
         let cursor_path = dir.join("consent.cursor");
         let lock_path = dir.join("consent.lock");
+        let resets_consumed_path = dir.join("consent.mirror_resets_consumed");
 
         // Ensure the log exists and is durable.
         let log_file = OpenOptions::new()
@@ -155,7 +192,9 @@ impl ConsentLogMaterializer {
             log_path,
             cursor_path,
             lock_path,
+            resets_consumed_path,
             cursor,
+            resets_validated_fingerprint: None,
         })
     }
 
@@ -198,6 +237,17 @@ impl ConsentLogMaterializer {
     /// committed; the next call re-reads from the log's last envelope.
     pub fn tick(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
+
+        // CORRUPTION-FIRST INVARIANT (Phase-B finding 1):
+        //
+        // The log-corruption check runs BEFORE any 0021-style reset
+        // replay. A pending `consent_mirror_resets` marker is *not* a
+        // license to silently overwrite a corrupt log — operators must
+        // see `LogCorrupt` and explicitly opt into recovery via
+        // `rebuild_at`. Reset auto-replay is reserved for the
+        // known-good-log path so the audit trail remains visible at
+        // exactly the moment something went wrong.
+        //
         // Re-read the authoritative cursor under the lock — a peer
         // process may have advanced past us since `open`. Fail closed
         // on the same conditions `open()` does:
@@ -234,6 +284,60 @@ impl ConsentLogMaterializer {
                     return Err(MirrorError::LogCorrupt);
                 }
             }
+        }
+
+        // Migration 0021 promoted legacy `kind IS NULL` rows in the
+        // consent_journal to event-shape rows preserving their original
+        // rowid. Existing vaults' cursor sidecar may already point ABOVE
+        // those legacy rowids (the mirror tailed only event-kind rows
+        // pre-0021 via the `kind IS NOT NULL` predicate in
+        // `read_since_rowid`), so a plain `tick()` would silently skip
+        // every newly-visible legacy row and brick brief §14 "no gaps".
+        //
+        // Migration 0021 inserts a `(migration_id, applied_at,
+        // consumed=0, db_nonce)` row into `consent_mirror_resets`.
+        // Sidecar consumption is bound to `db_nonce` (round-12 finding;
+        // applied_at is second-resolution and DB copies preserve it).
+        // Here we look
+        // for any reset rows this mirror has not yet consumed (the
+        // sidecar at `consent.mirror_resets_consumed` is the per-mirror
+        // source of truth — see Phase-B finding 2); on finding one we
+        // replay from rowid 0 via `rebuild_log_to` (the same atomic
+        // truncate-and-replay path `rebuild_from_db` uses), update the
+        // in-memory cursor to the rebuild's high-water mark, and append
+        // the migration_id to the local sidecar. The lock guard above
+        // serializes us against any peer mirror.
+        let pending_resets = read_pending_mirror_resets_with_cache(
+            conn,
+            &self.resets_consumed_path,
+            self.cursor,
+            &self.log_path,
+            &mut self.resets_validated_fingerprint,
+        )?;
+        if !pending_resets.is_empty() {
+            let rebuild = rebuild_log_to(&self.log_path, conn)?;
+            // The rebuild rewrote the log — any prior cached validation
+            // is no longer trustworthy until we mark the sidecar below.
+            self.resets_validated_fingerprint = None;
+            self.cursor = rebuild.high_water;
+            let _ = write_cursor_hint(&self.cursor_path, self.cursor);
+            // Watermark: the highest rowid the rebuild actually serialized.
+            // Future ticks compare the live cursor against this value; a
+            // cursor that regresses below the watermark (vault rollback,
+            // backup restore without DB) forces a replay even though the
+            // sidecar still claims "consumed" — see round-4 medium finding.
+            // Line count: the live log's line count *after* the rebuild —
+            // a tail-only truncation that leaves the watermark envelope
+            // parseable would still satisfy `cursor >= watermark`, so we
+            // also bind to line count (round-13 medium finding).
+            let watermark = rebuild.high_water;
+            let line_count = count_log_lines(&self.log_path)?;
+            let consumed: Vec<(i64, String, i64, u64)> = pending_resets
+                .into_iter()
+                .map(|(id, nonce)| (id, nonce, watermark, line_count))
+                .collect();
+            mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
+            return Ok(rebuild.written);
         }
 
         let pending = read_since_rowid(conn, self.cursor)?;
@@ -277,6 +381,7 @@ impl ConsentLogMaterializer {
         let log_path = dir.join("consent.log");
         let cursor_path = dir.join("consent.cursor");
         let lock_path = dir.join("consent.lock");
+        let resets_consumed_path = dir.join("consent.mirror_resets_consumed");
 
         // Make sure the lock file exists so we can hold it during the
         // rebuild — without an existing file `LockGuard::acquire` would
@@ -293,11 +398,41 @@ impl ConsentLogMaterializer {
         let cursor = rebuild.high_water;
         let _ = write_cursor_hint(&cursor_path, cursor);
 
+        // Consume any pending mirror-reset markers — `rebuild_at` is the
+        // operator-driven recovery path and supersedes any pending
+        // 0021-style instruction to replay from zero. Per-mirror
+        // consumption (Phase-B finding 2): peers with their own
+        // sidecars still see and replay the marker independently.
+        //
+        // Use a fresh, throwaway cache fingerprint here — we're inside
+        // a constructor and the post-consumption Self isn't built yet.
+        let mut validated_fingerprint: Option<ResetsFingerprint> = None;
+        let pending = read_pending_mirror_resets_with_cache(
+            conn,
+            &resets_consumed_path,
+            cursor,
+            &log_path,
+            &mut validated_fingerprint,
+        )?;
+        if !pending.is_empty() {
+            let watermark = rebuild.high_water;
+            let line_count = count_log_lines(&log_path)?;
+            let consumed: Vec<(i64, String, i64, u64)> = pending
+                .into_iter()
+                .map(|(id, nonce)| (id, nonce, watermark, line_count))
+                .collect();
+            mark_mirror_resets_consumed(&resets_consumed_path, &consumed)?;
+            // We just rewrote the sidecar — re-validate on first tick.
+            validated_fingerprint = None;
+        }
+
         Ok(Self {
             log_path,
             cursor_path,
             lock_path,
+            resets_consumed_path,
             cursor,
+            resets_validated_fingerprint: validated_fingerprint,
         })
     }
 
@@ -315,11 +450,36 @@ impl ConsentLogMaterializer {
     pub fn rebuild_from_db(&mut self, conn: &Connection) -> Result<usize, MirrorError> {
         let _guard = LockGuard::acquire(&self.lock_path)?;
         let rebuild = rebuild_log_to(&self.log_path, conn)?;
+        // The rebuild rewrote the log — invalidate any cached
+        // validation fingerprint (round-9 high finding). The
+        // post-consumption path below will set it again once the
+        // sidecar is fresh.
+        self.resets_validated_fingerprint = None;
         // Advance only to the rowid we proved was serialized — never to
         // `max_rowid(conn)`, which could include rows inserted after the
         // replay query and would create an audit gap.
         self.cursor = rebuild.high_water;
         let _ = write_cursor_hint(&self.cursor_path, self.cursor);
+        // Consume any pending mirror-reset markers — an explicit rebuild
+        // supersedes any pending 0021-style replay instruction.
+        // Consumption is per-mirror (Phase-B finding 2): the sidecar
+        // holds the local truth, leaving peers free to replay.
+        let pending = read_pending_mirror_resets_with_cache(
+            conn,
+            &self.resets_consumed_path,
+            self.cursor,
+            &self.log_path,
+            &mut self.resets_validated_fingerprint,
+        )?;
+        if !pending.is_empty() {
+            let watermark = rebuild.high_water;
+            let line_count = count_log_lines(&self.log_path)?;
+            let consumed: Vec<(i64, String, i64, u64)> = pending
+                .into_iter()
+                .map(|(id, nonce)| (id, nonce, watermark, line_count))
+                .collect();
+            mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
+        }
         Ok(rebuild.written)
     }
 
@@ -404,6 +564,300 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
     {
         let mut f = File::create(&tmp)?;
         writeln!(f, "{rowid}")?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    fsync_parent(path)?;
+    Ok(())
+}
+
+/// Read every mirror-reset marker that this mirror has not yet
+/// replayed. Migration 0021 inserts a `consent_mirror_resets` row to
+/// instruct any vault that already has a tail-cursor past pre-0021
+/// legacy rowids to replay the journal from rowid 0 once after upgrade.
+///
+/// Per-mirror semantics (Phase-B finding 2): the DB row records "a
+/// reset was needed at migration N"; the *consumption* sidecar at
+/// `resets_consumed_path` records "this mirror has handled it." Two
+/// mirrors at different `vault_dir`s sharing the same DB therefore each
+/// replay independently. The `consumed` column on the DB row is now
+/// reserved-for-no-use — schema 0021 still defines it (changing the
+/// schema would break verifier fingerprints), but we ignore it.
+///
+/// DB-instance binding (round-12 finding): consumption is keyed by the
+/// `(migration_id, db_nonce)` tuple. `db_nonce` is a 32-char hex string
+/// minted by `lower(hex(randomblob(16)))` at migration apply time, so
+/// two distinct DB schema instances (e.g., a backup restore vs. the
+/// original, or two DBs migrated in the same wall-clock second) hold
+/// different nonces for the same `migration_id`. `applied_at` (round-3)
+/// proved insufficient: it is second-resolution and DB copies preserve
+/// it verbatim. A stale sidecar that records the source DB's nonce
+/// therefore cannot match the freshly-minted nonce of a separate DB.
+///
+/// Log-state binding (round-4 finding, strengthened round-13): each
+/// sidecar entry carries the `watermark_rowid` (highest rowid the prior
+/// replay serialized) AND the `line_count` (number of lines the log
+/// held immediately after that replay). For consumption to count, the
+/// current `cursor` must be `>= watermark` AND the live log's line
+/// count must be `>= recorded line_count`. The watermark check alone
+/// is not proof: `recover_cursor_from_log` only inspects the LAST
+/// well-formed envelope in a bounded scan window, so a log that was
+/// truncated or replaced between consumption and now — but still has
+/// the watermark envelope at its tail — would falsely satisfy
+/// `cursor >= watermark`. Line-count grows monotonically with the
+/// cursor (each replayed envelope is one line), so a tick-time count
+/// below the recorded count proves the log has been rolled back even
+/// when the tail still parses. Sidecar lines that lack the
+/// `line_count` field (round-4 three-field, round-3 two-field, round-2 bare
+/// `migration_id`) or that carry the round-3 `applied_at`-bound
+/// middle field instead of a hex `db_nonce` are all treated the same
+/// way: unknown state → unsafe to honor → replay.
+fn read_pending_mirror_resets_with_cache(
+    conn: &Connection,
+    resets_consumed_path: &Path,
+    cursor: i64,
+    log_path: &Path,
+    validated: &mut Option<ResetsFingerprint>,
+) -> Result<Vec<(i64, String)>, MirrorError> {
+    // Steady-state fast path: once we have proven every DB marker is
+    // consumed by a fresh sidecar entry, cache the DB-state fingerprint
+    // we validated against and skip the sidecar read + the O(file)
+    // `count_log_lines` scan on subsequent ticks while the fingerprint
+    // is unchanged.
+    //
+    // Round-10 high finding: a bare bool would latch "validated" for
+    // the materializer's lifetime, so a peer process applying a new
+    // reset migration after our first tick would never be observed.
+    // The fingerprint is `(count, max(migration_id))` over
+    // `consent_mirror_resets` — a single indexed aggregate, much
+    // cheaper than `count_log_lines`. A new marker bumps both fields,
+    // so the cache invalidates automatically on cross-process change.
+    let fingerprint = db_resets_fingerprint(conn)?;
+    if *validated == Some(fingerprint) {
+        return Ok(Vec::new());
+    }
+    if fingerprint.count == 0 {
+        // No markers (table absent or empty) — nothing to honor. Cache
+        // the empty fingerprint; it will invalidate the moment a peer
+        // applies the reset migration.
+        *validated = Some(fingerprint);
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn
+        .prepare("SELECT migration_id, db_nonce FROM consent_mirror_resets")
+        .map_err(StoreError::from)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(StoreError::from)?;
+    let mut all = Vec::new();
+    for row in rows {
+        all.push(row.map_err(StoreError::from)?);
+    }
+    let consumed = read_resets_consumed_sidecar(resets_consumed_path)?;
+    let live_line_count = count_log_lines(log_path)?;
+    all.retain(|tuple| {
+        // A DB row is considered consumed only when there's a sidecar
+        // entry for the matching (migration_id, db_nonce) AND the
+        // recorded watermark is still <= the live cursor AND the
+        // recorded line_count is still <= the live log's line count.
+        // A cursor below the watermark or a line count below the
+        // recorded count means the log was rolled back behind the
+        // sidecar's claim — force replay. The line-count check guards
+        // against a tail-only truncation that leaves the watermark
+        // envelope parseable while erasing earlier rows (round-13
+        // medium finding).
+        !consumed.iter().any(|(id, nonce, watermark, line_count)| {
+            (*id, nonce.as_str()) == (tuple.0, tuple.1.as_str())
+                && cursor >= *watermark
+                && live_line_count >= *line_count
+        })
+    });
+    if all.is_empty() {
+        // Every DB marker has a fresh, satisfying sidecar entry — the
+        // steady state. Cache the fingerprint so subsequent ticks skip
+        // the sidecar read and line-count scan; a peer process that
+        // adds a marker afterwards will bump the fingerprint and force
+        // a re-validate. Cleared the next time we rewrite the log.
+        *validated = Some(fingerprint);
+    } else {
+        // Pending markers — leave the cache untouched (or stale) so
+        // we revisit on the next tick.
+        *validated = None;
+    }
+    Ok(all)
+}
+
+/// Cheap DB-state fingerprint over `consent_mirror_resets` used to
+/// invalidate `resets_validated_fingerprint` on cross-process changes.
+///
+/// A new reset marker (e.g., applying migration 0022 in a peer
+/// process) bumps `count` and typically `max_migration_id`, so a cache
+/// keyed on this tuple flips automatically. A missing table (legacy
+/// connection that never ran 0021) yields `(0, None)`.
+fn db_resets_fingerprint(conn: &Connection) -> Result<ResetsFingerprint, MirrorError> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'consent_mirror_resets'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StoreError::from)?;
+    if exists == 0 {
+        return Ok(ResetsFingerprint {
+            count: 0,
+            max_migration_id: None,
+        });
+    }
+    let (count, max_migration_id): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(migration_id) FROM consent_mirror_resets",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(StoreError::from)?;
+    Ok(ResetsFingerprint {
+        count,
+        max_migration_id,
+    })
+}
+
+/// Count newline-terminated lines in the log. Returns 0 if the file is
+/// missing. Used to detect a log rollback that the watermark check
+/// alone cannot catch — a truncate-to-tail that preserves the last
+/// well-formed envelope leaves `recover_cursor_from_log` reporting the
+/// recorded watermark, but the line count drops.
+fn count_log_lines(path: &Path) -> std::io::Result<u64> {
+    match File::open(path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let mut n: u64 = 0;
+            for line in reader.lines() {
+                let _ = line?;
+                n = n.saturating_add(1);
+            }
+            Ok(n)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// Mark the given `(migration_id, db_nonce, watermark, line_count)`
+/// tuples as consumed by this mirror. Persists to the per-mirror
+/// sidecar (atomic tmp+rename, fsynced, parent dir fsynced) — the DB
+/// row is intentionally untouched so peer mirrors can still observe
+/// and replay it.
+///
+/// `watermark` is the highest rowid the replay that produced this
+/// consumption actually serialized; `line_count` is the live log's
+/// line count at the moment of consumption (must be measured AFTER
+/// `rebuild_log_to`). Subsequent ticks compare the live cursor and
+/// live line count against these values to detect post-consumption
+/// rollbacks (round-4 medium finding + round-13 strengthening). A new
+/// entry replaces any older entry for the same `(migration_id,
+/// db_nonce)` so both fields always reflect the most recent successful
+/// replay.
+fn mark_mirror_resets_consumed(
+    resets_consumed_path: &Path,
+    entries: &[(i64, String, i64, u64)],
+) -> Result<(), MirrorError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut existing = read_resets_consumed_sidecar(resets_consumed_path)?;
+    for entry in entries {
+        // Replace any prior entry for the same (migration_id,
+        // db_nonce) — keep one row per DB-bound marker, with the
+        // newest watermark + line_count winning.
+        existing.retain(|(id, nonce, _, _)| (*id, nonce.as_str()) != (entry.0, entry.1.as_str()));
+        existing.push(entry.clone());
+    }
+    write_resets_consumed_sidecar(resets_consumed_path, &existing)
+}
+
+/// Read the per-mirror reset-consumption sidecar. Missing file → empty
+/// vec (no resets consumed yet).
+///
+/// Format: each non-empty line is
+/// `migration_id:db_nonce:watermark_rowid:line_count`, where
+/// `migration_id`, `watermark_rowid`, and `line_count` parse as
+/// integers (`line_count` as `u64`) and `db_nonce` is a 32-char lower
+/// hex string (minted by migration 0021 via `randomblob(16)`).
+/// `watermark_rowid` is the highest rowid the replay that produced
+/// this entry serialized; `line_count` is the live log's line count
+/// immediately after that replay. The caller compares both against
+/// the live state to detect post-consumption log rollbacks (round-4
+/// watermark + round-13 line-count strengthening: a tail-only
+/// truncation that leaves the watermark envelope parseable would
+/// satisfy the watermark check but drop the line count).
+///
+/// Tolerance: lines that don't match the expected four-field shape
+/// — including the round-2 bare-`migration_id` format, the round-3
+/// two-field `migration_id:applied_at`, the round-4 three-field
+/// `migration_id:applied_at:watermark` (middle decimal-parses), and
+/// the round-12 three-field `migration_id:db_nonce:watermark` (no
+/// `line_count`) — are silently skipped. A skipped line cannot match
+/// any DB tuple, which forces the next tick to replay (the safe
+/// default; the DB is still the source of truth for "a reset was
+/// needed"). I/O errors propagate; parse errors do not.
+fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, String, i64, u64)>, MirrorError> {
+    match File::open(path) {
+        Ok(file) => {
+            let reader = BufReader::new(file);
+            let mut out = Vec::new();
+            for line in reader.lines() {
+                let line = line?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = trimmed.splitn(4, ':').collect();
+                if parts.len() < 4 {
+                    // Legacy 1/2/3-field formats lack a line_count
+                    // (and possibly a watermark / nonce); treat as
+                    // unknown log state and skip so the next tick
+                    // force-replays.
+                    continue;
+                }
+                let nonce = parts[1].trim();
+                // Reject the round-4 `applied_at`-bound format: its
+                // middle field is a decimal integer (millis-since-epoch),
+                // never a hex nonce. A 32-char lowercase hex string
+                // never parses cleanly as i64, so an i64::parse success
+                // on the middle field is a reliable round-4 signal.
+                if nonce.parse::<i64>().is_ok() {
+                    continue;
+                }
+                if let (Ok(id), Ok(watermark), Ok(line_count)) = (
+                    parts[0].trim().parse::<i64>(),
+                    parts[2].trim().parse::<i64>(),
+                    parts[3].trim().parse::<u64>(),
+                ) {
+                    out.push((id, nonce.to_owned(), watermark, line_count));
+                }
+            }
+            Ok(out)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Write the consumed sidecar atomically. Same pattern as
+/// `write_cursor_hint`: write tmp, fsync, rename, fsync parent. Each
+/// entry is serialized as
+/// `migration_id:db_nonce:watermark_rowid:line_count` on its own line.
+fn write_resets_consumed_sidecar(
+    path: &Path,
+    entries: &[(i64, String, i64, u64)],
+) -> Result<(), MirrorError> {
+    let tmp = path.with_extension("mirror_resets_consumed.tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        for (id, nonce, watermark, line_count) in entries {
+            writeln!(f, "{id}:{nonce}:{watermark}:{line_count}")?;
+        }
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;

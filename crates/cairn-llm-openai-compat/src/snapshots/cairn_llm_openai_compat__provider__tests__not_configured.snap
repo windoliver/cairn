@@ -1,0 +1,5 @@
+---
+source: crates/cairn-llm-openai-compat/src/provider.rs
+expression: "LlmError::NotConfigured\n{ remediation: \"cairn config set llm.provider ollama\".into(), }.to_string()"
+---
+llm.not_configured: cairn config set llm.provider ollama

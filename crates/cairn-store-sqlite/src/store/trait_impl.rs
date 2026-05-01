@@ -6,8 +6,9 @@
 
 use async_trait::async_trait;
 use cairn_core::contract::memory_store::{
-    Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage, MemoryStore,
-    MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason, UpsertOutcome,
+    Edge, EdgeDir, EdgeKey, IndexStats, KeywordSearchArgs, KeywordSearchPage, ListArgs, ListPage,
+    MemoryStore, MemoryStoreCapabilities, RecordVersion, StoreError, TombstoneReason,
+    UpsertOutcome,
 };
 use cairn_core::contract::version::VersionRange;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
@@ -99,5 +100,12 @@ impl MemoryStore for SqliteMemoryStore {
             return not_initialized("search_keyword");
         }
         self.do_search_keyword(args).await.map_err(Into::into)
+    }
+
+    async fn index_stats(&self) -> Result<IndexStats, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("index_stats");
+        }
+        self.do_index_stats().await.map_err(Into::into)
     }
 }

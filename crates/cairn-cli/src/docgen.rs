@@ -57,7 +57,7 @@ pub enum DocgenError {
     Json(#[from] serde_json::Error),
     /// YAML rendering failed.
     #[error("yaml: {0}")]
-    Yaml(#[from] serde_yml::Error),
+    Yaml(#[from] yaml_serde::Error),
     /// Cargo metadata could not be collected.
     #[error("cargo metadata: {0}")]
     Metadata(String),
@@ -265,7 +265,7 @@ fn emit_command_pages(
 }
 
 fn emit_config_defaults(files: &mut Vec<GeneratedFile>) -> Result<(), DocgenError> {
-    let yaml = serde_yml::to_string(&CairnConfig::default())?;
+    let yaml = yaml_serde::to_string(&CairnConfig::default())?;
     let mut out = generated_doc("Config Defaults");
     out.push_str("Generated from `CairnConfig::default()`.\n\n");
     out.push_str("```yaml\n");

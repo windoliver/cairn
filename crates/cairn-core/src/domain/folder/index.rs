@@ -211,9 +211,9 @@ pub fn project_index(state: &FolderState) -> ProjectedFile {
     let _ = writeln!(frontmatter, "record_count: {}", state.records.len());
     let _ = writeln!(frontmatter, "subfolder_count: {}", state.subfolders.len());
     if let Some(purpose) = &state.effective_policy.purpose {
-        // Quote with serde_yml to avoid breaking on `:` / leading whitespace.
-        let yaml_val = serde_yml::Value::String(purpose.clone());
-        let s = serde_yml::to_string(&yaml_val)
+        // Quote with yaml_serde to avoid breaking on `:` / leading whitespace.
+        let yaml_val = yaml_serde::Value::String(purpose.clone());
+        let s = yaml_serde::to_string(&yaml_val)
             .ok()
             .and_then(|s| s.strip_prefix("---\n").map(str::to_owned).or(Some(s)))
             .unwrap_or_else(|| purpose.clone());
