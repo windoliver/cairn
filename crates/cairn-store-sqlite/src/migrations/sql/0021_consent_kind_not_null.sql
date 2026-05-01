@@ -141,7 +141,7 @@ CREATE TEMP TRIGGER __cairn_assert_legacy_rowid_trg
   BEFORE INSERT ON __cairn_assert_legacy_rowid
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) with rowid <= 0; cannot promote without changing replay order. Resolve manually before re-running migration (issue #255).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) with rowid <= 0; cannot promote without changing replay order. Repair tool tracked in issue #267; until then, resolve manually before re-running migration.');
 END;
 INSERT INTO __cairn_assert_legacy_rowid (n)
   SELECT COUNT(*) FROM consent_journal WHERE kind IS NULL AND rowid <= 0;
@@ -155,7 +155,7 @@ CREATE TEMP TRIGGER __cairn_assert_legacy_iso_trg
   BEFORE INSERT ON __cairn_assert_legacy_iso
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose decided_at cannot be rendered as RFC3339 (out-of-range UNIX millis). Resolve manually before re-running migration (issue #255).');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose decided_at cannot be rendered as RFC3339 (out-of-range UNIX millis). Repair tool tracked in issue #267; until then, resolve manually before re-running migration.');
 END;
 INSERT INTO __cairn_assert_legacy_iso (n)
   SELECT COUNT(*) FROM consent_journal
