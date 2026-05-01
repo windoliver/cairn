@@ -1,5 +1,8 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod vault_registry;
+pub use vault_registry::{VaultEntry, VaultRegistry};
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +91,7 @@ pub enum ExtractTrigger {
 #[non_exhaustive]
 pub enum LlmProvider {
     /// Any `OpenAI`-compatible endpoint (Ollama, LM Studio, `OpenAI`, Azure).
+    #[serde(alias = "ollama")]
     OpenaiCompatible,
 }
 
@@ -233,7 +237,7 @@ string_enum! {
 /// `SQLite` store, no LLM, hook + IDE sensors, local tokio orchestrator,
 /// regex-only extractor chain.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CairnConfig {
     /// Vault-level configuration.
     pub vault: VaultConfig,
@@ -253,7 +257,7 @@ pub struct CairnConfig {
 
 /// Vault-level configuration (§3.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VaultConfig {
     /// Human-readable vault name.
     pub name: String,
@@ -284,7 +288,7 @@ impl Default for VaultConfig {
 
 /// Folder names and enabled kinds (§3.1 layout block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LayoutConfig {
     /// Directory name for source files.
     pub sources: String,
@@ -319,7 +323,7 @@ impl Default for LayoutConfig {
 
 /// Index file caps (§3.1 layout.index).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IndexConfig {
     /// Maximum number of lines in the index.
     pub max_lines: u32,
@@ -338,7 +342,7 @@ impl Default for IndexConfig {
 
 /// Hot-memory assembly recipe and budget (§3.1 `hot_memory`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HotMemoryConfig {
     /// Ordered steps in the assembly recipe.
     pub recipe: Vec<HotMemoryRecipeStep>,
@@ -366,7 +370,7 @@ impl Default for HotMemoryConfig {
 
 /// Store adapter selection (§4.1 plugin config).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StoreConfig {
     /// Which memory store adapter is active.
     pub kind: StoreKind,
@@ -388,7 +392,7 @@ impl Default for StoreConfig {
 /// `CapabilityUnavailable { code: "llm.not_configured" }`.
 /// Fields `model` and `api_key` support `${VAR}` interpolation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     /// Which LLM provider backend is active.
     pub provider: Option<LlmProvider>,
@@ -404,7 +408,7 @@ pub struct LlmConfig {
 
 /// Sensor enablement (§3.1 sensors block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SensorsConfig {
     /// Hook sensor configuration.
     pub hooks: SensorToggle,
@@ -429,6 +433,7 @@ impl Default for SensorsConfig {
 
 /// Simple on/off toggle for a sensor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SensorToggle {
     /// Whether this sensor is enabled.
     pub enabled: bool,
@@ -436,7 +441,7 @@ pub struct SensorToggle {
 
 /// Slack sensor configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SlackSensorConfig {
     /// Whether the Slack sensor is enabled.
     pub enabled: bool,
@@ -448,7 +453,7 @@ pub struct SlackSensorConfig {
 
 /// Workflow orchestrator selection (§4.1, §4.0 row 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WorkflowsConfig {
     /// Which workflow orchestrator is active.
     pub orchestrator: OrchestratorKind,
@@ -466,7 +471,7 @@ impl Default for WorkflowsConfig {
 
 /// Pipeline stage configuration (§5.2.a).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Extractor chain configuration.
     pub extract: ExtractConfig,
@@ -474,7 +479,7 @@ pub struct PipelineConfig {
 
 /// Extractor chain configuration (§5.2.a).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractConfig {
     /// Ordered list of extractor entries.
     pub chain: Vec<ExtractorEntry>,
@@ -495,7 +500,7 @@ impl Default for ExtractConfig {
 
 /// One entry in the extractor chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractorEntry {
     /// Which extractor worker mode is used.
     pub worker: ExtractorWorkerKind,
@@ -520,7 +525,7 @@ impl Default for ExtractorEntry {
 
 /// Resource limits for one extractor worker. `None` means unlimited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractBudget {
     /// Maximum tokens this extractor may consume.
     pub max_tokens: Option<u32>,

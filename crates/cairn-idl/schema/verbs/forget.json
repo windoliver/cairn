@@ -74,7 +74,7 @@
       "x-cairn-cli": {
         "command": "forget",
         "flags": [
-          { "name": "scope", "long": "scope", "value_source": "json" }
+          { "name": "scope", "long": "scope", "value_source": "json", "cli_exemplar": "{\"user\":\"u\"}" }
         ]
       },
       "properties": {

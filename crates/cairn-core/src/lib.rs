@@ -11,6 +11,9 @@
 pub mod config;
 pub mod contract;
 pub mod domain;
+pub mod error;
 pub mod generated;
-pub mod session;
+pub mod pipeline;
+pub mod policy_trace;
+pub mod verbs;
 pub mod verifier;

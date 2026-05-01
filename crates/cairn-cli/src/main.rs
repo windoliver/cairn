@@ -8,88 +8,19 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::config as cli_config;
-use cairn_cli::{plugins, verbs};
+use cairn_cli::{command, identity, plugins, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
-
-mod generated;
-
-fn build_command() -> clap::Command {
-    clap::Command::new("cairn")
-        .about("Cairn — agent memory framework (cairn.mcp.v1)")
-        .version(env!("CARGO_PKG_VERSION"))
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        // Eight core verbs, each with --json added.
-        .subcommand(verbs::with_json(generated::verbs::ingest_subcommand()))
-        .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
-        .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
-        .subcommand(verbs::with_json(generated::verbs::summarize_subcommand()))
-        .subcommand(verbs::with_json(generated::verbs::assemble_hot_subcommand()))
-        .subcommand(verbs::with_json(
-            generated::verbs::capture_trace_subcommand(),
-        ))
-        .subcommand(verbs::with_json(generated::verbs::lint_subcommand()))
-        .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
-        // Protocol preludes.
-        .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
-        .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
-        // Management subcommand (plugins already has --json per sub-subcommand).
-        .subcommand(plugins_subcommand())
-        .subcommand(mcp_subcommand())
-        .subcommand(bootstrap_subcommand())
+fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
+    let path = if let Ok(p) = std::env::var("CAIRN_REGISTRY") {
+        std::path::PathBuf::from(p)
+    } else {
+        cairn_cli::vault::VaultRegistryStore::default_path()?
+    };
+    Ok(cairn_cli::vault::VaultRegistryStore::new(path))
 }
-
-fn mcp_subcommand() -> clap::Command {
-    clap::Command::new("mcp").about("Start the cairn.mcp.v1 server over stdio")
-}
-
-fn bootstrap_subcommand() -> clap::Command {
-    clap::Command::new("bootstrap")
-        .about("Write a default .cairn/config.yaml to a vault directory")
-        .arg(
-            clap::Arg::new("vault-path")
-                .long("vault-path")
-                .default_value(".")
-                .value_name("PATH")
-                .help("Vault root directory (default: current directory)"),
-        )
-}
-
-fn plugins_subcommand() -> clap::Command {
-    clap::Command::new("plugins")
-        .about("Manage and inspect bundled plugins")
-        .subcommand_required(true)
-        .arg_required_else_help(true)
-        .subcommand(
-            clap::Command::new("list").about("List loaded plugins").arg(
-                clap::Arg::new("json")
-                    .long("json")
-                    .action(clap::ArgAction::SetTrue)
-                    .help("Emit JSON instead of a human-readable table"),
-            ),
-        )
-        .subcommand(
-            clap::Command::new("verify")
-                .about("Run the conformance suite against every loaded plugin")
-                .arg(
-                    clap::Arg::new("strict")
-                        .long("strict")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Treat tier-2 `pending` cases as failures"),
-                )
-                .arg(
-                    clap::Arg::new("json")
-                        .long("json")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Emit JSON instead of a human-readable report"),
-                ),
-        )
-}
-
 fn main() -> ExitCode {
-    let matches = match build_command().try_get_matches() {
+    let matches = match command::build_command().try_get_matches() {
         Ok(m) => m,
         Err(e) => {
             let _ = e.print();
@@ -103,6 +34,58 @@ fn main() -> ExitCode {
         }
     };
 
+    // Resolve --vault flag or CAIRN_VAULT env (§3.3 precedence 1 + 2).
+    // Skip for `vault` and `bootstrap` management subcommands — they operate on the
+    // registry/filesystem itself, not on a single vault's data.
+    let explicit_vault: Option<String> = matches
+        .get_one::<String>("vault")
+        .cloned()
+        .or_else(|| std::env::var("CAIRN_VAULT").ok());
+
+    let active_subcommand = matches.subcommand_name().unwrap_or("");
+    // `identity` manages vault-path internally for each subcommand; exclude
+    // from the top-level vault registry guard (which requires a named vault).
+    let needs_vault_guard = !matches!(
+        active_subcommand,
+        "vault" | "bootstrap" | "plugins" | "mcp" | "llm" | "identity"
+    );
+
+    if needs_vault_guard {
+        let store = match registry_store() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cairn: registry path error — {e:#}");
+                return ExitCode::from(78);
+            }
+        };
+        let resolve_result = cairn_cli::vault::resolve_vault(cairn_cli::vault::ResolveOpts {
+            explicit: explicit_vault.clone(),
+            cwd: std::env::current_dir().ok(),
+            store: &store,
+        });
+        match resolve_result {
+            Ok(_vault_path) => {
+                // vault_path resolved; will be passed to store context in #9
+            }
+            Err(e) => {
+                // Hard-fail only for NotFound (explicit name that isn't registered).
+                // NoneResolved is tolerated — all verbs return Internal anyway until #9.
+                // NOTE: downcast_ref works only when no .context() wraps resolve_vault's error.
+                // If #9 adds .context(...) at this call site, NotFound will silently become
+                // tolerated. Update this guard when wiring the store.
+                let is_not_found = e
+                    .downcast_ref::<cairn_cli::vault::VaultError>()
+                    .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NotFound { .. }));
+                if is_not_found {
+                    eprintln!("cairn: {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+                // NoneResolved and other errors are tolerated until the store is wired (#9).
+                let _e = e;
+            }
+        }
+    }
+
     match matches.subcommand() {
         Some(("ingest", sub)) => verbs::ingest::run(sub),
         Some(("search", sub)) => verbs::search::run(sub),
@@ -115,8 +98,12 @@ fn main() -> ExitCode {
         Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
-        Some(("mcp", _sub)) => run_mcp(),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
+        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
+        Some(("vault", sub)) => run_vault(sub),
+        Some(("skill", sub)) => run_skill(sub),
+        Some(("llm", sub)) => run_llm(sub),
+        Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
             // Defensive: clap's subcommand_required(true) prevents this in practice.
@@ -126,46 +113,95 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_mcp() -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            eprintln!("cairn mcp: failed to start async runtime: {e}");
-            return ExitCode::from(69);
-        }
-    };
-
-    match runtime.block_on(cairn_mcp::serve_stdio()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("cairn mcp: {e}");
-            ExitCode::from(69)
-        }
-    }
-}
-
 fn run_bootstrap(matches: &ArgMatches) -> ExitCode {
     let vault_path = std::path::PathBuf::from(
         matches
             .get_one::<String>("vault-path")
-            .expect("vault-path has a default value"),
+            .expect("invariant: vault-path has a default value"),
     );
+    let json = matches.get_flag("json");
+    let force = matches.get_flag("force");
 
-    match cli_config::write_default(&vault_path) {
-        Ok(()) => {
-            println!(
-                "cairn bootstrap: wrote default config to {}",
-                vault_path.join(".cairn/config.yaml").display()
-            );
+    let opts = cairn_cli::vault::BootstrapOpts { vault_path, force };
+
+    match cairn_cli::vault::bootstrap(&opts) {
+        Ok(receipt) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: BootstrapReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::vault::render_human(&receipt));
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
-            // EX_CONFIG (78) — bad config or file already exists
             eprintln!("cairn bootstrap: {e:#}");
-            ExitCode::from(78)
+            // EX_DATAERR (65) — vault.id is lost; DB or binding sentinel
+            // proves the vault was already bound. The user must recover.
+            if format!("{e:#}").contains("vault.id lost") {
+                ExitCode::from(65)
+            } else {
+                ExitCode::from(74) // EX_IOERR
+            }
+        }
+    }
+}
+
+fn run_skill(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("install", sub)) => run_skill_install(sub),
+        _ => unreachable!(
+            "clap subcommand_required(true) on skill ensures a subcommand is always present"
+        ),
+    }
+}
+
+fn run_skill_install(matches: &ArgMatches) -> ExitCode {
+    let harness = matches
+        .get_one::<cairn_cli::skill::Harness>("harness")
+        .expect("invariant: --harness is required by clap")
+        .clone();
+
+    let target_dir = if let Some(path) = matches.get_one::<String>("target-dir") {
+        std::path::PathBuf::from(path)
+    } else {
+        match cairn_cli::skill::default_target_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("cairn skill install: {e:#}");
+                return ExitCode::from(69); // EX_UNAVAILABLE
+            }
+        }
+    };
+
+    let force = matches.get_flag("force");
+    let json = matches.get_flag("json");
+
+    let opts = cairn_cli::skill::InstallOpts {
+        target_dir,
+        harness,
+        force,
+    };
+
+    match cairn_cli::skill::install(&opts) {
+        Ok(receipt) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&receipt)
+                        .expect("invariant: InstallReceipt is always serializable")
+                );
+            } else {
+                println!("{}", cairn_cli::skill::render_human(&receipt));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cairn skill install: {e:#}");
+            ExitCode::from(74) // EX_IOERR
         }
     }
 }
@@ -212,4 +248,234 @@ fn run_plugins(matches: &ArgMatches) -> ExitCode {
         }
         _ => unreachable!("clap subcommand_required(true) on plugins ensures a subcommand is set"),
     }
+}
+
+// Four subcommand branches (add/list/switch/remove) exceed the lint limit; split would add indirection for no gain.
+#[allow(clippy::too_many_lines)]
+fn run_vault(matches: &ArgMatches) -> ExitCode {
+    let store = match registry_store() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cairn vault: registry path error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    match matches.subcommand() {
+        Some(("add", sub)) => {
+            let path = std::path::PathBuf::from(
+                sub.get_one::<String>("path")
+                    .expect("invariant: path is required"),
+            );
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: --name is required")
+                .clone();
+            let label = sub.get_one::<String>("label").cloned();
+            let json = sub.get_flag("json");
+
+            match cairn_cli::vault::add_vault(&store, path, name, label) {
+                Ok(entry) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&entry)
+                                .expect("invariant: VaultEntry always serializes")
+                        );
+                    } else {
+                        println!(
+                            "cairn vault add: registered '{}' → {}",
+                            entry.name, entry.path
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cairn vault add: {e:#}");
+                    ExitCode::from(78) // EX_CONFIG
+                }
+            }
+        }
+        Some(("list", sub)) => {
+            let json = sub.get_flag("json");
+            let reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault list: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if json {
+                let arr: Vec<serde_json::Value> = reg
+                    .vaults
+                    .iter()
+                    .map(|v| {
+                        let mut obj = serde_json::to_value(v)
+                            .expect("invariant: VaultEntry always serializes to JSON");
+                        obj["is_default"] =
+                            serde_json::Value::Bool(reg.default.as_deref() == Some(&v.name));
+                        obj
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&arr)
+                        .expect("invariant: JSON array always serializes")
+                );
+            } else if reg.vaults.is_empty() {
+                println!("cairn vault list: no vaults registered");
+                println!("  add one with: cairn vault add <path> --name <name>");
+            } else {
+                for v in &reg.vaults {
+                    let marker = if reg.default.as_deref() == Some(&v.name) {
+                        "* "
+                    } else {
+                        "  "
+                    };
+                    let label = v
+                        .label
+                        .as_deref()
+                        .map(|l| format!("  — {l}"))
+                        .unwrap_or_default();
+                    println!("{marker}{:<20} {}{}", v.name, v.path, label);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Some(("switch", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault switch: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!("cairn vault switch: vault '{name}' not found — run `cairn vault list`");
+                return ExitCode::from(78);
+            }
+            reg.default = Some(name.clone());
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault switch: {e:#}");
+                return ExitCode::from(74); // EX_IOERR
+            }
+            if json {
+                println!("{}", serde_json::json!({ "default": name }));
+            } else {
+                println!("cairn vault switch: default vault is now '{name}'");
+            }
+            ExitCode::SUCCESS
+        }
+        Some(("remove", sub)) => {
+            let name = sub
+                .get_one::<String>("name")
+                .expect("invariant: name is required")
+                .clone();
+            let json = sub.get_flag("json");
+
+            let mut reg = match store.load() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("cairn vault remove: {e:#}");
+                    return ExitCode::from(78);
+                }
+            };
+            if !reg.contains(&name) {
+                eprintln!("cairn vault remove: vault '{name}' not found — run `cairn vault list`");
+                return ExitCode::from(78);
+            }
+            if reg.default.as_deref() == Some(&name) {
+                reg.default = None;
+            }
+            reg.vaults.retain(|v| v.name != name);
+            if let Err(e) = store.save(&reg) {
+                eprintln!("cairn vault remove: {e:#}");
+                return ExitCode::from(74);
+            }
+            if json {
+                println!("{}", serde_json::json!({ "removed": name }));
+            } else {
+                println!(
+                    "cairn vault remove: removed '{name}' from registry (vault files untouched)"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        _ => unreachable!("clap subcommand_required(true) on vault"),
+    }
+}
+
+fn run_llm(matches: &ArgMatches) -> ExitCode {
+    match matches.subcommand() {
+        Some(("probe", sub)) => run_llm_probe(sub),
+        _ => unreachable!("clap subcommand_required(true) on llm"),
+    }
+}
+
+fn run_llm_probe(matches: &ArgMatches) -> ExitCode {
+    let json = matches.get_flag("json");
+    let prompt = matches.get_one::<String>("prompt").cloned();
+    let schema_file = matches.get_one::<String>("schema-file").cloned();
+
+    // Load config from cwd. The probe is a vault-agnostic diagnostic;
+    // it reads `.cairn/config.yaml` from the current directory if present,
+    // otherwise uses defaults (which produces NotConfigured).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let config = match cairn_cli::config::load(&cwd, &cairn_cli::config::CliOverrides::default()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cairn llm probe: config error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    // Load schema file if provided. Compile it now (before any network
+    // call) so an invalid schema fails fast as a config error and never
+    // reaches the provider.
+    let schema: Option<serde_json::Value> = match schema_file {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(v) => {
+                    if let Err(e) = jsonschema::validator_for(&v) {
+                        eprintln!("cairn llm probe: invalid JSON schema in {path}: {e}");
+                        return ExitCode::from(78); // EX_CONFIG
+                    }
+                    Some(v)
+                }
+                Err(e) => {
+                    eprintln!("cairn llm probe: schema parse error in {path}: {e}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+            },
+            Err(e) => {
+                eprintln!("cairn llm probe: cannot read schema file {path}: {e}");
+                return ExitCode::from(78);
+            }
+        },
+        None => None,
+    };
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cairn llm probe: tokio init error — {e}");
+            return ExitCode::from(70); // EX_SOFTWARE
+        }
+    };
+
+    runtime.block_on(cairn_cli::llm::run_probe(
+        &config,
+        json,
+        prompt.as_deref(),
+        schema,
+    ))
 }

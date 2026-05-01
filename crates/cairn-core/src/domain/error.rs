@@ -100,4 +100,73 @@ pub enum DomainError {
         /// Name of the empty field.
         field: &'static str,
     },
+
+    /// A `CaptureEvent` (§5.0.a / §9) was malformed — missing fields, bad
+    /// shape for its [`crate::domain::SourceFamily`] variant, or violated
+    /// an internal invariant unrelated to identity/scope/timestamps.
+    #[error("capture: {message}")]
+    MalformedCapture {
+        /// Specific reason the capture event was rejected.
+        message: String,
+    },
+
+    /// A [`crate::domain::SourceFamily`] string did not parse to one of the
+    /// declared families (§9.1).
+    #[error("source_family: unsupported family `{value}`")]
+    UnsupportedSourceFamily {
+        /// Family string that failed to parse.
+        value: String,
+    },
+
+    /// A [`crate::domain::CaptureMode`] string did not parse to `auto`,
+    /// `explicit`, or `proactive` (§5.0.a).
+    #[error("capture_mode: unsupported mode `{value}`")]
+    UnsupportedCaptureMode {
+        /// Mode string that failed to parse.
+        value: String,
+    },
+
+    /// A `SensorLabel` (the `body` portion of a `snr:` identity, §9.1) was
+    /// not present in the declared P0 manifest. Sensors may not emit
+    /// `CaptureEvent`s under labels they have not registered.
+    #[error("sensor_label: undeclared label `{label}`")]
+    UndeclaredSensor {
+        /// Label string that failed manifest validation.
+        label: String,
+    },
+
+    /// The `actor_chain` author for a [`crate::domain::CaptureMode`] did
+    /// not match the §5.0.a attribution rule
+    /// (Mode A → sensor, Mode B → human, Mode C → agent).
+    #[error("attribution: {message}")]
+    AttributionMismatch {
+        /// Specific reason the mode/author pairing was rejected.
+        message: String,
+    },
+
+    /// A payload hash string did not match `sha256:<64 lowercase hex>` —
+    /// the same shape `CanonicalRecordHash` and `target_hash` use.
+    #[error("payload_hash: {message}")]
+    InvalidPayloadHash {
+        /// Specific reason the hash string was rejected.
+        message: String,
+    },
+
+    /// A `SessionId` (§8.1) was empty or contained characters outside
+    /// `[A-Za-z0-9._:-]`.
+    #[error("session_id: {message}")]
+    InvalidSessionId {
+        /// Specific reason the session identifier was rejected.
+        message: String,
+    },
+
+    /// A session `project_root` failed normalization (§8.1) — most often
+    /// because it was a relative path. Two callers in different CWDs
+    /// passing the same relative string would otherwise collapse into one
+    /// session, breaking the `(user, agent, project_root)` isolation rule.
+    #[error("project_root: {message}")]
+    InvalidProjectRoot {
+        /// Specific reason the project root was rejected.
+        message: String,
+    },
 }

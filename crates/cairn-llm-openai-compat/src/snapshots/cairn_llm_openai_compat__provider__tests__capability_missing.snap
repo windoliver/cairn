@@ -1,0 +1,5 @@
+---
+source: crates/cairn-llm-openai-compat/src/provider.rs
+expression: "LlmError::CapabilityMissing { capability: \"json_mode\".into(), }.to_string()"
+---
+llm.capability_missing: json_mode
