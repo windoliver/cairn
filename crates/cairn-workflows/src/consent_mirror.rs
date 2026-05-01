@@ -273,12 +273,23 @@ impl ConsentLogMaterializer {
         // in-memory cursor to the rebuild's high-water mark, and append
         // the migration_id to the local sidecar. The lock guard above
         // serializes us against any peer mirror.
-        let pending_resets = read_pending_mirror_resets(conn, &self.resets_consumed_path)?;
+        let pending_resets =
+            read_pending_mirror_resets(conn, &self.resets_consumed_path, self.cursor)?;
         if !pending_resets.is_empty() {
             let rebuild = rebuild_log_to(&self.log_path, conn)?;
             self.cursor = rebuild.high_water;
             let _ = write_cursor_hint(&self.cursor_path, self.cursor);
-            mark_mirror_resets_consumed(&self.resets_consumed_path, &pending_resets)?;
+            // Watermark: the highest rowid the rebuild actually serialized.
+            // Future ticks compare the live cursor against this value; a
+            // cursor that regresses below the watermark (vault rollback,
+            // backup restore without DB) forces a replay even though the
+            // sidecar still claims "consumed" — see round-4 medium finding.
+            let watermark = rebuild.high_water;
+            let consumed: Vec<(i64, i64, i64)> = pending_resets
+                .into_iter()
+                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .collect();
+            mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
             return Ok(rebuild.written);
         }
 
@@ -345,9 +356,14 @@ impl ConsentLogMaterializer {
         // 0021-style instruction to replay from zero. Per-mirror
         // consumption (Phase-B finding 2): peers with their own
         // sidecars still see and replay the marker independently.
-        let pending = read_pending_mirror_resets(conn, &resets_consumed_path)?;
+        let pending = read_pending_mirror_resets(conn, &resets_consumed_path, cursor)?;
         if !pending.is_empty() {
-            mark_mirror_resets_consumed(&resets_consumed_path, &pending)?;
+            let watermark = rebuild.high_water;
+            let consumed: Vec<(i64, i64, i64)> = pending
+                .into_iter()
+                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .collect();
+            mark_mirror_resets_consumed(&resets_consumed_path, &consumed)?;
         }
 
         Ok(Self {
@@ -382,9 +398,14 @@ impl ConsentLogMaterializer {
         // supersedes any pending 0021-style replay instruction.
         // Consumption is per-mirror (Phase-B finding 2): the sidecar
         // holds the local truth, leaving peers free to replay.
-        let pending = read_pending_mirror_resets(conn, &self.resets_consumed_path)?;
+        let pending = read_pending_mirror_resets(conn, &self.resets_consumed_path, self.cursor)?;
         if !pending.is_empty() {
-            mark_mirror_resets_consumed(&self.resets_consumed_path, &pending)?;
+            let watermark = rebuild.high_water;
+            let consumed: Vec<(i64, i64, i64)> = pending
+                .into_iter()
+                .map(|(id, applied_at)| (id, applied_at, watermark))
+                .collect();
+            mark_mirror_resets_consumed(&self.resets_consumed_path, &consumed)?;
         }
         Ok(rebuild.written)
     }
@@ -498,9 +519,21 @@ fn write_cursor_hint(path: &Path, rowid: i64) -> Result<(), MirrorError> {
 /// values for the same `migration_id`. A stale sidecar that records
 /// only the `migration_id` therefore cannot suppress a replay against a
 /// fresh DB whose marker has a different `applied_at`.
+///
+/// Log-state binding (round-4 finding): each sidecar entry also carries
+/// the `watermark_rowid` — the highest rowid the previous replay
+/// actually serialized. The current `cursor` must be `>= watermark` for
+/// the entry to count as consumed. If the cursor regressed below the
+/// watermark (e.g., the vault file was restored from a backup without
+/// also restoring the DB, or the log was truncated to a valid prefix),
+/// the sidecar still claims consumption but the on-disk audit no longer
+/// covers the migrated rows — force a replay. Sidecar lines that lack
+/// a watermark (legacy two-field or bare-`migration_id` formats) are
+/// treated the same way: unknown state → unsafe to honor → replay.
 fn read_pending_mirror_resets(
     conn: &Connection,
     resets_consumed_path: &Path,
+    cursor: i64,
 ) -> Result<Vec<(i64, i64)>, MirrorError> {
     // Tolerate the table being absent (e.g., a legacy connection that
     // somehow never ran 0021): no resets to honor.
@@ -526,26 +559,45 @@ fn read_pending_mirror_resets(
         all.push(row.map_err(StoreError::from)?);
     }
     let consumed = read_resets_consumed_sidecar(resets_consumed_path)?;
-    all.retain(|tuple| !consumed.contains(tuple));
+    all.retain(|tuple| {
+        // A DB row is considered consumed only when there's a sidecar
+        // entry for the matching (migration_id, applied_at) AND the
+        // recorded watermark is still <= the live cursor. A cursor
+        // below the watermark means the log was rolled back behind the
+        // sidecar's claim — force replay.
+        !consumed
+            .iter()
+            .any(|(id, applied, watermark)| (*id, *applied) == *tuple && cursor >= *watermark)
+    });
     Ok(all)
 }
 
-/// Mark the given `(migration_id, applied_at)` tuples as consumed by
-/// this mirror. Persists to the per-mirror sidecar (atomic tmp+rename,
-/// fsynced, parent dir fsynced) — the DB row is intentionally untouched
-/// so peer mirrors can still observe and replay it.
+/// Mark the given `(migration_id, applied_at, watermark)` tuples as
+/// consumed by this mirror. Persists to the per-mirror sidecar (atomic
+/// tmp+rename, fsynced, parent dir fsynced) — the DB row is
+/// intentionally untouched so peer mirrors can still observe and
+/// replay it.
+///
+/// `watermark` is the highest rowid the replay that produced this
+/// consumption actually serialized. Subsequent ticks compare the live
+/// cursor against this value to detect post-consumption rollbacks
+/// (round-4 medium finding). A new entry replaces any older entry for
+/// the same `(migration_id, applied_at)` so the watermark always
+/// reflects the most recent successful replay.
 fn mark_mirror_resets_consumed(
     resets_consumed_path: &Path,
-    entries: &[(i64, i64)],
+    entries: &[(i64, i64, i64)],
 ) -> Result<(), MirrorError> {
     if entries.is_empty() {
         return Ok(());
     }
     let mut existing = read_resets_consumed_sidecar(resets_consumed_path)?;
     for entry in entries {
-        if !existing.contains(entry) {
-            existing.push(*entry);
-        }
+        // Replace any prior entry for the same (migration_id,
+        // applied_at) — keep one row per DB-bound marker, with the
+        // newest watermark winning.
+        existing.retain(|(id, applied, _)| (*id, *applied) != (entry.0, entry.1));
+        existing.push(*entry);
     }
     write_resets_consumed_sidecar(resets_consumed_path, &existing)
 }
@@ -553,18 +605,20 @@ fn mark_mirror_resets_consumed(
 /// Read the per-mirror reset-consumption sidecar. Missing file → empty
 /// vec (no resets consumed yet).
 ///
-/// Format: each non-empty line is `migration_id:applied_at`, both
-/// parsed as `i64`. The parser splits on the first `:` and treats the
-/// remainder as the opaque `applied_at` value, leaving room for future
-/// format extensions that append additional `:`-delimited fields.
+/// Format: each non-empty line is
+/// `migration_id:applied_at:watermark_rowid`, all parsed as `i64`.
+/// `watermark_rowid` is the highest rowid the replay that produced
+/// this entry serialized; the caller compares it against the live
+/// cursor to detect post-consumption log rollbacks (round-4 finding).
 ///
-/// Tolerance: lines that don't match the expected shape — including
-/// the legacy bare-`migration_id` format from earlier commits in this
-/// PR — are silently skipped. A skipped line cannot match any DB
-/// `(migration_id, applied_at)` tuple, which forces the next tick to
-/// replay (the safe default; the DB is still the source of truth for
-/// "a reset was needed"). I/O errors propagate; parse errors do not.
-fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64)>, MirrorError> {
+/// Tolerance: lines that don't match the expected three-field shape
+/// — including the legacy bare-`migration_id` format and the round-3
+/// two-field `migration_id:applied_at` format — are silently skipped.
+/// A skipped line cannot match any DB tuple, which forces the next
+/// tick to replay (the safe default; the DB is still the source of
+/// truth for "a reset was needed"). I/O errors propagate; parse
+/// errors do not.
+fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64, i64)>, MirrorError> {
     match File::open(path) {
         Ok(file) => {
             let reader = BufReader::new(file);
@@ -575,18 +629,20 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64)>, MirrorEr
                 if trimmed.is_empty() {
                     continue;
                 }
-                let Some((id_str, applied_str)) = trimmed.split_once(':') else {
-                    // Legacy bare-`migration_id` lines (no colon) are
-                    // intentionally skipped so they cannot match any
-                    // (migration_id, applied_at) tuple → replay is
-                    // forced.
+                let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
+                if parts.len() < 3 {
+                    // Legacy bare-`migration_id` and round-3
+                    // two-field `migration_id:applied_at` lines lack a
+                    // watermark; treat as unknown log state and skip
+                    // so the next tick force-replays.
                     continue;
-                };
-                if let (Ok(id), Ok(applied)) = (
-                    id_str.trim().parse::<i64>(),
-                    applied_str.trim().parse::<i64>(),
+                }
+                if let (Ok(id), Ok(applied), Ok(watermark)) = (
+                    parts[0].trim().parse::<i64>(),
+                    parts[1].trim().parse::<i64>(),
+                    parts[2].trim().parse::<i64>(),
                 ) {
-                    out.push((id, applied));
+                    out.push((id, applied, watermark));
                 }
             }
             Ok(out)
@@ -598,13 +654,17 @@ fn read_resets_consumed_sidecar(path: &Path) -> Result<Vec<(i64, i64)>, MirrorEr
 
 /// Write the consumed sidecar atomically. Same pattern as
 /// `write_cursor_hint`: write tmp, fsync, rename, fsync parent. Each
-/// entry is serialized as `migration_id:applied_at` on its own line.
-fn write_resets_consumed_sidecar(path: &Path, entries: &[(i64, i64)]) -> Result<(), MirrorError> {
+/// entry is serialized as `migration_id:applied_at:watermark_rowid`
+/// on its own line.
+fn write_resets_consumed_sidecar(
+    path: &Path,
+    entries: &[(i64, i64, i64)],
+) -> Result<(), MirrorError> {
     let tmp = path.with_extension("mirror_resets_consumed.tmp");
     {
         let mut f = File::create(&tmp)?;
-        for (id, applied) in entries {
-            writeln!(f, "{id}:{applied}")?;
+        for (id, applied, watermark) in entries {
+            writeln!(f, "{id}:{applied}:{watermark}")?;
         }
         f.sync_all()?;
     }

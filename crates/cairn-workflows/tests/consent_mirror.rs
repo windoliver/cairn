@@ -380,11 +380,13 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     // Pre-mark the migration-0021 reset row as consumed in this
     // mirror's per-mirror sidecar (Phase-B finding 2 moved consumption
     // tracking out of the DB; round-3 finding binds the entry to the
-    // DB instance via `applied_at`), so the first tick processes
-    // normally.
+    // DB instance via `applied_at`; round-4 finding adds a
+    // `watermark_rowid` so a cursor below that rowid forces replay).
+    // Seed watermark=0 so the initial cursor (also 0) satisfies
+    // `cursor >= watermark` and the first tick processes normally.
     let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
     let applied_at = applied_at_for(&conn, 21);
-    std::fs::write(&resets_consumed, format!("21:{applied_at}\n")).expect("seed sidecar");
+    std::fs::write(&resets_consumed, format!("21:{applied_at}:0\n")).expect("seed sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("first tick");
@@ -407,12 +409,12 @@ fn tick_rebuilds_when_migration_0021_reset_marker_unconsumed() {
     assert_eq!(lines.len(), 2);
 
     // The reset row must now be in this mirror's sidecar; another tick
-    // is a no-op.
+    // is a no-op. Watermark = high_water of the replay = 2 (rowids 1,2).
     let sidecar = std::fs::read_to_string(&resets_consumed).expect("sidecar");
-    let expected = format!("21:{applied_at}");
+    let expected = format!("21:{applied_at}:2");
     assert!(
         sidecar.lines().any(|l| l.trim() == expected),
-        "sidecar must record (21,{applied_at}) as consumed: {sidecar:?}"
+        "sidecar must record (21,{applied_at},watermark=2) as consumed: {sidecar:?}"
     );
 
     let n = mirror.tick(&conn).expect("idempotent tick");
@@ -437,7 +439,7 @@ fn tick_surfaces_log_corrupt_when_reset_pending_and_log_damaged() {
         let applied_at = applied_at_for(&conn, 21);
         std::fs::write(
             dir.path().join("consent.mirror_resets_consumed"),
-            format!("21:{applied_at}\n"),
+            format!("21:{applied_at}:0\n"),
         )
         .expect("seed sidecar");
         append(&conn, &forget_event("c-1", &h(1))).expect("a1");
@@ -493,7 +495,7 @@ fn tick_replays_reset_when_log_intact() {
     let sidecar = std::fs::read_to_string(dir.path().join("consent.mirror_resets_consumed"))
         .expect("sidecar written");
     let applied_at = applied_at_for(&conn, 21);
-    let expected = format!("21:{applied_at}");
+    let expected = format!("21:{applied_at}:2");
     assert!(sidecar.lines().any(|l| l.trim() == expected));
 
     let n = mirror.tick(&conn).expect("idempotent");
@@ -518,7 +520,7 @@ fn reset_marker_consumed_per_mirror_not_per_db() {
     let n_a = mirror_a.tick(&conn).expect("tick a");
     assert_eq!(n_a, 2);
     let applied_at = applied_at_for(&conn, 21);
-    let expected = format!("21:{applied_at}");
+    let expected = format!("21:{applied_at}:2");
     assert!(
         std::fs::read_to_string(dir_a.path().join("consent.mirror_resets_consumed"))
             .expect("a sidecar")
@@ -543,6 +545,127 @@ fn reset_marker_consumed_per_mirror_not_per_db() {
             .lines()
             .any(|l| l.trim() == expected),
         "mirror B must also record consumption locally"
+    );
+}
+
+#[test]
+fn reset_marker_replays_when_cursor_regresses_below_watermark() {
+    // Round-4 medium finding: the consumption sidecar is bound to the
+    // log state via a `watermark_rowid`. If the on-disk log is rolled
+    // back below that watermark (e.g., vault restored from a backup
+    // without the DB), the sidecar still claims "consumed" but the
+    // audit no longer covers the migrated rows. The next tick must
+    // replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // First tick replays the reset and writes sidecar `21:T:2`.
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let applied_at = applied_at_for(&conn, 21);
+    let after_first = std::fs::read_to_string(&resets_consumed).expect("after first");
+    assert!(
+        after_first
+            .lines()
+            .any(|l| l.trim() == format!("21:{applied_at}:2")),
+        "watermark must be the high_water of the replay (2): {after_first:?}"
+    );
+
+    // Roll the log back: keep only the first envelope. The sidecar
+    // still claims watermark=2 but the on-disk audit only goes to
+    // rowid 1.
+    let lines = mirror.read_lines().expect("read lines");
+    let truncated = format!("{}\n", lines[0]);
+    std::fs::write(dir.path().join("consent.log"), &truncated).expect("rollback log");
+    // Drop the materializer so the next tick reopens against the
+    // rolled-back log and recovers cursor=1.
+    drop(mirror);
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("reopen");
+    assert_eq!(mirror.cursor(), 1, "recovered cursor must reflect rollback");
+
+    let n = mirror.tick(&conn).expect("re-tick after rollback");
+    assert_eq!(
+        n, 2,
+        "cursor below watermark must force replay even though sidecar claims consumed"
+    );
+    assert_eq!(mirror.read_lines().expect("after replay").len(), 2);
+}
+
+#[test]
+fn reset_marker_consumption_survives_normal_cursor_advance() {
+    // Round-4 medium finding companion: when the cursor advances
+    // *past* the watermark via normal appends, the sidecar entry must
+    // continue to suppress replays. Watermark forces replay on
+    // regression, not on growth.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("first tick");
+    assert_eq!(n, 2);
+    let watermark_after = mirror.cursor();
+    assert_eq!(watermark_after, 2);
+
+    // Normal append advances cursor past the watermark.
+    append(&conn, &forget_event("c-3", &h(3))).expect("a3");
+    let n = mirror.tick(&conn).expect("normal tick");
+    assert_eq!(n, 1, "normal append, no replay");
+    assert!(mirror.cursor() > watermark_after);
+
+    // Idempotent — sidecar still suppresses replay.
+    let n = mirror.tick(&conn).expect("idempotent tick");
+    assert_eq!(n, 0);
+    assert_eq!(mirror.read_lines().expect("lines").len(), 3);
+}
+
+#[test]
+fn sidecar_with_two_field_legacy_format_forces_replay() {
+    // Round-4 forward-compat: lines that don't carry a watermark
+    // (legacy bare `migration_id` and round-3 `migration_id:applied_at`
+    // formats) cannot prove the log still reflects the replay. They
+    // must be treated as unknown state and skipped, forcing the next
+    // tick to replay.
+    let conn = open_in_memory().expect("open store");
+    let dir = tempdir().expect("tempdir");
+
+    append(&conn, &forget_event("c-1", &h(1))).expect("a1");
+    append(&conn, &forget_event("c-2", &h(2))).expect("a2");
+
+    // Seed the round-3 two-field format (no watermark).
+    let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
+    let applied_at = applied_at_for(&conn, 21);
+    std::fs::write(&resets_consumed, format!("21:{applied_at}\n")).expect("seed two-field sidecar");
+
+    let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open");
+    let n = mirror.tick(&conn).expect("tick");
+    assert_eq!(
+        n, 2,
+        "two-field sidecar with no watermark must not suppress replay"
+    );
+    assert_eq!(mirror.read_lines().expect("lines").len(), 2);
+
+    // Sidecar is rewritten in the new bound format.
+    let after = std::fs::read_to_string(&resets_consumed).expect("after");
+    let expected = format!("21:{applied_at}:2");
+    assert!(
+        after.lines().any(|l| l.trim() == expected),
+        "post-replay sidecar must include watermark: {after:?}"
+    );
+    assert!(
+        !after
+            .lines()
+            .any(|l| l.trim() == format!("21:{applied_at}")),
+        "two-field legacy line must not survive: {after:?}"
     );
 }
 
@@ -594,7 +717,12 @@ fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
     let stale_applied = real_applied.wrapping_add(1);
     assert_ne!(real_applied, stale_applied);
     let resets_consumed = dir.path().join("consent.mirror_resets_consumed");
-    std::fs::write(&resets_consumed, format!("21:{stale_applied}\n")).expect("seed stale sidecar");
+    // Seed in the round-4 three-field format with a watermark high
+    // enough to satisfy `cursor >= watermark` on its own — that way
+    // the replay is forced specifically by the applied_at mismatch,
+    // not by a missing watermark or a stale one.
+    std::fs::write(&resets_consumed, format!("21:{stale_applied}:0\n"))
+        .expect("seed stale sidecar");
 
     let mut mirror = ConsentLogMaterializer::open(dir.path()).expect("open mirror");
     let n = mirror.tick(&conn).expect("tick");
@@ -604,9 +732,10 @@ fn reset_marker_replays_after_db_swap_with_stale_sidecar() {
     );
     assert_eq!(mirror.read_lines().expect("lines").len(), 2);
 
-    // Sidecar must now record the *real* (migration_id, applied_at).
+    // Sidecar must now record the *real* (migration_id, applied_at,
+    // watermark). Watermark = high_water of the replay = 2.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
-    let expected = format!("21:{real_applied}");
+    let expected = format!("21:{real_applied}:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
         "post-replay sidecar must bind to the live DB's applied_at: {after:?}"
@@ -667,10 +796,11 @@ fn sidecar_with_legacy_format_forces_replay() {
     );
     assert_eq!(mirror.read_lines().expect("lines").len(), 2);
 
-    // Sidecar is rewritten in the new `migration_id:applied_at` form.
+    // Sidecar is rewritten in the new
+    // `migration_id:applied_at:watermark_rowid` form.
     let after = std::fs::read_to_string(&resets_consumed).expect("after");
     let applied_at = applied_at_for(&conn, 21);
-    let expected = format!("21:{applied_at}");
+    let expected = format!("21:{applied_at}:2");
     assert!(
         after.lines().any(|l| l.trim() == expected),
         "sidecar must be rewritten in bound format: {after:?}"
