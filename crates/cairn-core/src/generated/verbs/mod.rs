@@ -87,4 +87,5 @@ pub const CAPABILITIES: &[&str] = &[
     "cairn.mcp.v1.extension.admin",
     "cairn.mcp.v1.extension.federation",
     "cairn.mcp.v1.extension.sessiontree",
+    "cairn.mcp.v1.policy_trace",
 ];

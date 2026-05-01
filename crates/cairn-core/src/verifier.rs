@@ -93,7 +93,7 @@ mod tests {
             chain_parents: vec![],
             expires_at: "2026-04-22T14:07:11Z".to_owned(),
             issued_at: "2026-04-22T14:02:11Z".to_owned(),
-            issuer: common::Identity("usr:tafeng".to_owned()),
+            issuer: common::Identity("hmn:tafeng".to_owned()),
             key_version: 1,
             nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
             operation_id: common::Ulid("01HQZX9F5N0000000000000000".to_owned()),

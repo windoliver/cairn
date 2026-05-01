@@ -1,0 +1,24 @@
+[package]
+name = "cairn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cairn-core = { path = "../crates/cairn-core", features = ["fuzz"] }
+
+# Fuzz targets must build with -Zsanitizer=address on nightly only,
+# which is incompatible with workspace lints / pinned MSRV. Keep this
+# package OUT of the workspace.
+[workspace]
+
+[[bin]]
+name = "squash"
+path = "fuzz_targets/squash.rs"
+test = false
+doc = false
+bench = false

@@ -38,6 +38,18 @@ pub trait SensorIngress: Send + Sync {
     fn supported_contract_versions(&self) -> VersionRange;
 }
 
+/// Static identity descriptor for a [`SensorIngress`] plugin (§4.1).
+///
+/// Carries the two associated consts the `register_plugin_with!` macro checks
+/// before construction. See [`MemoryStorePlugin`](crate::contract::MemoryStorePlugin)
+/// for the design rationale.
+pub trait SensorIngressPlugin: SensorIngress + Sized {
+    /// Stable plugin name, checked statically before construction (§4.1).
+    const NAME: &'static str;
+    /// Version range checked statically before construction (§4.1).
+    const SUPPORTED_VERSIONS: VersionRange;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,7 +59,7 @@ mod tests {
     #[async_trait::async_trait]
     impl SensorIngress for StubSensor {
         fn name(&self) -> &'static str {
-            "stub-sensor"
+            Self::NAME
         }
         fn capabilities(&self) -> &SensorIngressCapabilities {
             static CAPS: SensorIngressCapabilities = SensorIngressCapabilities {
@@ -58,8 +70,14 @@ mod tests {
             &CAPS
         }
         fn supported_contract_versions(&self) -> VersionRange {
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+            Self::SUPPORTED_VERSIONS
         }
+    }
+
+    impl SensorIngressPlugin for StubSensor {
+        const NAME: &'static str = "stub-sensor";
+        const SUPPORTED_VERSIONS: VersionRange =
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0));
     }
 
     #[test]
@@ -67,5 +85,11 @@ mod tests {
         let s: Box<dyn SensorIngress> = Box::new(StubSensor);
         assert_eq!(s.name(), "stub-sensor");
         assert!(s.supported_contract_versions().accepts(CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn static_consts_accessible() {
+        assert_eq!(StubSensor::NAME, "stub-sensor");
+        assert!(StubSensor::SUPPORTED_VERSIONS.accepts(CONTRACT_VERSION));
     }
 }

@@ -3,7 +3,13 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! For P0 scaffold with no store wired, capabilities is empty.
+//! P0 advertises **no** capabilities: the IDL declares
+//! `cairn.mcp.v1.policy_trace` (#95) and the store-driven search /
+//! retrieve / forget mode capabilities, but verb runtime does not yet
+//! emit traces or honor those modes (work tracked in #9 / #61 / #62).
+//! Advertising a capability the runtime cannot back would mislead
+//! clients that negotiate from `status.capabilities`, so this list stays
+//! empty until each capability is honored end-to-end.
 
 use std::process::ExitCode;
 
@@ -38,7 +44,7 @@ pub fn run(json: bool) -> ExitCode {
         println!("started_at:  {started_at}");
         println!("incarnation: {}", incarnation.0);
         if resp.capabilities.is_empty() {
-            println!("capabilities: (none — store not wired in this P0 build)");
+            println!("capabilities: (none advertised)");
         } else {
             for cap in &resp.capabilities {
                 println!(
@@ -51,10 +57,31 @@ pub fn run(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// P0 advertises no capabilities — the store adapter is not wired yet.
-/// Update this list when store adapters land (issue #9).
+/// Advertised P0 capabilities — currently empty.
+///
+/// Negotiable capabilities are advertised only when the runtime can honor
+/// them end-to-end. P0 verbs return the unimplemented stub envelope, so
+/// no capability is advertised yet. `cairn.mcp.v1.policy_trace` (#95)
+/// and the store-driven search / retrieve / forget mode capabilities
+/// land here as their respective verb-runtime issues close (#9 / #61 /
+/// #62).
 fn p0_capabilities() -> Vec<Capabilities> {
     vec![]
+}
+
+/// True if `capability` is in the current `status.capabilities` list.
+/// Used by capability-gated args (e.g. `search --explain`) to fail closed
+/// before verb dispatch when the required capability is not advertised
+/// (CLAUDE.md §4.6).
+#[must_use]
+pub fn p0_capabilities_advertises(capability: &str) -> bool {
+    p0_capabilities().iter().any(|c| {
+        serde_json::to_value(c)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(capability)
+    })
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.
@@ -207,8 +234,11 @@ mod tests {
     }
 
     #[test]
-    fn p0_capabilities_returns_empty() {
+    fn p0_capabilities_is_empty_until_runtime_honors_them() {
         let caps = p0_capabilities();
-        assert!(caps.is_empty(), "P0 must advertise no capabilities");
+        assert!(
+            caps.is_empty(),
+            "P0 advertises no capabilities until verb runtime can honor them; got {caps:?}"
+        );
     }
 }
