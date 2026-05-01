@@ -69,6 +69,25 @@
 --                         decided_at_iso is gated by the 0009
 --                         `consent_journal_event_requires_iso` trigger,
 --                         so we keep it as-is.
+--   * `expires_at_iso`  ← CASE WHEN kind IS NULL AND expires_at IS NOT
+--                         NULL THEN strftime(...) WHEN kind IS NULL
+--                         THEN NULL ELSE expires_at_iso END. Round-13
+--                         high finding: the `expires_at_iso` column was
+--                         added in 0009 and was never populated for
+--                         pre-0009 legacy rows, which carry the bound
+--                         only in the integer `expires_at` column.
+--                         Post-0021 decoders read expiry from
+--                         `expires_at_iso` exclusively, so without
+--                         synthesis a legacy GRANT/REVOKE with a
+--                         non-NULL `expires_at` integer becomes an
+--                         event whose decoded `expires_at = None` —
+--                         silent widening of a time-bounded consent
+--                         into an indefinite one. We render via
+--                         strftime with the same UNIX-millis convention
+--                         as `decided_at_iso`; preserve NULL when the
+--                         legacy bound is absent. Step 0b's preflight
+--                         aborts the migration if any legacy
+--                         `expires_at` is unrenderable.
 --   * `rowid`           ← preserved 1:1 unconditionally (mirror cursor
 --                         stability AND replay-order preservation).
 --                         Pathological `rowid <= 0` rows (only reachable
@@ -162,19 +181,32 @@ INSERT INTO __cairn_assert_legacy_rowid (n)
 DROP TRIGGER __cairn_assert_legacy_rowid_trg;
 DROP TABLE __cairn_assert_legacy_rowid;
 
--- 0b. Abort if any legacy row's decided_at can't render as RFC3339
---     (Finding 2). strftime returns NULL for out-of-range UNIX seconds.
+-- 0b. Abort if any legacy row's decided_at OR expires_at can't render
+--     as RFC3339 (Finding 2; round-13 extension for expires_at).
+--     strftime returns NULL for out-of-range UNIX seconds. The data
+--     move synthesizes both `decided_at_iso` and `expires_at_iso`
+--     from the corresponding legacy integer columns, so an
+--     unrenderable value on either column would yield a NULL ISO
+--     and trip the 0009 iso-required trigger (decided_at_iso) or
+--     silently lose the bound (expires_at_iso). Catch both here so
+--     the operator sees the structural reason rather than a generic
+--     trigger message.
 CREATE TEMP TABLE __cairn_assert_legacy_iso (n INTEGER);
 CREATE TEMP TRIGGER __cairn_assert_legacy_iso_trg
   BEFORE INSERT ON __cairn_assert_legacy_iso
   FOR EACH ROW WHEN NEW.n > 0
 BEGIN
-  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose decided_at cannot be rendered as RFC3339 (out-of-range UNIX millis). Repair tool tracked in issue #267; until then, resolve manually before re-running migration.');
+  SELECT RAISE(ABORT, 'migration 0021: consent_journal contains legacy row(s) whose decided_at or expires_at cannot be rendered as RFC3339 (out-of-range UNIX millis). Repair tool tracked in issue #267; until then, resolve manually before re-running migration.');
 END;
 INSERT INTO __cairn_assert_legacy_iso (n)
   SELECT COUNT(*) FROM consent_journal
    WHERE kind IS NULL
-     AND strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch') IS NULL;
+     AND (
+          (decided_at IS NOT NULL
+            AND strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch') IS NULL)
+       OR (expires_at IS NOT NULL
+            AND strftime('%Y-%m-%dT%H:%M:%SZ', expires_at / 1000, 'unixepoch') IS NULL)
+     );
 DROP TRIGGER __cairn_assert_legacy_iso_trg;
 DROP TABLE __cairn_assert_legacy_iso;
 
@@ -943,7 +975,25 @@ SELECT
       THEN strftime('%Y-%m-%dT%H:%M:%SZ', decided_at / 1000, 'unixepoch')
     ELSE decided_at_iso
   END AS decided_at_iso,
-  expires_at_iso
+  -- Round-13 high finding: pre-0009 schema had only the integer
+  -- `expires_at` column; `expires_at_iso` was added in 0009 and was
+  -- never populated for legacy rows. Without synthesis, post-0021
+  -- decoders (which read expiry from `expires_at_iso` only) see
+  -- `expires_at = None` for a legacy row whose integer `expires_at`
+  -- carries a non-NULL bound — silently widening a time-bounded
+  -- consent into an indefinite one. Render the legacy integer
+  -- (UNIX millis, same convention as `decided_at`) via strftime
+  -- when present; preserve NULL when absent. Step 0b's preflight
+  -- aborts the migration if any legacy `expires_at` is
+  -- unrenderable, so strftime here is total on the rows that
+  -- reach this SELECT.
+  CASE
+    WHEN kind IS NULL AND expires_at IS NOT NULL
+      THEN strftime('%Y-%m-%dT%H:%M:%SZ', expires_at / 1000, 'unixepoch')
+    WHEN kind IS NULL
+      THEN NULL
+    ELSE expires_at_iso
+  END AS expires_at_iso
 FROM consent_journal;
 
 -- 6. Drop old, rename new. SQLite re-targets the triggers attached to

@@ -1548,6 +1548,105 @@ fn consent_journal_rebuild_aborts_on_unrenderable_decided_at() {
 }
 
 #[test]
+fn consent_journal_rebuild_synthesizes_legacy_expires_at_iso() {
+    // Phase-B (#255, brief §14): round-13 High finding. Pre-0009 schema
+    // had only the integer `expires_at` column; `expires_at_iso` was
+    // added in 0009 and was never populated for legacy rows. Earlier
+    // drafts of 0021 copied `expires_at_iso` through unchanged, so a
+    // legacy GRANT/REVOKE with a non-NULL `expires_at` integer became
+    // an event whose decoded `expires_at = None` — silent widening of
+    // a time-bounded consent into an indefinite one. The fix
+    // synthesizes `expires_at_iso` from the legacy integer with the
+    // same UNIX-millis-to-RFC3339 strftime as `decided_at_iso`.
+    use cairn_store_sqlite::consent::read_since_rowid;
+
+    let mut conn = open_at_version(20);
+    // expires_at = 1000 (UNIX millis) → 1 second after epoch →
+    // '1970-01-01T00:00:01Z'. decided_at = 0 → '1970-01-01T00:00:00Z'.
+    // Pre-0009 columns only — see drift preflight (step 0a-bis).
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           expires_at) \
+         VALUES ('legacy-bounded', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 1000)",
+        [],
+    )
+    .expect("legacy insert with bounded expires_at");
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    // Direct column inspection — synthesized iso must render the
+    // integer bound rather than stay NULL.
+    let iso: Option<String> = conn
+        .query_row(
+            "SELECT expires_at_iso FROM consent_journal \
+              WHERE consent_id = 'legacy-bounded'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row present after migration");
+    assert_eq!(
+        iso.as_deref(),
+        Some("1970-01-01T00:00:01Z"),
+        "legacy expires_at must be synthesized to RFC3339 from UNIX millis"
+    );
+
+    // End-to-end: the decoded ConsentEvent must surface the bound, not
+    // `None`. This is the user-visible regression the synthesis
+    // prevents.
+    let events = read_since_rowid(&conn, 0).expect("read_since_rowid");
+    assert_eq!(events.len(), 1, "single legacy row must decode: {events:?}");
+    let (_rowid, event) = &events[0];
+    let expires = event
+        .expires_at
+        .as_ref()
+        .expect("decoded ConsentEvent.expires_at must be Some, not silently None");
+    assert_eq!(expires.as_str(), "1970-01-01T00:00:01Z");
+}
+
+#[test]
+fn consent_journal_rebuild_aborts_on_unrenderable_legacy_expires_at() {
+    // Phase-B (#255, brief §14): round-13 High finding companion test.
+    // Step 0b's preflight aborts the migration when ANY legacy row
+    // carries a non-NULL `expires_at` integer that strftime cannot
+    // render as RFC3339 (e.g. UNIX millis past year 9999). Without
+    // this gate, the synthesis CASE in the data-move SELECT would
+    // produce NULL for the bound and silently lose the time-bound on
+    // the decoded event.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           expires_at) \
+         VALUES ('out-of-range-exp', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 253402300800000000)",
+        [],
+    )
+    .expect("legacy insert with out-of-range expires_at");
+
+    let err = migrations()
+        .to_version(&mut conn, 21)
+        .expect_err("migration 0021 must abort on unrenderable expires_at");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cannot be rendered as RFC3339") && msg.contains("expires_at"),
+        "abort message must cite RFC3339 and expires_at; got: {msg}"
+    );
+
+    // Original row still present — rollback intact, no partial rebuild.
+    let consent_id: String = conn
+        .query_row(
+            "SELECT consent_id FROM consent_journal \
+              WHERE consent_id = 'out-of-range-exp'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("legacy row must survive aborted migration");
+    assert_eq!(consent_id, "out-of-range-exp");
+}
+
+#[test]
 fn consent_journal_rebuild_aborts_on_invalid_legacy_subject() {
     // Phase-B (#255, brief §14): round-6 High finding. Pre-0011 schema did
     // not enforce closed character classes on `subject`, so legacy rows can
