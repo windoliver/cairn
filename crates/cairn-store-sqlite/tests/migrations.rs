@@ -1234,6 +1234,85 @@ fn consent_journal_remains_append_only_under_0007() {
     );
 }
 
+fn open_at_version(version: usize) -> rusqlite::Connection {
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open in-memory");
+    migrations()
+        .to_version(&mut conn, version)
+        .expect("apply migrations to version");
+    conn
+}
+
+#[test]
+fn consent_journal_rebuild_preserves_rowid_and_backfills_revoke() {
+    // Phase-B (#255, brief §14): the cairn-workflows consent.log materializer
+    // tails consent_journal by rowid. Migration 0021 rebuilds the table to
+    // promote `kind` to NOT NULL; the rebuild must preserve rowid 1:1 (so
+    // existing mirror cursors are not silently invalidated) and must
+    // backfill legacy `kind IS NULL` rows from the `decision` column.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('legacy-revoke', 'sub', 'private', 'REVOKE', 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert");
+    let rowid_before: i64 = conn
+        .query_row(
+            "SELECT rowid FROM consent_journal WHERE consent_id = 'legacy-revoke'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("rowid before");
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    let (rowid_after, kind_after): (i64, String) = conn
+        .query_row(
+            "SELECT rowid, kind FROM consent_journal WHERE consent_id = 'legacy-revoke'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("row after");
+    assert_eq!(
+        rowid_before, rowid_after,
+        "rebuild must preserve rowid 1:1 to keep mirror cursors valid"
+    );
+    assert_eq!(
+        kind_after, "revoke",
+        "REVOKE decision must backfill kind = 'revoke'"
+    );
+}
+
+#[test]
+fn consent_journal_rebuild_backfills_grant_kind() {
+    // Phase-B (#255, brief §14): symmetric coverage of the GRANT arm of the
+    // 0021 backfill CASE/COALESCE. Pinned separately so a future refactor
+    // that drops the GRANT branch surfaces immediately.
+    let mut conn = open_at_version(20);
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('legacy-grant', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
+        [],
+    )
+    .expect("legacy insert");
+
+    migrations().to_version(&mut conn, 21).expect("apply 0021");
+
+    let kind_after: String = conn
+        .query_row(
+            "SELECT kind FROM consent_journal WHERE consent_id = 'legacy-grant'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("row after");
+    assert_eq!(
+        kind_after, "grant",
+        "GRANT decision must backfill kind = 'grant'"
+    );
+}
+
 #[test]
 fn wal_ops_terminal_immutable() {
     let conn = open_in_memory().expect("open");
