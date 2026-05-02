@@ -74,17 +74,8 @@ pub struct TraceLink {
 }
 ```
 
-Serialization into `extra_frontmatter`:
-
-```yaml
-trace_event: pre_tool
-trace:
-  session_id: 01ARZ3...
-  turn_id: "turn-4"
-  sequence: 2
-  capture_event_id: 01HQ...
-  tool_call_id: call_abc
-```
+Serialization into `extra_frontmatter` is shown in §5.1 below; all trace
+fields live at `extra_frontmatter.trace.*` (the single canonical path).
 
 Validation invariants. **Field-level** (`TraceLink::validate`, pure):
 
@@ -106,9 +97,10 @@ Validation invariants. **Field-level** (`TraceLink::validate`, pure):
   the union (existing ∪ new), and rewrites the old rows in place. The
   unique sequence index lets the rewrite happen as `UPDATE` against the
   same rows; no row is dropped or reinserted.
-- A backfill is rejected with `TraceBackfillClosed` if the affected turn
-  is already closed (a `turn_summary` row exists) — see referential
-  invariant below.
+- A backfill into a closed turn (one whose `turn_summary` row already
+  exists) is admitted; the transaction additionally recomputes and
+  upserts the summary so `member_event_ids` reflects current turn state
+  — see referential invariant below.
 
 **Referential** (enforced inside `transaction(...)` before commit;
 violations roll back the entire turn):
@@ -121,16 +113,19 @@ violations roll back the entire turn):
 - `member_event_ids` on a `TurnSummary` MUST be exactly the set of
   non-summary trace records persisted under the same
   `(session_id, turn_id)`. Drift surfaces as `TraceSummaryMembership`.
-- **Closed-turn writes are rejected.** Once a `turn_summary` row exists
-  for `(session_id, turn_id)`, any further event write for that turn
-  fails with `TraceBackfillClosed` and rolls the transaction back. The
-  importer surfaces this in the verb's `failed_turns` list so the caller
-  can choose to (a) `forget` the turn and re-import from a fixed source,
-  or (b) accept the loss. This rule eliminates the stale-summary failure
-  mode: a summary, once written, is the authoritative member set for
-  that turn. Re-summarizing on every close-turn write would be the
-  alternative, but that complicates `member_event_ids` audits and adds a
-  non-deterministic write back into a "finalized" record.
+- **Closed-turn writes recompute the summary.** A `turn_summary` is a
+  *snapshot of current turn state*, not a write-once finalization. When
+  a late event lands for a turn whose summary already exists, the
+  transaction (a) admits the new event, (b) renumbers sequences over
+  the union, and (c) **upserts the summary** with a fresh
+  `member_event_ids` reflecting the new state. The summary's record id
+  is deterministic on `(session_id, turn_id)` (§5.2), so the upsert
+  targets the same row — no duplicate summaries. Idempotent replay
+  still produces no-op summary rewrites because the inputs are
+  unchanged. Result: late `tool_output` / `post_tool` / `stop` events
+  reconcile cleanly without operator intervention. The
+  `member_event_ids` invariant continues to hold because it is
+  *recomputed*, never *retained from a prior commit*.
 - `sequence` strictly monotonic within `(session_id, turn_id)` —
   enforced at the store layer (UNIQUE index), surfaced as
   `TraceSequenceConflict`.
@@ -176,8 +171,24 @@ Builds a `MemoryRecord` with:
 - `visibility = MemoryVisibility::Private`
 - `scope = ScopeTuple { session_id: Some(link.session_id), .. }`
 - `body` = privacy-filtered text per event type (see §5.3)
-- `extra_frontmatter` = `{trace_event, trace}` plus carry-through of
-  `payload_hash` and `capture_event_id` from the envelope
+- `extra_frontmatter` = `{trace_event, trace}` only. `trace`
+  itself contains `payload_hash` (and `payload_ref`) carried through
+  from the envelope. There is **no top-level `payload_hash` key**: all
+  trace metadata lives at `extra_frontmatter.trace.*`. This single
+  canonical path is the one indexes, generated columns, and forget SQL
+  query against. Concretely the YAML shape is:
+
+```yaml
+trace_event: pre_tool
+trace:
+  session_id: 01ARZ3...
+  turn_id: "turn-4"
+  sequence: 2
+  capture_event_id: 01HQ...
+  payload_hash: "sha256:..."     # from CaptureEvent.payload_hash
+  payload_ref: "sources/..."     # from CaptureEvent.payload_ref
+  tool_call_id: call_abc
+```
 - `actor_chain` cloned from the `CaptureEvent` — preserves sensor/author
   attribution
 - `provenance` filled from `CaptureEvent` metadata (sensor, mode, captured_at)
@@ -276,6 +287,14 @@ ALTER TABLE records ADD COLUMN trace_parent_event_id TEXT
 
 ALTER TABLE records ADD COLUMN trace_capture_event_id TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.capture_event_id')) VIRTUAL;
+ALTER TABLE records ADD COLUMN trace_payload_hash TEXT
+  GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.payload_hash')) VIRTUAL;
+
+-- Forget refcounting reads this column to decide whether a sources/
+-- blob can be deleted. Index keeps the COUNT(*) cheap.
+CREATE INDEX records_trace_payload_hash
+  ON records(trace_payload_hash)
+  WHERE trace_payload_hash IS NOT NULL;
 
 -- Idempotency for raw events: same CaptureEvent may not produce two rows.
 CREATE UNIQUE INDEX records_trace_event_id
@@ -455,11 +474,6 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
         };
         let group = projected;
         let result = store.transaction(|tx| async move {
-            // Reject if the turn is already closed (summary present).
-            if tx.turn_summary_exists(&session_id, &turn_id).await? {
-                return Err(TraceError::BackfillClosed { session_id, turn_id });
-            }
-
             // Sequences come from captured_at ordering across the union of
             // (already-persisted events ∪ this batch). Concurrent writes
             // serialize at BEGIN IMMEDIATE, so the read+rewrite is
@@ -475,7 +489,14 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
                 )?;
                 tx.upsert_trace(record).await?;  // updates seq on existing rows; inserts new
             }
-            if turn_is_closed(&group) {
+
+            // The turn is "closed" if a Stop event is in the persisted set
+            // OR a turn_summary already exists. In either case, recompute
+            // the summary from current state — late events reconcile by
+            // upserting the deterministic-id summary row.
+            let already_summarized =
+                tx.turn_summary_exists(&session_id, &turn_id).await?;
+            if turn_is_closed(&renumbered) || already_summarized {
                 let turn_records = tx.list_trace_events(&session_id, &turn_id).await?;
                 let summary = pipeline::turn::summarize_turn(
                     &session_id, &turn_id, &turn_records,
@@ -552,13 +573,13 @@ Concretely:
    audit anchor — the hash alone is not user-recoverable PII; the bytes
    it pointed to are gone.
 
-Refcount tracking is a SQL `COUNT(*)` over the records table keyed on
-`extra_frontmatter.trace.payload_hash` (or the same field surfaced by an
-extracted virtual column, paralleling §6.1). It does not rely on a
-separate sources-side index. If `payload_ref` is ever observed to deviate
-from `sources/<payload_hash>.<ext>` for an existing record, that's a
-capture-pipeline bug, surfaced as a separate issue; the forget code
-itself stays hash-keyed.
+Refcount tracking is a SQL `COUNT(*)` over the `trace_payload_hash`
+generated column added in §6.1 — `SELECT COUNT(*) FROM records WHERE
+trace_payload_hash = ? AND id NOT IN (<forgetting set>)`. The index
+`records_trace_payload_hash` keeps the lookup O(log n). If `payload_ref`
+is ever observed to deviate from `sources/<payload_hash>.<ext>` for an
+existing record, that's a capture-pipeline bug surfaced as a separate
+issue; the forget code stays hash-keyed.
 
 ### 8.2 Other concerns
 
@@ -605,10 +626,11 @@ adjustment is needed, that's a finding, not planned work.
   for an open turn, then a follow-up batch `[C@t=1]`. Final
   `list_trace_events` ordering is `[C, A, B]` (sequence renumbered by
   `captured_at`). No row is dropped; `capture_event_id` is preserved.
-- **Backfill rejected on closed turn**: attempting to write any event
-  to a turn whose `turn_summary` already exists returns
-  `TraceBackfillClosed` and the transaction rolls back. The summary's
-  `member_event_ids` remains intact.
+- **Backfill on closed turn resummarizes**: a turn already has events +
+  summary; importing one more `tool_output` for that turn updates
+  sequences and rewrites the summary row in place. The summary's
+  `member_event_ids` now includes the new event; the row id is
+  unchanged. No duplicate summary, no error.
 - **Ties on `captured_at`**: two events with identical timestamps
   produce a stable order keyed on `capture_event_id`; the same input
   always yields the same sequence assignment.
