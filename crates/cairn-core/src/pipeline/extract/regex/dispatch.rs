@@ -235,6 +235,7 @@ pub(crate) async fn dispatch(
 
     Ok(ExtractResult {
         outputs,
+        discards: vec![],
         truncated,
         llm_eligible_spans: llm_spans,
     })

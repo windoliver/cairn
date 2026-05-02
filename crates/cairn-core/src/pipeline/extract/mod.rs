@@ -210,6 +210,9 @@ pub enum TruncationReason {
 pub struct ExtractResult {
     /// Drafts and forget intents produced.
     pub outputs: Vec<ExtractOutput>,
+    /// Model-suggested discards. `RegexExtractor` always returns `vec![]`
+    /// here; `LLMExtractor` populates this from the parsed response.
+    pub discards: Vec<DiscardCandidate>,
     /// Whether and why the extractor truncated.
     pub truncated: TruncationReason,
     /// Byte ranges of the body that the LLM extractor in the chain

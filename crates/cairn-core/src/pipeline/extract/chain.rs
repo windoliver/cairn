@@ -188,9 +188,7 @@ impl ExtractChain {
         };
 
         let mut outputs: Vec<ExtractOutput> = Vec::new();
-        // `discards` is populated by LLM workers in future tasks; kept
-        // mutable here so the field flows through `ChainResult` correctly.
-        let discards: Vec<DiscardCandidate> = Vec::new();
+        let mut discards: Vec<DiscardCandidate> = Vec::new();
         let mut failures: Vec<WorkerFailure> = Vec::new();
         let mut truncated = TruncationReason::None;
 
@@ -214,6 +212,8 @@ impl ExtractChain {
                             );
                         }
                     }
+                    // Merge discards from this worker (LLMExtractor populates these).
+                    discards.extend(r.discards);
                     // Monotonic narrowing: clamp returned eligibility to
                     // the intersection with the current window. Widening
                     // is rejected and logged.
@@ -342,6 +342,7 @@ mod tests {
         async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![],
             })
@@ -365,6 +366,7 @@ mod tests {
         async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![],
             })
@@ -609,6 +611,7 @@ mod tests {
                 .push(input.eligible_spans.clone());
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![],
             })
@@ -635,6 +638,7 @@ mod tests {
         async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 // Narrows eligibility to bytes 2..8 only.
                 llm_eligible_spans: vec![TextSpan::new(2, 8)],
@@ -663,6 +667,7 @@ mod tests {
         async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 // Returns span 0..100 which is wider than the initial 3..7.
                 llm_eligible_spans: vec![TextSpan::new(0, 100)],
@@ -760,6 +765,7 @@ mod tests {
                         trigger_id: None,
                     }),
                 ],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![TextSpan::new(0, 10)],
             })
@@ -799,6 +805,7 @@ mod tests {
         async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![], // explicit suppression
             })
@@ -827,6 +834,7 @@ mod tests {
             *self.received.lock().expect("mutex not poisoned") = input.eligible_spans.clone();
             Ok(ExtractResult {
                 outputs: vec![],
+                discards: vec![],
                 truncated: TruncationReason::None,
                 llm_eligible_spans: vec![],
             })
