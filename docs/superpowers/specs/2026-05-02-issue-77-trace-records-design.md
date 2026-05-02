@@ -126,10 +126,17 @@ Builds a `MemoryRecord` with:
 ```rust
 pub fn summarize_turn(
     session_id: &SessionId,
-    turn_id: u64,
+    turn_id: &str,                      // opaque, matches TraceLink.turn_id
     events: &[MemoryRecord],
 ) -> Result<MemoryRecord, TurnSummaryError>
 ```
+
+The summary record uses a **deterministic record id** derived from
+`(session_id, turn_id)` — `RecordId(format!("turnsum:{session_id}:{turn_id}"))`,
+ULID-like prefix or a hash, picked to fit the existing `RecordId` newtype.
+That id is what `upsert_trace` keys on for summary rows: a replay of the
+same turn produces the same id, so the second write is a no-op upsert into
+the existing row instead of a duplicate.
 
 Concatenates ordered events into a single `TurnSummary` record. No LLM —
 deterministic format:
@@ -190,15 +197,20 @@ ALTER TABLE records ADD COLUMN trace_parent_event_id TEXT
 ALTER TABLE records ADD COLUMN trace_capture_event_id TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.capture_event_id')) VIRTUAL;
 
--- Idempotency: the same CaptureEvent may not produce two records.
--- Replays of the same JSONL file therefore upsert into the existing row
--- (no new sequence allocation) instead of duplicating the logical event.
+-- Idempotency for raw events: same CaptureEvent may not produce two rows.
 CREATE UNIQUE INDEX records_trace_event_id
   ON records(trace_capture_event_id)
   WHERE trace_capture_event_id IS NOT NULL;
 
--- Sequence monotonicity within a turn (excluding the synthetic
--- turn_summary, which has no sequence of its own).
+-- Idempotency for the synthetic turn_summary: exactly one summary per
+-- (session_id, turn_id). The summary's record id is also derived
+-- deterministically from the same pair (§5.2) so upserts are stable on
+-- both the primary key and this index.
+CREATE UNIQUE INDEX records_trace_summary
+  ON records(trace_session_id, trace_turn_id)
+  WHERE trace_event = 'turn_summary';
+
+-- Sequence monotonicity within a turn (excluding turn_summary).
 CREATE UNIQUE INDEX records_trace_seq
   ON records(trace_session_id, trace_turn_id, trace_sequence)
   WHERE trace_event IS NOT NULL AND trace_event != 'turn_summary';
@@ -208,13 +220,17 @@ CREATE INDEX records_trace_parent
   WHERE trace_parent_event_id IS NOT NULL;
 ```
 
-The unique indices enforce two invariants at the database boundary:
+The unique indices enforce three invariants at the database boundary:
 
-- **Idempotent replay** — `capture_event_id` is the stable event identity.
-  A second `capture_trace --from <same file>` is absorbed as no-op upserts
-  on existing rows; no fresh sequences allocated.
+- **Idempotent event replay** — `capture_event_id` is the stable event
+  identity. A second `capture_trace --from <same file>` is absorbed as
+  no-op upserts on existing rows; no fresh sequences allocated.
+- **Idempotent summary replay** — at most one `turn_summary` per
+  `(session_id, turn_id)`. Combined with the deterministic record id
+  derived in §5.2, replays converge on the same row.
 - **Sequence monotonicity** — within a `(session_id, turn_id)` no two
-  events share a `sequence`. Surfaced as a typed `TraceSequenceConflict`.
+  non-summary events share a `sequence`. Surfaced as a typed
+  `TraceSequenceConflict`.
 
 ### 6.2 Reconstruction surface and `retrieve` IDL gap
 
@@ -276,24 +292,39 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
     refuse_if_degraded(...)?;
     let events = read_jsonl::<CaptureEvent>(&args.from).await?;  // streaming, bounded buffer
 
-    // Persist every event. Idempotent on capture_event_id (§6.1) — replays
-    // upsert into existing rows.
-    for event in &events {
-        event.validate()?;                                       // existing envelope validation
-        let classified = classify(event)?;                       // (hook_name, payload tag) → TraceEvent
-        let link = build_link(store, event, classified).await?;  // assigns next sequence per (session, turn) for new rows; reuses for replay
-        let record = pipeline::capture_trace::project(event, classified, link)?;
-        store.upsert_trace(record).await?;                       // WAL two-phase, §5.6
-    }
+    // Validate the full file *before* writing anything. A malformed event
+    // anywhere in the file aborts the import with no rows persisted.
+    let projected: Vec<(_, _, _)> = events.iter()
+        .map(|event| {
+            event.validate()?;
+            let classified = classify(event)?;
+            Ok((event, classified))
+        })
+        .collect::<Result<_, _>>()?;
 
-    // Emit one `turn_summary` per closed turn boundary in the file.
-    // A turn is "closed" when the file contains a Stop event (or an explicit
-    // `end_of_turn` sentinel) for that `(session_id, turn_id)`. Multi-turn
-    // input files are supported — each closed turn gets its own summary.
-    for (session_id, turn_id) in closed_turns(&events) {
-        let turn_records = store.list_trace_events(&session_id, &turn_id).await?;
-        let summary = pipeline::turn::summarize_turn(&turn_records)?;
-        store.upsert_trace(summary).await?;
+    // Group by (session_id, turn_id). Each turn group is one transaction:
+    // either all of its events plus the summary land, or none do. A
+    // mid-import failure for turn N never strands a partial prefix of
+    // turn N's events committed.
+    for (session_id, turn_id, group) in group_by_turn(&projected) {
+        store.transaction(|tx| async move {
+            for (event, classified) in &group {
+                // Inside the tx, build_link's read-max-then-write is
+                // serialized by the WAL state machine (§5.6) — concurrent
+                // writers are sequenced, not racing.
+                let link = build_link(tx, event, *classified).await?;
+                let record = pipeline::capture_trace::project(event, *classified, link)?;
+                tx.upsert_trace(record).await?;
+            }
+            if turn_is_closed(&group) {
+                let turn_records = tx.list_trace_events(&session_id, &turn_id).await?;
+                let summary = pipeline::turn::summarize_turn(
+                    &session_id, &turn_id, &turn_records,
+                )?;
+                tx.upsert_trace(summary).await?;
+            }
+            Ok::<_, TraceError>(())
+        }).await?;
     }
     Ok(success_response(trace_id))
 }
@@ -352,6 +383,10 @@ a path *does* need adjustment, that's a finding, not planned work.
 - **Multi-turn input**: a JSONL containing two complete turns yields two
   `turn_summary` records, each with `member_event_ids` pointing only at
   its own turn's events.
+- **Atomicity per turn**: a JSONL whose second turn contains a malformed
+  event leaves the *first* turn fully persisted (events + summary) and
+  the *second* turn unwritten — no partial prefix. Re-running with the
+  fixed file completes the second turn idempotently.
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
