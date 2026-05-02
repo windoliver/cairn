@@ -163,6 +163,33 @@ impl LLMExtractor {
                 format!("{base_prompt}{RETRY_SUFFIX}")
             };
 
+            // Defensive cap check on the retry path: the pre-render estimate
+            // reserves RETRY_SUFFIX headroom so this should never fire when the
+            // initial preflight ran.  It remains as a safety net for call sites
+            // that bypass the preflight (e.g. future direct callers of
+            // `run_with_retry`).
+            if let Some(cap) = self.budget.max_prompt_bytes
+                && prompt.len() > cap as usize
+            {
+                tracing::warn!(
+                    reason = "llm.retry_prompt_size_byte_cap_skip",
+                    prompt_bytes = prompt.len(),
+                    cap = cap,
+                    attempt = attempt,
+                );
+                // Return the parse error that caused the retry rather than
+                // escalating to BudgetExceeded — the initial prompt already
+                // succeeded the preflight, so we surface the parse problem.
+                return InnerOutcome::HardError(ExtractError::Provider {
+                    worker: "llm",
+                    code: "invalid_json_output",
+                    source: LlmError::InvalidJsonOutput {
+                        detail: "retry prompt exceeds byte cap; retry skipped".to_owned(),
+                        raw: String::new(),
+                    },
+                });
+            }
+
             let req = CompletionRequest::builder()
                 .prompt(prompt)
                 .schema(schema::schema_value().clone())
@@ -295,7 +322,13 @@ impl ExtractorWorker for LLMExtractor {
                 .iter()
                 .map(|s| (s.end.saturating_sub(s.start)) as usize)
                 .fold(0_usize, usize::saturating_add);
-            let estimate = eligible_bytes.saturating_add(PROMPT_TEMPLATE_OVERHEAD_BYTES);
+            // Reserve headroom for `RETRY_SUFFIX` so the retry attempt (which
+            // appends the suffix to the base prompt) also fits within the cap.
+            // Without this reservation the initial prompt can fit but the retry
+            // prompt can silently exceed the cap.
+            let estimate = eligible_bytes
+                .saturating_add(PROMPT_TEMPLATE_OVERHEAD_BYTES)
+                .saturating_add(RETRY_SUFFIX.len());
             if estimate > cap_usize {
                 tracing::warn!(
                     reason = "llm.prompt_size_byte_cap_skip_precheck",
@@ -771,6 +804,72 @@ mod tests {
         assert!(
             matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
             "expected MaxWallMs{{0}} truncation, got {:?}",
+            res.truncated
+        );
+    }
+
+    // ── Regression: Finding 2 (adversarial review round 3) — retry suffix headroom ──
+
+    /// Test that the initial preflight reserves headroom for `RETRY_SUFFIX` so
+    /// the provider is never called when the suffix would push the prompt over
+    /// the cap.
+    ///
+    /// Setup: `max_prompt_bytes` is set so that `eligible_bytes +
+    /// PROMPT_TEMPLATE_OVERHEAD_BYTES` is just under the cap but
+    /// `eligible_bytes + PROMPT_TEMPLATE_OVERHEAD_BYTES + RETRY_SUFFIX.len()`
+    /// exceeds it.  With the fix, the preflight rejects and the provider is
+    /// never called; the `PanicProvider` ensures that assertion.
+    #[tokio::test]
+    async fn retry_prompt_respects_byte_cap() {
+        // RETRY_SUFFIX is ~145 bytes. We pick a cap such that:
+        //   eligible_bytes + OVERHEAD fits (cap > eligible_bytes + OVERHEAD)
+        //   eligible_bytes + OVERHEAD + RETRY_SUFFIX.len() does NOT fit
+        //
+        // eligible_bytes = 10 (body is "hello_world" = 11 chars, span 0..10)
+        // OVERHEAD = 4096
+        // RETRY_SUFFIX.len() = 145 (approx; at least > 100)
+        // Set cap = 4110  → eligible_bytes(10) + OVERHEAD(4096) = 4106 < 4110
+        //                    + RETRY_SUFFIX = 4106 + 145 = 4251 > 4110  ✓
+        let retry_suffix_len = RETRY_SUFFIX.len();
+        let body = "hello_world"; // 11 bytes; eligible span 0..10 = 10 bytes
+        let eligible_bytes: usize = 10;
+        let overhead = PROMPT_TEMPLATE_OVERHEAD_BYTES;
+        // Cap is just above base estimate but below base + suffix.
+        let cap = eligible_bytes + overhead + 4; // 4110 with current OVERHEAD=4096
+        assert!(
+            cap > eligible_bytes + overhead,
+            "cap must be above base estimate for test invariant"
+        );
+        assert!(
+            eligible_bytes + overhead + retry_suffix_len > cap,
+            "base + suffix must exceed cap for test to be meaningful \
+             (suffix_len={retry_suffix_len}, cap={cap})"
+        );
+
+        let extractor =
+            LLMExtractor::new(std::sync::Arc::new(PanicProvider)).with_budget(ExtractBudget {
+                max_prompt_bytes: Some(u32::try_from(cap).expect("fits in u32")),
+                ..ExtractBudget::llm_default()
+            });
+
+        let event = fixture_event();
+        let spans = vec![crate::pipeline::extract::TextSpan::new(0, 10)];
+        let input = make_input(&event, body, spans);
+
+        // If headroom reservation is missing the provider would be called
+        // (PanicProvider panics). With the fix the preflight rejects early.
+        let res = extractor
+            .extract(&input)
+            .await
+            .expect("preflight rejection must return Ok + truncation, not Err");
+        assert!(
+            res.outputs.is_empty(),
+            "no outputs expected on cap rejection; got: {:?}",
+            res.outputs
+        );
+        assert!(
+            matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
+            "expected MaxWallMs{{0}} truncation (preflight skip), got {:?}",
             res.truncated
         );
     }
