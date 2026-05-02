@@ -106,10 +106,28 @@ pub struct ExtractChain {
 }
 
 impl ExtractChain {
-    /// Validate worker ordering per spec §4.3:
-    /// - empty chain is allowed
-    /// - non-empty chain must contain exactly one `Gating` worker
-    /// - the `Gating` worker must precede any `Augmenting` workers
+    /// Construct an `ExtractChain`. Validates ordering: a non-empty chain
+    /// MUST contain exactly one `Gating` worker, which MUST appear first.
+    /// All other workers MUST be `Augmenting`. The empty chain is allowed.
+    ///
+    /// Returns `Err(ExtractChainBuildError)` if the ordering is invalid.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use cairn_core::contract::llm_provider::LLMProvider;
+    /// use cairn_core::pipeline::extract::ExtractChain;
+    /// use cairn_core::pipeline::extract::llm::LLMExtractor;
+    /// use cairn_core::pipeline::extract::regex::RegexExtractor;
+    ///
+    /// fn build(provider: Arc<dyn LLMProvider>) -> ExtractChain {
+    ///     ExtractChain::new(vec![
+    ///         Box::new(RegexExtractor::builtin()),    // Gating, first
+    ///         Box::new(LLMExtractor::new(provider)),  // Augmenting
+    ///     ]).expect("valid ordering")
+    /// }
+    /// ```
     ///
     /// # Errors
     ///

@@ -30,7 +30,20 @@ pub struct LLMExtractor {
 }
 
 impl LLMExtractor {
-    /// Construct with the LLM-default budget.
+    /// Construct an `LLMExtractor` over the given provider with the
+    /// default LLM budget (`ExtractBudget::llm_default()`).
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use cairn_core::contract::llm_provider::LLMProvider;
+    /// use cairn_core::pipeline::extract::llm::LLMExtractor;
+    ///
+    /// fn build(provider: Arc<dyn LLMProvider>) -> LLMExtractor {
+    ///     LLMExtractor::new(provider)
+    /// }
+    /// ```
     pub fn new(provider: Arc<dyn LLMProvider>) -> Self {
         Self {
             provider,
@@ -38,7 +51,23 @@ impl LLMExtractor {
         }
     }
 
-    /// Override the budget.
+    /// Override the budget. Returns `self` for chaining.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use cairn_core::contract::llm_provider::LLMProvider;
+    /// use cairn_core::pipeline::extract::ExtractBudget;
+    /// use cairn_core::pipeline::extract::llm::LLMExtractor;
+    ///
+    /// fn build(provider: Arc<dyn LLMProvider>) -> LLMExtractor {
+    ///     LLMExtractor::new(provider).with_budget(ExtractBudget {
+    ///         max_wall_ms: 200,
+    ///         ..ExtractBudget::llm_default()
+    ///     })
+    /// }
+    /// ```
     #[must_use]
     pub fn with_budget(mut self, budget: ExtractBudget) -> Self {
         self.budget = budget;
