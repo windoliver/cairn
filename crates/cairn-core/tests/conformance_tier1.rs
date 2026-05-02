@@ -160,6 +160,27 @@ fn tier1_cases_pass_for_well_formed_mcp_server() {
     assert!(ids.contains(&"manifest_features_match_capabilities"));
 }
 
+#[test]
+fn mcp_tool_conformance_stays_pending_without_runtime_check() {
+    let mut reg = PluginRegistry::new();
+    let name = PluginName::new("stub-mcp").expect("valid");
+    let manifest = PluginManifest::parse_toml(MCP_MANIFEST).expect("manifest parses");
+    reg.register_mcp_server_with_manifest(name.clone(), manifest, Arc::new(StubMcpServer))
+        .expect("registers");
+
+    let outcomes = run_conformance_for_plugin(&reg, &name);
+    let tool_case = outcomes
+        .iter()
+        .find(|outcome| outcome.id == "initialize_and_list_tools")
+        .expect("tool conformance case exists");
+
+    assert!(
+        matches!(tool_case.status, CaseStatus::Pending { .. }),
+        "tool conformance needs a real initialize/list-tools check, got {:?}",
+        tool_case.status
+    );
+}
+
 const SENSOR_MANIFEST: &str = r#"
 name = "stub-sensor"
 contract = "SensorIngress"

@@ -83,7 +83,7 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
     let documented_env =
         documented_llm_env_config().context("applying documented LLM environment aliases")?;
 
-    let config: CairnConfig = Figment::new()
+    let mut config: CairnConfig = Figment::new()
         .merge(Serialized::defaults(CairnConfig::default()))
         .merge(Yaml::string(&yaml_content))
         .merge(Env::prefixed("CAIRN_").split("__"))
@@ -91,6 +91,8 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
         .merge(Serialized::globals(cli))
         .extract()
         .context("parsing config")?;
+
+    apply_openai_api_key_for_explicit_intent(&mut config);
 
     config
         .validate()
@@ -167,6 +169,17 @@ fn documented_llm_env_config() -> Result<DocumentedEnvConfig> {
     Ok(DocumentedEnvConfig {
         llm: has_any.then_some(llm),
     })
+}
+
+fn apply_openai_api_key_for_explicit_intent(config: &mut CairnConfig) {
+    if env_value("CAIRN_LLM_API_KEY").is_some() {
+        return;
+    }
+
+    let has_explicit_intent = config.llm.provider.is_some() || config.llm.base_url.is_some();
+    if has_explicit_intent && let Some(api_key) = env_value("OPENAI_API_KEY") {
+        config.llm.api_key = Some(api_key);
+    }
 }
 
 fn env_value(name: &str) -> Option<String> {
