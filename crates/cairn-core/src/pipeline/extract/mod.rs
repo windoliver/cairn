@@ -13,6 +13,7 @@ pub mod body;
 pub mod chain;
 pub mod draft;
 pub mod intent;
+pub mod llm;
 pub mod regex;
 
 pub use body::{
