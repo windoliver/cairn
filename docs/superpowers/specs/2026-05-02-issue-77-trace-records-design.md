@@ -404,28 +404,38 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
     refuse_if_degraded(...)?;
     let events = read_jsonl::<CaptureEvent>(&args.from).await?;  // streaming, bounded buffer
 
-    // Validate the full file *before* writing anything. A malformed event
-    // anywhere in the file aborts the import with no rows persisted.
-    let projected: Vec<(_, _, _)> = events.iter()
-        .map(|event| {
-            event.validate()?;
-            let classified = classify(event)?;
-            Ok((event, classified))
-        })
-        .collect::<Result<_, _>>()?;
-
-    // Group by (session_id, turn_id). Each turn group is one transaction:
-    // either all of its events plus the summary land, or none do. A
-    // mid-import failure for turn N never strands a partial prefix of
-    // turn N's events committed.
-    for (session_id, turn_id, group) in group_by_turn(&projected) {
-        store.transaction(|tx| async move {
+    // Group by (session_id, turn_id). Each turn group is validated and
+    // committed independently — a malformed event in turn 2 does NOT
+    // abort already-validated, committed turn 1. Reasons:
+    //   - large trace batches stay resilient to one bad event;
+    //   - replay with a fixed file finishes the missing turn idempotently;
+    //   - cross-turn coupling is undesirable (the brief treats turns as
+    //     independent units of memory).
+    for (session_id, turn_id, raw_group) in group_by_turn(&events) {
+        // Per-turn validation. Failure leaves earlier turns intact and
+        // surfaces in the response's `failed_turns` list (see below);
+        // it does not poison later turns either.
+        let projected: Result<Vec<_>, _> = raw_group.iter()
+            .map(|event| {
+                event.validate()?;
+                Ok((event, classify(event)?))
+            })
+            .collect();
+        let projected = match projected {
+            Ok(p) => p,
+            Err(e) => { failed_turns.push((session_id, turn_id, e)); continue; }
+        };
+        let group = projected;
+        let result = store.transaction(|tx| async move {
             for (event, classified) in &group {
                 // Inside the tx, build_link's read-max-then-write is
                 // serialized by the WAL state machine (§5.6) — concurrent
                 // writers are sequenced, not racing.
                 let link = build_link(tx, event, *classified).await?;
-                let record = pipeline::capture_trace::project(event, *classified, link)?;
+                let resolved = resolve_body(tx, event).await?; // hash-verified text
+                let record = pipeline::capture_trace::project(
+                    event, *classified, &resolved, link,
+                )?;
                 tx.upsert_trace(record).await?;
             }
             if turn_is_closed(&group) {
@@ -436,9 +446,15 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
                 tx.upsert_trace(summary).await?;
             }
             Ok::<_, TraceError>(())
-        }).await?;
+        }).await;
+        if let Err(e) = result {
+            // Transaction rolled back — entire turn is unwritten.
+            // Continue to the next turn; partial earlier turns stay
+            // committed.
+            failed_turns.push((session_id, turn_id, e));
+        }
     }
-    Ok(success_response(trace_id))
+    Ok(success_response(trace_id, failed_turns))
 }
 ```
 
@@ -468,29 +484,44 @@ reasoning — lives in `sources/<payload_hash>` referenced by every trace
 record's envelope. Leaving those bytes on disk after `forget --session`
 defeats the privacy story.
 
-This PR therefore extends `forget` for trace-backed records:
+**One canonical identity for source blobs: `payload_hash`.** The existing
+`CaptureEvent` carries both `payload_hash` (sha256 of bytes) and
+`payload_ref` (vault-relative path under `sources/`). Refcounting and
+deletion both key on `payload_hash` — never on `payload_ref` — to avoid
+the failure mode where two refs point at the same content and only one
+gets cleaned up.
+
+Concretely:
 
 1. `forget --record <id>` and `forget --session <id>` collect the set of
-   `payload_ref` values from every targeted trace record.
-2. For each `payload_ref`:
-   - If no other (non-forgotten) record still references the same
-     `payload_hash`, the file at `sources/<payload_ref>` is **deleted**.
-   - If another record still references it (e.g., the same prompt was
-     captured twice with different attribution), the file is retained
-     and the consent journal logs the retention reason.
+   `payload_hash` values from every targeted trace record's envelope.
+2. For each `payload_hash`:
+   - Query the records table for any non-forgotten record whose envelope
+     references the same `payload_hash`. If the count is zero, **all**
+     `sources/` files associated with that hash are deleted.
+   - Sources are stored at `sources/<payload_hash>.<ext>` going forward
+     (single canonical path per blob); existing capture-write code
+     already obeys this layout per brief §3. If a legacy record exists
+     where multiple `payload_ref` paths share one hash, all matching
+     paths are deleted in the same step — the index walk is over
+     `payload_hash`, not over `payload_ref`.
+   - If the count is non-zero (the blob is still referenced by a live
+     record — same prompt captured twice with different attribution),
+     the file is retained and the consent journal logs the retention.
 3. The consent journal records, per forgotten record:
    `{record_id, payload_hash, sources_action: "deleted" | "retained-shared"}`
-   so an auditor can verify after the fact whether raw bytes were erased.
-4. `payload_hash` is still retained on the (now redacted) record itself
-   as the audit anchor — the hash alone is not user-recoverable PII; the
-   bytes it pointed to are gone.
+   so an auditor can verify whether raw bytes were erased.
+4. `payload_hash` itself is retained on the (now redacted) record as the
+   audit anchor — the hash alone is not user-recoverable PII; the bytes
+   it pointed to are gone.
 
-Refcount tracking lives in the existing `sources/` index already maintained
-by the capture pipeline (it must be — `payload_ref` deduplication across
-events is brief §3 behavior). This PR only consults it on forget; if the
-existing implementation lacks a refcount, surfacing that gap as a separate
-issue is acceptable, but #77 cannot ship until *some* sources-deletion
-path lands or the issue's privacy acceptance is downgraded.
+Refcount tracking is a SQL `COUNT(*)` over the records table keyed on
+`extra_frontmatter.trace.payload_hash` (or the same field surfaced by an
+extracted virtual column, paralleling §6.1). It does not rely on a
+separate sources-side index. If `payload_ref` is ever observed to deviate
+from `sources/<payload_hash>.<ext>` for an existing record, that's a
+capture-pipeline bug, surfaced as a separate issue; the forget code
+itself stays hash-keyed.
 
 ### 8.2 Other concerns
 
@@ -538,10 +569,11 @@ adjustment is needed, that's a finding, not planned work.
   `TraceLinkOrphan`; the entire turn rolls back.
 - **Tool-call-id mismatch rejected**: a `tool_output` whose
   `tool_call_id` differs from its parent's returns `TraceLinkOrphan`.
-- **Forget deletes sources**: `forget --session <id>` removes
-  `sources/<payload_ref>` for every trace record where no other live
-  record references the same `payload_hash`. Asserts file removal +
-  consent journal entries `{deleted, retained-shared}`.
+- **Forget deletes sources by hash**: `forget --session <id>` deletes
+  every `sources/<payload_hash>.<ext>` whose `payload_hash` is no
+  longer referenced by any live record. Asserts file removal even
+  when the original `payload_ref` differed across records that shared
+  the same hash. Consent journal records `{deleted, retained-shared}`.
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
