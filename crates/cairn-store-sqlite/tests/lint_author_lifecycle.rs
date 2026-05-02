@@ -214,6 +214,9 @@ async fn scan_vault(
                     revoked_at: rec
                         .revoked_at
                         .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+                    purge_requested_at: rec
+                        .purge_requested_at
+                        .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
                     purged_at: rec
                         .purged_at
                         .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
@@ -449,6 +452,9 @@ async fn prefetch_author_states(
                     .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
                 revoked_at: rec
                     .revoked_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
+                purge_requested_at: rec
+                    .purge_requested_at
                     .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok()),
                 purged_at: rec
                     .purged_at

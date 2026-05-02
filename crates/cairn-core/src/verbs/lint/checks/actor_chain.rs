@@ -243,6 +243,7 @@ mod tests {
                 // check trivially holds for the sample record.
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
                 revoked_at: None,
+                purge_requested_at: None,
                 purged_at: None,
             },
         );
@@ -282,6 +283,7 @@ mod tests {
                 // revocation → Warning per round-6 policy (chain.at
                 // unauthenticated, but visible audit signal).
                 revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
+                purge_requested_at: None,
                 purged_at: None,
             },
         );
@@ -329,6 +331,7 @@ mod tests {
                 // here to keep the test asserting the in-flight
                 // suspicious-write path.
                 revoked_at: Some(Rfc3339Timestamp::parse("2000-01-02T00:00:00Z").expect("valid")),
+                purge_requested_at: None,
                 purged_at: None,
             },
         );

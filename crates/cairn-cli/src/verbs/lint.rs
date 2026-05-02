@@ -591,6 +591,9 @@ async fn prefetch_author_states(
                 let revoked_at = rec
                     .revoked_at
                     .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+                let purge_requested_at = rec
+                    .purge_requested_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
                 let purged_at = rec
                     .purged_at
                     .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
@@ -600,6 +603,7 @@ async fn prefetch_author_states(
                         state: rec.provisioning_state,
                         activated_at,
                         revoked_at,
+                        purge_requested_at,
                         purged_at,
                     },
                 );
