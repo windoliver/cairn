@@ -455,7 +455,7 @@ async fn prefetch_author_states(
 }
 
 #[tokio::test]
-async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
+async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     use cairn_core::config::CairnConfig;
     use cairn_core::contract::memory_store::IndexStats;
     use cairn_core::generated::verbs::lint::{Kind, Severity};
@@ -495,25 +495,26 @@ async fn run_checks_emits_broken_actor_chain_error_for_revoked_author() {
 
     let data = run_checks(&inputs);
 
-    // Round-5 fix: every revocation-related verdict gates as Error
-    // until P1 ships cryptographic verification — chain.at is
-    // unauthenticated at P0 so the pre-revocation downgrade can't
-    // depend on it. Remediation still steers operators away from
-    // destructive cleanup (records signed pre-revocation under a
-    // verified key remain legitimate).
-    let chain_errors: Vec<_> = data
+    // Round-6 resolution: chain.at-derived verdicts (Revoked,
+    // PostRevocationWrite, PreActivationWrite) gate as Warning at P0
+    // because chain.at is unauthenticated. Routine
+    // offboarding/key-rotation must not retroactively flip every
+    // historical record into a blocking failure. Remediation still
+    // steers operators away from destructive cleanup (records signed
+    // pre-revocation under a verified key remain legitimate).
+    let chain_warnings: Vec<_> = data
         .findings
         .iter()
         .filter(|f| {
-            matches!(f.kind, Kind::BrokenActorChain) && matches!(f.severity, Severity::Error)
+            matches!(f.kind, Kind::BrokenActorChain) && matches!(f.severity, Severity::Warning)
         })
         .collect();
     assert_eq!(
-        chain_errors.len(),
+        chain_warnings.len(),
         1,
-        "expected exactly one BrokenActorChain error: {data:?}"
+        "expected exactly one BrokenActorChain warning: {data:?}"
     );
-    let f = chain_errors[0];
+    let f = chain_warnings[0];
     assert!(f.target.is_some(), "finding must carry a record-id target");
     assert_eq!(f.tracking_issue, Some(256));
     assert!(f.suggested_fix.is_some());

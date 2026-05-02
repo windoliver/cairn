@@ -76,11 +76,14 @@ pub enum ChainStatus {
     Revoked,
     /// Author identity is in a *terminal* revocation / purge state
     /// **and** the chain author timestamp is at-or-after `revoked_at`.
-    /// The record was signed under a key whose signing right had
-    /// already been withdrawn — a real trust violation. Surfaces at
-    /// `Severity::Error`. Maps to brief §1223 `revoked` but split out
-    /// from the legitimate-history case so the operator-blocking
-    /// signal is not diluted.
+    /// Diagnostic value: this is the suspicious-write shape under
+    /// authenticated chain.at. Surfaces at `Severity::Warning` at P0
+    /// because chain.at is unauthenticated (an at-rest tamper could
+    /// move the timestamp either direction), so this status cannot
+    /// independently prove a trust violation; once P1 ships signature
+    /// verification it becomes authenticated evidence and may
+    /// escalate. Maps to brief §1223 `revoked` but split out from the
+    /// pre-revocation-history shape for diagnostic richness.
     PostRevocationWrite,
     /// Author identity is in an *in-flight* revocation / purge
     /// transition (`RevokePending` or `PurgePending`). A record
@@ -95,6 +98,15 @@ pub enum ChainStatus {
     /// terminal revocation so the operator-blocking signal is not
     /// diluted.
     RevocationInFlight,
+    /// Author identity is `Active` now but the chain author timestamp
+    /// is *before* `activated_at`. The verdict depends on
+    /// unauthenticated `actor_chain.author.at`, so at P0 it surfaces
+    /// at `Severity::Warning` rather than `Error` — once P1 ships
+    /// signature verification + `key_version` persistence, chain.at is
+    /// authenticated and this can escalate. Split out from
+    /// `Malformed` so chain-shape and registry-corruption Errors
+    /// remain unambiguous.
+    PreActivationWrite,
     /// At-rest verification cannot establish the issuer:
     ///
     /// - the `actor_chain` lacks an `Author` entry, has more than one,
@@ -103,10 +115,6 @@ pub enum ChainStatus {
     /// - the author identity is `Pending` (provisioning never
     ///   completed, so the issuer never had authoritative signing
     ///   right);
-    /// - the author identity is `Active` but the chain author
-    ///   timestamp is *before* `activated_at` — a write that landed
-    ///   while the identity had no authoritative signing right, the
-    ///   pre-activation tamper case; or
     /// - the author identity is not in the `IdentityRegistry`.
     ///
     /// Maps to brief §1223 `broken`. Failing closed here keeps tampered
@@ -321,9 +329,9 @@ fn classify_resolved(
                 && chain_at.cmp_chronological(activated_at) == Ordering::Less
             {
                 return Some((
-                    ChainStatus::Malformed,
+                    ChainStatus::PreActivationWrite,
                     format!(
-                        "author identity `{}` is `Active` now but the chain author timestamp ({}) is before `activated_at` ({}) — pre-activation write under an issuer that did not yet have authoritative signing right",
+                        "author identity `{}` is `Active` now but the chain author timestamp ({}) is before `activated_at` ({}) — chain.at-derived pre-activation shape (unauthenticated at P0; P1 escalates)",
                         author.as_str(),
                         chain_at,
                         activated_at,
@@ -530,11 +538,12 @@ mod tests {
     }
 
     #[test]
-    fn pre_activation_write_under_active_identity_is_flagged_as_malformed() {
-        // Round-9 fix: even when current state is Active, a chain
-        // author timestamp before `activated_at` proves the write
-        // landed while the issuer had no authoritative signing right.
-        // This is the "becomes clean once activated" gap.
+    fn pre_activation_write_under_active_identity_is_flagged_as_pre_activation_write() {
+        // Round-6 resolution: this status is chain.at-derived, so it
+        // surfaces with the dedicated `PreActivationWrite` variant
+        // (Severity::Warning at P0; Error once P1 authenticates the
+        // timestamp). Distinct from chain-shape Malformed so the
+        // chain-shape Errors stay unambiguous.
         let record = record_with_active_author(); // chain `at` = 2026-04-22T14:02:11Z
         let finding = check_author_lifecycle(
             &record,
@@ -545,7 +554,7 @@ mod tests {
             ),
         )
         .expect("pre-activation write must surface");
-        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert_eq!(finding.status, ChainStatus::PreActivationWrite);
         assert!(finding.message.contains("pre-activation"));
     }
 
