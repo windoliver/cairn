@@ -814,6 +814,9 @@ mod tests {
         let budget = ExtractBudget {
             max_wall_ms: 100,
             max_drafts: 3,
+            max_prompt_bytes: None,
+            max_prompt_tokens: None,
+            max_response_tokens: None,
         };
         let body_text = (0..20)
             .map(|i| format!("remember thing {i}"))
@@ -865,6 +868,9 @@ mod tests {
         let budget = ExtractBudget {
             max_wall_ms: 100,
             max_drafts: 3,
+            max_prompt_bytes: None,
+            max_prompt_tokens: None,
+            max_response_tokens: None,
         };
         let event = make_event(CapturePayload::Hook {
             hook_name: "PostToolUse".to_owned(),
@@ -920,6 +926,9 @@ mod tests {
         let budget = ExtractBudget {
             max_wall_ms: 100,
             max_drafts: 3,
+            max_prompt_bytes: None,
+            max_prompt_tokens: None,
+            max_response_tokens: None,
         };
         let event = make_event(CapturePayload::Hook {
             hook_name: "UserPromptSubmit".to_owned(),

@@ -66,6 +66,15 @@ pub struct ExtractBudget {
     /// need a hard total-output bound must apply it at the chain
     /// dispatcher above this extractor.
     pub max_drafts: u16,
+    /// Maximum input prompt size in bytes. Local DoS guard, rejected
+    /// before provider call.
+    pub max_prompt_bytes: Option<u32>,
+    /// Maximum input prompt tokens (provider-side hint, passed via
+    /// `CompletionRequest.budget`).
+    pub max_prompt_tokens: Option<u32>,
+    /// Maximum response tokens (provider-side hint, passed via
+    /// `CompletionRequest.budget`).
+    pub max_response_tokens: Option<u32>,
 }
 
 impl ExtractBudget {
@@ -75,6 +84,21 @@ impl ExtractBudget {
         Self {
             max_wall_ms: MAX_PHASE_A_WALL_MS,
             max_drafts: 16,
+            max_prompt_bytes: None,
+            max_prompt_tokens: None,
+            max_response_tokens: None,
+        }
+    }
+
+    /// Default budget for `LLMExtractor`.
+    #[must_use]
+    pub const fn llm_default() -> Self {
+        Self {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: Some(64 * 1024),
+            max_prompt_tokens: Some(2000),
+            max_response_tokens: Some(1500),
         }
     }
 }
@@ -272,5 +296,23 @@ mod mod_tests {
     #[test]
     fn confidence_gate_constant_is_zero_point_nine() {
         assert!((CONFIDENCE_GATE_FOR_SUPPRESSION - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn llm_default_budget_matches_spec() {
+        let b = ExtractBudget::llm_default();
+        assert_eq!(b.max_wall_ms, 500);
+        assert_eq!(b.max_drafts, 16);
+        assert_eq!(b.max_prompt_bytes, Some(64 * 1024));
+        assert_eq!(b.max_prompt_tokens, Some(2000));
+        assert_eq!(b.max_response_tokens, Some(1500));
+    }
+
+    #[test]
+    fn regex_default_budget_keeps_token_fields_none() {
+        let b = ExtractBudget::regex_default();
+        assert!(b.max_prompt_bytes.is_none());
+        assert!(b.max_prompt_tokens.is_none());
+        assert!(b.max_response_tokens.is_none());
     }
 }
