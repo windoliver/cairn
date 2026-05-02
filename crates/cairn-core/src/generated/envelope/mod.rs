@@ -464,11 +464,14 @@ impl<'de> ::serde::Deserialize<'de> for SignedIntent {
     }
 }
 
-/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars
-/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).
+/// Return true iff `s` is a valid 128-bit Crockford base32 ULID — exactly 26
+/// chars, first char `0..=7`, then the alphabet
+/// `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).
 fn is_ulid_shape(s: &str) -> bool {
     if s.len() != 26 { return false; }
-    s.bytes().all(|b| matches!(b,
+    let bytes = s.as_bytes();
+    if !matches!(bytes[0], b'0'..=b'7') { return false; }
+    bytes[1..].iter().all(|b| matches!(b,
         b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'
     ))
 }

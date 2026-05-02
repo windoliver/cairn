@@ -1,7 +1,7 @@
 //! Integration tests for the cairn-cli config loader (brief §3.1, §6.5).
 
 use cairn_cli::config::{CliOverrides, load, write_default};
-use cairn_core::config::{CairnConfig, StoreKind};
+use cairn_core::config::{CairnConfig, LlmProvider, StoreKind};
 
 fn write_yaml(vault: &std::path::Path, content: &str) {
     let dir = vault.join(".cairn");
@@ -9,13 +9,34 @@ fn write_yaml(vault: &std::path::Path, content: &str) {
     std::fs::write(dir.join("config.yaml"), content).unwrap();
 }
 
+fn with_clean_llm_env<R>(overrides: &[(&str, Option<&str>)], f: impl FnOnce() -> R) -> R {
+    let mut vars = vec![
+        ("CAIRN_LLM_PROVIDER", None),
+        ("CAIRN_LLM_BASE_URL", None),
+        ("CAIRN_LLM_MODEL", None),
+        ("CAIRN_LLM_API_KEY", None),
+        ("CAIRN_LLM__PROVIDER", None),
+        ("CAIRN_LLM__BASE_URL", None),
+        ("CAIRN_LLM__MODEL", None),
+        ("CAIRN_LLM__API_KEY", None),
+        ("OPENAI_BASE_URL", None),
+        ("OPENAI_API_BASE", None),
+        ("OPENAI_API_KEY", None),
+        ("OLLAMA_HOST", None),
+    ];
+    vars.extend_from_slice(overrides);
+    temp_env::with_vars(vars, f)
+}
+
 // ── Loader ────────────────────────────────────────────────────────────────
 
 #[test]
 fn absent_config_file_gives_default() {
     let dir = tempfile::tempdir().unwrap();
-    let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(config, CairnConfig::default());
+    with_clean_llm_env(&[], || {
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config, CairnConfig::default());
+    });
 }
 
 #[test]
@@ -37,11 +58,13 @@ fn env_var_interpolation_sets_api_key() {
         dir.path(),
         "llm:\n  provider: openai-compatible\n  api_key: ${HOME}\n",
     );
-    let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(
-        config.llm.api_key,
-        Some(std::env::var("HOME").expect("HOME must be set in test environment"))
-    );
+    with_clean_llm_env(&[], || {
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(
+            config.llm.api_key,
+            Some(std::env::var("HOME").expect("HOME must be set in test environment"))
+        );
+    });
 }
 
 #[test]
@@ -73,6 +96,63 @@ fn cairn_env_override_wins_over_file() {
 }
 
 #[test]
+fn documented_flat_cairn_llm_env_vars_are_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    with_clean_llm_env(
+        &[
+            ("CAIRN_LLM_PROVIDER", Some("openai-compatible")),
+            ("CAIRN_LLM_BASE_URL", Some("http://localhost:11434/v1")),
+            ("CAIRN_LLM_MODEL", Some("llama3.2")),
+            ("CAIRN_LLM_API_KEY", Some("ollama")),
+        ],
+        || {
+            let config = load(dir.path(), &CliOverrides::default()).unwrap();
+            assert_eq!(config.llm.provider, Some(LlmProvider::OpenaiCompatible));
+            assert_eq!(
+                config.llm.base_url.as_deref(),
+                Some("http://localhost:11434/v1")
+            );
+            assert_eq!(config.llm.model.as_deref(), Some("llama3.2"));
+            assert_eq!(config.llm.api_key.as_deref(), Some("ollama"));
+        },
+    );
+}
+
+#[test]
+fn documented_openai_base_env_vars_are_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    with_clean_llm_env(
+        &[
+            ("OPENAI_API_BASE", Some("https://legacy.example/v1")),
+            ("OPENAI_BASE_URL", Some("https://openai.example/v1")),
+            ("OPENAI_API_KEY", Some("sk-test")),
+        ],
+        || {
+            let config = load(dir.path(), &CliOverrides::default()).unwrap();
+            assert_eq!(config.llm.provider, Some(LlmProvider::OpenaiCompatible));
+            assert_eq!(
+                config.llm.base_url.as_deref(),
+                Some("https://openai.example/v1")
+            );
+            assert_eq!(config.llm.api_key.as_deref(), Some("sk-test"));
+        },
+    );
+}
+
+#[test]
+fn documented_ollama_host_env_var_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    with_clean_llm_env(&[("OLLAMA_HOST", Some("localhost:11434"))], || {
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config.llm.provider, Some(LlmProvider::OpenaiCompatible));
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+    });
+}
+
+#[test]
 fn invalid_config_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     // zero budget is invalid
@@ -98,8 +178,10 @@ fn bootstrap_writes_config_file() {
 fn bootstrap_round_trips_to_default() {
     let dir = tempfile::tempdir().unwrap();
     write_default(dir.path()).unwrap();
-    let config = load(dir.path(), &CliOverrides::default()).unwrap();
-    assert_eq!(config, CairnConfig::default());
+    with_clean_llm_env(&[], || {
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config, CairnConfig::default());
+    });
 }
 
 #[test]

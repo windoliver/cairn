@@ -362,12 +362,20 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
     match name {
         "Ulid" => {
             // Crockford base32, 26 chars, alphabet [0-9A-HJKMNP-TV-Z].
+            // ULID is a 128-bit value; 26 base32 chars can encode 130 bits, so
+            // the first character is capped at 7 to reject overflow values.
             // Error messages keep the uppercase "ULID" tag so callers
             // grepping for the IDL primitive name see a consistent token
             // across every call site (SignedIntent's bespoke check uses the
             // same wording — see write_signed_intent_extra_checks).
             w.line("if s.len() != 26 { return Err(::serde::de::Error::custom(\"ULID: must be 26 chars\")); }");
-            w.line("if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
+            w.line("let bytes = s.as_bytes();");
+            w.line("if !matches!(bytes[0], b'0'..=b'7') {");
+            w.indent();
+            w.line("return Err(::serde::de::Error::custom(\"ULID: first char must be 0..=7 to fit 128-bit ULID\"));");
+            w.dedent();
+            w.line("}");
+            w.line("if !bytes[1..].iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {");
             w.indent();
             w.line("return Err(::serde::de::Error::custom(\"ULID: must be Crockford base32 (uppercase, no I/L/O/U)\"));");
             w.dedent();
@@ -2638,12 +2646,15 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
 /// hand-rolled byte-level checks so we don't have to pull `regex` into
 /// `cairn-core`. Emitted once at module scope.
 fn write_ulid_shape_helper(w: &mut RustWriter) {
-    w.line("/// Return true iff `s` is a valid Crockford base32 ULID — exactly 26 chars");
-    w.line("/// from the alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
+    w.line("/// Return true iff `s` is a valid 128-bit Crockford base32 ULID — exactly 26");
+    w.line("/// chars, first char `0..=7`, then the alphabet");
+    w.line("/// `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no I, L, O, U).");
     w.line("fn is_ulid_shape(s: &str) -> bool {");
     w.indent();
     w.line("if s.len() != 26 { return false; }");
-    w.line("s.bytes().all(|b| matches!(b,");
+    w.line("let bytes = s.as_bytes();");
+    w.line("if !matches!(bytes[0], b'0'..=b'7') { return false; }");
+    w.line("bytes[1..].iter().all(|b| matches!(b,");
     w.indent();
     w.line("b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z'");
     w.dedent();

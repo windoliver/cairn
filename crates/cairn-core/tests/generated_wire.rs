@@ -202,6 +202,20 @@ fn signed_intent_rejects_malformed_operation_id() {
 }
 
 #[test]
+fn signed_intent_rejects_overflow_operation_id() {
+    let mut m = signed_intent_minimum();
+    m.insert(
+        "operation_id".into(),
+        serde_json::json!("81ARZ3NDEKTSV4RRFFQ69G5FAV"),
+    );
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_malformed_chain_parent_ulid() {
     let mut m = signed_intent_minimum();
     m.insert(
@@ -1877,6 +1891,16 @@ fn retrieve_record_rejects_lowercase_ulid() {
     assert!(
         err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
         "expected lowercase-ULID rejection, got: {err}"
+    );
+}
+
+#[test]
+fn retrieve_record_rejects_overflow_ulid_first_char() {
+    let json = serde_json::json!({"target": "record", "id": "81ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    let err = serde_json::from_value::<RetrieveArgs>(json).unwrap_err();
+    assert!(
+        err.to_string().contains("ULID") || err.to_string().contains("Crockford"),
+        "expected overflow ULID rejection, got: {err}"
     );
 }
 

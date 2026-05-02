@@ -2,9 +2,10 @@
 //!
 //! Precedence (highest to lowest):
 //! 1. `CliOverrides` (parsed CLI flags / env forwarded by the verb layer)
-//! 2. `CAIRN_*` environment variables (double-underscore nested keys)
-//! 3. `.cairn/config.yaml` with `${VAR}` interpolation
-//! 4. `CairnConfig::default()` (P0 offline-local deployment)
+//! 2. Documented LLM environment aliases (`CAIRN_LLM_PROVIDER`, `OLLAMA_HOST`, etc.)
+//! 3. `CAIRN_*` environment variables (double-underscore nested keys)
+//! 4. `.cairn/config.yaml` with `${VAR}` interpolation
+//! 5. `CairnConfig::default()` (P0 offline-local deployment)
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -13,7 +14,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use cairn_core::config::{CairnConfig, ConfigError};
+use cairn_core::config::{CairnConfig, ConfigError, LlmProvider};
 
 /// CLI-layer overrides. Sparse at P0 — extended as verbs land.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,10 +80,14 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
         String::new()
     };
 
+    let documented_env =
+        documented_llm_env_config().context("applying documented LLM environment aliases")?;
+
     let config: CairnConfig = Figment::new()
         .merge(Serialized::defaults(CairnConfig::default()))
         .merge(Yaml::string(&yaml_content))
         .merge(Env::prefixed("CAIRN_").split("__"))
+        .merge(Serialized::globals(documented_env))
         .merge(Serialized::globals(cli))
         .extract()
         .context("parsing config")?;
@@ -93,6 +98,102 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
         .context("validating config")?;
 
     Ok(config)
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct DocumentedEnvConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm: Option<DocumentedLlmEnvConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct DocumentedLlmEnvConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<LlmProvider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
+}
+
+fn documented_llm_env_config() -> Result<DocumentedEnvConfig> {
+    let mut llm = DocumentedLlmEnvConfig::default();
+
+    if let Some(provider) = env_value("CAIRN_LLM_PROVIDER") {
+        llm.provider = Some(parse_documented_llm_provider(&provider)?);
+    }
+
+    let endpoint_from_env = if let Some(base_url) = env_value("CAIRN_LLM_BASE_URL") {
+        llm.base_url = Some(base_url);
+        true
+    } else if let Some(base_url) = env_value("OPENAI_BASE_URL") {
+        llm.base_url = Some(base_url);
+        llm.provider = Some(LlmProvider::OpenaiCompatible);
+        true
+    } else if let Some(base_url) = env_value("OPENAI_API_BASE") {
+        llm.base_url = Some(base_url);
+        llm.provider = Some(LlmProvider::OpenaiCompatible);
+        true
+    } else if let Some(host) = env_value("OLLAMA_HOST") {
+        llm.base_url = Some(ollama_host_to_openai_base_url(&host));
+        llm.provider = Some(LlmProvider::OpenaiCompatible);
+        true
+    } else {
+        false
+    };
+
+    if let Some(model) = env_value("CAIRN_LLM_MODEL") {
+        llm.model = Some(model);
+    }
+
+    if let Some(api_key) = env_value("CAIRN_LLM_API_KEY") {
+        llm.api_key = Some(api_key);
+    } else if (endpoint_from_env || llm.provider.is_some())
+        && let Some(api_key) = env_value("OPENAI_API_KEY")
+    {
+        llm.api_key = Some(api_key);
+    }
+
+    if endpoint_from_env && llm.provider.is_none() {
+        llm.provider = Some(LlmProvider::OpenaiCompatible);
+    }
+
+    let has_any = llm.provider.is_some()
+        || llm.base_url.is_some()
+        || llm.model.is_some()
+        || llm.api_key.is_some();
+    Ok(DocumentedEnvConfig {
+        llm: has_any.then_some(llm),
+    })
+}
+
+fn env_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn parse_documented_llm_provider(raw: &str) -> Result<LlmProvider> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai-compatible" | "ollama" => Ok(LlmProvider::OpenaiCompatible),
+        other => anyhow::bail!(
+            "unsupported CAIRN_LLM_PROVIDER {other:?}; expected openai-compatible or ollama"
+        ),
+    }
+}
+
+fn ollama_host_to_openai_base_url(raw: &str) -> String {
+    let host = raw.trim().trim_end_matches('/');
+    let base = if host.starts_with("http://") || host.starts_with("https://") {
+        host.to_owned()
+    } else {
+        format!("http://{host}")
+    };
+    if base.ends_with("/v1") {
+        base
+    } else {
+        format!("{base}/v1")
+    }
 }
 
 /// Write the serialized default config to `<vault_path>/.cairn/config.yaml`.

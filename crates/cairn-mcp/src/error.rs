@@ -13,6 +13,10 @@ pub enum McpTransportError {
     #[error("MCP stdio server failed to initialize: {0}")]
     Initialize(String),
 
+    /// `rmcp` service setup or serving failed.
+    #[error("MCP stdio service error: {0}")]
+    Service(String),
+
     /// IO error on the underlying stdio transport.
     #[error("stdio IO error: {0}")]
     Io(#[from] std::io::Error),
