@@ -221,8 +221,25 @@ impl ExtractChain {
                 Ok(r) => {
                     // Validate every output against current eligibility;
                     // drop any output whose source_span falls outside.
+                    //
+                    // Trust-boundary rule for Augmenting workers: text-derived
+                    // outputs (Draft, Forget) MUST carry a concrete source_span.
+                    // A None provenance from an Augmenting worker bypasses the
+                    // eligibility fence — record a WorkerFailure and drop.
+                    // Gating workers may keep the existing None-tolerated semantics.
                     for out in r.outputs {
-                        if span_in_eligibility(out.source_span(), &eligible) {
+                        if w.role() == WorkerRole::Augmenting && out.source_span().is_none() {
+                            tracing::warn!(
+                                worker = w.name(),
+                                "chain: augmenting worker emitted output with None source_span; \
+                                 dropping and recording failure (trust-boundary bypass)"
+                            );
+                            failures.push(WorkerFailure {
+                                worker: w.name(),
+                                role: WorkerRole::Augmenting,
+                                error: ExtractError::SpanOutOfBounds { worker: w.name() },
+                            });
+                        } else if span_in_eligibility(out.source_span(), &eligible) {
                             outputs.push(out);
                         } else {
                             tracing::warn!(
@@ -339,7 +356,11 @@ impl ExtractChain {
 
 /// Returns `true` when `span` falls within at least one of the
 /// `eligible` ranges. `None` source spans (hook/tool-frame events
-/// without text provenance) are always considered in-eligibility.
+/// without text provenance) are always considered in-eligibility for
+/// `Gating` workers. **Callers must apply the role-aware None check
+/// before calling this for `Augmenting` workers** — a `None` span from
+/// an `Augmenting` worker is a trust-boundary bypass and is handled by
+/// the caller before reaching this function.
 fn span_in_eligibility(span: Option<TextSpan>, eligible: &[TextSpan]) -> bool {
     match span {
         None => true,
@@ -1467,6 +1488,89 @@ mod tests {
             res.discards
         );
         assert_eq!(res.discards[0].source_span, TextSpan::new(2, 8));
+    }
+
+    // ── Regression: Finding 1 (adversarial review round 3) — None provenance bypasses eligibility ──
+
+    /// Augmenting worker that emits a `Draft` with `source_span: None`.
+    struct NoneProvenanceAug;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for NoneProvenanceAug {
+        fn name(&self) -> &'static str {
+            "none_provenance_aug"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            use crate::domain::CaptureEventId;
+            use crate::domain::taxonomy::MemoryKind;
+            use crate::pipeline::extract::draft::{Confidence, KindHint, MemoryDraft};
+            Ok(ExtractResult {
+                outputs: vec![ExtractOutput::Draft(MemoryDraft {
+                    kind_hint: KindHint::from(MemoryKind::User),
+                    body: "should be dropped".to_owned(),
+                    confidence: Confidence::try_from(0.9_f32).expect("valid"),
+                    source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                        .expect("valid ulid"),
+                    // None provenance: the trust-boundary bypass attempt.
+                    source_span: None,
+                    trigger_id: None,
+                })],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn augmenting_worker_with_none_provenance_is_dropped() {
+        // Regression for adversarial-review Finding 1 (round 3): an
+        // Augmenting worker that emits a Draft with `source_span: None`
+        // must NOT appear in `result.outputs` — the None span is a
+        // trust-boundary bypass attempt that escapes the eligibility gate.
+        // The chain must drop the output and record a WorkerFailure instead.
+        let chain = ExtractChain::new(vec![Box::new(PassthroughGate), Box::new(NoneProvenanceAug)])
+            .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: vec![TextSpan::new(0, 20)],
+        };
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        assert!(
+            res.outputs.is_empty(),
+            "None-provenance draft from Augmenting worker must NOT appear in outputs; got: {:?}",
+            res.outputs
+        );
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "chain must record a WorkerFailure for the None-provenance drop; got: {:?}",
+            res.failures
+        );
+        assert_eq!(res.failures[0].role, WorkerRole::Augmenting);
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::SpanOutOfBounds {
+                    worker: "none_provenance_aug"
+                }
+            ),
+            "unexpected error variant: {:?}",
+            res.failures[0].error
+        );
     }
 
     // ── Regression: Finding 2 (adversarial review round 2) — augmenters narrow eligibility ──
