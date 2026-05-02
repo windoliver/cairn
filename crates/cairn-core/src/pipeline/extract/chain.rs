@@ -869,4 +869,320 @@ mod tests {
             "augmenter should have received empty eligible_spans, got {received_spans:?}"
         );
     }
+
+    // ── Task 11: regex→LLM chain integration tests ────────────────────────────
+
+    use crate::contract::llm_provider::{CompletionOutput, LlmError};
+    use crate::pipeline::extract::llm::{LLMExtractor, test_support::StubProvider};
+    use crate::pipeline::extract::regex::RegexExtractor;
+
+    /// Build a `CapturePayload::Cli` event (needed for `RegexExtractor` + LLM).
+    fn fixture_cli_event() -> crate::domain::CaptureEvent {
+        use crate::domain::{
+            ActorChainEntry, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, ChainRole,
+            Identity, PayloadHash, Rfc3339Timestamp,
+        };
+        let payload = CapturePayload::Cli {
+            kind_hint: "user".to_owned(),
+        };
+        let source_family = payload.source_family();
+        let ts = Rfc3339Timestamp::parse("2026-01-01T00:00:00Z").expect("valid ts");
+        let sensor = Identity::parse("snr:local:hook:test:v1").expect("valid sensor");
+        crate::domain::CaptureEvent {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: ts.clone(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some("sess-test".into()),
+                turn_id: None,
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(format!("sha256:{}", "ab".repeat(32)))
+                .expect("valid hash"),
+            payload_ref: "sources/cli/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
+            captured_at: ts,
+            payload,
+            source_family,
+        }
+    }
+
+    /// Build an `ExtractInput` from a Cli event + body text.
+    fn make_cli_input<'a>(
+        event: &'a crate::domain::CaptureEvent,
+        body: &'a str,
+    ) -> ExtractInput<'a> {
+        use crate::pipeline::extract::body::{ResolvedBody, UserIngestPayloadKind};
+        let resolved =
+            ResolvedBody::from_user_ingest(body, &event.payload, UserIngestPayloadKind::Cli)
+                .expect("Cli payload matches");
+        ExtractInput {
+            event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![],
+        }
+    }
+
+    /// End-to-end: `RegexExtractor` (gating) runs on plain prose and hands
+    /// the LLM-eligible spans to the `LLMExtractor` (augmenting). The prose
+    /// does not trigger any regex rule, so regex emits no draft but passes
+    /// the whole body as LLM-eligible. The LLM emits one draft.
+    #[tokio::test]
+    async fn regex_then_llm_chain_runs_end_to_end() {
+        let body = "user prefers tabs over spaces in their editor today";
+
+        let provider =
+            StubProvider::with_responses(vec![Ok(CompletionOutput::Json(serde_json::json!({
+                "items": [{
+                    "type": "draft",
+                    "kind": "user",
+                    "body": "tabs preferred",
+                    "confidence": 0.9,
+                    "source": {
+                        "region_id": 0,
+                        "text_excerpt": "user prefers tabs over spaces"
+                    }
+                }]
+            })))]);
+
+        let chain = ExtractChain::new(vec![
+            Box::new(RegexExtractor::builtin()),
+            Box::new(LLMExtractor::new(provider)),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_cli_event();
+        let input = make_cli_input(&event, body);
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        // Regex emits 0 drafts (plain prose, no triggers), LLM emits 1.
+        assert_eq!(
+            res.outputs.len(),
+            1,
+            "regex emits 0, llm emits 1; got: {:?}",
+            res.outputs
+        );
+        assert!(res.failures.is_empty(), "no failures expected");
+    }
+
+    /// Provider that records every prompt it receives; returns empty `items`.
+    struct RecordingProvider {
+        prompts: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::contract::llm_provider::LLMProvider for RecordingProvider {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn capabilities(&self) -> &crate::contract::llm_provider::LLMProviderCapabilities {
+            static CAPS: crate::contract::llm_provider::LLMProviderCapabilities =
+                crate::contract::llm_provider::LLMProviderCapabilities {
+                    json_mode: true,
+                    streaming: false,
+                    tool_calls: false,
+                };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+            use crate::contract::version::{ContractVersion, VersionRange};
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(
+            &self,
+            req: &crate::contract::llm_provider::CompletionRequest,
+        ) -> Result<
+            crate::contract::llm_provider::CompletionOutput,
+            crate::contract::llm_provider::LlmError,
+        > {
+            self.prompts
+                .lock()
+                .expect("mutex not poisoned")
+                .push(req.prompt.clone());
+            Ok(crate::contract::llm_provider::CompletionOutput::Json(
+                serde_json::json!({ "items": [] }),
+            ))
+        }
+    }
+
+    /// Gate that narrows eligibility to bytes `20..40` only.
+    struct NarrowingGateForChain;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for NarrowingGateForChain {
+        fn name(&self) -> &'static str {
+            "narrowing_gate_for_chain"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> crate::pipeline::extract::ExtractBudget {
+            crate::pipeline::extract::ExtractBudget::regex_default()
+        }
+
+        async fn extract(
+            &self,
+            _: &ExtractInput<'_>,
+        ) -> Result<crate::pipeline::extract::ExtractResult, ExtractError> {
+            Ok(crate::pipeline::extract::ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![TextSpan::new(20, 40)],
+            })
+        }
+    }
+
+    /// Verifies that eligibility narrowing from the gating worker is
+    /// correctly threaded into the `LLMExtractor`.  We use a
+    /// `NarrowingGate` stub (deterministic, offset-exact) instead of the
+    /// real `RegexExtractor` so the test is independent of phrase-window
+    /// heuristics.  A recording provider captures the prompt; we verify
+    /// the prompt contains only bytes from within the narrowed window.
+    #[tokio::test]
+    async fn narrowing_gate_restricts_llm_prompt_to_eligible_slice() {
+        // Body laid out so we can check which slice the LLM received.
+        // Positions: 0..20 = "OUTSIDE_BEFORE_____" (19 chars + space)
+        //            20..40 = "INSIDE_NARROWED____" (19 chars + space)
+        //            40..58 = "OUTSIDE_AFTER_____"
+        let body = "OUTSIDE_BEFORE_____ INSIDE_NARROWED____ OUTSIDE_AFTER_____";
+        // Make sure slice [20..40] actually contains the markers we assert
+        // on (ignoring trailing space at pos 39).
+        assert!(
+            body.get(20..39)
+                .is_some_and(|s| s.starts_with("INSIDE_NARROWED")),
+            "test body layout changed; adjust offsets"
+        );
+
+        let recording_provider = Arc::new(RecordingProvider {
+            prompts: Mutex::new(vec![]),
+        });
+
+        let chain = ExtractChain::new(vec![
+            Box::new(NarrowingGateForChain),
+            Box::new(LLMExtractor::new(recording_provider.clone())),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_cli_event();
+        let input = make_cli_input(&event, body);
+        let _ = chain.run(&input).await.expect("chain ok");
+
+        let prompts = recording_provider
+            .prompts
+            .lock()
+            .expect("mutex not poisoned");
+        assert_eq!(prompts.len(), 1, "LLM should be called exactly once");
+        let prompt = &prompts[0];
+        assert!(
+            prompt.contains("INSIDE_NARROWED"),
+            "prompt should contain inside slice: {prompt}"
+        );
+        assert!(
+            !prompt.contains("OUTSIDE_BEFORE"),
+            "prompt should NOT contain outside-before text"
+        );
+        assert!(
+            !prompt.contains("OUTSIDE_AFTER"),
+            "prompt should NOT contain outside-after text"
+        );
+    }
+
+    /// A gating stub that both emits a draft (simulating a high-confidence
+    /// regex hit) AND returns a non-empty `llm_eligible_spans` so the
+    /// downstream LLM extractor is invoked and can fail.
+    struct DraftAndSpanGate;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for DraftAndSpanGate {
+        fn name(&self) -> &'static str {
+            "draft_and_span_gate"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> crate::pipeline::extract::ExtractBudget {
+            crate::pipeline::extract::ExtractBudget::regex_default()
+        }
+
+        async fn extract(
+            &self,
+            _: &ExtractInput<'_>,
+        ) -> Result<crate::pipeline::extract::ExtractResult, ExtractError> {
+            use crate::domain::CaptureEventId;
+            use crate::domain::taxonomy::MemoryKind;
+            use crate::pipeline::extract::draft::{Confidence, KindHint, MemoryDraft};
+            Ok(crate::pipeline::extract::ExtractResult {
+                outputs: vec![ExtractOutput::Draft(MemoryDraft {
+                    kind_hint: KindHint::from(MemoryKind::User),
+                    body: "gate draft".to_owned(),
+                    confidence: Confidence::try_from(0.95_f32).expect("valid"),
+                    source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                        .expect("valid ulid"),
+                    source_span: None,
+                    trigger_id: None,
+                })],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                // Return non-empty eligible spans so the LLM extractor is invoked.
+                llm_eligible_spans: vec![TextSpan::new(0, 38)],
+            })
+        }
+    }
+
+    /// Verifies that an `Augmenting` LLM failure is recorded in
+    /// `ChainResult.failures` while the gating worker's outputs are
+    /// still delivered.  Uses a `DraftAndSpanGate` stub that both emits a
+    /// draft and returns non-empty `llm_eligible_spans`, ensuring the LLM
+    /// extractor is invoked and can fail with `ProviderUnreachable`.
+    #[tokio::test]
+    async fn llm_provider_unreachable_does_not_block_regex_outputs() {
+        let provider = StubProvider::with_responses(vec![Err(LlmError::ProviderUnreachable {
+            detail: "no route".into(),
+        })]);
+
+        let chain = ExtractChain::new(vec![
+            Box::new(DraftAndSpanGate),
+            Box::new(LLMExtractor::new(provider)),
+        ])
+        .expect("valid chain");
+
+        // Body long enough to cover span [0, 38].
+        let body = "remember that I prefer tabs over spaces";
+        let event = fixture_cli_event();
+        let input = make_cli_input(&event, body);
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        // Gate draft must survive
+        assert!(
+            !res.outputs.is_empty(),
+            "gate draft missing from outputs; got: {:?}",
+            res.outputs
+        );
+        // LLM failure recorded
+        assert_eq!(res.failures.len(), 1);
+        assert_eq!(res.failures[0].role, WorkerRole::Augmenting);
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::Provider {
+                    code: "unreachable",
+                    ..
+                }
+            ),
+            "unexpected error: {:?}",
+            res.failures[0].error
+        );
+    }
 }

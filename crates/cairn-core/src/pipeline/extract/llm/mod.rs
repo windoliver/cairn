@@ -291,29 +291,39 @@ impl ExtractorWorker for LLMExtractor {
     }
 }
 
+/// Test support module: contains stub/spy implementations for in-crate tests.
+///
+/// Gated to `#[cfg(test)]` so it is never compiled into production artifacts.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::llm_provider::{CompletionRequest, LLMProvider, LLMProviderCapabilities};
-    use crate::contract::version::{ContractVersion, VersionRange};
-    use crate::pipeline::extract::TextSpan;
-    use std::sync::Mutex;
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex};
 
+    use crate::contract::llm_provider::{
+        CompletionOutput, CompletionRequest, LLMProvider, LLMProviderCapabilities, LlmError,
+    };
+    use crate::contract::version::{ContractVersion, VersionRange};
+
+    /// A deterministic stub for [`LLMProvider`] that pops responses from a
+    /// pre-loaded queue.  Panics if it is called more times than there are
+    /// responses; useful for asserting call counts.
     #[derive(Default)]
-    struct StubProvider {
+    pub(crate) struct StubProvider {
         responses: Mutex<Vec<Result<CompletionOutput, LlmError>>>,
         call_count: std::sync::atomic::AtomicUsize,
     }
 
     impl StubProvider {
-        fn with_responses(rs: Vec<Result<CompletionOutput, LlmError>>) -> Arc<Self> {
+        /// Build a [`StubProvider`] with a fixed list of responses (first
+        /// element is returned on the first call).
+        pub(crate) fn with_responses(rs: Vec<Result<CompletionOutput, LlmError>>) -> Arc<Self> {
             Arc::new(Self {
                 responses: Mutex::new(rs.into_iter().rev().collect()),
                 call_count: std::sync::atomic::AtomicUsize::new(0),
             })
         }
 
-        fn calls(&self) -> usize {
+        /// Number of times [`LLMProvider::complete`] has been called.
+        pub(crate) fn calls(&self) -> usize {
             self.call_count.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
@@ -347,6 +357,16 @@ mod tests {
                 .unwrap_or_else(|| panic!("StubProvider: more calls than configured responses"))
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::llm_provider::{CompletionRequest, LLMProvider, LLMProviderCapabilities};
+    use crate::contract::version::{ContractVersion, VersionRange};
+    use crate::pipeline::extract::TextSpan;
+
+    use test_support::StubProvider;
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
