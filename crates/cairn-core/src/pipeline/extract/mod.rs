@@ -10,6 +10,7 @@
 // Submodules land in subsequent tasks.
 
 pub mod body;
+pub mod chain;
 pub mod draft;
 pub mod intent;
 pub mod regex;
@@ -17,6 +18,9 @@ pub mod regex;
 pub use body::{
     BodyResolution, BodyResolutionError, BodySource, ResolvedBody, UserIngestPayloadKind,
     is_user_utterance_hook,
+};
+pub use chain::{
+    ChainResult, ChainRunError, ExtractChain, ExtractChainBuildError, WorkerFailure,
 };
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};
