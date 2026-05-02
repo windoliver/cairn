@@ -277,7 +277,10 @@ Bodies cap at 4 KiB each; full content stays in `sources/` referenced by
 
 ## 6. Store (`cairn-store-sqlite`)
 
-### 6.1 Migration `0003_trace_links.sql`
+### 6.1 Migration `0022_trace_links.sql`
+
+(Number follows the existing migration sequence — `0021` is the most
+recently committed migration.)
 
 Generated columns over the existing records table extracting trace fields
 from `extra_frontmatter` JSON (SQLite supports `GENERATED ALWAYS AS ... VIRTUAL`
@@ -343,63 +346,43 @@ The unique indices enforce three invariants at the database boundary:
 
 ### 6.2 `MemoryStore` contract additions
 
-Per CLAUDE.md §5/invariant 4 ("implement behind an existing trait"), the
-trace path needs three new method on `MemoryStore`. None alter existing
-methods; all are additive:
+**Established pattern: transactional work uses `SqliteMemoryStore::with_tx`
+(inherent), not a trait method.** `MemoryStore` is `dyn`-compatible by
+design — generic-method `transaction(...)` would break that. The existing
+verb layer (consolidate, promote) reaches into the concrete
+`SqliteMemoryStore` for atomic multi-statement writes; trace persistence
+follows the same pattern.
+
+Additions to the SQLite store (none touch the dyn trait):
 
 ```rust
-trait MemoryStore {
-    // ... existing methods ...
-
-    /// Idempotent write keyed on the stable identity in
-    /// `record.extra_frontmatter.trace.capture_event_id` (for raw events)
-    /// or on `record.id` (for `turn_summary`). The store SHALL NOT allocate
-    /// a new row when a matching identity already exists; it MAY no-op or
-    /// update mutable columns (body, salience, redaction state).
-    async fn upsert_trace(&self, record: MemoryRecord) -> Result<(), StoreError>;
-
-    /// Returns trace records for a turn ordered by
-    /// `extra_frontmatter.trace.sequence`. Excludes `turn_summary`.
-    async fn list_trace_events(
-        &self,
-        session_id: &SessionId,
-        turn_id: &str,
+impl StoreTx<'_> {
+    pub fn upsert_trace(&mut self, record: &MemoryRecord)
+        -> Result<UpsertOutcome, StoreError>;
+    pub fn list_trace_events(
+        &self, session_id: &SessionId, turn_id: &str,
     ) -> Result<Vec<MemoryRecord>, StoreError>;
-
-    /// Run `f` inside a single store-level transaction. Implementations on
-    /// SQLite use `BEGIN IMMEDIATE` so concurrent `capture_trace` invocations
-    /// serialize at the file-lock boundary rather than racing on
-    /// `build_link`'s read-max-then-write. The closure receives a
-    /// `&dyn MemoryStoreTx` — the same trait surface the closure needs
-    /// (`upsert_trace`, `list_trace_events`) bound to the open transaction.
-    async fn transaction<'a, F, T>(
-        &'a self,
-        f: F,
-    ) -> Result<T, StoreError>
-    where
-        F: for<'tx> FnOnce(&'tx dyn MemoryStoreTx) -> BoxFuture<'tx, Result<T, StoreError>>
-            + Send
-            + 'a,
-        T: Send + 'a;
-}
-
-trait MemoryStoreTx: Send + Sync {
-    async fn upsert_trace(&self, record: MemoryRecord) -> Result<(), StoreError>;
-    async fn list_trace_events(
-        &self,
-        session_id: &SessionId,
-        turn_id: &str,
-    ) -> Result<Vec<MemoryRecord>, StoreError>;
+    pub fn turn_summary_exists(
+        &self, session_id: &SessionId, turn_id: &str,
+    ) -> Result<bool, StoreError>;
 }
 ```
 
-The exact callback shape (BoxFuture vs RPITIT, `MemoryStoreTx` as a sealed
-trait) is an implementation detail; the contract is: there exists a way to
-submit a closure that runs atomically against the store, with access to
-the trace methods. Test doubles in `cairn-test-fixtures` implement the
-same trait pair so that pure-core unit tests do not need a real SQLite
-file. WAL §5.6 guarantees still apply — `transaction(...)` is the
-verb-level wrapper *around* the WAL state machine, not a replacement for it.
+`upsert_trace` reuses the existing `upsert_in_tx` plumbing — idempotency
+flows from the new `records_trace_event_id` and `records_trace_summary`
+unique indices (§6.1) plus the deterministic summary record id (§5.2),
+not from new logic in the upsert helper.
+
+The CLI verb takes `&SqliteMemoryStore` directly (not `&dyn MemoryStore`),
+matching how `consolidate` and `promote` already work. The pure pipeline
+functions in `cairn-core` (`project`, `summarize_turn`,
+`order_by_captured_at`, `assign_sequences`) stay dyn-store-free and
+adapter-free, so unit tests need no SQLite. Integration tests use a real
+in-memory `SqliteMemoryStore` via `cairn-test-fixtures`.
+
+WAL §5.6 guarantees still apply — `with_tx` runs inside the same
+`tokio_rusqlite` worker thread that the WAL state machine uses; the
+trace path is a verb-level wrapper *around* it, not a replacement.
 
 ### 6.3 Reconstruction surface and `retrieve` IDL gap
 
@@ -702,10 +685,9 @@ crates/cairn-core/src/domain/mod.rs                  # +pub mod trace
 crates/cairn-core/src/pipeline/capture_trace.rs      # NEW
 crates/cairn-core/src/pipeline/turn.rs               # NEW
 crates/cairn-core/src/pipeline/mod.rs                # +pub mod
-crates/cairn-store-sqlite/migrations/0003_trace_links.sql  # NEW
-crates/cairn-store-sqlite/src/...                    # +upsert_trace, +list_trace_events, +transaction impl (BEGIN IMMEDIATE)
-crates/cairn-core/src/contract/memory_store.rs       # +upsert_trace, +list_trace_events, +transaction (additive — see §6.2)
-crates/cairn-test-fixtures/src/memory_store.rs       # extend in-memory double for new methods
+crates/cairn-store-sqlite/src/migrations/sql/0022_trace_links.sql  # NEW
+crates/cairn-store-sqlite/src/store/tx.rs            # +upsert_trace, +list_trace_events, +turn_summary_exists on StoreTx
+crates/cairn-store-sqlite/migrations/0022_trace_links.sql  # new generated columns + indices (number is next-after-0021)
 crates/cairn-cli/src/verbs/capture_trace.rs          # replace stub (uses existing IDL `from` flag)
 crates/cairn-test-fixtures/src/...                   # trace fixtures (JSONL inputs)
 ```
