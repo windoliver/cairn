@@ -54,6 +54,22 @@ pub struct Query {
 pub struct UpstreamBaseline {
     /// Map of adapter name to per-adapter metric snapshot.
     pub adapters: BTreeMap<String, AdapterBaseline>,
+    /// Provenance metadata for the snapshot. Currently used to mark
+    /// metrics that the upstream source did not publish, so the report
+    /// can render `n/a` instead of misleading `0.000` placeholders.
+    #[serde(default, rename = "_provenance")]
+    pub provenance: Option<UpstreamProvenance>,
+}
+
+/// Optional `_provenance` block in `upstream-baseline.json`. Captures
+/// where the snapshot came from and which metrics were never published.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct UpstreamProvenance {
+    /// Metric names whose value is a placeholder, not a measurement.
+    /// Recognised values today: `"mrr"`, `"ndcg_at_5"`. Other values
+    /// are accepted forward-compatibly but currently ignored.
+    pub metrics_unpublished: Vec<String>,
 }
 
 /// One adapter's headline aggregate + per-query metrics.
@@ -64,6 +80,11 @@ pub struct AdapterBaseline {
     /// Per-query metric snapshots.
     #[serde(default)]
     pub per_query: Vec<QueryResult>,
+    /// Number of queries aggregated. Set when `per_query` is empty
+    /// (e.g. transcribed published numbers); falls back to
+    /// `per_query.len()` when present.
+    #[serde(default)]
+    pub aggregate_n: Option<usize>,
 }
 
 /// Headline aggregate IR metrics for a single adapter.

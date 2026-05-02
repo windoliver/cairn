@@ -115,14 +115,14 @@ mod tests {
 
     #[test]
     fn auto_mode_rejects_human_author() {
-        let chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+        let chain = vec![entry(ChainRole::Author, "hmn:tafeng")];
         let err = attribute(CaptureMode::Auto, &chain).unwrap_err();
         assert!(matches!(err, DomainError::AttributionMismatch { .. }));
     }
 
     #[test]
     fn explicit_mode_requires_human_author() {
-        let chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+        let chain = vec![entry(ChainRole::Author, "hmn:tafeng")];
         let author = attribute(CaptureMode::Explicit, &chain).expect("valid");
         assert_eq!(author.identity.kind(), IdentityKind::Human);
     }
@@ -131,7 +131,7 @@ mod tests {
     fn explicit_mode_with_delegator_ok() {
         let chain = vec![
             entry(ChainRole::Delegator, "agt:claude-code:opus-4-7:main:v1"),
-            entry(ChainRole::Author, "usr:tafeng"),
+            entry(ChainRole::Author, "hmn:tafeng"),
         ];
         attribute(CaptureMode::Explicit, &chain).expect("valid");
     }
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn proactive_mode_rejects_human_author() {
-        let chain = vec![entry(ChainRole::Author, "usr:tafeng")];
+        let chain = vec![entry(ChainRole::Author, "hmn:tafeng")];
         let err = attribute(CaptureMode::Proactive, &chain).unwrap_err();
         assert!(matches!(err, DomainError::AttributionMismatch { .. }));
     }

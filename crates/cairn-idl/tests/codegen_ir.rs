@@ -331,3 +331,28 @@ fn build_real_document() {
     assert!(!doc.error_codes.is_empty());
     assert!(!doc.capabilities.is_empty());
 }
+
+#[test]
+fn capability_when_true_emits_override_for_boolean_flag() {
+    // `x-cairn-capability-when-true` on a boolean property must produce a
+    // CapabilityOverride with path `<flag>=true` so the MCP layer can gate
+    // `explain: true` without hard-coding verb logic in the transport.
+    use cairn_idl::codegen::ir::{CapabilityOverride, build};
+    use cairn_idl::codegen::loader;
+    let raw = loader::load(std::path::Path::new(cairn_idl::SCHEMA_DIR)).unwrap();
+    let doc = build(&raw).unwrap();
+    let search = doc.verbs.iter().find(|v| v.id == "search").unwrap();
+    let explain_override: Option<&CapabilityOverride> = search
+        .capability_overrides
+        .iter()
+        .find(|ov| ov.path == "explain=true");
+    assert!(
+        explain_override.is_some(),
+        "search must have a capability_override for explain=true; got: {:#?}",
+        search.capability_overrides
+    );
+    assert_eq!(
+        explain_override.unwrap().capability,
+        "cairn.mcp.v1.policy_trace"
+    );
+}

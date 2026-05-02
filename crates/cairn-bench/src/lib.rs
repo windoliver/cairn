@@ -11,6 +11,7 @@
 
 pub mod adapter;
 pub mod cache;
+pub mod cached_embedder;
 pub mod fixture;
 pub mod metrics;
 pub mod report;

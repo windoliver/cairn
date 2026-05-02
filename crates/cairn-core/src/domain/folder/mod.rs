@@ -19,9 +19,9 @@ pub enum FolderError {
     /// `_policy.yaml` could not be parsed as a `FolderPolicy`.
     #[error("policy parse failed: {source}")]
     PolicyParse {
-        /// Underlying `serde_yaml` error.
+        /// Underlying `yaml_serde` error.
         #[source]
-        source: serde_yaml::Error,
+        source: yaml_serde::Error,
     },
 }
 
@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn folder_error_displays_with_source() {
         let yaml = "purpose: [unclosed";
-        let err = serde_yaml::from_str::<serde_yaml::Value>(yaml).unwrap_err();
+        let err = yaml_serde::from_str::<yaml_serde::Value>(yaml).unwrap_err();
         let folder_err = FolderError::PolicyParse { source: err };
         assert!(folder_err.to_string().starts_with("policy parse failed:"));
     }

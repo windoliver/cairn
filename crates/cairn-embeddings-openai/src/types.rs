@@ -10,6 +10,11 @@ pub(crate) struct EmbedRequest<'a> {
     pub input: EmbedInput<'a>,
     /// Always `"float"` for our path; `OpenAI` also supports `"base64"`.
     pub encoding_format: &'static str,
+    /// Pinned to `EmbeddingModelKind::dim()` so the store always
+    /// receives the configured dimension. `text-embedding-3-large`
+    /// defaults to 3072 dims if omitted; without this the store would
+    /// silently mismatch its 1536-dim sqlite-vec table.
+    pub dimensions: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

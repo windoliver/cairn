@@ -33,13 +33,19 @@ cairn-store-sqlite = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+# `EmbeddingCache::save` takes an OS-level exclusive flock around the
+# load-merge-persist sequence so two parallel bench processes cannot
+# interleave reads and atomic renames and silently lose one another's
+# additions. fs4 is already in the transitive tree (sqlite-vec).
+fs4 = { version = "0.13", features = ["sync"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
-[dev-dependencies]
+# Runtime: `EmbeddingCache::save` writes to a sibling temp file and
+# atomically renames so a kill or disk-full event mid-write cannot
+# corrupt the only cache (which holds expensive OpenAI embeddings).
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

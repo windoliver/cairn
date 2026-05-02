@@ -480,7 +480,7 @@ fn primitive_ref_exemplar(reference: &str) -> Option<&'static str> {
     let suffix = reference.rsplit('/').next()?;
     match suffix {
         "Ulid" => Some("01H8XGJWBWBAQ4N1NQK1A8X9YZ"),
-        "Identity" => Some("usr:alice"),
+        "Identity" => Some("hmn:alice"),
         _ => None,
     }
 }
@@ -513,7 +513,6 @@ fn emit_conventions(doc: &Document) -> GeneratedFile {
     for (kind, desc) in kinds {
         let _ = writeln!(s, "- `{kind}` — {desc}");
     }
-    s.push('\n');
     GeneratedFile {
         path: PathBuf::from("skills/cairn/conventions.md"),
         bytes: s.into_bytes(),

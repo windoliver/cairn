@@ -4,11 +4,14 @@
 //! one `conn.call(|c| { … })` round-trip on a dedicated DB thread. Records
 //! persist as a `record_json` blob plus denormalized hot columns; the WAL
 //! state machine (#8) lives at the verb layer.
+//!
+//! This crate also ships [`SqliteIdentityRegistry`] (issue #50).
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
 pub mod error;
+mod identity;
 pub mod migrations;
 pub mod open;
 pub mod store;
@@ -16,6 +19,7 @@ pub mod vec_ext;
 mod verify;
 
 pub use error::StoreError;
+pub use identity::SqliteIdentityRegistry;
 pub use open::{
     open, open_in_memory, open_in_memory_with_embedder, open_in_memory_with_embedder_and_config,
     open_with_embedder, open_with_embedder_and_config,

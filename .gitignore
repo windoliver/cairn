@@ -12,3 +12,6 @@ Cargo.lock.bak
 
 # insta snapshot review artifacts (pending approval).
 *.snap.new
+
+# Repo-local Cairn runtime state (model cache, vault scratch).
+/.cairn/

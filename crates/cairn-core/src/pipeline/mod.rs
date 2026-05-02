@@ -23,7 +23,10 @@
 //! - §14 Privacy and Consent (pre-persist redaction, deny-by-default,
 //!   per-sensor opt-in, append-only audit)
 
+pub mod explain;
+pub mod extract;
 pub mod filter;
+pub mod lint;
 pub(crate) mod squash;
 
 /// Fuzz-only re-export of the squash module's public surface. Gated

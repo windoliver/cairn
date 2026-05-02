@@ -40,17 +40,27 @@ pub fn compute(
     }
 }
 
-/// Precision at K: fraction of the top-K hits that are in `rel`.
+/// Precision at K — matches `gbrain-evals` `precisionAtK`:
+/// `hits ∩ top-K  /  min(K, |returned|)`.
 ///
-/// Returns 0.0 if `k == 0` or `rel` is empty (avoids divide-by-zero
-/// and lets the caller treat empty-relevance queries uniformly).
+/// The denominator is the number of items the adapter actually returned
+/// (capped at K), not K itself. This is gbrain's published convention
+/// (`/tmp/gbrain-evals/eval/runner/types.ts:258`); using `K` instead
+/// would penalise an adapter that confidently returns 3 strong hits and
+/// stops, which is precisely the graph-first pattern we're measuring.
+///
+/// Returns 0.0 if `k == 0`, `rel` is empty, or no hits were returned.
 #[must_use]
 pub fn precision_at_k(hits: &[String], rel: &BTreeSet<String>, k: usize) -> f64 {
     if k == 0 || rel.is_empty() {
         return 0.0;
     }
+    let returned = hits.len().min(k);
+    if returned == 0 {
+        return 0.0;
+    }
     let take = hits.iter().take(k).filter(|s| rel.contains(*s)).count();
-    take as f64 / k as f64
+    take as f64 / returned as f64
 }
 
 /// Recall at K: fraction of relevant items captured in the top-K hits.
@@ -121,10 +131,23 @@ mod tests {
     }
 
     #[test]
-    fn p_at_5_top_1() {
+    fn p_at_5_uses_min_k_returned_denominator() {
+        // 3 hits returned, 1 relevant — gbrain convention: 1/3, not 1/5.
         let hits = vec!["a".into(), "b".into(), "c".into()];
         let r = rel(&["a", "z"]);
-        assert!((precision_at_k(&hits, &r, 5) - 0.2).abs() < 1e-12);
+        let p = precision_at_k(&hits, &r, 5);
+        assert!((p - 1.0 / 3.0).abs() < 1e-12, "got {p}");
+    }
+
+    #[test]
+    fn p_at_5_caps_denominator_at_k() {
+        // 10 hits returned, 1 relevant in top-5 — denominator caps at K=5.
+        let hits: Vec<String> = (0..10).map(|i| format!("h{i}")).collect();
+        let mut hits = hits;
+        hits[2] = "a".into();
+        let r = rel(&["a"]);
+        let p = precision_at_k(&hits, &r, 5);
+        assert!((p - 0.2).abs() < 1e-12, "got {p}");
     }
 
     #[test]

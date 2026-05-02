@@ -18,9 +18,15 @@ use crate::error::OpenAiEmbeddingError;
 use crate::types::{EmbedInput, EmbedRequest, EmbedResponse};
 
 const DEFAULT_BASE: &str = "https://api.openai.com/v1";
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RETRIES: u32 = 3;
-const BACKOFF_BASE_MS: u64 = 200;
+// Match gbrain's embedding service: 60s timeout, 5 retries, 4s base
+// backoff capped at 120s, 100-input sub-batches, 8000-char per-input
+// truncation. See /tmp/gbrain/src/core/embedding.ts (commit 96852c0).
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
+const MAX_RETRIES: u32 = 5;
+const BACKOFF_BASE_MS: u64 = 4_000;
+const BACKOFF_MAX_MS: u64 = 120_000;
+const MAX_CHARS_PER_INPUT: usize = 8_000;
+const BATCH_SIZE: usize = 100;
 
 /// HTTP client for `OpenAI`'s `/v1/embeddings` endpoint.
 ///
@@ -32,6 +38,13 @@ pub struct OpenAiEmbedder {
     model_label: &'static str,
     kind: EmbeddingModelKind,
     http: reqwest::Client,
+    /// Output dimensionality requested from the API. Defaults to
+    /// `kind.dim()`. `text-embedding-3-large` supports any dim from 1
+    /// to 3072 via Matryoshka Representation Learning, which we use to
+    /// match the local sqlite-vec table's compile-time dim (384) when
+    /// the bench wants apples-to-apples ANN results without changing
+    /// the schema.
+    target_dim: u32,
 }
 
 impl OpenAiEmbedder {
@@ -91,7 +104,18 @@ impl OpenAiEmbedder {
             model_label,
             kind,
             http,
+            target_dim: u32::try_from(kind.dim()).unwrap_or(1536),
         })
+    }
+
+    /// Override the requested embedding dimensionality. Only meaningful
+    /// for `text-embedding-3-*` models (which honour the `dimensions`
+    /// parameter via MRL). Used by `cairn-bench` to match the
+    /// 384-dim sqlite-vec table without altering the canonical model dim.
+    #[must_use]
+    pub fn with_dim(mut self, dim: usize) -> Self {
+        self.target_dim = u32::try_from(dim).unwrap_or(self.target_dim);
+        self
     }
 
     fn url(&self) -> String {
@@ -144,9 +168,19 @@ impl OpenAiEmbedder {
                 });
             }
             if status == StatusCode::TOO_MANY_REQUESTS {
+                // Honor Retry-After when present (gbrain pattern). The
+                // header is either a delta-seconds integer or an HTTP-date;
+                // we parse only the integer form OpenAI sends in practice.
+                let retry_after_ms = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(|secs| secs.saturating_mul(1_000));
                 last_err = Some(OpenAiEmbeddingError::RateLimited);
                 if attempt < MAX_RETRIES {
-                    backoff_sleep(attempt).await;
+                    let delay = retry_after_ms.unwrap_or_else(|| backoff_delay_ms(attempt));
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                     continue;
                 }
                 break;
@@ -173,10 +207,12 @@ impl OpenAiEmbedder {
     }
 
     fn embed_one(&self, text: &str) -> Result<Vec<f32>, OpenAiEmbeddingError> {
+        let truncated = truncate_for_embedding(text);
         let req = EmbedRequest {
             model: self.model_label,
-            input: EmbedInput::One(text),
+            input: EmbedInput::One(&truncated),
             encoding_format: "float",
+            dimensions: self.target_dim,
         };
         let resp = self.embed_inner_blocking(&req)?;
         if resp.data.len() != 1 {
@@ -187,15 +223,29 @@ impl OpenAiEmbedder {
         }
         // SAFETY (invariant): the length check above guarantees exactly one
         // element, so the iterator's first item is present.
-        Ok(resp
+        let embedding = resp
             .data
             .into_iter()
             .next()
             .expect("invariant: len == 1 verified above")
-            .embedding)
+            .embedding;
+        let want = self.target_dim as usize;
+        if embedding.len() != want {
+            return Err(OpenAiEmbeddingError::BadResponseShape {
+                expected: want,
+                got: embedding.len(),
+            });
+        }
+        Ok(embedding)
     }
 
     /// Batch embed (used by `cairn-bench` and bulk reindex paths).
+    ///
+    /// Matches gbrain's strategy: truncate each input at 8000 chars and
+    /// process in 100-input sub-batches so a single `OpenAI` request stays
+    /// well under per-request token caps and re-runs after a transient
+    /// rate-limit pick up where they left off (the caller's retry loop
+    /// retries each sub-batch independently).
     ///
     /// # Errors
     ///
@@ -204,32 +254,89 @@ impl OpenAiEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let req = EmbedRequest {
-            model: self.model_label,
-            input: EmbedInput::Many(texts),
-            encoding_format: "float",
-        };
-        let resp = self.embed_inner_blocking(&req)?;
-        if resp.data.len() != texts.len() {
-            return Err(OpenAiEmbeddingError::BadResponseShape {
-                expected: texts.len(),
-                got: resp.data.len(),
-            });
+        let truncated: Vec<String> = texts.iter().map(|t| truncate_for_embedding(t)).collect();
+        let dims = self.target_dim;
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for chunk in truncated.chunks(BATCH_SIZE) {
+            let chunk_refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let req = EmbedRequest {
+                model: self.model_label,
+                input: EmbedInput::Many(&chunk_refs),
+                encoding_format: "float",
+                dimensions: dims,
+            };
+            let resp = self.embed_inner_blocking(&req)?;
+            if resp.data.len() != chunk_refs.len() {
+                return Err(OpenAiEmbeddingError::BadResponseShape {
+                    expected: chunk_refs.len(),
+                    got: resp.data.len(),
+                });
+            }
+            // Sort by `index` to defend against any out-of-order response.
+            let mut data = resp.data;
+            data.sort_by_key(|d| d.index);
+            // Validate the index sequence is exactly 0..n with no gaps
+            // or duplicates. Without this, an upstream proxy that
+            // reorders or drops one entry and inserts a duplicate index
+            // would silently align our `chunk_refs[i]` to the wrong
+            // embedding — caching the result against the wrong content
+            // hash and poisoning the bench.
+            for (expected_idx, datum) in data.iter().enumerate() {
+                if datum.index != expected_idx {
+                    return Err(OpenAiEmbeddingError::BadResponseShape {
+                        expected: chunk_refs.len(),
+                        got: datum.index,
+                    });
+                }
+            }
+            // Validate every embedding matches `target_dim`. A skewed
+            // OPENAI_BASE_URL or an API-version drift could return 3072
+            // or 384 vectors silently; vec0 would then reject the row
+            // at insertion time, far away from the source of truth.
+            let want = self.target_dim as usize;
+            for datum in &data {
+                if datum.embedding.len() != want {
+                    return Err(OpenAiEmbeddingError::BadResponseShape {
+                        expected: want,
+                        got: datum.embedding.len(),
+                    });
+                }
+            }
+            out.extend(data.into_iter().map(|d| d.embedding));
         }
-        Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+        Ok(out)
     }
 }
 
-async fn backoff_sleep(attempt: u32) {
-    // Bind to u64 *before* multiplying to avoid the cast-lossless / cast-precision
-    // lints; `attempt` is a small retry counter so the widening is exact.
+fn backoff_delay_ms(attempt: u32) -> u64 {
+    // Cap at BACKOFF_MAX_MS (gbrain pattern). Attempt-derived jitter
+    // ≤ half the base avoids RNG dep while still de-synchronizing
+    // concurrent callers.
     let attempt_u64 = u64::from(attempt);
     let exp = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(attempt));
-    // Add a small deterministic jitter (≤ half the base) so concurrent callers
-    // don't synchronize their retries. No RNG dep — the value is bounded and
-    // monotonic in `attempt`, which is plenty for backoff de-synchronization.
+    let capped = exp.min(BACKOFF_MAX_MS);
     let jitter = (attempt_u64.saturating_mul(17)) % (BACKOFF_BASE_MS / 2);
-    tokio::time::sleep(Duration::from_millis(exp.saturating_add(jitter))).await;
+    capped.saturating_add(jitter)
+}
+
+async fn backoff_sleep(attempt: u32) {
+    tokio::time::sleep(Duration::from_millis(backoff_delay_ms(attempt))).await;
+}
+
+/// Slice `text` to at most [`MAX_CHARS_PER_INPUT`] bytes, snapping back
+/// to the previous UTF-8 character boundary so we never split a code
+/// point. gbrain's TS implementation uses `text.slice(0, MAX_CHARS)`
+/// which counts UTF-16 code units; we count bytes and the result is
+/// equivalent for ASCII-dominated corpora and safe for non-ASCII.
+fn truncate_for_embedding(text: &str) -> String {
+    if text.len() <= MAX_CHARS_PER_INPUT {
+        return text.to_owned();
+    }
+    let mut end = MAX_CHARS_PER_INPUT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
 }
 
 impl EmbeddingModel for OpenAiEmbedder {
@@ -238,7 +345,7 @@ impl EmbeddingModel for OpenAiEmbedder {
     }
 
     fn dim(&self) -> usize {
-        self.kind.dim()
+        usize::try_from(self.target_dim).unwrap_or_else(|_| self.kind.dim())
     }
 
     fn embed_query(&self, q: &str) -> Result<Vec<f32>, EmbeddingError> {

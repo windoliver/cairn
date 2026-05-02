@@ -6,6 +6,20 @@
 //! The `--resync <path>` flag re-ingests an out-of-band edited markdown
 //! projection (brief §3.0, #43). The handler is fully implemented and
 //! accepts `&dyn MemoryStore`; the real store is wired in #46.
+//!
+//! # Trust boundary (spec §3.5)
+//!
+//! `ingest` is an issuer-dependent verb: it will sign records on behalf of an
+//! identity once the store is wired (#9).  The guard call below invokes
+//! [`crate::identity::guard::refuse_if_degraded`] to enforce the
+//! `VaultDegraded → EX_TEMPFAIL=75` contract even in the stub path.
+//!
+//! **Deferred**: full async wiring (calling [`open_for_signed_verb`] against the
+//! resolved vault path) is deferred to issue #9 when this verb becomes async.
+//! Until then the guard runs against a clean default report and always passes,
+//! but the exit-code path is exercised by the unit tests in `guard.rs`.
+//!
+//! [`open_for_signed_verb`]: crate::identity::guard::open_for_signed_verb
 
 use std::io::Read;
 use std::path::Path;
@@ -18,6 +32,8 @@ use cairn_core::domain::projection::{
 };
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
+
+use crate::identity::{guard::refuse_if_degraded, status::ReconciliationReport};
 
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
@@ -323,6 +339,14 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     } else {
         sub.get_one::<String>("body").cloned()
     };
+
+    // §3.5 trust-boundary guard: refuse if the vault is degraded.
+    // In this P0 stub the report is always clean (no store is open); full async
+    // wiring against the resolved vault path is deferred to issue #9.
+    if let Err(e) = refuse_if_degraded(&ReconciliationReport::default(), vec![]) {
+        eprintln!("cairn ingest: VaultDegraded — {e}");
+        return ExitCode::from(75); // EX_TEMPFAIL
+    }
 
     let resp = unimplemented_response(ResponseVerb::Ingest);
     if json {

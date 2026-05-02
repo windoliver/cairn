@@ -38,7 +38,7 @@ pub struct ParsedProjection {
     /// Free-form tags — mutable in resync.
     pub tags: Vec<String>,
     /// All frontmatter key/value pairs, including those not in the fixed set.
-    pub raw_frontmatter: BTreeMap<String, serde_yaml::Value>,
+    pub raw_frontmatter: BTreeMap<String, yaml_serde::Value>,
 }
 
 /// Result of the optimistic-concurrency conflict check.
@@ -141,7 +141,7 @@ impl MarkdownProjector {
         // Using the mapping API keeps key order stable: standard fields first (struct
         // declaration order), then extras (BTreeMap alphabetical order).
         #[allow(clippy::expect_used)]
-        let mut yaml_map = serde_yaml::to_value(&doc)
+        let mut yaml_map = yaml_serde::to_value(&doc)
             .expect("FrontmatterDoc serializes infallibly")
             .as_mapping()
             .expect("FrontmatterDoc serializes as a YAML mapping")
@@ -149,19 +149,19 @@ impl MarkdownProjector {
         for (k, v) in &r.extra_frontmatter {
             // Skip collisions with schema-owned keys; allow everything else.
             if !PROJECTED_STANDARD_FIELDS.contains(&k.as_str())
-                && let Ok(yaml_val) = serde_yaml::to_value(v)
+                && let Ok(yaml_val) = yaml_serde::to_value(v)
             {
-                yaml_map.insert(serde_yaml::Value::String(k.clone()), yaml_val);
+                yaml_map.insert(yaml_serde::Value::String(k.clone()), yaml_val);
             }
         }
         #[allow(clippy::expect_used)]
-        let yaml = serde_yaml::to_string(&yaml_map).expect("YAML mapping serializes infallibly");
-        // serde_yaml 0.9.34 does NOT prepend a "---\n" document-start marker for
+        let yaml = yaml_serde::to_string(&yaml_map).expect("YAML mapping serializes infallibly");
+        // The YAML serializer should not prepend a "---\n" document-start marker for
         // plain structs or mappings; debug_assert guards against a future version
         // change that would silently double-fence the output.
         debug_assert!(
             !yaml.starts_with("---\n"),
-            "serde_yaml now prepends document-start marker; strip_prefix logic needs revisiting: {:?}",
+            "yaml_serde now prepends document-start marker; strip_prefix logic needs revisiting: {:?}",
             &yaml[..yaml.len().min(60)]
         );
         let yaml = yaml.strip_prefix("---\n").unwrap_or(&yaml);
@@ -184,8 +184,8 @@ impl MarkdownProjector {
         // leading blank lines that are part of the body content itself.
         let body = body_raw.strip_prefix('\n').unwrap_or(body_raw).to_owned();
 
-        let val: serde_yaml::Value =
-            serde_yaml::from_str(yaml_part).map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
+        let val: yaml_serde::Value =
+            yaml_serde::from_str(yaml_part).map_err(|e| ResyncError::ParseFailed(e.to_string()))?;
 
         let map = val.as_mapping().ok_or_else(|| {
             ResyncError::ParseFailed("frontmatter must be a YAML mapping".to_owned())
@@ -317,7 +317,7 @@ impl MarkdownProjector {
         }
         // Compare backend-owned projected fields (scope, confidence, salience, created,
         // updated) using the canonical projection as the reference so both sides go through
-        // the same serde_yaml round-trip. This avoids f32↔f64 precision mismatches and
+        // the same yaml_serde round-trip. This avoids f32↔f64 precision mismatches and
         // YAML-tagged timestamp subtleties.
         let canonical = self.project(current);
         // The canonical projection is always parseable; if it somehow isn't, skip the check.

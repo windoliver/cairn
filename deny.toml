@@ -18,8 +18,10 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "Zlib",
-    # CDLA-Permissive-2.0 — pulled in via webpki-roots → candle-nn (cairn-embeddings-local).
-    # Permissive community data license; approved alongside the embeddings crate (#48).
+    # CDLA-Permissive-2.0 = Community Data License Agreement Permissive 2.0.
+    # Pulled in via webpki-roots → candle-nn (cairn-embeddings-local) and
+    # via reqwest → rustls-platform-verifier → async-openai. Permissive
+    # community data license; no copyleft restrictions on use/distribution.
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
@@ -29,10 +31,14 @@ multiple-versions = "warn"
 
 [advisories]
 yanked = "deny"
-# paste 1.0.x is pulled in transitively via gemm → candle-core → cairn-embeddings-local.
-# The RUSTSEC-2024-0436 advisory is informational (unmaintained, not a CVE).
-# We cannot easily replace it without forking candle; tracked for future update (#48).
-ignore = ["RUSTSEC-2024-0436"]
+# RUSTSEC-2024-0436: `paste` 1.0.x — unmaintained (informational, not a CVE).
+#   Pulled in via gemm → candle-core → cairn-embeddings-local. Tracked
+#   for future update (#48).
+# RUSTSEC-2024-0384: `instant` crate is unmaintained, no safe upgrade.
+# RUSTSEC-2025-0012: `backoff` crate is unmaintained, no safe upgrade.
+#   Both transitive deps via async-openai → cairn-llm-openai-compat;
+#   tracked for replacement when async-openai migrates away.
+ignore = ["RUSTSEC-2024-0436", "RUSTSEC-2024-0384", "RUSTSEC-2025-0012"]
 
 # Deny-by-default for dependency sources. Without this, the
 # `cargo-deny check sources` step in supply-chain.yml only warns on

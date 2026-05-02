@@ -10,7 +10,7 @@ use rmcp::{
     RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolsCapability,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
 };
@@ -36,12 +36,8 @@ impl CairnMcpHandler {
 impl ServerHandler for CairnMcpHandler {
     /// Return server identity and advertise tool capability.
     fn get_info(&self) -> ServerInfo {
-        let mut caps = ServerCapabilities::default();
-        caps.tools = Some(ToolsCapability { list_changed: None });
-        let mut info = ServerInfo::default();
-        info.capabilities = caps;
-        info.server_info = Implementation::new("cairn", env!("CARGO_PKG_VERSION"));
-        info
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("cairn", env!("CARGO_PKG_VERSION")))
     }
 
     /// Return all Cairn verbs as MCP tools.

@@ -26,12 +26,16 @@ async fn embed_query_round_trip() {
         .mount(&server)
         .await;
 
+    // The mock returns a stub 3-element vector; pin `target_dim` to 3
+    // so the new per-vector dim validation accepts it. Production paths
+    // leave `target_dim` at the model default (1536).
     let embedder = OpenAiEmbedder::new(
         "test-key",
         &server.uri(),
         EmbeddingModelKind::OpenAiTextEmbedding3Large,
     )
-    .expect("construct embedder");
+    .expect("construct embedder")
+    .with_dim(3);
 
     let embedder_clone = embedder.clone();
     let v = tokio::task::spawn_blocking(move || embedder_clone.embed_query("hello"))
@@ -39,6 +43,42 @@ async fn embed_query_round_trip() {
         .expect("spawn_blocking joined")
         .expect("embed_query succeeded");
     assert_eq!(v, vec![0.1_f32, 0.2_f32, 0.3_f32]);
+}
+
+/// Negative case: when the API returns a vector whose length differs
+/// from `target_dim`, the embedder must surface `BadResponseShape`
+/// rather than caching/returning a wrong-dim vector that would later
+/// be rejected by the sqlite-vec INSERT path.
+#[tokio::test]
+async fn embed_query_rejects_dim_mismatch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "embedding": [0.1_f32, 0.2_f32, 0.3_f32], "index": 0 }
+            ],
+            "model": "text-embedding-3-large"
+        })))
+        .mount(&server)
+        .await;
+    // target_dim defaults to 1536; the mock returns 3.
+    let embedder = OpenAiEmbedder::new(
+        "test-key",
+        &server.uri(),
+        EmbeddingModelKind::OpenAiTextEmbedding3Large,
+    )
+    .expect("construct embedder");
+    let embedder_clone = embedder.clone();
+    let res = tokio::task::spawn_blocking(move || embedder_clone.embed_query("hello"))
+        .await
+        .expect("spawn_blocking joined");
+    let err = res.expect_err("dim mismatch must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("1536") && msg.contains('3'),
+        "expected dim-mismatch error message, got: {msg}"
+    );
 }
 
 #[tokio::test]

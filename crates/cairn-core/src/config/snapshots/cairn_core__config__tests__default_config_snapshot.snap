@@ -46,6 +46,9 @@ expression: json
     "model": null,
     "api_key": null
   },
+  "search": {
+    "local_embeddings": true
+  },
   "sensors": {
     "hooks": {
       "enabled": true

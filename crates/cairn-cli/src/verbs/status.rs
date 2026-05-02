@@ -3,6 +3,14 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
+//!
+//! Capabilities are advertised only when the runtime can honor them
+//! end-to-end. The IDL declares `cairn.mcp.v1.policy_trace` (#95) and
+//! store-driven search / retrieve / forget mode capabilities; verb
+//! runtime emits the keyword/semantic search capabilities once the
+//! store is wired and gates the others (#9 / #61 / #62) until each is
+//! honored. Advertising a capability the runtime cannot back would
+//! mislead clients that negotiate from `status.capabilities`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -57,7 +65,7 @@ pub fn run_with_context(
         println!("started_at:  {started_at}");
         println!("incarnation: {}", incarnation.0);
         if resp.capabilities.is_empty() {
-            println!("capabilities: (none — store not wired in this build)");
+            println!("capabilities: (none advertised — store not wired in this build)");
         } else {
             for cap in &resp.capabilities {
                 println!(
@@ -73,7 +81,10 @@ pub fn run_with_context(
 /// Derive the `Capabilities` list from the active config and filesystem state.
 ///
 /// `vault_root` is used only to stat-check the embedding-model directory;
-/// no I/O is performed when it is `None`.
+/// no I/O is performed when it is `None`. When `config` is `None` we fall
+/// back to the empty list — the IDL declares `cairn.mcp.v1.policy_trace`
+/// (#95) and store-driven mode capabilities, but they're advertised only
+/// once verb runtime can honor them end-to-end (#9 / #61 / #62).
 fn compute_capabilities(
     vault_root: Option<&Path>,
     config: Option<&CairnConfig>,
@@ -96,8 +107,30 @@ fn compute_capabilities(
     if cap_set.semantic_search {
         out.push(Capabilities::CairnMcpV1SearchSemantic);
     }
-    // hybrid_search is always false at v0.1 — omit.
+    if cap_set.hybrid_search {
+        out.push(Capabilities::CairnMcpV1SearchHybrid);
+    }
     out
+}
+
+/// True if `capability` is in the current `status.capabilities` list.
+/// Used by capability-gated args (e.g. `search --explain`) to fail closed
+/// before verb dispatch when the required capability is not advertised
+/// (CLAUDE.md §4.6).
+#[must_use]
+pub fn p0_capabilities_advertises(capability: &str) -> bool {
+    // Compute against the empty-context fast path: no vault, no config →
+    // matches the conservative status response that the legacy `p0_*`
+    // helper used to return. Verb-time gates fail closed when the
+    // requested capability is absent, even if the runtime *would*
+    // advertise it under a fully-configured open.
+    compute_capabilities(None, None).iter().any(|c| {
+        serde_json::to_value(c)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .as_deref()
+            == Some(capability)
+    })
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.

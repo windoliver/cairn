@@ -53,7 +53,7 @@
     },
     "issuer": {
       "allOf": [{ "$ref": "../common/primitives.json#/$defs/Identity" }],
-      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, usr:alice, snr:local:screen:host:v1."
+      "description": "AgentIdentity, HumanIdentity, or SensorIdentity. Examples: agt:claude-code:opus-4-7:reviewer:v1, hmn:alice, snr:local:screen:host:v1."
     },
     "issued_at": { "type": "string", "format": "date-time", "minLength": 20 },
     "expires_at": { "type": "string", "format": "date-time", "minLength": 20 },

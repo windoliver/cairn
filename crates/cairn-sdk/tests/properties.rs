@@ -35,6 +35,7 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
         mode: SearchArgsMode::Keyword,
         query: "q".to_owned(),
         scope: None,
+        explain: None,
     }
 }
 
@@ -246,6 +247,7 @@ fn empty_scope_filter_rejects() {
             user: None,
             workspace: None,
         }),
+        explain: None,
     };
     assert!(matches!(
         sdk().search(&args).expect_err("must reject"),
@@ -268,6 +270,7 @@ proptest! {
             mode: SearchArgsMode::Keyword,
             query: "q".to_owned(),
             scope: None,
+            explain: None,
         };
         prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
     }

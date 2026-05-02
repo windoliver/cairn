@@ -20,7 +20,7 @@ fn forget_event(consent_id: &str, target_hash: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
         kind: ConsentKind::ForgetIntent,
-        actor: Identity::parse("usr:tafeng").expect("identity"),
+        actor: Identity::parse("hmn:tafeng").expect("identity"),
         subject: target_hash.to_owned(),
         scope: "private".to_owned(),
         op_id: Some(format!("op-{consent_id}")),
@@ -40,7 +40,7 @@ fn sensor_event(consent_id: &str, label: &str) -> ConsentEvent {
     ConsentEvent {
         consent_id: consent_id.to_owned(),
         kind: ConsentKind::SensorEnable,
-        actor: Identity::parse("usr:tafeng").expect("identity"),
+        actor: Identity::parse("hmn:tafeng").expect("identity"),
         subject: format!("snr:{label}"),
         scope: "global".to_owned(),
         op_id: None,
@@ -70,16 +70,16 @@ fn append_round_trips_through_query_by_op() {
 fn query_by_actor_filters_to_principal() {
     let conn = open_in_memory().expect("open");
     let mut alice = forget_event("c-a", &h(0xa));
-    alice.actor = Identity::parse("usr:alice").expect("id");
+    alice.actor = Identity::parse("hmn:alice").expect("id");
     let mut bob = forget_event("c-b", &h(0xb));
-    bob.actor = Identity::parse("usr:bob").expect("id");
+    bob.actor = Identity::parse("hmn:bob").expect("id");
     bob.op_id = Some("op-bob".to_owned());
 
     append(&conn, &alice).expect("a");
     append(&conn, &bob).expect("b");
 
     let by_alice =
-        query_by_actor(&conn, &Identity::parse("usr:alice").expect("id")).expect("actor query");
+        query_by_actor(&conn, &Identity::parse("hmn:alice").expect("id")).expect("actor query");
     assert_eq!(by_alice.len(), 1);
     assert_eq!(by_alice[0].consent_id, "c-a");
 }
@@ -189,12 +189,143 @@ fn append_rejects_body_bearing_payload_via_serializer() {
             "INSERT INTO consent_journal \
               (consent_id, subject, scope, decision, granted_by, decided_at, \
                kind, actor, decided_at_iso, payload_json) \
-             VALUES ('c-bypass', ?, 'private', 'GRANT', 'usr:t', 0, \
-                     'forget_intent', 'usr:t', '2026-04-28T12:00:00Z', ?)",
+             VALUES ('c-bypass', ?, 'private', 'GRANT', 'hmn:t', 0, \
+                     'forget_intent', 'hmn:t', '2026-04-28T12:00:00Z', ?)",
             rusqlite::params![hash, payload],
         )
         .unwrap_err();
     assert!(format!("{err}").contains("body-free"));
+}
+
+#[test]
+fn read_since_rowid_surfaces_schema_drift_on_invalid_consent_id() {
+    // Phase-B (#255, brief §14): round-6 High finding (defense in depth).
+    // `consent::append` calls `ConsentEvent::validate()` and the
+    // `consent_journal_event_metadata_domains` trigger gates direct SQL
+    // writes — but a future migration that lifts the trigger, a direct-SQL
+    // writer that runs before the trigger fires (e.g. inside a migration),
+    // or a legacy promotion that misses sanitization could still seat a
+    // row whose `consent_id` violates the §14 closed character class.
+    // `decode_event_inner` now calls `ConsentEvent::validate()` on every
+    // read so such drift surfaces as `StoreError::SchemaDrift` rather than
+    // silently flowing into the consent.log mirror.
+    //
+    // To exercise that path we temporarily drop the metadata-domain trigger
+    // and write a row with a malformed consent_id, then read it back.
+    let conn = open_in_memory().expect("open");
+    conn.execute("DROP TRIGGER consent_journal_event_metadata_domains", [])
+        .expect("drop metadata trigger");
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('has@bad!', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 'grant', 'hmn:tafeng', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"sub\"}')",
+        [],
+    )
+    .expect("direct SQL insert bypassing append validation");
+
+    let err = read_since_rowid(&conn, 0)
+        .expect_err("decode must surface SchemaDrift when consent_id violates §14 domain");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("failed validate") || msg.contains("consent_id"),
+        "error must indicate the validate failure / consent_id; got: {msg}"
+    );
+}
+
+#[test]
+fn read_since_rowid_surfaces_drift_on_null_kind() {
+    // Phase-B (#255, brief §14): round-5 (new loop) High finding. The
+    // rowid readers used to gate on `kind IS NOT NULL`. Post-0021 the
+    // column is NOT NULL with a CHECK, so the filter was tautological in
+    // normal operation — but if drift occurs (direct SQL via PRAGMA,
+    // schema-fingerprint bypass, etc.), a NULL-kind row would be
+    // silently SKIPPED from the mirror tail, breaking the §14 audit
+    // invariant. With the filter dropped, `decode_event_inner` fires
+    // `SchemaDrift` on missing kind via `parse_kind` → returns None.
+    //
+    // To exercise that path we rebuild `consent_journal` without the
+    // kind NOT NULL / CHECK, then direct-SQL-insert a NULL-kind row and
+    // assert the reader surfaces SchemaDrift mentioning the kind.
+    let conn = open_in_memory().expect("open");
+
+    // Drop every trigger + index + the table so we can rebuild without
+    // the kind constraints. The append-only triggers gate UPDATE/DELETE
+    // but not DROP TABLE in SQLite.
+    let trigger_names: [&str; 22] = [
+        "consent_journal_immutable",
+        "consent_journal_no_delete",
+        "consent_journal_event_requires_iso",
+        "consent_journal_forget_receipt_body_free",
+        "consent_journal_event_requires_actor",
+        "consent_journal_event_requires_payload",
+        "consent_journal_payload_shape_matches_kind",
+        "consent_journal_payload_body_free",
+        "consent_journal_sensor_kind_requires_sensor_id",
+        "consent_journal_sensor_id_matches_payload",
+        "consent_journal_sensor_subject_matches_sensor_id",
+        "consent_journal_non_sensor_kind_forbids_sensor_id",
+        "consent_journal_hash_kind_subject_shape",
+        "consent_journal_hash_kind_target_id_hash_shape",
+        "consent_journal_payload_required_fields",
+        "consent_journal_payload_unknown_top_level_keys",
+        "consent_journal_payload_no_duplicate_keys",
+        "consent_journal_subject_domain_for_non_hash_kinds",
+        "consent_journal_event_requires_positive_rowid",
+        "consent_journal_payload_keys_match_shape",
+        "consent_journal_payload_scalar_domains",
+        "consent_journal_event_metadata_domains",
+    ];
+    for t in trigger_names {
+        conn.execute(&format!("DROP TRIGGER IF EXISTS {t}"), [])
+            .expect("drop trigger");
+    }
+    conn.execute("DROP TABLE consent_journal", [])
+        .expect("drop table");
+
+    // Recreate WITHOUT the `kind NOT NULL CHECK` constraint — a minimal
+    // shape sufficient to insert a row that decode_event will read.
+    conn.execute(
+        "CREATE TABLE consent_journal (\
+           consent_id      TEXT NOT NULL PRIMARY KEY,\
+           subject         TEXT NOT NULL,\
+           scope           TEXT NOT NULL,\
+           decision        TEXT NOT NULL,\
+           reason          TEXT,\
+           granted_by      TEXT NOT NULL,\
+           decided_at      INTEGER NOT NULL,\
+           expires_at      INTEGER,\
+           op_id           TEXT,\
+           kind            TEXT,\
+           sensor_id       TEXT,\
+           actor           TEXT,\
+           payload_json    TEXT,\
+           decided_at_iso  TEXT,\
+           expires_at_iso  TEXT\
+         )",
+        [],
+    )
+    .expect("recreate without kind constraints");
+
+    conn.execute(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at, \
+           kind, actor, decided_at_iso, payload_json) \
+         VALUES ('c-drift', 'sub', 'private', 'GRANT', 'hmn:t', 0, \
+                 NULL, 'hmn:tafeng', '2026-04-28T12:00:00Z', \
+                 '{\"shape\":\"decision\",\"subject_code\":\"sub\"}')",
+        [],
+    )
+    .expect("direct SQL insert with NULL kind");
+
+    let err = read_since_rowid(&conn, 0).expect_err("decode must surface SchemaDrift on NULL kind");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("missing kind") || msg.contains("kind"),
+        "error must mention missing kind; got: {msg}"
+    );
 }
 
 #[test]
@@ -222,7 +353,7 @@ fn round_trip_preserves_every_kind() {
             ConsentKind::PolicyChange => ConsentEvent {
                 consent_id: id.clone(),
                 kind: *kind,
-                actor: Identity::parse("usr:tafeng").expect("id"),
+                actor: Identity::parse("hmn:tafeng").expect("id"),
                 subject: "sensors.screen.enabled".to_owned(),
                 scope: "global".to_owned(),
                 op_id: None,
@@ -238,7 +369,7 @@ fn round_trip_preserves_every_kind() {
             ConsentKind::Grant | ConsentKind::Revoke => ConsentEvent {
                 consent_id: id.clone(),
                 kind: *kind,
-                actor: Identity::parse("usr:tafeng").expect("id"),
+                actor: Identity::parse("hmn:tafeng").expect("id"),
                 subject: "share_link:abcd".to_owned(),
                 scope: "team:platform".to_owned(),
                 op_id: None,
@@ -255,7 +386,7 @@ fn round_trip_preserves_every_kind() {
                 ConsentEvent {
                     consent_id: id.clone(),
                     kind: *kind,
-                    actor: Identity::parse("usr:tafeng").expect("id"),
+                    actor: Identity::parse("hmn:tafeng").expect("id"),
                     subject: promoted.clone(),
                     scope: "team:platform".to_owned(),
                     op_id: Some(format!("op-{id}")),

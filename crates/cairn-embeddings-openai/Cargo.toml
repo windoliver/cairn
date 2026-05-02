@@ -13,7 +13,7 @@ description = "OpenAI embedding provider for Cairn (opt-in, behind cairn-cli's `
 [dependencies]
 cairn-core = { workspace = true }
 cairn-embeddings-local = { workspace = true }
-reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "rt"] }

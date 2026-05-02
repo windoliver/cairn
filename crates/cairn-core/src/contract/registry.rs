@@ -816,6 +816,17 @@ patch = 0
             fn supported_contract_versions(&self) -> VersionRange {
                 self.range
             }
+            async fn complete(
+                &self,
+                _req: &crate::contract::llm_provider::CompletionRequest,
+            ) -> Result<
+                crate::contract::llm_provider::CompletionOutput,
+                crate::contract::llm_provider::LlmError,
+            > {
+                Ok(crate::contract::llm_provider::CompletionOutput::Text(
+                    "stub".into(),
+                ))
+            }
         }
         impl LLMProviderPlugin for StubLlm {
             const NAME: &'static str = "cairn-store-sqlite";
@@ -893,6 +904,17 @@ patch = 0
             }
             fn supported_contract_versions(&self) -> VersionRange {
                 self.range
+            }
+            async fn complete(
+                &self,
+                _req: &crate::contract::llm_provider::CompletionRequest,
+            ) -> Result<
+                crate::contract::llm_provider::CompletionOutput,
+                crate::contract::llm_provider::LlmError,
+            > {
+                Ok(crate::contract::llm_provider::CompletionOutput::Text(
+                    "stub".into(),
+                ))
             }
         }
         impl LLMProviderPlugin for StubLlm {

@@ -193,7 +193,7 @@ mod tests {
 
     fn ident() -> SessionIdentity {
         SessionIdentity::new(
-            Identity::parse("usr:alice").expect("user"),
+            Identity::parse("hmn:alice").expect("user"),
             Identity::parse("agt:cli:opus-4-7:main:v1").expect("agent"),
             Some("/repo".into()),
         )

@@ -97,6 +97,10 @@ cairn search --mode keyword --citations on QUERY
 cairn search --mode keyword --cursor CURSOR QUERY
 ```
 
+```bash
+cairn search --mode keyword --explain QUERY
+```
+
 ## `cairn retrieve`
 
 **Use when:**
@@ -245,7 +249,7 @@ cairn capture_trace --from FROM --session SESSION_ID
 ## `cairn lint`
 
 **Use when:**
-- use to check vault health — contradictions, orphans, stale claims, missing concept pages
+- use to check vault health — contradictions, orphans, stale claims, missing concept pages, malformed records, broken actor chains, schema drift, hot-memory budget, derived-index drift
 
 **Do NOT use when:**
 - do NOT call per turn — run on a cadence (daily / on PR)

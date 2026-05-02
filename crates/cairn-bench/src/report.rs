@@ -50,10 +50,13 @@ pub struct AggregateRow {
     pub p_at_5: f64,
     /// Mean recall at 5 across graded queries.
     pub r_at_5: f64,
-    /// Mean reciprocal rank across graded queries.
-    pub mrr: f64,
-    /// Mean nDCG at 5 across graded queries.
-    pub ndcg_at_5: f64,
+    /// Mean reciprocal rank across graded queries.  `None` when the
+    /// upstream source did not publish this metric (`_provenance.metrics_unpublished`)
+    /// — rendered as `n/a` in the markdown rather than `0.000`, which
+    /// reviewers were misreading as a measured zero.
+    pub mrr: Option<f64>,
+    /// Mean nDCG at 5 across graded queries. `None` semantics same as `mrr`.
+    pub ndcg_at_5: Option<f64>,
     /// Number of queries contributing to the averages above.
     pub graded_queries: usize,
 }
@@ -92,14 +95,21 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
 
     // Append upstream reference rows when present.
     if let Some(up) = &fixture.upstream {
+        let unpublished: std::collections::BTreeSet<&str> = up
+            .provenance
+            .as_ref()
+            .map(|p| p.metrics_unpublished.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let mrr_published = !unpublished.contains("mrr");
+        let ndcg_published = !unpublished.contains("ndcg_at_5");
         for (name, ad) in &up.adapters {
             all_rows.push(AggregateRow {
                 adapter: name.clone(),
                 p_at_5: ad.aggregate.p_at_5,
                 r_at_5: ad.aggregate.r_at_5,
-                mrr: ad.aggregate.mrr,
-                ndcg_at_5: ad.aggregate.ndcg_at_5,
-                graded_queries: ad.per_query.len(),
+                mrr: mrr_published.then_some(ad.aggregate.mrr),
+                ndcg_at_5: ndcg_published.then_some(ad.aggregate.ndcg_at_5),
+                graded_queries: ad.aggregate_n.unwrap_or(ad.per_query.len()),
             });
         }
     }
@@ -113,15 +123,18 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
     writeln!(md)?;
     writeln!(md, "| Adapter | P@5 | R@5 | MRR | nDCG@5 | n |")?;
     writeln!(md, "|---|---|---|---|---|---|")?;
+    let fmt_opt = |v: Option<f64>| -> String {
+        v.map_or_else(|| "n/a".to_owned(), |n| format!("{n:.3}"))
+    };
     for row in &all_rows {
         writeln!(
             md,
-            "| `{}` | {:.3} | {:.3} | {:.3} | {:.3} | {} |",
+            "| `{}` | {:.3} | {:.3} | {} | {} | {} |",
             row.adapter,
             row.p_at_5,
             row.r_at_5,
-            row.mrr,
-            row.ndcg_at_5,
+            fmt_opt(row.mrr),
+            fmt_opt(row.ndcg_at_5),
             row.graded_queries,
         )?;
     }
@@ -164,8 +177,8 @@ fn aggregate_cairn(runs: &[AdapterResults]) -> Vec<AggregateRow> {
                 adapter: adapter.clone(),
                 p_at_5: 0.0,
                 r_at_5: 0.0,
-                mrr: 0.0,
-                ndcg_at_5: 0.0,
+                mrr: Some(0.0),
+                ndcg_at_5: Some(0.0),
                 graded_queries: 0,
             });
             continue;
@@ -185,8 +198,8 @@ fn aggregate_cairn(runs: &[AdapterResults]) -> Vec<AggregateRow> {
             adapter: adapter.clone(),
             p_at_5: sum_p / n,
             r_at_5: sum_r / n,
-            mrr: sum_m / n,
-            ndcg_at_5: sum_n / n,
+            mrr: Some(sum_m / n),
+            ndcg_at_5: Some(sum_n / n),
             graded_queries: queries.len(),
         });
     }
@@ -300,12 +313,16 @@ mod tests {
                     mrr: 1.00,
                     ndcg_at_5: 0.85,
                 }],
+                aggregate_n: None,
             },
         );
         let fixture = Fixture {
             pages: vec![synthetic_page("alice")],
             queries: vec![synthetic_query("q1", &["alice"])],
-            upstream: Some(UpstreamBaseline { adapters }),
+            upstream: Some(UpstreamBaseline {
+                adapters,
+                provenance: None,
+            }),
         };
         let runs: Vec<AdapterResults> = vec![(
             "bm25-only".to_owned(),
@@ -341,8 +358,8 @@ mod tests {
         assert_eq!(row.adapter, "hybrid-openai-rrf");
         assert!((row.p_at_5 - 0.0).abs() < f64::EPSILON);
         assert!((row.r_at_5 - 0.0).abs() < f64::EPSILON);
-        assert!((row.mrr - 0.0).abs() < f64::EPSILON);
-        assert!((row.ndcg_at_5 - 0.0).abs() < f64::EPSILON);
+        assert_eq!(row.mrr, Some(0.0));
+        assert_eq!(row.ndcg_at_5, Some(0.0));
         assert_eq!(row.graded_queries, 0);
     }
 }

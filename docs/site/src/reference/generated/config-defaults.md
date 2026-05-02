@@ -39,6 +39,8 @@ llm:
   base_url: null
   model: null
   api_key: null
+search:
+  local_embeddings: true
 sensors:
   hooks:
     enabled: true

@@ -49,6 +49,23 @@ pub enum DiscardReason {
     Duplicate,
 }
 
+impl DiscardReason {
+    /// Wire-format identifier (lower `snake_case`, identical to the serde form).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Volatile => "volatile",
+            Self::ToolLookup => "tool_lookup",
+            Self::CompetingSource => "competing_source",
+            Self::LowSalience => "low_salience",
+            Self::PiiBlocked => "pii_blocked",
+            Self::InjectionBlocked => "injection_blocked",
+            Self::PolicyBlocked => "policy_blocked",
+            Self::Duplicate => "duplicate",
+        }
+    }
+}
+
 /// Inputs to [`should_memorize`]. Carries only metadata derived from the
 /// payload — never the raw body.
 //

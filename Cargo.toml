@@ -17,6 +17,7 @@ homepage = "https://github.com/windoliver/cairn"
 readme = "README.md"
 
 [workspace.dependencies]
+aho-corasick = { version = "1", default-features = false, features = ["std", "perf-literal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -34,12 +35,11 @@ rstest = "0.23"
 tempfile = "3"
 sha2 = { version = "0.10", default-features = false }
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
-figment = { version = "0.10", features = ["yaml", "env"] }
 regex = { version = "1", default-features = false, features = ["std"] }
-serde_yaml = "0.9"
+yaml_serde = "0.10.4"
 unicode-normalization = "0.1"
 temp-env = "0.3"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", default-features = false, features = ["bundled", "blob", "chrono", "serde_json"] }
 clap = { version = "4.5", features = ["derive", "wrap_help"] }
 rusqlite_migration = "1"
 ulid = { version = "1.1", default-features = false, features = ["std"] }
@@ -64,16 +64,32 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
 safetensors = { version = "0.7", default-features = false }
 
-# HTTP client — cairn-embeddings-openai only. Pinned at the workspace root so
-# the optional `openai` feature in cairn-cli pulls a single coherent version.
-# Heavy default features (default-tls, cookies, gzip) stay off; the openai
-# crate enables `json` + `rustls-tls` locally.
-reqwest = { version = "0.12", default-features = false }
+# OpenAI-compat — cairn-llm-openai-compat
+async-openai = { version = "0.36", default-features = false, features = ["rustls", "chat-completion"] }
+# HTTP client shared by cairn-embeddings-openai (direct calls) and
+# cairn-llm-openai-compat (alongside async-openai). The latter needs
+# direct reqwest because `async-openai` discards HTTP status on
+# `JSONDeserialize` errors (e.g. empty bodies), which blocks accurate
+# 401/429/5xx disambiguation. async-openai is used for typed structs only.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+futures-util = { version = "0.3", default-features = false }
+wiremock = "0.6"
+zeroize = { version = "1.7", default-features = false, features = ["zeroize_derive"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "zeroize", "rand_core"] }
+rand_core = { version = "0.6", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
+parking_lot = "0.12"
+fs2 = "0.4"
+whoami = "1.5"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version
 # tracks `[workspace.package].version`; bump them together.
 cairn-core = { path = "crates/cairn-core", version = "0.0.1" }
+cairn-llm-openai-compat = { path = "crates/cairn-llm-openai-compat", version = "0.0.1" }
+cairn-keychain = { path = "crates/cairn-keychain", version = "0.0.1" }
 cairn-mcp = { path = "crates/cairn-mcp", version = "0.0.1" }
 cairn-store-sqlite = { path = "crates/cairn-store-sqlite", version = "0.0.1" }
 cairn-sensors-local = { path = "crates/cairn-sensors-local", version = "0.0.1" }

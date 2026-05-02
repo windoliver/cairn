@@ -1,14 +1,1684 @@
 [
   {
-    "id": "stub-q1",
-    "query": "Who is Adam Lee?",
-    "relevant": ["people/adam-lee-19"],
-    "grades": { "people/adam-lee-19": 3 }
+    "id": "q0001",
+    "query": "Who attended Demo Day W26 \u2013 Gamma Presentation",
+    "relevant": [
+      "people/iris-lee-82",
+      "people/mark-jones-2",
+      "people/ulrich-johnson-7",
+      "people/mia-lee-13",
+      "people/tina-jones-112"
+    ],
+    "grades": {
+      "people/iris-lee-82": 3,
+      "people/mark-jones-2": 3,
+      "people/ulrich-johnson-7": 3,
+      "people/mia-lee-13": 3,
+      "people/tina-jones-112": 3
+    }
   },
   {
-    "id": "stub-q2",
-    "query": "What does Nimbus do?",
-    "relevant": ["companies/nimbus-5"],
-    "grades": { "companies/nimbus-5": 3 }
+    "id": "q0002",
+    "query": "Who attended 1:1 Eric Martinez + Mia Lee \u2013 February 2025",
+    "relevant": [
+      "people/eric-martinez-93",
+      "people/mia-lee-13"
+    ],
+    "grades": {
+      "people/eric-martinez-93": 3,
+      "people/mia-lee-13": 3
+    }
+  },
+  {
+    "id": "q0003",
+    "query": "Who attended 1:1 Iris Lee + Mark Jones",
+    "relevant": [
+      "people/iris-lee-82",
+      "people/mark-jones-2"
+    ],
+    "grades": {
+      "people/iris-lee-82": 3,
+      "people/mark-jones-2": 3
+    }
+  },
+  {
+    "id": "q0004",
+    "query": "Who attended Demo Day W30",
+    "relevant": [
+      "people/julia-davis-86",
+      "people/uma-brown-6",
+      "people/mark-thomas-11",
+      "people/quinten-wang-17",
+      "people/victor-jackson-116"
+    ],
+    "grades": {
+      "people/julia-davis-86": 3,
+      "people/uma-brown-6": 3,
+      "people/mark-thomas-11": 3,
+      "people/quinten-wang-17": 3,
+      "people/victor-jackson-116": 3
+    }
+  },
+  {
+    "id": "q0005",
+    "query": "Who attended Vector Board Meeting Q3 2025",
+    "relevant": [
+      "people/uma-brown-6",
+      "people/david-zhang-83",
+      "people/wendy-wilson-170"
+    ],
+    "grades": {
+      "people/uma-brown-6": 3,
+      "people/david-zhang-83": 3,
+      "people/wendy-wilson-170": 3
+    }
+  },
+  {
+    "id": "q0006",
+    "query": "Who attended Demo Day W37 \u2013 Cipher Batch 13 Presentation",
+    "relevant": [
+      "people/eric-martinez-93",
+      "people/mia-lee-13",
+      "people/nina-rodriguez-18",
+      "people/quinten-lee-24"
+    ],
+    "grades": {
+      "people/eric-martinez-93": 3,
+      "people/mia-lee-13": 3,
+      "people/nina-rodriguez-18": 3,
+      "people/quinten-lee-24": 3
+    }
+  },
+  {
+    "id": "q0007",
+    "query": "Who attended 1:1 Rosa Nakamura + Vera Chen",
+    "relevant": [
+      "people/rosa-nakamura-94",
+      "people/vera-chen-14"
+    ],
+    "grades": {
+      "people/rosa-nakamura-94": 3,
+      "people/vera-chen-14": 3
+    }
+  },
+  {
+    "id": "q0008",
+    "query": "Who attended 1:1 Rachel Brown + Noah Kapoor",
+    "relevant": [
+      "people/rachel-brown-95",
+      "people/noah-kapoor-15"
+    ],
+    "grades": {
+      "people/rachel-brown-95": 3,
+      "people/noah-kapoor-15": 3
+    }
+  },
+  {
+    "id": "q0009",
+    "query": "Who attended 1:1 Tina Hernandez + Quinten Wang",
+    "relevant": [
+      "people/tina-hernandez-97",
+      "people/quinten-wang-17"
+    ],
+    "grades": {
+      "people/tina-hernandez-97": 3,
+      "people/quinten-wang-17": 3
+    }
+  },
+  {
+    "id": "q0010",
+    "query": "Who attended Acme Board Meeting Q1 2025",
+    "relevant": [
+      "people/mia-brown-0",
+      "people/chris-jackson-91"
+    ],
+    "grades": {
+      "people/mia-brown-0": 3,
+      "people/chris-jackson-91": 3
+    }
+  },
+  {
+    "id": "q0011",
+    "query": "Who attended Demo Day W32 \u2013 Pulse",
+    "relevant": [
+      "people/fiona-moore-88",
+      "people/yara-johnson-8",
+      "people/mia-lee-13",
+      "people/adam-lee-19",
+      "people/xavier-nakamura-118"
+    ],
+    "grades": {
+      "people/fiona-moore-88": 3,
+      "people/yara-johnson-8": 3,
+      "people/mia-lee-13": 3,
+      "people/adam-lee-19": 3,
+      "people/xavier-nakamura-118": 3
+    }
+  },
+  {
+    "id": "q0012",
+    "query": "Who attended Demo Day W34 \u2013 Beacon Pitch",
+    "relevant": [
+      "people/rosa-jackson-90",
+      "people/david-wang-10",
+      "people/noah-kapoor-15",
+      "people/eric-lee-21"
+    ],
+    "grades": {
+      "people/rosa-jackson-90": 3,
+      "people/david-wang-10": 3,
+      "people/noah-kapoor-15": 3,
+      "people/eric-lee-21": 3
+    }
+  },
+  {
+    "id": "q0013",
+    "query": "Who attended 1:1 Sarah Williams + Henry Johnson",
+    "relevant": [
+      "people/sarah-williams-92",
+      "people/henry-johnson-12"
+    ],
+    "grades": {
+      "people/sarah-williams-92": 3,
+      "people/henry-johnson-12": 3
+    }
+  },
+  {
+    "id": "q0014",
+    "query": "Who attended Epsilon Board Meeting Q1 2025",
+    "relevant": [
+      "people/paul-rodriguez-4",
+      "people/sarah-lopez-84",
+      "people/sarah-williams-92",
+      "people/olivia-miller-176"
+    ],
+    "grades": {
+      "people/paul-rodriguez-4": 3,
+      "people/sarah-lopez-84": 3,
+      "people/sarah-williams-92": 3,
+      "people/olivia-miller-176": 3
+    }
+  },
+  {
+    "id": "q0015",
+    "query": "Who attended 1:1 Rosa Miller + Nina Rodriguez",
+    "relevant": [
+      "people/rosa-miller-98",
+      "people/nina-rodriguez-18"
+    ],
+    "grades": {
+      "people/rosa-miller-98": 3,
+      "people/nina-rodriguez-18": 3
+    }
+  },
+  {
+    "id": "q0016",
+    "query": "Who attended 1:1 Rosa Jackson + David Wang",
+    "relevant": [
+      "people/rosa-jackson-90",
+      "people/david-wang-10"
+    ],
+    "grades": {
+      "people/rosa-jackson-90": 3,
+      "people/david-wang-10": 3
+    }
+  },
+  {
+    "id": "q0017",
+    "query": "Who attended 1:1 Chris Miller + Eric Lee",
+    "relevant": [
+      "people/eric-lee-21"
+    ],
+    "grades": {
+      "people/eric-lee-21": 3
+    }
+  },
+  {
+    "id": "q0018",
+    "query": "Who attended Demo Day W33 \u2013 Helix Pitch",
+    "relevant": [
+      "people/jack-davis-89",
+      "people/rachel-garcia-9",
+      "people/vera-chen-14",
+      "people/vera-singh-20",
+      "people/quinn-park-119"
+    ],
+    "grades": {
+      "people/jack-davis-89": 3,
+      "people/rachel-garcia-9": 3,
+      "people/vera-chen-14": 3,
+      "people/vera-singh-20": 3,
+      "people/quinn-park-119": 3
+    }
+  },
+  {
+    "id": "q0019",
+    "query": "Who attended 1:1 Jack Davis + Rachel Garcia",
+    "relevant": [
+      "people/jack-davis-89",
+      "people/rachel-garcia-9"
+    ],
+    "grades": {
+      "people/jack-davis-89": 3,
+      "people/rachel-garcia-9": 3
+    }
+  },
+  {
+    "id": "q0020",
+    "query": "Who attended Demo Day W36 \u2014 Lumen (Batch 12)",
+    "relevant": [
+      "people/sarah-williams-92",
+      "people/henry-johnson-12",
+      "people/quinten-wang-17",
+      "people/paul-anderson-23"
+    ],
+    "grades": {
+      "people/sarah-williams-92": 3,
+      "people/henry-johnson-12": 3,
+      "people/quinten-wang-17": 3,
+      "people/paul-anderson-23": 3
+    }
+  },
+  {
+    "id": "q0021",
+    "query": "Who attended 1:1 Wendy Hernandez + Mia Brown",
+    "relevant": [
+      "people/wendy-hernandez-80",
+      "people/mia-brown-0"
+    ],
+    "grades": {
+      "people/wendy-hernandez-80": 3,
+      "people/mia-brown-0": 3
+    }
+  },
+  {
+    "id": "q0022",
+    "query": "Who attended 1:1 Priya Taylor + Mia Anderson",
+    "relevant": [
+      "people/priya-taylor-85",
+      "people/mia-anderson-5"
+    ],
+    "grades": {
+      "people/priya-taylor-85": 3,
+      "people/mia-anderson-5": 3
+    }
+  },
+  {
+    "id": "q0023",
+    "query": "Who attended 1:1 Kate Lopez + Adam Lee",
+    "relevant": [
+      "people/kate-lopez-99",
+      "people/adam-lee-19"
+    ],
+    "grades": {
+      "people/kate-lopez-99": 3,
+      "people/adam-lee-19": 3
+    }
+  },
+  {
+    "id": "q0024",
+    "query": "Who attended 1:1 David Zhang + Victor Wilson",
+    "relevant": [
+      "people/david-zhang-83",
+      "people/victor-wilson-3"
+    ],
+    "grades": {
+      "people/david-zhang-83": 3,
+      "people/victor-wilson-3": 3
+    }
+  },
+  {
+    "id": "q0025",
+    "query": "Who attended Demo Day W35 \u2013 Compass",
+    "relevant": [
+      "people/chris-jackson-91",
+      "people/mark-thomas-11",
+      "people/ulrich-wang-16",
+      "people/quinten-rodriguez-22"
+    ],
+    "grades": {
+      "people/chris-jackson-91": 3,
+      "people/mark-thomas-11": 3,
+      "people/ulrich-wang-16": 3,
+      "people/quinten-rodriguez-22": 3
+    }
+  },
+  {
+    "id": "q0026",
+    "query": "Who attended Gamma Board Meeting Q3 2025",
+    "relevant": [
+      "people/mark-jones-2"
+    ],
+    "grades": {
+      "people/mark-jones-2": 3
+    }
+  },
+  {
+    "id": "q0027",
+    "query": "Who attended Delta Board Meeting Q4 2025",
+    "relevant": [
+      "people/victor-wilson-3",
+      "people/david-zhang-83",
+      "people/rachel-brown-95"
+    ],
+    "grades": {
+      "people/victor-wilson-3": 3,
+      "people/david-zhang-83": 3,
+      "people/rachel-brown-95": 3
+    }
+  },
+  {
+    "id": "q0028",
+    "query": "Who attended 1:1 Chris Jackson + Mark Thomas",
+    "relevant": [
+      "people/chris-jackson-91",
+      "people/mark-thomas-11"
+    ],
+    "grades": {
+      "people/chris-jackson-91": 3,
+      "people/mark-thomas-11": 3
+    }
+  },
+  {
+    "id": "q0029",
+    "query": "Who attended 1:1 Vera Gonzalez + Paul Anderson",
+    "relevant": [
+      "people/paul-anderson-23"
+    ],
+    "grades": {
+      "people/paul-anderson-23": 3
+    }
+  },
+  {
+    "id": "q0030",
+    "query": "Who attended 1:1 Chris Singh + Ulrich Wang",
+    "relevant": [
+      "people/chris-singh-96",
+      "people/ulrich-wang-16"
+    ],
+    "grades": {
+      "people/chris-singh-96": 3,
+      "people/ulrich-wang-16": 3
+    }
+  },
+  {
+    "id": "q0031",
+    "query": "Who attended Demo Day W27 - Delta Biotech Presentation",
+    "relevant": [
+      "people/david-zhang-83",
+      "people/victor-wilson-3",
+      "people/yara-johnson-8",
+      "people/vera-chen-14",
+      "people/adam-lopez-113"
+    ],
+    "grades": {
+      "people/david-zhang-83": 3,
+      "people/victor-wilson-3": 3,
+      "people/yara-johnson-8": 3,
+      "people/vera-chen-14": 3,
+      "people/adam-lopez-113": 3
+    }
+  },
+  {
+    "id": "q0032",
+    "query": "Who attended Demo Day W29 \u2013 Nimbus Pitch",
+    "relevant": [
+      "people/priya-taylor-85",
+      "people/mia-anderson-5",
+      "people/david-wang-10",
+      "people/ulrich-wang-16",
+      "people/quinten-nakamura-115"
+    ],
+    "grades": {
+      "people/priya-taylor-85": 3,
+      "people/mia-anderson-5": 3,
+      "people/david-wang-10": 3,
+      "people/ulrich-wang-16": 3,
+      "people/quinten-nakamura-115": 3
+    }
+  },
+  {
+    "id": "q0033",
+    "query": "Who attended 1:1 Carol Jackson + Victor Taylor",
+    "relevant": [
+      "people/carol-jackson-81",
+      "people/victor-taylor-1"
+    ],
+    "grades": {
+      "people/carol-jackson-81": 3,
+      "people/victor-taylor-1": 3
+    }
+  },
+  {
+    "id": "q0034",
+    "query": "Who attended 1:1 Sarah Lopez + Paul Rodriguez",
+    "relevant": [
+      "people/sarah-lopez-84",
+      "people/paul-rodriguez-4"
+    ],
+    "grades": {
+      "people/sarah-lopez-84": 3,
+      "people/paul-rodriguez-4": 3
+    }
+  },
+  {
+    "id": "q0035",
+    "query": "Who attended Demo Day W25 - Beta Cybersecurity Pitch",
+    "relevant": [
+      "people/carol-jackson-81",
+      "people/victor-taylor-1",
+      "people/uma-brown-6",
+      "people/henry-johnson-12",
+      "people/tara-kapoor-111"
+    ],
+    "grades": {
+      "people/carol-jackson-81": 3,
+      "people/victor-taylor-1": 3,
+      "people/uma-brown-6": 3,
+      "people/henry-johnson-12": 3,
+      "people/tara-kapoor-111": 3
+    }
+  },
+  {
+    "id": "q0036",
+    "query": "Who attended Demo Day W28 \u2013 Epsilon Pitch",
+    "relevant": [
+      "people/sarah-lopez-84",
+      "people/paul-rodriguez-4",
+      "people/rachel-garcia-9",
+      "people/noah-kapoor-15",
+      "people/julia-johnson-114"
+    ],
+    "grades": {
+      "people/sarah-lopez-84": 3,
+      "people/paul-rodriguez-4": 3,
+      "people/rachel-garcia-9": 3,
+      "people/noah-kapoor-15": 3,
+      "people/julia-johnson-114": 3
+    }
+  },
+  {
+    "id": "q0037",
+    "query": "Who attended 1:1 Kevin Taylor + Quinten Rodriguez",
+    "relevant": [
+      "people/quinten-rodriguez-22"
+    ],
+    "grades": {
+      "people/quinten-rodriguez-22": 3
+    }
+  },
+  {
+    "id": "q0038",
+    "query": "Who attended 1:1 Sarah Wang + Quinten Lee",
+    "relevant": [
+      "people/quinten-lee-24"
+    ],
+    "grades": {
+      "people/quinten-lee-24": 3
+    }
+  },
+  {
+    "id": "q0039",
+    "query": "Who attended Helix Board Meeting Q2 2025",
+    "relevant": [
+      "people/rachel-garcia-9"
+    ],
+    "grades": {
+      "people/rachel-garcia-9": 3
+    }
+  },
+  {
+    "id": "q0040",
+    "query": "Who attended Demo Day W38 \u2013 Mosaic Pitch",
+    "relevant": [
+      "people/rosa-nakamura-94",
+      "people/vera-chen-14",
+      "people/adam-lee-19",
+      "people/vera-wilson-25"
+    ],
+    "grades": {
+      "people/rosa-nakamura-94": 3,
+      "people/vera-chen-14": 3,
+      "people/adam-lee-19": 3,
+      "people/vera-wilson-25": 3
+    }
+  },
+  {
+    "id": "q0041",
+    "query": "Who attended Nimbus Board Meeting Q2 2025",
+    "relevant": [
+      "people/mia-anderson-5"
+    ],
+    "grades": {
+      "people/mia-anderson-5": 3
+    }
+  },
+  {
+    "id": "q0042",
+    "query": "Who attended 1:1 Julia Davis + Uma Brown",
+    "relevant": [
+      "people/julia-davis-86",
+      "people/uma-brown-6"
+    ],
+    "grades": {
+      "people/julia-davis-86": 3,
+      "people/uma-brown-6": 3
+    }
+  },
+  {
+    "id": "q0043",
+    "query": "Who attended Demo Day W24 \u2014 Acme",
+    "relevant": [
+      "people/wendy-hernandez-80",
+      "people/mia-brown-0",
+      "people/mia-anderson-5",
+      "people/mark-thomas-11",
+      "people/chris-smith-110"
+    ],
+    "grades": {
+      "people/wendy-hernandez-80": 3,
+      "people/mia-brown-0": 3,
+      "people/mia-anderson-5": 3,
+      "people/mark-thomas-11": 3,
+      "people/chris-smith-110": 3
+    }
+  },
+  {
+    "id": "q0044",
+    "query": "Who attended 1:1 Zoe Gonzalez + Vera Singh",
+    "relevant": [
+      "people/vera-singh-20"
+    ],
+    "grades": {
+      "people/vera-singh-20": 3
+    }
+  },
+  {
+    "id": "q0045",
+    "query": "Who attended Beta Board Meeting Q2 2025",
+    "relevant": [
+      "people/victor-taylor-1"
+    ],
+    "grades": {
+      "people/victor-taylor-1": 3
+    }
+  },
+  {
+    "id": "q0046",
+    "query": "Who attended 1:1 Helen Martinez + Ulrich Johnson",
+    "relevant": [
+      "people/helen-martinez-87",
+      "people/ulrich-johnson-7"
+    ],
+    "grades": {
+      "people/helen-martinez-87": 3,
+      "people/ulrich-johnson-7": 3
+    }
+  },
+  {
+    "id": "q0047",
+    "query": "Who attended Quantum Board Meeting Q4 2025",
+    "relevant": [
+      "people/ulrich-johnson-7"
+    ],
+    "grades": {
+      "people/ulrich-johnson-7": 3
+    }
+  },
+  {
+    "id": "q0048",
+    "query": "Who attended Pulse Board Meeting Q1 2025",
+    "relevant": [
+      "people/yara-johnson-8",
+      "people/eric-martinez-93"
+    ],
+    "grades": {
+      "people/yara-johnson-8": 3,
+      "people/eric-martinez-93": 3
+    }
+  },
+  {
+    "id": "q0049",
+    "query": "Who attended Demo Day W31 \u2013 Quantum",
+    "relevant": [
+      "people/helen-martinez-87",
+      "people/ulrich-johnson-7",
+      "people/henry-johnson-12",
+      "people/nina-rodriguez-18",
+      "people/tina-lopez-117"
+    ],
+    "grades": {
+      "people/helen-martinez-87": 3,
+      "people/ulrich-johnson-7": 3,
+      "people/henry-johnson-12": 3,
+      "people/nina-rodriguez-18": 3,
+      "people/tina-lopez-117": 3
+    }
+  },
+  {
+    "id": "q0050",
+    "query": "Who attended 1:1 Fiona Moore + Yara Johnson",
+    "relevant": [
+      "people/fiona-moore-88",
+      "people/yara-johnson-8"
+    ],
+    "grades": {
+      "people/fiona-moore-88": 3,
+      "people/yara-johnson-8": 3
+    }
+  },
+  {
+    "id": "q0051",
+    "query": "Who works at Nimbus",
+    "relevant": [
+      "people/mia-anderson-5",
+      "people/quinten-nakamura-115"
+    ],
+    "grades": {
+      "people/mia-anderson-5": 3,
+      "people/quinten-nakamura-115": 3
+    }
+  },
+  {
+    "id": "q0052",
+    "query": "Who works at Anchor - Data Infrastructure Startup",
+    "relevant": [
+      "people/carol-wilson-28"
+    ],
+    "grades": {
+      "people/carol-wilson-28": 3
+    }
+  },
+  {
+    "id": "q0053",
+    "query": "Who works at Pulse - EdTech Startup",
+    "relevant": [
+      "people/yara-johnson-8",
+      "people/xavier-nakamura-118"
+    ],
+    "grades": {
+      "people/yara-johnson-8": 3,
+      "people/xavier-nakamura-118": 3
+    }
+  },
+  {
+    "id": "q0054",
+    "query": "Who works at Cascade",
+    "relevant": [
+      "people/yara-smith-30"
+    ],
+    "grades": {
+      "people/yara-smith-30": 3
+    }
+  },
+  {
+    "id": "q0055",
+    "query": "Who works at Delta",
+    "relevant": [
+      "people/adam-lopez-113",
+      "people/victor-wilson-3"
+    ],
+    "grades": {
+      "people/adam-lopez-113": 3,
+      "people/victor-wilson-3": 3
+    }
+  },
+  {
+    "id": "q0056",
+    "query": "Who works at Cipher",
+    "relevant": [
+      "people/mia-lee-13"
+    ],
+    "grades": {
+      "people/mia-lee-13": 3
+    }
+  },
+  {
+    "id": "q0057",
+    "query": "Who works at Jolt - AI Applications Startup",
+    "relevant": [
+      "people/chris-williams-37"
+    ],
+    "grades": {
+      "people/chris-williams-37": 3
+    }
+  },
+  {
+    "id": "q0058",
+    "query": "Who works at Apex",
+    "relevant": [
+      "people/nina-rodriguez-18"
+    ],
+    "grades": {
+      "people/nina-rodriguez-18": 3
+    }
+  },
+  {
+    "id": "q0059",
+    "query": "Who works at Lucid",
+    "relevant": [
+      "people/eric-lee-21"
+    ],
+    "grades": {
+      "people/eric-lee-21": 3
+    }
+  },
+  {
+    "id": "q0060",
+    "query": "Who works at Iris",
+    "relevant": [
+      "people/mia-park-36"
+    ],
+    "grades": {
+      "people/mia-park-36": 3
+    }
+  },
+  {
+    "id": "q0061",
+    "query": "Who works at Forge",
+    "relevant": [
+      "people/adam-lee-19"
+    ],
+    "grades": {
+      "people/adam-lee-19": 3
+    }
+  },
+  {
+    "id": "q0062",
+    "query": "Who works at Mosaic - Consumer Social Startup",
+    "relevant": [
+      "people/vera-chen-14"
+    ],
+    "grades": {
+      "people/vera-chen-14": 3
+    }
+  },
+  {
+    "id": "q0063",
+    "query": "Who works at Helix",
+    "relevant": [
+      "people/rachel-garcia-9",
+      "people/quinn-park-119"
+    ],
+    "grades": {
+      "people/rachel-garcia-9": 3,
+      "people/quinn-park-119": 3
+    }
+  },
+  {
+    "id": "q0064",
+    "query": "Who works at Tempo",
+    "relevant": [
+      "people/quinten-lee-24"
+    ],
+    "grades": {
+      "people/quinten-lee-24": 3
+    }
+  },
+  {
+    "id": "q0065",
+    "query": "Who works at Keel",
+    "relevant": [
+      "people/steve-williams-38"
+    ],
+    "grades": {
+      "people/steve-williams-38": 3
+    }
+  },
+  {
+    "id": "q0066",
+    "query": "Who works at Hatch",
+    "relevant": [
+      "people/eric-miller-35"
+    ],
+    "grades": {
+      "people/eric-miller-35": 3
+    }
+  },
+  {
+    "id": "q0067",
+    "query": "Who works at Gravity",
+    "relevant": [
+      "people/quinten-wang-17"
+    ],
+    "grades": {
+      "people/quinten-wang-17": 3
+    }
+  },
+  {
+    "id": "q0068",
+    "query": "Who works at Lumen - Biotech Startup",
+    "relevant": [
+      "people/henry-johnson-12"
+    ],
+    "grades": {
+      "people/henry-johnson-12": 3
+    }
+  },
+  {
+    "id": "q0069",
+    "query": "Who works at Gust",
+    "relevant": [
+      "people/steve-liu-34"
+    ],
+    "grades": {
+      "people/steve-liu-34": 3
+    }
+  },
+  {
+    "id": "q0070",
+    "query": "Who works at Wisp",
+    "relevant": [
+      "people/linda-kim-26"
+    ],
+    "grades": {
+      "people/linda-kim-26": 3
+    }
+  },
+  {
+    "id": "q0071",
+    "query": "Who works at Quantum",
+    "relevant": [
+      "people/tina-lopez-117",
+      "people/ulrich-johnson-7"
+    ],
+    "grades": {
+      "people/tina-lopez-117": 3,
+      "people/ulrich-johnson-7": 3
+    }
+  },
+  {
+    "id": "q0072",
+    "query": "Who works at Gamma - Fintech Startup",
+    "relevant": [
+      "people/tina-jones-112",
+      "people/mark-jones-2"
+    ],
+    "grades": {
+      "people/tina-jones-112": 3,
+      "people/mark-jones-2": 3
+    }
+  },
+  {
+    "id": "q0073",
+    "query": "Who works at Brink",
+    "relevant": [
+      "people/uma-gonzalez-29"
+    ],
+    "grades": {
+      "people/uma-gonzalez-29": 3
+    }
+  },
+  {
+    "id": "q0074",
+    "query": "Who works at Foundry",
+    "relevant": [
+      "people/ian-davis-33"
+    ],
+    "grades": {
+      "people/ian-davis-33": 3
+    }
+  },
+  {
+    "id": "q0075",
+    "query": "Who works at Kindle - Climate Tech Startup",
+    "relevant": [
+      "people/vera-singh-20"
+    ],
+    "grades": {
+      "people/vera-singh-20": 3
+    }
+  },
+  {
+    "id": "q0076",
+    "query": "Who works at Epsilon",
+    "relevant": [
+      "people/paul-rodriguez-4",
+      "people/julia-johnson-114"
+    ],
+    "grades": {
+      "people/paul-rodriguez-4": 3,
+      "people/julia-johnson-114": 3
+    }
+  },
+  {
+    "id": "q0077",
+    "query": "Who works at Tessera",
+    "relevant": [
+      "people/noah-kapoor-15"
+    ],
+    "grades": {
+      "people/noah-kapoor-15": 3
+    }
+  },
+  {
+    "id": "q0078",
+    "query": "Who works at Beacon",
+    "relevant": [
+      "people/david-wang-10"
+    ],
+    "grades": {
+      "people/david-wang-10": 3
+    }
+  },
+  {
+    "id": "q0079",
+    "query": "Who works at Vox - AI Applications Startup",
+    "relevant": [
+      "people/vera-wilson-25"
+    ],
+    "grades": {
+      "people/vera-wilson-25": 3
+    }
+  },
+  {
+    "id": "q0080",
+    "query": "Who works at Ranger",
+    "relevant": [
+      "people/quinten-rodriguez-22"
+    ],
+    "grades": {
+      "people/quinten-rodriguez-22": 3
+    }
+  },
+  {
+    "id": "q0081",
+    "query": "Who works at Echo - Robotics Startup",
+    "relevant": [
+      "people/helen-johnson-32"
+    ],
+    "grades": {
+      "people/helen-johnson-32": 3
+    }
+  },
+  {
+    "id": "q0082",
+    "query": "Who works at Vector",
+    "relevant": [
+      "people/victor-jackson-116",
+      "people/uma-brown-6"
+    ],
+    "grades": {
+      "people/victor-jackson-116": 3,
+      "people/uma-brown-6": 3
+    }
+  },
+  {
+    "id": "q0083",
+    "query": "Who works at Lattice - Enterprise SaaS Startup",
+    "relevant": [
+      "people/quinn-miller-39"
+    ],
+    "grades": {
+      "people/quinn-miller-39": 3
+    }
+  },
+  {
+    "id": "q0084",
+    "query": "Who works at Beta - Cybersecurity Startup",
+    "relevant": [
+      "people/victor-taylor-1",
+      "people/tara-kapoor-111"
+    ],
+    "grades": {
+      "people/victor-taylor-1": 3,
+      "people/tara-kapoor-111": 3
+    }
+  },
+  {
+    "id": "q0085",
+    "query": "Who works at Zenith",
+    "relevant": [
+      "people/priya-zhang-27"
+    ],
+    "grades": {
+      "people/priya-zhang-27": 3
+    }
+  },
+  {
+    "id": "q0086",
+    "query": "Who works at Sentinel",
+    "relevant": [
+      "people/paul-anderson-23"
+    ],
+    "grades": {
+      "people/paul-anderson-23": 3
+    }
+  },
+  {
+    "id": "q0087",
+    "query": "Who works at Compass",
+    "relevant": [
+      "people/mark-thomas-11"
+    ],
+    "grades": {
+      "people/mark-thomas-11": 3
+    }
+  },
+  {
+    "id": "q0088",
+    "query": "Who works at Mantle",
+    "relevant": [
+      "people/ulrich-wang-16"
+    ],
+    "grades": {
+      "people/ulrich-wang-16": 3
+    }
+  },
+  {
+    "id": "q0089",
+    "query": "Who works at Acme",
+    "relevant": [
+      "people/mia-brown-0",
+      "people/chris-smith-110"
+    ],
+    "grades": {
+      "people/mia-brown-0": 3,
+      "people/chris-smith-110": 3
+    }
+  },
+  {
+    "id": "q0090",
+    "query": "Who works at Drift",
+    "relevant": [
+      "people/frank-hernandez-31"
+    ],
+    "grades": {
+      "people/frank-hernandez-31": 3
+    }
+  },
+  {
+    "id": "q0091",
+    "query": "Who invested in Helix Labs",
+    "relevant": [
+      "people/priya-taylor-85",
+      "people/julia-davis-86"
+    ],
+    "grades": {
+      "people/priya-taylor-85": 3,
+      "people/julia-davis-86": 3
+    }
+  },
+  {
+    "id": "q0092",
+    "query": "Who invested in Anchor - Data Infrastructure Startup",
+    "relevant": [
+      "people/sarah-williams-92"
+    ],
+    "grades": {
+      "people/sarah-williams-92": 3
+    }
+  },
+  {
+    "id": "q0093",
+    "query": "Who invested in Vellum",
+    "relevant": [
+      "people/rosa-miller-98"
+    ],
+    "grades": {
+      "people/rosa-miller-98": 3
+    }
+  },
+  {
+    "id": "q0094",
+    "query": "Who invested in Pulse - EdTech Startup",
+    "relevant": [
+      "people/eric-martinez-93"
+    ],
+    "grades": {
+      "people/eric-martinez-93": 3
+    }
+  },
+  {
+    "id": "q0095",
+    "query": "Who invested in Delta",
+    "relevant": [
+      "people/david-zhang-83",
+      "people/rachel-brown-95"
+    ],
+    "grades": {
+      "people/david-zhang-83": 3,
+      "people/rachel-brown-95": 3
+    }
+  },
+  {
+    "id": "q0096",
+    "query": "Who invested in Jolt - AI Applications Startup",
+    "relevant": [
+      "people/tina-hernandez-97"
+    ],
+    "grades": {
+      "people/tina-hernandez-97": 3
+    }
+  },
+  {
+    "id": "q0097",
+    "query": "Who invested in Apex",
+    "relevant": [
+      "people/priya-taylor-85"
+    ],
+    "grades": {
+      "people/priya-taylor-85": 3
+    }
+  },
+  {
+    "id": "q0098",
+    "query": "Who invested in Lucid",
+    "relevant": [
+      "people/fiona-moore-88"
+    ],
+    "grades": {
+      "people/fiona-moore-88": 3
+    }
+  },
+  {
+    "id": "q0099",
+    "query": "Who invested in Delta Labs",
+    "relevant": [
+      "people/wendy-hernandez-80",
+      "people/tina-hernandez-97"
+    ],
+    "grades": {
+      "people/wendy-hernandez-80": 3,
+      "people/tina-hernandez-97": 3
+    }
+  },
+  {
+    "id": "q0100",
+    "query": "Who invested in Beta Labs",
+    "relevant": [
+      "people/jack-davis-89",
+      "people/chris-singh-96"
+    ],
+    "grades": {
+      "people/jack-davis-89": 3,
+      "people/chris-singh-96": 3
+    }
+  },
+  {
+    "id": "q0101",
+    "query": "Who invested in Iris",
+    "relevant": [
+      "people/jack-davis-89"
+    ],
+    "grades": {
+      "people/jack-davis-89": 3
+    }
+  },
+  {
+    "id": "q0102",
+    "query": "Who invested in Pulse Labs",
+    "relevant": [
+      "people/carol-jackson-81",
+      "people/priya-taylor-85",
+      "people/rosa-jackson-90"
+    ],
+    "grades": {
+      "people/carol-jackson-81": 3,
+      "people/priya-taylor-85": 3,
+      "people/rosa-jackson-90": 3
+    }
+  },
+  {
+    "id": "q0103",
+    "query": "Who invested in Forge",
+    "relevant": [
+      "people/sarah-lopez-84"
+    ],
+    "grades": {
+      "people/sarah-lopez-84": 3
+    }
+  },
+  {
+    "id": "q0104",
+    "query": "Who invested in Quantum Labs",
+    "relevant": [
+      "people/rachel-brown-95",
+      "people/rosa-miller-98"
+    ],
+    "grades": {
+      "people/rachel-brown-95": 3,
+      "people/rosa-miller-98": 3
+    }
+  },
+  {
+    "id": "q0105",
+    "query": "Who invested in Mosaic - Consumer Social Startup",
+    "relevant": [
+      "people/helen-martinez-87"
+    ],
+    "grades": {
+      "people/helen-martinez-87": 3
+    }
+  },
+  {
+    "id": "q0106",
+    "query": "Who invested in Orbit - Biotech Startup",
+    "relevant": [
+      "people/julia-davis-86"
+    ],
+    "grades": {
+      "people/julia-davis-86": 3
+    }
+  },
+  {
+    "id": "q0107",
+    "query": "Who invested in Prism",
+    "relevant": [
+      "people/carol-jackson-81",
+      "people/rosa-jackson-90",
+      "people/tina-hernandez-97"
+    ],
+    "grades": {
+      "people/carol-jackson-81": 3,
+      "people/rosa-jackson-90": 3,
+      "people/tina-hernandez-97": 3
+    }
+  },
+  {
+    "id": "q0108",
+    "query": "Who invested in Meridian",
+    "relevant": [
+      "people/priya-taylor-85",
+      "people/chris-jackson-91"
+    ],
+    "grades": {
+      "people/priya-taylor-85": 3,
+      "people/chris-jackson-91": 3
+    }
+  },
+  {
+    "id": "q0109",
+    "query": "Who invested in Vector Labs",
+    "relevant": [
+      "people/iris-lee-82"
+    ],
+    "grades": {
+      "people/iris-lee-82": 3
+    }
+  },
+  {
+    "id": "q0110",
+    "query": "Who invested in Keel",
+    "relevant": [
+      "people/carol-jackson-81"
+    ],
+    "grades": {
+      "people/carol-jackson-81": 3
+    }
+  },
+  {
+    "id": "q0111",
+    "query": "Who invested in Talon",
+    "relevant": [
+      "people/sarah-williams-92"
+    ],
+    "grades": {
+      "people/sarah-williams-92": 3
+    }
+  },
+  {
+    "id": "q0112",
+    "query": "Who invested in Gravity",
+    "relevant": [
+      "people/chris-jackson-91",
+      "people/rosa-nakamura-94",
+      "people/rachel-brown-95"
+    ],
+    "grades": {
+      "people/chris-jackson-91": 3,
+      "people/rosa-nakamura-94": 3,
+      "people/rachel-brown-95": 3
+    }
+  },
+  {
+    "id": "q0113",
+    "query": "Who invested in Lumen - Biotech Startup",
+    "relevant": [
+      "people/kate-lopez-99"
+    ],
+    "grades": {
+      "people/kate-lopez-99": 3
+    }
+  },
+  {
+    "id": "q0114",
+    "query": "Who invested in Gust",
+    "relevant": [
+      "people/sarah-lopez-84"
+    ],
+    "grades": {
+      "people/sarah-lopez-84": 3
+    }
+  },
+  {
+    "id": "q0115",
+    "query": "Who invested in Quasar",
+    "relevant": [
+      "people/jack-davis-89"
+    ],
+    "grades": {
+      "people/jack-davis-89": 3
+    }
+  },
+  {
+    "id": "q0116",
+    "query": "Who invested in Acme Labs",
+    "relevant": [
+      "people/helen-martinez-87"
+    ],
+    "grades": {
+      "people/helen-martinez-87": 3
+    }
+  },
+  {
+    "id": "q0117",
+    "query": "Who invested in Foundry",
+    "relevant": [
+      "people/tina-hernandez-97"
+    ],
+    "grades": {
+      "people/tina-hernandez-97": 3
+    }
+  },
+  {
+    "id": "q0118",
+    "query": "Who invested in Epsilon",
+    "relevant": [
+      "people/sarah-lopez-84",
+      "people/sarah-williams-92",
+      "people/kate-lopez-99"
+    ],
+    "grades": {
+      "people/sarah-lopez-84": 3,
+      "people/sarah-williams-92": 3,
+      "people/kate-lopez-99": 3
+    }
+  },
+  {
+    "id": "q0119",
+    "query": "Who invested in Tessera",
+    "relevant": [
+      "people/kate-lopez-99"
+    ],
+    "grades": {
+      "people/kate-lopez-99": 3
+    }
+  },
+  {
+    "id": "q0120",
+    "query": "Who invested in Beacon",
+    "relevant": [
+      "people/rachel-brown-95"
+    ],
+    "grades": {
+      "people/rachel-brown-95": 3
+    }
+  },
+  {
+    "id": "q0121",
+    "query": "Who invested in Vox - AI Applications Startup",
+    "relevant": [
+      "people/fiona-moore-88"
+    ],
+    "grades": {
+      "people/fiona-moore-88": 3
+    }
+  },
+  {
+    "id": "q0122",
+    "query": "Who invested in Ranger",
+    "relevant": [
+      "people/helen-martinez-87"
+    ],
+    "grades": {
+      "people/helen-martinez-87": 3
+    }
+  },
+  {
+    "id": "q0123",
+    "query": "Who invested in Gamma Labs",
+    "relevant": [
+      "people/david-zhang-83",
+      "people/rosa-miller-98"
+    ],
+    "grades": {
+      "people/david-zhang-83": 3,
+      "people/rosa-miller-98": 3
+    }
+  },
+  {
+    "id": "q0124",
+    "query": "Who invested in Echo - Robotics Startup",
+    "relevant": [
+      "people/julia-davis-86",
+      "people/helen-martinez-87"
+    ],
+    "grades": {
+      "people/julia-davis-86": 3,
+      "people/helen-martinez-87": 3
+    }
+  },
+  {
+    "id": "q0125",
+    "query": "Who invested in Vector",
+    "relevant": [
+      "people/david-zhang-83"
+    ],
+    "grades": {
+      "people/david-zhang-83": 3
+    }
+  },
+  {
+    "id": "q0126",
+    "query": "Who invested in Spire",
+    "relevant": [
+      "people/wendy-hernandez-80",
+      "people/eric-martinez-93",
+      "people/rosa-nakamura-94"
+    ],
+    "grades": {
+      "people/wendy-hernandez-80": 3,
+      "people/eric-martinez-93": 3,
+      "people/rosa-nakamura-94": 3
+    }
+  },
+  {
+    "id": "q0127",
+    "query": "Who invested in Acme",
+    "relevant": [
+      "people/chris-jackson-91"
+    ],
+    "grades": {
+      "people/chris-jackson-91": 3
+    }
+  },
+  {
+    "id": "q0128",
+    "query": "Who invested in Epsilon Labs",
+    "relevant": [
+      "people/iris-lee-82"
+    ],
+    "grades": {
+      "people/iris-lee-82": 3
+    }
+  },
+  {
+    "id": "q0129",
+    "query": "Who invested in Drift",
+    "relevant": [
+      "people/wendy-hernandez-80",
+      "people/fiona-moore-88",
+      "people/jack-davis-89",
+      "people/tina-hernandez-97"
+    ],
+    "grades": {
+      "people/wendy-hernandez-80": 3,
+      "people/fiona-moore-88": 3,
+      "people/jack-davis-89": 3,
+      "people/tina-hernandez-97": 3
+    }
+  },
+  {
+    "id": "q0130",
+    "query": "Who advises Vellum",
+    "relevant": [
+      "people/rachel-gonzalez-175"
+    ],
+    "grades": {
+      "people/rachel-gonzalez-175": 3
+    }
+  },
+  {
+    "id": "q0131",
+    "query": "Who advises Apex",
+    "relevant": [
+      "people/tina-wang-179"
+    ],
+    "grades": {
+      "people/tina-wang-179": 3
+    }
+  },
+  {
+    "id": "q0132",
+    "query": "Who advises Lucid",
+    "relevant": [
+      "people/vera-rodriguez-171"
+    ],
+    "grades": {
+      "people/vera-rodriguez-171": 3
+    }
+  },
+  {
+    "id": "q0133",
+    "query": "Who advises Delta Labs",
+    "relevant": [
+      "people/wendy-wilson-170"
+    ],
+    "grades": {
+      "people/wendy-wilson-170": 3
+    }
+  },
+  {
+    "id": "q0134",
+    "query": "Who advises Forge",
+    "relevant": [
+      "people/tara-jackson-173"
+    ],
+    "grades": {
+      "people/tara-jackson-173": 3
+    }
+  },
+  {
+    "id": "q0135",
+    "query": "Who advises Prism",
+    "relevant": [
+      "people/alice-davis-172",
+      "people/olivia-miller-176"
+    ],
+    "grades": {
+      "people/alice-davis-172": 3,
+      "people/olivia-miller-176": 3
+    }
+  },
+  {
+    "id": "q0136",
+    "query": "Who advises Tempo",
+    "relevant": [
+      "people/yara-moore-174"
+    ],
+    "grades": {
+      "people/yara-moore-174": 3
+    }
+  },
+  {
+    "id": "q0137",
+    "query": "Who advises Vector Labs",
+    "relevant": [
+      "people/yara-moore-174"
+    ],
+    "grades": {
+      "people/yara-moore-174": 3
+    }
+  },
+  {
+    "id": "q0138",
+    "query": "Who advises Keel",
+    "relevant": [
+      "people/linda-taylor-178"
+    ],
+    "grades": {
+      "people/linda-taylor-178": 3
+    }
+  },
+  {
+    "id": "q0139",
+    "query": "Who advises Gravity",
+    "relevant": [
+      "people/tina-wang-179"
+    ],
+    "grades": {
+      "people/tina-wang-179": 3
+    }
+  },
+  {
+    "id": "q0140",
+    "query": "Who advises Umbra",
+    "relevant": [
+      "people/vera-rodriguez-171"
+    ],
+    "grades": {
+      "people/vera-rodriguez-171": 3
+    }
+  },
+  {
+    "id": "q0141",
+    "query": "Who advises Acme Labs",
+    "relevant": [
+      "people/wendy-wilson-170"
+    ],
+    "grades": {
+      "people/wendy-wilson-170": 3
+    }
+  },
+  {
+    "id": "q0142",
+    "query": "Who advises Foundry",
+    "relevant": [
+      "people/rachel-gonzalez-175"
+    ],
+    "grades": {
+      "people/rachel-gonzalez-175": 3
+    }
+  },
+  {
+    "id": "q0143",
+    "query": "Who advises Epsilon",
+    "relevant": [
+      "people/olivia-miller-176"
+    ],
+    "grades": {
+      "people/olivia-miller-176": 3
+    }
+  },
+  {
+    "id": "q0144",
+    "query": "Who advises Ranger",
+    "relevant": [
+      "people/beth-williams-177"
+    ],
+    "grades": {
+      "people/beth-williams-177": 3
+    }
+  },
+  {
+    "id": "q0145",
+    "query": "Who advises Vector",
+    "relevant": [
+      "people/wendy-wilson-170"
+    ],
+    "grades": {
+      "people/wendy-wilson-170": 3
+    }
   }
 ]
