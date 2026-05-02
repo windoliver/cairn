@@ -216,13 +216,19 @@ impl ExtractChain {
                     }
                     // Monotonic narrowing: clamp returned eligibility to
                     // the intersection with the current window. Widening
-                    // is rejected silently (logged below).
+                    // is rejected and logged.
                     let clamped = clamp_intersection(&r.llm_eligible_spans, &eligible);
-                    if clamped != r.llm_eligible_spans && !r.llm_eligible_spans.is_empty() {
-                        tracing::warn!(
-                            worker = w.name(),
-                            "chain: worker tried to widen eligibility; clamped to intersection"
-                        );
+                    // Warn if a widening attempt was detected: returned was non-empty
+                    // and clamping changed it (meaning at least one returned span
+                    // extended outside the current eligibility).
+                    let widened = !r.llm_eligible_spans.is_empty()
+                        && r.llm_eligible_spans.iter().any(|rs| {
+                            !eligible
+                                .iter()
+                                .any(|e| e.start <= rs.start && rs.end <= e.end)
+                        });
+                    if widened {
+                        tracing::warn!(worker = w.name(), "chain.eligibility_widening");
                     }
                     eligible = clamped;
                     if r.truncated != TruncationReason::None {
@@ -293,15 +299,11 @@ fn span_in_eligibility(span: Option<TextSpan>, eligible: &[TextSpan]) -> bool {
     }
 }
 
-/// Compute the intersection of `returned` spans with the `current`
-/// eligibility window. Any span in `returned` that extends beyond a
-/// span in `current` is clamped. If `returned` is empty the current
-/// eligibility is preserved unchanged (worker produced no narrowing
-/// signal, not a request to widen).
+/// Compute the strict interval-set intersection of `returned` with the
+/// `current` eligibility window. Empty `returned` ⇒ empty result, by
+/// design: a worker that returns no LLM-eligible spans is reporting
+/// suppression, not silence. The chain MUST forward that suppression.
 fn clamp_intersection(returned: &[TextSpan], current: &[TextSpan]) -> Vec<TextSpan> {
-    if returned.is_empty() {
-        return current.to_vec();
-    }
     let mut out = Vec::new();
     for r in returned {
         for e in current {
@@ -776,5 +778,87 @@ mod tests {
         let res = chain.run(&input).await.expect("ok");
         // Only the in-span output (2..8) survives; out-of-span (20..30) is dropped.
         assert_eq!(res.outputs.len(), 1);
+    }
+
+    struct GateReturnsEmpty;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for GateReturnsEmpty {
+        fn name(&self) -> &'static str {
+            "gate_empty"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::regex_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            Ok(ExtractResult {
+                outputs: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![], // explicit suppression
+            })
+        }
+    }
+
+    struct AugRecorder {
+        received: Arc<Mutex<Vec<TextSpan>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for AugRecorder {
+        fn name(&self) -> &'static str {
+            "aug_recorder"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            *self.received.lock().expect("mutex not poisoned") = input.eligible_spans.clone();
+            Ok(ExtractResult {
+                outputs: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_returning_empty_eligibility_blocks_downstream_aug() {
+        // A gate that succeeds but returns empty llm_eligible_spans should
+        // narrow downstream to nothing — the augmenter must see eligible_spans = [].
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let chain = ExtractChain::new(vec![
+            Box::new(GateReturnsEmpty),
+            Box::new(AugRecorder {
+                received: Arc::clone(&recorded),
+            }),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            // Start with a non-empty eligible span (would be inherited by first worker).
+            eligible_spans: vec![TextSpan::new(0, 20)],
+        };
+
+        let _ = chain.run(&input).await.expect("chain should succeed");
+        let received_spans = recorded.lock().expect("mutex not poisoned").clone();
+        assert!(
+            received_spans.is_empty(),
+            "augmenter should have received empty eligible_spans, got {received_spans:?}"
+        );
     }
 }
