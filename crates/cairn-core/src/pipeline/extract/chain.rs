@@ -273,12 +273,24 @@ impl ExtractChain {
                         } else {
                             tracing::warn!(
                                 worker = w.name(),
-                                "chain: output source_span outside current eligibility; dropping"
+                                role = ?role,
+                                "chain: output source_span outside current eligibility; \
+                                 dropping and recording failure (trust-boundary bypass)"
                             );
+                            // Record as Augmenting-role failure: the worker returned Ok but
+                            // emitted an output outside the authorised window. This is an
+                            // output policy violation, not a gate failure — use Augmenting
+                            // so it does not promote to GatingFailed.
+                            failures.push(WorkerFailure {
+                                worker: w.name(),
+                                role: WorkerRole::Augmenting,
+                                error: ExtractError::SpanOutOfBounds { worker: w.name() },
+                            });
                         }
                     }
                     // Validate every discard against current eligibility;
-                    // drop any discard whose source_span falls outside.
+                    // drop any discard whose source_span falls outside and
+                    // record a WorkerFailure so the caller can observe the drop.
                     for discard in r.discards {
                         if eligible.iter().any(|e| {
                             e.start <= discard.source_span.start && discard.source_span.end <= e.end
@@ -287,8 +299,19 @@ impl ExtractChain {
                         } else {
                             tracing::warn!(
                                 worker = w.name(),
-                                "chain: discard source_span outside current eligibility; dropping"
+                                role = ?role,
+                                "chain: discard source_span outside current eligibility; \
+                                 dropping and recording failure (trust-boundary bypass)"
                             );
+                            // Record as Augmenting-role failure: the worker returned Ok but
+                            // emitted a discard outside the authorised window. This is an
+                            // output policy violation, not a gate failure — use Augmenting
+                            // so it does not promote to GatingFailed.
+                            failures.push(WorkerFailure {
+                                worker: w.name(),
+                                role: WorkerRole::Augmenting,
+                                error: ExtractError::SpanOutOfBounds { worker: w.name() },
+                            });
                         }
                     }
                     // Monotonic narrowing: only Gating workers may narrow the
@@ -917,6 +940,24 @@ mod tests {
         let res = chain.run(&input).await.expect("ok");
         // Only the in-span output (2..8) survives; out-of-span (20..30) is dropped.
         assert_eq!(res.outputs.len(), 1);
+        // The out-of-eligibility drop must be recorded as a WorkerFailure
+        // (adversarial-review Finding 2).
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "expected 1 WorkerFailure for out-of-eligibility output drop, got: {:?}",
+            res.failures
+        );
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::SpanOutOfBounds {
+                    worker: "output_in_span_gate"
+                }
+            ),
+            "unexpected failure error: {:?}",
+            res.failures[0].error
+        );
     }
 
     struct GateReturnsEmpty;
@@ -1500,6 +1541,9 @@ mod tests {
         // be validated against the current eligibility window the same way
         // outputs are. A worker must not be able to emit a discard for a span
         // it was not authorised to see.
+        //
+        // Updated (adversarial-review Finding 2): out-of-eligibility discard
+        // drops must also produce a WorkerFailure, not just a warn-log.
         let chain =
             ExtractChain::new(vec![Box::new(DiscardOutsideEligibilityGate)]).expect("valid chain");
         let event = fixture_event();
@@ -1517,6 +1561,23 @@ mod tests {
             res.discards
         );
         assert_eq!(res.discards[0].source_span, TextSpan::new(2, 8));
+        // The out-of-bounds drop must be recorded as a WorkerFailure.
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "expected 1 WorkerFailure for out-of-eligibility discard, got: {:?}",
+            res.failures
+        );
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::SpanOutOfBounds {
+                    worker: "discard_outside_eligibility_gate"
+                }
+            ),
+            "unexpected failure error: {:?}",
+            res.failures[0].error
+        );
     }
 
     // ── Regression: Finding 1 (adversarial review round 3) — None provenance bypasses eligibility ──
@@ -1807,6 +1868,95 @@ mod tests {
             "no WorkerFailure expected when caller imposed no restriction; \
              got: {:?}",
             res.failures
+        );
+    }
+
+    // ── Regression: Finding 2 (adversarial review round 4) — out-of-eligibility drops recorded ──
+
+    /// Augmenting worker that emits an output with a span deliberately outside
+    /// the current eligibility window.
+    struct OutOfEligibilityAug;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for OutOfEligibilityAug {
+        fn name(&self) -> &'static str {
+            "out_of_eligibility_aug"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            use crate::domain::CaptureEventId;
+            use crate::domain::taxonomy::MemoryKind;
+            use crate::pipeline::extract::draft::{Confidence, KindHint, MemoryDraft};
+            Ok(ExtractResult {
+                outputs: vec![ExtractOutput::Draft(MemoryDraft {
+                    kind_hint: KindHint::from(MemoryKind::User),
+                    body: "outside eligible window".to_owned(),
+                    confidence: Confidence::try_from(0.9_f32).expect("valid"),
+                    source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                        .expect("valid ulid"),
+                    // Span 50..60 is outside the eligibility 0..10.
+                    source_span: Some(TextSpan::new(50, 60)),
+                    trigger_id: None,
+                })],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    /// Regression for adversarial-review Finding 2 (round 4): an Augmenting
+    /// worker that emits an output whose `source_span` falls outside the current
+    /// eligibility window must be recorded as a `WorkerFailure` with
+    /// `SpanOutOfBounds`, not silently dropped.
+    #[tokio::test]
+    async fn out_of_eligibility_outputs_recorded_as_failures() {
+        let chain = ExtractChain::new(vec![
+            Box::new(PassthroughGate),
+            Box::new(OutOfEligibilityAug),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            // Eligibility 0..10; the augmenting worker emits 50..60.
+            eligible_spans: vec![TextSpan::new(0, 10)],
+        };
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        // The out-of-eligibility output must be dropped.
+        assert!(
+            res.outputs.is_empty(),
+            "out-of-eligibility output must not appear in outputs; got: {:?}",
+            res.outputs
+        );
+        // Exactly one WorkerFailure must be recorded.
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "expected exactly 1 WorkerFailure for the out-of-eligibility drop; \
+             got: {:?}",
+            res.failures
+        );
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::SpanOutOfBounds {
+                    worker: "out_of_eligibility_aug"
+                }
+            ),
+            "unexpected failure error variant: {:?}",
+            res.failures[0].error
         );
     }
 }
