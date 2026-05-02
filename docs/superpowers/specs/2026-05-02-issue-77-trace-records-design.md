@@ -92,11 +92,21 @@ Validation invariants. **Field-level** (`TraceLink::validate`, pure):
   tiebreaker so concurrent events with identical wall-clock timestamps
   still produce a deterministic, replay-stable order.
 - A backfilled event whose `captured_at` precedes already-persisted
-  events triggers a **renumber within the affected turn**: the
-  transaction reads the turn's existing rows, recomputes sequences over
-  the union (existing ∪ new), and rewrites the old rows in place. The
-  unique sequence index lets the rewrite happen as `UPDATE` against the
-  same rows; no row is dropped or reinserted.
+  events triggers a **two-phase renumber within the affected turn**:
+  1. **Park** the turn's existing trace rows by rewriting each row's
+     `extra_frontmatter.trace.sequence` to `-1 - i` for `i = 0..M-1`
+     where `i` walks the rows in their pre-existing order. Distinct
+     negatives, so the unique index `records_trace_seq` (which keys on
+     `(session_id, turn_id, sequence)`) holds at every statement.
+  2. **Reassign** sequences over the union (existing ∪ new) sorted by
+     `(captured_at, capture_event_id)`; write the final positive `0..N`
+     values to every row.
+  Both phases run inside the same `BEGIN IMMEDIATE` transaction; the
+  intermediate (negative) state is invisible to other connections, and
+  a crash rolls back to pre-renumber. SQLite checks uniqueness at the
+  end of each statement on a non-deferred index; the parked sentinels
+  guarantee no transient collision because every value is unique within
+  the turn at every step. No row is dropped or reinserted.
 - A backfill into a closed turn (one whose `turn_summary` row already
   exists) is admitted; the transaction additionally recomputes and
   upserts the summary so `member_event_ids` reflects current turn state
@@ -542,44 +552,57 @@ reasoning — lives in `sources/<payload_hash>` referenced by every trace
 record's envelope. Leaving those bytes on disk after `forget --session`
 defeats the privacy story.
 
-**One canonical identity for source blobs: `payload_hash`.** The existing
+**One canonical identity for source blobs: `payload_hash`. Refcounting is
+scoped to the forgetting principal, never global.** The existing
 `CaptureEvent` carries both `payload_hash` (sha256 of bytes) and
-`payload_ref` (vault-relative path under `sources/`). Refcounting and
-deletion both key on `payload_hash` — never on `payload_ref` — to avoid
-the failure mode where two refs point at the same content and only one
-gets cleaned up.
+`payload_ref` (vault-relative path under `sources/`). Deletion keys on
+`payload_hash` so duplicate `payload_ref` paths cannot leave bytes
+behind. Refcounting keys on the **same isolation boundary as the
+forgetting record** so the operation never reveals whether bytes are
+shared with another principal.
 
 Concretely:
 
 1. `forget --record <id>` and `forget --session <id>` collect the set of
-   `payload_hash` values from every targeted trace record's envelope.
-2. For each `payload_hash`:
-   - Query the records table for any non-forgotten record whose envelope
-     references the same `payload_hash`. If the count is zero, **all**
-     `sources/` files associated with that hash are deleted.
-   - Sources are stored at `sources/<payload_hash>.<ext>` going forward
-     (single canonical path per blob); existing capture-write code
-     already obeys this layout per brief §3. If a legacy record exists
-     where multiple `payload_ref` paths share one hash, all matching
-     paths are deleted in the same step — the index walk is over
-     `payload_hash`, not over `payload_ref`.
-   - If the count is non-zero (the blob is still referenced by a live
-     record — same prompt captured twice with different attribution),
-     the file is retained and the consent journal logs the retention.
+   `payload_hash` values from every targeted trace record, **paired
+   with the record's scope** (`scope.tenant`, `scope.user`,
+   `scope.agent`).
+2. For each `(payload_hash, scope)`:
+   - Query the records table for any other live record sharing the same
+     `payload_hash` **AND** matching scope dimensions
+     (same tenant, same user, same agent). If the count is zero in
+     this scope, the corresponding `sources/<payload_hash>.<ext>`
+     entries the principal owns are **deleted**.
+   - If the count is non-zero (the principal has another live record
+     referencing the same blob — same prompt captured twice in their
+     own session), the file is retained.
+   - **Cross-scope references are never inspected.** If a record under
+     a different `(tenant, user, agent)` happens to share the
+     `payload_hash`, this principal's forget proceeds as if no other
+     reference exists. The shared blob remains on disk for the other
+     principal's record (which lives in its own `sources/` namespace if
+     scoped storage is in use, or in a shared blob whose deletion is
+     governed by *that* principal's lifecycle, not this one).
+   - Implementation note: P0 stores `sources/` per-principal already
+     (brief §3 isolation rule). When P1+ shared content addressing
+     ships, blob deletion will move to a refcount maintained at the
+     blob layer with no per-principal disclosure. #77 does not
+     introduce that shared layer; it stays inside the per-principal
+     boundary.
 3. The consent journal records, per forgotten record:
-   `{record_id, payload_hash, sources_action: "deleted" | "retained-shared"}`
-   so an auditor can verify whether raw bytes were erased.
-4. `payload_hash` itself is retained on the (now redacted) record as the
+   `{record_id, payload_hash, sources_action: "deleted" | "retained-self"}`.
+   `retained-self` means the same principal still has a live record
+   referencing the blob. There is no `retained-shared` outcome — the
+   journal never reveals cross-principal blob coincidence.
+4. `payload_hash` itself stays on the (now redacted) record as the
    audit anchor — the hash alone is not user-recoverable PII; the bytes
-   it pointed to are gone.
+   it pointed to are gone for this principal.
 
-Refcount tracking is a SQL `COUNT(*)` over the `trace_payload_hash`
-generated column added in §6.1 — `SELECT COUNT(*) FROM records WHERE
-trace_payload_hash = ? AND id NOT IN (<forgetting set>)`. The index
-`records_trace_payload_hash` keeps the lookup O(log n). If `payload_ref`
-is ever observed to deviate from `sources/<payload_hash>.<ext>` for an
-existing record, that's a capture-pipeline bug surfaced as a separate
-issue; the forget code stays hash-keyed.
+Refcount SQL: `SELECT COUNT(*) FROM records WHERE trace_payload_hash = ?
+AND scope_tenant IS ? AND scope_user IS ? AND scope_agent IS ? AND id
+NOT IN (<forgetting set>)`. The `trace_payload_hash` index from §6.1
+keeps it O(log n). The scope columns are existing generated columns on
+the records table (added by prior migrations, not new in this PR).
 
 ### 8.2 Other concerns
 
@@ -639,11 +662,18 @@ adjustment is needed, that's a finding, not planned work.
   `TraceLinkOrphan`; the entire turn rolls back.
 - **Tool-call-id mismatch rejected**: a `tool_output` whose
   `tool_call_id` differs from its parent's returns `TraceLinkOrphan`.
-- **Forget deletes sources by hash**: `forget --session <id>` deletes
-  every `sources/<payload_hash>.<ext>` whose `payload_hash` is no
-  longer referenced by any live record. Asserts file removal even
-  when the original `payload_ref` differed across records that shared
-  the same hash. Consent journal records `{deleted, retained-shared}`.
+- **Forget deletes sources by hash, scoped to principal**:
+  `forget --session <id>` deletes every `sources/<payload_hash>.<ext>`
+  whose hash has no other live record under the **same**
+  `(tenant, user, agent)`. Asserts file removal when the originating
+  `payload_ref` paths differ but the hash is the same. Consent journal
+  records `{deleted, retained-self}` only — no cross-principal leak.
+- **Forget privacy boundary**: a record under principal A and another
+  under principal B share the same `payload_hash`. Forgetting A's
+  record proceeds as if B's reference does not exist; the consent
+  journal never mentions B and never produces a `retained-shared`
+  entry. (Whether A's bytes are physically deleted depends on the P0
+  per-principal layout — assert the journal entry, not the file path.)
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
