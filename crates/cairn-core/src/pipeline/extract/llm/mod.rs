@@ -23,6 +23,13 @@ use crate::pipeline::filter::fence::FenceMark;
 use parse::parse_response;
 use prompt::{Region as PromptRegion, build_regions, render_prompt};
 
+/// Conservative upper-bound overhead for the prompt template, JSON
+/// region wrappers, and instruction prefix when computing the pre-render
+/// byte-cap estimate.  4 KiB covers the template comfortably; if the
+/// actual rendered overhead exceeds this the post-render check is the
+/// defence-in-depth backstop.
+const PROMPT_TEMPLATE_OVERHEAD_BYTES: usize = 4096;
+
 /// Convert a pipeline-side [`ExtractBudget`] to the config-side
 /// `crate::config::ExtractBudget` used by [`CompletionRequest`].
 ///
@@ -30,11 +37,6 @@ use prompt::{Region as PromptRegion, build_regions, render_prompt};
 /// - `max_response_tokens` → `config::ExtractBudget::max_tokens` (the
 ///   `OpenAI` `max_completion_tokens` field; controls response length).
 /// - `max_wall_ms` → `config::ExtractBudget::max_wall_ms`.
-/// - `max_prompt_tokens` has no direct equivalent in `config::ExtractBudget`
-///   today (the config type predates the pipeline type and only has a single
-///   `max_tokens` field for responses). The gap is intentional for now.
-///   TODO(#74-followup): add `max_prompt_tokens` to `config::ExtractBudget`
-///   so providers can enforce context-window caps before sending.
 fn pipeline_budget_to_completion_budget(b: &ExtractBudget) -> Option<crate::config::ExtractBudget> {
     // Only attach a budget if at least one provider-relevant field is set;
     // avoids sending a vacuous `Some(ExtractBudget { None, None, None })`.
@@ -277,6 +279,33 @@ impl ExtractorWorker for LLMExtractor {
 
         if input.eligible_spans.is_empty() {
             return Ok(empty_result());
+        }
+
+        // Pre-render byte-cap guard: compute an upper-bound estimate from
+        // eligible-span byte counts + fixed template overhead and reject
+        // immediately if it exceeds the cap.  This avoids paying the full
+        // fence+render allocation cost for inputs that would inevitably fail
+        // the post-render check.  The post-render check below is kept as
+        // defence-in-depth for the rare case where the estimate under-counts
+        // (e.g. region wrappers larger than PROMPT_TEMPLATE_OVERHEAD_BYTES).
+        if let Some(cap) = self.budget.max_prompt_bytes {
+            let cap_usize = cap as usize;
+            let eligible_bytes: usize = input
+                .eligible_spans
+                .iter()
+                .map(|s| (s.end.saturating_sub(s.start)) as usize)
+                .fold(0_usize, usize::saturating_add);
+            let estimate = eligible_bytes.saturating_add(PROMPT_TEMPLATE_OVERHEAD_BYTES);
+            if estimate > cap_usize {
+                tracing::warn!(
+                    reason = "llm.prompt_size_byte_cap_skip_precheck",
+                    estimate_bytes = estimate,
+                    cap = cap,
+                );
+                return Ok(empty_with_truncation(TruncationReason::MaxWallMs {
+                    elapsed_ms: 0,
+                }));
+            }
         }
 
         // Step 1: fence + render
@@ -681,6 +710,69 @@ mod tests {
             res.truncated
         );
         assert_eq!(provider.calls(), 0);
+    }
+
+    // ── Regression: Finding 2 (adversarial review) — pre-render byte-cap check ──
+
+    /// Provider that panics if called — proves the pre-render check fires
+    /// before any rendering work is done.
+    struct PanicProvider;
+
+    #[async_trait::async_trait]
+    impl LLMProvider for PanicProvider {
+        fn name(&self) -> &'static str {
+            "panic"
+        }
+
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+                json_mode: true,
+                streaming: false,
+                tool_calls: false,
+            };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> Result<CompletionOutput, LlmError> {
+            panic!("PanicProvider::complete must never be called when pre-render cap fires")
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_byte_cap_rejects_before_rendering() {
+        // Regression for adversarial-review Finding 2: the byte-cap must
+        // be checked BEFORE fence+render so that big inputs don't pay the
+        // full allocation cost.  We use a cap smaller than the body so the
+        // pre-render estimate (eligible_bytes + PROMPT_TEMPLATE_OVERHEAD_BYTES)
+        // will exceed it, and a PanicProvider to prove the provider is never
+        // reached.
+        //
+        // Cap = 512 bytes. Body = 2000 bytes (eligible_bytes 2000 >>
+        // cap 512), so estimate = 2000 + 4096 = 6096 > 512.
+        let body = "x".repeat(2_000);
+        let extractor =
+            LLMExtractor::new(std::sync::Arc::new(PanicProvider)).with_budget(ExtractBudget {
+                max_prompt_bytes: Some(512),
+                ..ExtractBudget::llm_default()
+            });
+        let event = fixture_event();
+        let (_, spans) = fixture_input_with_body(&event, &body);
+        let input = make_input(&event, &body, spans);
+        // If the pre-render check doesn't fire, PanicProvider::complete panics.
+        let res = extractor.extract(&input).await.expect("should succeed");
+        assert!(res.outputs.is_empty(), "no outputs expected on cap rejection");
+        assert!(
+            matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
+            "expected MaxWallMs{{0}} truncation, got {:?}",
+            res.truncated
+        );
     }
 
     // Wall-clock timeout test. We use a 50 ms budget and a provider that sleeps
