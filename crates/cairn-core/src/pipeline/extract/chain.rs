@@ -197,6 +197,13 @@ impl ExtractChain {
             _ => 0,
         };
 
+        // Remember whether the *caller* supplied an eligibility restriction.
+        // This is captured before any chain seeding so we know whether to
+        // enforce span presence on Gating outputs (Finding 2 fix): if the
+        // caller passed a non-empty `eligible_spans`, Gating outputs with
+        // `source_span: None` are dropped just like Augmenting ones.
+        let caller_restricted_eligibility = !input.eligible_spans.is_empty();
+
         // Cast is safe: MAX_BODY_LEN_FOR_REGEX is 64 KiB << u32::MAX.
         #[allow(clippy::cast_possible_truncation)]
         let body_len_u32 = body_len as u32;
@@ -222,18 +229,40 @@ impl ExtractChain {
                     // Validate every output against current eligibility;
                     // drop any output whose source_span falls outside.
                     //
-                    // Trust-boundary rule for Augmenting workers: text-derived
-                    // outputs (Draft, Forget) MUST carry a concrete source_span.
-                    // A None provenance from an Augmenting worker bypasses the
-                    // eligibility fence — record a WorkerFailure and drop.
-                    // Gating workers may keep the existing None-tolerated semantics.
+                    // Trust-boundary rules:
+                    //
+                    // Augmenting workers: text-derived outputs (Draft, Forget)
+                    // MUST carry a concrete source_span. A None provenance from
+                    // an Augmenting worker bypasses the eligibility fence —
+                    // record a WorkerFailure and drop unconditionally.
+                    //
+                    // Gating workers: None provenance is tolerated ONLY when the
+                    // caller did NOT supply a restriction (i.e. the caller passed
+                    // empty `eligible_spans`, meaning "everywhere is allowed").
+                    // When the caller DID supply a restriction (`eligible_spans`
+                    // was non-empty), Gating outputs with `source_span: None`
+                    // are similarly dropped + recorded — they bypass the
+                    // consent/policy fence set by the caller.
+                    let role = w.role();
                     for out in r.outputs {
-                        if w.role() == WorkerRole::Augmenting && out.source_span().is_none() {
+                        let none_span = out.source_span().is_none();
+                        let must_have_span = role == WorkerRole::Augmenting
+                            || (role == WorkerRole::Gating && caller_restricted_eligibility);
+
+                        if none_span && must_have_span {
                             tracing::warn!(
                                 worker = w.name(),
-                                "chain: augmenting worker emitted output with None source_span; \
-                                 dropping and recording failure (trust-boundary bypass)"
+                                caller_restricted = caller_restricted_eligibility,
+                                "chain: worker emitted output with None source_span under \
+                                 caller restriction; dropping and recording failure \
+                                 (trust-boundary bypass)"
                             );
+                            // Record with Augmenting role: the *worker* itself returned
+                            // Ok (no gate-level failure), so this output-level policy drop
+                            // must not promote to GatingFailed. Gating failures are
+                            // reserved for workers that return Err — a worker that returns
+                            // Ok but emits a None-provenance output under caller restriction
+                            // is an output policy violation, not a gate failure.
                             failures.push(WorkerFailure {
                                 worker: w.name(),
                                 role: WorkerRole::Augmenting,
@@ -1659,6 +1688,125 @@ mod tests {
             vec![TextSpan::new(2, 8)],
             "second augmenter received wrong eligibility (was starved before fix): {:?}",
             calls2[0]
+        );
+    }
+
+    // ── Regression: Finding 2 (adversarial review) — gating None-provenance ──
+    // ── outputs must be dropped when caller restricts eligibility             ──
+
+    /// Gating worker that emits a Draft with `source_span: None` (simulating a
+    /// hook/tool-frame event draft that has no text provenance).
+    struct NoneProvenanceGate;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for NoneProvenanceGate {
+        fn name(&self) -> &'static str {
+            "none_provenance_gate"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::regex_default()
+        }
+
+        async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            use crate::domain::CaptureEventId;
+            use crate::domain::taxonomy::MemoryKind;
+            use crate::pipeline::extract::draft::{Confidence, KindHint, MemoryDraft};
+            Ok(ExtractResult {
+                outputs: vec![ExtractOutput::Draft(MemoryDraft {
+                    kind_hint: KindHint::from(MemoryKind::User),
+                    body: "hook frame draft".to_owned(),
+                    confidence: Confidence::try_from(0.9_f32).expect("valid"),
+                    source_event: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                        .expect("valid ulid"),
+                    // None: typical for hook/tool-frame drafts.
+                    source_span: None,
+                    trigger_id: None,
+                })],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: input.eligible_spans.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gating_none_provenance_dropped_when_caller_restricts_eligibility() {
+        // Regression for Finding 2 (adversarial review): a Gating worker that
+        // emits a Draft with `source_span: None` MUST be dropped + recorded as
+        // a WorkerFailure when the caller passed a non-empty `eligible_spans`.
+        // Otherwise the None-provenance output bypasses the consent/policy fence.
+        let chain = ExtractChain::new(vec![Box::new(NoneProvenanceGate)]).expect("valid chain");
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            // Non-empty: caller explicitly restricted eligibility.
+            eligible_spans: vec![TextSpan::new(0, 20)],
+        };
+        let res = chain
+            .run(&input)
+            .await
+            .expect("chain should succeed (gating Ok)");
+
+        assert!(
+            res.outputs.is_empty(),
+            "None-provenance draft from Gating worker must NOT appear in outputs \
+             when caller restricted eligibility; got: {:?}",
+            res.outputs
+        );
+        assert_eq!(
+            res.failures.len(),
+            1,
+            "chain must record a WorkerFailure for the None-provenance gating drop; \
+             got: {:?}",
+            res.failures
+        );
+        assert!(
+            matches!(
+                res.failures[0].error,
+                ExtractError::SpanOutOfBounds {
+                    worker: "none_provenance_gate"
+                }
+            ),
+            "unexpected error variant: {:?}",
+            res.failures[0].error
+        );
+    }
+
+    #[tokio::test]
+    async fn gating_none_provenance_allowed_when_caller_imposes_no_restriction() {
+        // Converse: when the caller passes EMPTY `eligible_spans` (no restriction),
+        // the existing None-tolerated behaviour must be preserved — the Gating
+        // worker's None-provenance draft should pass through to `outputs`.
+        let chain = ExtractChain::new(vec![Box::new(NoneProvenanceGate)]).expect("valid chain");
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            // Empty: caller imposed no eligibility restriction.
+            eligible_spans: vec![],
+        };
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        // The draft should be present: caller imposed no restriction, so
+        // None-provenance is legitimate (hook/tool-frame event with no body).
+        assert_eq!(
+            res.outputs.len(),
+            1,
+            "None-provenance draft from Gating worker should pass through \
+             when caller imposed no restriction; got: {:?}",
+            res.outputs
+        );
+        assert!(
+            res.failures.is_empty(),
+            "no WorkerFailure expected when caller imposed no restriction; \
+             got: {:?}",
+            res.failures
         );
     }
 }
