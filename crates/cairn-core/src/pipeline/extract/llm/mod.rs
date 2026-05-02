@@ -23,6 +23,31 @@ use crate::pipeline::filter::fence::FenceMark;
 use parse::parse_response;
 use prompt::{Region as PromptRegion, build_regions, render_prompt};
 
+/// Convert a pipeline-side [`ExtractBudget`] to the config-side
+/// `crate::config::ExtractBudget` used by [`CompletionRequest`].
+///
+/// Mapping rationale:
+/// - `max_response_tokens` → `config::ExtractBudget::max_tokens` (the
+///   `OpenAI` `max_completion_tokens` field; controls response length).
+/// - `max_wall_ms` → `config::ExtractBudget::max_wall_ms`.
+/// - `max_prompt_tokens` has no direct equivalent in `config::ExtractBudget`
+///   today (the config type predates the pipeline type and only has a single
+///   `max_tokens` field for responses). The gap is intentional for now.
+///   TODO(#74-followup): add `max_prompt_tokens` to `config::ExtractBudget`
+///   so providers can enforce context-window caps before sending.
+fn pipeline_budget_to_completion_budget(b: &ExtractBudget) -> Option<crate::config::ExtractBudget> {
+    // Only attach a budget if at least one provider-relevant field is set;
+    // avoids sending a vacuous `Some(ExtractBudget { None, None, None })`.
+    if b.max_response_tokens.is_none() && b.max_wall_ms == 0 {
+        return None;
+    }
+    Some(crate::config::ExtractBudget {
+        max_tokens: b.max_response_tokens,
+        max_wall_ms: Some(b.max_wall_ms),
+        max_turns: None,
+    })
+}
+
 /// LLM-backed extractor; spec §4.2.
 pub struct LLMExtractor {
     provider: Arc<dyn LLMProvider>,
@@ -139,6 +164,7 @@ impl LLMExtractor {
             let req = CompletionRequest::builder()
                 .prompt(prompt)
                 .schema(schema::schema_value().clone())
+                .maybe_budget(pipeline_budget_to_completion_budget(&self.budget))
                 .build();
 
             match self.provider.complete(&req).await {
@@ -292,15 +318,20 @@ impl ExtractorWorker for LLMExtractor {
                 if parsed.all_dropped {
                     return Err(ExtractError::SpanOutOfBounds { worker: "llm" });
                 }
-                let outputs: Vec<ExtractOutput> = parsed
-                    .drafts
-                    .into_iter()
-                    .map(ExtractOutput::Draft)
-                    .collect();
+                let max_drafts = self.budget.max_drafts as usize;
+                let mut drafts = parsed.drafts;
+                let truncated_for_drafts = if drafts.len() > max_drafts {
+                    drafts.truncate(max_drafts);
+                    TruncationReason::MaxDrafts
+                } else {
+                    TruncationReason::None
+                };
+                let outputs: Vec<ExtractOutput> =
+                    drafts.into_iter().map(ExtractOutput::Draft).collect();
                 Ok(ExtractResult {
                     outputs,
                     discards: parsed.discards,
-                    truncated: TruncationReason::None,
+                    truncated: truncated_for_drafts,
                     llm_eligible_spans: vec![],
                 })
             }
@@ -761,5 +792,166 @@ mod tests {
         let provider = StubProvider::with_responses(vec![]);
         let extractor = LLMExtractor::new(provider);
         assert_eq!(extractor.name(), "llm");
+    }
+
+    // ── Regression: Finding 1 — token budget passed through to CompletionRequest ──
+
+    /// A recording provider that captures the `CompletionRequest.budget` it receives.
+    struct BudgetCapturingProvider {
+        captured: std::sync::Mutex<Vec<Option<crate::config::ExtractBudget>>>,
+        response: CompletionOutput,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for BudgetCapturingProvider {
+        fn name(&self) -> &'static str {
+            "budget_capturing"
+        }
+
+        fn capabilities(&self) -> &crate::contract::llm_provider::LLMProviderCapabilities {
+            static CAPS: crate::contract::llm_provider::LLMProviderCapabilities =
+                crate::contract::llm_provider::LLMProviderCapabilities {
+                    json_mode: true,
+                    streaming: false,
+                    tool_calls: false,
+                };
+            &CAPS
+        }
+
+        fn supported_contract_versions(&self) -> crate::contract::version::VersionRange {
+            use crate::contract::version::{ContractVersion, VersionRange};
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+        }
+
+        async fn complete(
+            &self,
+            req: &crate::contract::llm_provider::CompletionRequest,
+        ) -> Result<CompletionOutput, crate::contract::llm_provider::LlmError> {
+            self.captured
+                .lock()
+                .expect("mutex not poisoned")
+                .push(req.budget.clone());
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn token_budget_passed_through_to_completion_request() {
+        // Regression for Finding 1: extractor must attach max_response_tokens
+        // and max_wall_ms to CompletionRequest.budget.
+        let provider = std::sync::Arc::new(BudgetCapturingProvider {
+            captured: std::sync::Mutex::new(vec![]),
+            response: CompletionOutput::Json(serde_json::json!({ "items": [] })),
+        });
+
+        let custom_budget = ExtractBudget {
+            max_response_tokens: Some(512),
+            max_wall_ms: 300,
+            ..ExtractBudget::llm_default()
+        };
+        let extractor = LLMExtractor::new(provider.clone()).with_budget(custom_budget);
+        let event = fixture_event();
+        let body = "user prefers tabs over spaces";
+        let (_, spans) = fixture_input_with_body(&event, body);
+        let input = make_input(&event, body, spans);
+        let _ = extractor.extract(&input).await.expect("should succeed");
+
+        let captured = provider.captured.lock().expect("mutex not poisoned");
+        assert!(
+            !captured.is_empty(),
+            "provider was never called — body might not have triggered LLM path"
+        );
+        let budget = captured[0]
+            .as_ref()
+            .expect("CompletionRequest.budget must be Some when ExtractBudget is set");
+        assert_eq!(
+            budget.max_tokens,
+            Some(512),
+            "max_response_tokens must map to CompletionRequest.budget.max_tokens"
+        );
+        assert_eq!(
+            budget.max_wall_ms,
+            Some(300),
+            "max_wall_ms must be forwarded to CompletionRequest.budget.max_wall_ms"
+        );
+    }
+
+    // ── Regression: Finding 2 — parsed drafts clamped to max_drafts budget ──
+
+    #[tokio::test]
+    async fn parsed_drafts_clamped_to_max_drafts_budget() {
+        // Four distinct phrases so each draft's text_excerpt unambiguously
+        // matches a different part of the body. The body has four ≥16-char
+        // sections separated by newlines.
+        let body = "user prefers tabs in editor\nuser dislikes dark mode themes\nuser enjoys vim keybindings always\nuser hates trailing whitespace files";
+
+        let provider =
+            StubProvider::with_responses(vec![Ok(CompletionOutput::Json(serde_json::json!({
+                "items": [
+                    {
+                        "type": "draft",
+                        "kind": "user",
+                        "body": "prefers tabs",
+                        "confidence": 0.9,
+                        "source": {
+                            "region_id": 0,
+                            "text_excerpt": "user prefers tabs in editor"
+                        }
+                    },
+                    {
+                        "type": "draft",
+                        "kind": "user",
+                        "body": "dislikes dark mode",
+                        "confidence": 0.9,
+                        "source": {
+                            "region_id": 0,
+                            "text_excerpt": "user dislikes dark mode themes"
+                        }
+                    },
+                    {
+                        "type": "draft",
+                        "kind": "user",
+                        "body": "enjoys vim",
+                        "confidence": 0.9,
+                        "source": {
+                            "region_id": 0,
+                            "text_excerpt": "user enjoys vim keybindings always"
+                        }
+                    },
+                    {
+                        "type": "draft",
+                        "kind": "user",
+                        "body": "hates trailing whitespace",
+                        "confidence": 0.9,
+                        "source": {
+                            "region_id": 0,
+                            "text_excerpt": "user hates trailing whitespace files"
+                        }
+                    }
+                ]
+            })))]);
+
+        let extractor = LLMExtractor::new(provider).with_budget(ExtractBudget {
+            max_drafts: 2,
+            ..ExtractBudget::llm_default()
+        });
+
+        let event = fixture_event();
+        let (_, spans) = fixture_input_with_body(&event, body);
+        let input = make_input(&event, body, spans);
+        let res = extractor.extract(&input).await.expect("should succeed");
+
+        assert!(
+            res.outputs.len() <= 2,
+            "expected at most 2 outputs (max_drafts=2), got {}",
+            res.outputs.len()
+        );
+        if res.outputs.len() == 2 {
+            assert!(
+                matches!(res.truncated, TruncationReason::MaxDrafts),
+                "expected TruncationReason::MaxDrafts when clamped, got {:?}",
+                res.truncated
+            );
+        }
     }
 }

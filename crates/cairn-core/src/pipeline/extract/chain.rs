@@ -255,16 +255,20 @@ impl ExtractChain {
                 }
                 Err(e) => {
                     let role = w.role();
+                    let was_gating = role == WorkerRole::Gating;
                     failures.push(WorkerFailure {
                         worker: w.name(),
                         role,
                         error: e,
                     });
-                    if role == WorkerRole::Gating {
-                        // Fail closed: collapse eligibility so no
-                        // subsequent augmenting worker can run on
-                        // unchecked input.
-                        eligible = vec![];
+                    if was_gating {
+                        // Fail closed: abort the worker loop immediately.
+                        // Trusting downstream workers to early-return on
+                        // empty eligibility was an unenforced invariant —
+                        // structural abort is the only way to guarantee no
+                        // augmenting worker can inspect or transmit
+                        // suppressed body content.
+                        break;
                     }
                 }
             }
@@ -1201,6 +1205,69 @@ mod tests {
             ),
             "unexpected error: {:?}",
             res.failures[0].error
+        );
+    }
+
+    // ── Regression: Finding 3 — gating failure aborts chain before aug runs ──
+
+    struct CountingAug {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for CountingAug {
+        fn name(&self) -> &'static str {
+            "counting_aug"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gating_failure_aborts_chain_before_aug_runs() {
+        // Regression for Finding 3: when a Gating worker errors, the chain
+        // must break immediately — no augmenting worker should be invoked,
+        // because it could otherwise inspect or transmit suppressed body content.
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = ExtractChain::new(vec![
+            Box::new(FailingGate),
+            Box::new(CountingAug {
+                calls: calls.clone(),
+            }),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: vec![],
+        };
+        let res = chain.run(&input).await;
+        assert!(
+            matches!(res, Err(ChainRunError::GatingFailed { .. })),
+            "expected GatingFailed, got: {res:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "augmenting worker must not run after gating failure"
         );
     }
 }
