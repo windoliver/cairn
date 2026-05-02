@@ -19,9 +19,7 @@ pub use body::{
     BodyResolution, BodyResolutionError, BodySource, ResolvedBody, UserIngestPayloadKind,
     is_user_utterance_hook,
 };
-pub use chain::{
-    ChainResult, ChainRunError, ExtractChain, ExtractChainBuildError, WorkerFailure,
-};
+pub use chain::{ChainResult, ChainRunError, ExtractChain, ExtractChainBuildError, WorkerFailure};
 pub use draft::{Confidence, ConfidenceError, KindHint, MemoryDraft, TextSpan};
 pub use intent::{ForgetIntent, ForgetMatchStrategy};
 pub use regex::RegexExtractor;
