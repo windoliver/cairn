@@ -21,6 +21,8 @@ and forget. A full agent turn must be reconstructable from these records.
 - Sensor adapters that translate harness payloads into `CaptureEvent`s (#84).
 - LLM-synthesized turn summaries (P1+).
 - P2 tree-structured sessions beyond simple parent/child turn links.
+- IDL evolution of `retrieve(target=Turn|Session)` to carry an ordered
+  event array and string `turn_id`. Tracked as a follow-up; see §6.2.
 
 ## 3. Approach
 
@@ -56,7 +58,11 @@ pub enum TraceEvent {
 #[serde(deny_unknown_fields)]
 pub struct TraceLink {
     pub session_id: SessionId,
-    pub turn_id: u64,
+    /// Opaque harness-supplied turn id. Mirrors `CaptureRefs.turn_id`
+    /// (`Option<String>` in the capture envelope) — kept as a string
+    /// end-to-end so producers do not need a numeric remapping layer.
+    /// The trace projector rejects events with `refs.turn_id == None`.
+    pub turn_id: String,
     pub sequence: u64,                          // monotonic within turn
     pub capture_event_id: CaptureEventId,       // back-ref to raw envelope
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,7 +80,7 @@ Serialization into `extra_frontmatter`:
 trace_event: pre_tool
 trace:
   session_id: 01ARZ3...
-  turn_id: 4
+  turn_id: "turn-4"
   sequence: 2
   capture_event_id: 01HQ...
   tool_call_id: call_abc
@@ -174,7 +180,7 @@ ALTER TABLE records ADD COLUMN trace_event TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace_event')) VIRTUAL;
 ALTER TABLE records ADD COLUMN trace_session_id TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.session_id')) VIRTUAL;
-ALTER TABLE records ADD COLUMN trace_turn_id INTEGER
+ALTER TABLE records ADD COLUMN trace_turn_id TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.turn_id')) VIRTUAL;
 ALTER TABLE records ADD COLUMN trace_sequence INTEGER
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.sequence')) VIRTUAL;
@@ -194,42 +200,79 @@ The unique index enforces sequence monotonicity at the database boundary,
 turning a duplicate `sequence` into a typed `TraceSequenceConflict` error
 instead of silent corruption.
 
-### 6.2 Retrieve targets
+### 6.2 Retrieve targets — store-level reads only
 
-`retrieve(target=Turn)` and `retrieve(target=Session)` already exist in the
-IDL with `DataTurn` / `TurnItem` wire shape. Implement them in the SQLite
-store:
+The current `retrieve` IDL is incompatible with what #77 needs to read back:
 
-- `Turn`: `SELECT ... WHERE trace_session_id=? AND trace_turn_id=? ORDER BY trace_sequence`,
-  fold into `TurnItem` per role mapping (user_message → User,
-  agent_message → Assistant, pre_tool/post_tool/tool_output → Tool with
-  `tool_calls` array).
-- `Session`: paged across turns using the cursor field already in the IDL.
+- `DataTurn.turn_id` is `integer` (capture envelopes carry strings).
+- `DataTurn.turn` is a single `TurnItem` with one role — it cannot represent
+  an ordered, multi-role event sequence inside a turn.
+- `TurnItem.turn_id` is also integer.
+
+Reshaping the IDL is a brief-level change (CLAUDE.md §5/§4) and is
+**out of scope for #77**. This PR therefore:
+
+1. Persists records with the linkage needed to reconstruct any future shape:
+   `(session_id, turn_id, sequence, parent_event_id)` plus `member_event_ids`
+   on the turn summary.
+2. Adds a **store-internal** read API on `MemoryStore` —
+   `list_trace_events(session_id, turn_id) -> Vec<MemoryRecord>` ordered by
+   `sequence` — that the existing `retrieve` verb can call when (and only
+   when) the IDL evolves. Until then, this method is exercised by the
+   integration tests below to satisfy the issue's "full agent turn can be
+   reconstructed" acceptance criterion.
+3. Files a follow-up issue: *Evolve `retrieve(target=Turn|Session)` IDL to
+   carry an ordered event array and string `turn_id`*. Linked from the PR
+   and listed in `docs/design/traceability.md`.
+
+The unique sequence index from §6.1 still ships — it protects the linkage
+even though the public retrieve verb cannot yet expose it.
 
 ## 7. CLI verb (`cairn-cli/src/verbs/capture_trace.rs`)
 
-Replace the current stub. Pseudocode:
+The published IDL (`crates/cairn-idl/schema/verbs/capture_trace.json`) is:
+
+```json
+{ "from": "<path>", "session_id": "<optional>" }
+```
+
+`from` is a path to a **trace log file** containing one JSON-encoded
+`CaptureEvent` per line (JSONL). The verb does not accept an inline event
+batch and there is no `is_stop` flag — the stop boundary is recovered from
+the events themselves (an event whose `hook_name == "Stop"`).
+
+Pseudocode:
 
 ```rust
 async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
     refuse_if_degraded(...)?;
-    for event in args.events {
-        let classified = classify(&event)?;          // hook_name + payload tag
-        let link = next_link_for(&store, &event).await?;
-        let record = pipeline::capture_trace::project(&event, classified, link)?;
-        store.write(record).await?;                  // WAL two-phase, §5.6
+    let events = read_jsonl::<CaptureEvent>(&args.from).await?;  // streaming, bounded buffer
+    for event in &events {
+        event.validate()?;                                       // existing envelope validation
+        let classified = classify(event)?;                       // (hook_name, payload tag) → TraceEvent
+        let link = build_link(store, event, classified).await?;  // assigns next sequence per (session, turn)
+        let record = pipeline::capture_trace::project(event, classified, link)?;
+        store.write(record).await?;                              // WAL two-phase, §5.6
     }
-    if args.is_stop {
-        let turn = store.list_turn(session, turn_id).await?;
-        let summary = pipeline::turn::summarize_turn(...)?;
+    if let Some(stop_event) = events.iter().rfind(|e| is_stop(e)) {
+        let turn_records = store
+            .list_trace_events(stop_event.session_id()?, stop_event.turn_id()?)
+            .await?;
+        let summary = pipeline::turn::summarize_turn(&turn_records)?;
         store.write(summary).await?;
     }
-    Ok(success_response(...))
+    Ok(success_response(trace_id))
 }
 ```
 
 Classification rule: `(CaptureEvent.refs.hook_name, payload tag) → TraceEvent`.
-Static table — no LLM.
+Static table — no LLM. `hook_name` lives in the existing `CapturePayload`
+hook variant; payload tag covers non-hook surfaces (CLI/MCP message capture).
+
+**No IDL changes.** The verb shape and CLI flags stay byte-identical to the
+current schema; the docgen output should be unchanged. If a flag does need
+to change later (e.g., to surface `trace_id` in human output), that's a
+separate scoped change with `cairn-docgen --write` re-run.
 
 ## 8. Privacy, forget, search — no new code paths
 
@@ -263,8 +306,11 @@ a path *does* need adjustment, that's a finding, not planned work.
 
 ### 9.3 Integration (`cairn-store-sqlite/tests/`)
 
-- End-to-end `capture_trace` → store → `retrieve(target=Turn)` returns the
-  expected `DataTurn` with `tool_calls` populated, ordering preserved.
+- End-to-end `capture_trace --from <fixture.jsonl>` → store →
+  `MemoryStore::list_trace_events(session, turn)` returns records in
+  `sequence` order with parent/child edges intact. Asserts full-turn
+  reconstruction directly at the store boundary (the public retrieve verb
+  does not yet expose this shape — see §6.2).
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
@@ -286,9 +332,10 @@ crates/cairn-core/src/pipeline/capture_trace.rs      # NEW
 crates/cairn-core/src/pipeline/turn.rs               # NEW
 crates/cairn-core/src/pipeline/mod.rs                # +pub mod
 crates/cairn-store-sqlite/migrations/0003_trace_links.sql  # NEW
-crates/cairn-store-sqlite/src/...                    # retrieve(Turn|Session) impl
-crates/cairn-cli/src/verbs/capture_trace.rs          # replace stub
-crates/cairn-test-fixtures/src/...                   # trace fixtures
+crates/cairn-store-sqlite/src/...                    # +list_trace_events impl
+crates/cairn-core/src/contract/memory_store.rs       # +list_trace_events trait method
+crates/cairn-cli/src/verbs/capture_trace.rs          # replace stub (uses existing IDL `from` flag)
+crates/cairn-test-fixtures/src/...                   # trace fixtures (JSONL inputs)
 ```
 
 ## 11. Risks
