@@ -563,16 +563,22 @@ shared with another principal.
 
 Concretely:
 
-1. `forget --record <id>` and `forget --session <id>` collect the set of
-   `payload_hash` values from every targeted trace record, **paired
-   with the record's scope** (`scope.tenant`, `scope.user`,
-   `scope.agent`).
-2. For each `(payload_hash, scope)`:
-   - Query the records table for any other live record sharing the same
-     `payload_hash` **AND** matching scope dimensions
-     (same tenant, same user, same agent). If the count is zero in
-     this scope, the corresponding `sources/<payload_hash>.<ext>`
-     entries the principal owns are **deleted**.
+1. `forget --record <id>` and `forget --session <id>` collect, from each
+   targeted trace record's envelope:
+   - `payload_hash` (used for the in-scope refcount query),
+   - **the concrete `payload_ref`** (the actual on-disk path under
+     `sources/`, used for deletion),
+   - the record's scope dimensions (`scope.tenant`, `scope.user`,
+     `scope.agent`).
+2. For each forgotten record:
+   - Query the records table for any *other* live record under the
+     **same** `(tenant, user, agent)` whose `trace_payload_hash` matches
+     this record's hash. If the count is zero in scope, every
+     `payload_ref` collected in step 1 for this hash is **deleted from
+     disk** by its concrete path. This guarantees every on-disk file the
+     forgotten records actually referenced is removed, even if the
+     storage layout is not yet canonicalized to a single hash-derived
+     path.
    - If the count is non-zero (the principal has another live record
      referencing the same blob — same prompt captured twice in their
      own session), the file is retained.
@@ -662,12 +668,14 @@ adjustment is needed, that's a finding, not planned work.
   `TraceLinkOrphan`; the entire turn rolls back.
 - **Tool-call-id mismatch rejected**: a `tool_output` whose
   `tool_call_id` differs from its parent's returns `TraceLinkOrphan`.
-- **Forget deletes sources by hash, scoped to principal**:
-  `forget --session <id>` deletes every `sources/<payload_hash>.<ext>`
-  whose hash has no other live record under the **same**
-  `(tenant, user, agent)`. Asserts file removal when the originating
-  `payload_ref` paths differ but the hash is the same. Consent journal
-  records `{deleted, retained-self}` only — no cross-principal leak.
+- **Forget deletes by concrete payload_ref, scoped refcount by hash**:
+  `forget --session <id>` removes every `payload_ref` path persisted
+  on the forgotten records, gated by an in-scope hash refcount that
+  decides "no other live record references this hash for the same
+  principal." Asserts file removal at the actual paths even when the
+  storage layout uses non-canonical `payload_ref` values. Consent
+  journal records `{deleted, retained-self}` only — no cross-principal
+  leak.
 - **Forget privacy boundary**: a record under principal A and another
   under principal B share the same `payload_hash`. Forgetting A's
   record proceeds as if B's reference does not exist; the consent
