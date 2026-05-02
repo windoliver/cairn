@@ -252,6 +252,16 @@ impl ExtractChain {
                     if r.truncated != TruncationReason::None {
                         truncated = r.truncated;
                     }
+                    // Trust-boundary enforcement: a Gating worker that
+                    // succeeds but narrows eligibility to nothing is
+                    // signalling suppression. Invoking downstream
+                    // Augmenting workers after that is unsafe — they could
+                    // still read `input.body` even if `eligible_spans` is
+                    // empty. Structural break is the only way to guarantee
+                    // no augmenting worker sees suppressed body content.
+                    if w.role() == WorkerRole::Gating && eligible.is_empty() {
+                        break;
+                    }
                 }
                 Err(e) => {
                     let role = w.role();
@@ -1268,6 +1278,75 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "augmenting worker must not run after gating failure"
+        );
+    }
+
+    // ── Regression: Finding 1 (adversarial review) — empty post-gate eligibility ──
+
+    /// Gate that SUCCEEDS but returns empty `llm_eligible_spans` (suppression
+    /// signal — e.g. a consent or privacy gate decided no text is eligible).
+    struct EmptyEligibilityGate;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for EmptyEligibilityGate {
+        fn name(&self) -> &'static str {
+            "empty_eligibility_gate"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::regex_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                // Explicit suppression: gate succeeds but marks zero spans
+                // as LLM-eligible.
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_post_gate_eligibility_skips_downstream_aug() {
+        // Regression for adversarial-review Finding 1: a Gating worker that
+        // succeeds but returns empty llm_eligible_spans is signalling
+        // suppression. No downstream Augmenting worker should be invoked —
+        // they could still read `input.body` even if `eligible_spans` is [].
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = ExtractChain::new(vec![
+            Box::new(EmptyEligibilityGate),
+            Box::new(CountingAug {
+                calls: calls.clone(),
+            }),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            // Start with a non-empty span so the gate's suppression is
+            // meaningful (it narrows from something to nothing).
+            eligible_spans: vec![TextSpan::new(0, 20)],
+        };
+        let res = chain.run(&input).await;
+        // The chain must succeed (gate did not error).
+        assert!(
+            res.is_ok(),
+            "chain should return Ok when gate suppresses without error"
+        );
+        // The augmenting worker must NOT have been invoked.
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "augmenting worker must not run after gate returns empty eligibility"
         );
     }
 }
