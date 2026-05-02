@@ -465,10 +465,7 @@ pub async fn lint_handler(
         push_registry_unavailable(&mut data, Some(id), err);
     }
 
-    let sensor_authored_count = count_sensor_authored(&lint_records);
-    if sensor_authored_count > 0 {
-        push_sensor_author_unverified(&mut data, sensor_authored_count);
-    }
+    push_section_6_2_advisories(&mut data, &lint_records);
 
     let has_error = data.findings.iter().any(|f| {
         matches!(
@@ -607,6 +604,69 @@ fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintD
         ),
         target: None,
         tracking_issue: None,
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Emit the §6.2 honesty advisories pinning what the leaf's "clean"
+/// verdict does *not* assert. The leaf validates chain-shape +
+/// lifecycle classification — it does *not* verify
+/// `record.signature` cryptographically and does *not* recompute the
+/// body integrity hash. Anyone who can mutate a stored row can
+/// rewrite the body while leaving `actor_chain` shape + an Active
+/// author id intact and slip past §6.2. Real Ed25519 verification is
+/// P1+ (needs `key_version` persistence + canonical-payload spec).
+/// Two advisories: one always-on signature-verification deferral, one
+/// conditional sensor-author-bypass deferral.
+fn push_section_6_2_advisories(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    lint_records: &[cairn_core::verbs::lint::LintRecord],
+) {
+    if !lint_records.is_empty() {
+        push_signature_verification_deferred(data, lint_records.len());
+    }
+    let sensor_authored_count = count_sensor_authored(lint_records);
+    if sensor_authored_count > 0 {
+        push_sensor_author_unverified(data, sensor_authored_count);
+    }
+}
+
+/// Append a `deferred_check` Info finding pinning what §6.2's
+/// "clean" verdict does *and does not* assert. The leaf currently
+/// validates chain-shape + lifecycle classification — it does *not*
+/// verify `record.signature` cryptographically and does *not*
+/// recompute a body integrity hash. Without this advisory, an
+/// operator could read a clean §6.2 as "the at-rest signature was
+/// verified," and a tampered body under an active author would slip
+/// past silently. Real Ed25519 verification is P1+.
+fn push_signature_verification_deferred(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    record_count: usize,
+) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: format!(
+            "§6.2 ran chain-shape + lifecycle classification across {record_count} record(s); record.signature was NOT cryptographically verified and target_hash was NOT recomputed at P0 — a clean verdict means shape + author state pass, not that the at-rest body or signature is unforgeable"
+        ),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "ship Ed25519 signature verification + canonical-payload body-hash recompute in P1; \
+             these require key_version persistence and a canonical-serialization spec, both \
+             outside the PR-1 scope"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(256),
     };
     data.findings.push(f);
     data.summary.total += 1;
@@ -861,8 +921,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 4,
-            "expect §6.3 + §6.4 + §6.5 + §6.6 deferred-info findings"
+            info_count, 5,
+            "expect §6.3 + §6.4 + §6.5 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory"
         );
         assert!(
             result.has_error,
