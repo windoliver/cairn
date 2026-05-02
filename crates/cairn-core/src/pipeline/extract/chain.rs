@@ -187,6 +187,7 @@ impl ExtractChain {
     ///
     /// Returns [`ChainRunError::GatingFailed`] when a `Gating` worker
     /// returns an error.
+    #[allow(clippy::too_many_lines)] // sequential trust-boundary logic; splitting hurts readability
     pub async fn run(&self, input: &ExtractInput<'_>) -> Result<ChainResult, ChainRunError> {
         // Initial running eligibility: use what the caller provided.
         // If empty AND body has length, seed with whole-body span so
@@ -230,8 +231,20 @@ impl ExtractChain {
                             );
                         }
                     }
-                    // Merge discards from this worker (LLMExtractor populates these).
-                    discards.extend(r.discards);
+                    // Validate every discard against current eligibility;
+                    // drop any discard whose source_span falls outside.
+                    for discard in r.discards {
+                        if eligible.iter().any(|e| {
+                            e.start <= discard.source_span.start && discard.source_span.end <= e.end
+                        }) {
+                            discards.push(discard);
+                        } else {
+                            tracing::warn!(
+                                worker = w.name(),
+                                "chain: discard source_span outside current eligibility; dropping"
+                            );
+                        }
+                    }
                     // Monotonic narrowing: clamp returned eligibility to
                     // the intersection with the current window. Widening
                     // is rejected and logged.
@@ -1381,5 +1394,73 @@ mod tests {
             0,
             "augmenting worker must not run after gate returns empty eligibility"
         );
+    }
+
+    // ── Regression: Finding 1 (adversarial review round 2) — discard bypass eligibility guard ──
+
+    /// Gate that emits a discard with `source_span` inside eligibility AND
+    /// one with `source_span` outside eligibility. The chain must drop the
+    /// out-of-bounds discard.
+    struct DiscardOutsideEligibilityGate;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for DiscardOutsideEligibilityGate {
+        fn name(&self) -> &'static str {
+            "discard_outside_eligibility_gate"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::regex_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            use crate::pipeline::extract::{DiscardCandidate, DiscardReason};
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![
+                    DiscardCandidate {
+                        reason: DiscardReason::LowSalience,
+                        source_span: TextSpan::new(2, 8), // inside eligibility 0..10
+                        evidence: "in-bounds discard".to_owned(),
+                    },
+                    DiscardCandidate {
+                        reason: DiscardReason::LowSalience,
+                        source_span: TextSpan::new(20, 30), // OUTSIDE eligibility 0..10
+                        evidence: "out-of-bounds discard".to_owned(),
+                    },
+                ],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![TextSpan::new(0, 10)],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_outside_eligibility_is_dropped() {
+        // Regression for adversarial-review Finding 1 (round 2): discards must
+        // be validated against the current eligibility window the same way
+        // outputs are. A worker must not be able to emit a discard for a span
+        // it was not authorised to see.
+        let chain =
+            ExtractChain::new(vec![Box::new(DiscardOutsideEligibilityGate)]).expect("valid chain");
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: vec![TextSpan::new(0, 10)], // eligibility 0..10
+        };
+        let res = chain.run(&input).await.expect("ok");
+        // Only the in-bounds discard (2..8) survives; out-of-bounds (20..30) is dropped.
+        assert_eq!(
+            res.discards.len(),
+            1,
+            "expected 1 discard, got: {:?}",
+            res.discards
+        );
+        assert_eq!(res.discards[0].source_span, TextSpan::new(2, 8));
     }
 }
