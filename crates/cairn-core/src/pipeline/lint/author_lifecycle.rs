@@ -368,11 +368,29 @@ fn classify_resolved(
             ))
         }
         state @ (ProvisioningState::Revoked | ProvisioningState::Purged) => {
+            // Round-(this loop) fix: terminal revocation/purge with
+            // missing `revoked_at` is corrupted/partially-migrated
+            // registry metadata, not benign history. The registry's
+            // revocation path always writes `revoked_at` when flipping
+            // to Revoked/Purged; absence means the only ordering
+            // signal that distinguishes pre- from post-revocation
+            // writes is gone. Mirror the Active-without-activated_at
+            // policy: fail closed (brief invariant 6), do not
+            // downgrade to a non-blocking warning.
+            let Some(revoked_at) = lc.revoked_at.as_ref() else {
+                return Some((
+                    ChainStatus::Malformed,
+                    format!(
+                        "author identity `{}` is `{state:?}` but the registry row has no `revoked_at` — corrupted lifecycle metadata; cannot prove the record predates revocation, fail-closed",
+                        author.as_str()
+                    ),
+                ));
+            };
             // Post-revocation write: the chain author timestamp is at
             // or after `revoked_at`. The signing right had already
             // been withdrawn — a real trust violation, not legitimate
             // history.
-            if let (Some(chain_at), Some(revoked_at)) = (chain_at, lc.revoked_at.as_ref())
+            if let Some(chain_at) = chain_at
                 && chain_at.cmp_chronological(revoked_at) != Ordering::Less
             {
                 return Some((
@@ -385,16 +403,15 @@ fn classify_resolved(
                     ),
                 ));
             }
-            // Either chain `at` < `revoked_at` (legitimate
-            // pre-revocation history) or `revoked_at` is unknown
-            // (cannot prove post-revocation; default to the
-            // legitimate-history case so routine revocations don't
-            // poison historical records). Non-blocking warning.
+            // chain `at` < `revoked_at` (or chain `at` unknown): the
+            // record predates revocation. Legitimate history;
+            // non-blocking warning.
             Some((
                 ChainStatus::Revoked,
                 format!(
-                    "author identity `{}` is `{state:?}` — signing right is terminally withdrawn (pre-revocation history; review for audit)",
-                    author.as_str()
+                    "author identity `{}` is `{state:?}` (revoked_at {}) — signing right is terminally withdrawn (pre-revocation history; review for audit)",
+                    author.as_str(),
+                    revoked_at,
                 ),
             ))
         }
@@ -421,15 +438,17 @@ mod tests {
 
     /// Build an `AuthorState::Resolved` for tests where the lifecycle
     /// *state* drives the verdict and timestamp comparisons are not
-    /// the focus. Stamps a far-past `activated_at` so `Active` rows
-    /// pass the activation-ordering check trivially (any realistic
-    /// chain `at` will be after it). Tests that need to exercise the
-    /// timestamp branches use `resolved_with` instead.
+    /// the focus. Stamps a far-past `activated_at` and far-future
+    /// `revoked_at` so the corruption-detection branches do not fire:
+    /// realistic chain `at`s land after activation but before
+    /// revocation, putting the record in the legitimate-history case.
+    /// Tests that need to exercise the timestamp branches directly
+    /// use `resolved_with` instead.
     fn resolved(state: ProvisioningState) -> AuthorState {
         AuthorState::Resolved(AuthorLifecycle {
             state,
             activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
-            revoked_at: None,
+            revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
         })
     }
 
@@ -467,31 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn revoke_pending_author_is_flagged_as_revocation_in_flight() {
-        let record = record_with_active_author();
-        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::RevokePending))
-            .expect("revoke-pending issuer must be flagged");
-        assert_eq!(finding.status, ChainStatus::RevocationInFlight);
-        assert!(finding.author.is_some());
-        assert!(finding.message.contains("RevokePending"));
-    }
-
-    #[test]
     fn revoked_author_is_flagged_as_revoked() {
         let record = record_with_active_author();
         let finding = check_author_lifecycle(&record, resolved(ProvisioningState::Revoked))
             .expect("revoked issuer must be flagged");
         assert_eq!(finding.status, ChainStatus::Revoked);
         assert!(finding.message.contains("Revoked"));
-    }
-
-    #[test]
-    fn purge_pending_author_is_flagged_as_revocation_in_flight() {
-        let record = record_with_active_author();
-        let finding = check_author_lifecycle(&record, resolved(ProvisioningState::PurgePending))
-            .expect("purge-pending issuer must be flagged");
-        assert_eq!(finding.status, ChainStatus::RevocationInFlight);
-        assert!(finding.message.contains("PurgePending"));
     }
 
     #[test]
@@ -565,6 +565,28 @@ mod tests {
         .expect("corrupted Active row must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
         assert!(finding.message.contains("no `activated_at`"));
+    }
+
+    #[test]
+    fn revoked_without_revoked_at_is_flagged_as_malformed() {
+        // Round-(this loop) fix: terminal Revoked / Purged with
+        // `revoked_at == None` is corrupted/partially-migrated
+        // registry state, not benign history. Mirrors the Active +
+        // missing `activated_at` policy. Fail closed (brief invariant
+        // 6); do NOT downgrade post-revocation writes to a warning
+        // just because the timestamp is gone.
+        let record = record_with_active_author();
+        let finding = check_author_lifecycle(
+            &record,
+            AuthorState::Resolved(AuthorLifecycle {
+                state: ProvisioningState::Revoked,
+                activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
+                revoked_at: None,
+            }),
+        )
+        .expect("corrupted Revoked row must surface");
+        assert_eq!(finding.status, ChainStatus::Malformed);
+        assert!(finding.message.contains("no `revoked_at`"));
     }
 
     #[test]

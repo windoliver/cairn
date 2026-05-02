@@ -225,9 +225,9 @@ mod tests {
             AuthorLifecycle {
                 state: ProvisioningState::Revoked,
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
-                // No revoked_at → falls through to legitimate-history
-                // case (Warning), per the round-9 timestamp policy.
-                revoked_at: None,
+                // Far-future revoked_at → chain `at` predates
+                // revocation → legitimate-history case (Warning).
+                revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
             },
         );
         let recs = [lint_record(r)];

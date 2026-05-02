@@ -393,8 +393,21 @@ pub async fn lint_handler(
 
     // §6.2 author-lifecycle slice (issue #256). The registry is required
     // (no `Option`) so a caller cannot silently degrade lint into a
-    // no-op against revoked / unknown / pending issuers.
-    let author_states = prefetch_author_states(identity_registry, &stored).await?;
+    // no-op against revoked / unknown / pending issuers. A registry
+    // backend error is an infrastructure fault, not a per-record
+    // finding — but aborting the whole lint run on one transient
+    // hiccup also strips operators of every other check's coverage at
+    // exactly the moment they need partial visibility. Degraded path:
+    // surface the failure as a `DeferredCheck` info finding, run the
+    // rest of the checks against an empty author_states map (so #6.2
+    // resolves every author as `MissingFromRegistry` → blocking
+    // BrokenActorChain Error, fail-closed), and let the operator see
+    // the report.
+    let (author_states, registry_error) =
+        match prefetch_author_states(identity_registry, &stored).await {
+            Ok(map) => (map, None),
+            Err(e) => (std::collections::HashMap::new(), Some(format!("{e:#}"))),
+        };
 
     // `index_stats` is opt-in for adapters: the default trait impl returns
     // an `Err` carrying the literal "not supported by this store adapter"
@@ -442,6 +455,10 @@ pub async fn lint_handler(
 
     if index_stats_skipped {
         push_index_stats_skipped(&mut data);
+    }
+
+    if let Some(err) = registry_error {
+        push_registry_unavailable(&mut data, &err);
     }
 
     let has_error = data.findings.iter().any(|f| {
@@ -576,6 +593,42 @@ fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintD
     data.findings.push(f);
     data.summary.total += 1;
     data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Append a `deferred_check` Error finding noting that the
+/// `IdentityRegistry` lookup failed mid-prefetch. The lint run
+/// continues with an empty `author_states` map (so §6.2 marks every
+/// chain author as `MissingFromRegistry` → blocking
+/// `BrokenActorChain`), but the operator must see explicit evidence
+/// that registry coverage is degraded — otherwise the audit looks
+/// uniformly broken without the cause being visible.
+fn push_registry_unavailable(data: &mut cairn_core::generated::verbs::lint::LintData, err: &str) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: format!(
+            "IdentityRegistry prefetch failed mid-run; §6.2 author-lifecycle ran with no resolvable identities (every author surfaces as MissingFromRegistry): {err}"
+        ),
+        severity: cairn_core::generated::verbs::lint::Severity::Error,
+        suggested_fix: Some(
+            "investigate the registry backend (transient I/O, schema drift, lock contention) and \
+             re-run lint once it is reachable; the partial report still surfaces shape and \
+             other-check findings"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(256),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.error += 1;
     if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
         let entry = map
             .entry("deferred_check".to_owned())
@@ -770,5 +823,50 @@ mod tests {
             .filter(|f| matches!(f.kind, cairn_core::generated::verbs::lint::Kind::IndexDrift,))
             .collect();
         assert_eq!(drifts.len(), 1);
+    }
+
+    #[test]
+    fn push_registry_unavailable_emits_blocking_deferred_finding() {
+        // Round-(this loop) fix: a registry-prefetch failure must
+        // surface as a visible, blocking finding inside the report
+        // instead of aborting the whole lint run. This unit pins:
+        // - severity is Error (operator must see it),
+        // - kind is DeferredCheck (categorically a coverage gap),
+        // - tracking_issue is #256,
+        // - the summary aggregates (total / by_severity / by_kind)
+        //   stay consistent so the json/markdown render is correct.
+        let mut data = cairn_core::generated::verbs::lint::LintData {
+            findings: Vec::new(),
+            summary: cairn_core::generated::verbs::lint::LintDataSummary {
+                total: 0,
+                by_severity: cairn_core::generated::verbs::lint::LintDataSummaryBySeverity {
+                    error: 0,
+                    warning: 0,
+                    info: 0,
+                },
+                by_kind: serde_json::Value::Object(serde_json::Map::new()),
+            },
+            report_path: None,
+        };
+        super::push_registry_unavailable(&mut data, "boom: connection refused");
+        assert_eq!(data.findings.len(), 1);
+        let f = &data.findings[0];
+        assert!(matches!(
+            f.kind,
+            cairn_core::generated::verbs::lint::Kind::DeferredCheck
+        ));
+        assert_eq!(
+            f.severity,
+            cairn_core::generated::verbs::lint::Severity::Error
+        );
+        assert_eq!(f.tracking_issue, Some(256));
+        assert!(f.message.contains("boom: connection refused"));
+        assert_eq!(data.summary.total, 1);
+        assert_eq!(data.summary.by_severity.error, 1);
+        if let serde_json::Value::Object(map) = &data.summary.by_kind {
+            assert_eq!(map.get("deferred_check").and_then(serde_json::Value::as_u64), Some(1));
+        } else {
+            panic!("by_kind must be an object");
+        }
     }
 }
