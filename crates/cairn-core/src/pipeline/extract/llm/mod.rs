@@ -15,7 +15,7 @@ use crate::contract::llm_provider::{CompletionOutput, CompletionRequest, LLMProv
 use crate::pipeline::extract::body::BodyResolution;
 use crate::pipeline::extract::{
     ExtractBudget, ExtractError, ExtractInput, ExtractOutput, ExtractResult, ExtractorWorker,
-    TruncationReason, WorkerRole,
+    TextSpan, TruncationReason, WorkerRole,
 };
 use crate::pipeline::filter::fence::fence;
 
@@ -29,6 +29,54 @@ use prompt::{Region as PromptRegion, build_regions, render_prompt};
 /// actual rendered overhead exceeds this the post-render check is the
 /// defence-in-depth backstop.
 const PROMPT_TEMPLATE_OVERHEAD_BYTES: usize = 4096;
+
+/// Conservative per-region overhead in bytes, covering the JSON wrapper,
+/// region-id field, content copy, and other scaffolding emitted by
+/// `build_regions` / `render_prompt` for each region.
+const PER_REGION_OVERHEAD_BYTES: usize = 256;
+
+/// Hard cap on the number of regions passed to the LLM per prompt.
+/// A 64 KiB body fragmented into thousands of 1-byte spans would produce
+/// thousands of regions even after the byte-cap estimate passes (because raw
+/// eligible bytes are small but region overhead is large). This cap ensures
+/// the preflight rejects pathological fragmentation before any allocation.
+const MAX_REGIONS_PER_PROMPT: usize = 64;
+
+/// Merge contiguous or overlapping [`TextSpan`]s into their union, sorted by
+/// start offset.  This must be applied to `eligible_spans` before the byte-cap
+/// estimate and before `build_regions` so that a 64 KiB body split into
+/// thousands of 1-byte spans does not bypass the cap via sheer region count.
+///
+/// # Example
+///
+/// ```rust
+/// use cairn_core::pipeline::extract::TextSpan;
+///
+/// // The function is module-private; tested through `LLMExtractor::extract`.
+/// ```
+fn merge_contiguous_spans(spans: &[TextSpan]) -> Vec<TextSpan> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted: Vec<TextSpan> = spans.to_vec();
+    sorted.sort_by_key(|s| s.start);
+
+    let mut merged: Vec<TextSpan> = Vec::with_capacity(sorted.len());
+    let mut current = sorted[0];
+    for span in sorted.into_iter().skip(1) {
+        if span.start <= current.end {
+            // Overlapping or contiguous — extend the running span.
+            if span.end > current.end {
+                current = TextSpan::new(current.start, span.end);
+            }
+        } else {
+            merged.push(current);
+            current = span;
+        }
+    }
+    merged.push(current);
+    merged
+}
 
 /// Convert a pipeline-side [`ExtractBudget`] to the config-side
 /// `crate::config::ExtractBudget` used by [`CompletionRequest`].
@@ -287,6 +335,7 @@ impl ExtractorWorker for LLMExtractor {
         self.budget
     }
 
+    #[allow(clippy::too_many_lines)] // sequential preflight + render + retry + timeout logic; splitting hurts readability
     async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
         // Step 0: body resolution
         let body = match &input.body {
@@ -308,25 +357,51 @@ impl ExtractorWorker for LLMExtractor {
             return Ok(empty_result());
         }
 
+        // Merge contiguous/overlapping eligible spans before any estimation or
+        // region building. A 64 KiB body fragmented into thousands of 1-byte
+        // spans passes a naive byte-count cap but would explode the region
+        // count (and the rendered prompt). Merging first closes that bypass.
+        let eligible_spans = merge_contiguous_spans(&input.eligible_spans);
+
         // Pre-render byte-cap guard: compute an upper-bound estimate from
-        // eligible-span byte counts + fixed template overhead and reject
-        // immediately if it exceeds the cap.  This avoids paying the full
-        // fence+render allocation cost for inputs that would inevitably fail
-        // the post-render check.  The post-render check below is kept as
-        // defence-in-depth for the rare case where the estimate under-counts
-        // (e.g. region wrappers larger than PROMPT_TEMPLATE_OVERHEAD_BYTES).
+        // merged eligible-span byte counts + per-region overhead + fixed
+        // template overhead, and reject immediately if it exceeds the cap.
+        // This avoids paying the full fence+render allocation cost for inputs
+        // that would inevitably fail the post-render check.  The post-render
+        // check below is kept as defence-in-depth for the rare case where the
+        // estimate under-counts (e.g. region wrappers larger than
+        // PROMPT_TEMPLATE_OVERHEAD_BYTES).
         if let Some(cap) = self.budget.max_prompt_bytes {
             let cap_usize = cap as usize;
-            let eligible_bytes: usize = input
-                .eligible_spans
+
+            // Hard region-count cap: reject before any allocation if the merged
+            // span count itself exceeds the limit.
+            if eligible_spans.len() > MAX_REGIONS_PER_PROMPT {
+                tracing::warn!(
+                    reason = "llm.too_many_regions",
+                    region_count = eligible_spans.len(),
+                    max = MAX_REGIONS_PER_PROMPT,
+                );
+                return Ok(empty_with_truncation(TruncationReason::MaxWallMs {
+                    elapsed_ms: 0,
+                }));
+            }
+
+            let eligible_bytes: usize = eligible_spans
                 .iter()
                 .map(|s| (s.end.saturating_sub(s.start)) as usize)
                 .fold(0_usize, usize::saturating_add);
+            // Include per-region overhead so that thousands of tiny spans
+            // can't slip through via small raw byte counts.
+            let region_overhead = eligible_spans
+                .len()
+                .saturating_mul(PER_REGION_OVERHEAD_BYTES);
             // Reserve headroom for `RETRY_SUFFIX` so the retry attempt (which
             // appends the suffix to the base prompt) also fits within the cap.
             // Without this reservation the initial prompt can fit but the retry
             // prompt can silently exceed the cap.
             let estimate = eligible_bytes
+                .saturating_add(region_overhead)
                 .saturating_add(PROMPT_TEMPLATE_OVERHEAD_BYTES)
                 .saturating_add(RETRY_SUFFIX.len());
             if estimate > cap_usize {
@@ -341,9 +416,9 @@ impl ExtractorWorker for LLMExtractor {
             }
         }
 
-        // Step 1: fence + render
+        // Step 1: fence + render (use the already-merged eligible_spans)
         let payload = fence(body);
-        let regions = build_regions(&payload.text, &input.eligible_spans, &payload.marks);
+        let regions = build_regions(&payload.text, &eligible_spans, &payload.marks);
         if regions.is_empty() {
             return Ok(empty_result());
         }
@@ -866,6 +941,57 @@ mod tests {
             res.outputs.is_empty(),
             "no outputs expected on cap rejection; got: {:?}",
             res.outputs
+        );
+        assert!(
+            matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
+            "expected MaxWallMs{{0}} truncation (preflight skip), got {:?}",
+            res.truncated
+        );
+    }
+
+    // ── Regression: Finding 1 (adversarial review round 4) — fragmented eligibility bypass ──
+
+    /// Regression for adversarial-review Finding 1 (round 4): a 64 KiB body with
+    /// 1000 fragmented 1-byte eligible spans must be rejected before any prompt
+    /// render — the per-region overhead makes the real rendered prompt much larger
+    /// than the raw eligible bytes suggest.
+    ///
+    /// Uses a `PanicProvider` to assert `complete()` is never called, confirming
+    /// rejection happens before the LLM provider is invoked.
+    #[tokio::test]
+    async fn fragmented_eligibility_rejected_before_render() {
+        // Body of 64 KiB.  Eligible spans: 1000 fragments of 1 byte each,
+        // scattered across the body (positions 0, 64, 128, ...).
+        // Raw eligible bytes = 1000, well below the cap, but with
+        // PER_REGION_OVERHEAD_BYTES=256 the estimate is
+        //   1000 (bytes) + 1000 * 256 (region overhead) + 4096 (template) + retry
+        //   = ~265 KiB >> 8 KiB cap
+        // so the preflight must reject and the PanicProvider must never be called.
+        let body_len = 64 * 1024_usize;
+        let body = "a".repeat(body_len);
+
+        // 1000 spans of exactly 1 byte each, spaced 64 bytes apart.
+        let eligible_spans: Vec<TextSpan> = (0_u32..1000_u32)
+            .map(|i| TextSpan::new(i * 64, i * 64 + 1))
+            .collect();
+
+        let extractor =
+            LLMExtractor::new(std::sync::Arc::new(PanicProvider)).with_budget(ExtractBudget {
+                max_prompt_bytes: Some(8 * 1024), // 8 KiB cap
+                ..ExtractBudget::llm_default()
+            });
+
+        let event = fixture_event();
+        let input = make_input(&event, &body, eligible_spans);
+
+        // PanicProvider panics if called; the preflight must reject first.
+        let res = extractor
+            .extract(&input)
+            .await
+            .expect("preflight rejection must return Ok + truncation, not Err");
+        assert!(
+            res.outputs.is_empty(),
+            "no outputs expected on fragmented cap rejection"
         );
         assert!(
             matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
