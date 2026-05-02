@@ -4,11 +4,14 @@
 //! function and maps its output into the lint verb's `Finding` shape.
 //!
 //! Per-record check: chain-shape violations (no `Author`, duplicate
-//! `Author`, role-order violation) and unknown-issuer cases surface as
-//! `Kind::BrokenActorChain` at `Severity::Error`; currently-revoked
-//! issuers surface at `Severity::Error` (in-flight transitions) or
-//! `Severity::Warning` (terminal) — see `severity_for` for the
-//! rationale and the persistent-issue note.
+//! `Author`, role-order violation), unknown-issuer cases, and every
+//! revocation-related verdict surface as `Kind::BrokenActorChain` at
+//! `Severity::Error`. The structural distinction between `Revoked`,
+//! `PostRevocationWrite`, `RevocationInFlight`, and `Malformed` lives
+//! in the message and the `ChainStatus` variant for diagnostic value
+//! — severity does not depend on `actor_chain.author.at` because that
+//! field is unauthenticated at P0. See `severity_for` for the
+//! rationale.
 //!
 //! `LintInputs.author_states` is required (not `Option`) so a caller
 //! cannot silently degrade lint into a no-op against revoked / unknown
@@ -102,22 +105,26 @@ fn into_finding(lf: AuthorLifecycleFinding) -> Finding {
 }
 
 fn severity_for(status: ChainStatus) -> Severity {
-    // Severity policy:
-    // - Terminal `Revoked` (chain `at` < `revoked_at`, or `revoked_at`
-    //   unknown) — Warning. Legitimate pre-revocation history; routine
-    //   revocation must not poison every historical record by the same
-    //   author with a blocking verdict.
-    // - `PostRevocationWrite` (chain `at` >= `revoked_at`) — Error.
-    //   Timestamp evidence proves the write landed under withdrawn
-    //   signing right; this is no longer the ambiguous case.
-    // - `RevocationInFlight` (`RevokePending` / `PurgePending`) —
-    //   Error. Suspicious-write case (bypassed gate, race, tamper).
-    // - `Malformed` (chain shape, unknown issuer, `Pending` issuer,
-    //   pre-activation tamper) — Error. Real corruption / missing
-    //   truth source.
+    // Severity policy: every revocation-related verdict is blocking
+    // until P1 cryptographic verification ships. Earlier rounds split
+    // `Revoked` (chain `at` < `revoked_at` → Warning) from
+    // `PostRevocationWrite` (chain `at` >= `revoked_at` → Error) on
+    // the assumption that the chain timestamp could be trusted to
+    // distinguish legitimate pre-revocation history from a
+    // post-revocation tamper. At P0, `record.signature` is *not*
+    // verified and `target_hash` is *not* recomputed (see module
+    // docs + the cli's §6.2 deferred advisory), so an at-rest
+    // attacker can backdate `actor_chain.author.at` to convert a
+    // real post-revocation write into the lower-severity branch.
+    // Severity must therefore not depend on unauthenticated record
+    // content. The structural distinction stays in the message + the
+    // `ChainStatus` variant for diagnostic value, but every
+    // revocation-related status gates as Error. Once P1 verifies the
+    // signature, the chain timestamp becomes authenticated and the
+    // pre-revocation-history downgrade can return.
     match status {
-        ChainStatus::Revoked => Severity::Warning,
-        ChainStatus::PostRevocationWrite
+        ChainStatus::Revoked
+        | ChainStatus::PostRevocationWrite
         | ChainStatus::RevocationInFlight
         | ChainStatus::Malformed => Severity::Error,
     }
@@ -126,10 +133,12 @@ fn severity_for(status: ChainStatus) -> Severity {
 fn suggested_fix_for(status: ChainStatus) -> &'static str {
     match status {
         ChainStatus::Revoked => {
-            "audit the affected records — author identity is terminally revoked, but the chain \
-             timestamp shows the write predates revocation; do NOT auto-tombstone until P1 ships \
-             real signature verification + key_version persistence (records signed pre-revocation \
-             remain valid)"
+            "audit the affected records — author identity is terminally revoked. The chain \
+             timestamp suggests the write predates revocation, BUT chain.at is unauthenticated at \
+             P0 (record.signature is not verified, target_hash is not recomputed) so backdating \
+             cannot be ruled out; treat as blocking until P1 ships Ed25519 verification + \
+             key_version persistence — do NOT auto-tombstone (records signed pre-revocation under \
+             a verified key are legitimate)"
         }
         ChainStatus::PostRevocationWrite => {
             "investigate as a suspected trust-boundary breach — the chain author timestamp is \
@@ -238,15 +247,17 @@ mod tests {
     }
 
     #[test]
-    fn revoked_author_with_states_emits_warning_not_error() {
-        // Persistent-issue resolution (rounds 5/7/8): terminal Revoked
-        // is non-blocking. The integration test
-        // `revocation_after_write_now_flags_record` concretely
-        // demonstrates the legitimate case (record written under
-        // Active, author revoked later); without P1 evidence we cannot
-        // distinguish that benign history from a post-revocation
-        // write. Warning surfaces the audit trail without poisoning
-        // legitimate history with a blocking verdict.
+    fn revoked_author_with_pre_revocation_chain_at_emits_blocking_error() {
+        // Round-5 fix: chain.at is unauthenticated at P0
+        // (record.signature is not verified, target_hash is not
+        // recomputed) so the pre-revocation downgrade cannot rely on
+        // it — a tamper could backdate `actor_chain.author.at`.
+        // Severity must therefore not depend on unauthenticated record
+        // content; every revocation-related verdict gates as Error
+        // until P1 ships Ed25519 verification + key_version
+        // persistence. The structural Revoked-vs-PostRevocationWrite
+        // distinction stays in the message + the ChainStatus variant
+        // for diagnostic value.
         let cfg = CairnConfig::default();
         let r = sample_record();
         let author_id = r
@@ -262,7 +273,9 @@ mod tests {
                 state: ProvisioningState::Revoked,
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
                 // Far-future revoked_at → chain `at` predates
-                // revocation → legitimate-history case (Warning).
+                // revocation → would have been Warning under the
+                // pre-round-5 policy; now Error because chain.at is
+                // unauthenticated.
                 revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
             },
         );
@@ -271,7 +284,7 @@ mod tests {
         let findings = run(&inp);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, Kind::BrokenActorChain);
-        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].severity, Severity::Error);
         assert!(findings[0].target.is_some());
         assert!(
             findings[0]
