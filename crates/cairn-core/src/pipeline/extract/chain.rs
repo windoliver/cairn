@@ -245,23 +245,28 @@ impl ExtractChain {
                             );
                         }
                     }
-                    // Monotonic narrowing: clamp returned eligibility to
-                    // the intersection with the current window. Widening
-                    // is rejected and logged.
-                    let clamped = clamp_intersection(&r.llm_eligible_spans, &eligible);
-                    // Warn if a widening attempt was detected: returned was non-empty
-                    // and clamping changed it (meaning at least one returned span
-                    // extended outside the current eligibility).
-                    let widened = !r.llm_eligible_spans.is_empty()
-                        && r.llm_eligible_spans.iter().any(|rs| {
-                            !eligible
-                                .iter()
-                                .any(|e| e.start <= rs.start && rs.end <= e.end)
-                        });
-                    if widened {
-                        tracing::warn!(worker = w.name(), "chain.eligibility_widening");
+                    // Monotonic narrowing: only Gating workers may narrow the
+                    // running eligibility. Augmenting workers return
+                    // `llm_eligible_spans` as informational metadata but do NOT
+                    // reduce the window — their `vec![]` return on success would
+                    // otherwise collapse eligibility to empty and starve every
+                    // subsequent augmenting worker.
+                    if w.role() == WorkerRole::Gating {
+                        let clamped = clamp_intersection(&r.llm_eligible_spans, &eligible);
+                        // Warn if a widening attempt was detected: returned was non-empty
+                        // and clamping changed it (meaning at least one returned span
+                        // extended outside the current eligibility).
+                        let widened = !r.llm_eligible_spans.is_empty()
+                            && r.llm_eligible_spans.iter().any(|rs| {
+                                !eligible
+                                    .iter()
+                                    .any(|e| e.start <= rs.start && rs.end <= e.end)
+                            });
+                        if widened {
+                            tracing::warn!(worker = w.name(), "chain.eligibility_widening");
+                        }
+                        eligible = clamped;
                     }
-                    eligible = clamped;
                     if r.truncated != TruncationReason::None {
                         truncated = r.truncated;
                     }
@@ -1462,5 +1467,94 @@ mod tests {
             res.discards
         );
         assert_eq!(res.discards[0].source_span, TextSpan::new(2, 8));
+    }
+
+    // ── Regression: Finding 2 (adversarial review round 2) — augmenters narrow eligibility ──
+
+    /// Augmenting worker that records the `eligible_spans` it received each
+    /// time it is called.
+    struct EligibilityRecordingAug {
+        received: Arc<Mutex<Vec<Vec<TextSpan>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for EligibilityRecordingAug {
+        fn name(&self) -> &'static str {
+            "eligibility_recording_aug"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            self.received
+                .lock()
+                .expect("mutex not poisoned")
+                .push(input.eligible_spans.clone());
+            // Return empty llm_eligible_spans — this previously collapsed
+            // eligibility to empty, starving any subsequent augmenter.
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_then_two_augmenters_both_see_gated_eligibility() {
+        // Regression for adversarial-review Finding 2 (round 2): after the fix,
+        // augmenting workers must NOT narrow eligibility. Both augmenters in a
+        // gate→aug→aug chain must receive the same span that the gate returned,
+        // not the empty vec that the first augmenter's `llm_eligible_spans`
+        // would have caused before the fix.
+        let received1 = Arc::new(Mutex::new(Vec::new()));
+        let received2 = Arc::new(Mutex::new(Vec::new()));
+
+        let chain = ExtractChain::new(vec![
+            Box::new(NarrowingGate), // returns llm_eligible_spans: [2..8]
+            Box::new(EligibilityRecordingAug {
+                received: Arc::clone(&received1),
+            }),
+            Box::new(EligibilityRecordingAug {
+                received: Arc::clone(&received2),
+            }),
+        ])
+        .expect("valid chain");
+
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: vec![TextSpan::new(0, 20)],
+        };
+        chain.run(&input).await.expect("ok");
+
+        let calls1 = received1.lock().expect("mutex not poisoned");
+        let calls2 = received2.lock().expect("mutex not poisoned");
+
+        // Both augmenters should have been called exactly once.
+        assert_eq!(calls1.len(), 1, "first augmenter must be called once");
+        assert_eq!(calls2.len(), 1, "second augmenter must be called once");
+
+        // Both must have received the gated span (2..8), not empty.
+        assert_eq!(
+            calls1[0],
+            vec![TextSpan::new(2, 8)],
+            "first augmenter received wrong eligibility: {:?}",
+            calls1[0]
+        );
+        assert_eq!(
+            calls2[0],
+            vec![TextSpan::new(2, 8)],
+            "second augmenter received wrong eligibility (was starved before fix): {:?}",
+            calls2[0]
+        );
     }
 }
