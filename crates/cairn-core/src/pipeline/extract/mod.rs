@@ -134,6 +134,40 @@ impl ExtractOutput {
     }
 }
 
+/// Why the LLM extractor proposed not memorising a span. Mirrors a
+/// subset of brief §5.2 Filter discard reasons — Filter, not the
+/// extractor, is authoritative on `pii_blocked`, `policy_blocked`,
+/// `duplicate`, so those are not represented here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DiscardReason {
+    /// Transient or short-lived signal (e.g. ephemeral status check).
+    Volatile,
+    /// One-off tool lookup that produces no durable knowledge.
+    ToolLookup,
+    /// Same fact already covered by another (likely better) source.
+    CompetingSource,
+    /// Low salience — judged not worth memorising.
+    LowSalience,
+    /// Other reason (model-supplied free text in `evidence`).
+    Other,
+}
+
+/// A model-suggested discard, with the same provenance shape as a
+/// draft. Filter (a later issue) decides whether to honour the
+/// suggestion or override; this type is the wire format between
+/// `LLMExtractor` and Filter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DiscardCandidate {
+    /// Why the model proposes discarding this span.
+    pub reason: DiscardReason,
+    /// Span the discard applies to (in original-body coordinates).
+    pub source_span: TextSpan,
+    /// Model-emitted free-text justification, ≤ 512 chars (schema-enforced upstream).
+    pub evidence: String,
+}
+
 /// Why an extraction was truncated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
@@ -215,6 +249,30 @@ pub enum ExtractError {
         event_id: String,
         /// The payload variant family that should have produced a body.
         payload_variant: &'static str,
+    },
+    /// Provider returned an error the extractor cannot recover from.
+    /// The chain runner captures these into `ChainResult.failures`.
+    #[error("provider failure in extractor `{worker}`: {code}")]
+    Provider {
+        /// Which extractor surfaced the error.
+        worker: &'static str,
+        /// Stable error class for metrics; matches `LlmError` discriminant
+        /// stringified, e.g. `"unreachable"`, `"auth_denied"`.
+        code: &'static str,
+        /// Underlying provider error.
+        #[source]
+        source: crate::contract::llm_provider::LlmError,
+    },
+    /// Model emitted only items the parser had to drop — out-of-range
+    /// `region_id`, `text_excerpt` not present in the named region, or
+    /// (defence-in-depth) a derived span outside `eligible_spans`.
+    /// Per-item drops happen with `tracing::warn!` + a metric; this
+    /// error is *only* raised when the model emits at least one item
+    /// but zero items survive validation.
+    #[error("extractor `{worker}` emitted only items the parser had to drop")]
+    SpanOutOfBounds {
+        /// Which extractor produced the unsalvageable result.
+        worker: &'static str,
     },
 }
 
@@ -347,5 +405,44 @@ mod mod_tests {
         use crate::pipeline::extract::regex::RegexExtractor;
         let r = RegexExtractor::builtin();
         assert_eq!(r.role(), WorkerRole::Gating);
+    }
+
+    #[test]
+    fn extract_error_provider_display() {
+        let e = ExtractError::Provider {
+            worker: "llm",
+            code: "unreachable",
+            source: crate::contract::llm_provider::LlmError::ProviderUnreachable {
+                detail: "connect refused".into(),
+            },
+        };
+        let s = e.to_string();
+        assert!(s.contains("provider failure"), "got: {s}");
+        assert!(s.contains("unreachable"), "got: {s}");
+    }
+
+    #[test]
+    fn extract_error_span_out_of_bounds_display() {
+        let e = ExtractError::SpanOutOfBounds { worker: "llm" };
+        assert!(e.to_string().contains("had to drop"));
+    }
+
+    #[test]
+    fn discard_candidate_round_trips_via_serde() {
+        let dc = DiscardCandidate {
+            reason: DiscardReason::Volatile,
+            source_span: TextSpan::new(0, 5),
+            evidence: "transient lookup".to_owned(),
+        };
+        let json = serde_json::to_string(&dc).unwrap();
+        let back: DiscardCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dc);
+    }
+
+    #[test]
+    fn discard_reason_serializes_snake_case() {
+        let r = DiscardReason::ToolLookup;
+        let s = serde_json::to_string(&r).unwrap();
+        assert_eq!(s, "\"tool_lookup\"");
     }
 }
