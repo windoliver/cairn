@@ -461,8 +461,18 @@ pub async fn lint_handler(
         push_index_stats_skipped(&mut data);
     }
 
+    // Build affected-record map per failed identity. Per-record ids
+    // (stable ULIDs, not record bodies → safe under privacy invariant
+    // §9) let operators identify exactly which rows lost §6.2
+    // coverage. Without this, a partial outage leaves an arbitrary
+    // number of records unclassified with no rows to quarantine or
+    // retry.
+    let affected_by_identity = affected_records_by_identity(&lint_records, &prefetch_failures);
     for (id, err) in &prefetch_failures {
-        push_registry_unavailable(&mut data, Some(id), err);
+        let affected = affected_by_identity
+            .get(id)
+            .map_or(&[][..], std::vec::Vec::as_slice);
+        push_registry_unavailable(&mut data, Some(id), err, affected);
     }
 
     push_section_6_2_advisories(&mut data, &lint_records);
@@ -618,6 +628,39 @@ fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintD
     }
 }
 
+/// Group record ids by their chain author identity, restricted to
+/// the set of identities whose registry lookup failed. Lets the cli
+/// emit per-identity `DeferredCheck` Error findings that name the
+/// exact rows whose §6.2 coverage was lost — operators need this to
+/// quarantine or retry specific rows.
+fn affected_records_by_identity(
+    lint_records: &[cairn_core::verbs::lint::LintRecord],
+    failures: &std::collections::HashMap<cairn_core::domain::Identity, String>,
+) -> std::collections::HashMap<
+    cairn_core::domain::Identity,
+    Vec<cairn_core::domain::record::RecordId>,
+> {
+    use cairn_core::domain::ChainRole;
+    let mut by_id: std::collections::HashMap<_, Vec<_>> =
+        std::collections::HashMap::with_capacity(failures.len());
+    for r in lint_records {
+        if let Some(e) = r
+            .stored
+            .record
+            .actor_chain
+            .iter()
+            .find(|e| e.role == ChainRole::Author)
+            && failures.contains_key(&e.identity)
+        {
+            by_id
+                .entry(e.identity.clone())
+                .or_default()
+                .push(r.stored.record.id.clone());
+        }
+    }
+    by_id
+}
+
 /// Emit the §6.2 honesty advisories pinning what the leaf's "clean"
 /// verdict does *not* assert. The leaf validates chain-shape +
 /// lifecycle classification — it does *not* verify
@@ -759,12 +802,46 @@ fn push_registry_unavailable(
     data: &mut cairn_core::generated::verbs::lint::LintData,
     identity: Option<&cairn_core::domain::Identity>,
     err: &str,
+    affected_record_ids: &[cairn_core::domain::record::RecordId],
 ) {
+    // Privacy §9: record ids are stable ULIDs, not bodies — safe to
+    // surface so operators can identify the rows that lost §6.2
+    // coverage. Cap inline ids at 16; the total count is always
+    // shown. `target.record_id` carries the first id so single-row
+    // outages render with a usable target field.
+    const MAX_INLINE_IDS: usize = 16;
     let id_label = identity.map(|id| format!(" for {id}")).unwrap_or_default();
+    let total = affected_record_ids.len();
+    let affected_label = if total == 0 {
+        String::new()
+    } else if total <= MAX_INLINE_IDS {
+        let joined = affected_record_ids
+            .iter()
+            .map(cairn_core::domain::record::RecordId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" — {total} record(s) lost §6.2 coverage: [{joined}]")
+    } else {
+        let head = affected_record_ids
+            .iter()
+            .take(MAX_INLINE_IDS)
+            .map(cairn_core::domain::record::RecordId::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" — {total} record(s) lost §6.2 coverage; first {MAX_INLINE_IDS}: [{head}, …]")
+    };
+    let target =
+        affected_record_ids
+            .first()
+            .map(|rid| cairn_core::generated::verbs::lint::Target {
+                operation_id: None,
+                path: None,
+                record_id: Some(cairn_core::generated::common::Ulid(rid.as_str().to_owned())),
+            });
     let f = cairn_core::generated::verbs::lint::Finding {
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: format!(
-            "IdentityRegistry lookup failed{id_label}; §6.2 author-lifecycle classification deferred for records authored by this identity (synthetic MissingFromRegistry suppressed to avoid masking the real cause): {err}"
+            "IdentityRegistry lookup failed{id_label}; §6.2 author-lifecycle classification deferred for records authored by this identity (synthetic MissingFromRegistry suppressed to avoid masking the real cause){affected_label}: {err}"
         ),
         severity: cairn_core::generated::verbs::lint::Severity::Error,
         suggested_fix: Some(
@@ -773,7 +850,7 @@ fn push_registry_unavailable(
              other-check findings"
                 .to_owned(),
         ),
-        target: None,
+        target,
         tracking_issue: Some(256),
     };
     data.findings.push(f);
@@ -999,7 +1076,17 @@ mod tests {
             report_path: None,
         };
         let id = cairn_core::domain::Identity::parse("agt:test").expect("parse identity");
-        super::push_registry_unavailable(&mut data, Some(&id), "boom: connection refused");
+        let r1 =
+            cairn_core::domain::record::RecordId::parse("01HZZZZZZZZZZZZZZZZZZZZZZ1").expect("rid");
+        let r2 =
+            cairn_core::domain::record::RecordId::parse("01HZZZZZZZZZZZZZZZZZZZZZZ2").expect("rid");
+        let affected = vec![r1.clone(), r2.clone()];
+        super::push_registry_unavailable(
+            &mut data,
+            Some(&id),
+            "boom: connection refused",
+            &affected,
+        );
         assert_eq!(data.findings.len(), 1);
         let f = &data.findings[0];
         assert!(matches!(
@@ -1012,6 +1099,19 @@ mod tests {
         );
         assert_eq!(f.tracking_issue, Some(256));
         assert!(f.message.contains("boom: connection refused"));
+        assert!(
+            f.message.contains(r1.as_str()),
+            "message must surface affected record ids: {}",
+            f.message,
+        );
+        assert_eq!(
+            f.target
+                .as_ref()
+                .and_then(|t| t.record_id.as_ref())
+                .map(|u| u.0.as_str()),
+            Some(r1.as_str()),
+            "target.record_id must point at the first affected record"
+        );
         assert_eq!(data.summary.total, 1);
         assert_eq!(data.summary.by_severity.error, 1);
         if let serde_json::Value::Object(map) = &data.summary.by_kind {
