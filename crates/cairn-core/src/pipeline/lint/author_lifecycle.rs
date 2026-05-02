@@ -396,10 +396,7 @@ fn classify_resolved(
             // withdrawal boundary; using it would silently classify
             // writes that landed between `mark_purge_pending` and
             // `finalise_purge` as pre-withdrawal history.
-            let cutoff = lc
-                .revoked_at
-                .as_ref()
-                .or(lc.purge_requested_at.as_ref());
+            let cutoff = lc.revoked_at.as_ref().or(lc.purge_requested_at.as_ref());
             if let (Some(chain_at), Some(cutoff)) = (chain_at, cutoff)
                 && chain_at.cmp_chronological(cutoff) == Ordering::Less
             {

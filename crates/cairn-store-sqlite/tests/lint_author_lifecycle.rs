@@ -29,7 +29,9 @@
 //! them here would require bypassing `MemoryStore::upsert`'s
 //! validation via raw SQL — duplicative without buying real coverage.
 
-use cairn_core::contract::identity_registry::{IdentityRegistry, IdentityVisibility};
+use cairn_core::contract::identity_registry::{
+    IdentityRegistry, IdentityVisibility, PurgeAcknowledgement, PurgeReason,
+};
 use cairn_core::contract::memory_store::{ListArgs, MemoryStore};
 use cairn_core::domain::Rfc3339Timestamp;
 use cairn_core::domain::identity::keys::{
@@ -115,6 +117,39 @@ async fn provision_active(registry: &SqliteIdentityRegistry, id: &Identity) -> S
         .await
         .expect("activate_identity");
     sk
+}
+
+/// Reserve a Pending identity (no activate). Used by tests that
+/// exercise `Pending -> PurgePending` direct purges of
+/// never-activated identities.
+async fn provision_pending(registry: &SqliteIdentityRegistry, id: &Identity) -> SigningKey {
+    let sk = SigningKey::generate(&mut rand_core::OsRng);
+    let (rec, key) = make_identity_record(id, &sk);
+    registry
+        .reserve_identity(&rec, &key)
+        .await
+        .expect("reserve_identity");
+    sk
+}
+
+/// Drive an identity through `mark_purge_pending`, leaving it in
+/// `ProvisioningState::PurgePending`. Allowed from `Pending`,
+/// `Active`, or `Revoked` per the registry contract.
+async fn mark_purge_pending(registry: &SqliteIdentityRegistry, id: &Identity) {
+    registry
+        .mark_purge_pending(
+            id,
+            &PurgeAcknowledgement::for_test(),
+            PurgeReason("test".to_owned()),
+        )
+        .await
+        .expect("mark_purge_pending");
+}
+
+/// Drive a purge-pending identity through `finalise_purge`, leaving
+/// it in `ProvisioningState::Purged` with `purged_at` stamped.
+async fn finalise_purge(registry: &SqliteIdentityRegistry, id: &Identity) {
+    registry.finalise_purge(id).await.expect("finalise_purge");
 }
 
 /// Drive an active identity through `begin_revocation` →
@@ -584,4 +619,193 @@ async fn one_revocation_cascades_to_all_records_by_same_author() {
             "every record by alice must surface as Revoked"
         );
     }
+}
+
+// ── Round-7/8 purge-flow corner cases ────────────────────────────
+
+/// Round-7 fix: a record written before `mark_purge_pending` under a
+/// direct `Active -> PurgePending -> Purged` flow (no revocation
+/// step) must classify as legitimate pre-withdrawal history, not as
+/// `Malformed` corruption. Before the fix, the absence of
+/// `revoked_at` on the registry row was treated as
+/// partial-migration corruption — a false positive that would block
+/// lint on every routine direct-purge.
+#[tokio::test]
+async fn direct_purge_from_active_classifies_pre_request_writes_as_revoked() {
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let _alice_sk = provision_active(&registry, &alice).await;
+    // Record lands while alice is still Active.
+    let r = record_authored_by(&alice, "01HQZX9F5N0000000000000080");
+    store.upsert(&r).await.expect("upsert");
+
+    // Direct purge: Active -> PurgePending -> Purged, no revocation.
+    mark_purge_pending(&registry, &alice).await;
+    finalise_purge(&registry, &alice).await;
+
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    assert_eq!(
+        findings.len(),
+        1,
+        "alice's record must surface: {findings:?}"
+    );
+    assert_eq!(findings[0].record_id, r.id);
+    // pre-request chain.at < purge_requested_at (no revoked_at)
+    // -> falls into the legitimate-history branch using
+    // purge_requested_at as the cutoff -> ChainStatus::Revoked.
+    assert_eq!(
+        findings[0].status,
+        ChainStatus::Revoked,
+        "pre-purge-request history under direct purge must be Revoked, not Malformed",
+    );
+}
+
+/// Round-8 fix: an identity that never activated
+/// (`Pending -> PurgePending`) never had authoritative signing
+/// right. Records under it must surface as `Malformed` (Error), not
+/// as a non-blocking `Revoked` warning. Before the fix the
+/// `revoked_at == None` fallthrough downgraded these to Warning.
+#[tokio::test]
+async fn never_activated_purge_pending_fails_closed_as_malformed() {
+    let (store, registry, _dir) = setup().await;
+
+    let mallory = Identity::parse("hmn:mallory").expect("valid");
+    let _mallory_sk = provision_pending(&registry, &mallory).await;
+    // Record lands while mallory is still Pending. We have to bypass
+    // the activated_at-required path that record_authored_by triggers
+    // — a record under a never-activated identity is exactly the
+    // forged-write scenario this branch must catch. Stamp chain.at
+    // "now" so validate_chain accepts the row; classification then
+    // surfaces `PurgePending && activated_at == None`.
+    let r = record_authored_by(&mallory, "01HQZX9F5N0000000000000081");
+    store.upsert(&r).await.expect("upsert");
+
+    // Direct purge: Pending -> PurgePending. Stop before
+    // finalise_purge so we exercise the in-flight branch.
+    mark_purge_pending(&registry, &mallory).await;
+
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    assert_eq!(
+        findings.len(),
+        1,
+        "mallory's record must surface: {findings:?}"
+    );
+    assert_eq!(findings[0].record_id, r.id);
+    assert_eq!(
+        findings[0].status,
+        ChainStatus::Malformed,
+        "PurgePending && activated_at == None must fail closed, not warn",
+    );
+    assert!(
+        findings[0].message.contains("never activated"),
+        "message must surface the never-activated cause: {}",
+        findings[0].message,
+    );
+}
+
+/// Round-8 fix: `purged_at` is the *finalisation* timestamp, not the
+/// withdrawal boundary. A record whose chain timestamp lands
+/// at-or-after `purge_requested_at` (signing right withdrawn) but
+/// before `purged_at` (finalise still pending) must classify as
+/// `PostRevocationWrite`, not as pre-withdrawal history. Before the
+/// fix, using `purged_at` as the cutoff would silently accept these
+/// as legitimate.
+#[tokio::test]
+async fn write_between_purge_request_and_finalise_is_post_withdrawal() {
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let _alice_sk = provision_active(&registry, &alice).await;
+
+    // Issue purge request first — purge_requested_at lands "now".
+    mark_purge_pending(&registry, &alice).await;
+    // Then write a record under alice (now in PurgePending). The
+    // chain.at stamp is "now" >= purge_requested_at, so the
+    // in-flight branch must classify this as RevocationInFlight
+    // (suspicious write) — not as pre-withdrawal Revoked.
+    let r_in_flight = record_authored_by(&alice, "01HQZX9F5N0000000000000082");
+    store.upsert(&r_in_flight).await.expect("upsert");
+
+    // Now finalise the purge. The same in-flight record was written
+    // before purged_at, so under the old logic (cutoff = purged_at)
+    // it would have been classified as legitimate pre-withdrawal
+    // history. Under the round-8 fix the cutoff is
+    // purge_requested_at, which the chain.at is at-or-after — so
+    // PostRevocationWrite.
+    finalise_purge(&registry, &alice).await;
+
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    let in_flight_finding = findings
+        .iter()
+        .find(|f| f.record_id == r_in_flight.id)
+        .unwrap_or_else(|| panic!("in-flight record must surface: {findings:?}"));
+    assert_eq!(
+        in_flight_finding.status,
+        ChainStatus::PostRevocationWrite,
+        "write between purge_requested_at and purged_at must classify as PostRevocationWrite, \
+         not pre-withdrawal Revoked (purged_at is finalisation, not the withdrawal boundary)",
+    );
+}
+
+/// Direct-purge variant of the round-8 fix: a record written
+/// at-or-after `purge_requested_at` survives the `finalise_purge`
+/// transition. The terminal `Purged` branch must still prefer
+/// `purge_requested_at` over `purged_at` as the cutoff.
+#[tokio::test]
+async fn write_after_purge_request_classified_post_withdrawal_after_finalise() {
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let _alice_sk = provision_active(&registry, &alice).await;
+
+    mark_purge_pending(&registry, &alice).await;
+    let r_post_request = record_authored_by(&alice, "01HQZX9F5N0000000000000083");
+    store.upsert(&r_post_request).await.expect("upsert");
+    finalise_purge(&registry, &alice).await;
+
+    // Now alice is terminally Purged; the cutoff for chain.at is
+    // purge_requested_at (preferred) > purged_at. The chain.at on
+    // r_post_request landed between purge_requested_at and
+    // purged_at, so this is a post-withdrawal write under terminal
+    // Purged.
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    let f = findings
+        .iter()
+        .find(|f| f.record_id == r_post_request.id)
+        .unwrap_or_else(|| panic!("post-request record must surface: {findings:?}"));
+    assert_eq!(
+        f.status,
+        ChainStatus::PostRevocationWrite,
+        "terminal Purged must use purge_requested_at, not purged_at, as the withdrawal cutoff",
+    );
+}
+
+/// Round-7/8 sanity: a record written *before* `mark_purge_pending`
+/// remains legitimate pre-withdrawal history even after
+/// `finalise_purge` lands. This pins the cutoff-priority order
+/// `revoked_at > purge_requested_at > purged_at` against the direct
+/// `Active -> PurgePending -> Purged` flow.
+#[tokio::test]
+async fn pre_request_writes_remain_legitimate_after_terminal_purge() {
+    let (store, registry, _dir) = setup().await;
+
+    let alice = Identity::parse("hmn:alice").expect("valid");
+    let _alice_sk = provision_active(&registry, &alice).await;
+    let r_pre = record_authored_by(&alice, "01HQZX9F5N0000000000000084");
+    store.upsert(&r_pre).await.expect("upsert");
+
+    mark_purge_pending(&registry, &alice).await;
+    finalise_purge(&registry, &alice).await;
+
+    let findings = scan_vault(&store, &registry, IdentityVisibility::Audit).await;
+    let f = findings
+        .iter()
+        .find(|f| f.record_id == r_pre.id)
+        .unwrap_or_else(|| panic!("pre-request record must surface: {findings:?}"));
+    assert_eq!(
+        f.status,
+        ChainStatus::Revoked,
+        "pre-purge-request writes must remain pre-withdrawal Revoked under terminal Purged",
+    );
 }

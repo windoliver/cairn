@@ -1070,6 +1070,125 @@ mod tests {
         assert_eq!(drifts.len(), 1);
     }
 
+    #[tokio::test]
+    async fn lint_handler_skips_sensor_identities_in_registry_prefetch() {
+        // Round-7 fix: sensor identities must not be looked up in
+        // IdentityRegistry. The §6.2 leaf short-circuits sensor-
+        // authored sensor_observation records via the carve-out
+        // (kind == SensorObservation && author == source_sensor),
+        // and sensors aren't required to live in the registry. A
+        // registry hiccup on a sensor identity must not surface as a
+        // blocking DeferredCheck Error for records the leaf wouldn't
+        // have classified through the registry anyway.
+        //
+        // E2E shape: build a valid sensor-authored sensor_observation,
+        // upsert it under an empty registry, run lint_handler. The
+        // handler must produce:
+        // - no BrokenActorChain finding (the sensor carve-out
+        //   short-circuits before MissingFromRegistry can trip),
+        // - no per-identity DeferredCheck Error (prefetch never
+        //   tried to look the sensor up),
+        // - the aggregate sensor-author advisory Info IS present.
+        use cairn_core::config::CairnConfig;
+        use cairn_core::domain::record::tests_export::sample_record;
+        use cairn_core::domain::{
+            ActorChainEntry, ChainRole, Identity, MemoryKind, Rfc3339Timestamp, ScopeTuple,
+        };
+        use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_store_sqlite::SqliteIdentityRegistry;
+        use cairn_test_fixtures::store::FixtureStore;
+
+        let store = FixtureStore::default();
+        let mut r = sample_record();
+        r.kind = MemoryKind::SensorObservation;
+        let sensor =
+            Identity::parse("snr:local:hook:cc-session:v1").expect("valid sensor identity");
+        r.actor_chain = vec![ActorChainEntry {
+            role: ChainRole::Author,
+            identity: sensor.clone(),
+            at: Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("valid"),
+        }];
+        r.provenance.source_sensor = sensor.clone();
+        r.provenance.originating_agent_id = sensor.clone();
+        r.scope = ScopeTuple {
+            entity: Some("camera-4".to_owned()),
+            ..ScopeTuple::default()
+        };
+        r.validate().expect("valid sensor-authored record");
+        store.upsert(&r).await.expect("upsert");
+
+        // Empty registry — no rows for any identity. A non-sensor
+        // author would emit a BrokenActorChain Error
+        // (MissingFromRegistry); a sensor under the carve-out must
+        // not.
+        let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+        let cfg = CairnConfig::default();
+        let vault = tempfile::tempdir().expect("tempdir");
+        let result = lint_handler(
+            &store,
+            &registry,
+            &cfg,
+            SchemaVersion { major: 0, minor: 1 },
+            false,
+            vault.path(),
+        )
+        .await
+        .expect("handler");
+
+        let chain_findings: Vec<_> = result
+            .data
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    cairn_core::generated::verbs::lint::Kind::BrokenActorChain,
+                )
+            })
+            .collect();
+        assert!(
+            chain_findings.is_empty(),
+            "sensor carve-out must short-circuit before any BrokenActorChain finding: {chain_findings:?}",
+        );
+
+        // The §6.2 sensor-author advisory must surface (count == 1
+        // record hit the carve-out).
+        let sensor_advisory = result.data.findings.iter().find(|f| {
+            matches!(
+                f.kind,
+                cairn_core::generated::verbs::lint::Kind::DeferredCheck
+            ) && f.tracking_issue == Some(256)
+                && f.message.contains("sensor-authored")
+        });
+        assert!(
+            sensor_advisory.is_some(),
+            "expected the §6.2 sensor-author DeferredCheck advisory: {:?}",
+            result.data.findings,
+        );
+
+        // No per-identity registry-unavailable error: the sensor
+        // identity was filtered out of prefetch entirely, so no
+        // lookup happened, so no failure to surface.
+        let registry_failures: Vec<_> = result
+            .data
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+                ) && matches!(
+                    f.severity,
+                    cairn_core::generated::verbs::lint::Severity::Error,
+                )
+            })
+            .collect();
+        assert!(
+            registry_failures.is_empty(),
+            "no per-identity DeferredCheck Error expected (sensor skipped from prefetch): {registry_failures:?}",
+        );
+    }
+
     #[test]
     fn push_registry_unavailable_emits_blocking_deferred_finding() {
         // Round-(this loop) fix: a registry-prefetch failure must
