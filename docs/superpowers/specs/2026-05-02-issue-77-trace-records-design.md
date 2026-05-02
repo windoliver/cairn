@@ -104,9 +104,24 @@ Two pure modules.
 pub fn project(
     event: &CaptureEvent,
     classified: TraceEvent,
+    resolved_body: &ResolvedBody,    // hash-verified text from sources/
     link: TraceLink,
 ) -> Result<MemoryRecord, TraceProjectError>
 ```
+
+`ResolvedBody` is the existing extractor-pipeline type
+(`crates/cairn-core/src/pipeline/extract/body.rs`) that pairs raw text with
+its `payload_hash` after verification. Same construction as the extractor
+path: callers (the CLI verb) resolve the body from `sources/` referenced by
+`event.payload_ref`, verify `sha256(bytes) == event.payload_hash`, then
+pass the verified body in. The projector itself stays pure — it does no
+I/O, never opens a file, and never receives raw bytes — so the privacy
+boundary stays the same as for ingest.
+
+The privacy filter (Presidio pre-persist) runs on the verified text *before*
+construction so the body stored on the record is the redacted form;
+`payload_hash` continues to bind the record to the un-redacted source for
+audit.
 
 Builds a `MemoryRecord` with:
 
@@ -131,12 +146,31 @@ pub fn summarize_turn(
 ) -> Result<MemoryRecord, TurnSummaryError>
 ```
 
-The summary record uses a **deterministic record id** derived from
-`(session_id, turn_id)` — `RecordId(format!("turnsum:{session_id}:{turn_id}"))`,
-ULID-like prefix or a hash, picked to fit the existing `RecordId` newtype.
-That id is what `upsert_trace` keys on for summary rows: a replay of the
-same turn produces the same id, so the second write is a no-op upsert into
-the existing row instead of a duplicate.
+The summary record uses a **deterministic, ULID-shaped record id** derived
+from `(session_id, turn_id)`. The current `RecordId` newtype validates
+26-char Crockford-base32 ULIDs, so the id must satisfy that lexer:
+
+```rust
+fn summary_record_id(session_id: &SessionId, turn_id: &str) -> RecordId {
+    // SHA-256 over the canonical pair, first 80 bits → ULID timestamp,
+    // next 80 bits → ULID randomness.
+    let mut h = Sha256::new();
+    h.update(b"cairn:trace:turnsum\0");
+    h.update(session_id.as_str().as_bytes());
+    h.update(b"\0");
+    h.update(turn_id.as_bytes());
+    let digest = h.finalize();
+    let ulid = Ulid::from_bytes(digest[..16].try_into().unwrap());
+    RecordId::parse(ulid.to_string()).expect("ULID-shaped by construction")
+}
+```
+
+The result is a stable ULID — same input always maps to the same id — but
+also a *legal* `RecordId` that the rest of the store, IDL serialization,
+and sort logic accept without special-casing. The unique
+`records_trace_summary` index in §6.1 is the second line of defense if a
+deterministic id ever collides with an existing record id (probability
+~2⁻¹²⁸; treated as unreachable but the index still rejects it).
 
 Concatenates ordered events into a single `TurnSummary` record. No LLM —
 deterministic format:
@@ -232,7 +266,67 @@ The unique indices enforce three invariants at the database boundary:
   non-summary events share a `sequence`. Surfaced as a typed
   `TraceSequenceConflict`.
 
-### 6.2 Reconstruction surface and `retrieve` IDL gap
+### 6.2 `MemoryStore` contract additions
+
+Per CLAUDE.md §5/invariant 4 ("implement behind an existing trait"), the
+trace path needs three new method on `MemoryStore`. None alter existing
+methods; all are additive:
+
+```rust
+trait MemoryStore {
+    // ... existing methods ...
+
+    /// Idempotent write keyed on the stable identity in
+    /// `record.extra_frontmatter.trace.capture_event_id` (for raw events)
+    /// or on `record.id` (for `turn_summary`). The store SHALL NOT allocate
+    /// a new row when a matching identity already exists; it MAY no-op or
+    /// update mutable columns (body, salience, redaction state).
+    async fn upsert_trace(&self, record: MemoryRecord) -> Result<(), StoreError>;
+
+    /// Returns trace records for a turn ordered by
+    /// `extra_frontmatter.trace.sequence`. Excludes `turn_summary`.
+    async fn list_trace_events(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<Vec<MemoryRecord>, StoreError>;
+
+    /// Run `f` inside a single store-level transaction. Implementations on
+    /// SQLite use `BEGIN IMMEDIATE` so concurrent `capture_trace` invocations
+    /// serialize at the file-lock boundary rather than racing on
+    /// `build_link`'s read-max-then-write. The closure receives a
+    /// `&dyn MemoryStoreTx` — the same trait surface the closure needs
+    /// (`upsert_trace`, `list_trace_events`) bound to the open transaction.
+    async fn transaction<'a, F, T>(
+        &'a self,
+        f: F,
+    ) -> Result<T, StoreError>
+    where
+        F: for<'tx> FnOnce(&'tx dyn MemoryStoreTx) -> BoxFuture<'tx, Result<T, StoreError>>
+            + Send
+            + 'a,
+        T: Send + 'a;
+}
+
+trait MemoryStoreTx: Send + Sync {
+    async fn upsert_trace(&self, record: MemoryRecord) -> Result<(), StoreError>;
+    async fn list_trace_events(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<Vec<MemoryRecord>, StoreError>;
+}
+```
+
+The exact callback shape (BoxFuture vs RPITIT, `MemoryStoreTx` as a sealed
+trait) is an implementation detail; the contract is: there exists a way to
+submit a closure that runs atomically against the store, with access to
+the trace methods. Test doubles in `cairn-test-fixtures` implement the
+same trait pair so that pure-core unit tests do not need a real SQLite
+file. WAL §5.6 guarantees still apply — `transaction(...)` is the
+verb-level wrapper *around* the WAL state machine, not a replacement for it.
+
+### 6.3 Reconstruction surface and `retrieve` IDL gap
 
 Issue #77's acceptance reads **"A full agent turn can be reconstructed from
 trace records and links"** and its verification step is **"Run turn
@@ -408,8 +502,9 @@ crates/cairn-core/src/pipeline/capture_trace.rs      # NEW
 crates/cairn-core/src/pipeline/turn.rs               # NEW
 crates/cairn-core/src/pipeline/mod.rs                # +pub mod
 crates/cairn-store-sqlite/migrations/0003_trace_links.sql  # NEW
-crates/cairn-store-sqlite/src/...                    # +list_trace_events impl
-crates/cairn-core/src/contract/memory_store.rs       # +list_trace_events trait method
+crates/cairn-store-sqlite/src/...                    # +upsert_trace, +list_trace_events, +transaction impl (BEGIN IMMEDIATE)
+crates/cairn-core/src/contract/memory_store.rs       # +upsert_trace, +list_trace_events, +transaction (additive — see §6.2)
+crates/cairn-test-fixtures/src/memory_store.rs       # extend in-memory double for new methods
 crates/cairn-cli/src/verbs/capture_trace.rs          # replace stub (uses existing IDL `from` flag)
 crates/cairn-test-fixtures/src/...                   # trace fixtures (JSONL inputs)
 ```
@@ -427,6 +522,14 @@ crates/cairn-test-fixtures/src/...                   # trace fixtures (JSONL inp
 - **Body cap of 4 KiB.** Could truncate useful context for long tool outputs.
   Mitigated by `payload_ref` pointing at full bytes in `sources/`. Tunable
   via config; default conservative.
+- **Public read surface for trace records is a known gap.** Adversarial
+  review surfaced this in three consecutive rounds. The decision (Choice X
+  in §6.3) is to ship persistence first and evolve `retrieve(target=Turn)`
+  in a follow-up. Risk: first-party CLI/MCP/SDK clients see records they
+  cannot read back through the supported public verb until the follow-up
+  lands. Accepted because the user explicitly scoped #77 to persistence-only
+  and the issue's reconstruction acceptance is satisfied at the store
+  boundary by `list_trace_events`.
 
 ## 12. Verification checklist
 
