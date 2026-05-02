@@ -66,7 +66,7 @@ pub struct ExtractBudget {
     /// need a hard total-output bound must apply it at the chain
     /// dispatcher above this extractor.
     pub max_drafts: u16,
-    /// Maximum input prompt size in bytes. Local DoS guard, rejected
+    /// Maximum input prompt size in bytes. Local `DoS` guard, rejected
     /// before provider call.
     pub max_prompt_bytes: Option<u32>,
     /// Maximum input prompt tokens (provider-side hint, passed via
@@ -218,6 +218,30 @@ pub enum ExtractError {
     },
 }
 
+/// The role of an extractor worker in the extraction chain.
+///
+/// An extractor's role determines how the chain reacts to its failure and
+/// how it manages eligibility bounds for downstream workers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerRole {
+    /// The worker narrows eligibility for downstream workers. A failure
+    /// in a Gating worker fails the chain closed (`eligibility` → empty).
+    ///
+    /// `RegexExtractor` is `Gating` because its `llm_eligible_spans`
+    /// is the only safety boundary against oversize bodies, clause-cap
+    /// truncation, and confidence-gated forget suppression reaching
+    /// downstream workers (e.g., the LLM).
+    Gating,
+    /// The worker adds extraction outputs within already-narrowed
+    /// eligibility but does not itself narrow. Failure does not affect
+    /// downstream eligibility.
+    ///
+    /// `LLMExtractor` is `Augmenting` because it operates within the
+    /// eligibility bounds set by upstream workers and does not further
+    /// restrict what downstream workers can see.
+    Augmenting,
+}
+
 /// The pluggable extractor contract — see brief §5.2.a and spec §4.1.
 ///
 /// `#[async_trait]` is used because the chain dispatcher in #74 holds
@@ -228,6 +252,8 @@ pub enum ExtractError {
 pub trait ExtractorWorker: Send + Sync {
     /// Stable name of the extractor (for tracing / dedup).
     fn name(&self) -> &'static str;
+    /// The role of this worker in the extraction chain.
+    fn role(&self) -> WorkerRole;
     /// Per-extractor budget.
     fn budget(&self) -> ExtractBudget;
     /// Run the extractor.
@@ -314,5 +340,12 @@ mod mod_tests {
         assert!(b.max_prompt_bytes.is_none());
         assert!(b.max_prompt_tokens.is_none());
         assert!(b.max_response_tokens.is_none());
+    }
+
+    #[tokio::test]
+    async fn regex_extractor_is_gating() {
+        use crate::pipeline::extract::regex::RegexExtractor;
+        let r = RegexExtractor::builtin();
+        assert_eq!(r.role(), WorkerRole::Gating);
     }
 }
