@@ -86,13 +86,31 @@ trace:
   tool_call_id: call_abc
 ```
 
-Validation invariants (all in `TraceLink::validate`):
+Validation invariants. **Field-level** (`TraceLink::validate`, pure):
 
 - `member_event_ids` is empty unless `trace_event == TurnSummary`.
 - `parent_event_id` is set iff `trace_event ∈ {PostTool, ToolOutput}`.
 - `tool_call_id` is set iff `trace_event ∈ {PreTool, PostTool, ToolOutput}`.
-- `sequence` strictly monotonic within `(session_id, turn_id)` — enforced at
-  the store layer (UNIQUE index), surfaced as a typed error.
+
+**Referential** (enforced inside `transaction(...)` before commit;
+violations roll back the entire turn):
+
+- For every `PostTool` / `ToolOutput` record, `parent_event_id` MUST
+  resolve to an existing `PreTool` record in the same
+  `(session_id, turn_id)` whose `tool_call_id` matches. Cross-turn,
+  cross-session, or cross-tool-call links are rejected with a typed
+  `TraceLinkOrphan` error.
+- `member_event_ids` on a `TurnSummary` MUST be exactly the set of
+  non-summary trace records persisted under the same
+  `(session_id, turn_id)`. Drift surfaces as `TraceSummaryMembership`.
+- `sequence` strictly monotonic within `(session_id, turn_id)` —
+  enforced at the store layer (UNIQUE index), surfaced as
+  `TraceSequenceConflict`.
+
+The referential checks run inside the transaction so a malformed parent
+reference cannot land partially. Field-level checks run earlier in the CLI
+verb's pre-write validation pass (see §7) so invalid input fails fast
+without acquiring write locks.
 
 ## 5. Pipeline (`cairn-core/src/pipeline/`)
 
@@ -437,13 +455,47 @@ separate scoped change with `cairn-docgen --write` re-run.
 
 | Concern   | Mechanism                                                              |
 | --------- | ---------------------------------------------------------------------- |
-| Privacy   | Bodies pass through existing `filter` (Presidio pre-persist). Raw bytes stay in `sources/` referenced by `payload_hash`. |
-| Forget    | `forget --record` / `forget --session` operates on `MemoryRecord` regardless of kind — trace records get embeddings zeroed, bodies dropped, `payload_hash` retained for audit. |
+| Privacy   | Bodies pass through existing `filter` (Presidio pre-persist). Raw bytes live in `sources/` referenced by `payload_hash`; deleted on `forget` (see below). |
 | Search    | FTS5 already gates by visibility. Trace records default to `private`; `search` with the right scope predicate finds them. |
 | Retention | `ExpirationWorkflow` already operates on `MemoryRecord` — trace records inherit the same decay/salience rules. |
 
-Tests confirm these paths work — no implementation changes expected here. If
-a path *does* need adjustment, that's a finding, not planned work.
+### 8.1 Forget for trace records — sources deletion is part of #77
+
+The brief's existing forget semantics for `MemoryRecord` (zero bodies + zero
+embeddings + retain `payload_hash` for audit) is insufficient for trace
+records: the *most sensitive* trace content — raw prompts, tool I/O,
+reasoning — lives in `sources/<payload_hash>` referenced by every trace
+record's envelope. Leaving those bytes on disk after `forget --session`
+defeats the privacy story.
+
+This PR therefore extends `forget` for trace-backed records:
+
+1. `forget --record <id>` and `forget --session <id>` collect the set of
+   `payload_ref` values from every targeted trace record.
+2. For each `payload_ref`:
+   - If no other (non-forgotten) record still references the same
+     `payload_hash`, the file at `sources/<payload_ref>` is **deleted**.
+   - If another record still references it (e.g., the same prompt was
+     captured twice with different attribution), the file is retained
+     and the consent journal logs the retention reason.
+3. The consent journal records, per forgotten record:
+   `{record_id, payload_hash, sources_action: "deleted" | "retained-shared"}`
+   so an auditor can verify after the fact whether raw bytes were erased.
+4. `payload_hash` is still retained on the (now redacted) record itself
+   as the audit anchor — the hash alone is not user-recoverable PII; the
+   bytes it pointed to are gone.
+
+Refcount tracking lives in the existing `sources/` index already maintained
+by the capture pipeline (it must be — `payload_ref` deduplication across
+events is brief §3 behavior). This PR only consults it on forget; if the
+existing implementation lacks a refcount, surfacing that gap as a separate
+issue is acceptable, but #77 cannot ship until *some* sources-deletion
+path lands or the issue's privacy acceptance is downgraded.
+
+### 8.2 Other concerns
+
+Tests confirm the search and retention paths work without code changes — if
+adjustment is needed, that's a finding, not planned work.
 
 ## 9. Testing
 
@@ -481,6 +533,15 @@ a path *does* need adjustment, that's a finding, not planned work.
   event leaves the *first* turn fully persisted (events + summary) and
   the *second* turn unwritten — no partial prefix. Re-running with the
   fixed file completes the second turn idempotently.
+- **Orphan parent rejected**: a `post_tool` whose `parent_event_id`
+  points at a non-existent or cross-turn `pre_tool` returns
+  `TraceLinkOrphan`; the entire turn rolls back.
+- **Tool-call-id mismatch rejected**: a `tool_output` whose
+  `tool_call_id` differs from its parent's returns `TraceLinkOrphan`.
+- **Forget deletes sources**: `forget --session <id>` removes
+  `sources/<payload_ref>` for every trace record where no other live
+  record references the same `payload_hash`. Asserts file removal +
+  consent journal entries `{deleted, retained-shared}`.
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
