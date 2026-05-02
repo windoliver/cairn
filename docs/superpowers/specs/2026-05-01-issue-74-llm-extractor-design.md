@@ -23,7 +23,7 @@ Implement the **`LLMExtractor`** — the P0 mainline extractor that turns a `Cap
 - Error policy: typed soft-fail vs hard-fail (§6 below) with one retry on `InvalidJsonOutput`.
 - Wall-clock and prompt-size budgets enforced inside the extractor before delegating to the provider.
 - `ExtractChain` sequencer — a `Vec<Box<dyn ExtractorWorker>>` runner that honours `llm_eligible_spans`, captures per-worker hard-fails, and merges results.
-- Extension to `ExtractBudget` (`max_prompt_bytes`, `max_prompt_tokens`, `max_response_tokens`).
+- Extension to `ExtractBudget` (`max_prompt_bytes`, `max_response_tokens`).
 - Two new error variants on `ExtractError`: `Provider { worker, code, source }` and `SpanOutOfBounds { worker, span }`.
 - One new public type: `DiscardCandidate { reason, source_span: TextSpan, evidence: String }` (the `TextSpan` is *derived* in trusted code from the model's `{region_id, text_excerpt}`; the model never emits a span directly).
 - Unit + property + chain integration tests; wiremock-backed end-to-end test using `cairn-llm-openai-compat`.
@@ -248,27 +248,42 @@ pub struct ExtractBudget {
     pub max_wall_ms: u32,
     pub max_drafts: u16,
     pub max_prompt_bytes: Option<u32>,      // NEW; local DoS cap, not a token estimate
-    pub max_prompt_tokens: Option<u32>,     // NEW; provider-side hint
     pub max_response_tokens: Option<u32>,   // NEW; provider-side hint
 }
 impl ExtractBudget {
     pub const fn llm_default() -> Self {
         Self { max_wall_ms: 500, max_drafts: 16,
                max_prompt_bytes: Some(64 * 1024),  // 64 KiB hard byte cap
-               max_prompt_tokens: Some(2000),
                max_response_tokens: Some(1500) }
     }
 }
 ```
 
-**Local byte cap (`max_prompt_bytes`):** if `assembled_prompt.len() > max_prompt_bytes`, the extractor refuses to send the prompt. This is a true byte-length comparison — no tokeniser implication is claimed. The cap exists to prevent multi-megabyte bodies from being serialised and transmitted blindly; it is **not** a substitute for token-budget enforcement. Default 64 KiB is well below all known provider context windows expressed in bytes, so it is effectively only a DoS / memory-safety guard.
+**Local byte cap (`max_prompt_bytes`):** the extractor checks an upper-bound
+estimate (eligible-span byte sum + `PROMPT_TEMPLATE_OVERHEAD_BYTES`) before
+fencing or rendering. If the estimate exceeds `max_prompt_bytes` it returns
+`Ok(empty, truncated = MaxWallMs { elapsed_ms: 0 })` immediately without
+paying the allocation cost. A post-render check is kept as defence-in-depth.
+Default 64 KiB is well below all known provider context windows expressed in
+bytes, so it is effectively only a DoS / memory-safety guard.
 
-When the byte cap fires, the extractor returns `Ok(empty, truncated = MaxWallMs { elapsed_ms: 0 })` with `tracing::warn!(reason = "prompt_size_byte_cap", prompt_bytes, max_prompt_bytes, ...)` and a metric `llm.prompt_size_byte_cap_skip`.
+When the byte cap fires, the extractor emits
+`tracing::warn!(reason = "llm.prompt_size_byte_cap_skip_precheck", ...)`.
 
 **Provider-side token enforcement:**
 
-- `max_prompt_tokens` / `max_response_tokens` — passed verbatim to `CompletionRequest.budget`. The provider returns `LlmError::BudgetExceeded` if its tokeniser concludes the request is over budget; `LLMExtractor` maps that to `Ok(empty, truncated = MaxWallMs { elapsed_ms })`.
-- `max_wall_ms` — `LLMExtractor` wraps `provider.complete()` in `tokio::time::timeout(Duration::from_millis(max_wall_ms), ...)`. Timeout → `Ok(empty, truncated = MaxWallMs { elapsed_ms })`.
+- `max_response_tokens` — passed verbatim to `CompletionRequest.budget`.
+  The provider returns `LlmError::BudgetExceeded` if its tokeniser concludes
+  the request is over budget; `LLMExtractor` maps that to
+  `Ok(empty, truncated = MaxWallMs { elapsed_ms })`.
+- `max_wall_ms` — `LLMExtractor` wraps `provider.complete()` in
+  `tokio::time::timeout(Duration::from_millis(max_wall_ms), ...)`.
+  Timeout → `Ok(empty, truncated = MaxWallMs { elapsed_ms })`.
+
+Note: `max_prompt_tokens` was initially included in this design but removed
+before shipping because it was never forwarded to `CompletionRequest.budget`
+(the config type only has `max_tokens` for responses). Exposing a dead budget
+field is worse than omitting it. A follow-up issue can re-add it once wired.
 
 A follow-up issue (§10) wires `LLMProvider::estimate_tokens(text) -> Option<u32>`. Once available, `LLMExtractor` calls it before submission and treats over-budget prompts the same way the byte cap is treated today, with a distinct metric. Until then, token enforcement is honestly described as provider-side, the byte cap is honestly described as a DoS guard, and neither is conflated with the other.
 

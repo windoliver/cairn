@@ -600,15 +600,48 @@ mod tests {
         }
     }
 
+    /// Gate that echoes back whatever `eligible_spans` it received as
+    /// `llm_eligible_spans`, allowing downstream workers to be reached.
+    struct PassthroughGate;
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for PassthroughGate {
+        fn name(&self) -> &'static str {
+            "passthrough_gate"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Gating
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::regex_default()
+        }
+
+        async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                // Echo the input spans so downstream workers see non-empty eligibility.
+                llm_eligible_spans: input.eligible_spans.clone(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn augmenting_worker_error_recorded_but_run_succeeds() {
-        let chain =
-            ExtractChain::new(vec![Box::new(StubGate), Box::new(FailingAug)]).expect("valid");
+        // Use PassthroughGate so the gate passes non-empty eligibility to the
+        // downstream FailingAug. StubGate returns empty llm_eligible_spans,
+        // which now triggers the trust-boundary break before FailingAug runs.
+        let chain = ExtractChain::new(vec![Box::new(PassthroughGate), Box::new(FailingAug)])
+            .expect("valid");
         let event = fixture_event();
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            // Non-empty so PassthroughGate forwards it and FailingAug is reached.
+            eligible_spans: vec![TextSpan::new(0, 10)],
         };
         let res = chain.run(&input).await.expect("augmenting failure -> Ok");
         assert_eq!(res.failures.len(), 1);

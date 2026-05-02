@@ -737,10 +737,7 @@ mod tests {
             VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
         }
 
-        async fn complete(
-            &self,
-            _req: &CompletionRequest,
-        ) -> Result<CompletionOutput, LlmError> {
+        async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
             panic!("PanicProvider::complete must never be called when pre-render cap fires")
         }
     }
@@ -767,7 +764,10 @@ mod tests {
         let input = make_input(&event, &body, spans);
         // If the pre-render check doesn't fire, PanicProvider::complete panics.
         let res = extractor.extract(&input).await.expect("should succeed");
-        assert!(res.outputs.is_empty(), "no outputs expected on cap rejection");
+        assert!(
+            res.outputs.is_empty(),
+            "no outputs expected on cap rejection"
+        );
         assert!(
             matches!(res.truncated, TruncationReason::MaxWallMs { elapsed_ms: 0 }),
             "expected MaxWallMs{{0}} truncation, got {:?}",
