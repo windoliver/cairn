@@ -243,6 +243,7 @@ mod tests {
                 // check trivially holds for the sample record.
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
                 revoked_at: None,
+                purged_at: None,
             },
         );
         let recs = [lint_record(r)];
@@ -281,6 +282,7 @@ mod tests {
                 // revocation → Warning per round-6 policy (chain.at
                 // unauthenticated, but visible audit signal).
                 revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
+                purged_at: None,
             },
         );
         let recs = [lint_record(r)];
@@ -320,10 +322,14 @@ mod tests {
             AuthorLifecycle {
                 state: ProvisioningState::RevokePending,
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
-                // No revoked_at → falls through to RevocationInFlight
-                // (Error). With timestamps the legitimate-history
-                // case for in-flight is exercised by a separate test.
-                revoked_at: None,
+                // RevokePending with revoked_at present → falls
+                // through to RevocationInFlight (Error). Without
+                // revoked_at the round-7 fix routes this to
+                // ChainStatus::Revoked Warning, so set revoked_at
+                // here to keep the test asserting the in-flight
+                // suspicious-write path.
+                revoked_at: Some(Rfc3339Timestamp::parse("2000-01-02T00:00:00Z").expect("valid")),
+                purged_at: None,
             },
         );
         let recs = [lint_record(r)];

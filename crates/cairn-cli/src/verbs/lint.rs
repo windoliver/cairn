@@ -550,10 +550,19 @@ async fn prefetch_author_states(
     use cairn_core::contract::identity_registry::IdentityVisibility;
     use cairn_core::domain::ChainRole;
     use cairn_core::domain::Identity;
+    use cairn_core::domain::IdentityKind;
     use cairn_core::domain::Rfc3339Timestamp;
     use cairn_core::pipeline::lint::author_lifecycle::AuthorLifecycle;
     use std::collections::{HashMap, HashSet};
 
+    // Round-7 fix: skip sensor identities. The §6.2 leaf
+    // short-circuits sensor-authored sensor_observation records
+    // before consulting registry state — sensors aren't required to
+    // be in IdentityRegistry. Looking them up unconditionally
+    // creates a false failure mode: a registry hiccup on a sensor
+    // identity would surface as a blocking DeferredCheck Error for
+    // records the leaf wouldn't have classified through the
+    // registry anyway.
     let mut unique: HashSet<Identity> = HashSet::new();
     for s in stored {
         if let Some(e) = s
@@ -561,6 +570,7 @@ async fn prefetch_author_states(
             .actor_chain
             .iter()
             .find(|e| e.role == ChainRole::Author)
+            && e.identity.kind() != IdentityKind::Sensor
         {
             unique.insert(e.identity.clone());
         }
@@ -581,12 +591,16 @@ async fn prefetch_author_states(
                 let revoked_at = rec
                     .revoked_at
                     .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+                let purged_at = rec
+                    .purged_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
                 map.insert(
                     id,
                     AuthorLifecycle {
                         state: rec.provisioning_state,
                         activated_at,
                         revoked_at,
+                        purged_at,
                     },
                 );
             }

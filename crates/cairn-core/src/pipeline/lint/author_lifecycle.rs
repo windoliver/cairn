@@ -142,8 +142,17 @@ pub struct AuthorLifecycle {
     /// When the identity transitioned to `Active`. `None` until the
     /// identity has activated (i.e., `state == Pending`).
     pub activated_at: Option<Rfc3339Timestamp>,
-    /// When the identity was revoked. `None` until revoked.
+    /// When the identity was revoked. `None` until revoked. Note:
+    /// the registry does *not* always write `revoked_at` on purge —
+    /// a direct `Active -> PurgePending -> Purged` path skips the
+    /// revoke step and leaves this `None`, so purge-state branches
+    /// must fall back to `purged_at` rather than fail-close on
+    /// missing `revoked_at`.
     pub revoked_at: Option<Rfc3339Timestamp>,
+    /// When the identity finished purging. `None` until purged. Used
+    /// as the cutoff timestamp for `Purged` records when
+    /// `revoked_at` is absent (direct purge-from-Active path).
+    pub purged_at: Option<Rfc3339Timestamp>,
 }
 
 /// Outcome of looking up the record's author identity in the
@@ -348,12 +357,18 @@ fn classify_resolved(
             ),
         )),
         state @ (ProvisioningState::RevokePending | ProvisioningState::PurgePending) => {
-            // Round-10 fix: parallel the terminal Revoked branch. Use
-            // `revoked_at` as transition evidence — the registry
-            // writes `revoked_at` when flipping to RevokePending. If
-            // chain `at` < `revoked_at`, the record predates the
-            // transition and is legitimate history; only a write at
-            // or after the transition is the suspicious-write case.
+            // The registry writes `revoked_at` when flipping to
+            // RevokePending. PurgePending may also be reached
+            // directly from Active (mark_purge_pending allows
+            // Pending/Active transitions and does not write
+            // `revoked_at`); in that path there is no transition
+            // timestamp to anchor a pre-vs-post comparison. Round-7
+            // fix: with no transition timestamp, do *not* fall
+            // through to RevocationInFlight Error (false positive on
+            // legitimate purge-from-active history). Surface as the
+            // chain.at-derived legitimate-history shape (Warning) so
+            // operators see the audit signal without lint blocking
+            // on routine direct-purge flows.
             if let (Some(chain_at), Some(revoked_at)) = (chain_at, lc.revoked_at.as_ref())
                 && chain_at.cmp_chronological(revoked_at) == Ordering::Less
             {
@@ -367,6 +382,19 @@ fn classify_resolved(
                     ),
                 ));
             }
+            if lc.revoked_at.is_none() {
+                // Direct purge from Active: no transition timestamp,
+                // no chain.at evidence either way. Emit Revoked
+                // status (Warning) for visibility; operators can
+                // audit if needed.
+                return Some((
+                    ChainStatus::Revoked,
+                    format!(
+                        "author identity `{}` is `{state:?}` (no `revoked_at` recorded — direct purge-from-active path); legitimate history cannot be distinguished from suspicious write at P0",
+                        author.as_str()
+                    ),
+                ));
+            }
             Some((
                 ChainStatus::RevocationInFlight,
                 format!(
@@ -376,50 +404,50 @@ fn classify_resolved(
             ))
         }
         state @ (ProvisioningState::Revoked | ProvisioningState::Purged) => {
-            // Round-(this loop) fix: terminal revocation/purge with
-            // missing `revoked_at` is corrupted/partially-migrated
-            // registry metadata, not benign history. The registry's
-            // revocation path always writes `revoked_at` when flipping
-            // to Revoked/Purged; absence means the only ordering
-            // signal that distinguishes pre- from post-revocation
-            // writes is gone. Mirror the Active-without-activated_at
-            // policy: fail closed (brief invariant 6), do not
-            // downgrade to a non-blocking warning.
-            let Some(revoked_at) = lc.revoked_at.as_ref() else {
+            // Round-7 fix: terminal Purged may be reached via direct
+            // Active -> PurgePending -> Purged without a revocation
+            // step, leaving `revoked_at == None`; in that path
+            // `purged_at` is the transition cutoff. Prefer
+            // `revoked_at` (Revoked path); fall back to `purged_at`
+            // (direct-purge path); only fail closed when *neither*
+            // is present, which would be genuine registry corruption
+            // for a terminal state.
+            let cutoff = lc.revoked_at.as_ref().or(lc.purged_at.as_ref());
+            let Some(cutoff) = cutoff else {
                 return Some((
                     ChainStatus::Malformed,
                     format!(
-                        "author identity `{}` is `{state:?}` but the registry row has no `revoked_at` — corrupted lifecycle metadata; cannot prove the record predates revocation, fail-closed",
+                        "author identity `{}` is `{state:?}` but the registry row has neither `revoked_at` nor `purged_at` — corrupted lifecycle metadata; cannot prove the record predates withdrawal, fail-closed",
                         author.as_str()
                     ),
                 ));
             };
-            // Post-revocation write: the chain author timestamp is at
-            // or after `revoked_at`. The signing right had already
-            // been withdrawn — a real trust violation, not legitimate
-            // history.
+            // Post-revocation write: the chain author timestamp is
+            // at-or-after the cutoff. Under authenticated chain.at
+            // this would be a trust-boundary breach; at P0 chain.at
+            // is unauthenticated so this maps to PostRevocationWrite
+            // (Warning) — see severity_for in the dispatch leaf.
             if let Some(chain_at) = chain_at
-                && chain_at.cmp_chronological(revoked_at) != Ordering::Less
+                && chain_at.cmp_chronological(cutoff) != Ordering::Less
             {
                 return Some((
                     ChainStatus::PostRevocationWrite,
                     format!(
-                        "author identity `{}` is `{state:?}` and the chain author timestamp ({}) is at-or-after `revoked_at` ({}) — record was signed under withdrawn signing right",
+                        "author identity `{}` is `{state:?}` and the chain author timestamp ({}) is at-or-after the withdrawal cutoff ({}) — chain.at-derived post-withdrawal shape",
                         author.as_str(),
                         chain_at,
-                        revoked_at,
+                        cutoff,
                     ),
                 ));
             }
-            // chain `at` < `revoked_at` (or chain `at` unknown): the
-            // record predates revocation. Legitimate history;
-            // non-blocking warning.
+            // chain `at` < cutoff (or chain `at` unknown): the
+            // record predates withdrawal. Legitimate history.
             Some((
                 ChainStatus::Revoked,
                 format!(
-                    "author identity `{}` is `{state:?}` (revoked_at {}) — signing right is terminally withdrawn (pre-revocation history; review for audit)",
+                    "author identity `{}` is `{state:?}` (cutoff {}) — signing right is terminally withdrawn (pre-withdrawal history; review for audit)",
                     author.as_str(),
-                    revoked_at,
+                    cutoff,
                 ),
             ))
         }
@@ -457,6 +485,7 @@ mod tests {
             state,
             activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
             revoked_at: Some(Rfc3339Timestamp::parse("2099-12-31T23:59:59Z").expect("valid")),
+            purged_at: None,
         })
     }
 
@@ -471,6 +500,7 @@ mod tests {
             state,
             activated_at: activated_at.map(|s| Rfc3339Timestamp::parse(s).expect("valid")),
             revoked_at: revoked_at.map(|s| Rfc3339Timestamp::parse(s).expect("valid")),
+            purged_at: None,
         })
     }
 
@@ -569,6 +599,7 @@ mod tests {
                 state: ProvisioningState::Active,
                 activated_at: None,
                 revoked_at: None,
+                purged_at: None,
             }),
         )
         .expect("corrupted Active row must surface");
@@ -577,13 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn revoked_without_revoked_at_is_flagged_as_malformed() {
-        // Round-(this loop) fix: terminal Revoked / Purged with
-        // `revoked_at == None` is corrupted/partially-migrated
-        // registry state, not benign history. Mirrors the Active +
-        // missing `activated_at` policy. Fail closed (brief invariant
-        // 6); do NOT downgrade post-revocation writes to a warning
-        // just because the timestamp is gone.
+    fn revoked_without_any_cutoff_is_flagged_as_malformed() {
+        // Round-7 update: terminal Revoked/Purged falls back to
+        // `purged_at` when `revoked_at` is absent (direct
+        // purge-from-Active path). Only when *both* are missing is
+        // this corrupted/partially-migrated registry state. Mirrors
+        // the Active-without-activated_at policy. Fail closed (brief
+        // invariant 6).
         let record = record_with_active_author();
         let finding = check_author_lifecycle(
             &record,
@@ -591,11 +622,16 @@ mod tests {
                 state: ProvisioningState::Revoked,
                 activated_at: Some(Rfc3339Timestamp::parse("2000-01-01T00:00:00Z").expect("valid")),
                 revoked_at: None,
+                purged_at: None,
             }),
         )
         .expect("corrupted Revoked row must surface");
         assert_eq!(finding.status, ChainStatus::Malformed);
-        assert!(finding.message.contains("no `revoked_at`"));
+        assert!(
+            finding
+                .message
+                .contains("neither `revoked_at` nor `purged_at`")
+        );
     }
 
     #[test]
