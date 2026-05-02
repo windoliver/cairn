@@ -88,7 +88,22 @@ pub(crate) async fn dispatch(
     let user_count_after_a = outputs.len() - baseline_pre_user_a;
 
     if let Some(text) = body_text {
+        // Enforce caller-supplied eligibility fence before any text scanning.
+        // When `input.eligible_spans` is non-empty, only prefilter hits whose
+        // start offset falls inside an eligible span are admitted; hits outside
+        // authorised ranges are discarded before window construction so that no
+        // output (draft, forget, or `llm_eligible_spans` entry) can reference
+        // disallowed bytes (consent / policy boundary).
+        //
+        // When `eligible_spans` is empty the chain has already seeded it with
+        // the full-body span (see `ExtractChain::run`), so empty here means
+        // "no restriction from caller" and we keep the current full-body scan.
         let scan = prefilter.scan(text);
+        let scan = if input.eligible_spans.is_empty() {
+            scan
+        } else {
+            filter_scan_to_eligible(scan, &input.eligible_spans)
+        };
         let windows = build_phrase_windows(text, &scan);
 
         let body_too_large = text.len() > MAX_BODY_LEN_FOR_REGEX;
@@ -213,8 +228,15 @@ pub(crate) async fn dispatch(
             // confidence regex coverage. Replacing with `0..body_len`
             // would re-expose explicit `remember`/`forget` clauses to
             // the LLM and risk duplicate or conflicting outputs.
+            // When caller supplied eligible_spans, seed from those
+            // authorised ranges rather than the full body so disallowed
+            // bytes are never handed to the LLM extractor.
             let body_len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-            let mut full = vec![TextSpan::new(0, body_len)];
+            let mut full = if input.eligible_spans.is_empty() {
+                vec![TextSpan::new(0, body_len)]
+            } else {
+                input.eligible_spans.clone()
+            };
             subtract_covered(&mut full, &covered);
             llm_spans.extend(full);
         } else {
@@ -232,6 +254,16 @@ pub(crate) async fn dispatch(
     // both push into the same buffer, so without this final pass we can
     // hand the LLM extractor duplicate or overlapping ranges.
     normalise_spans(&mut llm_spans);
+
+    // Intersect llm_eligible_spans with caller-supplied eligible_spans so
+    // the LLM extractor never receives a range that covers disallowed
+    // bytes. This mirrors the prefilter hit-filtering done above; both
+    // guards are required because `compute_llm_eligible_spans` seeds from
+    // the phrase windows (which are already restricted) but also fills
+    // inter-window gaps — those gaps must still respect the fence.
+    if !input.eligible_spans.is_empty() {
+        intersect_spans_with_eligible(&mut llm_spans, &input.eligible_spans);
+    }
 
     Ok(ExtractResult {
         outputs,
@@ -263,6 +295,51 @@ fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
         // for the proactive-body follow-up issue.
         _ => None,
     }
+}
+
+/// Discard hits in `scan` whose `start` offset does not fall within any
+/// span in `eligible`. Returns a new `PrefilterScan` with the surviving
+/// hits; `first_omitted_start` is preserved unchanged because it marks
+/// the clause-cap truncation point (an earlier scan-level limit), not an
+/// eligibility limit.
+fn filter_scan_to_eligible(
+    mut scan: super::prefilter::PrefilterScan,
+    eligible: &[TextSpan],
+) -> super::prefilter::PrefilterScan {
+    scan.hits.retain(|hit| {
+        eligible
+            .iter()
+            .any(|es| hit.start >= es.start && hit.start < es.end)
+    });
+    scan
+}
+
+/// Intersect `spans` in place with `eligible`, keeping only the byte
+/// ranges that fall within at least one eligible span. Each span in
+/// `spans` is clipped to the overlapping portion of every eligible span
+/// it intersects. Spans with no overlap are dropped entirely.
+fn intersect_spans_with_eligible(spans: &mut Vec<TextSpan>, eligible: &[TextSpan]) {
+    let mut out: Vec<TextSpan> = Vec::with_capacity(spans.len());
+    for s in spans.drain(..) {
+        for es in eligible {
+            let start = s.start.max(es.start);
+            let end = s.end.min(es.end);
+            if start < end {
+                out.push(TextSpan::new(start, end));
+            }
+        }
+    }
+    // Re-sort and merge any fragments produced by multiple eligible spans
+    // overlapping the same source span.
+    out.sort_by_key(|s| s.start);
+    let mut merged: Vec<TextSpan> = Vec::with_capacity(out.len());
+    for s in out {
+        match merged.last_mut() {
+            Some(last) if s.start <= last.end => last.end = last.end.max(s.end),
+            _ => merged.push(s),
+        }
+    }
+    *spans = merged;
 }
 
 /// Subtract `covered` spans from `spans` in place. Each input span is
@@ -970,5 +1047,164 @@ mod tests {
         ];
         normalise_spans(&mut spans);
         assert_eq!(spans, vec![TextSpan::new(0, 25)]);
+    }
+
+    /// Regression: `eligible_spans` restriction must be honored — trigger text
+    /// outside the authorized span must not produce any output, and
+    /// `llm_eligible_spans` must not reference bytes outside the authorized range.
+    #[tokio::test]
+    async fn regex_gate_honors_caller_eligibility() {
+        // Body layout (bytes, ASCII):
+        //   "remember my secret password. remember my preferred editor."
+        //    ^--- OUTSIDE eligible span    ^--- INSIDE eligible span
+        //
+        // The second "remember" starts after the period+space following "password."
+        // We supply eligible_spans anchored at the second "remember" to restrict
+        // extraction to only that clause. The first "remember" must produce no output.
+        //
+        // Both trigger keywords are sentence-start eligible in the prefilter
+        // (the first starts at pos 0; the second follows a `. ` sentence boundary).
+        let disallowed = "remember my secret password. "; // 29 bytes
+        let authorized = "remember my preferred editor."; // 29 bytes
+        let body_text = format!("{disallowed}{authorized}");
+
+        let authorized_start = u32::try_from(disallowed.len()).expect("small body");
+        let authorized_end = u32::try_from(body_text.len()).expect("small body");
+
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            &body_text,
+            &event.payload,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        )
+        .expect("matching variant");
+        let eligible_span = TextSpan::new(authorized_start, authorized_end);
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![eligible_span],
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        // Every output must have a source_span entirely within the authorized span.
+        for out in &result.outputs {
+            if let Some(span) = out.source_span() {
+                assert!(
+                    span.start >= authorized_start && span.end <= authorized_end,
+                    "output span {span:?} references bytes outside authorized range \
+                     {authorized_start}..{authorized_end}"
+                );
+            }
+        }
+
+        // At least one draft for the authorized "remember" should have fired.
+        let drafts_in_authorized = result.outputs.iter().filter(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains("preferred editor")
+            } else {
+                false
+            }
+        });
+        assert!(
+            drafts_in_authorized.count() > 0,
+            "expected a draft from the authorized span; outputs: {:?}",
+            result.outputs
+        );
+
+        // No draft should reference the disallowed "secret password" text.
+        let disallowed_drafts = result.outputs.iter().any(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains("secret password")
+            } else {
+                false
+            }
+        });
+        assert!(
+            !disallowed_drafts,
+            "draft from disallowed span must not appear; outputs: {:?}",
+            result.outputs
+        );
+
+        // llm_eligible_spans must not reference bytes outside the authorized range.
+        for span in &result.llm_eligible_spans {
+            assert!(
+                span.start >= authorized_start && span.end <= authorized_end,
+                "llm_eligible_spans entry {span:?} references bytes outside authorized range \
+                 {authorized_start}..{authorized_end}"
+            );
+        }
+    }
+
+    /// Preserves current full-body behavior when `eligible_spans` is empty
+    /// (no caller restriction): both triggers in the body must produce outputs.
+    #[tokio::test]
+    async fn regex_gate_full_body_when_caller_eligibility_empty() {
+        let body_text = "remember my preferred editor. remember my shell alias";
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            body_text,
+            &event.payload,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        )
+        .expect("matching variant");
+        // Empty eligible_spans → no restriction → full body must be scanned.
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![],
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        // Both trigger phrases must have fired.
+        let has_editor = result.outputs.iter().any(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains("preferred editor")
+            } else {
+                false
+            }
+        });
+        let has_alias = result.outputs.iter().any(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains("shell alias")
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_editor,
+            "first trigger must fire with empty eligible_spans; outputs: {:?}",
+            result.outputs
+        );
+        assert!(
+            has_alias,
+            "second trigger must fire with empty eligible_spans; outputs: {:?}",
+            result.outputs
+        );
     }
 }
