@@ -92,6 +92,24 @@ Validation invariants. **Field-level** (`TraceLink::validate`, pure):
 - `parent_event_id` is set iff `trace_event ∈ {PostTool, ToolOutput}`.
 - `tool_call_id` is set iff `trace_event ∈ {PreTool, PostTool, ToolOutput}`.
 
+**Ordering** (derived, not allocated from store state):
+
+- `sequence` is **derived from `CaptureEvent.captured_at`** (RFC 3339
+  timestamp on every envelope), not from a read-max-then-write counter.
+  The projector sorts a turn's events by `(captured_at, capture_event_id)`
+  and assigns `sequence = 0..N` in that order; `capture_event_id` is the
+  tiebreaker so concurrent events with identical wall-clock timestamps
+  still produce a deterministic, replay-stable order.
+- A backfilled event whose `captured_at` precedes already-persisted
+  events triggers a **renumber within the affected turn**: the
+  transaction reads the turn's existing rows, recomputes sequences over
+  the union (existing ∪ new), and rewrites the old rows in place. The
+  unique sequence index lets the rewrite happen as `UPDATE` against the
+  same rows; no row is dropped or reinserted.
+- A backfill is rejected with `TraceBackfillClosed` if the affected turn
+  is already closed (a `turn_summary` row exists) — see referential
+  invariant below.
+
 **Referential** (enforced inside `transaction(...)` before commit;
 violations roll back the entire turn):
 
@@ -103,6 +121,16 @@ violations roll back the entire turn):
 - `member_event_ids` on a `TurnSummary` MUST be exactly the set of
   non-summary trace records persisted under the same
   `(session_id, turn_id)`. Drift surfaces as `TraceSummaryMembership`.
+- **Closed-turn writes are rejected.** Once a `turn_summary` row exists
+  for `(session_id, turn_id)`, any further event write for that turn
+  fails with `TraceBackfillClosed` and rolls the transaction back. The
+  importer surfaces this in the verb's `failed_turns` list so the caller
+  can choose to (a) `forget` the turn and re-import from a fixed source,
+  or (b) accept the loss. This rule eliminates the stale-summary failure
+  mode: a summary, once written, is the authoritative member set for
+  that turn. Re-summarizing on every close-turn write would be the
+  alternative, but that complicates `member_event_ids` audits and adds a
+  non-deterministic write back into a "finalized" record.
 - `sequence` strictly monotonic within `(session_id, turn_id)` —
   enforced at the store layer (UNIQUE index), surfaced as
   `TraceSequenceConflict`.
@@ -427,16 +455,25 @@ async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
         };
         let group = projected;
         let result = store.transaction(|tx| async move {
-            for (event, classified) in &group {
-                // Inside the tx, build_link's read-max-then-write is
-                // serialized by the WAL state machine (§5.6) — concurrent
-                // writers are sequenced, not racing.
-                let link = build_link(tx, event, *classified).await?;
-                let resolved = resolve_body(tx, event).await?; // hash-verified text
+            // Reject if the turn is already closed (summary present).
+            if tx.turn_summary_exists(&session_id, &turn_id).await? {
+                return Err(TraceError::BackfillClosed { session_id, turn_id });
+            }
+
+            // Sequences come from captured_at ordering across the union of
+            // (already-persisted events ∪ this batch). Concurrent writes
+            // serialize at BEGIN IMMEDIATE, so the read+rewrite is
+            // race-free within a single transaction.
+            let existing = tx.list_trace_events(&session_id, &turn_id).await?;
+            let ordered = order_by_captured_at(existing, &group)?;  // pure
+            let renumbered = assign_sequences(&ordered);            // pure
+
+            for entry in &renumbered {
+                let resolved = resolve_body(tx, entry.event).await?; // hash-verified
                 let record = pipeline::capture_trace::project(
-                    event, *classified, &resolved, link,
+                    entry.event, entry.classified, &resolved, entry.link.clone(),
                 )?;
-                tx.upsert_trace(record).await?;
+                tx.upsert_trace(record).await?;  // updates seq on existing rows; inserts new
             }
             if turn_is_closed(&group) {
                 let turn_records = tx.list_trace_events(&session_id, &turn_id).await?;
@@ -564,6 +601,17 @@ adjustment is needed, that's a finding, not planned work.
   event leaves the *first* turn fully persisted (events + summary) and
   the *second* turn unwritten — no partial prefix. Re-running with the
   fixed file completes the second turn idempotently.
+- **Out-of-order backfill (open turn)**: import events `[A@t=2, B@t=3]`
+  for an open turn, then a follow-up batch `[C@t=1]`. Final
+  `list_trace_events` ordering is `[C, A, B]` (sequence renumbered by
+  `captured_at`). No row is dropped; `capture_event_id` is preserved.
+- **Backfill rejected on closed turn**: attempting to write any event
+  to a turn whose `turn_summary` already exists returns
+  `TraceBackfillClosed` and the transaction rolls back. The summary's
+  `member_event_ids` remains intact.
+- **Ties on `captured_at`**: two events with identical timestamps
+  produce a stable order keyed on `capture_event_id`; the same input
+  always yields the same sequence assignment.
 - **Orphan parent rejected**: a `post_tool` whose `parent_event_id`
   points at a non-existent or cross-turn `pre_tool` returns
   `TraceLinkOrphan`; the entire turn rolls back.
