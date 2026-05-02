@@ -175,7 +175,7 @@ pub fn bootstrap(opts: &BootstrapOpts) -> Result<BootstrapReceipt> {
     }
 
     // --- placeholder files ---
-    let config_yaml = serde_yaml::to_string(&CairnConfig::default())
+    let config_yaml = yaml_serde::to_string(&CairnConfig::default())
         .context("serializing default config to YAML")?;
     write_once(
         vault,
