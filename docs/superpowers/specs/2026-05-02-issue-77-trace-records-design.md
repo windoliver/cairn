@@ -187,6 +187,18 @@ ALTER TABLE records ADD COLUMN trace_sequence INTEGER
 ALTER TABLE records ADD COLUMN trace_parent_event_id TEXT
   GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.parent_event_id')) VIRTUAL;
 
+ALTER TABLE records ADD COLUMN trace_capture_event_id TEXT
+  GENERATED ALWAYS AS (json_extract(extra_frontmatter, '$.trace.capture_event_id')) VIRTUAL;
+
+-- Idempotency: the same CaptureEvent may not produce two records.
+-- Replays of the same JSONL file therefore upsert into the existing row
+-- (no new sequence allocation) instead of duplicating the logical event.
+CREATE UNIQUE INDEX records_trace_event_id
+  ON records(trace_capture_event_id)
+  WHERE trace_capture_event_id IS NOT NULL;
+
+-- Sequence monotonicity within a turn (excluding the synthetic
+-- turn_summary, which has no sequence of its own).
 CREATE UNIQUE INDEX records_trace_seq
   ON records(trace_session_id, trace_turn_id, trace_sequence)
   WHERE trace_event IS NOT NULL AND trace_event != 'turn_summary';
@@ -196,37 +208,53 @@ CREATE INDEX records_trace_parent
   WHERE trace_parent_event_id IS NOT NULL;
 ```
 
-The unique index enforces sequence monotonicity at the database boundary,
-turning a duplicate `sequence` into a typed `TraceSequenceConflict` error
-instead of silent corruption.
+The unique indices enforce two invariants at the database boundary:
 
-### 6.2 Retrieve targets — store-level reads only
+- **Idempotent replay** — `capture_event_id` is the stable event identity.
+  A second `capture_trace --from <same file>` is absorbed as no-op upserts
+  on existing rows; no fresh sequences allocated.
+- **Sequence monotonicity** — within a `(session_id, turn_id)` no two
+  events share a `sequence`. Surfaced as a typed `TraceSequenceConflict`.
 
-The current `retrieve` IDL is incompatible with what #77 needs to read back:
+### 6.2 Reconstruction surface and `retrieve` IDL gap
 
-- `DataTurn.turn_id` is `integer` (capture envelopes carry strings).
-- `DataTurn.turn` is a single `TurnItem` with one role — it cannot represent
-  an ordered, multi-role event sequence inside a turn.
-- `TurnItem.turn_id` is also integer.
+Issue #77's acceptance reads **"A full agent turn can be reconstructed from
+trace records and links"** and its verification step is **"Run turn
+reconstruction tests"** — the linkage and reconstruction *capability* is
+what's gated, not a specific public surface.
 
-Reshaping the IDL is a brief-level change (CLAUDE.md §5/§4) and is
-**out of scope for #77**. This PR therefore:
+Even so, the current public `retrieve` IDL cannot today expose a
+reconstructed turn:
 
-1. Persists records with the linkage needed to reconstruct any future shape:
-   `(session_id, turn_id, sequence, parent_event_id)` plus `member_event_ids`
-   on the turn summary.
-2. Adds a **store-internal** read API on `MemoryStore` —
-   `list_trace_events(session_id, turn_id) -> Vec<MemoryRecord>` ordered by
-   `sequence` — that the existing `retrieve` verb can call when (and only
-   when) the IDL evolves. Until then, this method is exercised by the
-   integration tests below to satisfy the issue's "full agent turn can be
-   reconstructed" acceptance criterion.
-3. Files a follow-up issue: *Evolve `retrieve(target=Turn|Session)` IDL to
-   carry an ordered event array and string `turn_id`*. Linked from the PR
-   and listed in `docs/design/traceability.md`.
+- `DataTurn.turn_id` is `integer`; capture envelopes carry strings.
+- `DataTurn.turn` is a single `TurnItem` — one role, no event ordering —
+  so a multi-message, multi-tool turn cannot round-trip through it.
 
-The unique sequence index from §6.1 still ships — it protects the linkage
-even though the public retrieve verb cannot yet expose it.
+Two ways to close this gap. Both are explicit choices, not silent deferral:
+
+**Choice X (default, recommended): rescope the public read surface to a
+follow-up.** This PR adds a store-internal
+`MemoryStore::list_trace_events(session_id, turn_id) -> Vec<MemoryRecord>`
+ordered by `sequence`. Reconstruction tests run against that method,
+satisfying #77's acceptance criterion. A follow-up issue is filed to evolve
+`retrieve(target=Turn|Session)` to carry an ordered event array and string
+`turn_id`; #77's PR links to it and notes that first-party CLI/MCP/SDK
+clients cannot read trace records back through `retrieve` until that
+follow-up lands.
+
+**Choice Y: bundle the IDL evolution into this PR.** Mutates the public
+contract — IDL schema change, regenerate via `cairn-codegen`, update
+`retrieve` verb in store, regen docs via `cairn-docgen --write`. Larger
+diff; the change must run alongside any consumers that already deserialize
+`DataTurn`.
+
+Default is **X** because the issue scope (and the user's earlier "A.
+persistence only") explicitly excluded surface-level work. Choosing Y is a
+re-scoping conversation, not a review-loop fix.
+
+The unique sequence + capture_event_id indices from §6.1 ship in either
+choice — they protect the linkage regardless of which read surface is
+exposed first.
 
 ## 7. CLI verb (`cairn-cli/src/verbs/capture_trace.rs`)
 
@@ -247,19 +275,25 @@ Pseudocode:
 async fn run(args: CaptureTraceArgs, store: &dyn MemoryStore) -> Result<...> {
     refuse_if_degraded(...)?;
     let events = read_jsonl::<CaptureEvent>(&args.from).await?;  // streaming, bounded buffer
+
+    // Persist every event. Idempotent on capture_event_id (§6.1) — replays
+    // upsert into existing rows.
     for event in &events {
         event.validate()?;                                       // existing envelope validation
         let classified = classify(event)?;                       // (hook_name, payload tag) → TraceEvent
-        let link = build_link(store, event, classified).await?;  // assigns next sequence per (session, turn)
+        let link = build_link(store, event, classified).await?;  // assigns next sequence per (session, turn) for new rows; reuses for replay
         let record = pipeline::capture_trace::project(event, classified, link)?;
-        store.write(record).await?;                              // WAL two-phase, §5.6
+        store.upsert_trace(record).await?;                       // WAL two-phase, §5.6
     }
-    if let Some(stop_event) = events.iter().rfind(|e| is_stop(e)) {
-        let turn_records = store
-            .list_trace_events(stop_event.session_id()?, stop_event.turn_id()?)
-            .await?;
+
+    // Emit one `turn_summary` per closed turn boundary in the file.
+    // A turn is "closed" when the file contains a Stop event (or an explicit
+    // `end_of_turn` sentinel) for that `(session_id, turn_id)`. Multi-turn
+    // input files are supported — each closed turn gets its own summary.
+    for (session_id, turn_id) in closed_turns(&events) {
+        let turn_records = store.list_trace_events(&session_id, &turn_id).await?;
         let summary = pipeline::turn::summarize_turn(&turn_records)?;
-        store.write(summary).await?;
+        store.upsert_trace(summary).await?;
     }
     Ok(success_response(trace_id))
 }
@@ -311,6 +345,13 @@ a path *does* need adjustment, that's a finding, not planned work.
   `sequence` order with parent/child edges intact. Asserts full-turn
   reconstruction directly at the store boundary (the public retrieve verb
   does not yet expose this shape — see §6.2).
+- **Idempotent replay**: running `capture_trace --from` twice on the same
+  file produces identical store state — no duplicate rows, no new
+  sequences, exactly one `turn_summary` per closed turn. Asserts row
+  counts and `capture_event_id` uniqueness.
+- **Multi-turn input**: a JSONL containing two complete turns yields two
+  `turn_summary` records, each with `member_event_ids` pointing only at
+  its own turn's events.
 - Duplicate-`sequence` write returns `TraceSequenceConflict`, store state
   unchanged.
 - `forget --session <id>` zeros bodies of all trace records, leaves
@@ -344,9 +385,10 @@ crates/cairn-test-fixtures/src/...                   # trace fixtures (JSONL inp
   free at write time but rebuild on read. If retrieve perf suffers, fall back
   to a denormalized `trace_links` side table populated via trigger. Defer
   until benchmarks show a problem.
-- **Sequence assignment under crash.** `next_link_for` reads max sequence
+- **Sequence assignment under crash.** `build_link` reads max sequence
   then writes — a crash between commits could leave a gap. Acceptable
-  (gaps are not corruption); the unique index prevents duplicates.
+  (gaps are not corruption); the unique index prevents duplicates and
+  the `capture_event_id` index keeps replay idempotent.
 - **Body cap of 4 KiB.** Could truncate useful context for long tool outputs.
   Mitigated by `payload_ref` pointing at full bytes in `sources/`. Tunable
   via config; default conservative.
