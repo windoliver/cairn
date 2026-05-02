@@ -44,6 +44,8 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let f = run(&inputs);
         assert_eq!(f.len(), 1);

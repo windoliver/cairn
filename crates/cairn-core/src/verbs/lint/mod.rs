@@ -3,12 +3,16 @@
 //! Spec: `docs/superpowers/specs/2026-04-30-lint-checks-design.md`.
 //! Issue: <https://github.com/windoliver/cairn/issues/96>.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::config::CairnConfig;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
+use crate::domain::Identity;
 use crate::domain::record::RecordId;
 use crate::generated::verbs::lint::{
     Finding, Kind, LintData, LintDataSummary, LintDataSummaryBySeverity, Severity, Target,
 };
+use crate::pipeline::lint::author_lifecycle::AuthorLifecycle;
 
 pub mod checks;
 pub mod report;
@@ -37,6 +41,17 @@ pub enum ConsentModel {
 }
 
 /// Snapshot the check engine operates over. Pure inputs; no I/O.
+///
+/// `author_states` is the §6.2 author-lifecycle slice's pre-fetched
+/// payload. The dispatch layer (`cairn-cli`) is responsible for
+/// resolving every active record's chain author against the
+/// `IdentityRegistry` under `IdentityVisibility::Audit` and assembling
+/// the map. The reference is required (not `Option`) so a caller cannot
+/// silently degrade lint into a no-op against revoked / unknown / pending
+/// issuers — passing an empty map signals "no chain authors / no
+/// resolvable identities", not "skip the check." An identity present on
+/// a record but absent from the map is treated as `MissingFromRegistry`
+/// (fail-closed, brief invariant 6).
 #[derive(Debug)]
 pub struct LintInputs<'a> {
     /// Active records under audit.
@@ -47,6 +62,15 @@ pub struct LintInputs<'a> {
     pub index_stats: IndexStats,
     /// Current contract version reported by the runtime — drives §6.4.
     pub schema_version: SchemaVersion,
+    /// Pre-fetched author identity → lifecycle state map. See struct
+    /// docs.
+    pub author_states: &'a HashMap<Identity, AuthorLifecycle>,
+    /// Identities whose registry lookup failed during prefetch. The
+    /// dispatch layer surfaces a per-identity `DeferredCheck` Error
+    /// for each one; the §6.2 leaf must NOT additionally synthesize
+    /// `MissingFromRegistry` Errors for these — that would manufacture
+    /// false corruption findings out of an infrastructure fault.
+    pub unresolvable_authors: &'a HashSet<Identity>,
 }
 
 /// Major.minor schema version for the §6.4 staleness check. Patch is
@@ -69,6 +93,26 @@ impl SchemaVersion {
         }
         self.minor.saturating_sub(record.minor)
     }
+}
+
+/// Returns a process-wide shared empty `author_states` map for tests
+/// of checks that don't exercise §6.2. Avoids repeating
+/// `let states = HashMap::new();` in every test fixture.
+#[cfg(test)]
+pub(crate) fn empty_author_states() -> &'static HashMap<Identity, AuthorLifecycle> {
+    use std::sync::OnceLock;
+    static M: OnceLock<HashMap<Identity, AuthorLifecycle>> = OnceLock::new();
+    M.get_or_init(HashMap::new)
+}
+
+/// Companion test helper: process-wide empty `unresolvable_authors`
+/// set for tests of checks that don't exercise registry-failure
+/// degraded paths.
+#[cfg(test)]
+pub(crate) fn empty_unresolvable_authors() -> &'static HashSet<Identity> {
+    use std::sync::OnceLock;
+    static S: OnceLock<HashSet<Identity>> = OnceLock::new();
+    S.get_or_init(HashSet::new)
 }
 
 /// Run every check, aggregate findings, return the canonical `LintData`.
@@ -196,22 +240,25 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let data = run_checks(&inputs);
-        // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
-        // each emit one deferred-check info finding; all other stubs return empty.
+        // provenance (#257), schema (#258), consent (#253), and
+        // hot_memory (#259) each emit one deferred-info finding.
+        // actor_chain (#256) is now a real check (registry required at
+        // the API boundary), so it no longer emits a deferred.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            5
+            4
         );
-        assert_eq!(data.summary.by_severity.info, 5);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 
     #[test]
@@ -253,12 +300,16 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(forward.len() as u64, forward.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let inputs_rev = LintInputs {
             records: &reversed,
             config: &cfg,
             index_stats: IndexStats::new(reversed.len() as u64, reversed.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).findings);
@@ -275,21 +326,26 @@ mod tests {
             config: &cfg,
             index_stats: IndexStats::new(1, 1),
             schema_version: SchemaVersion { major: 0, minor: 1 },
+            author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);
-        // actor_chain (#256), provenance (#257), schema (#258), consent (#253), and hot_memory (#259)
-        // each emit one deferred-check info finding; all other stubs return empty.
-        assert_eq!(data.summary.by_severity.error, 0);
+        // §6.2 actor_chain runs the real check now (registry required
+        // at the API boundary). With an empty author_states map the
+        // sample record's author resolves to MissingFromRegistry →
+        // BrokenActorChain Error. The other four checks
+        // (provenance/schema/consent/hot_memory) each emit one
+        // deferred-info finding.
+        assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
-        // Exactly five deferred-info findings: §6.2/#256 + §6.3/#257 + §6.4/#258 + §6.5/#253 + §6.6/#259.
         assert_eq!(
             data.findings
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            5
+            4
         );
-        assert_eq!(data.summary.by_severity.info, 5);
+        assert_eq!(data.summary.by_severity.info, 4);
     }
 }
