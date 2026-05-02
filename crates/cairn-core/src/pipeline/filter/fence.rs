@@ -39,6 +39,26 @@ const CLOSE: &str = "</cairn:fenced>";
 const NEUTRAL_OPEN: &str = "<cairn~fenced>";
 const NEUTRAL_CLOSE: &str = "</cairn~fenced>";
 
+/// Discriminant on a [`FenceMark`]: whether the mark corresponds to a real
+/// sentinel insertion in the fenced output, or is an audit-only record of a
+/// pre-existing attacker-supplied sentinel that was neutralised in place
+/// (no bytes were inserted).
+///
+/// Only `Insertion` marks shift byte offsets in the fenced output. `AuditOnly`
+/// marks are purely informational for downstream consent/audit consumers and
+/// MUST NOT be counted as byte insertions by the offset translators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FenceMarkKind {
+    /// The fencer inserted `<cairn:fenced>…</cairn:fenced>` sentinel bytes
+    /// around a detector hit. Offset translators MUST account for
+    /// `OPEN_LEN + CLOSE_LEN` inserted bytes at this position.
+    Insertion,
+    /// A pre-existing `<cairn:fenced>…</cairn:fenced>` pair was present in the
+    /// *input* and was neutralised in place (`:` → `~`). No bytes were
+    /// inserted; the mark is surfaced only for audit / consent accounting.
+    AuditOnly,
+}
+
 /// One fenced injection-pattern span — offsets are into the **input**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FenceMark {
@@ -46,6 +66,9 @@ pub struct FenceMark {
     pub start: usize,
     /// Byte offset (exclusive) where the pattern ends in the **input**.
     pub end: usize,
+    /// Whether this mark corresponds to a real sentinel insertion or is
+    /// an audit-only record of a neutralised attacker-supplied sentinel.
+    pub kind: FenceMarkKind,
 }
 
 /// Output of [`fence`] — wrapped text plus the spans that triggered.
@@ -122,6 +145,7 @@ pub fn fence(input: &str) -> FencedPayload {
                 FenceMark {
                     start: orig_start,
                     end: extend_to_clause_end(&neutralized, orig_end),
+                    kind: FenceMarkKind::Insertion,
                 }
             })
         })
@@ -150,12 +174,17 @@ pub fn fence(input: &str) -> FencedPayload {
     // the signal. Pre-existing wraps that *do* enclose a detector hit
     // are not double-counted: the inner detector mark already represents
     // the injection content.
+    //
+    // Crucially, these are AuditOnly marks: the neutralisation pass
+    // rewrote them in place (`:` → `~`), so NO sentinel bytes were
+    // inserted at these positions. Offset translators MUST skip them.
     let attacker_wraps: Vec<FenceMark> = pre_existing
         .iter()
         .filter(|(s, e)| !detector_marks.iter().any(|m| *s <= m.start && m.end <= *e))
         .map(|(open, close)| FenceMark {
             start: *open,
             end: *close,
+            kind: FenceMarkKind::AuditOnly,
         })
         .collect();
 
