@@ -50,6 +50,12 @@ pub struct ExtractInput<'a> {
     pub event: &'a CaptureEvent,
     /// The caller-resolved body, with source-tagging.
     pub body: BodyResolution<'a>,
+    /// Byte ranges of `body` (in original-body coordinates, inclusive
+    /// of nothing-fenced) that this extractor is permitted to inspect.
+    /// Initialised by `ExtractChain` and narrowed by each `Gating`
+    /// worker. An empty `Vec` means "nothing eligible — extractor
+    /// should return `Ok(empty)` without doing work".
+    pub eligible_spans: Vec<TextSpan>,
 }
 
 /// Per-extractor budget.
@@ -444,5 +450,49 @@ mod mod_tests {
         let r = DiscardReason::ToolLookup;
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(s, "\"tool_lookup\"");
+    }
+
+    #[test]
+    fn extract_input_carries_eligible_spans() {
+        use crate::domain::{
+            ActorChainEntry, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, ChainRole,
+            Identity, PayloadHash, Rfc3339Timestamp,
+        };
+        use crate::pipeline::extract::body::BodyResolution;
+        let payload = CapturePayload::Hook {
+            hook_name: "SessionStart".to_owned(),
+            tool_name: None,
+        };
+        let source_family = payload.source_family();
+        let ts = Rfc3339Timestamp::parse("2026-01-01T00:00:00Z").expect("valid ts");
+        let sensor = Identity::parse("snr:local:hook:test:v1").expect("valid sensor");
+        let event = crate::domain::CaptureEvent {
+            event_id: CaptureEventId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid ulid"),
+            sensor_id: sensor.clone(),
+            capture_mode: CaptureMode::Auto,
+            actor_chain: vec![ActorChainEntry {
+                role: ChainRole::Author,
+                identity: sensor,
+                at: ts.clone(),
+            }],
+            refs: Some(CaptureRefs {
+                session_id: Some("sess-test".into()),
+                turn_id: None,
+                tool_id: None,
+            }),
+            payload_hash: PayloadHash::parse(format!("sha256:{}", "ab".repeat(32)))
+                .expect("valid hash"),
+            payload_ref: "sources/hook/01ARZ3NDEKTSV4RRFFQ69G5FAV.json".into(),
+            captured_at: ts,
+            payload,
+            source_family,
+        };
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: vec![TextSpan::new(0, 5)],
+        };
+        assert_eq!(input.eligible_spans.len(), 1);
+        assert_eq!(input.eligible_spans[0], TextSpan::new(0, 5));
     }
 }

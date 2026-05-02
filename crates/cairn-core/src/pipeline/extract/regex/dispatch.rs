@@ -662,6 +662,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -683,6 +684,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
+            eligible_spans: vec![],
         };
         let err = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -708,6 +710,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -730,6 +733,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -752,6 +756,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -775,6 +780,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -834,6 +840,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![],
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -879,6 +886,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
+            eligible_spans: vec![],
         };
         let result = dispatch(&ruleset, &prefilter, &budget, &input)
             .await
@@ -941,6 +949,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![],
         };
         let result = dispatch(&ruleset, &prefilter, &budget, &input)
             .await
