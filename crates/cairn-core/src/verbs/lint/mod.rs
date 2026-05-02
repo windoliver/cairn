@@ -3,7 +3,7 @@
 //! Spec: `docs/superpowers/specs/2026-04-30-lint-checks-design.md`.
 //! Issue: <https://github.com/windoliver/cairn/issues/96>.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::CairnConfig;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
@@ -65,6 +65,12 @@ pub struct LintInputs<'a> {
     /// Pre-fetched author identity → lifecycle state map. See struct
     /// docs.
     pub author_states: &'a HashMap<Identity, AuthorLifecycle>,
+    /// Identities whose registry lookup failed during prefetch. The
+    /// dispatch layer surfaces a per-identity `DeferredCheck` Error
+    /// for each one; the §6.2 leaf must NOT additionally synthesize
+    /// `MissingFromRegistry` Errors for these — that would manufacture
+    /// false corruption findings out of an infrastructure fault.
+    pub unresolvable_authors: &'a HashSet<Identity>,
 }
 
 /// Major.minor schema version for the §6.4 staleness check. Patch is
@@ -97,6 +103,16 @@ pub(crate) fn empty_author_states() -> &'static HashMap<Identity, AuthorLifecycl
     use std::sync::OnceLock;
     static M: OnceLock<HashMap<Identity, AuthorLifecycle>> = OnceLock::new();
     M.get_or_init(HashMap::new)
+}
+
+/// Companion test helper: process-wide empty `unresolvable_authors`
+/// set for tests of checks that don't exercise registry-failure
+/// degraded paths.
+#[cfg(test)]
+pub(crate) fn empty_unresolvable_authors() -> &'static HashSet<Identity> {
+    use std::sync::OnceLock;
+    static S: OnceLock<HashSet<Identity>> = OnceLock::new();
+    S.get_or_init(HashSet::new)
 }
 
 /// Run every check, aggregate findings, return the canonical `LintData`.
@@ -225,6 +241,7 @@ mod tests {
             index_stats: IndexStats::new(0, 0),
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let data = run_checks(&inputs);
         // provenance (#257), schema (#258), consent (#253), and
@@ -284,6 +301,7 @@ mod tests {
             index_stats: IndexStats::new(forward.len() as u64, forward.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -291,6 +309,7 @@ mod tests {
             index_stats: IndexStats::new(reversed.len() as u64, reversed.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
 
         let fwd = canonicalize(&run_checks(&inputs_fwd).findings);
@@ -308,6 +327,7 @@ mod tests {
             index_stats: IndexStats::new(1, 1),
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let data = run_checks(&inputs);
         assert_eq!(data.summary.total, data.findings.len() as u64);

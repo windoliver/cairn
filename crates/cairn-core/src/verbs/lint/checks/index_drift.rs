@@ -59,6 +59,7 @@ mod tests {
             index_stats: stats,
             schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         assert!(run(&li).is_empty());
     }
@@ -72,6 +73,7 @@ mod tests {
             index_stats: stats,
             schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -95,6 +97,7 @@ mod tests {
             index_stats: stats,
             schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         let f = run(&li);
         assert_eq!(f.len(), 1);
@@ -110,6 +113,7 @@ mod tests {
             index_stats: stats,
             schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         };
         assert!(run(&li).is_empty());
     }

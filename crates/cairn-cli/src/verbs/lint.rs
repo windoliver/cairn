@@ -398,16 +398,17 @@ pub async fn lint_handler(
     // finding — but aborting the whole lint run on one transient
     // hiccup also strips operators of every other check's coverage at
     // exactly the moment they need partial visibility. Degraded path:
-    // surface the failure as a `DeferredCheck` info finding, run the
-    // rest of the checks against an empty author_states map (so #6.2
-    // resolves every author as `MissingFromRegistry` → blocking
-    // BrokenActorChain Error, fail-closed), and let the operator see
-    // the report.
-    let (author_states, registry_error) =
-        match prefetch_author_states(identity_registry, &stored).await {
-            Ok(map) => (map, None),
-            Err(e) => (std::collections::HashMap::new(), Some(format!("{e:#}"))),
-        };
+    // per-identity isolation. One identity's lookup failure is
+    // confined to that identity: it lands in `unresolvable_authors`
+    // (the §6.2 leaf suppresses synthetic `MissingFromRegistry` for
+    // those, treating their state as explicitly unavailable rather
+    // than absent) and we emit a per-identity `DeferredCheck` Error
+    // finding pinning the cause. Successfully fetched states still
+    // drive lifecycle classification on every other record. This
+    // prevents a single registry hiccup from poisoning the whole
+    // vault into uniform false `BrokenActorChain` errors.
+    let (author_states, prefetch_failures) =
+        prefetch_author_states(identity_registry, &stored).await;
 
     // `index_stats` is opt-in for adapters: the default trait impl returns
     // an `Err` carrying the literal "not supported by this store adapter"
@@ -444,12 +445,15 @@ pub async fn lint_handler(
         })
         .collect();
 
+    let unresolvable_authors: std::collections::HashSet<cairn_core::domain::Identity> =
+        prefetch_failures.keys().cloned().collect();
     let inputs = LintInputs {
         records: &lint_records,
         config,
         index_stats,
         schema_version,
         author_states: &author_states,
+        unresolvable_authors: &unresolvable_authors,
     };
     let mut data = run_checks(&inputs);
 
@@ -457,8 +461,13 @@ pub async fn lint_handler(
         push_index_stats_skipped(&mut data);
     }
 
-    if let Some(err) = registry_error {
-        push_registry_unavailable(&mut data, &err);
+    for (id, err) in &prefetch_failures {
+        push_registry_unavailable(&mut data, Some(id), err);
+    }
+
+    let sensor_authored_count = count_sensor_authored(&lint_records);
+    if sensor_authored_count > 0 {
+        push_sensor_author_unverified(&mut data, sensor_authored_count);
     }
 
     let has_error = data.findings.iter().any(|f| {
@@ -510,21 +519,27 @@ pub async fn lint_handler(
 
 /// Pre-fetch the `ProvisioningState` of every distinct chain-author
 /// identity under `IdentityVisibility::Audit` so revoked / purged
-/// states surface. Registry backend errors propagate — the alternative
-/// (silent skip) would mis-flag every record as `MissingFromRegistry`
-/// once the registry hiccups. Identities not in the registry are
-/// omitted from the map; the actor-chain leaf treats absence as
-/// `MissingFromRegistry` and emits a `BrokenActorChain` finding (brief
-/// invariant 6, fail-closed).
+/// states surface. Per-identity failure isolation: a backend error on
+/// one identity must not contaminate every other record's verdict, so
+/// failures land in the second map (`identity -> error string`)
+/// instead of aborting prefetch. Successful lookups land in the first
+/// map; identities the registry returns `None` for are omitted (the
+/// §6.2 leaf treats absence as `MissingFromRegistry` →
+/// `BrokenActorChain` Error). Identities in the failure map are fed
+/// to the leaf via `LintInputs.unresolvable_authors` so it suppresses
+/// the synthetic `MissingFromRegistry` finding for them — a
+/// `DeferredCheck` Error gets emitted per-identity at the cli layer
+/// instead, pinning the actual cause.
 async fn prefetch_author_states(
     registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
     stored: &[cairn_core::contract::memory_store::StoredRecord],
-) -> anyhow::Result<
+) -> (
     std::collections::HashMap<
         cairn_core::domain::Identity,
         cairn_core::pipeline::lint::author_lifecycle::AuthorLifecycle,
     >,
-> {
+    std::collections::HashMap<cairn_core::domain::Identity, String>,
+) {
     use cairn_core::contract::identity_registry::IdentityVisibility;
     use cairn_core::domain::ChainRole;
     use cairn_core::domain::Identity;
@@ -544,34 +559,37 @@ async fn prefetch_author_states(
         }
     }
     let mut map: HashMap<Identity, AuthorLifecycle> = HashMap::with_capacity(unique.len());
+    let mut failures: HashMap<Identity, String> = HashMap::new();
     for id in unique {
-        let row = registry
-            .get_identity(&id, IdentityVisibility::Audit)
-            .await
-            .map_err(|e| anyhow::anyhow!("registry: get_identity({id:?}): {e}"))
-            .context("lint: get_identity")?;
-        if let Some(rec) = row {
-            // Convert chrono timestamps to the core's Rfc3339 newtype
-            // so the check stays in `cairn-core` without a chrono dep.
-            // `to_rfc3339` always emits a valid form so the parse
-            // cannot fail in practice; `.ok()` keeps lint defensive.
-            let activated_at = rec
-                .activated_at
-                .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
-            let revoked_at = rec
-                .revoked_at
-                .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
-            map.insert(
-                id,
-                AuthorLifecycle {
-                    state: rec.provisioning_state,
-                    activated_at,
-                    revoked_at,
-                },
-            );
+        match registry.get_identity(&id, IdentityVisibility::Audit).await {
+            Ok(Some(rec)) => {
+                // Convert chrono timestamps to the core's Rfc3339
+                // newtype so the check stays in `cairn-core` without
+                // a chrono dep. `to_rfc3339` always emits a valid
+                // form so the parse cannot fail in practice; `.ok()`
+                // keeps lint defensive.
+                let activated_at = rec
+                    .activated_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+                let revoked_at = rec
+                    .revoked_at
+                    .and_then(|t| Rfc3339Timestamp::parse(t.to_rfc3339()).ok());
+                map.insert(
+                    id,
+                    AuthorLifecycle {
+                        state: rec.provisioning_state,
+                        activated_at,
+                        revoked_at,
+                    },
+                );
+            }
+            Ok(None) => {} // genuinely absent — leaf surfaces MissingFromRegistry
+            Err(e) => {
+                failures.insert(id, format!("{e}"));
+            }
         }
     }
-    Ok(map)
+    (map, failures)
 }
 
 /// Append a `deferred_check` info finding noting that `MemoryStore::index_stats`
@@ -603,18 +621,90 @@ fn push_index_stats_skipped(data: &mut cairn_core::generated::verbs::lint::LintD
     }
 }
 
-/// Append a `deferred_check` Error finding noting that the
-/// `IdentityRegistry` lookup failed mid-prefetch. The lint run
-/// continues with an empty `author_states` map (so §6.2 marks every
-/// chain author as `MissingFromRegistry` → blocking
-/// `BrokenActorChain`), but the operator must see explicit evidence
-/// that registry coverage is degraded — otherwise the audit looks
-/// uniformly broken without the cause being visible.
-fn push_registry_unavailable(data: &mut cairn_core::generated::verbs::lint::LintData, err: &str) {
+/// §6.2 sensor-author carve-out: `sensor_observation` records authored
+/// by their own `provenance.source_sensor` legitimately bypass the
+/// human/agent lifecycle state machine (sensors are not in
+/// `IdentityRegistry`). At P0 the binding rests on
+/// `MemoryRecord::validate`'s shape-equality check — the at-rest
+/// signature is *not* cryptographically verified to come from that
+/// sensor's signing key. Count records that hit the carve-out so the
+/// cli can surface the coverage gap as a single aggregate
+/// `DeferredCheck` Info finding.
+fn count_sensor_authored(lint_records: &[cairn_core::verbs::lint::LintRecord]) -> usize {
+    use cairn_core::domain::{ChainRole, IdentityKind, MemoryKind};
+    lint_records
+        .iter()
+        .filter(|r| {
+            r.stored.record.kind == MemoryKind::SensorObservation
+                && r.stored
+                    .record
+                    .actor_chain
+                    .iter()
+                    .find(|e| e.role == ChainRole::Author)
+                    .is_some_and(|e| {
+                        e.identity.kind() == IdentityKind::Sensor
+                            && e.identity == r.stored.record.provenance.source_sensor
+                    })
+        })
+        .count()
+}
+
+/// Append a `deferred_check` Info finding noting that N
+/// sensor-authored `sensor_observation` records passed the §6.2
+/// carve-out on shape-equality alone — the at-rest signature is *not*
+/// cryptographically verified to come from that sensor's signing key.
+/// P1+ ships real Ed25519 verification + per-sensor key attestation;
+/// until then, operators must see this gap explicitly.
+fn push_sensor_author_unverified(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    count: usize,
+) {
     let f = cairn_core::generated::verbs::lint::Finding {
         kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
         message: format!(
-            "IdentityRegistry prefetch failed mid-run; §6.2 author-lifecycle ran with no resolvable identities (every author surfaces as MissingFromRegistry): {err}"
+            "{count} sensor-authored sensor_observation record(s) bypassed the §6.2 author-lifecycle classification on shape-equality (kind == sensor_observation && author == provenance.source_sensor); cryptographic binding of the sensor identity to its at-rest signature is P1+"
+        ),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "ship Ed25519 verification + per-sensor key attestation in P1; until then the sensor \
+             carve-out trusts MemoryRecord::validate's shape check rather than a cryptographic \
+             proof of origin"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(256),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Append a `deferred_check` Error finding noting that the
+/// `IdentityRegistry` lookup failed for a specific identity. Per
+/// identity isolation: one backend hiccup must not contaminate every
+/// other record's §6.2 verdict, so the cli emits one finding per
+/// failing identity (pinning the actual cause) and the §6.2 leaf
+/// suppresses synthetic `MissingFromRegistry` for those identities.
+/// `identity` is `None` only in legacy unit tests that pre-date
+/// per-identity isolation; production paths always supply one.
+fn push_registry_unavailable(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    identity: Option<&cairn_core::domain::Identity>,
+    err: &str,
+) {
+    let id_label = identity.map(|id| format!(" for {id}")).unwrap_or_default();
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: format!(
+            "IdentityRegistry lookup failed{id_label}; §6.2 author-lifecycle classification deferred for records authored by this identity (synthetic MissingFromRegistry suppressed to avoid masking the real cause): {err}"
         ),
         severity: cairn_core::generated::verbs::lint::Severity::Error,
         suggested_fix: Some(
@@ -848,7 +938,8 @@ mod tests {
             },
             report_path: None,
         };
-        super::push_registry_unavailable(&mut data, "boom: connection refused");
+        let id = cairn_core::domain::Identity::parse("agt:test").expect("parse identity");
+        super::push_registry_unavailable(&mut data, Some(&id), "boom: connection refused");
         assert_eq!(data.findings.len(), 1);
         let f = &data.findings[0];
         assert!(matches!(
@@ -864,7 +955,11 @@ mod tests {
         assert_eq!(data.summary.total, 1);
         assert_eq!(data.summary.by_severity.error, 1);
         if let serde_json::Value::Object(map) = &data.summary.by_kind {
-            assert_eq!(map.get("deferred_check").and_then(serde_json::Value::as_u64), Some(1));
+            assert_eq!(
+                map.get("deferred_check")
+                    .and_then(serde_json::Value::as_u64),
+                Some(1)
+            );
         } else {
             panic!("by_kind must be an object");
         }

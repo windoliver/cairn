@@ -43,6 +43,41 @@ pub fn run(inputs: &LintInputs<'_>) -> Vec<Finding> {
                 .iter()
                 .find(|e| e.role == ChainRole::Author)
                 .map(|e| e.identity.clone());
+            // If the registry lookup for this author failed (per-id
+            // fault, surfaced as its own DeferredCheck Error by the
+            // dispatch layer), do not synthesize a MissingFromRegistry
+            // BrokenActorChain on top — that would manufacture
+            // corruption findings out of an infrastructure fault.
+            // Chain-shape is still cheap; force the check fn into
+            // its shape-only branch by short-circuiting after the
+            // shape pass via the `MissingFromRegistry` arm only when
+            // chain-shape is also clean (the shape branch fires
+            // first inside check_author_lifecycle).
+            if let Some(id) = author.as_ref()
+                && inputs.unresolvable_authors.contains(id)
+            {
+                // Run only the chain-shape part by passing a
+                // throwaway state; the shape branch fires first and
+                // any non-shape verdict is suppressed below by
+                // filtering ChainStatus::Malformed messages that did
+                // not originate from validate_chain. Simpler: inline
+                // the chain-shape check directly.
+                use crate::domain::actor_chain::validate_chain;
+                use crate::pipeline::lint::author_lifecycle::{
+                    AuthorLifecycleFinding, ChainStatus,
+                };
+                if let Err(e) = validate_chain(&r.stored.record.actor_chain) {
+                    return Some(into_finding(AuthorLifecycleFinding {
+                        record_id: r.stored.record.id.clone(),
+                        author: None,
+                        status: ChainStatus::Malformed,
+                        message: format!(
+                            "actor_chain failed shape validation: {e} — at-rest signature cannot be attributed to a single issuer"
+                        ),
+                    }));
+                }
+                return None;
+            }
             let state = match author.as_ref() {
                 Some(id) => match inputs.author_states.get(id) {
                     Some(lc) => AuthorState::Resolved(lc.clone()),
@@ -144,6 +179,7 @@ mod tests {
             index_stats: IndexStats::new(records.len() as u64, records.len() as u64),
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states,
+            unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
         }
     }
 

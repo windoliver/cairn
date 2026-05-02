@@ -490,6 +490,7 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         index_stats: IndexStats::new(lint_records.len() as u64, lint_records.len() as u64),
         schema_version: SchemaVersion { major: 0, minor: 1 },
         author_states: &states,
+        unresolvable_authors: &std::collections::HashSet::new(),
     };
 
     let data = run_checks(&inputs);
