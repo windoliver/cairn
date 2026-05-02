@@ -104,7 +104,11 @@ pub(crate) async fn dispatch(
         } else {
             filter_scan_to_eligible(scan, &input.eligible_spans)
         };
-        let windows = build_phrase_windows(text, &scan);
+        let windows = if input.eligible_spans.is_empty() {
+            build_phrase_windows(text, &scan)
+        } else {
+            clip_windows_to_eligible(build_phrase_windows(text, &scan), &input.eligible_spans)
+        };
 
         let body_too_large = text.len() > MAX_BODY_LEN_FOR_REGEX;
         if body_too_large {
@@ -122,6 +126,7 @@ pub(crate) async fn dispatch(
                 event,
                 text,
                 window,
+                &input.eligible_spans,
                 &mut outputs,
                 &mut covered,
             );
@@ -188,7 +193,15 @@ pub(crate) async fn dispatch(
                         break 'phase_b;
                     }
                     let before = outputs.len();
-                    apply_text_rule(rule, event, text, window, &mut outputs, &mut covered);
+                    apply_text_rule(
+                        rule,
+                        event,
+                        text,
+                        window,
+                        &input.eligible_spans,
+                        &mut outputs,
+                        &mut covered,
+                    );
                     let added = outputs.len() > before;
                     if added {
                         user_count += 1;
@@ -312,6 +325,37 @@ fn filter_scan_to_eligible(
             .any(|es| hit.start >= es.start && hit.start < es.end)
     });
     scan
+}
+
+/// Clip each phrase window's end to the eligible span that contains its
+/// start. If no eligible span contains the hit start, the window is
+/// dropped (defense-in-depth; `filter_scan_to_eligible` should have
+/// already removed such hits). Windows whose start falls inside an
+/// eligible span are clipped so their end does not exceed that span's end,
+/// preventing text rules from scanning or emitting `match_span` that covers
+/// disallowed bytes near the eligibility boundary.
+fn clip_windows_to_eligible(
+    windows: Vec<super::prefilter::PhraseWindow>,
+    eligible: &[TextSpan],
+) -> Vec<super::prefilter::PhraseWindow> {
+    windows
+        .into_iter()
+        .filter_map(|mut w| {
+            // Find the eligible span that contains this window's start.
+            let containing = eligible
+                .iter()
+                .find(|es| w.span.start >= es.start && w.span.start < es.end)?;
+            // Clip the window's end to the boundary of that eligible span.
+            if w.span.end > containing.end {
+                w.span.end = containing.end;
+            }
+            if w.span.end > w.span.start {
+                Some(w)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Intersect `spans` in place with `eligible`, keeping only the byte
@@ -508,12 +552,21 @@ fn run_text_rules_first_match_wins(
     event: &CaptureEvent,
     body: &str,
     window: &PhraseWindow,
+    eligible_spans: &[TextSpan],
     outputs: &mut Vec<ExtractOutput>,
     covered_high_conf: &mut Vec<TextSpan>,
 ) {
     for rule in rules {
         let before = outputs.len();
-        apply_text_rule(rule, event, body, window, outputs, covered_high_conf);
+        apply_text_rule(
+            rule,
+            event,
+            body,
+            window,
+            eligible_spans,
+            outputs,
+            covered_high_conf,
+        );
         if outputs.len() > before {
             return;
         }
@@ -525,6 +578,7 @@ fn apply_text_rule(
     event: &CaptureEvent,
     body: &str,
     window: &PhraseWindow,
+    eligible_spans: &[TextSpan],
     outputs: &mut Vec<ExtractOutput>,
     covered_high_conf: &mut Vec<TextSpan>,
 ) {
@@ -546,6 +600,22 @@ fn apply_text_rule(
                 // not silently mask trailing text in the same window
                 // from the LLM extractor.
                 let match_span = match_span_in_body(&caps, win_start, window.span);
+                // Defence-in-depth: if a caller-supplied eligibility fence is
+                // active, skip emission for any match_span that is not fully
+                // contained within an eligible span. The primary guard is
+                // `clip_windows_to_eligible`, which restricts the window slice
+                // that the regex runs against; this check catches any residual
+                // cases (e.g., a regex match that spans up to but not past the
+                // clipped window end, which is always safe, so this fires only
+                // when the span somehow escapes — keeping the invariant tight).
+                if !eligible_spans.is_empty() && !span_within_eligible(match_span, eligible_spans) {
+                    tracing::warn!(
+                        worker = "regex",
+                        reason = "match_span_outside_eligible",
+                        "skipping emit: match_span exceeds eligibility boundary"
+                    );
+                    return;
+                }
                 outputs.push(ExtractOutput::Draft(MemoryDraft {
                     kind_hint: kind_hint.clone(),
                     body: group_text.to_owned(),
@@ -568,6 +638,15 @@ fn apply_text_rule(
             if let Some(caps) = re.captures(slice) {
                 let target = caps.get(*target_group as usize).map_or("", |m| m.as_str());
                 let match_span = match_span_in_body(&caps, win_start, window.span);
+                // Defence-in-depth: same eligibility guard as TriggerPhrase above.
+                if !eligible_spans.is_empty() && !span_within_eligible(match_span, eligible_spans) {
+                    tracing::warn!(
+                        worker = "regex",
+                        reason = "match_span_outside_eligible",
+                        "skipping emit: forget match_span exceeds eligibility boundary"
+                    );
+                    return;
+                }
                 outputs.push(ExtractOutput::Forget(ForgetIntent {
                     target_text_normalized: normalize_target(target),
                     match_strategy: *match_strategy,
@@ -584,6 +663,14 @@ fn apply_text_rule(
         }
         _ => {}
     }
+}
+
+/// True when `span` is fully contained within at least one of the `eligible`
+/// spans. Used as a defence-in-depth guard before emitting outputs.
+fn span_within_eligible(span: TextSpan, eligible: &[TextSpan]) -> bool {
+    eligible
+        .iter()
+        .any(|es| span.start >= es.start && span.end <= es.end)
 }
 
 /// Translate the regex group-0 match (which is in `slice` coordinates,
@@ -1206,5 +1293,105 @@ mod tests {
             "second trigger must fire with empty eligible_spans; outputs: {:?}",
             result.outputs
         );
+    }
+
+    /// Regression: phrase window must be clipped to the eligibility boundary.
+    ///
+    /// Body layout:
+    ///   "Save user X to db. Forget user Y from db."
+    ///    ^-- eligible ends here --^
+    ///
+    /// The trigger word "user" in the first clause starts inside the eligible
+    /// span. Without clipping, the phrase window that `build_phrase_windows`
+    /// builds extends past the first period into "Forget user Y from db." which
+    /// is outside the eligible span. After the fix, the window is clipped so
+    /// no `match_span` and no `covered_high_conf` byte references text past the
+    /// eligibility boundary.
+    #[tokio::test]
+    async fn regex_gate_clips_window_at_eligibility_boundary() {
+        // "Save user X to db." is 19 bytes (0..19). The period ends the sentence.
+        // Eligible span covers only those 19 bytes. The second clause starts at
+        // byte 20: "Forget user Y from db."
+        let first_clause = "Save user X to db.";
+        let second_clause = " Forget user Y from db.";
+        let body_text = format!("{first_clause}{second_clause}");
+
+        let eligible_end = u32::try_from(first_clause.len()).expect("small");
+        let body_end = u32::try_from(body_text.len()).expect("small");
+
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            &body_text,
+            &event.payload,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        )
+        .expect("matching variant");
+        let eligible_span = TextSpan::new(0, eligible_end);
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: vec![eligible_span],
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        // No output match_span must extend past the eligible boundary.
+        for out in &result.outputs {
+            if let Some(span) = out.source_span() {
+                assert!(
+                    span.end <= eligible_end,
+                    "match_span {span:?} extends past eligibility boundary {eligible_end}; \
+                     outputs: {:?}",
+                    result.outputs
+                );
+            }
+        }
+
+        // No draft body should contain text from the second clause.
+        let has_y = result.outputs.iter().any(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains('Y') || d.body.contains("from db")
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_y,
+            "draft body must not reference bytes from outside the eligible span; \
+             outputs: {:?}",
+            result.outputs
+        );
+
+        // llm_eligible_spans must not reference bytes outside the authorized range.
+        for span in &result.llm_eligible_spans {
+            assert!(
+                span.end <= eligible_end,
+                "llm_eligible_spans entry {span:?} references bytes outside authorized range \
+                 0..{eligible_end}"
+            );
+        }
+
+        // covered_high_conf is internal; we verify indirectly: the LLM eligible
+        // spans should not extend past eligible_end (already checked above), which
+        // means any covered bytes subtracted from them were also within bounds.
+        // Direct check: assert that body_end is not mentioned in any span.
+        for span in &result.llm_eligible_spans {
+            assert!(
+                span.end <= eligible_end && span.end < body_end,
+                "llm_eligible_spans entry {span:?} mentions bytes from the disallowed region"
+            );
+        }
     }
 }
