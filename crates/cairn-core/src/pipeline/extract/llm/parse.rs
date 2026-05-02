@@ -127,12 +127,23 @@ fn process_item(
         return true;
     };
 
-    // Safe: region_id comes from the schema (non-negative integer) — the schema
-    // enforces `"minimum": 0` so u64 fits in usize on any 64-bit target. On 32-bit
-    // targets a value > u32::MAX would be rejected by the schema's maxItems cap
-    // (≤16) long before reaching this conversion.
-    #[allow(clippy::cast_possible_truncation)] // schema-bounded to maxItems 16 << usize::MAX
-    let region_id = region_id_u64 as usize;
+    // Use a checked conversion so that a region_id value that exceeds
+    // `usize::MAX` on 32-bit targets (or any platform where usize < u64)
+    // is caught explicitly rather than silently truncating to the wrong
+    // region. On failure we fall through to the same out-of-range drop
+    // path that handles region_id values beyond `regions.len()`.
+    // Note: the schema's `maxItems` bound limits the *item count*, not
+    // the region_id value itself, so a model could still emit an
+    // arbitrarily large region_id even when the item list is short.
+    let Ok(region_id) = usize::try_from(region_id_u64) else {
+        tracing::warn!(
+            reason = "llm.region_id_out_of_range",
+            region_id = region_id_u64,
+            items_index = item_index,
+            regions_len = regions.len(),
+        );
+        return true;
+    };
 
     let Some(region) = regions.get(region_id) else {
         tracing::warn!(
@@ -540,6 +551,39 @@ mod tests {
                 "derived span does not point at the expected text in the original body"
             );
         }
+    }
+
+    /// Regression: `region_id = u64::MAX` must be dropped cleanly, not
+    /// panic or silently attribute the draft to the wrong region via
+    /// truncating cast. On 32-bit targets `u64::MAX as usize` would wrap
+    /// to `usize::MAX` which is a different (wrong) region index; on
+    /// 64-bit targets it simply exceeds `regions.len()`. Either way the
+    /// item must be dropped via the out-of-range path.
+    #[test]
+    fn region_id_above_usize_max_is_rejected() {
+        let body = "user prefers tabs over spaces today";
+        let regions = build_regions(body, &[TextSpan::new(0, body_len_u32(body))], &[]);
+        let raw = json!({
+            "items": [{
+                "type": "draft",
+                "kind": "user",
+                "body": "x",
+                "confidence": 0.5,
+                // u64::MAX as a JSON integer — parseable as u64 but never a
+                // valid region index for any realistic regions slice.
+                "source": {
+                    "region_id": u64::MAX,
+                    "text_excerpt": "user prefers tabs"
+                }
+            }]
+        });
+        // Must not panic; must drop the item.
+        let r = parse_response(&raw, &regions, &[], &fixture_event_id()).unwrap();
+        assert!(
+            r.drafts.is_empty(),
+            "u64::MAX region_id must be dropped, not attributed to a region"
+        );
+        assert!(r.all_dropped, "model emitted 1 item and it must be dropped");
     }
 
     /// Verify that a `text_excerpt` containing a multi-byte UTF-8 emoji is
