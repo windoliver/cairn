@@ -635,6 +635,7 @@ dependencies = [
  "async-trait",
  "cairn-core",
  "cairn-store-sqlite",
+ "chrono",
  "ed25519-dalek",
  "insta",
  "parking_lot",
