@@ -647,6 +647,37 @@ async fn malformed_second_turn_leaves_first_intact() {
         .expect("store query should succeed");
 }
 
+/// Snapshot test: pin the JSON shape of [`CaptureTraceResponse`].
+///
+/// `trace_id` is a fresh ULID generated server-side per invocation, so the
+/// value is replaced with a stable placeholder before snapshotting.
+/// `failed_turns` is a `Vec<(String, String, String)>` which serde encodes
+/// as JSON arrays — that shape is what we are pinning.
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn capture_trace_response_envelope_snapshot() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    write_fixture(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+
+    // `trace_id` is a fresh ULID per invocation — substitute a stable
+    // placeholder before snapshotting so the snapshot pins shape, not value.
+    let mut value =
+        serde_json::to_value(&resp).expect("serialize CaptureTraceResponse");
+    value["trace_id"] = serde_json::Value::String("[trace_id]".into());
+
+    insta::assert_json_snapshot!("capture_trace_response_envelope", value);
+}
+
 #[tokio::test]
 #[allow(
     clippy::expect_used,
