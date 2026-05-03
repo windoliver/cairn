@@ -65,6 +65,7 @@ rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 rand_core = { workspace = true }
 rand = { workspace = true }
+rstest = { workspace = true }
 tracing-test = "0.2"
 jsonschema = { workspace = true }
 
