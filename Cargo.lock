@@ -579,12 +579,14 @@ dependencies = [
 name = "cairn-sdk"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "cairn-core",
  "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "ulid",
 ]
 

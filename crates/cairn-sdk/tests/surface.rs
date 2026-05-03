@@ -418,8 +418,8 @@ fn ingest_accepts_well_formed_uri_schemes() {
     }
 }
 
-#[test]
-fn search_rejects_empty_query_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_query_with_invalid_args() {
     // Wire format requires non-empty query; SDK must surface it as
     // InvalidArgs instead of capability-checking an unvalidated request.
     let args = SearchArgs {
@@ -432,7 +432,7 @@ fn search_rejects_empty_query_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("query"), "reason: {reason}");
         }
@@ -440,8 +440,8 @@ fn search_rejects_empty_query_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_out_of_range_limit_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_out_of_range_limit_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -452,7 +452,7 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("limit"), "reason: {reason}");
         }
@@ -460,8 +460,8 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
+#[tokio::test]
+async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
     // P0 advertises no capabilities. `args.explain == Some(true)` is
     // gated on `cairn.mcp.v1.policy_trace` per the
     // `x-cairn-capability-when-true` annotation in
@@ -477,7 +477,10 @@ fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
         scope: None,
         explain: Some(true),
     };
-    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    let err = sdk()
+        .search(&args)
+        .await
+        .expect_err("must fail closed in P0");
     match err {
         SdkError::CapabilityUnavailable {
             capability,
@@ -495,8 +498,8 @@ fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
     }
 }
 
-#[test]
-fn search_explain_false_does_not_require_policy_trace() {
+#[tokio::test]
+async fn search_explain_false_does_not_require_policy_trace() {
     // The default `explain: None` (and explicit `Some(false)`) must NOT
     // require the policy_trace capability. Only `Some(true)` triggers
     // the gate.
@@ -510,7 +513,10 @@ fn search_explain_false_does_not_require_policy_trace() {
         scope: None,
         explain: Some(false),
     };
-    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    let err = sdk()
+        .search(&args)
+        .await
+        .expect_err("must fail closed in P0");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {
             // Should be the search mode capability, not policy_trace —
@@ -521,8 +527,8 @@ fn search_explain_false_does_not_require_policy_trace() {
     }
 }
 
-#[test]
-fn search_rejects_unadvertised_modes_with_capability_unavailable() {
+#[tokio::test]
+async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
     // P0 advertises no capabilities, so every search mode must fail closed
     // with CapabilityUnavailable rather than the generic Internal stub.
     for (mode, expected) in [
@@ -540,7 +546,10 @@ fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             scope: None,
             explain: None,
         };
-        let err = sdk().search(&args).expect_err("must fail closed in P0");
+        let err = sdk()
+            .search(&args)
+            .await
+            .expect_err("must fail closed in P0");
         match err {
             SdkError::CapabilityUnavailable {
                 capability,
@@ -593,8 +602,8 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
-#[test]
-fn search_rejects_empty_and_filter_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -605,7 +614,7 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("filter.and"), "reason: {reason}");
         }
@@ -613,8 +622,8 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_excessive_filter_depth_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_excessive_filter_depth_with_invalid_args() {
     // Build a 9-level Not chain — exceeds max depth of 8.
     let mut node = SearchArgsFilters::Leaf(serde_json::json!({
         "field": "kind", "op": "eq", "value": "note"
@@ -634,7 +643,7 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("max boolean depth"), "reason: {reason}");
         }
@@ -642,8 +651,8 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_malformed_filter_leaf_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -658,7 +667,7 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("field"), "reason: {reason}");
         }
@@ -666,8 +675,8 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_accepts_extended_filter_operators() {
+#[tokio::test]
+async fn search_accepts_extended_filter_operators() {
     // Mirrors the generated grammar: between, array_contains,
     // array_contains_any/all, and array_size_eq must validate cleanly.
     // With no capability advertised in P0 the call lands on
@@ -691,15 +700,15 @@ fn search_accepts_extended_filter_operators() {
             scope: None,
             explain: None,
         };
-        match sdk().search(&args).expect_err("P0 has no capability") {
+        match sdk().search(&args).await.expect_err("P0 has no capability") {
             SdkError::CapabilityUnavailable { .. } => {}
             other => panic!("expected CapabilityUnavailable for {leaf:?}, got {other:?}"),
         }
     }
 }
 
-#[test]
-fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
     let bad_leaves = [
         // between: wrong arity / non-numeric
         serde_json::json!({"field": "x", "op": "between", "value": [1]}),
@@ -727,15 +736,15 @@ fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
             scope: None,
             explain: None,
         };
-        match sdk().search(&args).expect_err("must reject") {
+        match sdk().search(&args).await.expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
             other => panic!("expected InvalidArgs for {leaf:?}, got {other:?}"),
         }
     }
 }
 
-#[test]
-fn search_rejects_malformed_cursor_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_cursor_with_invalid_args() {
     // Cursor newtype is publicly constructible; the SDK must re-apply the
     // generated Cursor::Deserialize rules (non-empty, ≤ 512 chars).
     let args = SearchArgs {
@@ -748,14 +757,14 @@ fn search_rejects_malformed_cursor_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
         other => panic!("expected InvalidArgs, got {other:?}"),
     }
 }
 
-#[test]
-fn search_rejects_empty_scope_filter_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_scope_filter_with_invalid_args() {
     // Empty ScopeFilter: every field None — must mirror RawScopeFilter
     // TryFrom's "at least one of [...]" check.
     let args = SearchArgs {
@@ -768,7 +777,7 @@ fn search_rejects_empty_scope_filter_with_invalid_args() {
         scope: Some(empty_scope_filter()),
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("at least one of"), "reason: {reason}");
         }

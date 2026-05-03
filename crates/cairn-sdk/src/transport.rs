@@ -9,6 +9,10 @@
 //! When verb handlers move into `cairn-core::verbs::*`, replace each `Err(...)`
 //! arm with the dispatch into the shared handler.
 
+use std::sync::Arc;
+
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
 use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
@@ -19,7 +23,7 @@ use cairn_core::generated::verbs::{
     ingest::{IngestArgs, IngestData},
     lint::{LintArgs, LintData},
     retrieve::{RetrieveArgs, RetrieveData},
-    search::{SearchArgs, SearchData},
+    search::{SearchArgs, SearchArgsMode, SearchData},
     summarize::{SummarizeArgs, SummarizeData},
 };
 
@@ -48,26 +52,75 @@ impl Transport for InProcess {}
 
 /// SDK client.
 ///
-/// Construct with [`Sdk::new`] for the default in-process transport. Every
-/// verb fn returns either a typed [`VerbResponse`] or an [`SdkError`]; no
-/// CLI parsing required.
+/// Construct with [`Sdk::new`] for the default in-process transport, or
+/// [`Sdk::with_store`] to wire a [`MemoryStore`] so that verbs like
+/// [`Sdk::search`] actually dispatch instead of returning
+/// [`SdkError::Unimplemented`].
 ///
 /// `status.server_info.incarnation` and `started_at` are minted **fresh on
 /// every call**, matching the P0 CLI ground-truth (`cairn status` —
 /// `crates/cairn-cli/src/verbs/status.rs`). Once the store adapter lands
 /// (issue #9), both surfaces will read the canonical values from the
 /// daemon table; until then SDK and CLI behave identically.
-#[derive(Debug, Clone, Copy)]
 pub struct Sdk<T: Transport = InProcess> {
     _transport: T,
+    /// Optional wired store. `None` → verbs return [`SdkError::Unimplemented`].
+    store: Option<Arc<dyn MemoryStore>>,
+    /// Active config, used for capability derivation and dispatch knobs.
+    config: CairnConfig,
+}
+
+impl std::fmt::Debug for Sdk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sdk")
+            .field(
+                "store",
+                &if self.store.is_some() {
+                    "wired"
+                } else {
+                    "none"
+                },
+            )
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl Clone for Sdk {
+    fn clone(&self) -> Self {
+        Self {
+            _transport: InProcess,
+            store: self.store.clone(),
+            config: self.config.clone(),
+        }
+    }
 }
 
 impl Sdk<InProcess> {
     /// Construct an in-process SDK client.
+    ///
+    /// Verbs that require a store return [`SdkError::Unimplemented`] until
+    /// the store is wired. Use [`Sdk::with_store`] to wire one.
     #[must_use]
     pub fn new() -> Self {
         Self {
             _transport: InProcess,
+            store: None,
+            config: CairnConfig::default(),
+        }
+    }
+
+    /// Construct an in-process SDK client wired to a real store.
+    ///
+    /// Verbs that previously returned [`SdkError::Unimplemented`] now
+    /// dispatch against the supplied store. The store is shared via [`Arc`]
+    /// so callers can keep their own handle.
+    #[must_use]
+    pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
+        Self {
+            _transport: InProcess,
+            store: Some(store),
+            config,
         }
     }
 }
@@ -137,13 +190,82 @@ impl<T: Transport> Sdk<T> {
     /// `cairn.mcp.v1.policy_trace` (per the
     /// `x-cairn-capability-when-true` annotation in
     /// `crates/cairn-idl/schema/verbs/search.json`).
-    pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
+    ///
+    /// When the SDK was constructed with [`Sdk::with_store`], this dispatches
+    /// into the shared [`cairn_core::verbs::search::run`] handler (the same
+    /// one the CLI uses). Otherwise it returns [`SdkError::Unimplemented`].
+    pub async fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
         validate_search(args)?;
         self.require_capability(args.mode.capability())?;
         if args.explain == Some(true) {
             self.require_capability(Some("cairn.mcp.v1.policy_trace"))?;
         }
-        Err(unimplemented("search"))
+
+        let Some(store) = self.store.as_ref() else {
+            return Err(unimplemented("search"));
+        };
+
+        // Map from the IDL SearchArgsMode to the core dispatcher SearchMode.
+        // SearchArgsMode is imported at the top of the fn's enclosing module
+        // via the type already in scope (used in validate_search above).
+        let mode = match args.mode {
+            SearchArgsMode::Keyword => cairn_core::verbs::search::SearchMode::Keyword,
+            SearchArgsMode::Semantic => cairn_core::verbs::search::SearchMode::Semantic,
+            SearchArgsMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
+            // Forward-compat: SearchArgsMode is #[non_exhaustive]; reject unknown variants
+            // rather than silently accepting them.
+            _ => return Err(unimplemented("search")),
+        };
+
+        // Derive the capability set from config. We assume model present =
+        // `config.search.local_embeddings`; true here because the dispatcher's
+        // mode gate already passed via `require_capability` above, which consults
+        // the P0 capability advertisement. A fully wired SDK (Task 14+) will
+        // stat the model file; for now this keeps the capability derivation
+        // consistent with what was advertised.
+        let caps = self
+            .config
+            .capabilities(self.config.search.local_embeddings);
+
+        // `args.limit` is validated in range [1, 1000] by `validate_search`,
+        // so the `try_from` should not fail. Fall back to 10 on error.
+        let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+        let request = cairn_core::verbs::search::SearchRequest {
+            query: args.query.clone(),
+            mode,
+            limit,
+            visibility_allowlist: vec![],
+            model_label: self.config.search.embedding_model.as_str().to_owned(),
+            explain: args.explain.unwrap_or(false),
+        };
+
+        match cairn_core::verbs::search::run(store.as_ref(), &self.config, &caps, request).await {
+            Ok(outcome) => Ok(envelope_from_outcome(outcome)),
+            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+                Err(SdkError::CapabilityUnavailable {
+                    capability: capability.to_owned(),
+                    reason: "rejected by dispatcher".to_owned(),
+                    operation_id: crate::stub::new_operation_id(),
+                })
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+                Err(SdkError::InvalidArgs { reason })
+            }
+            Err(cairn_core::verbs::search::SearchError::Store(e)) => Err(SdkError::Protocol {
+                code: crate::error::ErrorCode::Internal,
+                message: format!("store error: {e}"),
+                data: None,
+                operation_id: crate::stub::new_operation_id(),
+            }),
+            // Forward-compat: SearchError is #[non_exhaustive]; surface unknown
+            // variants as Internal rather than panicking.
+            Err(e) => Err(SdkError::Protocol {
+                code: crate::error::ErrorCode::Internal,
+                message: format!("search dispatcher error: {e}"),
+                data: None,
+                operation_id: crate::stub::new_operation_id(),
+            }),
+        }
     }
 
     /// `retrieve` — by-target fetch (record/session/turn/folder/scope/profile).
@@ -201,17 +323,45 @@ impl<T: Transport> Sdk<T> {
     /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
     /// not advertised by `status()`. Verbs whose IDL declares no
     /// capability (`None`) are unconditionally allowed.
-    #[allow(clippy::unused_self)] // method form for future per-instance capability state
+    ///
+    /// When a store is wired (via [`Sdk::with_store`]), capability gating
+    /// consults the config-derived [`CapabilitySet`] so that keyword / hybrid /
+    /// semantic searches are accepted once the store is present. When no
+    /// store is wired, only the static P0 capability list is consulted (empty
+    /// in P0), giving `CapabilityUnavailable` for all search modes — the same
+    /// behavior as before Task 12.
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
+
+        // When a store is wired, derive capabilities from config.
+        if self.store.is_some() {
+            let caps = self
+                .config
+                .capabilities(self.config.search.local_embeddings);
+            let is_advertised = match cap {
+                "cairn.mcp.v1.search.keyword" => caps.keyword_search,
+                "cairn.mcp.v1.search.semantic" => caps.semantic_search,
+                "cairn.mcp.v1.search.hybrid" => caps.hybrid_search,
+                "cairn.mcp.v1.policy_trace" => caps.policy_trace,
+                _ => false,
+            };
+            if is_advertised {
+                return Ok(());
+            }
+            return Err(SdkError::CapabilityUnavailable {
+                capability: cap.to_owned(),
+                reason: "not advertised by `status` in this incarnation".to_owned(),
+                operation_id: crate::stub::new_operation_id(),
+            });
+        }
+
+        // No store wired: fall back to the static P0 capability list
+        // (empty in P0 — all capability-gated verbs return
+        // CapabilityUnavailable until the store lands).
         // Read capabilities directly instead of routing through `status()`,
         // which would mint a fresh `incarnation`/`started_at` per call.
-        // Capabilities are the only field needed for the gating decision,
-        // and they are stable for the lifetime of the process — no
-        // TOCTOU window between an inspection `status()` and the verb
-        // call that follows it.
         let advertised = p0_capabilities();
         let is_advertised = advertised.iter().any(|c| {
             serde_json::to_value(c)
@@ -229,6 +379,61 @@ impl<T: Transport> Sdk<T> {
                 operation_id: crate::stub::new_operation_id(),
             })
         }
+    }
+}
+
+/// Convert a [`cairn_core::verbs::search::SearchOutcome`] into the SDK's
+/// [`VerbResponse<SearchData>`] envelope.
+fn envelope_from_outcome(
+    outcome: cairn_core::verbs::search::SearchOutcome,
+) -> VerbResponse<SearchData> {
+    use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::envelope::ResponseVerb;
+    use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+
+    let hits: Vec<Hit> = outcome
+        .candidates
+        .iter()
+        .map(|c| Hit {
+            record_id: Ulid(c.record_id.as_str().to_owned()),
+            score: c.bm25,
+            snippet: Some(c.snippet.clone()),
+            citation: None,
+            trust: HitTrust::Unknown,
+        })
+        .collect();
+
+    let score_explain = outcome.explain.map(|exps| {
+        exps.into_iter()
+            .map(|e| ScoreExplain {
+                record_id: Ulid(e.record_id.as_str().to_owned()),
+                // Rank values are 1-based positions (usually < 10_000).
+                // `i64::try_from` is infallible on 64-bit; saturate to
+                // `i64::MAX` on the unlikely 32-bit overflow edge.
+                bm25_rank: e.bm25_rank.map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                semantic_rank: e
+                    .semantic_rank
+                    .map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                rrf_score: e.rrf_score,
+                cosine: e.cosine,
+                final_score: e.final_score,
+            })
+            .collect()
+    });
+
+    let data = SearchData {
+        hits,
+        next_cursor: None,
+        excluded: None,
+        score_explain,
+    };
+
+    VerbResponse {
+        operation_id: crate::stub::new_operation_id(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Search,
+        target: None,
+        data,
     }
 }
 
