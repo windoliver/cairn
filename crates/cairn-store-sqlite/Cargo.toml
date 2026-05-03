@@ -42,6 +42,7 @@ test-helpers = []
 cairn-core = { workspace = true, features = ["test-fixtures", "test-helpers"] }
 cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
+insta = { workspace = true }
 proptest = { workspace = true }
 serde = { workspace = true }
 tempfile = { workspace = true }
