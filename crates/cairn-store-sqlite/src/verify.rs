@@ -174,6 +174,13 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "pending_embeddings"),
     ("index", "pending_embeddings_enqueued_idx"),
     ("trigger", "records_vector_cleanup"),
+    // 0023_trace_links (issue #77, spec §6.1; renumbered from 0022 on
+    // rebase since main shipped 0022_record_vectors first).
+    ("index", "records_trace_event_id"),
+    ("index", "records_trace_summary"),
+    ("index", "records_trace_seq"),
+    ("index", "records_trace_parent"),
+    ("index", "records_trace_payload_hash"),
 ];
 
 fn hash_hex(content: &str) -> String {
