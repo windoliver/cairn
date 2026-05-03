@@ -29,6 +29,7 @@ pub mod extract;
 pub mod filter;
 pub mod lint;
 pub(crate) mod squash;
+pub mod turn;
 
 /// Fuzz-only re-export of the squash module's public surface. Gated
 /// behind the `fuzz` crate feature so production builds keep the
