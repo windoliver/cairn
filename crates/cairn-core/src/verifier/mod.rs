@@ -239,3 +239,6 @@ fn decode_hex_nibble(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod proptests;
