@@ -72,7 +72,7 @@ until automated enforcement is added.
 | §4 Contracts / plugins / identity | #3, #7, #10, #23, #27, #50–#53, #113, #124, #143 | — | Plugin registry and conformance covered. |
 | §4.1 Plugin architecture | #177 | — | `XxxPlugin` companion traits with `NAME` and `SUPPORTED_VERSIONS` static pre-construction checks; `register_plugin_with!` factory variant. |
 | §4.2 Actor-chain / identity provisioning | #50 | — | Ed25519 identity domain (`hmn:`/`agt:`/`snr:` prefixes), `IdentityRegistry` contract, vault-binding protocol, two-phase key rotation, revoke, purge, `IdentityService`, default-identity provisioning, keystore integration, status sweep, and `usr:` → `hmn:` rename. Privacy-by-construction invariant (no plaintext key bytes on disk) verified in E2 acceptance suite. |
-| §5 Pipeline / WAL / sessions | #8, #12, #13, #16, #54–#58, #71–#79, #89–#92 | #146 (resolved) | Capture, extract, filter, classify, plan/apply, WAL, hooks, and session capture covered. |
+| §5 Pipeline / WAL / sessions | #8, #12, #13, #16, #49, #54–#58, #71–#79, #89–#92 | #146 (resolved) | Capture, extract, filter, classify, plan/apply, WAL, hooks, and session capture covered. §5.1 read-path orchestration (RRF + cosine re-rank, token-budget trim, score-component explanations) ships in #49 alongside `cairn-core::verbs::search::run` dispatcher consumed by CLI/SDK/MCP. |
 | §6 Taxonomy / provenance | #4, #37–#40 | — | Canonical kinds, classes, visibility, and provenance owned by core schema. |
 | §6.a Multi-modal memory | #15, #29, #84–#88, #130–#132 | — | P0 local sensors plus P2 connectors and aggregate memory. |
 | §7 Hot memory / profile | #14, #80–#83 | — | Budgeted hot prefix, profile, cache, and lint coverage. |
