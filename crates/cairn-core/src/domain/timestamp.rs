@@ -51,6 +51,25 @@ impl Rfc3339Timestamp {
     pub fn cmp_chronological(&self, other: &Self) -> std::cmp::Ordering {
         chronological_key(&self.0).cmp(&chronological_key(&other.0))
     }
+
+    /// Convert to a [`chrono::DateTime<chrono::Utc>`] for arithmetic that
+    /// the in-tree comparator (`cmp_chronological`) cannot express — for
+    /// example, the verifier's `[issued_at − skew, expires_at)` window
+    /// check.
+    ///
+    /// The inner string was validated by [`Rfc3339Timestamp::parse`]
+    /// before construction, so the chrono parse below cannot fail for any
+    /// value reachable through the public API.
+    #[must_use]
+    #[allow(
+        clippy::expect_used,
+        reason = "invariant: Rfc3339Timestamp inner string validated by parse()"
+    )]
+    pub fn as_chrono(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(&self.0)
+            .expect("invariant: Rfc3339Timestamp inner string validated by parse()")
+            .with_timezone(&chrono::Utc)
+    }
 }
 
 /// Convert a validated RFC3339 string to a `(utc_seconds_from_civil_day_zero,
