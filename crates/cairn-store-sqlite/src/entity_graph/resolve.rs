@@ -1,6 +1,6 @@
 //! `resolve_contradiction` — caller-driven invalidate-and-insert.
 //!
-//! Mostly an internal hook used by [`super::edge::do_upsert_entity_edge`]'s
+//! Mostly an internal hook used by `SqliteMemoryStore::do_upsert_entity_edge`'s
 //! contradiction branch; exposed for callers (e.g. `lint --fix-graph`) that
 //! need to invalidate a specific known-bad edge.
 

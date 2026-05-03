@@ -2,7 +2,7 @@
 //!
 //! On dedup hit (a row with the same `name_norm` already exists), this is a
 //! pure-read no-op: we return the existing row's id and write nothing —
-//! including no WAL row, mirroring [`crate::store::upsert::do_upsert`]'s
+//! including no WAL row, mirroring `SqliteMemoryStore::do_upsert`'s
 //! idempotent branch (brief §5.2).
 //!
 //! On fresh insert, we write through the generic `wal_ops` + `wal_steps`
