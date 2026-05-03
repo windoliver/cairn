@@ -3,10 +3,21 @@
 --
 -- SQLite CHECK constraints are immutable, so we table-rebuild wal_ops:
 -- copy data into a new table with the widened CHECK, then swap names.
--- All triggers, indexes, and FKs (from wal_op_deps and wal_steps) are
--- recreated verbatim.
-
-PRAGMA foreign_keys = OFF;
+-- All triggers and indexes are recreated verbatim. FK references from
+-- wal_op_deps and wal_steps to wal_ops(operation_id) survive the rename
+-- because SQLite resolves FK targets by name at validation time.
+--
+-- Why these PRAGMAs:
+--   * defer_foreign_keys = ON  — the runner wraps each migration in a
+--     transaction; PRAGMA foreign_keys=OFF is a documented no-op inside
+--     a transaction, so we must defer FK validation to commit time
+--     instead. Live rows in wal_op_deps / wal_steps would otherwise
+--     reject the DROP TABLE wal_ops below. defer_foreign_keys auto-
+--     resets at transaction end, so no explicit OFF is needed.
+--   * legacy_alter_table = ON  — modern SQLite (3.26+) rewrites trigger
+--     bodies during ALTER TABLE … RENAME TO. wal_op_deps_must_be_acyclic
+--     references wal_ops in its WHEN clause, and the rewrite path can
+--     fail mid-rename. Disabling the rewrite is the documented escape.
 PRAGMA legacy_alter_table = ON;
 PRAGMA defer_foreign_keys = ON;
 
@@ -102,7 +113,6 @@ BEGIN
   SELECT RAISE(ABORT, 'wal_ops is append-only; DELETE not permitted');
 END;
 
-PRAGMA foreign_keys = ON;
 PRAGMA legacy_alter_table = OFF;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)

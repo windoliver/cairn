@@ -1,4 +1,8 @@
 //! Issue #186 — bitemporal knowledge-graph integration tests.
+//!
+//! This file is the seed for the entity-graph test suite. The first test
+//! is a migration regression test (0031 wal_ops table-rebuild); subsequent
+//! tasks (4–13) add entity-node, entity-edge, episode-link, and query tests.
 
 use cairn_store_sqlite::open_in_memory_sync;
 
@@ -55,5 +59,18 @@ fn migration_0031_widens_wal_ops_kind_and_preserves_existing_rows() {
     assert!(
         res.is_err(),
         "state-transition trigger must reject ISSUED -> COMMITTED",
+    );
+
+    // FK enforcement on wal_op_deps must still work after the rebuild.
+    // The runtime path re-asserts PRAGMA foreign_keys=ON on connection
+    // open, so this exercises the live-FK path users actually hit.
+    let fk_res = conn.execute(
+        "INSERT INTO wal_op_deps (operation_id, depends_on_op_id) \
+         VALUES ('does-not-exist', 'op-pre')",
+        [],
+    );
+    assert!(
+        fk_res.is_err(),
+        "wal_op_deps FK must still reject unknown operation_id after rebuild",
     );
 }
