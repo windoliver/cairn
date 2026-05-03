@@ -125,18 +125,30 @@ pub async fn run_handler(
         .context("capture_trace: vault degraded")?;
 
     let events = read_jsonl_events(from).await?;
-    for event in &events {
-        event
-            .validate()
-            .context("CaptureEvent envelope validation")?;
-    }
 
-    // Group by (session_id, turn_id). Events missing either ref are reported
-    // as failed and skipped — there is no turn to persist them into.
+    // Group by (session_id, turn_id). Events missing either ref, or
+    // failing structural validation, are reported as failed and skipped
+    // rather than aborting the whole import — per-turn isolation means
+    // one bad line should not block unrelated turns from being persisted.
     let mut groups: BTreeMap<(String, String), Vec<&CaptureEvent>> = BTreeMap::new();
     let mut failed_turns: Vec<(String, String, String)> = Vec::new();
 
     for event in &events {
+        // Structural envelope validation. Failures land in failed_turns
+        // keyed on whatever session/turn refs the event managed to carry.
+        if let Err(e) = event.validate() {
+            let (s, t) = event
+                .refs
+                .as_ref()
+                .map_or((String::new(), String::new()), |r| {
+                    (
+                        r.session_id.clone().unwrap_or_default(),
+                        r.turn_id.clone().unwrap_or_default(),
+                    )
+                });
+            failed_turns.push((s, t, format!("envelope validate: {e}")));
+            continue;
+        }
         let Some(refs) = event.refs.as_ref() else {
             failed_turns.push((String::new(), String::new(), "event missing refs".into()));
             continue;
