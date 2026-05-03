@@ -175,8 +175,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "pending_embeddings_enqueued_idx"),
     ("trigger", "records_vector_cleanup"),
     // 0032_entity_nodes (issue #186 §3.2: bitemporal knowledge-graph schema).
+    // The implicit unique index from UNIQUE(name_norm) is auto-named
+    // `sqlite_autoindex_*` and excluded by the `sqlite_%` filter below.
     ("table", "entity_nodes"),
-    ("index", "entity_nodes_name_norm_idx"),
     ("table", "entity_nodes_fts"),
     ("trigger", "entity_nodes_shrink_guard"),
     ("trigger", "entity_nodes_fts_ai"),

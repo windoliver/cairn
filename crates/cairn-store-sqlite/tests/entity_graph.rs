@@ -96,6 +96,75 @@ fn migration_0032_creates_entity_nodes_with_constraints() {
 }
 
 #[test]
+fn migration_0032_fts_round_trips_inserts_updates_deletes() {
+    let conn = open_in_memory_sync().expect("open");
+
+    // Insert with summary — both columns indexed.
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, summary, created_at) \
+         VALUES ('01HZE7JV5N0000000000000010', 'Carol', 'carol', 'algorithms expert', 1)",
+        [],
+    )
+    .expect("insert with summary");
+
+    // Insert with NULL summary — exercises COALESCE in the trigger.
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('01HZE7JV5N0000000000000011', 'Dave', 'dave', 1)",
+        [],
+    )
+    .expect("insert without summary");
+
+    let hits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entity_nodes_fts WHERE entity_nodes_fts MATCH 'algorithms'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("fts query");
+    assert_eq!(hits, 1, "FTS index must surface inserted summary text");
+
+    // Update changes the summary; old terms must drop, new terms must appear.
+    conn.execute(
+        "UPDATE entity_nodes SET summary = 'cryptography lead' \
+         WHERE id = '01HZE7JV5N0000000000000010'",
+        [],
+    )
+    .expect("update summary");
+    let stale: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entity_nodes_fts WHERE entity_nodes_fts MATCH 'algorithms'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("post-update query");
+    assert_eq!(stale, 0, "FTS sync trigger must drop old summary terms");
+    let fresh: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entity_nodes_fts WHERE entity_nodes_fts MATCH 'cryptography'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("post-update query");
+    assert_eq!(fresh, 1, "FTS sync trigger must surface new summary terms");
+
+    // Delete must purge from the FTS index.
+    conn.execute(
+        "DELETE FROM entity_nodes WHERE id = '01HZE7JV5N0000000000000010'",
+        [],
+    )
+    .expect("delete");
+    let after_delete: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entity_nodes_fts WHERE entity_nodes_fts MATCH 'cryptography'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("post-delete query");
+    assert_eq!(after_delete, 0, "FTS sync trigger must purge on delete");
+}
+
+#[test]
 fn migration_0032_shrink_guard_rejects_silent_expiry() {
     let conn = open_in_memory_sync().expect("open");
     conn.execute(

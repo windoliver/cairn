@@ -12,7 +12,9 @@ CREATE TABLE entity_nodes (
     embedding_id    TEXT
 );
 
-CREATE INDEX entity_nodes_name_norm_idx ON entity_nodes(name_norm);
+-- UNIQUE(name_norm) on the column above already creates an implicit
+-- unique index; an explicit secondary index would be dead weight on
+-- writes and never preferred by the planner over the unique one.
 
 CREATE VIRTUAL TABLE entity_nodes_fts USING fts5(
     name, summary,
