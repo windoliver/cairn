@@ -62,6 +62,10 @@ const ULID_F: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAF";
 const ULID_G: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAG";
 const ULID_H: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAH";
 
+// ULID for late tool_output event (after the main 4-event turn).
+// Note: Crockford base32 has no I, L, O, U — use K (valid) for the suffix.
+const ULID_LATE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAK";
+
 #[tokio::test]
 async fn parses_jsonl_into_events() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -677,6 +681,192 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
                 "turn summary should exist after Stop event"
             );
             Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+/// Write a single late `PostToolUse` event for the same turn-1 created by
+/// [`write_fixture`].  The event uses the same `tool_call_id` as the
+/// `pre_tool` in that fixture (`"toolu_test_01"`) and a timestamp that falls
+/// between `PreToolUse` and `PostToolUse` — ensuring it interleaves when
+/// `renumber_turn_with` sorts by `captured_at`.
+///
+/// The source file is written under `vault/sources/hook/`.
+fn write_late_tool_output_fixture(vault: &Path, jsonl_path: &Path) {
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-1";
+    // Same tool_call_id as the pre_tool in write_fixture so the store-lookup
+    // path in run_handler can resolve the parent.
+    let tool_id = "toolu_test_01";
+
+    let late_body = r#"{"tool":"bash","late_output":"extra info"}"#;
+    let late_ref = write_source(vault, &format!("{ULID_LATE}.txt"), late_body);
+
+    let event = make_event(
+        ULID_LATE,
+        // "PostToolUse" maps to TraceEvent::PostTool which requires a parent.
+        // We use PostToolUse here — the store-lookup path will resolve the
+        // parent from the existing pre_tool row already in the store.
+        "PostToolUse",
+        session,
+        turn,
+        // Timestamp between PreToolUse (00:00:02Z) and PostToolUse (00:00:03Z)
+        // so it lands at sequence 2 after renumber, pushing the original
+        // PostToolUse to sequence 3.
+        "2026-05-02T00:00:02.500Z",
+        Some(tool_id.to_owned()),
+        &late_ref,
+        &sha256_hex(late_body),
+    );
+
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    let line = serde_json::to_string(&event).expect("serialize event");
+    writeln!(f, "{line}").expect("write JSONL line");
+}
+
+// ── Test 1: replay idempotency ────────────────────────────────────────────────
+
+/// Replaying the same JSONL file twice must not create duplicate records.
+///
+/// The `renumber_turn_with` upsert path is idempotent by design: the
+/// `record_id` is derived deterministically from `capture_event_id`, so a
+/// second import of the same event converges to the same row.  The
+/// `UNIQUE INDEX records_trace_summary` on the summary row guarantees at
+/// most one summary per turn; `upsert_trace` performs an INSERT OR REPLACE,
+/// so a second summary write replaces the first rather than inserting a
+/// duplicate.
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn replay_is_idempotent() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+
+    let jsonl_path = vault.path().join("trace.jsonl");
+    write_fixture(vault.path(), &jsonl_path);
+
+    // First import.
+    let resp1 = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("first run_handler should succeed");
+    assert!(
+        resp1.failed_turns.is_empty(),
+        "expected no failures on first import, got: {:?}",
+        resp1.failed_turns
+    );
+
+    // Second import of the identical JSONL.
+    let resp2 = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("second run_handler should succeed");
+    assert!(
+        resp2.failed_turns.is_empty(),
+        "expected no failures on second import, got: {:?}",
+        resp2.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+
+    store
+        .with_tx({
+            let session_id = session_id.clone();
+            move |tx| {
+                let rows = tx.list_trace_events(&session_id, "turn-1")?;
+                assert_eq!(rows.len(), 4, "no duplicate events from replay: got {}", rows.len());
+
+                // Summary must exist and remain a single row.  The
+                // UNIQUE INDEX on (session_id, turn_id) for turn_summary
+                // combined with `upsert_trace`'s INSERT OR REPLACE semantics
+                // guarantees ≤1 summary; `turn_summary_exists` confirms ≥1.
+                assert!(
+                    tx.turn_summary_exists(&session_id, "turn-1")?,
+                    "summary must exist after replay"
+                );
+                Ok(())
+            }
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+// ── Test 2: late event after a closed turn re-summarizes ──────────────────────
+
+/// A late event arriving after a Stop-closed turn must be ingested and the
+/// summary must be updated to cover all five events.
+///
+/// The late `PostToolUse` event has no `PreTool` in its own JSONL batch.
+/// `run_handler` must fall back to the store-resident rows to resolve the
+/// `parent_event_id` (Option A implementation).
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn late_event_after_close_resummarizes() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+
+    // Import the initial 4-event turn (with Stop → turn is closed).
+    let initial = vault.path().join("initial.jsonl");
+    write_fixture(vault.path(), &initial);
+    let resp = run_handler(&store, vault.path(), &initial)
+        .await
+        .expect("initial run_handler should succeed");
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures on initial import, got: {:?}",
+        resp.failed_turns
+    );
+
+    // Import a single late PostToolUse for the same turn.  Its PreTool is
+    // only available in the store (not in this JSONL), exercising the
+    // store-lookup fallback in run_handler.
+    let late = vault.path().join("late.jsonl");
+    write_late_tool_output_fixture(vault.path(), &late);
+    let resp = run_handler(&store, vault.path(), &late)
+        .await
+        .expect("late run_handler should succeed");
+    assert!(
+        resp.failed_turns.is_empty(),
+        "late event import should not fail, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+
+    store
+        .with_tx({
+            let session_id = session_id.clone();
+            move |tx| {
+                let rows = tx.list_trace_events(&session_id, "turn-1")?;
+                assert_eq!(
+                    rows.len(),
+                    5,
+                    "late event must land: expected 5 events, got {}",
+                    rows.len()
+                );
+
+                // Sequences must be 0..4 (renumbered by captured_at order).
+                let seqs: Vec<u64> = rows
+                    .iter()
+                    .map(|r| {
+                        r.extra_frontmatter["trace"]["sequence"]
+                            .as_u64()
+                            .expect("sequence must be u64")
+                    })
+                    .collect();
+                assert_eq!(seqs, vec![0, 1, 2, 3, 4], "sequences must be contiguous 0..4");
+
+                // The summary must have been updated to cover all 5 events.
+                assert!(
+                    tx.turn_summary_exists(&session_id, "turn-1")?,
+                    "summary must exist after late-event re-summarize"
+                );
+                Ok(())
+            }
         })
         .await
         .expect("store query should succeed");

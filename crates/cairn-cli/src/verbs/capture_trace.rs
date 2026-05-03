@@ -180,6 +180,11 @@ pub async fn run_handler(
         // so post_tool events can resolve their parent_event_id.
         let mut last_pre_tool: BTreeMap<String, CaptureEventId> = BTreeMap::new();
 
+        // Indices into `projected` whose parent_event_id must be resolved
+        // from the store (i.e., the PreTool arrived in a prior batch).
+        // Tuple: (projected_index, tool_call_id).
+        let mut needs_parent_from_store: Vec<(usize, String)> = Vec::new();
+
         for event in &group {
             // Classify the event.
             let classified = match classify(event) {
@@ -220,28 +225,30 @@ pub async fn run_handler(
             // Resolve tool_call_id and parent_event_id.
             let tool_call_id: Option<String> = refs.tool_id.clone();
 
-            // Derive parent_event_id for PostTool/ToolOutput from the
-            // most-recently-seen PreTool with the same tool_call_id.
-            let parent_event_id: Option<CaptureEventId> =
+            // Derive parent_event_id for PostTool/ToolOutput.
+            //
+            // Primary: most-recently-seen PreTool with matching tool_call_id
+            // *in this batch* (fast path, no store round-trip).
+            //
+            // Fallback: if no in-batch PreTool is found, the PreTool may
+            // have arrived in a previous batch.  We project the record with
+            // a placeholder parent (the event's own id) and record it in
+            // `needs_parent_from_store`; the real parent is resolved inside
+            // the transaction after existing rows are loaded.
+            let (parent_event_id, needs_store_lookup) =
                 if matches!(classified, TraceEvent::PostTool | TraceEvent::ToolOutput) {
                     let key = tool_call_id.clone().unwrap_or_default();
-                    let Some(id) = last_pre_tool.get(&key).cloned() else {
-                        failed_turns.push((
-                            session_str.clone(),
-                            turn_str.clone(),
-                            format!(
-                                "PostTool/ToolOutput event {} has no preceding PreTool \
-                                 for tool_call_id={:?}",
-                                event.event_id.as_str(),
-                                tool_call_id,
-                            ),
-                        ));
-                        group_failed = true;
-                        break;
-                    };
-                    Some(id)
+                    if let Some(id) = last_pre_tool.get(&key).cloned() {
+                        (Some(id), false)
+                    } else {
+                        // Use own event id as placeholder so `TraceLink::validate`
+                        // passes (it only requires parent_event_id is Some for
+                        // PostTool/ToolOutput, not that it points at a distinct id).
+                        // The real parent is patched inside `with_tx`.
+                        (Some(event.event_id.clone()), true)
+                    }
                 } else {
-                    None
+                    (None, false)
                 };
 
             let link = TraceLink {
@@ -273,6 +280,11 @@ pub async fn run_handler(
                     break;
                 }
             };
+
+            if needs_store_lookup {
+                let key = tool_call_id.clone().unwrap_or_default();
+                needs_parent_from_store.push((projected.len(), key));
+            }
             projected.push(record);
 
             // Register this PreTool so later PostTool/ToolOutput events can
@@ -292,6 +304,68 @@ pub async fn run_handler(
         let turn_str_tx = turn_str.clone();
         let result = store
             .with_tx(move |tx| {
+                // Resolve any parent_event_ids that could not be satisfied
+                // by the in-batch `last_pre_tool` map.  These are
+                // PostTool/ToolOutput events whose PreTool arrived in a
+                // prior batch.  We query the existing rows for the turn,
+                // locate the pre_tool row with the matching tool_call_id,
+                // and patch `extra_frontmatter.trace.parent_event_id` on
+                // the projected record before `renumber_turn_with` sees it.
+                if !needs_parent_from_store.is_empty() {
+                    let existing = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
+                    // Build: tool_call_id -> capture_event_id for pre_tool rows.
+                    let pre_tool_by_tcid: BTreeMap<String, String> = existing
+                        .iter()
+                        .filter_map(|r| {
+                            let evt = r
+                                .extra_frontmatter
+                                .get("trace_event")
+                                .and_then(|v| v.as_str())?;
+                            if evt != "pre_tool" {
+                                return None;
+                            }
+                            let trace = r
+                                .extra_frontmatter
+                                .get("trace")
+                                .and_then(|v| v.as_object())?;
+                            let tcid = trace
+                                .get("tool_call_id")
+                                .and_then(|v| v.as_str())?
+                                .to_owned();
+                            let ceid = trace
+                                .get("capture_event_id")
+                                .and_then(|v| v.as_str())?
+                                .to_owned();
+                            Some((tcid, ceid))
+                        })
+                        .collect();
+
+                    for (idx, tool_call_id) in &needs_parent_from_store {
+                        let Some(parent_ceid) = pre_tool_by_tcid.get(tool_call_id) else {
+                            return Err(
+                                cairn_store_sqlite::error::StoreError::Invariant {
+                                    what: format!(
+                                        "PostTool/ToolOutput at projected[{idx}] has no \
+                                         PreTool (in-batch or store) for \
+                                         tool_call_id={tool_call_id:?}"
+                                    ),
+                                },
+                            );
+                        };
+                        // Patch `extra_frontmatter.trace.parent_event_id`.
+                        if let Some(trace_obj) = projected[*idx]
+                            .extra_frontmatter
+                            .get_mut("trace")
+                            .and_then(|v| v.as_object_mut())
+                        {
+                            trace_obj.insert(
+                                "parent_event_id".into(),
+                                serde_json::Value::String(parent_ceid.clone()),
+                            );
+                        }
+                    }
+                }
+
                 tx.renumber_turn_with(&session_id_tx, &turn_str_tx, &projected)?;
                 tx.validate_turn_links(&session_id_tx, &turn_str_tx)?;
 

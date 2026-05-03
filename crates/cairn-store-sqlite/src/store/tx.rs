@@ -352,6 +352,50 @@ impl StoreTx<'_> {
     ///   happen under the documented projector contract).
     /// - Any other [`StoreError`] from the underlying upsert path.
     pub fn upsert_trace(&mut self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+        // `turn_summary` records use a deterministic `record_id` derived from
+        // `(session_id, turn_id)`.  The `records_trace_summary` UNIQUE index
+        // covers all rows (active *and* inactive) whose `trace_event` is
+        // `'turn_summary'`, so the standard `upsert_in_tx` flow
+        // (deactivate-old + insert-new) would leave an inactive summary row
+        // in the index and cause a UNIQUE constraint violation on the next
+        // re-summarize.  We avoid this by doing an in-place JSON UPDATE on
+        // the existing active summary row instead of the deactivate+insert
+        // pattern.
+        let is_summary = record
+            .extra_frontmatter
+            .get("trace_event")
+            .and_then(|v| v.as_str())
+            == Some("turn_summary");
+
+        if is_summary {
+            let new_json = serde_json::to_string(record).map_err(|e| {
+                StoreError::Invariant {
+                    what: format!("serialize summary record: {e}"),
+                }
+            })?;
+            let target_id = record.target_id.as_str();
+            let n = self.tx.execute(
+                "UPDATE records SET record_json = ?1 \
+                  WHERE target_id = ?2 AND active = 1",
+                rusqlite::params![new_json, target_id],
+            )?;
+            if n == 0 {
+                // No existing row: fall through to standard insert.
+                return match upsert_in_tx(&mut self.tx, record) {
+                    Ok(out) => Ok(out),
+                    Err(other) => Err(other),
+                };
+            }
+            // Updated in place: return an outcome consistent with UpsertOutcome.
+            return Ok(UpsertOutcome {
+                record_id: record.id.clone(),
+                target_id: record.target_id.clone(),
+                version: 1, // version is not bumped on in-place updates
+                content_changed: true,
+                prior_hash: None,
+            });
+        }
+
         match upsert_in_tx(&mut self.tx, record) {
             Ok(out) => Ok(out),
             // `records_trace_seq` index columns: trace_session_id,
@@ -436,14 +480,28 @@ impl StoreTx<'_> {
         // Existing rows are updated in-place (same direct SQL UPDATE pattern).
         // Incoming rows are brand-new records — `upsert_in_tx` inserts them
         // directly with the final sequence.
+        //
+        // Deduplication: if an incoming record carries the same `record_id`
+        // as an existing row (i.e., a replay of an already-persisted event),
+        // it is excluded from `all`.  The existing row already covers it and
+        // will be updated to its final sequence in the loop below.  Including
+        // the duplicate would inflate the total count, assign wrong sequences
+        // (0..2N instead of 0..N), and hit the UNIQUE index on
+        // `(session_id, turn_id, sequence)` on the second write to the same
+        // record_id.
+        let existing_ids: std::collections::HashSet<&str> =
+            existing.iter().map(|r| r.id.as_str()).collect();
+
         let mut all: Vec<MemoryRecord> =
             Vec::with_capacity(existing.len() + incoming.len());
         all.extend(existing.iter().cloned());
-        all.extend(incoming.iter().cloned());
+        all.extend(
+            incoming
+                .iter()
+                .filter(|r| !existing_ids.contains(r.id.as_str()))
+                .cloned(),
+        );
         all.sort_by(compare_by_captured_at_and_event_id);
-
-        let existing_ids: std::collections::HashSet<&str> =
-            existing.iter().map(|r| r.id.as_str()).collect();
 
         for (i, row) in all.iter().enumerate() {
             let final_seq = i64::try_from(i).unwrap_or(i64::MAX);
