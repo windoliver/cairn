@@ -80,7 +80,8 @@ pub fn load(vault_path: &Path, cli: &CliOverrides) -> Result<CairnConfig> {
         merge_json(&mut merged, vault_config);
     }
 
-    let explicit_llm_intent = has_llm_provider(&merged) || explicit_llm_env_present();
+    let explicit_llm_intent =
+        has_llm_provider(&merged) || has_llm_base_url(&merged) || explicit_llm_env_present();
     merge_json(&mut merged, llm_env_overlay(explicit_llm_intent));
     merge_json(&mut merged, cairn_nested_env_overlay());
     merge_json(
@@ -188,6 +189,12 @@ fn explicit_llm_env_present() -> bool {
 fn has_llm_provider(config: &Value) -> bool {
     config
         .pointer("/llm/provider")
+        .is_some_and(|value| !value.is_null())
+}
+
+fn has_llm_base_url(config: &Value) -> bool {
+    config
+        .pointer("/llm/base_url")
         .is_some_and(|value| !value.is_null())
 }
 

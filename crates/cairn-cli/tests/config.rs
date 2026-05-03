@@ -188,6 +188,39 @@ fn openai_api_key_alone_does_not_configure_llm() {
 }
 
 #[test]
+fn openai_api_key_is_loaded_when_yaml_declares_llm_intent() {
+    with_clean_config_env(&[("OPENAI_API_KEY", Some("ambient-key"))], || {
+        let dir = tempfile::tempdir().unwrap();
+        write_yaml(
+            dir.path(),
+            "llm:\n  provider: openai-compatible\n  base_url: http://gateway.local/v1\n",
+        );
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config.llm.provider, Some(LlmProvider::OpenaiCompatible));
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("http://gateway.local/v1")
+        );
+        assert_eq!(config.llm.api_key.as_deref(), Some("ambient-key"));
+    });
+}
+
+#[test]
+fn openai_api_key_is_loaded_when_yaml_declares_base_url_intent() {
+    with_clean_config_env(&[("OPENAI_API_KEY", Some("ambient-key"))], || {
+        let dir = tempfile::tempdir().unwrap();
+        write_yaml(dir.path(), "llm:\n  base_url: http://gateway.local/v1\n");
+        let config = load(dir.path(), &CliOverrides::default()).unwrap();
+        assert_eq!(config.llm.provider, None);
+        assert_eq!(
+            config.llm.base_url.as_deref(),
+            Some("http://gateway.local/v1")
+        );
+        assert_eq!(config.llm.api_key.as_deref(), Some("ambient-key"));
+    });
+}
+
+#[test]
 fn openai_api_base_legacy_alias_configures_llm() {
     with_clean_config_env(
         &[

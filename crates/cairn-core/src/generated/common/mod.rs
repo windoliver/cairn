@@ -290,7 +290,11 @@ impl<'de> ::serde::Deserialize<'de> for Ulid {
     where D: ::serde::Deserializer<'de> {
         let s = <String as ::serde::Deserialize>::deserialize(deserializer)?;
         if s.len() != 26 { return Err(::serde::de::Error::custom("ULID: must be 26 chars")); }
-        if !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {
+        let bytes = s.as_bytes();
+        if !matches!(bytes[0], b'0'..=b'7') {
+            return Err(::serde::de::Error::custom("ULID: first char must be 0..=7 to fit 128-bit ULID"));
+        }
+        if !bytes[1..].iter().all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'H' | b'J' | b'K' | b'M' | b'N' | b'P'..=b'T' | b'V'..=b'Z')) {
             return Err(::serde::de::Error::custom("ULID: must be Crockford base32 (uppercase, no I/L/O/U)"));
         }
         Ok(Ulid(s))
