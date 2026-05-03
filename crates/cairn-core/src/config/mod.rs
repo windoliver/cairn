@@ -707,6 +707,9 @@ pub struct CapabilitySet {
     pub agent_extract: bool,
     /// False for `sqlite` (P0). P1+ stores may advertise this.
     pub graph_edges: bool,
+    /// True iff `cairn.mcp.v1.policy_trace` capability is advertised.
+    /// Gates `--explain` on search and other Tier-2 inspection paths.
+    pub policy_trace: bool,
 }
 
 impl CairnConfig {
@@ -822,6 +825,10 @@ impl CairnConfig {
             llm_extract: llm_on,
             agent_extract,
             graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
+            // P0 always advertises policy_trace; a future config knob
+            // (`search.disable_explain: true`) can opt out for environments
+            // that prohibit trace-level output.
+            policy_trace: true,
         }
     }
 
@@ -1106,6 +1113,7 @@ mod tests {
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(!caps.graph_edges, "sqlite → no graph edges");
+        assert!(caps.policy_trace, "policy_trace always true at P0");
     }
 
     #[test]
