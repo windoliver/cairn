@@ -66,5 +66,5 @@ pub use session::{
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
-pub use trace::TraceEvent;
+pub use trace::{TraceEvent, TraceLink, TraceLinkError};
 pub use timestamp::Rfc3339Timestamp;

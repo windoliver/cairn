@@ -184,6 +184,18 @@ impl<'a> ResolvedBody<'a> {
     }
 }
 
+/// Construct a `ResolvedBody` for **unit tests only**, bypassing the
+/// payload-variant checks. This is `pub(crate)` so `pipeline::capture_trace`
+/// tests can build a body for non-user-utterance hooks (e.g. `PreTool`)
+/// without duplicating its fields into a `CapturePayload::Hook`.
+#[cfg(test)]
+pub(crate) fn for_test(text: &str) -> ResolvedBody<'_> {
+    ResolvedBody {
+        text,
+        source: BodySource::HookUtterance,
+    }
+}
+
 /// Hook names whose payload body canonically carries direct user
 /// utterance text. Adding a new entry is a trust-boundary change —
 /// the hook must be one whose payload contains text the user actually
