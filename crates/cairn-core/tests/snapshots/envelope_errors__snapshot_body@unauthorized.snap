@@ -1,0 +1,11 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "Unauthorized",
+  "message": "unauthorized: issuer mismatch",
+  "data": {
+    "required": "issuer mismatch"
+  }
+}

@@ -1,0 +1,12 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "RevokedKey",
+  "message": "key version mismatch for hmn:tafeng: intent=1, registry has None",
+  "data": {
+    "issuer": "hmn:tafeng",
+    "key_version": 1
+  }
+}

@@ -1,0 +1,11 @@
+---
+source: crates/cairn-core/tests/envelope_errors.rs
+expression: body
+---
+{
+  "code": "Unauthorized",
+  "message": "scope denied: tenant: expected acme, got other",
+  "data": {
+    "required": "tenant: expected acme, got other"
+  }
+}
