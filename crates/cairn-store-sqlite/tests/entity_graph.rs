@@ -387,3 +387,54 @@ fn wal_helper_writes_op_and_steps_in_one_tx() {
         .expect("query");
     assert_eq!(step_state, "DONE");
 }
+
+#[tokio::test]
+async fn upsert_entity_inserts_new_returns_supplied_id() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EntityId, EntityNode};
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let node = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000010"),
+        name: "Alice".into(),
+        name_norm: "alice".into(),
+        summary: Some("eng".into()),
+        created_at: 1,
+        embedding_id: None,
+    };
+    let id = store.upsert_entity(&node).await.expect("upsert");
+    assert_eq!(id, node.id, "fresh insert returns the supplied id");
+}
+
+#[tokio::test]
+async fn upsert_entity_dedup_returns_existing_id() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EntityId, EntityNode};
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let first = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000020"),
+        name: "Alice".into(),
+        name_norm: "alice".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let id_a = store.upsert_entity(&first).await.expect("first");
+
+    let dup = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000021"),
+        name: "ALICE".into(),
+        name_norm: "alice".into(),
+        summary: Some("changed".into()),
+        created_at: 2,
+        embedding_id: None,
+    };
+    let id_b = store.upsert_entity(&dup).await.expect("dup");
+
+    assert_eq!(id_a, id_b, "duplicate name_norm collapses to existing id");
+    assert_eq!(
+        id_b, first.id,
+        "the existing id is preferred over the new one"
+    );
+}

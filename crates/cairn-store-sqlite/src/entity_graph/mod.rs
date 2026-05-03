@@ -5,3 +5,5 @@
 //! in [`wal`]. Spec: `docs/superpowers/specs/2026-05-02-issue-186-bitemporal-kg-schema-design.md`.
 
 pub mod wal;
+
+mod node;
