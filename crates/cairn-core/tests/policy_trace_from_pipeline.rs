@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use cairn_core::pipeline::filter::{
-    Decision, DiscardReason, FenceMark, FencedPayload, RedactedPayload, RedactionSpan, RedactionTag,
+    Decision, DiscardReason, FenceMark, FenceMarkKind, FencedPayload, RedactedPayload,
+    RedactionSpan, RedactionTag,
 };
 use cairn_core::policy_trace::{PolicyDetail, PolicyGate, PolicyOutcome, PolicyTraceEntry};
 
@@ -76,7 +77,11 @@ fn fenced_always_pass() {
     // Fencing is non-blocking by design — it wraps, never rejects.
     let payload = FencedPayload {
         text: String::from("[FENCE]x[/FENCE]"),
-        marks: vec![FenceMark { start: 0, end: 16 }],
+        marks: vec![FenceMark {
+            start: 0,
+            end: 16,
+            kind: FenceMarkKind::Insertion,
+        }],
     };
     let e: PolicyTraceEntry = (&payload).into();
     assert_eq!(e.gate, PolicyGate::PromptInjectionFence);

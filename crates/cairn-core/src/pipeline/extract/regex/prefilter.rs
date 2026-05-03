@@ -45,10 +45,22 @@ impl TriggerPrefilter {
     /// body. Capped at `MAX_PHRASE_WINDOWS` hits.
     #[must_use]
     pub fn scan(&self, body: &str) -> PrefilterScan {
+        self.scan_within(body, &[])
+    }
+
+    /// Like [`Self::scan`], but only counts hits whose start offset falls
+    /// inside one of `eligible_spans` toward the `MAX_PHRASE_WINDOWS` cap.
+    /// Hits outside the authorised ranges are skipped before the cap is
+    /// consulted, so a long disallowed prefix with many trigger words can
+    /// never starve later authorised hits. When `eligible_spans` is empty,
+    /// behaves identically to the unrestricted scan (full-body).
+    #[must_use]
+    pub fn scan_within(&self, body: &str, eligible_spans: &[TextSpan]) -> PrefilterScan {
         let quote_spans = collect_quote_spans(body);
         let mut hits: Vec<TextSpan> = Vec::new();
         let mut first_omitted: Option<u32> = None;
         let bytes = body.as_bytes();
+        let restricted = !eligible_spans.is_empty();
         for m in self.ac.find_iter(body) {
             let start = m.start();
             let end = m.end();
@@ -60,6 +72,15 @@ impl TriggerPrefilter {
             }
             if !is_sentence_start(bytes, start) {
                 continue;
+            }
+            if restricted {
+                let start_u32 = u32::try_from(start).unwrap_or(u32::MAX);
+                let inside = eligible_spans
+                    .iter()
+                    .any(|sp| sp.start <= start_u32 && start_u32 < sp.end);
+                if !inside {
+                    continue;
+                }
             }
             if hits.len() >= super::super::MAX_PHRASE_WINDOWS {
                 first_omitted = Some(u32::try_from(start).unwrap_or(u32::MAX));
