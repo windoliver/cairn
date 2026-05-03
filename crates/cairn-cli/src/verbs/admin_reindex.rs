@@ -65,16 +65,20 @@ pub fn run(sub: &ArgMatches, vault_root: &Path, config: &CairnConfig) -> ExitCod
         );
     }
 
-    // Probe model presence.
+    // Probe model presence. Skipped when CAIRN_MOCK_EMBEDDER=1 (test-only
+    // escape hatch that uses MockEmbedder in place of on-disk model weights).
     let models_root = vault_root.join(".cairn").join("models");
     let kind = config.search.embedding_model;
-    let cache = cairn_embeddings_local::ModelCache::new(&models_root);
-    if !cache.is_present(kind) {
-        let msg = format!(
-            "embedding model '{}' not on disk — run `cairn admin model fetch` first",
-            kind.as_str()
-        );
-        return bail(json, "admin reindex", "CapabilityUnavailable", &msg, 69);
+    let mock_embedder = std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1");
+    if !mock_embedder {
+        let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+        if !cache.is_present(kind) {
+            let msg = format!(
+                "embedding model '{}' not on disk — run `cairn admin model fetch` first",
+                kind.as_str()
+            );
+            return bail(json, "admin reindex", "CapabilityUnavailable", &msg, 69);
+        }
     }
 
     let db_path = vault_root.join(".cairn").join("cairn.db");
@@ -111,19 +115,24 @@ async fn run_reindex_async(
 ) -> ExitCode {
     use anyhow::Context as _;
 
-    // Load embedder (CPU-bound).
-    let cache = cairn_embeddings_local::ModelCache::new(models_root);
-    let embedder = match tokio::task::spawn_blocking(move || cache.ensure(kind))
-        .await
-        .context("join error")
-        .and_then(|r| r.context("model load failed"))
-    {
-        Ok(e) => e,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            return bail(json, "admin reindex", "Internal", &msg, 1);
-        }
-    };
+    // Load embedder (CPU-bound). CAIRN_MOCK_EMBEDDER=1 bypasses disk load for tests.
+    let embedder: Arc<dyn cairn_embeddings_local::EmbeddingModel> =
+        if std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1") {
+            Arc::new(cairn_embeddings_local::MockEmbedder::new(kind))
+        } else {
+            let cache = cairn_embeddings_local::ModelCache::new(models_root);
+            match tokio::task::spawn_blocking(move || cache.ensure(kind))
+                .await
+                .context("join error")
+                .and_then(|r| r.context("model load failed"))
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    return bail(json, "admin reindex", "Internal", &msg, 1);
+                }
+            }
+        };
 
     // Open store with embedder (background drain loop included).
     let store =
@@ -233,18 +242,23 @@ async fn run_rebuild_from_db_async(
 ) -> ExitCode {
     use anyhow::Context as _;
 
-    // Load embedder (CPU-bound).
-    let cache = cairn_embeddings_local::ModelCache::new(models_root);
-    let embedder = match tokio::task::spawn_blocking(move || cache.ensure(kind))
-        .await
-        .context("join error")
-        .and_then(|r| r.context("model load failed"))
-    {
-        Ok(e) => e,
-        Err(e) => {
-            return bail(json, "admin reindex", "Internal", &format!("{e:#}"), 1);
-        }
-    };
+    // Load embedder (CPU-bound). CAIRN_MOCK_EMBEDDER=1 bypasses disk load for tests.
+    let embedder: Arc<dyn cairn_embeddings_local::EmbeddingModel> =
+        if std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1") {
+            Arc::new(cairn_embeddings_local::MockEmbedder::new(kind))
+        } else {
+            let cache = cairn_embeddings_local::ModelCache::new(models_root);
+            match tokio::task::spawn_blocking(move || cache.ensure(kind))
+                .await
+                .context("join error")
+                .and_then(|r| r.context("model load failed"))
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    return bail(json, "admin reindex", "Internal", &format!("{e:#}"), 1);
+                }
+            }
+        };
 
     // Open store with embedder.
     let store =

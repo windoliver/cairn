@@ -1,0 +1,7 @@
+---
+source: crates/cairn-cli/tests/search_modes_golden.rs
+expression: stdout
+---
+{
+  "hits": []
+}

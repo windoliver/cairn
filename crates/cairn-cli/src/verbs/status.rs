@@ -110,6 +110,12 @@ fn compute_capabilities(
     if cap_set.hybrid_search {
         out.push(Capabilities::CairnMcpV1SearchHybrid);
     }
+    // policy_trace is always true at P0 (config always sets it; a future
+    // config knob could opt out). Advertise it so `--explain` is not
+    // rejected by the capability gate when a vault config is loaded.
+    if cap_set.policy_trace {
+        out.push(Capabilities::CairnMcpV1PolicyTrace);
+    }
     out
 }
 
@@ -117,20 +123,27 @@ fn compute_capabilities(
 /// Used by capability-gated args (e.g. `search --explain`) to fail closed
 /// before verb dispatch when the required capability is not advertised
 /// (CLAUDE.md §4.6).
+///
+/// Uses the P0 default config for the capability check. This includes
+/// `cairn.mcp.v1.policy_trace`, which is always `true` at P0 (the config
+/// unconditionally sets `policy_trace: true` — see `CairnConfig::capabilities`
+/// and its tests). Semantic/hybrid search require a model on disk and are
+/// therefore absent when probed without a vault root.
 #[must_use]
 pub fn p0_capabilities_advertises(capability: &str) -> bool {
-    // Compute against the empty-context fast path: no vault, no config →
-    // matches the conservative status response that the legacy `p0_*`
-    // helper used to return. Verb-time gates fail closed when the
-    // requested capability is absent, even if the runtime *would*
-    // advertise it under a fully-configured open.
-    compute_capabilities(None, None).iter().any(|c| {
-        serde_json::to_value(c)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_owned))
-            .as_deref()
-            == Some(capability)
-    })
+    // Use the default config (no vault root → model not present). This
+    // conservatively excludes semantic/hybrid search while including
+    // policy_trace which the P0 config always enables.
+    let default_config = CairnConfig::default();
+    compute_capabilities(None, Some(&default_config))
+        .iter()
+        .any(|c| {
+            serde_json::to_value(c)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .as_deref()
+                == Some(capability)
+        })
 }
 
 /// Return the current UTC time as an RFC-3339 string without sub-second precision.

@@ -215,54 +215,59 @@ fn search_accepts_explain_flag() {
 }
 
 #[test]
-fn search_explain_fails_closed_with_capability_unavailable() {
-    // P0 does not advertise cairn.mcp.v1.policy_trace, so `--explain`
-    // must fail-closed with EX_UNAVAILABLE (69) and a
-    // CapabilityUnavailable error envelope before any verb dispatch.
-    // Mirrors the SDK fail-closed path; together they enforce the
-    // x-cairn-capability-when-true annotation in search.json
-    // (PR #237 round 4).
+fn search_explain_is_gated_by_policy_trace_capability() {
+    // P0 always advertises cairn.mcp.v1.policy_trace (CairnConfig::capabilities
+    // unconditionally sets policy_trace = true; see config tests). Therefore
+    // `--explain` must NOT be rejected with CapabilityUnavailable — the gate
+    // passes and the request proceeds to verb dispatch.
+    // Without a live vault, the search opens an empty store and returns 0 results
+    // (exit 0); stderr must not mention CapabilityUnavailable.
     let out = cli()
         .args(["search", "--explain", "test"])
         .output()
         .expect("cairn");
-    assert_eq!(
-        out.status.code(),
-        Some(69),
-        "search --explain without policy_trace must exit 69 (EX_UNAVAILABLE); got status {:?}, stderr {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr)
-    );
     let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
     assert!(
-        stderr.contains("CapabilityUnavailable"),
-        "stderr must surface CapabilityUnavailable: {stderr:?}",
+        !stderr.contains("CapabilityUnavailable"),
+        "search --explain must not be rejected with CapabilityUnavailable \
+         because policy_trace is always advertised at P0; got: {stderr:?}",
     );
-    assert!(
-        stderr.contains("cairn.mcp.v1.policy_trace"),
-        "stderr must name the missing capability: {stderr:?}",
+    // Exit 0 (success, 0 results) or 1 (Internal store error); never 69.
+    assert_ne!(
+        out.status.code(),
+        Some(69),
+        "exit 69 (EX_UNAVAILABLE) must not occur when policy_trace is advertised; \
+         got status {:?}, stderr {stderr}",
+        out.status,
     );
 }
 
 #[test]
-fn search_explain_json_emits_capability_unavailable_envelope() {
-    // The JSON form of the same fail-closed path: error.code is
-    // CapabilityUnavailable and error.data.capability is
-    // cairn.mcp.v1.policy_trace.
+fn search_explain_json_does_not_emit_capability_unavailable() {
+    // P0 always advertises policy_trace, so `--explain --json` must NOT
+    // emit a CapabilityUnavailable error envelope. The exit code is 0
+    // (success, 0 results) or 1 (Internal if the temp store can't open) —
+    // never 69 (EX_UNAVAILABLE).
     let out = cli()
         .args(["search", "--explain", "test", "--json"])
         .output()
         .expect("cairn");
-    assert_eq!(out.status.code(), Some(69));
-    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("not valid JSON: {e}\nstdout: {stdout:?}"));
-    assert_eq!(v["status"].as_str(), Some("aborted"));
-    assert_eq!(v["error"]["code"].as_str(), Some("CapabilityUnavailable"));
-    assert_eq!(
-        v["error"]["data"]["capability"].as_str(),
-        Some("cairn.mcp.v1.policy_trace")
+    assert_ne!(
+        out.status.code(),
+        Some(69),
+        "exit 69 must not occur since policy_trace is always advertised at P0"
     );
+    // Verify the stdout (if any) is valid JSON and not a CapabilityUnavailable envelope.
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    if !stdout.trim().is_empty() {
+        let v: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("not valid JSON: {e}\nstdout: {stdout:?}"));
+        assert_ne!(
+            v["error"]["code"].as_str(),
+            Some("CapabilityUnavailable"),
+            "must not emit CapabilityUnavailable since policy_trace is advertised"
+        );
+    }
 }
 
 #[test]

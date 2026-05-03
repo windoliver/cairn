@@ -159,10 +159,15 @@ async fn run_async(sub: &ArgMatches, json: bool, explain: bool, mode: SearchMode
     };
 
     // Probe model presence (pure stat, no I/O).
+    // CAIRN_MOCK_EMBEDDER=1 is a test-only escape hatch: treat the model as
+    // present so semantic/hybrid capabilities are advertised without requiring
+    // real model weights on disk. See `resolve_local_embedder` for the
+    // corresponding embedder substitution.
     let models_root = vault_root.join(".cairn").join("models");
     let cache = cairn_embeddings_local::ModelCache::new(&models_root);
     let kind = config.search.embedding_model;
-    let model_present = cache.is_present(kind);
+    let mock_embedder = std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1");
+    let model_present = mock_embedder || cache.is_present(kind);
     let caps = config.capabilities(model_present);
     let provider = config.search.default_provider;
 
@@ -424,6 +429,15 @@ async fn resolve_local_embedder(
     kind: cairn_core::config::EmbeddingModelKind,
 ) -> Result<Arc<dyn EmbeddingModel>, EmbedderInitError> {
     use anyhow::Context as _;
+
+    // Test escape hatch: CAIRN_MOCK_EMBEDDER=1 bypasses disk model loading.
+    // Used by CLI integration tests that seed the DB with MockEmbedder vectors
+    // and need deterministic, offline query embedding.
+    if std::env::var("CAIRN_MOCK_EMBEDDER").as_deref() == Ok("1") {
+        let embedder: Arc<dyn EmbeddingModel> =
+            Arc::new(cairn_embeddings_local::MockEmbedder::new(kind));
+        return Ok(embedder);
+    }
 
     let models_root = vault_root.join(".cairn").join("models");
     let cache = cairn_embeddings_local::ModelCache::new(&models_root);
