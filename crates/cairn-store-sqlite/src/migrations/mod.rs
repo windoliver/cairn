@@ -39,6 +39,7 @@ const M0021_CONSENT_KIND_NOT_NULL: &str = include_str!("sql/0021_consent_kind_no
 const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
 const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
 const M0031_WAL_KIND_WIDENING: &str = include_str!("sql/0031_wal_kind_widening.sql");
+const M0032_ENTITY_NODES: &str = include_str!("sql/0032_entity_nodes.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -107,6 +108,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (22, "0022_record_vectors", M0022_RECORD_VECTORS),
     (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
     (31, "0031_wal_kind_widening", M0031_WAL_KIND_WIDENING),
+    (32, "0032_entity_nodes", M0032_ENTITY_NODES),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -138,5 +140,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0022_RECORD_VECTORS),
         M::up(M0030_RECORDS_FTS_WEIGHTED),
         M::up(M0031_WAL_KIND_WIDENING),
+        M::up(M0032_ENTITY_NODES),
     ])
 }

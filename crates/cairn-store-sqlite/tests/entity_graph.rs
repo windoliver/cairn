@@ -74,3 +74,48 @@ fn migration_0031_widens_wal_ops_kind_and_preserves_existing_rows() {
         "wal_op_deps FK must still reject unknown operation_id after rebuild",
     );
 }
+
+#[test]
+fn migration_0032_creates_entity_nodes_with_constraints() {
+    let conn = open_in_memory_sync().expect("open");
+
+    // Insert a row.
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, summary, created_at) \
+         VALUES ('01HZE7JV5N0000000000000001', 'Alice', 'alice', 'eng', 1)",
+        [],
+    ).expect("insert ok");
+
+    // UNIQUE(name_norm) enforced.
+    let dup = conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('01HZE7JV5N0000000000000002', 'ALICE', 'alice', 2)",
+        [],
+    );
+    assert!(dup.is_err(), "UNIQUE(name_norm) must reject duplicate normalized name");
+}
+
+#[test]
+fn migration_0032_shrink_guard_rejects_silent_expiry() {
+    let conn = open_in_memory_sync().expect("open");
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('01HZE7JV5N0000000000000003', 'Bob', 'bob', 1)",
+        [],
+    ).expect("seed");
+
+    // expired_at without tombstone_reason → trigger fires.
+    let res = conn.execute(
+        "UPDATE entity_nodes SET expired_at = 999 \
+         WHERE id = '01HZE7JV5N0000000000000003'",
+        [],
+    );
+    assert!(res.is_err(), "shrink-guard must reject expired_at without tombstone_reason");
+
+    // expired_at + tombstone_reason → allowed.
+    conn.execute(
+        "UPDATE entity_nodes SET expired_at = 999, tombstone_reason = 'forget' \
+         WHERE id = '01HZE7JV5N0000000000000003'",
+        [],
+    ).expect("with reason ok");
+}

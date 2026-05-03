@@ -174,6 +174,14 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("table", "pending_embeddings"),
     ("index", "pending_embeddings_enqueued_idx"),
     ("trigger", "records_vector_cleanup"),
+    // 0032_entity_nodes (issue #186 §3.2: bitemporal knowledge-graph schema).
+    ("table", "entity_nodes"),
+    ("index", "entity_nodes_name_norm_idx"),
+    ("table", "entity_nodes_fts"),
+    ("trigger", "entity_nodes_shrink_guard"),
+    ("trigger", "entity_nodes_fts_ai"),
+    ("trigger", "entity_nodes_fts_au"),
+    ("trigger", "entity_nodes_fts_ad"),
 ];
 
 fn hash_hex(content: &str) -> String {
@@ -447,6 +455,7 @@ pub(crate) fn verify_schema_fingerprint(
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
            AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'entity_nodes_fts_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;
@@ -561,6 +570,7 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
            AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'entity_nodes_fts_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;
