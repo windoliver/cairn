@@ -1124,7 +1124,10 @@ mod tests {
             !caps.semantic_search,
             "model absent → no semantic even with LLM"
         );
-        assert!(!caps.hybrid_search, "hybrid always false at v0.1");
+        assert!(
+            caps.hybrid_search,
+            "hybrid gates on local_embeddings only (model presence not required)"
+        );
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
     }
@@ -1154,7 +1157,7 @@ mod tests {
         let config = CairnConfig::default();
         let caps = config.capabilities(true);
         assert!(caps.semantic_search);
-        assert!(!caps.hybrid_search, "hybrid is a follow-up issue");
+        assert!(caps.hybrid_search, "hybrid on when local_embeddings: true");
     }
 
     #[test]
@@ -1224,9 +1227,9 @@ mod tests {
         let modes = [SearchMode::Bm25, SearchMode::Vector, SearchMode::Hybrid];
         let strs = ["bm25", "vector", "hybrid"];
         for (m, s) in modes.iter().zip(strs.iter()) {
-            let yaml = serde_yaml::to_string(m).unwrap();
+            let yaml = yaml_serde::to_string(m).unwrap();
             assert!(yaml.trim() == *s, "mode {m:?} serialized to {yaml:?}");
-            let back: SearchMode = serde_yaml::from_str(s).unwrap();
+            let back: SearchMode = yaml_serde::from_str(s).unwrap();
             assert_eq!(*m, back);
         }
     }
@@ -1238,9 +1241,9 @@ mod tests {
 
     #[test]
     fn embedding_provider_serde_kebab() {
-        let yaml = serde_yaml::to_string(&EmbeddingProvider::OpenAi).unwrap();
+        let yaml = yaml_serde::to_string(&EmbeddingProvider::OpenAi).unwrap();
         assert_eq!(yaml.trim(), "openai");
-        let back: EmbeddingProvider = serde_yaml::from_str("openai").unwrap();
+        let back: EmbeddingProvider = yaml_serde::from_str("openai").unwrap();
         assert_eq!(back, EmbeddingProvider::OpenAi);
     }
 
@@ -1293,9 +1296,9 @@ fts_column_weights: [10.0, 10.0, 5.0, 1.0]
 rrf_k: 60
 rerank_topk: 20
 ";
-        let c: SearchConfig = serde_yaml::from_str(yaml).unwrap();
-        let back = serde_yaml::to_string(&c).unwrap();
-        let again: SearchConfig = serde_yaml::from_str(&back).unwrap();
+        let c: SearchConfig = yaml_serde::from_str(yaml).unwrap();
+        let back = yaml_serde::to_string(&c).unwrap();
+        let again: SearchConfig = yaml_serde::from_str(&back).unwrap();
         assert_eq!(c, again);
     }
 

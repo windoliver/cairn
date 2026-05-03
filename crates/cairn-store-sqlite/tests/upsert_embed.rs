@@ -559,7 +559,9 @@ async fn pre_head_tampered_db_rejects_open_without_applying_pending_migrations()
             M::up(include_str!("../src/migrations/sql/0003_replay.sql")),
             M::up(include_str!("../src/migrations/sql/0004_locks.sql")),
             M::up(include_str!("../src/migrations/sql/0005_consent.sql")),
-            M::up(include_str!("../src/migrations/sql/0006_drift_hardening.sql")),
+            M::up(include_str!(
+                "../src/migrations/sql/0006_drift_hardening.sql"
+            )),
         ]);
         m.to_latest(&mut conn).expect("apply 1..=6");
         // Tamper migration 1's hash. Drop the immutable trigger first
@@ -576,7 +578,10 @@ async fn pre_head_tampered_db_rejects_open_without_applying_pending_migrations()
         conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .expect("count migrations")
     };
-    assert_eq!(pre_count, 6, "test setup: must start at 6 applied migrations");
+    assert_eq!(
+        pre_count, 6,
+        "test setup: must start at 6 applied migrations"
+    );
 
     let err = open(&db_path)
         .await

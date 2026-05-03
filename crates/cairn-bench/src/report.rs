@@ -123,9 +123,8 @@ pub fn write_report(out_dir: &Path, fixture: &Fixture, all_runs: &[AdapterResult
     writeln!(md)?;
     writeln!(md, "| Adapter | P@5 | R@5 | MRR | nDCG@5 | n |")?;
     writeln!(md, "|---|---|---|---|---|---|")?;
-    let fmt_opt = |v: Option<f64>| -> String {
-        v.map_or_else(|| "n/a".to_owned(), |n| format!("{n:.3}"))
-    };
+    let fmt_opt =
+        |v: Option<f64>| -> String { v.map_or_else(|| "n/a".to_owned(), |n| format!("{n:.3}")) };
     for row in &all_rows {
         writeln!(
             md,

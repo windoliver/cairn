@@ -1,4 +1,4 @@
--- Migration 0020: sqlite-vec ANN table + embedding backfill queue.
+-- Migration 0022: sqlite-vec ANN table + embedding backfill queue.
 -- Requires the sqlite-vec extension registered at connection open (see open.rs).
 -- Brief §3.0: record_vectors is the local ANN index; pending_embeddings
 -- is the idempotent backfill queue for failed or deferred embeddings.
@@ -36,4 +36,4 @@ CREATE TRIGGER records_vector_cleanup
   END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (20, '0020_record_vectors', '', strftime('%s','now') * 1000);
+  VALUES (22, '0022_record_vectors', '', strftime('%s','now') * 1000);

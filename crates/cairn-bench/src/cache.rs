@@ -387,7 +387,11 @@ mod tests {
         writer_b.save(&path).expect("save b");
 
         let final_cache = EmbeddingCache::load(&path).expect("reload");
-        assert_eq!(final_cache.len(), 2, "merge must preserve both writers' adds");
+        assert_eq!(
+            final_cache.len(),
+            2,
+            "merge must preserve both writers' adds"
+        );
         assert!(final_cache.get(&key_a).is_some(), "writer A's entry lost");
         assert!(final_cache.get(&key_b).is_some(), "writer B's entry lost");
     }

@@ -328,9 +328,7 @@ pub(crate) fn preflight_migration_history(conn: &Connection) -> Result<(), Store
 /// [`preflight_migration_history`] to switch between the legacy
 /// `sql_blake3` column and the post-0006 `sql_hash` column.
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
-    let mut stmt = conn.prepare(
-        "SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1",
-    )?;
+    let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1")?;
     let found: Option<i64> = stmt
         .query_row(rusqlite::params![table, column], |r| r.get(0))
         .ok();
@@ -424,7 +422,7 @@ fn verify_consent_journal_kind_check(conn: &Connection) -> Result<(), StoreError
 ///
 /// `vec_dim`: when `Some(n)` and `n != 384`, the expected DDL digest is
 /// re-computed against a connection where `record_vectors` has been
-/// resized to dim `n` — same operation [`crate::open::bootstrap`]
+/// resized to dim `n` — same operation `crate::open::record_vectors_create_sql`
 /// applies on the live connection. Without this, an `OpenAI`
 /// (`dim()=1536`) embedder would fail the digest check immediately on
 /// open even though the resized table is exactly what we asked for.

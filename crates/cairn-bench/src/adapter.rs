@@ -329,7 +329,9 @@ pub fn extract_link_graph(pages: &[Page]) -> (LinkGraph, TitleIndex) {
     let mut people_names: Vec<(String, String)> = Vec::new();
     let mut company_names: Vec<(String, String)> = Vec::new();
     for p in pages {
-        titles.entry(p.title.clone()).or_insert_with(|| p.slug.clone());
+        titles
+            .entry(p.title.clone())
+            .or_insert_with(|| p.slug.clone());
         if p.slug.starts_with("people/") {
             people_names.push((p.title.clone(), p.slug.clone()));
         } else if p.slug.starts_with("companies/") {
@@ -375,10 +377,8 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     while let Some(pos) = haystack[search_from..].find(needle) {
         let start = search_from + pos;
         let end = start + needle.len();
-        let prev_ok = start == 0
-            || !haystack.as_bytes()[start - 1].is_ascii_alphanumeric();
-        let next_ok = end == haystack.len()
-            || !haystack.as_bytes()[end].is_ascii_alphanumeric();
+        let prev_ok = start == 0 || !haystack.as_bytes()[start - 1].is_ascii_alphanumeric();
+        let next_ok = end == haystack.len() || !haystack.as_bytes()[end].is_ascii_alphanumeric();
         if prev_ok && next_ok {
             return true;
         }
@@ -492,7 +492,13 @@ impl Adapter for HybridAdapter<'_> {
 pub fn sanitize_for_fts5(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     cleaned
         .split_whitespace()
@@ -649,7 +655,6 @@ mod tests {
         assert_eq!(sanitize_for_fts5(""), "");
         assert_eq!(sanitize_for_fts5("?!@#$"), "");
     }
-
 
     #[test]
     fn rewrite_drops_punctuation_and_stopwords() {

@@ -12,7 +12,9 @@ use crate::error::StoreError;
 use crate::migrations::migrations;
 use crate::store::SqliteMemoryStore;
 use crate::vec_ext::register_vec0;
-use crate::verify::{preflight_migration_history, verify_migration_history, verify_schema_fingerprint};
+use crate::verify::{
+    preflight_migration_history, verify_migration_history, verify_schema_fingerprint,
+};
 
 const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA foreign_keys=ON;\
@@ -173,8 +175,7 @@ async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), Store
         // `schema_migrations.sql_hash` on a pre-head DB BEFORE
         // `to_latest` happily appends the next migration to an
         // untrusted store.
-        preflight_migration_history(c)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+        preflight_migration_history(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
         migrations()
             .to_latest(c)
             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
@@ -210,8 +211,8 @@ async fn bootstrap(conn: &AsyncConn, vec_dim: Option<usize>) -> Result<(), Store
         // and whitespace from migration 0020 vs the bare CREATE we emit
         // in `resize_record_vectors`), so the digest path must mirror
         // whichever form is actually present.
-        let on_disk_dim = read_record_vectors_dim(c)
-            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+        let on_disk_dim =
+            read_record_vectors_dim(c).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
         let effective_dim = if resized || on_disk_dim != DEFAULT_VEC_DIM {
             Some(on_disk_dim)
         } else {
@@ -261,11 +262,7 @@ fn resize_record_vectors(conn: &mut rusqlite::Connection, dim: usize) -> Result<
     // typed transaction also gives us RAII rollback if CREATE fails
     // (SQLite's `execute_batch` does not auto-rollback mid-batch).
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let existing: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM record_vectors",
-        [],
-        |r| r.get(0),
-    )?;
+    let existing: i64 = tx.query_row("SELECT COUNT(*) FROM record_vectors", [], |r| r.get(0))?;
     if existing > 0 {
         return Err(StoreError::SchemaDrift(format!(
             "record_vectors holds {existing} rows at dim {current_dim}; \
@@ -315,16 +312,18 @@ fn read_record_vectors_dim(conn: &rusqlite::Connection) -> Result<usize, StoreEr
         |r| r.get(0),
     )?;
     let needle = "float[";
-    let start = sql.find(needle).ok_or_else(|| StoreError::SchemaDrift(format!(
-        "record_vectors DDL missing `float[<dim>]`: {sql}",
-    )))?;
+    let start = sql.find(needle).ok_or_else(|| {
+        StoreError::SchemaDrift(format!("record_vectors DDL missing `float[<dim>]`: {sql}"))
+    })?;
     let after = &sql[start + needle.len()..];
-    let close = after.find(']').ok_or_else(|| StoreError::SchemaDrift(format!(
-        "record_vectors DDL missing `]` after dim: {sql}",
-    )))?;
-    after[..close].trim().parse::<usize>().map_err(|e| StoreError::SchemaDrift(format!(
-        "record_vectors DDL has non-numeric dim: {e}; sql={sql}",
-    )))
+    let close = after.find(']').ok_or_else(|| {
+        StoreError::SchemaDrift(format!("record_vectors DDL missing `]` after dim: {sql}"))
+    })?;
+    after[..close].trim().parse::<usize>().map_err(|e| {
+        StoreError::SchemaDrift(format!(
+            "record_vectors DDL has non-numeric dim: {e}; sql={sql}",
+        ))
+    })
 }
 
 /// Sync open at `path`, returning a raw `rusqlite::Connection`. For tests
