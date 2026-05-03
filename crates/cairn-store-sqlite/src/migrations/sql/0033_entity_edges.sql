@@ -1,0 +1,46 @@
+-- Migration 0033: entity_edges with bitemporal validity windows.
+-- Issue #186 — bitemporal knowledge-graph schema. Spec §3.3.
+
+CREATE TABLE entity_edges (
+    id                TEXT PRIMARY KEY,
+    source_id         TEXT NOT NULL REFERENCES entity_nodes(id),
+    target_id         TEXT NOT NULL REFERENCES entity_nodes(id),
+    relation          TEXT NOT NULL,
+    confidence        TEXT NOT NULL CHECK(confidence IN ('EXTRACTED','INFERRED','AMBIGUOUS')),
+    confidence_score  REAL NOT NULL CHECK(confidence_score BETWEEN 0.0 AND 1.0),
+    valid_at          INTEGER NOT NULL,
+    invalid_at        INTEGER,
+    created_at        INTEGER NOT NULL,
+    expired_at        INTEGER,
+    tombstone_reason  TEXT,
+    source_record_id  TEXT REFERENCES records(record_id) ON DELETE SET NULL,
+    body_hash         BLOB NOT NULL
+);
+
+CREATE UNIQUE INDEX entity_edges_live_triple
+  ON entity_edges(source_id, target_id, relation)
+  WHERE invalid_at IS NULL AND expired_at IS NULL;
+
+CREATE INDEX entity_edges_valid_at_idx
+  ON entity_edges(valid_at);
+
+CREATE INDEX entity_edges_invalid_at_idx
+  ON entity_edges(invalid_at)
+  WHERE invalid_at IS NOT NULL;
+
+CREATE INDEX entity_edges_source_relation_idx
+  ON entity_edges(source_id, relation);
+
+CREATE INDEX entity_edges_target_relation_idx
+  ON entity_edges(target_id, relation);
+
+CREATE TRIGGER entity_edges_shrink_guard
+  BEFORE UPDATE OF expired_at ON entity_edges
+  FOR EACH ROW
+  WHEN NEW.expired_at IS NOT NULL AND NEW.tombstone_reason IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'entity_edges.expired_at requires tombstone_reason');
+END;
+
+INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
+  VALUES (33, '0033_entity_edges', '', strftime('%s','now') * 1000);

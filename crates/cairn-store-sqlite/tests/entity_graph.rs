@@ -1,7 +1,7 @@
 //! Issue #186 — bitemporal knowledge-graph integration tests.
 //!
 //! This file is the seed for the entity-graph test suite. The first test
-//! is a migration regression test (0031 wal_ops table-rebuild); subsequent
+//! is a migration regression test (0031 `wal_ops` table-rebuild); subsequent
 //! tasks (4–13) add entity-node, entity-edge, episode-link, and query tests.
 
 use cairn_store_sqlite::open_in_memory_sync;
@@ -84,7 +84,8 @@ fn migration_0032_creates_entity_nodes_with_constraints() {
         "INSERT INTO entity_nodes (id, name, name_norm, summary, created_at) \
          VALUES ('01HZE7JV5N0000000000000001', 'Alice', 'alice', 'eng', 1)",
         [],
-    ).expect("insert ok");
+    )
+    .expect("insert ok");
 
     // UNIQUE(name_norm) enforced.
     let dup = conn.execute(
@@ -92,7 +93,10 @@ fn migration_0032_creates_entity_nodes_with_constraints() {
          VALUES ('01HZE7JV5N0000000000000002', 'ALICE', 'alice', 2)",
         [],
     );
-    assert!(dup.is_err(), "UNIQUE(name_norm) must reject duplicate normalized name");
+    assert!(
+        dup.is_err(),
+        "UNIQUE(name_norm) must reject duplicate normalized name"
+    );
 }
 
 #[test]
@@ -171,7 +175,8 @@ fn migration_0032_shrink_guard_rejects_silent_expiry() {
         "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
          VALUES ('01HZE7JV5N0000000000000003', 'Bob', 'bob', 1)",
         [],
-    ).expect("seed");
+    )
+    .expect("seed");
 
     // expired_at without tombstone_reason → trigger fires.
     let res = conn.execute(
@@ -179,12 +184,108 @@ fn migration_0032_shrink_guard_rejects_silent_expiry() {
          WHERE id = '01HZE7JV5N0000000000000003'",
         [],
     );
-    assert!(res.is_err(), "shrink-guard must reject expired_at without tombstone_reason");
+    assert!(
+        res.is_err(),
+        "shrink-guard must reject expired_at without tombstone_reason"
+    );
 
     // expired_at + tombstone_reason → allowed.
     conn.execute(
         "UPDATE entity_nodes SET expired_at = 999, tombstone_reason = 'forget' \
          WHERE id = '01HZE7JV5N0000000000000003'",
         [],
-    ).expect("with reason ok");
+    )
+    .expect("with reason ok");
+}
+
+#[test]
+fn migration_0033_partial_unique_blocks_concurrent_live_triple() {
+    let conn = open_in_memory_sync().expect("open");
+
+    // Seed two entities.
+    conn.execute_batch(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
+           ('n1', 'Alice', 'alice', 1), \
+           ('n2', 'Acme', 'acme', 1);",
+    )
+    .expect("seed nodes");
+
+    // Insert one live edge.
+    conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, created_at, body_hash) \
+         VALUES ('e1', 'n1', 'n2', 'works_at', 'EXTRACTED', 1.0, 1, 1, X'00')",
+        [],
+    )
+    .expect("first edge ok");
+
+    // A second live edge for the same (source, target, relation) is rejected.
+    let dup = conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, created_at, body_hash) \
+         VALUES ('e2', 'n1', 'n2', 'works_at', 'EXTRACTED', 1.0, 2, 2, X'01')",
+        [],
+    );
+    assert!(
+        dup.is_err(),
+        "partial unique must reject second live triple"
+    );
+
+    // Invalidate the first; second insert now succeeds.
+    conn.execute("UPDATE entity_edges SET invalid_at = 2 WHERE id = 'e1'", [])
+        .expect("invalidate");
+    conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, created_at, body_hash) \
+         VALUES ('e2', 'n1', 'n2', 'works_at', 'EXTRACTED', 1.0, 2, 2, X'01')",
+        [],
+    )
+    .expect("second insert ok after invalidate");
+}
+
+#[test]
+fn migration_0033_fk_set_null_on_record_delete() {
+    let conn = open_in_memory_sync().expect("open");
+
+    conn.execute_batch(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
+           ('n1', 'X', 'x', 1), ('n2', 'Y', 'y', 1);",
+    )
+    .expect("nodes");
+
+    // Seed a minimal records row directly via SQL. The records table has
+    // NOT NULL constraints on record_json/tags_json (DEFAULTs '{}' / '[]'
+    // from migration 0008) and GENERATED columns that json_extract from
+    // record_json (migration 0012), so we must provide valid JSON.
+    conn.execute(
+        "INSERT INTO records \
+         (record_id, target_id, version, path, kind, class, visibility, \
+          scope, actor_chain, body, body_hash, created_at, updated_at) \
+         VALUES \
+         ('rec-1', 't-1', 1, 'p', 'fact', 'episodic', 'private', \
+          '{}', '[]', '', 'h', 1, 1)",
+        [],
+    )
+    .expect("seed records row");
+
+    conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, created_at, body_hash, \
+         source_record_id) \
+         VALUES ('e1', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 1, 1, X'00', 'rec-1')",
+        [],
+    )
+    .expect("edge");
+
+    conn.execute("DELETE FROM records WHERE record_id = 'rec-1'", [])
+        .expect("delete record");
+
+    let fk: Option<String> = conn
+        .query_row(
+            "SELECT source_record_id FROM entity_edges WHERE id = 'e1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("query");
+    assert!(fk.is_none(), "FK should be SET NULL after record delete");
 }

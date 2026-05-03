@@ -183,6 +183,14 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "entity_nodes_fts_ai"),
     ("trigger", "entity_nodes_fts_au"),
     ("trigger", "entity_nodes_fts_ad"),
+    // 0033_entity_edges (issue #186 §3.3: bitemporal knowledge-graph schema).
+    ("table", "entity_edges"),
+    ("index", "entity_edges_live_triple"),
+    ("index", "entity_edges_valid_at_idx"),
+    ("index", "entity_edges_invalid_at_idx"),
+    ("index", "entity_edges_source_relation_idx"),
+    ("index", "entity_edges_target_relation_idx"),
+    ("trigger", "entity_edges_shrink_guard"),
 ];
 
 fn hash_hex(content: &str) -> String {
