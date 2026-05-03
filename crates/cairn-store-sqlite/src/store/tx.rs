@@ -272,6 +272,95 @@ impl StoreTx<'_> {
         }
     }
 
+    /// Two-phase renumber of a turn's trace events when out-of-order
+    /// backfill arrives (spec §4 "Ordering").
+    ///
+    /// Phase 1: park existing rows on unique negative sentinels so the
+    ///          `UNIQUE` sequence index never sees a transient collision.
+    /// Phase 2: reassign `0..N` sorted by `(captured_at, capture_event_id)`
+    ///          across the union of existing and incoming records.
+    ///
+    /// All writes happen inside `self.tx`. A crash mid-renumber rolls
+    /// back to pre-renumber state.
+    ///
+    /// `incoming` records have their `extra_frontmatter.trace.sequence`
+    /// overridden by this call; caller-supplied sequence values are
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// Any [`StoreError`] from the underlying upserts, or
+    /// [`StoreError::Invariant`] if a record is missing the expected
+    /// `extra_frontmatter.trace` object.
+    pub fn renumber_turn_with(
+        &mut self,
+        session_id: &SessionId,
+        turn_id: &str,
+        incoming: &[MemoryRecord],
+    ) -> Result<(), StoreError> {
+        let existing = self.list_trace_events(session_id, turn_id)?;
+
+        // Phase 1: park each existing row at a distinct negative sentinel by
+        // directly patching `record_json` in the DB. Direct SQL UPDATE (rather
+        // than `upsert_in_tx`) is required because `upsert_in_tx` creates a new
+        // version row and leaves an inactive row still holding the old sequence
+        // value; since `records_trace_seq` covers ALL rows (not just active),
+        // that inactive row would hold onto the slot and block Phase 2.
+        for (i, row) in existing.iter().enumerate() {
+            let park_seq = -(i64::try_from(i).unwrap_or(i64::MAX) + 1);
+            let record_id = row.id.as_str();
+            let n = self.tx.execute(
+                "UPDATE records \
+                    SET record_json = json_set(record_json, \
+                        '$.extra_frontmatter.trace.sequence', ?1) \
+                  WHERE record_id = ?2 AND active = 1",
+                params![park_seq, record_id],
+            )?;
+            if n == 0 {
+                return Err(StoreError::Invariant {
+                    what: format!(
+                        "renumber park: no active row found for record_id `{record_id}`"
+                    ),
+                });
+            }
+        }
+
+        // Phase 2: union existing + incoming and sort by (captured_at,
+        // capture_event_id), then assign monotonic 0..N sequences.
+        //
+        // Existing rows are updated in-place (same direct SQL UPDATE pattern).
+        // Incoming rows are brand-new records — `upsert_in_tx` inserts them
+        // directly with the final sequence.
+        let mut all: Vec<MemoryRecord> =
+            Vec::with_capacity(existing.len() + incoming.len());
+        all.extend(existing.iter().cloned());
+        all.extend(incoming.iter().cloned());
+        all.sort_by(compare_by_captured_at_and_event_id);
+
+        let existing_ids: std::collections::HashSet<&str> =
+            existing.iter().map(|r| r.id.as_str()).collect();
+
+        for (i, row) in all.iter().enumerate() {
+            let final_seq = i64::try_from(i).unwrap_or(i64::MAX);
+            if existing_ids.contains(row.id.as_str()) {
+                // Existing row: update in-place.
+                let record_id = row.id.as_str();
+                self.tx.execute(
+                    "UPDATE records \
+                        SET record_json = json_set(record_json, \
+                            '$.extra_frontmatter.trace.sequence', ?1) \
+                      WHERE record_id = ?2 AND active = 1",
+                    params![final_seq, record_id],
+                )?;
+            } else {
+                // Incoming new record: set its final sequence and insert.
+                let final_row = with_sequence(row, final_seq)?;
+                upsert_in_tx(&mut self.tx, &final_row)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Synchronous edge removal. Returns `true` if a row was deleted,
     /// `false` if no row matched the key.
     ///
@@ -285,6 +374,51 @@ impl StoreTx<'_> {
         )?;
         Ok(n > 0)
     }
+}
+
+/// Clone `row` with `extra_frontmatter.trace.sequence` set to `sequence`.
+///
+/// Returns [`StoreError::Invariant`] if the record lacks the expected
+/// `extra_frontmatter.trace` object (structural invariant of a trace record).
+fn with_sequence(row: &MemoryRecord, sequence: i64) -> Result<MemoryRecord, StoreError> {
+    let mut next = row.clone();
+    let trace = next
+        .extra_frontmatter
+        .get_mut("trace")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| StoreError::Invariant {
+            what: "trace record missing extra_frontmatter.trace".into(),
+        })?;
+    trace.insert(
+        "sequence".into(),
+        serde_json::Value::Number(sequence.into()),
+    );
+    Ok(next)
+}
+
+/// Comparator for the two-phase renumber sort: primary key is chronological
+/// order of `updated_at` (which mirrors `captured_at` from the originating
+/// `CaptureEvent`); secondary key is `capture_event_id` for deterministic
+/// tie-breaking.
+///
+/// Uses [`cairn_core::domain::Rfc3339Timestamp::cmp_chronological`] for the
+/// timestamp comparison, which accounts for timezone offsets correctly — lexical
+/// `as_str()` comparison is wrong once offsets are involved.
+fn compare_by_captured_at_and_event_id(
+    a: &MemoryRecord,
+    b: &MemoryRecord,
+) -> std::cmp::Ordering {
+    let cap_id = |r: &MemoryRecord| -> String {
+        r.extra_frontmatter
+            .get("trace")
+            .and_then(|t| t.get("capture_event_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned()
+    };
+    a.updated_at
+        .cmp_chronological(&b.updated_at)
+        .then_with(|| cap_id(a).cmp(&cap_id(b)))
 }
 
 /// Returns `true` when `e` is a `UNIQUE` constraint failure whose error

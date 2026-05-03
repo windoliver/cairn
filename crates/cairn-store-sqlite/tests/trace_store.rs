@@ -124,6 +124,34 @@ fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[
     r
 }
 
+/// Like [`mk_trace_record`] but also sets `updated_at` on the record to
+/// `captured_at`, mirroring the projector contract where `updated_at` is
+/// derived from the originating `CaptureEvent`'s timestamp.
+///
+/// Used by renumber tests that need precise chronological ordering.
+#[allow(
+    clippy::expect_used,
+    reason = "fixture helpers: panic on invalid input is intentional"
+)]
+fn mk_trace_record_at(
+    session_id: &SessionId,
+    turn_id: &str,
+    sequence: u64,
+    capture_event_id: &str,
+    captured_at: &str,
+) -> MemoryRecord {
+    use cairn_core::domain::Rfc3339Timestamp;
+    let mut r = mk_trace_record(session_id, turn_id, sequence, capture_event_id);
+    r.updated_at = Rfc3339Timestamp::parse(captured_at)
+        .expect("test: captured_at must be a valid RFC3339 timestamp");
+    r
+}
+
+/// Convenience alias used by tests that need an in-memory store.
+async fn test_store_in_memory() -> cairn_store_sqlite::SqliteMemoryStore {
+    open_in_memory().await.expect("open in-memory store")
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -412,4 +440,86 @@ async fn upsert_trace_allows_same_sequence_after_first_record_replayed() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn out_of_order_backfill_renumbers() {
+    let store = test_store_in_memory().await;
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+
+    // Construct three records: a (t=2), b (t=3), c (t=1).
+    let a = mk_trace_record_at(
+        &session_id,
+        "turn-1",
+        999,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+        "2026-05-02T00:00:02Z",
+    );
+    let b = mk_trace_record_at(
+        &session_id,
+        "turn-1",
+        999,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+        "2026-05-02T00:00:03Z",
+    );
+    let c = mk_trace_record_at(
+        &session_id,
+        "turn-1",
+        999,
+        "01ARZ3NDEKTSV4RRFFQ69G5FAC",
+        "2026-05-02T00:00:01Z",
+    );
+
+    store
+        .with_tx({
+            let a = a.clone();
+            let b = b.clone();
+            let c = c.clone();
+            let session_id = session_id.clone();
+            move |tx| {
+                // First two events arrive in order and are renumbered.
+                tx.renumber_turn_with(&session_id, "turn-1", &[a, b])?;
+                // Late arrival of c (earliest captured_at) triggers a full renumber.
+                tx.renumber_turn_with(&session_id, "turn-1", &[c])?;
+
+                let rows = tx.list_trace_events(&session_id, "turn-1")?;
+
+                // Final order must be c (t=1), a (t=2), b (t=3).
+                let order: Vec<&str> = rows
+                    .iter()
+                    .map(|r| {
+                        r.extra_frontmatter["trace"]["capture_event_id"]
+                            .as_str()
+                            .expect("capture_event_id present")
+                    })
+                    .collect();
+                assert_eq!(
+                    order,
+                    vec![
+                        "01ARZ3NDEKTSV4RRFFQ69G5FAC", // captured_at = t1
+                        "01ARZ3NDEKTSV4RRFFQ69G5FAA", // captured_at = t2
+                        "01ARZ3NDEKTSV4RRFFQ69G5FAB", // captured_at = t3
+                    ],
+                    "rows must be ordered by captured_at after renumber"
+                );
+
+                let seqs: Vec<u64> = rows
+                    .iter()
+                    .map(|r| {
+                        r.extra_frontmatter["trace"]["sequence"]
+                            .as_u64()
+                            .expect("sequence present")
+                    })
+                    .collect();
+                assert_eq!(seqs, vec![0, 1, 2], "sequences must be 0..N after renumber");
+
+                Ok(())
+            }
+        })
+        .await
+        .expect("with_tx");
 }
