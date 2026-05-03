@@ -836,3 +836,50 @@ async fn graph_edges_as_of_event_time_slicing() {
         .expect("at");
     assert_eq!(at.len(), 1);
 }
+
+#[tokio::test]
+async fn resolve_contradiction_invalidates_caller_chosen_edge() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "B0").await;
+
+    let old_outcome = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000B0"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed");
+
+    let new_edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000B1"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Inferred,
+        confidence_score: 0.7,
+        valid_at: 200,
+        invalid_at: None,
+        created_at: 200,
+        source_record_id: None,
+    };
+
+    let outcome = store
+        .resolve_contradiction(&old_outcome.new_edge_id, &new_edge)
+        .await
+        .expect("resolve");
+    assert_eq!(
+        outcome.invalidated_edge_id,
+        Some(old_outcome.new_edge_id.clone())
+    );
+    assert_eq!(outcome.new_edge_id, new_edge.id);
+}

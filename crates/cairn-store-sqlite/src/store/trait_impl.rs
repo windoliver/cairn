@@ -161,6 +161,19 @@ impl MemoryStore for SqliteMemoryStore {
         self.do_upsert_entity_edge(edge).await.map_err(Into::into)
     }
 
+    async fn resolve_contradiction(
+        &self,
+        old_edge_id: &cairn_core::domain::graph::EntityEdgeId,
+        new_edge: &cairn_core::domain::graph::EntityEdge,
+    ) -> Result<cairn_core::domain::graph::EntityEdgeOutcome, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("resolve_contradiction");
+        }
+        self.do_resolve_contradiction(old_edge_id, new_edge)
+            .await
+            .map_err(Into::into)
+    }
+
     async fn graph_edges(
         &self,
         args: &cairn_core::domain::graph::GraphEdgesArgs<'_>,
