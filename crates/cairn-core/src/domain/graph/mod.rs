@@ -66,6 +66,7 @@ impl fmt::Display for EntityEdgeId {
 
 /// Confidence tier on an extracted edge (Graphify model, brief §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdgeConfidence {
     /// Directly present in the source. Score = 1.0.
     Extracted,
