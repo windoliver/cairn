@@ -65,6 +65,20 @@ pub(crate) async fn dispatch(
     let mut llm_spans: Vec<TextSpan> = Vec::new();
     let mut truncated = TruncationReason::None;
 
+    // Caller-driven suppression: when `eligible_spans = Some([])`, the
+    // contract is "nothing is eligible". Short-circuit BEFORE running any
+    // rules (hook, tool-frame, or text) so no draft can escape the consent /
+    // policy fence — even hook/tool-frame outputs that derive from
+    // structured event payload rather than body text. Spec §4.3.
+    if matches!(&input.eligible_spans, Some(spans) if spans.is_empty()) {
+        return Ok(ExtractResult {
+            outputs,
+            discards: vec![],
+            truncated,
+            llm_eligible_spans: llm_spans,
+        });
+    }
+
     // Built-in hook + tool-frame rules are uncapped (first-party).
     run_hook_rules(&rules.builtin_hook, event, &mut outputs, None);
     run_tool_frame_rules(&rules.builtin_tool_frame, event, &mut outputs, None);
@@ -92,43 +106,24 @@ pub(crate) async fn dispatch(
     //                    `eligible_spans` sentinel so existing helpers interpret
     //                    it as "scan everywhere". The body's `0..body_len` span
     //                    is enforced at scanning time via the branch below.
-    // - `Some([])`     → nothing eligible; suppress all text scanning (return
-    //                    empty immediately after hook/tool-frame rules run).
     // - `Some(spans)`  → restrict to those spans (existing behavior).
+    //                    `Some([])` was already short-circuited above.
     let eligible_spans_slice: &[TextSpan] = match &input.eligible_spans {
-        None => &[],                     // full body — existing "empty = no filter" path below
-        Some(spans) => spans.as_slice(), // may be empty (suppress) or non-empty (restrict)
+        None => &[],
+        Some(spans) => spans.as_slice(),
     };
 
-    // When caller explicitly suppressed all text extraction (`Some([])`),
-    // skip the entire text-scanning block.  Hook/tool-frame rules above ran
-    // already (they are not text-based); the rest of the function is all text.
-    if matches!(&input.eligible_spans, Some(spans) if spans.is_empty()) {
-        return Ok(ExtractResult {
-            outputs,
-            discards: vec![],
-            truncated,
-            llm_eligible_spans: llm_spans,
-        });
-    }
-
     if let Some(text) = body_text {
-        // Enforce caller-supplied eligibility fence before any text scanning.
-        // When `eligible_spans_slice` is non-empty (caller restriction), only
-        // prefilter hits whose start offset falls inside an eligible span are
-        // admitted; hits outside authorised ranges are discarded before window
-        // construction so that no output (draft, forget, or
-        // `llm_eligible_spans` entry) can reference disallowed bytes
-        // (consent / policy boundary).
+        // Enforce caller-supplied eligibility fence DURING prefilter scanning
+        // (not after). `scan_within` skips hits outside authorised ranges
+        // before counting them toward `MAX_PHRASE_WINDOWS`, so a long
+        // disallowed prefix with many trigger words cannot exhaust the cap
+        // and starve later authorised `remember`/`forget` clauses inside
+        // the allowed region (spec §4.3, consent / policy boundary).
         //
         // When `eligible_spans_slice` is empty, `input.eligible_spans` is
         // `None` (full body), so we keep the current full-body scan.
-        let scan = prefilter.scan(text);
-        let scan = if eligible_spans_slice.is_empty() {
-            scan
-        } else {
-            filter_scan_to_eligible(scan, eligible_spans_slice)
-        };
+        let scan = prefilter.scan_within(text, eligible_spans_slice);
         let windows = if eligible_spans_slice.is_empty() {
             build_phrase_windows(text, &scan)
         } else {
@@ -338,26 +333,9 @@ fn text_bearing_payload_variant(p: &CapturePayload) -> Option<&'static str> {
     }
 }
 
-/// Discard hits in `scan` whose `start` offset does not fall within any
-/// span in `eligible`. Returns a new `PrefilterScan` with the surviving
-/// hits; `first_omitted_start` is preserved unchanged because it marks
-/// the clause-cap truncation point (an earlier scan-level limit), not an
-/// eligibility limit.
-fn filter_scan_to_eligible(
-    mut scan: super::prefilter::PrefilterScan,
-    eligible: &[TextSpan],
-) -> super::prefilter::PrefilterScan {
-    scan.hits.retain(|hit| {
-        eligible
-            .iter()
-            .any(|es| hit.start >= es.start && hit.start < es.end)
-    });
-    scan
-}
-
 /// Clip each phrase window's end to the eligible span that contains its
 /// start. If no eligible span contains the hit start, the window is
-/// dropped (defense-in-depth; `filter_scan_to_eligible` should have
+/// dropped (defense-in-depth; `TriggerPrefilter::scan_within` should have
 /// already removed such hits). Windows whose start falls inside an
 /// eligible span are clipped so their end does not exceed that span's end,
 /// preventing text rules from scanning or emitting `match_span` that covers
@@ -1454,6 +1432,124 @@ mod tests {
                 span.end <= eligible_end && span.end < body_end,
                 "llm_eligible_spans entry {span:?} mentions bytes from the disallowed region"
             );
+        }
+    }
+
+    /// Regression: `Some(vec![])` ("nothing eligible") must short-circuit
+    /// BEFORE any rule executes — including built-in hook/tool-frame rules
+    /// that derive from structured event payload rather than body text.
+    /// Per spec §4.3 caller-driven suppression is the consent / policy fence;
+    /// no draft can escape it.
+    #[tokio::test]
+    async fn regex_gate_some_empty_eligibility_suppresses_hook_outputs() {
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        // A hook event whose hook_name would normally fire a built-in
+        // hook rule. With Some(vec![]) the dispatcher must short-circuit
+        // BEFORE running hook rules, so no output appears regardless.
+        let event = make_event(CapturePayload::Hook {
+            hook_name: "SessionStart".to_owned(),
+            tool_name: None,
+        });
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: Some(vec![]),
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        assert!(
+            result.outputs.is_empty(),
+            "Some(vec![]) must suppress all outputs including hook/tool-frame; got {:?}",
+            result.outputs
+        );
+        assert!(result.discards.is_empty());
+        assert!(result.llm_eligible_spans.is_empty());
+    }
+
+    /// Regression: a long disallowed prefix with many trigger words must not
+    /// exhaust `MAX_PHRASE_WINDOWS` and starve later authorised triggers
+    /// inside an eligible span. Eligibility filtering happens during the
+    /// prefilter scan (`scan_within`), so disallowed hits are skipped before
+    /// counting toward the cap.
+    #[tokio::test]
+    async fn regex_gate_eligibility_filters_before_prefilter_cap() {
+        // Build a body where many trigger words appear OUTSIDE the eligible
+        // span (enough to exhaust the prefilter cap if they were counted),
+        // followed by an authorised "remember" inside the eligible span.
+        let cap = crate::pipeline::extract::MAX_PHRASE_WINDOWS;
+        let mut prefix = String::new();
+        for _ in 0..(cap + 10) {
+            prefix.push_str("remember a. ");
+        }
+        let authorised = "remember my preferred editor.";
+        let body_text = format!("{prefix}{authorised}");
+
+        let auth_start = u32::try_from(prefix.len()).expect("small");
+        let auth_end = u32::try_from(body_text.len()).expect("small");
+
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            &body_text,
+            &event.payload,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        )
+        .expect("matching variant");
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: Some(vec![TextSpan::new(auth_start, auth_end)]),
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        // The authorised "remember my preferred editor" clause must produce
+        // a draft — the prefilter cap must NOT have been exhausted by the
+        // disallowed prefix.
+        let saw_authorised = result.outputs.iter().any(|o| {
+            if let ExtractOutput::Draft(d) = o {
+                d.body.contains("preferred editor")
+            } else {
+                false
+            }
+        });
+        assert!(
+            saw_authorised,
+            "authorised draft starved by disallowed-region prefilter cap; \
+             outputs: {:?}",
+            result.outputs
+        );
+
+        // No output may reference disallowed bytes.
+        for out in &result.outputs {
+            if let Some(span) = out.source_span() {
+                assert!(
+                    span.start >= auth_start && span.end <= auth_end,
+                    "output span {span:?} outside authorised range; outputs: {:?}",
+                    result.outputs
+                );
+            }
         }
     }
 }
