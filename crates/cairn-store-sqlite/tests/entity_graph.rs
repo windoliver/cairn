@@ -660,3 +660,179 @@ async fn upsert_entity_edge_contradiction_invalidates_old() {
     };
     assert_eq!(invalid_at, Some(200), "old edge invalid_at = new.valid_at");
 }
+
+#[tokio::test]
+async fn graph_edges_direction_in_out_both() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "80").await;
+
+    // a -> b
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N0000000000000080"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "out".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 1,
+            invalid_at: None,
+            created_at: 1,
+            source_record_id: None,
+        })
+        .await
+        .expect("a->b");
+    // b -> a
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N0000000000000081"),
+            source_id: b.clone(),
+            target_id: a.clone(),
+            relation: "in".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 1,
+            invalid_at: None,
+            created_at: 1,
+            source_record_id: None,
+        })
+        .await
+        .expect("b->a");
+
+    let out = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("out");
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].target_id, b);
+
+    let inn = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::In,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("in");
+    assert_eq!(inn.len(), 1);
+    assert_eq!(inn[0].source_id, b);
+
+    let both = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Both,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("both");
+    assert_eq!(both.len(), 2);
+}
+
+#[tokio::test]
+async fn graph_edges_relation_filter() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "90").await;
+    for (id, rel) in [
+        ("01HZE7JV5N0000000000000090", "works_at"),
+        ("01HZE7JV5N0000000000000091", "lives_in"),
+    ] {
+        store
+            .upsert_entity_edge(&EntityEdge {
+                id: EntityEdgeId::from(id),
+                source_id: a.clone(),
+                target_id: b.clone(),
+                relation: rel.into(),
+                confidence: EdgeConfidence::Extracted,
+                confidence_score: 1.0,
+                valid_at: 1,
+                invalid_at: None,
+                created_at: 1,
+                source_record_id: None,
+            })
+            .await
+            .expect("seed");
+    }
+
+    let edges = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: Some("works_at"),
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].relation, "works_at");
+}
+
+#[tokio::test]
+async fn graph_edges_as_of_event_time_slicing() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "A0").await;
+
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000A0"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed");
+
+    // Before t=100 -> no edges.
+    let before = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(99),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("before");
+    assert_eq!(before.len(), 0, "edge not yet valid at t=99");
+
+    // At t=100 -> present.
+    let at = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(100),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("at");
+    assert_eq!(at.len(), 1);
+}
