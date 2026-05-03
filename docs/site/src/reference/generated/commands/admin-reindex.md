@@ -18,6 +18,10 @@ Options:
       --all
           Enqueue ALL active records before draining (use after model swap)
 
+      --from-db
+          Rebuild FTS5 + vector indexes from the authoritative records table (use after derived
+          indexes are deleted or corrupted).
+
       --json
           Emit JSON output
 
