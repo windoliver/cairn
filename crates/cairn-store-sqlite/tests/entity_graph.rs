@@ -438,3 +438,57 @@ async fn upsert_entity_dedup_returns_existing_id() {
         "the existing id is preferred over the new one"
     );
 }
+
+#[tokio::test]
+async fn link_entity_episode_idempotent_returns_true_then_false() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::record::RecordId;
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+
+    // Seed an entity via the new API.
+    let node = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000030"),
+        name: "Alice".into(),
+        name_norm: "alice-link".into(),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let entity_id = store.upsert_entity(&node).await.expect("entity");
+
+    // Seed a real records row directly via the inner connection.
+    // `raw_conn()` is gated by #[cfg(any(test, feature = "test-helpers"))].
+    {
+        let conn_arc = store.raw_conn().expect("conn present after open_in_memory");
+        conn_arc
+            .call(|c| {
+                c.execute(
+                    "INSERT INTO records \
+                     (record_id, target_id, version, path, kind, class, visibility, \
+                      scope, actor_chain, body, body_hash, created_at, updated_at) \
+                     VALUES \
+                     ('01HQZX9F5N0000000000000099', 't-1', 1, 'p', 'fact', 'episodic', 'private', \
+                      '{}', '[]', '', 'h', 1, 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed record");
+    }
+    let rec_id = RecordId::parse("01HQZX9F5N0000000000000099").expect("parse rec id");
+
+    let first = store
+        .link_entity_episode(&entity_id, &rec_id)
+        .await
+        .expect("first link");
+    assert!(first, "first link returns true");
+
+    let second = store
+        .link_entity_episode(&entity_id, &rec_id)
+        .await
+        .expect("second link");
+    assert!(!second, "second link returns false");
+}

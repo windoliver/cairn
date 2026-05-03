@@ -137,4 +137,17 @@ impl MemoryStore for SqliteMemoryStore {
         }
         self.do_upsert_entity(node).await.map_err(Into::into)
     }
+
+    async fn link_entity_episode(
+        &self,
+        entity_id: &cairn_core::domain::graph::EntityId,
+        record_id: &cairn_core::domain::RecordId,
+    ) -> Result<bool, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("link_entity_episode");
+        }
+        self.do_link_entity_episode(entity_id, record_id)
+            .await
+            .map_err(Into::into)
+    }
 }
