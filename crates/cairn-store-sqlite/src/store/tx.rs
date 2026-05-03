@@ -137,6 +137,111 @@ impl StoreTx<'_> {
         .collect()
     }
 
+    /// Verify referential invariants among trace records for a turn (spec
+    /// §4 "Referential"). Call after writing all events for the turn,
+    /// before committing.
+    ///
+    /// Reads all non-tombstoned, non-summary trace records for the turn via
+    /// [`Self::list_trace_events`], then checks that every `post_tool` and
+    /// `tool_output` record:
+    ///
+    /// 1. Has a non-empty `parent_event_id`.
+    /// 2. References a parent that exists in the same turn.
+    /// 3. The parent's `trace_event` is `pre_tool`.
+    /// 4. The parent's `tool_call_id` matches the child's `tool_call_id`.
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::TraceLinkOrphan`] if a `post_tool`/`tool_output`
+    ///   parent is missing, cross-turn, the wrong event type, or has a
+    ///   mismatched `tool_call_id`.
+    /// - Other [`StoreError`] from the underlying read.
+    pub fn validate_turn_links(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<(), StoreError> {
+        use std::collections::HashMap;
+
+        let rows = self.list_trace_events(session_id, turn_id)?;
+
+        // Index by capture_event_id for O(1) parent lookup.
+        // Value: (trace_event, tool_call_id).
+        let by_id: HashMap<String, (&str, Option<&str>)> = rows
+            .iter()
+            .filter_map(|r| {
+                let trace = r.extra_frontmatter.get("trace")?.as_object()?;
+                let id = trace.get("capture_event_id")?.as_str()?.to_owned();
+                let evt = r.extra_frontmatter.get("trace_event")?.as_str()?;
+                let tcid = trace.get("tool_call_id").and_then(|v| v.as_str());
+                Some((id, (evt, tcid)))
+            })
+            .collect();
+
+        for r in &rows {
+            let trace = r
+                .extra_frontmatter
+                .get("trace")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| StoreError::Invariant {
+                    what: "trace record missing extra_frontmatter.trace".into(),
+                })?;
+            let event = r
+                .extra_frontmatter
+                .get("trace_event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !matches!(event, "post_tool" | "tool_output") {
+                continue;
+            }
+
+            let child_id = trace
+                .get("capture_event_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let child_tcid = trace
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let parent_id = trace
+                .get("parent_event_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| StoreError::TraceLinkOrphan {
+                    child_id: child_id.to_owned(),
+                    parent_id: String::new(),
+                    reason: "missing parent_event_id".into(),
+                })?;
+
+            let Some((parent_evt, parent_tcid)) = by_id.get(parent_id) else {
+                return Err(StoreError::TraceLinkOrphan {
+                    child_id: child_id.to_owned(),
+                    parent_id: parent_id.to_owned(),
+                    reason: "parent not found in turn".into(),
+                });
+            };
+            if *parent_evt != "pre_tool" {
+                return Err(StoreError::TraceLinkOrphan {
+                    child_id: child_id.to_owned(),
+                    parent_id: parent_id.to_owned(),
+                    reason: format!(
+                        "parent has trace_event={parent_evt}, expected pre_tool"
+                    ),
+                });
+            }
+            let parent_tcid = parent_tcid.unwrap_or("");
+            if child_tcid != parent_tcid {
+                return Err(StoreError::TraceLinkOrphan {
+                    child_id: child_id.to_owned(),
+                    parent_id: parent_id.to_owned(),
+                    reason: format!(
+                        "tool_call_id mismatch: child={child_tcid}, parent={parent_tcid}"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Returns `true` iff a non-tombstoned `turn_summary` row exists for
     /// the given session + turn.
     ///

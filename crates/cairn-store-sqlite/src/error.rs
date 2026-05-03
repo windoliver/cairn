@@ -155,6 +155,20 @@ pub enum StoreError {
         sequence: u64,
     },
 
+    /// A `post_tool` or `tool_output` record has a `parent_event_id` that
+    /// either doesn't resolve to a `pre_tool` in the same turn or has a
+    /// mismatched `tool_call_id`.
+    #[error("trace link orphan: child={child_id} parent={parent_id}: {reason}")]
+    TraceLinkOrphan {
+        /// The `capture_event_id` of the child record with the broken link.
+        child_id: String,
+        /// The `parent_event_id` referenced by the child (may be empty string
+        /// if the field was missing entirely).
+        parent_id: String,
+        /// Human-readable description of the violated invariant.
+        reason: String,
+    },
+
     /// Two distinct record ids share the same `trace.capture_event_id`.
     /// This should not happen under the documented projector contract
     /// (Task 6 derives `record_id` deterministically from

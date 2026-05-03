@@ -124,6 +124,45 @@ fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[
     r
 }
 
+/// Build a trace record where `trace_event`, `tool_call_id`, and
+/// `parent_event_id` are all caller-controlled.
+///
+/// This is the full-featured builder used by link-validation tests.
+/// Pass `None` for `tool_call_id` / `parent_event_id` to omit those
+/// fields from `extra_frontmatter.trace`.
+#[allow(
+    clippy::expect_used,
+    reason = "fixture helpers: panic on invalid input is intentional"
+)]
+fn mk_trace_record_with_event(
+    session_id: &SessionId,
+    turn_id: &str,
+    sequence: u64,
+    capture_event_id: &str,
+    trace_event: &str,
+    tool_call_id: Option<&str>,
+    parent_event_id: Option<&str>,
+) -> MemoryRecord {
+    let mut r = mk_trace_record(session_id, turn_id, sequence, capture_event_id);
+    // Override trace_event.
+    r.extra_frontmatter
+        .insert("trace_event".into(), Json::String(trace_event.to_owned()));
+    // Patch optional trace sub-fields.
+    let trace = r
+        .extra_frontmatter
+        .get_mut("trace")
+        .expect("trace key set by mk_trace_record")
+        .as_object_mut()
+        .expect("trace is an object");
+    if let Some(tcid) = tool_call_id {
+        trace.insert("tool_call_id".into(), Json::String(tcid.to_owned()));
+    }
+    if let Some(pid) = parent_event_id {
+        trace.insert("parent_event_id".into(), Json::String(pid.to_owned()));
+    }
+    r
+}
+
 /// Like [`mk_trace_record`] but also sets `updated_at` on the record to
 /// `captured_at`, mirroring the projector contract where `updated_at` is
 /// derived from the originating `CaptureEvent`'s timestamp.
@@ -522,4 +561,125 @@ async fn out_of_order_backfill_renumbers() {
         })
         .await
         .expect("with_tx");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn link_validation_passes_when_parent_in_turn() {
+    let store = test_store_in_memory().await;
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    store
+        .with_tx({
+            let session_id = session_id.clone();
+            move |tx| {
+                // pre_tool with tool_call_id="call_abc"
+                let pre = mk_trace_record_with_event(
+                    &session_id,
+                    "turn-1",
+                    0,
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+                    "pre_tool",
+                    Some("call_abc"),
+                    None,
+                );
+                // post_tool referencing the pre by capture_event_id
+                let post = mk_trace_record_with_event(
+                    &session_id,
+                    "turn-1",
+                    1,
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+                    "post_tool",
+                    Some("call_abc"),
+                    Some("01ARZ3NDEKTSV4RRFFQ69G5FAA"),
+                );
+                tx.upsert_trace(&pre)?;
+                tx.upsert_trace(&post)?;
+                tx.validate_turn_links(&session_id, "turn-1")?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn link_validation_rejects_missing_parent() {
+    let store = test_store_in_memory().await;
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let result = store
+        .with_tx({
+            let session_id = session_id.clone();
+            move |tx| {
+                // post_tool whose parent_event_id never landed.
+                let post = mk_trace_record_with_event(
+                    &session_id,
+                    "turn-1",
+                    0,
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+                    "post_tool",
+                    Some("call_abc"),
+                    Some("01ARZ3NDEKTSV4RRFFQ69G5FFF"), // does not exist
+                );
+                tx.upsert_trace(&post)?;
+                tx.validate_turn_links(&session_id, "turn-1")?;
+                Ok(())
+            }
+        })
+        .await;
+    let err = result.expect_err("missing parent should fail");
+    assert!(
+        matches!(err, StoreError::TraceLinkOrphan { .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn link_validation_rejects_tool_call_id_mismatch() {
+    let store = test_store_in_memory().await;
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let result = store
+        .with_tx({
+            let session_id = session_id.clone();
+            move |tx| {
+                let pre = mk_trace_record_with_event(
+                    &session_id,
+                    "turn-1",
+                    0,
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+                    "pre_tool",
+                    Some("call_abc"),
+                    None,
+                );
+                let post = mk_trace_record_with_event(
+                    &session_id,
+                    "turn-1",
+                    1,
+                    "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+                    "post_tool",
+                    Some("call_other"), // mismatch
+                    Some("01ARZ3NDEKTSV4RRFFQ69G5FAA"),
+                );
+                tx.upsert_trace(&pre)?;
+                tx.upsert_trace(&post)?;
+                tx.validate_turn_links(&session_id, "turn-1")?;
+                Ok(())
+            }
+        })
+        .await;
+    let err = result.expect_err("tool_call_id mismatch should fail");
+    assert!(
+        matches!(err, StoreError::TraceLinkOrphan { ref reason, .. } if reason.contains("tool_call_id")),
+        "got {err:?}"
+    );
 }
