@@ -54,6 +54,7 @@ pub async fn resolve_issuer(
         Ok(keys) => keys,
         Err(RegistryError::NotFound) => {
             return Err(DomainError::KeyVersionMismatch {
+                id: identity.clone(),
                 intent: key_version,
                 current: None,
             });
@@ -71,6 +72,7 @@ pub async fn resolve_issuer(
     };
     let Some(key_row) = keys.iter().find(|k| k.key_version == key_version) else {
         return Err(DomainError::KeyVersionMismatch {
+            id: identity.clone(),
             intent: key_version,
             current: Some(record.current_key_version),
         });

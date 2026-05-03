@@ -189,18 +189,22 @@ pub enum DomainError {
 
     /// The issuer's key is not in [`crate::domain::identity::records::ProvisioningState::Active`].
     /// `Pending`, `RevokePending`, `Revoked`, `PurgePending`, and `Purged` all reject.
-    #[error("issuer key not Active for {id}: state={state:?}")]
+    #[error("issuer key not Active for {id}@v{key_version}: state={state:?}")]
     RevokedKey {
         /// The rejected issuer.
         id: crate::domain::Identity,
+        /// The key version associated with the revoked key entry.
+        key_version: crate::domain::identity::keys::KeyVersion,
         /// The lifecycle state observed in the registry.
         state: crate::domain::identity::records::ProvisioningState,
     },
 
     /// `intent.key_version` does not match the version held in the
     /// registry for this issuer. Raised by `resolve_issuer` (registry lookup).
-    #[error("key version mismatch: intent={intent}, registry has {current:?}")]
+    #[error("key version mismatch for {id}: intent={intent}, registry has {current:?}")]
     KeyVersionMismatch {
+        /// The issuer the envelope referenced.
+        id: crate::domain::Identity,
         /// Version requested by the envelope.
         intent: crate::domain::identity::keys::KeyVersion,
         /// Highest known version in the registry; `None` if the issuer is

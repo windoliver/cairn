@@ -130,6 +130,7 @@ impl<'a> EnvelopeVerifier<'a> {
         if !matches!(resolved.state, ProvisioningState::Active) {
             return Err(DomainError::RevokedKey {
                 id: resolved.identity.clone(),
+                key_version: resolved.key_version,
                 state: resolved.state,
             });
         }

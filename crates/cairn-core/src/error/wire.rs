@@ -59,16 +59,30 @@ pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
             })),
         },
 
-        DomainError::RevokedKey { .. } | DomainError::KeyVersionMismatch { .. } => ErrorBody {
+        DomainError::RevokedKey {
+            id, key_version, ..
+        } => ErrorBody {
             code: ErrorCode::RevokedKey,
             message: err.to_string(),
-            data: None,
+            data: Some(serde_json::json!({
+                "issuer": id.as_str(),
+                "key_version": i64::from(key_version.as_u32()),
+            })),
         },
 
-        DomainError::ScopeDenied { .. } | DomainError::Unauthorized { .. } => ErrorBody {
+        DomainError::KeyVersionMismatch { id, intent, .. } => ErrorBody {
+            code: ErrorCode::RevokedKey,
+            message: err.to_string(),
+            data: Some(serde_json::json!({
+                "issuer": id.as_str(),
+                "key_version": i64::from(intent.as_u32()),
+            })),
+        },
+
+        DomainError::ScopeDenied { message } | DomainError::Unauthorized { message } => ErrorBody {
             code: ErrorCode::Unauthorized,
             message: err.to_string(),
-            data: None,
+            data: Some(serde_json::json!({ "required": message })),
         },
 
         // Fall-through: every remaining DomainError variant maps to
@@ -115,22 +129,29 @@ mod tests {
     }
 
     #[test]
-    fn revoked_key_has_no_data() {
+    fn revoked_key_carries_issuer_and_key_version() {
         let body = envelope_error_for(&DomainError::RevokedKey {
             id: Identity::parse("hmn:tafeng").unwrap(),
+            key_version: KeyVersion::FIRST,
             state: ProvisioningState::Revoked,
         });
         assert!(matches!(body.code, ErrorCode::RevokedKey));
-        assert!(body.data.is_none());
+        let data = body.data.unwrap();
+        assert_eq!(data.get("issuer").unwrap().as_str().unwrap(), "hmn:tafeng");
+        assert_eq!(data.get("key_version").unwrap().as_i64().unwrap(), 1);
     }
 
     #[test]
     fn key_version_mismatch_collapses_to_revoked_key_at_p0() {
         let body = envelope_error_for(&DomainError::KeyVersionMismatch {
+            id: Identity::parse("hmn:tafeng").unwrap(),
             intent: KeyVersion::FIRST,
             current: None,
         });
         assert!(matches!(body.code, ErrorCode::RevokedKey));
+        let data = body.data.unwrap();
+        assert_eq!(data.get("issuer").unwrap().as_str().unwrap(), "hmn:tafeng");
+        assert_eq!(data.get("key_version").unwrap().as_i64().unwrap(), 1);
     }
 
     #[test]
@@ -139,6 +160,8 @@ mod tests {
             message: "tenant".into(),
         });
         assert!(matches!(body.code, ErrorCode::Unauthorized));
+        let data = body.data.unwrap();
+        assert_eq!(data.get("required").unwrap().as_str().unwrap(), "tenant");
     }
 
     #[test]
@@ -150,5 +173,54 @@ mod tests {
         let data = body.data.unwrap();
         assert!(data.get("field").is_some());
         assert!(data.get("reason").is_some());
+    }
+
+    #[test]
+    fn round_trips_through_response_validator() {
+        // For each variant the verifier can produce, build an ErrorBody,
+        // serialize, and embed in a Response that we deserialize back —
+        // this exercises validate_error_envelope in the generated module.
+        let cases = vec![
+            envelope_error_for(&DomainError::InvalidSignature),
+            envelope_error_for(&DomainError::ExpiredIntent {
+                issued_at: "2026-04-22T14:02:11Z".into(),
+                expires_at: "2026-04-22T14:07:11Z".into(),
+                now: "2026-04-22T15:00:00Z".into(),
+            }),
+            envelope_error_for(&DomainError::RevokedKey {
+                id: Identity::parse("hmn:tafeng").unwrap(),
+                key_version: KeyVersion::FIRST,
+                state: ProvisioningState::Revoked,
+            }),
+            envelope_error_for(&DomainError::KeyVersionMismatch {
+                id: Identity::parse("hmn:tafeng").unwrap(),
+                intent: KeyVersion::FIRST,
+                current: None,
+            }),
+            envelope_error_for(&DomainError::ScopeDenied {
+                message: "tenant: expected acme, got other".into(),
+            }),
+            envelope_error_for(&DomainError::Unauthorized {
+                message: "issuer mismatch".into(),
+            }),
+        ];
+
+        for body in cases {
+            let payload = serde_json::json!({
+                "contract": "cairn.mcp.v1",
+                "operation_id": "01HQZX9F5N0000000000000000",
+                "policy_trace": [],
+                "status": "rejected",
+                "verb": "ingest",
+                "error": serde_json::to_value(&body).unwrap(),
+            });
+            let result: Result<crate::generated::envelope::Response, _> =
+                serde_json::from_value(payload);
+            assert!(
+                result.is_ok(),
+                "ErrorBody {body:?} failed Response deserialization: {:?}",
+                result.err()
+            );
+        }
     }
 }
