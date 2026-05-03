@@ -1,5 +1,8 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod vault_registry;
+pub use vault_registry::{VaultEntry, VaultRegistry};
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -88,6 +91,7 @@ pub enum ExtractTrigger {
 #[non_exhaustive]
 pub enum LlmProvider {
     /// Any `OpenAI`-compatible endpoint (Ollama, LM Studio, `OpenAI`, Azure).
+    #[serde(alias = "ollama")]
     OpenaiCompatible,
 }
 
@@ -231,9 +235,9 @@ string_enum! {
 ///
 /// All fields default to the P0 offline-local deployment:
 /// `SQLite` store, no LLM, hook + IDE sensors, local tokio orchestrator,
-/// regex-only extractor chain, and local search embeddings enabled.
+/// regex-only extractor chain.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CairnConfig {
     /// Vault-level configuration.
     pub vault: VaultConfig,
@@ -241,7 +245,7 @@ pub struct CairnConfig {
     pub store: StoreConfig,
     /// LLM provider configuration.
     pub llm: LlmConfig,
-    /// Search feature configuration.
+    /// Search and embedding availability.
     pub search: SearchConfig,
     /// Sensor enablement.
     pub sensors: SensorsConfig,
@@ -255,7 +259,7 @@ pub struct CairnConfig {
 
 /// Vault-level configuration (§3.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VaultConfig {
     /// Human-readable vault name.
     pub name: String,
@@ -286,7 +290,7 @@ impl Default for VaultConfig {
 
 /// Folder names and enabled kinds (§3.1 layout block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LayoutConfig {
     /// Directory name for source files.
     pub sources: String,
@@ -321,7 +325,7 @@ impl Default for LayoutConfig {
 
 /// Index file caps (§3.1 layout.index).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IndexConfig {
     /// Maximum number of lines in the index.
     pub max_lines: u32,
@@ -340,7 +344,7 @@ impl Default for IndexConfig {
 
 /// Hot-memory assembly recipe and budget (§3.1 `hot_memory`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HotMemoryConfig {
     /// Ordered steps in the assembly recipe.
     pub recipe: Vec<HotMemoryRecipeStep>,
@@ -368,7 +372,7 @@ impl Default for HotMemoryConfig {
 
 /// Store adapter selection (§4.1 plugin config).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StoreConfig {
     /// Which memory store adapter is active.
     pub kind: StoreKind,
@@ -390,7 +394,7 @@ impl Default for StoreConfig {
 /// `CapabilityUnavailable { code: "llm.not_configured" }`.
 /// Fields `model` and `api_key` support `${VAR}` interpolation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     /// Which LLM provider backend is active.
     pub provider: Option<LlmProvider>,
@@ -402,13 +406,13 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
 }
 
-// ── Search ────────────────────────────────────────────────────────────────
+// ── Search ───────────────────────────────────────────────────────────────
 
-/// Search feature configuration (§4.1).
+/// Search and local embedding configuration (§3.0, ADR 0001).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
-    /// Whether local embedding-backed semantic and hybrid search are enabled.
+    /// Enable the bundled local embedding runtime for semantic/hybrid search.
     pub local_embeddings: bool,
 }
 
@@ -424,7 +428,7 @@ impl Default for SearchConfig {
 
 /// Sensor enablement (§3.1 sensors block).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SensorsConfig {
     /// Hook sensor configuration.
     pub hooks: SensorToggle,
@@ -449,6 +453,7 @@ impl Default for SensorsConfig {
 
 /// Simple on/off toggle for a sensor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SensorToggle {
     /// Whether this sensor is enabled.
     pub enabled: bool,
@@ -456,7 +461,7 @@ pub struct SensorToggle {
 
 /// Slack sensor configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SlackSensorConfig {
     /// Whether the Slack sensor is enabled.
     pub enabled: bool,
@@ -468,7 +473,7 @@ pub struct SlackSensorConfig {
 
 /// Workflow orchestrator selection (§4.1, §4.0 row 3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WorkflowsConfig {
     /// Which workflow orchestrator is active.
     pub orchestrator: OrchestratorKind,
@@ -486,7 +491,7 @@ impl Default for WorkflowsConfig {
 
 /// Pipeline stage configuration (§5.2.a).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PipelineConfig {
     /// Extractor chain configuration.
     pub extract: ExtractConfig,
@@ -494,7 +499,7 @@ pub struct PipelineConfig {
 
 /// Extractor chain configuration (§5.2.a).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractConfig {
     /// Ordered list of extractor entries.
     pub chain: Vec<ExtractorEntry>,
@@ -515,7 +520,7 @@ impl Default for ExtractConfig {
 
 /// One entry in the extractor chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractorEntry {
     /// Which extractor worker mode is used.
     pub worker: ExtractorWorkerKind,
@@ -540,7 +545,7 @@ impl Default for ExtractorEntry {
 
 /// Resource limits for one extractor worker. `None` means unlimited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ExtractBudget {
     /// Maximum tokens this extractor may consume.
     pub max_tokens: Option<u32>,
@@ -560,7 +565,7 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff local embeddings are enabled.
+    /// True iff local embeddings are enabled and available.
     pub semantic_search: bool,
     /// True iff `semantic_search` (requires vector embeddings).
     pub hybrid_search: bool,
@@ -662,7 +667,7 @@ impl CairnConfig {
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
-        let local_embeddings = self.search.local_embeddings;
+        let embeddings_on = self.search.local_embeddings;
         let agent_extract = self
             .pipeline
             .extract
@@ -672,8 +677,8 @@ impl CairnConfig {
 
         CapabilitySet {
             keyword_search: true,
-            semantic_search: local_embeddings,
-            hybrid_search: local_embeddings,
+            semantic_search: embeddings_on,
+            hybrid_search: embeddings_on,
             llm_extract: llm_on,
             agent_extract,
             graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
@@ -780,6 +785,11 @@ mod tests {
     #[test]
     fn default_llm_provider_is_none() {
         assert!(CairnConfig::default().llm.provider.is_none());
+    }
+
+    #[test]
+    fn default_local_embeddings_enabled() {
+        assert!(CairnConfig::default().search.local_embeddings);
     }
 
     #[test]
@@ -920,6 +930,7 @@ mod tests {
           },
           "store": { "kind": "sqlite" },
           "llm": {},
+          "search": { "local_embeddings": true },
           "sensors": {
             "hooks": { "enabled": true },
             "ide": { "enabled": false },
@@ -940,17 +951,22 @@ mod tests {
     fn capabilities_llm_off_by_default() {
         let caps = CairnConfig::default().capabilities();
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(
-            caps.semantic_search,
-            "local embeddings enable semantic search without an LLM"
-        );
-        assert!(
-            caps.hybrid_search,
-            "local embeddings enable hybrid search without an LLM"
-        );
+        assert!(caps.semantic_search, "local embeddings enable semantic");
+        assert!(caps.hybrid_search, "local embeddings enable hybrid");
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(!caps.graph_edges, "sqlite → no graph edges");
+    }
+
+    #[test]
+    fn capabilities_local_embeddings_off() {
+        let mut config = CairnConfig::default();
+        config.search.local_embeddings = false;
+        let caps = config.capabilities();
+        assert!(caps.keyword_search);
+        assert!(!caps.semantic_search);
+        assert!(!caps.hybrid_search);
+        assert!(!caps.llm_extract);
     }
 
     #[test]
@@ -963,18 +979,6 @@ mod tests {
         assert!(caps.hybrid_search);
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
-    }
-
-    #[test]
-    fn capabilities_search_local_embeddings_opt_out() {
-        let mut config = CairnConfig::default();
-        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
-        config.search.local_embeddings = false;
-        let caps = config.capabilities();
-        assert!(caps.keyword_search);
-        assert!(!caps.semantic_search);
-        assert!(!caps.hybrid_search);
-        assert!(caps.llm_extract);
     }
 
     #[test]

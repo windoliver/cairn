@@ -1,0 +1,36 @@
+[package]
+name = "cairn-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "Cairn SDK — typed in-process surface for the eight verbs plus status and handshake (brief §8)."
+# Verb dispatch lands in #9; do not publish to crates.io until the
+# happy paths exist. Re-enable when status() advertises real capabilities
+# and at least one verb has a non-stub success path.
+publish = false
+
+[dependencies]
+cairn-core = { path = "../cairn-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ulid = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+# `serde` is used through fully-qualified paths (`serde::Serialize`,
+# `serde::ser::SerializeStruct`) inside the manual `Serialize` impl
+# for `VerbResponse`. Older cargo-machete (0.9.x in CI) does not pick
+# this up, so suppress the false positive here.
+[package.metadata.cargo-machete]
+ignored = ["serde"]
+
+[lints]
+workspace = true

@@ -16,7 +16,8 @@
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url."
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "aliases_one_of": ["body", "file", "url"]
     }
   },
   "x-cairn-capability": null,

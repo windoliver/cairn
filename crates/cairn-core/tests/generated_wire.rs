@@ -2374,7 +2374,7 @@ fn identity_primitive_rejects_empty_body() {
 fn identity_primitive_rejects_invalid_body_chars() {
     use cairn_core::generated::common::Identity;
     // Space is not in [A-Za-z0-9._:-].
-    let err = serde_json::from_value::<Identity>(serde_json::json!("usr:alice bob")).unwrap_err();
+    let err = serde_json::from_value::<Identity>(serde_json::json!("hmn:alice bob")).unwrap_err();
     assert!(
         err.to_string().contains("Identity"),
         "expected Identity rejection, got: {err}"

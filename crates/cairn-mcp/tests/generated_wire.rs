@@ -133,6 +133,7 @@ fn search_surfaces_capability_per_mode() {
     let mut got = capabilities_for("search");
     got.sort_unstable();
     let mut want = vec![
+        ("explain=true", "cairn.mcp.v1.policy_trace"),
         ("mode=keyword", "cairn.mcp.v1.search.keyword"),
         ("mode=semantic", "cairn.mcp.v1.search.semantic"),
         ("mode=hybrid", "cairn.mcp.v1.search.hybrid"),

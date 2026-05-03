@@ -1,0 +1,481 @@
+{
+  "pages": [
+    {
+      "slug": "people/alice-chen",
+      "title": "Alice Chen",
+      "compiled_truth": "Alice Chen is the CEO of NovaPay, a fintech startup building instant cross-border payments for SMBs. Previously VP Engineering at Stripe. Deep expertise in payment rails and regulatory compliance.",
+      "timeline": "2024-03-15: Met Alice at Fintech Forum. Discussed cross-border payment challenges in Southeast Asia. She mentioned NovaPay is expanding to Vietnam.\n2024-06-20: Coffee with Alice. NovaPay raised Series B. Hiring aggressively.",
+      "body": "Alice Chen is the CEO of NovaPay, a fintech startup building instant cross-border payments for SMBs. Previously VP Engineering at Stripe. Deep expertise in payment rails and regulatory compliance.\n2024-03-15: Met Alice at Fintech Forum. Discussed cross-border payment challenges in Southeast Asia. She mentioned NovaPay is expanding to Vietnam.\n2024-06-20: Coffee with Alice. NovaPay raised Series B. Hiring aggressively."
+    },
+    {
+      "slug": "people/bob-martinez",
+      "title": "Bob Martinez",
+      "compiled_truth": "Bob Martinez is a partner at Green Horizon Ventures, focused on climate tech and clean energy investments. Board member at SolarGrid and WindFlow. Former McKinsey energy practice.",
+      "timeline": "2024-04-10: Lunch with Bob. He is bullish on grid-scale battery storage. Mentioned a new fund for carbon capture.\n2024-08-05: Bob introduced me to the SolarGrid founder.",
+      "body": "Bob Martinez is a partner at Green Horizon Ventures, focused on climate tech and clean energy investments. Board member at SolarGrid and WindFlow. Former McKinsey energy practice.\n2024-04-10: Lunch with Bob. He is bullish on grid-scale battery storage. Mentioned a new fund for carbon capture.\n2024-08-05: Bob introduced me to the SolarGrid founder."
+    },
+    {
+      "slug": "people/carol-nakamura",
+      "title": "Carol Nakamura",
+      "compiled_truth": "Carol Nakamura is CTO of MindBridge, an AI company building diagnostic tools for mental health professionals. PhD in computational neuroscience from MIT. Pioneer in applying transformer models to clinical psychology.",
+      "timeline": "2024-02-28: Carol presented at AI Health Summit. MindBridge accuracy data is impressive, 94% concordance with clinical diagnosis.\n2024-07-12: Carol reached out about Series A. Looking for $15M.",
+      "body": "Carol Nakamura is CTO of MindBridge, an AI company building diagnostic tools for mental health professionals. PhD in computational neuroscience from MIT. Pioneer in applying transformer models to clinical psychology.\n2024-02-28: Carol presented at AI Health Summit. MindBridge accuracy data is impressive, 94% concordance with clinical diagnosis.\n2024-07-12: Carol reached out about Series A. Looking for $15M."
+    },
+    {
+      "slug": "people/david-okonkwo",
+      "title": "David Okonkwo",
+      "compiled_truth": "David Okonkwo is founder of EduStack, an AI-powered adaptive learning platform. Previously taught CS at Stanford. Believes personalized education is the biggest unlocked market in tech.",
+      "timeline": "2024-05-02: David demoed EduStack at demo day. The adaptive curriculum engine is genuinely novel.\n2024-09-18: David shipped v2 with real-time assessment. Growing 40% MoM in Nigeria.",
+      "body": "David Okonkwo is founder of EduStack, an AI-powered adaptive learning platform. Previously taught CS at Stanford. Believes personalized education is the biggest unlocked market in tech.\n2024-05-02: David demoed EduStack at demo day. The adaptive curriculum engine is genuinely novel.\n2024-09-18: David shipped v2 with real-time assessment. Growing 40% MoM in Nigeria."
+    },
+    {
+      "slug": "people/elena-volkov",
+      "title": "Elena Volkov",
+      "compiled_truth": "Elena Volkov is co-founder of CryptoSafe, building institutional-grade custody for digital assets. Former security engineer at Google. Expert in HSM architecture and multi-party computation.",
+      "timeline": "2024-01-20: Elena gave a talk on MPC wallets at ETH Denver. Very technical, very sharp.\n2024-06-15: CryptoSafe announced $30M Series A led by a16z crypto.",
+      "body": "Elena Volkov is co-founder of CryptoSafe, building institutional-grade custody for digital assets. Former security engineer at Google. Expert in HSM architecture and multi-party computation.\n2024-01-20: Elena gave a talk on MPC wallets at ETH Denver. Very technical, very sharp.\n2024-06-15: CryptoSafe announced $30M Series A led by a16z crypto."
+    },
+    {
+      "slug": "people/frank-dubois",
+      "title": "Frank Dubois",
+      "compiled_truth": "Frank Dubois is head of AI at RoboLogic, building autonomous warehouse robots. 15 years in robotics, previously at Boston Dynamics. Focused on manipulation in unstructured environments.",
+      "timeline": "2024-03-22: Frank showed the latest RoboLogic demo. Picking irregular objects at 98% accuracy.\n2024-11-01: RoboLogic deployed at Amazon fulfillment center in Memphis.",
+      "body": "Frank Dubois is head of AI at RoboLogic, building autonomous warehouse robots. 15 years in robotics, previously at Boston Dynamics. Focused on manipulation in unstructured environments.\n2024-03-22: Frank showed the latest RoboLogic demo. Picking irregular objects at 98% accuracy.\n2024-11-01: RoboLogic deployed at Amazon fulfillment center in Memphis."
+    },
+    {
+      "slug": "people/grace-lee",
+      "title": "Grace Lee",
+      "compiled_truth": "Grace Lee is a designer and founder of PixelCraft, a design tool for AI-generated UI components. Former lead designer at Figma. Strong opinions on AI replacing mockups with working prototypes.",
+      "timeline": "2024-04-30: Grace launched PixelCraft beta. 5000 signups in first week.\n2024-08-15: Grace hired 3 engineers from Vercel. PixelCraft growing fast.",
+      "body": "Grace Lee is a designer and founder of PixelCraft, a design tool for AI-generated UI components. Former lead designer at Figma. Strong opinions on AI replacing mockups with working prototypes.\n2024-04-30: Grace launched PixelCraft beta. 5000 signups in first week.\n2024-08-15: Grace hired 3 engineers from Vercel. PixelCraft growing fast."
+    },
+    {
+      "slug": "people/hiro-tanaka",
+      "title": "Hiro Tanaka",
+      "compiled_truth": "Hiro Tanaka is CEO of GenomeAI, using large language models to predict protein folding for drug discovery. Previously research scientist at DeepMind. Published 40+ papers on computational biology.",
+      "timeline": "2024-02-14: Hiro presented GenomeAI results at Bio conference. Beat AlphaFold on 3 benchmarks.\n2024-10-20: GenomeAI partnered with Pfizer for oncology drug discovery pipeline.",
+      "body": "Hiro Tanaka is CEO of GenomeAI, using large language models to predict protein folding for drug discovery. Previously research scientist at DeepMind. Published 40+ papers on computational biology.\n2024-02-14: Hiro presented GenomeAI results at Bio conference. Beat AlphaFold on 3 benchmarks.\n2024-10-20: GenomeAI partnered with Pfizer for oncology drug discovery pipeline."
+    },
+    {
+      "slug": "people/iris-washington",
+      "title": "Iris Washington",
+      "compiled_truth": "Iris Washington is VP of Product at CloudScale, an enterprise infrastructure company. Expert in developer experience and platform engineering. Previously PM at AWS Lambda team.",
+      "timeline": "2024-05-18: Iris spoke at re:Invent about serverless at scale. Great talk on cold start optimization.\n2024-09-03: CloudScale acquired by Datadog for $2.1B.",
+      "body": "Iris Washington is VP of Product at CloudScale, an enterprise infrastructure company. Expert in developer experience and platform engineering. Previously PM at AWS Lambda team.\n2024-05-18: Iris spoke at re:Invent about serverless at scale. Great talk on cold start optimization.\n2024-09-03: CloudScale acquired by Datadog for $2.1B."
+    },
+    {
+      "slug": "people/james-park",
+      "title": "James Park",
+      "compiled_truth": "James Park is a climate tech investor and founder of TerraFund. Focuses on hard tech: carbon capture, nuclear fusion, and sustainable materials. Believes climate is a $50T market by 2040.",
+      "timeline": "2024-07-22: James announced TerraFund II, $500M for climate deep tech.\n2024-11-15: Met James at Climate Week. He invested in 3 fusion startups this year.",
+      "body": "James Park is a climate tech investor and founder of TerraFund. Focuses on hard tech: carbon capture, nuclear fusion, and sustainable materials. Believes climate is a $50T market by 2040.\n2024-07-22: James announced TerraFund II, $500M for climate deep tech.\n2024-11-15: Met James at Climate Week. He invested in 3 fusion startups this year."
+    },
+    {
+      "slug": "companies/novapay",
+      "title": "NovaPay",
+      "compiled_truth": "NovaPay builds instant cross-border payments for SMBs. Founded by Alice Chen (ex-Stripe). Series B stage, expanding across Southeast Asia. Regulatory-first approach differentiates from competitors.",
+      "timeline": "2024-01-15: NovaPay launched in Thailand. 2024-06-20: Raised $45M Series B. 2024-09-01: Processed $1B in cross-border volume.",
+      "body": "NovaPay builds instant cross-border payments for SMBs. Founded by Alice Chen (ex-Stripe). Series B stage, expanding across Southeast Asia. Regulatory-first approach differentiates from competitors.\n2024-01-15: NovaPay launched in Thailand. 2024-06-20: Raised $45M Series B. 2024-09-01: Processed $1B in cross-border volume."
+    },
+    {
+      "slug": "companies/mindbridge",
+      "title": "MindBridge",
+      "compiled_truth": "MindBridge builds AI diagnostic tools for mental health. 94% concordance with clinical diagnosis. Used by 200+ clinics. Carol Nakamura (CTO) leads the technical vision.",
+      "timeline": "2024-02-28: Presented at AI Health Summit. 2024-07-12: Series A fundraising, targeting $15M. 2024-10-01: FDA breakthrough device designation.",
+      "body": "MindBridge builds AI diagnostic tools for mental health. 94% concordance with clinical diagnosis. Used by 200+ clinics. Carol Nakamura (CTO) leads the technical vision.\n2024-02-28: Presented at AI Health Summit. 2024-07-12: Series A fundraising, targeting $15M. 2024-10-01: FDA breakthrough device designation."
+    },
+    {
+      "slug": "companies/cryptosafe",
+      "title": "CryptoSafe",
+      "compiled_truth": "CryptoSafe provides institutional-grade custody for digital assets using multi-party computation. Founded by Elena Volkov (ex-Google security). $30M Series A from a16z crypto.",
+      "timeline": "2024-01-20: ETH Denver demo. 2024-06-15: $30M Series A announced. 2024-10-30: Onboarded first sovereign wealth fund client.",
+      "body": "CryptoSafe provides institutional-grade custody for digital assets using multi-party computation. Founded by Elena Volkov (ex-Google security). $30M Series A from a16z crypto.\n2024-01-20: ETH Denver demo. 2024-06-15: $30M Series A announced. 2024-10-30: Onboarded first sovereign wealth fund client."
+    },
+    {
+      "slug": "companies/robologic",
+      "title": "RoboLogic",
+      "compiled_truth": "RoboLogic builds autonomous warehouse robots for irregular object picking. 98% accuracy on unstructured items. Frank Dubois (head of AI) leads R&D. Deployed at major fulfillment centers.",
+      "timeline": "2024-03-22: Demo day showing. 2024-11-01: Amazon fulfillment deployment in Memphis.",
+      "body": "RoboLogic builds autonomous warehouse robots for irregular object picking. 98% accuracy on unstructured items. Frank Dubois (head of AI) leads R&D. Deployed at major fulfillment centers.\n2024-03-22: Demo day showing. 2024-11-01: Amazon fulfillment deployment in Memphis."
+    },
+    {
+      "slug": "companies/edustack",
+      "title": "EduStack",
+      "compiled_truth": "EduStack is an AI-powered adaptive learning platform. Personalizes curriculum in real-time based on student performance. Founded by David Okonkwo (ex-Stanford CS). Growing 40% MoM in Nigeria.",
+      "timeline": "2024-05-02: Demo day presentation. 2024-09-18: V2 launch with real-time assessment. 2024-12-01: Expanded to Kenya and Ghana.",
+      "body": "EduStack is an AI-powered adaptive learning platform. Personalizes curriculum in real-time based on student performance. Founded by David Okonkwo (ex-Stanford CS). Growing 40% MoM in Nigeria.\n2024-05-02: Demo day presentation. 2024-09-18: V2 launch with real-time assessment. 2024-12-01: Expanded to Kenya and Ghana."
+    },
+    {
+      "slug": "companies/pixelcraft",
+      "title": "PixelCraft",
+      "compiled_truth": "PixelCraft is a design tool that generates working UI components from natural language. Founded by Grace Lee (ex-Figma). 5000 signups in first week of beta.",
+      "timeline": "2024-04-30: Beta launch, 5000 signups. 2024-08-15: Hired 3 Vercel engineers.",
+      "body": "PixelCraft is a design tool that generates working UI components from natural language. Founded by Grace Lee (ex-Figma). 5000 signups in first week of beta.\n2024-04-30: Beta launch, 5000 signups. 2024-08-15: Hired 3 Vercel engineers."
+    },
+    {
+      "slug": "companies/genomeai",
+      "title": "GenomeAI",
+      "compiled_truth": "GenomeAI uses LLMs to predict protein folding for drug discovery. Beat AlphaFold on 3 benchmarks. CEO Hiro Tanaka (ex-DeepMind). Partnered with Pfizer.",
+      "timeline": "2024-02-14: Bio conference results. 2024-10-20: Pfizer partnership announced.",
+      "body": "GenomeAI uses LLMs to predict protein folding for drug discovery. Beat AlphaFold on 3 benchmarks. CEO Hiro Tanaka (ex-DeepMind). Partnered with Pfizer.\n2024-02-14: Bio conference results. 2024-10-20: Pfizer partnership announced."
+    },
+    {
+      "slug": "companies/terrafund",
+      "title": "TerraFund",
+      "compiled_truth": "TerraFund is a $500M climate deep tech fund. Founded by James Park. Invests in carbon capture, nuclear fusion, and sustainable materials. Three fusion investments in 2024.",
+      "timeline": "2024-07-22: TerraFund II announced at $500M. 2024-11-15: Climate Week panel.",
+      "body": "TerraFund is a $500M climate deep tech fund. Founded by James Park. Invests in carbon capture, nuclear fusion, and sustainable materials. Three fusion investments in 2024.\n2024-07-22: TerraFund II announced at $500M. 2024-11-15: Climate Week panel."
+    },
+    {
+      "slug": "companies/cloudscale",
+      "title": "CloudScale",
+      "compiled_truth": "CloudScale is an enterprise infrastructure company focused on serverless at scale. Iris Washington is VP Product. Acquired by Datadog for $2.1B in 2024.",
+      "timeline": "2024-05-18: re:Invent talk on cold starts. 2024-09-03: Datadog acquisition at $2.1B.",
+      "body": "CloudScale is an enterprise infrastructure company focused on serverless at scale. Iris Washington is VP Product. Acquired by Datadog for $2.1B in 2024.\n2024-05-18: re:Invent talk on cold starts. 2024-09-03: Datadog acquisition at $2.1B."
+    },
+    {
+      "slug": "companies/solargrid",
+      "title": "SolarGrid",
+      "compiled_truth": "SolarGrid builds distributed solar micro-grids for rural electrification. Bob Martinez is a board member. Operating in 12 African countries.",
+      "timeline": "2024-08-05: Bob introduced the founder. 2024-12-10: SolarGrid hit 1M homes powered.",
+      "body": "SolarGrid builds distributed solar micro-grids for rural electrification. Bob Martinez is a board member. Operating in 12 African countries.\n2024-08-05: Bob introduced the founder. 2024-12-10: SolarGrid hit 1M homes powered."
+    },
+    {
+      "slug": "concepts/ai-first-companies",
+      "title": "AI-First Companies",
+      "compiled_truth": "AI-first companies embed machine learning into the core product loop, not as a feature bolt-on. Examples: MindBridge (diagnostics), EduStack (adaptive learning), PixelCraft (design). The common pattern is that AI IS the product, not AI-enhanced.",
+      "timeline": "2024-03-01: Wrote first draft of AI-first thesis. 2024-09-15: Revisited after seeing 10 more examples.",
+      "body": "AI-first companies embed machine learning into the core product loop, not as a feature bolt-on. Examples: MindBridge (diagnostics), EduStack (adaptive learning), PixelCraft (design). The common pattern is that AI IS the product, not AI-enhanced.\n2024-03-01: Wrote first draft of AI-first thesis. 2024-09-15: Revisited after seeing 10 more examples."
+    },
+    {
+      "slug": "concepts/climate-investing",
+      "title": "Climate Tech Investment Thesis",
+      "compiled_truth": "Climate tech is a $50T market by 2040. Three waves: solar/wind (done), batteries/grid (now), carbon capture/fusion (next). TerraFund and Green Horizon are the key funds. Hard tech wins over software-only.",
+      "timeline": "2024-04-10: Bob articulated the three-wave framework. 2024-11-15: James confirmed fusion timeline at Climate Week.",
+      "body": "Climate tech is a $50T market by 2040. Three waves: solar/wind (done), batteries/grid (now), carbon capture/fusion (next). TerraFund and Green Horizon are the key funds. Hard tech wins over software-only.\n2024-04-10: Bob articulated the three-wave framework. 2024-11-15: James confirmed fusion timeline at Climate Week."
+    },
+    {
+      "slug": "concepts/fintech-rails",
+      "title": "Payment Rails Infrastructure",
+      "compiled_truth": "Cross-border payments are still broken. SWIFT takes 3-5 days. NovaPay and similar startups are building real-time rails using local payment networks. Regulatory compliance is the moat, not technology.",
+      "timeline": "2024-03-15: Alice explained regulatory-first approach at Fintech Forum.",
+      "body": "Cross-border payments are still broken. SWIFT takes 3-5 days. NovaPay and similar startups are building real-time rails using local payment networks. Regulatory compliance is the moat, not technology.\n2024-03-15: Alice explained regulatory-first approach at Fintech Forum."
+    },
+    {
+      "slug": "concepts/crypto-custody",
+      "title": "Institutional Crypto Custody",
+      "compiled_truth": "Institutional adoption of crypto requires custody solutions that meet banking-grade security standards. MPC (multi-party computation) is the winning architecture. CryptoSafe is leading this space.",
+      "timeline": "2024-01-20: Elena ETH Denver talk. 2024-10-30: First sovereign wealth fund using MPC custody.",
+      "body": "Institutional adoption of crypto requires custody solutions that meet banking-grade security standards. MPC (multi-party computation) is the winning architecture. CryptoSafe is leading this space.\n2024-01-20: Elena ETH Denver talk. 2024-10-30: First sovereign wealth fund using MPC custody."
+    },
+    {
+      "slug": "concepts/ai-health",
+      "title": "AI in Healthcare",
+      "compiled_truth": "AI in healthcare is moving from research to deployment. MindBridge (mental health, 94% accuracy), GenomeAI (drug discovery, beat AlphaFold). FDA is creating new regulatory pathways for AI diagnostics.",
+      "timeline": "2024-02-28: AI Health Summit. 2024-10-01: MindBridge FDA breakthrough designation.",
+      "body": "AI in healthcare is moving from research to deployment. MindBridge (mental health, 94% accuracy), GenomeAI (drug discovery, beat AlphaFold). FDA is creating new regulatory pathways for AI diagnostics.\n2024-02-28: AI Health Summit. 2024-10-01: MindBridge FDA breakthrough designation."
+    },
+    {
+      "slug": "concepts/robotics-warehouse",
+      "title": "Warehouse Automation",
+      "compiled_truth": "Warehouse robotics is moving from structured (conveyor belts, AGVs) to unstructured (picking irregular objects). RoboLogic at 98% accuracy. The bottleneck is manipulation, not navigation.",
+      "timeline": "2024-03-22: RoboLogic demo. 2024-11-01: Amazon deployment validates the market.",
+      "body": "Warehouse robotics is moving from structured (conveyor belts, AGVs) to unstructured (picking irregular objects). RoboLogic at 98% accuracy. The bottleneck is manipulation, not navigation.\n2024-03-22: RoboLogic demo. 2024-11-01: Amazon deployment validates the market."
+    },
+    {
+      "slug": "concepts/ai-education",
+      "title": "AI in Education",
+      "compiled_truth": "Personalized education at scale is now possible with AI. EduStack shows 40% MoM growth. The key insight: adaptive curriculum beats static textbooks because every student learns differently.",
+      "timeline": "2024-05-02: David demo day. 2024-12-01: EduStack expanded to 3 African countries.",
+      "body": "Personalized education at scale is now possible with AI. EduStack shows 40% MoM growth. The key insight: adaptive curriculum beats static textbooks because every student learns differently.\n2024-05-02: David demo day. 2024-12-01: EduStack expanded to 3 African countries."
+    },
+    {
+      "slug": "concepts/design-ai",
+      "title": "AI-Powered Design Tools",
+      "compiled_truth": "AI is replacing the mockup-to-code pipeline. PixelCraft generates working components from descriptions. Grace Lee argues designers should think in systems, not screens. The next Figma is AI-native.",
+      "timeline": "2024-04-30: PixelCraft beta launch validated the thesis.",
+      "body": "AI is replacing the mockup-to-code pipeline. PixelCraft generates working components from descriptions. Grace Lee argues designers should think in systems, not screens. The next Figma is AI-native.\n2024-04-30: PixelCraft beta launch validated the thesis."
+    },
+    {
+      "slug": "concepts/acquisitions-2024",
+      "title": "2024 Notable Acquisitions",
+      "compiled_truth": "Datadog acquired CloudScale for $2.1B (serverless infrastructure). Signaling: infrastructure consolidation is accelerating. Platform companies are buying specialized tools.",
+      "timeline": "2024-09-03: CloudScale acquisition announced. 2024-09-10: Market reacted positively, Datadog stock up 8%.",
+      "body": "Datadog acquired CloudScale for $2.1B (serverless infrastructure). Signaling: infrastructure consolidation is accelerating. Platform companies are buying specialized tools.\n2024-09-03: CloudScale acquisition announced. 2024-09-10: Market reacted positively, Datadog stock up 8%."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q01",
+      "query": "Who is Alice Chen?",
+      "relevant": [
+        "people/alice-chen",
+        "companies/novapay"
+      ],
+      "grades": {
+        "people/alice-chen": 3,
+        "companies/novapay": 1
+      }
+    },
+    {
+      "id": "q02",
+      "query": "What does MindBridge do?",
+      "relevant": [
+        "companies/mindbridge",
+        "people/carol-nakamura",
+        "concepts/ai-health"
+      ],
+      "grades": {
+        "companies/mindbridge": 3,
+        "people/carol-nakamura": 2,
+        "concepts/ai-health": 1
+      }
+    },
+    {
+      "id": "q03",
+      "query": "Tell me about climate tech investing",
+      "relevant": [
+        "concepts/climate-investing",
+        "people/bob-martinez",
+        "people/james-park",
+        "companies/terrafund"
+      ],
+      "grades": {
+        "concepts/climate-investing": 3,
+        "people/james-park": 2,
+        "people/bob-martinez": 2,
+        "companies/terrafund": 1
+      }
+    },
+    {
+      "id": "q04",
+      "query": "When did we last meet Alice?",
+      "relevant": [
+        "people/alice-chen"
+      ],
+      "grades": {}
+    },
+    {
+      "id": "q05",
+      "query": "Recent updates on GenomeAI",
+      "relevant": [
+        "companies/genomeai",
+        "people/hiro-tanaka"
+      ],
+      "grades": {
+        "companies/genomeai": 3,
+        "people/hiro-tanaka": 1
+      }
+    },
+    {
+      "id": "q06",
+      "query": "What happened with the CloudScale acquisition?",
+      "relevant": [
+        "companies/cloudscale",
+        "concepts/acquisitions-2024",
+        "people/iris-washington"
+      ],
+      "grades": {
+        "companies/cloudscale": 3,
+        "concepts/acquisitions-2024": 2,
+        "people/iris-washington": 1
+      }
+    },
+    {
+      "id": "q07",
+      "query": "Alice Chen NovaPay cross-border payments",
+      "relevant": [
+        "people/alice-chen",
+        "companies/novapay",
+        "concepts/fintech-rails"
+      ],
+      "grades": {
+        "people/alice-chen": 2,
+        "companies/novapay": 3,
+        "concepts/fintech-rails": 2
+      }
+    },
+    {
+      "id": "q08",
+      "query": "Carol Nakamura MindBridge AI health",
+      "relevant": [
+        "people/carol-nakamura",
+        "companies/mindbridge",
+        "concepts/ai-health"
+      ],
+      "grades": {
+        "people/carol-nakamura": 2,
+        "companies/mindbridge": 2,
+        "concepts/ai-health": 2
+      }
+    },
+    {
+      "id": "q09",
+      "query": "AI companies building real products",
+      "relevant": [
+        "concepts/ai-first-companies",
+        "companies/mindbridge",
+        "companies/edustack",
+        "companies/pixelcraft",
+        "companies/genomeai"
+      ],
+      "grades": {
+        "concepts/ai-first-companies": 3,
+        "companies/mindbridge": 2,
+        "companies/edustack": 2,
+        "companies/pixelcraft": 2,
+        "companies/genomeai": 2
+      }
+    },
+    {
+      "id": "q10",
+      "query": "Who raised funding recently?",
+      "relevant": [
+        "companies/novapay",
+        "companies/cryptosafe",
+        "companies/terrafund",
+        "people/carol-nakamura"
+      ],
+      "grades": {
+        "companies/novapay": 2,
+        "companies/cryptosafe": 2,
+        "companies/terrafund": 2,
+        "people/carol-nakamura": 1
+      }
+    },
+    {
+      "id": "q11",
+      "query": "Bob and James climate investments",
+      "relevant": [
+        "people/bob-martinez",
+        "people/james-park",
+        "concepts/climate-investing",
+        "companies/terrafund"
+      ],
+      "grades": {
+        "people/bob-martinez": 2,
+        "people/james-park": 2,
+        "concepts/climate-investing": 2,
+        "companies/terrafund": 1
+      }
+    },
+    {
+      "id": "q12",
+      "query": "AI replacing designers",
+      "relevant": [
+        "concepts/design-ai",
+        "companies/pixelcraft",
+        "people/grace-lee"
+      ],
+      "grades": {
+        "concepts/design-ai": 3,
+        "companies/pixelcraft": 2,
+        "people/grace-lee": 2
+      }
+    },
+    {
+      "id": "q13",
+      "query": "Give me everything on RoboLogic",
+      "relevant": [
+        "companies/robologic",
+        "people/frank-dubois",
+        "concepts/robotics-warehouse"
+      ],
+      "grades": {
+        "companies/robologic": 3,
+        "people/frank-dubois": 2,
+        "concepts/robotics-warehouse": 1
+      }
+    },
+    {
+      "id": "q14",
+      "query": "Deep dive on crypto custody",
+      "relevant": [
+        "concepts/crypto-custody",
+        "companies/cryptosafe",
+        "people/elena-volkov"
+      ],
+      "grades": {
+        "concepts/crypto-custody": 3,
+        "companies/cryptosafe": 2,
+        "people/elena-volkov": 2
+      }
+    },
+    {
+      "id": "q15",
+      "query": "Education technology Africa growth",
+      "relevant": [
+        "companies/edustack",
+        "people/david-okonkwo",
+        "concepts/ai-education"
+      ],
+      "grades": {
+        "companies/edustack": 3,
+        "people/david-okonkwo": 2,
+        "concepts/ai-education": 2
+      }
+    },
+    {
+      "id": "q16",
+      "query": "What launched this year?",
+      "relevant": [
+        "companies/novapay",
+        "companies/pixelcraft",
+        "companies/edustack",
+        "companies/robologic"
+      ],
+      "grades": {
+        "companies/pixelcraft": 2,
+        "companies/edustack": 2,
+        "companies/novapay": 2,
+        "companies/robologic": 2
+      }
+    },
+    {
+      "id": "q17",
+      "query": "MPC multi-party computation wallets",
+      "relevant": [
+        "people/elena-volkov",
+        "companies/cryptosafe",
+        "concepts/crypto-custody"
+      ],
+      "grades": {
+        "people/elena-volkov": 3,
+        "companies/cryptosafe": 2,
+        "concepts/crypto-custody": 2
+      }
+    },
+    {
+      "id": "q18",
+      "query": "Protein folding drug discovery LLMs",
+      "relevant": [
+        "companies/genomeai",
+        "people/hiro-tanaka",
+        "concepts/ai-health"
+      ],
+      "grades": {
+        "companies/genomeai": 3,
+        "people/hiro-tanaka": 2,
+        "concepts/ai-health": 1
+      }
+    },
+    {
+      "id": "q19",
+      "query": "quantum computing error correction",
+      "relevant": [],
+      "grades": {}
+    },
+    {
+      "id": "q20",
+      "query": "EduStack Nigeria",
+      "relevant": [
+        "companies/edustack",
+        "people/david-okonkwo"
+      ],
+      "grades": {
+        "companies/edustack": 3,
+        "people/david-okonkwo": 1
+      }
+    }
+  ]
+}

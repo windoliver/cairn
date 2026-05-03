@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use cairn_core::domain::{
     ActorChainEntry, ChainRole, DomainError, EvidenceVector, Identity, MemoryClass, MemoryKind,
-    MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple,
+    MemoryRecord, MemoryVisibility, Provenance, Rfc3339Timestamp, ScopeTuple, TargetId,
     record::{Ed25519Signature, RecordId},
 };
 use proptest::prelude::*;
@@ -23,14 +23,15 @@ fn signature_a() -> Ed25519Signature {
 }
 
 fn record() -> MemoryRecord {
-    let user_id = Identity::parse("usr:tafeng").expect("valid");
+    let user_id = Identity::parse("hmn:tafeng").expect("valid");
     MemoryRecord {
         id: RecordId::parse("01HQZX9F5N0000000000000000").expect("valid"),
+        target_id: TargetId::parse("01HQZX9F5N0000000000000000").expect("valid"),
         kind: MemoryKind::User,
         class: MemoryClass::Semantic,
         visibility: MemoryVisibility::Private,
         scope: ScopeTuple {
-            user: Some("usr:tafeng".to_owned()),
+            user: Some("hmn:tafeng".to_owned()),
             ..ScopeTuple::default()
         },
         body: "user prefers dark mode".to_owned(),
@@ -135,10 +136,11 @@ fn malformed_scope_rejected() {
 fn unsupported_visibility_rejected_at_deserialize() {
     let json = serde_json::json!({
         "id": "01HQZX9F5N0000000000000000",
+        "target_id": "01HQZX9F5N0000000000000000",
         "kind": "user",
         "class": "semantic",
         "visibility": "internal",
-        "scope": {"user": "usr:tafeng"},
+        "scope": {"user": "hmn:tafeng"},
         "body": "x",
         "provenance": {
             "source_sensor": "snr:local:hook:cc-session:v1",

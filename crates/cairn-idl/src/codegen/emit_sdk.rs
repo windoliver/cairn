@@ -434,13 +434,13 @@ fn write_pattern_newtype_deserialize(w: &mut RustWriter, name: &str) {
             w.line("}");
         }
         "Identity" => {
-            // ^(agt|usr|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
+            // ^(agt|hmn|snr):[A-Za-z0-9._:-]+$ — mirrors `is_identity`.
             w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-            w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+            w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
             w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
             w.line("    else {");
             w.indent();
-            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, usr:, snr:]\"));");
+            w.line("return Err(::serde::de::Error::custom(\"Identity: must start with one of [agt:, hmn:, snr:]\"));");
             w.dedent();
             w.line("};");
             w.line("if tail.is_empty() {");
@@ -2577,8 +2577,8 @@ fn write_retrieve_data_extra_checks(w: &mut RustWriter, type_name: &str) {
 ///   (`^ed25519:[0-9a-f]{128}$`).
 /// * `target_hash`: `sha256:` prefix + 64 lowercase hex chars
 ///   (`^sha256:[0-9a-f]{64}$`).
-/// * `issuer`: identity prefix (`agt:`/`usr:`/`snr:`) + non-empty body in
-///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|usr|snr):[A-Za-z0-9._:-]+$`).
+/// * `issuer`: identity prefix (`agt:`/`hmn:`/`snr:`) + non-empty body in
+///   the alphabet `[A-Za-z0-9._:-]+` (`^(agt|hmn|snr):[A-Za-z0-9._:-]+$`).
 /// * `scope.tenant`/`workspace`/`entity`: `minLength: 1`.
 /// * `issued_at`/`expires_at`: minimal RFC-3339 date-time shape — `len >= 20`,
 ///   ASCII-only, `-` at positions 4/7, `T` at 10, `:` at 13/16, second-pair
@@ -2628,7 +2628,7 @@ fn write_signed_intent_extra_checks(w: &mut RustWriter) {
     // SHA-256 target_hash prefix + 64 lowercase hex chars.
     w.line("if !is_sha256_target_hash(&raw.target_hash) { return Err(\"target_hash: must be \\\"sha256:\\\" + 64 lowercase hex chars\"); }");
     // Identity prefix on issuer.
-    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, usr:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
+    w.line("if !is_identity(&raw.issuer.0) { return Err(\"issuer: must start with one of [agt:, hmn:, snr:] followed by a non-empty body in [A-Za-z0-9._:-]\"); }");
     // Scope inner string fields — minLength: 1 per IDL.
     w.line("if raw.scope.tenant.is_empty() { return Err(\"scope.tenant: must not be empty\"); }");
     w.line(
@@ -2708,13 +2708,13 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.dedent();
     w.line("}");
     w.blank();
-    // Identity: ^(agt|usr|snr):[A-Za-z0-9._:-]+$
-    w.line("/// Return true iff `s` starts with `agt:`, `usr:`, or `snr:` followed by a");
+    // Identity: ^(agt|hmn|snr):[A-Za-z0-9._:-]+$
+    w.line("/// Return true iff `s` starts with `agt:`, `hmn:`, or `snr:` followed by a");
     w.line("/// non-empty body in `[A-Za-z0-9._:-]`.");
     w.line("fn is_identity(s: &str) -> bool {");
     w.indent();
     w.line("let tail = if let Some(t) = s.strip_prefix(\"agt:\") { t }");
-    w.line("    else if let Some(t) = s.strip_prefix(\"usr:\") { t }");
+    w.line("    else if let Some(t) = s.strip_prefix(\"hmn:\") { t }");
     w.line("    else if let Some(t) = s.strip_prefix(\"snr:\") { t }");
     w.line("    else { return false; };");
     w.line("if tail.is_empty() { return false; }");

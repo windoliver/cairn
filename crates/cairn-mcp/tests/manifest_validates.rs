@@ -4,7 +4,6 @@
 // Integration test files are not public API; doc-comments are not required.
 #![allow(missing_docs)]
 
-use cairn_core::contract::conformance::{CaseStatus, run_conformance_for_plugin};
 use cairn_core::contract::manifest::{ContractKind, PluginManifest};
 use cairn_core::contract::mcp_server::CONTRACT_VERSION;
 use cairn_core::contract::registry::PluginName;
@@ -30,17 +29,15 @@ fn register_populates_registry() {
 }
 
 #[test]
-fn manifest_features_match_runtime_capabilities() {
-    let mut reg = cairn_core::contract::registry::PluginRegistry::new();
+fn stdio_capability_advertised() {
+    use cairn_core::contract::registry::PluginRegistry;
+
+    let mut reg = PluginRegistry::new();
     cairn_mcp::register(&mut reg).expect("registers");
     let name = PluginName::new("cairn-mcp").expect("valid");
-    let outcomes = run_conformance_for_plugin(&reg, &name);
-    let outcome = outcomes
-        .iter()
-        .find(|case| case.id == "manifest_features_match_capabilities")
-        .expect("MCP conformance should include feature/capability parity");
+    let plugin = reg.mcp_server(&name).expect("registered");
     assert!(
-        matches!(outcome.status, CaseStatus::Ok),
-        "manifest features must agree with runtime MCP capabilities: {outcome:?}"
+        plugin.capabilities().stdio,
+        "CairnMcpServer must advertise stdio=true"
     );
 }

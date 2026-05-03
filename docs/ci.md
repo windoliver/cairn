@@ -17,7 +17,8 @@ verbatim.
 | `governance.yml` | Active path freezes (the bespoke reviewed-by gate was removed in ADR 0003 — see `GOVERNANCE.md` §5). | `pull_request_target` against `main`. |
 | `ci.yml` | Format, lint, build, test, doctest, core-boundary invariant, IDL codegen drift. | PRs + pushes to `main`, merge queue, manual. |
 | `supply-chain.yml` | `cargo-deny` (licenses + bans + sources), `cargo-audit` (RUSTSEC), `cargo-machete` (unused deps). | Manifest/lockfile-touching PRs, pushes to `main`, daily cron, manual. |
-| `docs.yml` | `cargo doc` with `-D warnings`; lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
+| `docs.yml` | Generated docs drift check, mdBook site build, `cargo doc` with `-D warnings`, lychee Markdown link check. | PRs + pushes to `main`, weekly cron, manual. |
+| `pages.yml` | Builds the mdBook site and deploys it to GitHub Pages. | Pushes to `main`, manual. |
 | `release-dry-run.yml` | tag-version validation; `cargo package --workspace --no-verify` for all crates; full `cargo publish --dry-run` for the two pure-leaf crates; release-mode binary build on Ubuntu + macOS; uploaded artifacts. Downstream-crate publish dry-run is a known v0.1 gap (→ #141). | `v*` tags, manual. |
 
 ## Required status checks
@@ -37,6 +38,8 @@ must be updated in the same PR.
 | `invariant / cairn-core dep-freeness` (`ci.yml`) | ✅ required | Enforces brief §4 plugin boundary. Adapter or runtime crates depending into core fail closed. |
 | `codegen / no drift` (`ci.yml`) | ✅ required | Runs `cargo run -p cairn-idl --bin cairn-codegen -- --check`; fails when generated CLI/MCP/SDK/skill artefacts disagree with the IDL. |
 | `plugins / cairn plugins verify` (`ci.yml`) | ✅ required | Runs the bundled-plugin conformance suite (`cairn plugins verify`) and uploads the JSON report as a build artifact. |
+| `docs / generated reference` (`docs.yml`) | ✅ required | Runs `cargo run -p cairn-cli --bin cairn-docgen -- --check`; fails when committed usage/reference docs disagree with CLI/config/plugin/IDL/MCP/package surfaces. |
+| `docs / mdbook build` (`docs.yml`) | ✅ required | Builds `docs/site` with mdBook; fails on broken book structure or missing pages. |
 | `docs / cargo doc` (`docs.yml`) | ✅ required | Broken intra-doc links fail. |
 | `deny / licenses + bans + sources` (`supply-chain.yml`) | ✅ required | Runs on every PR — workflow-level path filtering would leave the required check Pending on non-manifest PRs and either deadlock merges or silently miss manifest-only changes. Cache makes this cheap. |
 | `audit / RUSTSEC advisories` (`supply-chain.yml`) | ✅ required | Same reasoning as `deny`. Daily cron catches advisories disclosed after merge. |
@@ -74,6 +77,14 @@ cargo check --workspace --all-targets --locked
 # IDL codegen drift — fails if generated CLI/MCP/SDK/skill artefacts disagree
 # with the IDL. To regenerate, drop `-- --check` and commit the diff.
 cargo run -p cairn-idl --bin cairn-codegen --locked -- --check
+
+# docs generated-reference drift — fails if committed docs disagree with
+# runtime CLI/config/plugin/IDL/MCP/package surfaces. To regenerate, use --write.
+cargo run -p cairn-cli --bin cairn-docgen --locked -- --check
+
+# mdBook source site — install once: cargo install mdbook --version 0.5.2 \
+#   --no-default-features --features search --locked
+mdbook build docs/site
 
 # rustdoc — same flags as docs.yml
 RUSTDOCFLAGS="-D warnings -D rustdoc::broken-intra-doc-links" \
@@ -136,6 +147,8 @@ CI is split so the failed job tells you which kind of bug you have:
 | `invariant / cairn-core dep-freeness` | Adapter or runtime crate crept into core. Move it to the right crate; see CLAUDE.md §3. |
 | `codegen / no drift` | IDL changed without re-running codegen, or a generated file was hand-edited. Run `cargo run -p cairn-idl --bin cairn-codegen` and commit the diff. |
 | `plugins / cairn plugins verify` | Bundled-plugin conformance regression. Reproduce with `cargo run -p cairn-cli -- plugins verify --strict`. |
+| `docs / generated reference` | CLI/config/plugin/IDL/MCP/package docs drift. Run `cargo run -p cairn-cli --bin cairn-docgen -- --write` and commit the diff. |
+| `docs / mdbook build` | Broken docs site structure, missing `SUMMARY.md` target, or invalid mdBook config. Run `mdbook build docs/site`. |
 | `docs / cargo doc` | Broken intra-doc link or missing-docs lint. |
 | `deny` | License or banned crate. Update the manifest or `deny.toml` (with a justification in the PR). |
 | `audit` | RUSTSEC advisory on a transitive dep. Update the lockfile or pin a patched version. |
@@ -209,6 +222,8 @@ Configure under **Settings → Rules → Rulesets → Branch ruleset → main**:
    invariant / cairn-core dep-freeness
    codegen / no drift
    plugins / cairn plugins verify
+   docs / generated reference
+   docs / mdbook build
    docs / cargo doc
    deny / licenses + bans + sources
    audit / RUSTSEC advisories

@@ -21,6 +21,7 @@
     ],
     "common": [
       "common/primitives.json",
+      "common/record_exclusion.json",
       "common/scope_filter.json"
     ],
     "prelude": [

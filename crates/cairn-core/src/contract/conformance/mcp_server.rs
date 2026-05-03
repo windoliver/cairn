@@ -46,7 +46,7 @@ pub fn run(registry: &PluginRegistry, name: &PluginName) -> Vec<CaseOutcome> {
             ],
         ),
         // Tier 2
-        tier2_tool_availability(registry, name),
+        tier2_tool_availability(),
     ]
 }
 
@@ -118,21 +118,12 @@ fn tier1_capability_self_consistency_floor(
     }
 }
 
-fn tier2_tool_availability(registry: &PluginRegistry, name: &PluginName) -> CaseOutcome {
-    let Some(_plugin) = registry.mcp_server(name) else {
-        return CaseOutcome {
-            id: "initialize_and_list_tools",
-            tier: Tier::Two,
-            status: CaseStatus::Failed {
-                message: "plugin not registered".to_string(),
-            },
-        };
-    };
+fn tier2_tool_availability() -> CaseOutcome {
     CaseOutcome {
         id: "initialize_and_list_tools",
         tier: Tier::Two,
         status: CaseStatus::Pending {
-            reason: "real initialize/list-tools check pending",
+            reason: "transport-level MCP initialization is not exercised from cairn-core",
         },
     }
 }
