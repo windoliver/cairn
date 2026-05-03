@@ -128,14 +128,19 @@ pub async fn run_handler(
 
     // Group by (session_id, turn_id). Events missing either ref, or
     // failing structural validation, are reported as failed and skipped
-    // rather than aborting the whole import — per-turn isolation means
-    // one bad line should not block unrelated turns from being persisted.
+    // rather than aborting the whole import. Per-turn atomicity: a turn
+    // that contains *any* invalid event is poisoned — its valid siblings
+    // are dropped too so the store never sees a truncated turn that
+    // would summarize against incomplete data.
+    use std::collections::BTreeSet;
     let mut groups: BTreeMap<(String, String), Vec<&CaptureEvent>> = BTreeMap::new();
     let mut failed_turns: Vec<(String, String, String)> = Vec::new();
+    let mut poisoned: BTreeSet<(String, String)> = BTreeSet::new();
 
     for event in &events {
         // Structural envelope validation. Failures land in failed_turns
-        // keyed on whatever session/turn refs the event managed to carry.
+        // keyed on whatever session/turn refs the event managed to carry,
+        // and the (session, turn) pair is poisoned for this import.
         if let Err(e) = event.validate() {
             let (s, t) = event
                 .refs
@@ -146,7 +151,8 @@ pub async fn run_handler(
                         r.turn_id.clone().unwrap_or_default(),
                     )
                 });
-            failed_turns.push((s, t, format!("envelope validate: {e}")));
+            failed_turns.push((s.clone(), t.clone(), format!("envelope validate: {e}")));
+            poisoned.insert((s, t));
             continue;
         }
         let Some(refs) = event.refs.as_ref() else {
@@ -166,6 +172,8 @@ pub async fn run_handler(
             .or_default()
             .push(event);
     }
+    // Drop any group whose turn key was poisoned by an invalid sibling.
+    groups.retain(|key, _| !poisoned.contains(key));
 
     for ((session_str, turn_str), group) in groups {
         let session_id = match SessionId::parse(&session_str) {
