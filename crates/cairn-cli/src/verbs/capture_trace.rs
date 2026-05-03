@@ -173,7 +173,25 @@ pub async fn run_handler(
 
         // Track most-recently-seen pre_tool capture_event_id per tool_call_id
         // so post_tool events can resolve their parent_event_id.
+        //
+        // Pre-pass: scan the FULL group up-front and index every PreTool by
+        // tool_call_id. This makes parent resolution insensitive to JSONL
+        // file order — a PostTool that appears before its PreTool in the
+        // batch still resolves its parent in-batch instead of falling back
+        // to the cross-batch store-lookup (which only sees rows already
+        // persisted in prior transactions and would mis-fire here).
         let mut last_pre_tool: BTreeMap<String, CaptureEventId> = BTreeMap::new();
+        for event in &group {
+            if !matches!(classify(event), Ok(TraceEvent::PreTool)) {
+                continue;
+            }
+            let Some(refs) = event.refs.as_ref() else {
+                continue;
+            };
+            if let Some(tcid) = refs.tool_id.as_deref() {
+                last_pre_tool.insert(tcid.to_owned(), event.event_id.clone());
+            }
+        }
 
         // Indices into `projected` whose parent_event_id must be resolved
         // from the store (i.e., the PreTool arrived in a prior batch).

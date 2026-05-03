@@ -307,6 +307,80 @@ fn write_fixture(vault: &Path, jsonl_path: &Path) {
     }
 }
 
+/// Same four events as [`write_fixture`] but emitted in JSONL with the
+/// `PostToolUse` line *before* its matching `PreToolUse`. Used to verify
+/// that in-batch parent resolution is order-insensitive.
+fn write_fixture_post_before_pre(vault: &Path, jsonl_path: &Path) {
+    let id_user = "01ARZ3NDEKTSV4RRFFQ69G5FAA";
+    let id_pre = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
+    let id_post = "01ARZ3NDEKTSV4RRFFQ69G5FAC";
+    let id_stop = "01ARZ3NDEKTSV4RRFFQ69G5FAD";
+
+    let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let turn = "turn-1";
+    let tool_id = "toolu_test_01";
+
+    let user_body = "Hello, please run ls";
+    let pre_body = r#"{"tool":"bash","input":{"command":"ls"}}"#;
+    let post_body = r#"{"tool":"bash","output":"file.txt\ndir/"}"#;
+    let stop_body = "session ended";
+
+    let user_ref = write_source(vault, &format!("{id_user}.txt"), user_body);
+    let pre_ref = write_source(vault, &format!("{id_pre}.txt"), pre_body);
+    let post_ref = write_source(vault, &format!("{id_post}.txt"), post_body);
+    let stop_ref = write_source(vault, &format!("{id_stop}.txt"), stop_body);
+
+    // Emission order: user → POST → PRE → stop. captured_at remains
+    // canonical (PRE@02Z, POST@03Z) so renumber still sorts correctly.
+    let events = vec![
+        make_event(
+            id_user,
+            "UserPromptSubmit",
+            session,
+            turn,
+            "2026-05-02T00:00:01Z",
+            None,
+            &user_ref,
+            &sha256_hex(user_body),
+        ),
+        make_event(
+            id_post,
+            "PostToolUse",
+            session,
+            turn,
+            "2026-05-02T00:00:03Z",
+            Some(tool_id.to_owned()),
+            &post_ref,
+            &sha256_hex(post_body),
+        ),
+        make_event(
+            id_pre,
+            "PreToolUse",
+            session,
+            turn,
+            "2026-05-02T00:00:02Z",
+            Some(tool_id.to_owned()),
+            &pre_ref,
+            &sha256_hex(pre_body),
+        ),
+        make_event(
+            id_stop,
+            "Stop",
+            session,
+            turn,
+            "2026-05-02T00:00:04Z",
+            None,
+            &stop_ref,
+            &sha256_hex(stop_body),
+        ),
+    ];
+    let mut f = std::fs::File::create(jsonl_path).expect("create JSONL file");
+    for ev in &events {
+        let line = serde_json::to_string(ev).expect("serialize event");
+        writeln!(f, "{line}").expect("write JSONL line");
+    }
+}
+
 /// Write eight [`CaptureEvent`]s to `jsonl_path` for two complete turns:
 ///
 /// - Turn-1 (`turn-1`): events `FAA`–`FAD`, timestamps `00:00:01..00:00:04Z`
@@ -732,6 +806,54 @@ async fn capture_trace_single_turn_persists_and_summarizes() {
                 tx.turn_summary_exists(&session_id, "turn-1")?,
                 "turn summary should exist after Stop event"
             );
+            Ok(())
+        })
+        .await
+        .expect("store query should succeed");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn in_batch_post_before_pre_resolves_parent() {
+    let vault = tempfile::tempdir().expect("tempdir");
+    let store = open_test_store_in_memory().await;
+    let jsonl_path = vault.path().join("trace.jsonl");
+
+    write_fixture_post_before_pre(vault.path(), &jsonl_path);
+
+    let resp = run_handler(&store, vault.path(), &jsonl_path)
+        .await
+        .expect("run_handler should succeed");
+    assert!(
+        resp.failed_turns.is_empty(),
+        "expected no failures, got: {:?}",
+        resp.failed_turns
+    );
+
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid session_id");
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, "turn-1")?;
+            assert_eq!(rows.len(), 4, "expected 4 events");
+
+            // The post_tool row's parent_event_id must match the pre_tool's
+            // capture_event_id even though post arrived before pre in the JSONL.
+            let post = rows
+                .iter()
+                .find(|r| {
+                    r.extra_frontmatter
+                        .get("trace_event")
+                        .and_then(|v| v.as_str())
+                        == Some("post_tool")
+                })
+                .expect("post_tool row");
+            let parent = post.extra_frontmatter["trace"]["parent_event_id"]
+                .as_str()
+                .expect("parent_event_id present");
+            assert_eq!(parent, "01ARZ3NDEKTSV4RRFFQ69G5FAB");
             Ok(())
         })
         .await
