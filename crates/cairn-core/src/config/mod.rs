@@ -357,6 +357,10 @@ pub struct SearchConfig {
     pub rrf_k: usize,
     /// Number of top RRF candidates to second-pass cosine re-rank. Default `20`.
     pub rerank_topk: usize,
+    /// Maximum total snippet characters per search page. Trimming happens
+    /// after candidate ranking + dedup. Char-count proxy for token budget;
+    /// token-accurate trimming is P1 (see issue #49). Default `8000`.
+    pub max_snippet_chars_per_page: usize,
 }
 
 impl Default for SearchConfig {
@@ -370,6 +374,7 @@ impl Default for SearchConfig {
             fts_column_weights: [10.0, 10.0, 5.0, 1.0],
             rrf_k: 60,
             rerank_topk: 20,
+            max_snippet_chars_per_page: 8000,
         }
     }
 }

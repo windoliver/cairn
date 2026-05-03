@@ -4,9 +4,11 @@
 //! return scored output. The store adapters orchestrate the data fetching.
 
 mod cosine;
+mod explain;
 mod orchestrator;
 mod rrf;
 
 pub use cosine::{RerankedCandidate, cosine_rerank, cosine_similarity};
+pub use explain::ScoreExplain;
 pub use orchestrator::{HybridSearchInputs, HybridSearchParams, hybrid_search};
 pub use rrf::{RrfCandidate, ScoredCandidate, rrf_fusion};
