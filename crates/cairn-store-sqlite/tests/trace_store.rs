@@ -56,6 +56,29 @@ fn mk_trace_record(session_id: &SessionId, turn_id: &str, sequence: u64, capture
     r
 }
 
+/// Wrapper around [`mk_trace_record`] that overrides the `payload_hash`
+/// field in the trace object.
+#[allow(
+    clippy::expect_used,
+    reason = "fixture helpers: panic on invalid input is intentional"
+)]
+fn mk_trace_record_with_hash(
+    session_id: &SessionId,
+    turn_id: &str,
+    sequence: u64,
+    capture_event_id: &str,
+    payload_hash: &str,
+) -> MemoryRecord {
+    let mut r = mk_trace_record(session_id, turn_id, sequence, capture_event_id);
+    r.extra_frontmatter
+        .get_mut("trace")
+        .expect("trace key set by mk_trace_record")
+        .as_object_mut()
+        .expect("trace is an object")
+        .insert("payload_hash".into(), Json::String(payload_hash.to_owned()));
+    r
+}
+
 /// Build a `turn_summary` record for the given session/turn.
 ///
 /// The `trace_event` column is gated to `'turn_summary'`; this helper
@@ -65,7 +88,7 @@ fn mk_trace_record(session_id: &SessionId, turn_id: &str, sequence: u64, capture
     clippy::expect_used,
     reason = "fixture helpers: panic on invalid input is intentional"
 )]
-fn mk_summary_record(session_id: &SessionId, turn_id: &str) -> MemoryRecord {
+fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[&str]) -> MemoryRecord {
     // Derive the deterministic summary id exactly as the real pipeline does.
     let summary_id = cairn_core::domain::trace::summary_record_id(session_id, turn_id);
     let summary_id_str = summary_id.as_str().to_owned();
@@ -79,7 +102,11 @@ fn mk_summary_record(session_id: &SessionId, turn_id: &str) -> MemoryRecord {
     trace_obj.insert("turn_id".into(), Json::String(turn_id.to_owned()));
     // Summary rows have no sequence; sequence column will be NULL.
     trace_obj.insert("capture_event_id".into(), Json::String(summary_id_str.clone()));
-    trace_obj.insert("member_event_ids".into(), Json::Array(Vec::new()));
+    let members: Vec<Json> = member_event_ids
+        .iter()
+        .map(|s| Json::String((*s).to_owned()))
+        .collect();
+    trace_obj.insert("member_event_ids".into(), Json::Array(members));
     trace_obj.insert(
         "payload_hash".into(),
         Json::String(
@@ -150,7 +177,7 @@ async fn list_trace_events_excludes_summary() {
                 0,
                 "01ARZ3NDEKTSV4RRFFQ69G5FAA",
             ))?;
-            tx.upsert(&mk_summary_record(&session_id, "turn-1"))?;
+            tx.upsert(&mk_summary_record(&session_id, "turn-1", &[]))?;
 
             let rows = tx.list_trace_events(&session_id, "turn-1")?;
             assert_eq!(rows.len(), 1, "summary row must be excluded");
@@ -185,6 +212,103 @@ async fn list_trace_events_excludes_tombstoned() {
 
             let rows = tx.list_trace_events(&session_id, "turn-1")?;
             assert!(rows.is_empty(), "tombstoned row must be excluded");
+            Ok(())
+        })
+        .await
+        .expect("with_tx");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn turn_summary_exists_after_write() {
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    store
+        .with_tx(move |tx| {
+            assert!(!tx.turn_summary_exists(&session_id, "turn-1")?);
+            let s = mk_summary_record(&session_id, "turn-1", &["01ARZ3NDEKTSV4RRFFQ69G5FAA"]);
+            tx.upsert(&s)?;
+            assert!(tx.turn_summary_exists(&session_id, "turn-1")?);
+            Ok(())
+        })
+        .await
+        .expect("with_tx");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn turn_summary_exists_false_for_other_turn() {
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    store
+        .with_tx(move |tx| {
+            let s = mk_summary_record(&session_id, "turn-1", &["01ARZ3NDEKTSV4RRFFQ69G5FAA"]);
+            tx.upsert(&s)?;
+            assert!(!tx.turn_summary_exists(&session_id, "turn-2")?);
+            Ok(())
+        })
+        .await
+        .expect("with_tx");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn payload_hash_count_in_scope_basic() {
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let hash = "sha256:deadbeef";
+    store
+        .with_tx(move |tx| {
+            // Two records with the same hash under the same scope (scope.user = "hmn:tafeng").
+            let r1 = mk_trace_record_with_hash(
+                &session_id,
+                "turn-1",
+                0,
+                "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+                hash,
+            );
+            let r2 = mk_trace_record_with_hash(
+                &session_id,
+                "turn-1",
+                1,
+                "01ARZ3NDEKTSV4RRFFQ69G5FAB",
+                hash,
+            );
+            tx.upsert(&r1)?;
+            tx.upsert(&r2)?;
+
+            // No exclusion → 2.
+            let n = tx.payload_hash_count_in_scope(hash, None, Some("hmn:tafeng"), None, &[])?;
+            assert_eq!(n, 2, "expected 2 matching records");
+
+            // Exclude r1 → 1.
+            let n = tx.payload_hash_count_in_scope(
+                hash,
+                None,
+                Some("hmn:tafeng"),
+                None,
+                &[r1.id.as_str()],
+            )?;
+            assert_eq!(n, 1, "expected 1 after excluding r1");
+
+            // Wrong scope → 0.
+            let n =
+                tx.payload_hash_count_in_scope(hash, Some("other-tenant"), None, None, &[])?;
+            assert_eq!(n, 0, "wrong tenant scope should match 0");
+
+            // Different hash → 0.
+            let n =
+                tx.payload_hash_count_in_scope("sha256:other", None, Some("hmn:tafeng"), None, &[])?;
+            assert_eq!(n, 0, "different hash should match 0");
             Ok(())
         })
         .await

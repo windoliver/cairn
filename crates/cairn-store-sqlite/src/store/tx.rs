@@ -22,7 +22,7 @@
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
 use cairn_core::domain::{MemoryRecord, RecordId, SessionId};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
 use crate::error::StoreError;
@@ -135,6 +135,96 @@ impl StoreTx<'_> {
             record_from_json(&json)
         })
         .collect()
+    }
+
+    /// Returns `true` iff a non-tombstoned `turn_summary` row exists for
+    /// the given session + turn.
+    ///
+    /// Used by the `capture_trace` pipeline to decide whether a summary
+    /// has already been written for a turn before attempting to insert a
+    /// new one (brief §8.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn turn_summary_exists(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT 1 FROM records \
+              WHERE trace_event = 'turn_summary' \
+                AND trace_session_id = ?1 \
+                AND trace_turn_id = ?2 \
+                AND tombstoned = 0 \
+              LIMIT 1",
+        )?;
+        let exists = stmt
+            .query_row(params![session_id.as_str(), turn_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        Ok(exists)
+    }
+
+    /// Count non-tombstoned trace records whose `trace_payload_hash`
+    /// matches `payload_hash` AND whose scope `(tenant, user, agent)`
+    /// matches the given dimensions, excluding the listed `record_id`s.
+    ///
+    /// `NULL` matches `NULL` for each scope dimension via
+    /// `coalesce(json_extract(scope, '$.X'), '') = coalesce(?N, '')`.
+    ///
+    /// Used by the dedup gate in `capture_trace` to determine whether an
+    /// identical payload already exists in the same scope before inserting
+    /// a new trace record (brief §8.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures.
+    pub fn payload_hash_count_in_scope(
+        &self,
+        payload_hash: &str,
+        tenant: Option<&str>,
+        user: Option<&str>,
+        agent: Option<&str>,
+        exclude: &[&str],
+    ) -> Result<u64, StoreError> {
+        let where_exclude = if exclude.is_empty() {
+            String::new()
+        } else {
+            let placeholders = (0..exclude.len())
+                .map(|i| format!("?{}", i + 5)) // first 4 params: hash + 3 scopes
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" AND record_id NOT IN ({placeholders})")
+        };
+        let sql = format!(
+            "SELECT COUNT(*) FROM records \
+              WHERE trace_payload_hash = ?1 \
+                AND coalesce(json_extract(scope, '$.tenant'), '') = coalesce(?2, '') \
+                AND coalesce(json_extract(scope, '$.user'),   '') = coalesce(?3, '') \
+                AND coalesce(json_extract(scope, '$.agent'),  '') = coalesce(?4, '') \
+                AND tombstoned = 0{where_exclude}"
+        );
+        let mut params: Vec<rusqlite::types::Value> = vec![
+            rusqlite::types::Value::Text(payload_hash.to_owned()),
+            tenant.map_or(rusqlite::types::Value::Null, |s| {
+                rusqlite::types::Value::Text(s.to_owned())
+            }),
+            user.map_or(rusqlite::types::Value::Null, |s| {
+                rusqlite::types::Value::Text(s.to_owned())
+            }),
+            agent.map_or(rusqlite::types::Value::Null, |s| {
+                rusqlite::types::Value::Text(s.to_owned())
+            }),
+        ];
+        for id in exclude {
+            params.push(rusqlite::types::Value::Text((*id).to_owned()));
+        }
+        let mut stmt = self.tx.prepare(&sql)?;
+        let n: i64 =
+            stmt.query_row(rusqlite::params_from_iter(params), |row| row.get(0))?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 
     /// Synchronous edge removal. Returns `true` if a row was deleted,
