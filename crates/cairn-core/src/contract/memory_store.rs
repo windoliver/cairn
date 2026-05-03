@@ -6,7 +6,8 @@ use crate::domain::record::MemoryRecord;
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
 /// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs` landed.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
+/// Bumped 0.3 → 0.4 in #186 when bitemporal-KG methods landed.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -264,6 +265,85 @@ pub trait MemoryStore: Send + Sync {
     /// override.
     async fn index_stats(&self) -> Result<IndexStats, StoreError> {
         Err("index_stats: not supported by this store adapter".into())
+    }
+
+    // ── Bitemporal knowledge graph (#186) ─────────────────────────────────
+
+    /// Upsert an entity node. Deduplication is by `name_norm` (UNIQUE in
+    /// storage): if a row with this `name_norm` exists, return its id;
+    /// otherwise insert a fresh row and return the new id. Idempotent.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: bitemporal_graph"`.
+    /// Concrete adapters return [`StoreError`] on backend failures.
+    async fn upsert_entity(
+        &self,
+        node: &crate::domain::graph::EntityNode,
+    ) -> Result<crate::domain::graph::EntityId, StoreError> {
+        let _ = node;
+        Err("capability unavailable: bitemporal_graph".into())
+    }
+
+    /// Upsert a bitemporal entity edge.
+    ///
+    /// If a live edge for `(source_id, target_id, relation)` exists with a
+    /// different `body_hash`, contradiction-resolves: invalidates the old
+    /// (sets `invalid_at = new.valid_at`) and inserts the new in one atomic
+    /// op. Identical-body re-upsert is a no-op (`body_was_unchanged: true`,
+    /// no WAL row written) — mirrors [`MemoryStore::upsert`] idempotency.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: bitemporal_graph"`.
+    async fn upsert_entity_edge(
+        &self,
+        edge: &crate::domain::graph::EntityEdge,
+    ) -> Result<crate::domain::graph::EntityEdgeOutcome, StoreError> {
+        let _ = edge;
+        Err("capability unavailable: bitemporal_graph".into())
+    }
+
+    /// Read edges adjacent to a node. Supports direction (in/out/both),
+    /// relation-filter, and bitemporal as-of slicing.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: bitemporal_graph"`.
+    async fn graph_edges(
+        &self,
+        args: &crate::domain::graph::GraphEdgesArgs<'_>,
+    ) -> Result<Vec<crate::domain::graph::EntityEdge>, StoreError> {
+        let _ = args;
+        Err("capability unavailable: bitemporal_graph".into())
+    }
+
+    /// Explicit contradiction resolution — invalidate `old_edge_id` and
+    /// insert `new_edge` in one atomic op. Mostly an internal hook used by
+    /// [`MemoryStore::upsert_entity_edge`]; exposed for batch contradiction
+    /// callers (e.g. `lint --fix-graph`).
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: bitemporal_graph"`.
+    async fn resolve_contradiction(
+        &self,
+        old_edge_id: &crate::domain::graph::EntityEdgeId,
+        new_edge: &crate::domain::graph::EntityEdge,
+    ) -> Result<crate::domain::graph::EntityEdgeOutcome, StoreError> {
+        let _ = (old_edge_id, new_edge);
+        Err("capability unavailable: bitemporal_graph".into())
+    }
+
+    /// Link an entity to a record that mentions it. Idempotent — returns
+    /// `Ok(true)` when a new link was inserted, `Ok(false)` when the link
+    /// already existed.
+    ///
+    /// # Errors
+    /// Default impl returns `"capability unavailable: bitemporal_graph"`.
+    async fn link_entity_episode(
+        &self,
+        entity_id: &crate::domain::graph::EntityId,
+        record_id: &RecordId,
+    ) -> Result<bool, StoreError> {
+        let _ = (entity_id, record_id);
+        Err("capability unavailable: bitemporal_graph".into())
     }
 }
 
@@ -705,7 +785,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
+            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 5, 0));
     }
 
     #[tokio::test]
@@ -768,5 +848,72 @@ mod tests {
         };
         assert_eq!(s.records_active, 10);
         assert_eq!(s.fts5_rows, 10);
+    }
+
+    #[tokio::test]
+    async fn issue_186_default_impls_report_capability_unavailable() {
+        use crate::domain::graph::{
+            EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode, GraphEdgesArgs,
+        };
+        use crate::domain::record::RecordId;
+
+        let store = StubStore;
+
+        let node = EntityNode {
+            id: EntityId::from("01HZE7JV5N0000000000000001"),
+            name: "alice".into(),
+            name_norm: "alice".into(),
+            summary: None,
+            created_at: 1,
+            embedding_id: None,
+        };
+        let err = store.upsert_entity(&node).await.unwrap_err();
+        assert!(err.to_string().contains("bitemporal_graph"));
+
+        let edge = EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N0000000000000002"),
+            source_id: node.id.clone(),
+            target_id: node.id.clone(),
+            relation: "self".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 1,
+            invalid_at: None,
+            created_at: 1,
+            source_record_id: None,
+        };
+        let err = store.upsert_entity_edge(&edge).await.unwrap_err();
+        assert!(err.to_string().contains("bitemporal_graph"));
+
+        let id = EntityId::from("01HZE7JV5N0000000000000001");
+        let args = GraphEdgesArgs {
+            node_id: &id,
+            direction: EdgeDir::Both,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        };
+        let err = store.graph_edges(&args).await.unwrap_err();
+        assert!(err.to_string().contains("bitemporal_graph"));
+
+        let old_id = EntityEdgeId::from("01HZE7JV5N0000000000000003");
+        let err = store
+            .resolve_contradiction(&old_id, &edge)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("bitemporal_graph"));
+
+        let rec_id = RecordId::parse("01HQZX9F5N0000000000000000".to_owned()).unwrap();
+        let err = store
+            .link_entity_episode(&node.id, &rec_id)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("bitemporal_graph"));
+    }
+
+    #[test]
+    fn issue_186_contract_version_is_0_4_0() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 4, 0));
     }
 }
