@@ -139,6 +139,11 @@
           "type": "array",
           "items": { "$ref": "../common/record_exclusion.json" },
           "description": "Per-record exclusions; present only when args.explain is true."
+        },
+        "score_explain": {
+          "type": "array",
+          "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
+          "items": { "$ref": "#/$defs/ScoreExplain" }
         }
       }
     },
@@ -171,6 +176,19 @@
             "unknown"
           ]
         }
+      }
+    },
+    "ScoreExplain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "rrf_score", "final_score"],
+      "properties": {
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "bm25_rank": { "type": "integer", "minimum": 1 },
+        "semantic_rank": { "type": "integer", "minimum": 1 },
+        "rrf_score": { "type": "number" },
+        "cosine": { "type": "number" },
+        "final_score": { "type": "number" }
       }
     },
     "filter": {
