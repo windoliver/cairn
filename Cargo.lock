@@ -635,6 +635,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "cairn-core",
+ "cairn-embeddings-local",
  "cairn-store-sqlite",
  "ed25519-dalek",
  "insta",

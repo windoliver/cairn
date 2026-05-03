@@ -6,8 +6,10 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod hybrid_vault;
 pub mod keystore;
 pub mod store;
+pub use hybrid_vault::{HybridTestVault, RecordSpec, build_hybrid_test_vault};
 pub use keystore::MemoryKeystore;
 
 use std::path::{Path, PathBuf};
