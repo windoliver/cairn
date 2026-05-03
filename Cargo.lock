@@ -604,6 +604,7 @@ name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "cairn-cli",
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-store-sqlite",
