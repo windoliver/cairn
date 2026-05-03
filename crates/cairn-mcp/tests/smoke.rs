@@ -49,9 +49,9 @@ fn transport_error_service_display() {
 #[test]
 fn handler_is_default_and_new() {
     // Verify both construction paths compile and produce the same type.
-    let a = CairnMcpHandler;
+    let a = CairnMcpHandler::default();
     let b = CairnMcpHandler::new();
-    // Unit struct — Debug repr is identical.
+    // Both unwired — Debug repr is identical.
     assert_eq!(format!("{a:?}"), format!("{b:?}"));
 }
 
