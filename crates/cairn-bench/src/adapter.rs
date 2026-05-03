@@ -90,6 +90,7 @@ impl Adapter for Bm25Adapter<'_> {
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             cursor: None,
+            with_explain: false,
         };
         let page = self
             .store
@@ -129,6 +130,7 @@ impl Adapter for VectorAdapter<'_> {
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             model_label: self.model_label.clone(),
+            with_explain: false,
         };
         let page = self
             .store
@@ -239,6 +241,7 @@ impl Adapter for GraphHybridAdapter<'_> {
                 blend: self.blend,
                 rrf_k: self.rrf_k,
                 rerank_topk: self.rerank_topk,
+                with_explain: false,
             };
             let page = self
                 .store
@@ -460,6 +463,7 @@ impl Adapter for HybridAdapter<'_> {
             blend: self.blend,
             rrf_k: self.rrf_k,
             rerank_topk: self.rerank_topk,
+            with_explain: false,
         };
         let page = self
             .store

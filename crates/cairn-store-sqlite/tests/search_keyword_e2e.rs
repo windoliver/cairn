@@ -37,6 +37,7 @@ fn args(query: &str, limit: usize) -> KeywordSearchArgs<'static> {
         visibility_allowlist: vec![MemoryVisibility::Private],
         limit,
         cursor: None,
+        with_explain: false,
     }
 }
 

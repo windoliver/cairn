@@ -143,6 +143,7 @@ async fn golden_search_args_keyword_filters_to_user_private() {
         visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit,
         cursor: None,
+        with_explain: false,
     };
 
     let page = store.search_keyword(&key_args).await.expect("search");
@@ -170,6 +171,7 @@ async fn golden_leaf_eq_filter_narrows_to_user_kind() {
         visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit: 10,
         cursor: None,
+        with_explain: false,
     };
 
     let page = store.search_keyword(&key_args).await.expect("search");
@@ -199,6 +201,7 @@ async fn golden_or_with_not_admits_public_or_non_private() {
         visibility_allowlist: vec![MemoryVisibility::Private, MemoryVisibility::Public],
         limit: 10,
         cursor: None,
+        with_explain: false,
     };
 
     let page = store.search_keyword(&key_args).await.expect("search");

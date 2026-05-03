@@ -81,6 +81,7 @@ impl SqliteMemoryStore {
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             cursor: None,
+            with_explain: false,
         };
         let sem_args = SemanticSearchArgs {
             query: args.query.clone(),
@@ -88,6 +89,7 @@ impl SqliteMemoryStore {
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             model_label: args.model_label.clone(),
+            with_explain: false,
         };
         let (keyword, semantic) = tokio::try_join!(
             self.do_search_keyword(&kw_args),
@@ -134,7 +136,10 @@ impl SqliteMemoryStore {
             .filter_map(|r| by_id.remove(&r.record_id))
             .collect();
 
-        Ok(HybridSearchPage { candidates })
+        Ok(HybridSearchPage {
+            candidates,
+            explain: None,
+        })
     }
 }
 

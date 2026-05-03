@@ -256,6 +256,7 @@ fn project_page(
     Ok(KeywordSearchPage {
         candidates,
         next_cursor,
+        explain: None,
     })
 }
 
@@ -707,7 +708,10 @@ fn project_semantic_page(
     for row in rows {
         candidates.push(project_semantic_row(&row)?);
     }
-    Ok(SemanticSearchPage { candidates })
+    Ok(SemanticSearchPage {
+        candidates,
+        explain: None,
+    })
 }
 
 /// Project a single [`SemanticRawRow`] into a [`SearchCandidate`].
@@ -989,6 +993,7 @@ mod tests {
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 5,
             cursor: None,
+            with_explain: false,
         };
         let page = store.search_keyword(&args).await.expect("search");
         assert!(

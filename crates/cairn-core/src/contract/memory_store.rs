@@ -2,11 +2,13 @@
 
 use crate::contract::version::{ContractVersion, VersionRange};
 use crate::domain::record::MemoryRecord;
+use crate::search::ScoreExplain;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
 /// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs` landed.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
+/// Bumped 0.3 → 0.4 in #49 when search args/pages gained explain plumbing.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -524,6 +526,11 @@ pub struct KeywordSearchArgs<'a> {
     pub limit: usize,
     /// Optional resume cursor from the previous page.
     pub cursor: Option<KeywordCursor>,
+    /// When true, the store populates the page's `explain` block.
+    /// Callers are expected to set this only when `--explain` was requested
+    /// (and the `policy_trace` capability is advertised — gating happens
+    /// in the verb dispatcher, not the store).
+    pub with_explain: bool,
 }
 
 /// Opaque keyset cursor for keyword search. Encoded base64-json on the wire.
@@ -542,6 +549,10 @@ pub struct KeywordSearchPage {
     pub candidates: Vec<SearchCandidate>,
     /// Cursor to fetch the next page, or `None` when exhausted.
     pub next_cursor: Option<KeywordCursor>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the keyword
+    /// page, only `bm25_rank` is populated.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// Args for the semantic (ANN) branch of `search`.
@@ -563,6 +574,9 @@ pub struct SemanticSearchArgs<'a> {
     /// The store skips rows whose `record_vectors.model` column differs —
     /// they were produced by a stale model and will be rebuilt by the reindex drain.
     pub model_label: String,
+    /// When true, the store populates the page's `explain` block. See
+    /// [`KeywordSearchArgs::with_explain`].
+    pub with_explain: bool,
 }
 
 /// One page of candidates returned by the semantic branch of `search`.
@@ -570,6 +584,10 @@ pub struct SemanticSearchArgs<'a> {
 pub struct SemanticSearchPage {
     /// Candidates ordered by ascending L2 distance (smaller = more similar).
     pub candidates: Vec<SearchCandidate>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the semantic
+    /// page, only `semantic_rank` is populated.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// Args for the hybrid (RRF + cosine re-rank) branch of `search`.
@@ -599,6 +617,9 @@ pub struct HybridSearchArgs<'a> {
     pub rrf_k: usize,
     /// Top-K from RRF to second-pass re-rank with cosine. Canonical default `20`.
     pub rerank_topk: usize,
+    /// When true, the store populates the page's `explain` block. See
+    /// [`KeywordSearchArgs::with_explain`].
+    pub with_explain: bool,
 }
 
 /// One page of hybrid candidates.
@@ -606,6 +627,10 @@ pub struct HybridSearchArgs<'a> {
 pub struct HybridSearchPage {
     /// Candidates, sorted descending by blended `final_score`.
     pub candidates: Vec<SearchCandidate>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the hybrid
+    /// page, all fields are populated where applicable.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// A single candidate row from a search query, with the signal columns the
@@ -705,7 +730,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
+            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 5, 0));
     }
 
     #[tokio::test]
@@ -730,6 +755,7 @@ mod tests {
                 visibility_allowlist: vec![],
                 limit: 10,
                 model_label: "bge-small-en-v1.5".into(),
+                with_explain: false,
             })
             .await;
         assert!(
@@ -746,6 +772,7 @@ mod tests {
                 blend: 0.7,
                 rrf_k: 60,
                 rerank_topk: 20,
+                with_explain: false,
             })
             .await;
         assert!(

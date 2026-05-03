@@ -263,6 +263,7 @@ async fn run_semantic_async(
         visibility_allowlist,
         limit,
         model_label: kind.as_str().to_owned(),
+        with_explain: false,
     };
 
     match store.search_semantic(&args).await {
@@ -509,6 +510,7 @@ async fn run_hybrid_async(
         blend,
         rrf_k,
         rerank_topk,
+        with_explain: false,
     };
 
     match store.search_hybrid(&args).await {
