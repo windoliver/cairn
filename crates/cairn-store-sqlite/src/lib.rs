@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
+pub mod entity_graph;
 pub mod error;
 mod identity;
 pub mod migrations;

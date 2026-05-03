@@ -345,3 +345,45 @@ fn migration_0034_entity_episodes_idempotent_pk_and_cascade() {
         .expect("count");
     assert_eq!(count, 0, "cascade must remove orphan episode link");
 }
+
+#[test]
+fn wal_helper_writes_op_and_steps_in_one_tx() {
+    use cairn_store_sqlite::entity_graph::wal as gwal;
+
+    let mut conn = open_in_memory_sync().expect("open");
+    let tx = conn.transaction().expect("tx");
+
+    let op_id = gwal::issue_op(&tx, "graph_upsert_edge", "h-target").expect("issue");
+
+    gwal::write_step(&tx, &op_id, 0, "insert_edge", None).expect("step 0");
+    gwal::commit_op(&tx, &op_id).expect("commit");
+
+    tx.commit().expect("tx commit");
+
+    let kind: String = conn
+        .query_row(
+            "SELECT kind FROM wal_ops WHERE operation_id = ?1",
+            [&op_id],
+            |r| r.get(0),
+        )
+        .expect("query");
+    assert_eq!(kind, "graph_upsert_edge");
+
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM wal_ops WHERE operation_id = ?1",
+            [&op_id],
+            |r| r.get(0),
+        )
+        .expect("query");
+    assert_eq!(state, "COMMITTED");
+
+    let step_state: String = conn
+        .query_row(
+            "SELECT state FROM wal_steps WHERE operation_id = ?1 AND step_ord = 0",
+            [&op_id],
+            |r| r.get(0),
+        )
+        .expect("query");
+    assert_eq!(step_state, "DONE");
+}
