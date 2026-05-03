@@ -181,17 +181,23 @@ pub async fn run_handler(
         let mut needs_parent_from_store: Vec<(usize, String)> = Vec::new();
 
         for event in &group {
-            // Classify the event.
+            // Classify the event. P0 only recognizes the four hook payloads
+            // (UserPromptSubmit / PreToolUse / PostToolUse / Stop). Other
+            // event shapes (`AgentMessage`, `ToolOutput`) await sensor
+            // adapters (#84). Skip unrecognized events with a per-event
+            // diagnostic instead of aborting the whole turn — the rest of
+            // the turn's known events still persist correctly, and the
+            // skipped event id surfaces in `failed_turns` so callers can
+            // act on it.
             let classified = match classify(event) {
                 Ok(c) => c,
                 Err(e) => {
                     failed_turns.push((
                         session_str.clone(),
                         turn_str.clone(),
-                        format!("classify: {e}"),
+                        format!("classify {}: {e}", event.event_id),
                     ));
-                    group_failed = true;
-                    break;
+                    continue;
                 }
             };
             if classified == TraceEvent::Stop {

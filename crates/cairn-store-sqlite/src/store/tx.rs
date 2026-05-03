@@ -21,12 +21,12 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{MemoryRecord, RecordId, SessionId};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
 use crate::error::StoreError;
-use crate::store::projection::record_from_json;
+use crate::store::projection::{ProjectedRow, record_from_json};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
@@ -364,29 +364,97 @@ impl StoreTx<'_> {
             == Some("turn_summary");
 
         if is_summary {
-            let new_json = serde_json::to_string(record).map_err(|e| StoreError::Invariant {
-                what: format!("serialize summary record: {e}"),
-            })?;
+            // Re-summarize must keep `record_json` and the denormalized
+            // columns (body, body_hash, scope, kind/class/visibility,
+            // confidence, salience, tags, updated_at) in lock-step. The
+            // standard `upsert_in_tx` deactivate+insert path can't be used
+            // here: `records_trace_summary` is a UNIQUE index over
+            // `(trace_session_id, trace_turn_id) WHERE trace_event =
+            // 'turn_summary'` covering both active and inactive rows, so an
+            // inactive prior summary would collide with the new insert.
+            // Build a `ProjectedRow` and update every column from it.
+            let body_hash = BodyHash::compute(&record.body);
+            let now_ms = current_unix_ms();
             let target_id = record.target_id.as_str();
-            let n = self.tx.execute(
-                "UPDATE records SET record_json = ?1 \
-                  WHERE target_id = ?2 AND active = 1",
-                rusqlite::params![new_json, target_id],
+
+            // Look up the existing active row to preserve its created_at
+            // and version (in-place rewrite, not a new version row).
+            let prior: Option<(String, i64, i64)> = self
+                .tx
+                .query_row(
+                    "SELECT record_id, version, created_at FROM records \
+                       WHERE target_id = ?1 AND active = 1 LIMIT 1",
+                    params![target_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((prior_id, prior_version, created_at)) = prior else {
+                // No existing row: standard insert path is fine — there's no
+                // inactive summary row to collide with the partial UNIQUE.
+                return upsert_in_tx(&mut self.tx, record);
+            };
+
+            let version_u32 = u32::try_from(prior_version).map_err(|_| StoreError::Invariant {
+                what: format!("prior summary version overflows u32: {prior_version}"),
+            })?;
+            let row = ProjectedRow::from_record(
+                record,
+                version_u32,
+                created_at,
+                now_ms,
+                &body_hash,
+                true,
+                false,
             )?;
-            if n == 0 {
-                // No existing row: fall through to standard insert.
-                return match upsert_in_tx(&mut self.tx, record) {
-                    Ok(out) => Ok(out),
-                    Err(other) => Err(other),
-                };
-            }
-            // Updated in place: return an outcome consistent with UpsertOutcome.
+
+            let n = self.tx.execute(
+                "UPDATE records SET \
+                    record_json = ?1, \
+                    body = ?2, \
+                    body_hash = ?3, \
+                    updated_at = ?4, \
+                    scope = ?5, \
+                    actor_chain = ?6, \
+                    kind = ?7, \
+                    class = ?8, \
+                    visibility = ?9, \
+                    confidence = ?10, \
+                    salience = ?11, \
+                    tags_json = ?12, \
+                    path = ?13 \
+                  WHERE record_id = ?14",
+                params![
+                    row.record_json,
+                    row.body,
+                    row.body_hash,
+                    row.updated_at,
+                    row.scope,
+                    row.actor_chain,
+                    row.kind,
+                    row.class,
+                    row.visibility,
+                    row.confidence,
+                    row.salience,
+                    row.tags_json,
+                    row.path,
+                    prior_id,
+                ],
+            )?;
+            debug_assert_eq!(n, 1, "summary in-place UPDATE matched 0 rows");
+
             return Ok(UpsertOutcome {
                 record_id: record.id.clone(),
                 target_id: record.target_id.clone(),
-                version: 1, // version is not bumped on in-place updates
+                version: version_u32,
                 content_changed: true,
-                prior_hash: None,
+                prior_hash: Some(body_hash),
             });
         }
 
