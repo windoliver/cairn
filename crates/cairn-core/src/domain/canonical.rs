@@ -155,6 +155,33 @@ pub fn canonical_bytes_signed_payload(record: &MemoryRecord) -> Result<Vec<u8>, 
     Ok(buf.into_bytes())
 }
 
+/// Encode `intent` to canonical-JSON bytes with the `signature` field
+/// removed. The result is the byte string that was signed, suitable for
+/// passing to [`ed25519_dalek::Verifier::verify`] alongside
+/// `intent.signature`.
+///
+/// # Errors
+/// Returns [`DomainError::InvalidIdentity`] if `intent` cannot be
+/// serialized to a JSON object (should never happen — `SignedIntent` is a
+/// struct).
+pub fn canonical_bytes_signed_intent(
+    intent: &crate::generated::envelope::SignedIntent,
+) -> Result<Vec<u8>, crate::domain::DomainError> {
+    let mut value =
+        serde_json::to_value(intent).map_err(|e| crate::domain::DomainError::InvalidIdentity {
+            message: format!("canonical serialize failed: {e}"),
+        })?;
+    let map = value
+        .as_object_mut()
+        .ok_or_else(|| crate::domain::DomainError::InvalidIdentity {
+            message: "SignedIntent did not serialize to a JSON object".into(),
+        })?;
+    map.remove("signature");
+    let mut buf = String::new();
+    write_canonical(&value, &mut buf);
+    Ok(buf.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +318,71 @@ mod tests {
         let class_pos = s.find("\"class\"").expect("class present");
         assert!(actor_pos < body_pos);
         assert!(body_pos < class_pos);
+    }
+
+    #[test]
+    fn signed_intent_canonical_strips_signature() {
+        use crate::generated::common;
+        use crate::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
+
+        let mk = |sig: &str| SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            issuer: common::Identity("hmn:tafeng".into()),
+            key_version: 1,
+            nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".into()),
+            operation_id: common::Ulid("01HQZX9F5N0000000000000000".into()),
+            scope: SignedIntentScope {
+                tenant: "acme".into(),
+                workspace: "ws".into(),
+                entity: "ent".into(),
+                tier: SignedIntentScopeTier::Project,
+            },
+            sequence: Some(1),
+            server_challenge: None,
+            signature: common::Ed25519Signature(format!("ed25519:{sig}")),
+            target_hash: format!("sha256:{}", "a".repeat(64)),
+        };
+
+        let a = canonical_bytes_signed_intent(&mk(&"a".repeat(128))).unwrap();
+        let b = canonical_bytes_signed_intent(&mk(&"b".repeat(128))).unwrap();
+        assert_eq!(
+            a, b,
+            "canonical bytes must be invariant under signature mutation"
+        );
+        assert!(!std::str::from_utf8(&a).unwrap().contains("signature"));
+    }
+
+    #[test]
+    fn signed_intent_canonical_changes_when_payload_changes() {
+        use crate::generated::common;
+        use crate::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
+
+        let base = SignedIntent {
+            chain_parents: vec![],
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            issuer: common::Identity("hmn:tafeng".into()),
+            key_version: 1,
+            nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".into()),
+            operation_id: common::Ulid("01HQZX9F5N0000000000000000".into()),
+            scope: SignedIntentScope {
+                tenant: "acme".into(),
+                workspace: "ws".into(),
+                entity: "ent".into(),
+                tier: SignedIntentScopeTier::Project,
+            },
+            sequence: Some(1),
+            server_challenge: None,
+            signature: common::Ed25519Signature(format!("ed25519:{}", "a".repeat(128))),
+            target_hash: format!("sha256:{}", "a".repeat(64)),
+        };
+        let mut tweaked = base.clone();
+        tweaked.scope.entity = "different".into();
+
+        let a = canonical_bytes_signed_intent(&base).unwrap();
+        let b = canonical_bytes_signed_intent(&tweaked).unwrap();
+        assert_ne!(a, b);
     }
 }
