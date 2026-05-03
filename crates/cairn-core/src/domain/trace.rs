@@ -1,9 +1,11 @@
 //! Trace-record domain types (issue #77, brief §5.0, §9.3).
 
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ulid::Ulid;
 
-use crate::domain::{CaptureEventId, SessionId};
+use crate::domain::{CaptureEventId, RecordId, SessionId};
 
 /// Classifies the kind of event captured in a trace record.
 ///
@@ -123,6 +125,30 @@ impl TraceLink {
     }
 }
 
+/// Deterministic, ULID-shaped record id for a `turn_summary` (spec §5.2).
+///
+/// Same `(session_id, turn_id)` always maps to the same id, so summary
+/// upserts are idempotent across replays. The result is a legal
+/// [`RecordId`] (26-char Crockford ULID) so it round-trips through every
+/// store/IDL path that already accepts `RecordId`.
+#[must_use]
+pub fn summary_record_id(session_id: &SessionId, turn_id: &str) -> RecordId {
+    let mut h = Sha256::new();
+    h.update(b"cairn:trace:turnsum\0");
+    h.update(session_id.as_str().as_bytes());
+    h.update(b"\0");
+    h.update(turn_id.as_bytes());
+    let digest = h.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    let ulid = Ulid::from_bytes(bytes);
+    // invariant: Ulid::to_string() always produces 26 valid Crockford-base32
+    // characters by construction; RecordId::parse cannot fail on this input.
+    RecordId::parse(ulid.to_string()).unwrap_or_else(|_| {
+        unreachable!("ulid::to_string always yields valid RecordId")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +260,30 @@ mod tests {
             l.validate(TraceEvent::UserMessage).unwrap_err(),
             TraceLinkError::EmptyTurnId
         ));
+    }
+
+    #[test]
+    fn summary_id_is_deterministic() {
+        let s1 = summary_record_id(&sess(), "turn-4");
+        let s2 = summary_record_id(&sess(), "turn-4");
+        assert_eq!(s1, s2);
+        assert_ne!(s1, summary_record_id(&sess(), "turn-5"));
+    }
+
+    #[test]
+    fn summary_id_is_valid_record_id() {
+        let id = summary_record_id(&sess(), "turn-4");
+        let reparsed = crate::domain::RecordId::parse(id.as_str())
+            .expect("ulid-shaped record id must round-trip through RecordId::parse");
+        assert_eq!(id, reparsed);
+    }
+
+    #[test]
+    fn summary_id_distinguishes_session() {
+        let other = SessionId::parse("01BX5ZZKBKACTAV9WEVGEMMVRZ").expect("valid");
+        assert_ne!(
+            summary_record_id(&sess(), "turn-4"),
+            summary_record_id(&other, "turn-4")
+        );
     }
 }
