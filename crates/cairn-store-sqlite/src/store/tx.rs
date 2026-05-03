@@ -227,6 +227,51 @@ impl StoreTx<'_> {
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
+    /// Idempotent trace-record upsert. Replays of the same
+    /// `capture_event_id` converge on the same `record_id` (the
+    /// projector derives one from the other, Task 6) and become no-op
+    /// upserts via the primary-key idempotency in `upsert_in_tx`.
+    ///
+    /// Unique-constraint violations on the `records_trace_seq` and
+    /// `records_trace_event_id` indices are translated to typed errors
+    /// so callers can distinguish a sequence collision (two different
+    /// events competing for the same turn slot) from an
+    /// `capture_event_id` collision (projector contract violation).
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::TraceSequenceConflict`] if two distinct events
+    ///   tried to claim the same `(session_id, turn_id, sequence)`.
+    /// - [`StoreError::TraceCaptureEventIdConflict`] if two distinct
+    ///   record ids carry the same `trace.capture_event_id` (should not
+    ///   happen under the documented projector contract).
+    /// - Any other [`StoreError`] from the underlying upsert path.
+    pub fn upsert_trace(&mut self, record: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+        match upsert_in_tx(&mut self.tx, record) {
+            Ok(out) => Ok(out),
+            // `records_trace_seq` index columns: trace_session_id,
+            // trace_turn_id, trace_sequence.  SQLite error message:
+            // "UNIQUE constraint failed: records.trace_session_id,
+            //  records.trace_turn_id, records.trace_sequence"
+            Err(StoreError::Sqlite(ref e))
+                if is_unique_constraint(e, "records.trace_sequence") =>
+            {
+                Err(extract_seq_conflict(record))
+            }
+            // `records_trace_event_id` index column: trace_capture_event_id.
+            // SQLite error message:
+            // "UNIQUE constraint failed: records.trace_capture_event_id"
+            Err(StoreError::Sqlite(ref e))
+                if is_unique_constraint(e, "records.trace_capture_event_id") =>
+            {
+                Err(StoreError::TraceCaptureEventIdConflict {
+                    capture_event_id: extract_capture_event_id(record),
+                })
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Synchronous edge removal. Returns `true` if a row was deleted,
     /// `false` if no row matched the key.
     ///
@@ -240,6 +285,63 @@ impl StoreTx<'_> {
         )?;
         Ok(n > 0)
     }
+}
+
+/// Returns `true` when `e` is a `UNIQUE` constraint failure whose error
+/// message contains `column_signature`. `SQLite` formats the message as
+/// `"UNIQUE constraint failed: TABLE.COL, …"` using the indexed
+/// column names, not the index name, so we match on the column signature
+/// (`column_signature`) that uniquely identifies each index.
+///
+/// | Index                    | Column signature                  |
+/// |---|---|
+/// | `records_trace_seq`      | `"records.trace_sequence"`        |
+/// | `records_trace_event_id` | `"records.trace_capture_event_id"` |
+fn is_unique_constraint(e: &rusqlite::Error, column_signature: &str) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(_, Some(msg)) if msg.contains(column_signature)
+    )
+}
+
+/// Extract `(session_id, turn_id, sequence)` from `extra_frontmatter["trace"]`
+/// and return a [`StoreError::TraceSequenceConflict`]. Falls back to empty
+/// strings / 0 if the keys are absent (caller-side bug; still typed).
+fn extract_seq_conflict(r: &MemoryRecord) -> StoreError {
+    let trace = r
+        .extra_frontmatter
+        .get("trace")
+        .and_then(|v| v.as_object());
+    let session_id = trace
+        .and_then(|t| t.get("session_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let turn_id = trace
+        .and_then(|t| t.get("turn_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let sequence = trace
+        .and_then(|t| t.get("sequence"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    StoreError::TraceSequenceConflict {
+        session_id,
+        turn_id,
+        sequence,
+    }
+}
+
+/// Extract `trace.capture_event_id` from `extra_frontmatter`. Falls back
+/// to an empty string if absent.
+fn extract_capture_event_id(r: &MemoryRecord) -> String {
+    r.extra_frontmatter
+        .get("trace")
+        .and_then(|v| v.get("capture_event_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned()
 }
 
 impl SqliteMemoryStore {

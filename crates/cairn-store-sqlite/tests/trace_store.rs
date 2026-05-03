@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use cairn_core::contract::memory_store::TombstoneReason;
 use cairn_core::domain::{MemoryRecord, RecordId, SessionId, TargetId};
 use cairn_core::domain::record::tests_export::sample_record;
+use cairn_store_sqlite::error::StoreError;
 use cairn_store_sqlite::open_in_memory;
 use serde_json::{Map as JsonMap, Value as Json};
 
@@ -313,4 +314,102 @@ async fn payload_hash_count_in_scope_basic() {
         })
         .await
         .expect("with_tx");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn upsert_trace_is_idempotent_on_capture_event_id() {
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let event_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let record = mk_trace_record(&session_id, "turn-1", 0, event_id);
+
+    store
+        .with_tx({
+            let r = record.clone();
+            move |tx| {
+                tx.upsert_trace(&r)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    store
+        .with_tx({
+            let r = record.clone();
+            move |tx| {
+                tx.upsert_trace(&r)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    store
+        .with_tx(move |tx| {
+            let rows = tx.list_trace_events(&session_id, "turn-1")?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "duplicate capture_event_id must not produce two rows"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn upsert_trace_rejects_duplicate_sequence() {
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let r1 = mk_trace_record(&session_id, "turn-1", 0, "01ARZ3NDEKTSV4RRFFQ69G5FAA");
+    let r2 = mk_trace_record(&session_id, "turn-1", 0, "01ARZ3NDEKTSV4RRFFQ69G5FAB");
+
+    let result = store
+        .with_tx({
+            let r1 = r1.clone();
+            let r2 = r2.clone();
+            move |tx| {
+                tx.upsert_trace(&r1)?;
+                tx.upsert_trace(&r2)?;
+                Ok(())
+            }
+        })
+        .await;
+    let err = result.expect_err("duplicate sequence should error");
+    assert!(
+        matches!(err, StoreError::TraceSequenceConflict { .. }),
+        "got {err:?}"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::expect_used,
+    reason = "test: panics surface broken invariants immediately"
+)]
+async fn upsert_trace_allows_same_sequence_after_first_record_replayed() {
+    // Replaying r1 then upserting it again should still succeed (idempotent).
+    let store = open_in_memory().await.expect("open store");
+    let session_id = SessionId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").expect("valid");
+    let r1 = mk_trace_record(&session_id, "turn-1", 0, "01ARZ3NDEKTSV4RRFFQ69G5FAA");
+    store
+        .with_tx({
+            let r = r1.clone();
+            move |tx| {
+                tx.upsert_trace(&r)?;
+                tx.upsert_trace(&r)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
 }

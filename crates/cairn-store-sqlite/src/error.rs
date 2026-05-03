@@ -140,6 +140,31 @@ pub enum StoreError {
         /// The trait-method name that was invoked.
         method: &'static str,
     },
+
+    /// Two distinct events tried to land at the same trace `sequence`.
+    /// The `records_trace_seq` unique index enforces `(session_id,
+    /// turn_id, sequence)` uniqueness; this variant surfaces when two
+    /// different `capture_event_id`s collide on the same slot.
+    #[error("trace sequence conflict at session={session_id} turn={turn_id} seq={sequence}")]
+    TraceSequenceConflict {
+        /// The session id of the conflicting trace record.
+        session_id: String,
+        /// The turn id of the conflicting trace record.
+        turn_id: String,
+        /// The sequence number that was already claimed.
+        sequence: u64,
+    },
+
+    /// Two distinct record ids share the same `trace.capture_event_id`.
+    /// This should not happen under the documented projector contract
+    /// (Task 6 derives `record_id` deterministically from
+    /// `capture_event_id`), so this variant indicates a projector
+    /// contract violation.
+    #[error("trace capture_event_id collision: {capture_event_id}")]
+    TraceCaptureEventIdConflict {
+        /// The `capture_event_id` shared by two distinct record ids.
+        capture_event_id: String,
+    },
 }
 
 // Note: the plan specifies an explicit
