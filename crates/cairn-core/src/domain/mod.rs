@@ -37,6 +37,7 @@ pub mod scope;
 pub mod session;
 pub mod target_id;
 pub mod taxonomy;
+pub mod time;
 pub mod timestamp;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
@@ -65,4 +66,5 @@ pub use session::{
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
