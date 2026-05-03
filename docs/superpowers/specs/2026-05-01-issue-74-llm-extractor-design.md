@@ -191,8 +191,8 @@ pub enum ExtractChainBuildError {
 Behaviour:
 
 1. Iterate `workers` in declaration order.
-2. Maintain a running `eligible_spans: Vec<TextSpan>` whose initial value is `vec![TextSpan::new(0, body_len)]` — the chain authorises the first worker to look at the whole body. `RegexExtractor` then narrows that to its returned `llm_eligible_spans` for the next worker.
-3. Before each subsequent worker, set `input.eligible_spans` to the running set. The chain never recomputes eligibility from the full body or by subtracting confidence-gated draft spans on its own — `RegexExtractor` already encodes the safety/truncation rules (clause-cap tails, oversize-body skip, confidence-gated suppression) in its returned `llm_eligible_spans`.
+2. Interpret `ExtractInput.eligible_spans` with three-state semantics: `None` means no caller restriction (the chain seeds its internal running set from `0..body_len`), `Some(vec![])` means nothing is eligible (the chain returns an empty result immediately), and `Some(spans)` means extraction is restricted to exactly those spans.
+3. Before each worker invocation, set `input.eligible_spans = Some(running_eligible_spans.clone())`. The chain never forwards `None` to internal workers; it resolves the caller-facing three-state input once, then maintains a concrete running span set. The chain never recomputes eligibility from the full body or by subtracting confidence-gated draft spans on its own — `RegexExtractor` already encodes the safety/truncation rules (clause-cap tails, oversize-body skip, confidence-gated suppression) in its returned `llm_eligible_spans`.
 4. After each successful worker:
    - **Validate every emitted output and discard against the current `eligible_spans` BEFORE appending.** For each `result.outputs[i]` and each `result.discards[i]`, the chain checks that `item.source_span` is contained within at least one element of the current `eligible_spans`. If not, the item is dropped, a `tracing::warn!(worker, dropped_span)` is emitted, and the metric `chain.output_out_of_eligibility` is incremented. This is the chain-level enforcement that does not rely on worker self-discipline: a stale or buggy worker cannot inject an out-of-bounds output regardless of how the worker was implemented. Items that pass validation are appended to `ChainResult.outputs` / `.discards`.
    - **Apply the monotonicity guard on returned eligibility (Gating workers only)**: only a worker whose `role()` is `WorkerRole::Gating` may narrow the running eligibility. For `Gating` workers, the chain clamps `result.llm_eligible_spans` to `eligible_spans ∩ result.llm_eligible_spans` (interval-set intersection over `TextSpan`); the clamped set becomes the new running eligibility. A `Gating` worker can never widen eligibility beyond what it received — the chain enforces this regardless of worker correctness, so a buggy/stale gating worker cannot re-expose text a prior worker suppressed. For `Augmenting` workers, `result.llm_eligible_spans` is ignored entirely — augmenting workers return `vec![]` on success (no narrowing intent), and applying that as an intersection would collapse eligibility to empty and starve all subsequent augmenting workers. Augmenting workers add extraction outputs but have no narrowing duty.
@@ -561,8 +561,8 @@ If, after dropping, the parse yields zero usable items **and** the model emitted
 | `BodyResolution::NotApplicable`    | `Ok(empty)` — no LLM call                   |
 | `BodyResolution::Failed(_)`        | `Err(ExtractError::BodyResolution { .. })`  |
 | `BodyResolution::Resolved` empty   | `Ok(empty)` — no LLM call                   |
-| `eligible_spans` empty AND prior workers ran | `Ok(empty)` — high-confidence regex covered everything |
-| `eligible_spans` empty AND first worker | full body treated as one eligible span (chain initialiser sets this) |
+| `eligible_spans = Some(vec![])` | `Ok(empty)` — caller or upstream gating worker suppressed all extraction |
+| `eligible_spans = None` at chain entry | full body treated as one eligible span (chain initialiser sets this) |
 
 ### 5.5 Caller contract for `run`
 

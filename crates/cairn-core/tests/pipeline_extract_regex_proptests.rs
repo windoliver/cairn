@@ -59,7 +59,7 @@ proptest! {
             let input = ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(body),
-                eligible_spans: vec![],
+                eligible_spans: None,
             };
             let extractor = RegexExtractor::builtin();
             let res = extractor.extract(&input).await;
@@ -102,7 +102,7 @@ proptest! {
             let input = ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(rb),
-                eligible_spans: vec![],
+                eligible_spans: None,
             };
             let extractor = RegexExtractor::builtin();
             let res = extractor.extract(&input).await.unwrap();

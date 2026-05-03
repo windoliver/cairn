@@ -67,7 +67,7 @@ async fn p99_under_2ms_on_mixed_fixture() {
             .extract(&ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(rb),
-                eligible_spans: vec![],
+                eligible_spans: None,
             })
             .await;
     }
@@ -81,7 +81,7 @@ async fn p99_under_2ms_on_mixed_fixture() {
             .extract(&ExtractInput {
                 event: &event,
                 body: BodyResolution::Resolved(rb),
-                eligible_spans: vec![],
+                eligible_spans: None,
             })
             .await
             .expect("ok");

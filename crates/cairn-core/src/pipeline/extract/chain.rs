@@ -189,9 +189,23 @@ impl ExtractChain {
     /// returns an error.
     #[allow(clippy::too_many_lines)] // sequential trust-boundary logic; splitting hurts readability
     pub async fn run(&self, input: &ExtractInput<'_>) -> Result<ChainResult, ChainRunError> {
-        // Initial running eligibility: use what the caller provided.
-        // If empty AND body has length, seed with whole-body span so
-        // the first worker sees the full body (§4.3 step 2).
+        // Three-state `eligible_spans` semantics (§ finding fix):
+        //
+        // - `None`          → no caller restriction; seed from full body.
+        //                     `caller_restricted_eligibility = false`.
+        // - `Some(vec![])` → caller suppresses all extraction; return empty
+        //                     immediately without invoking any worker.
+        // - `Some(spans)`  → restrict to those spans.
+        //                     `caller_restricted_eligibility = true`.
+        match &input.eligible_spans {
+            Some(spans) if spans.is_empty() => {
+                // Caller explicitly suppressed extraction — return empty
+                // with no workers invoked and no WorkerFailure recorded.
+                return Ok(ChainResult::default());
+            }
+            _ => {}
+        }
+
         let body_len = match &input.body {
             BodyResolution::Resolved(rb) => rb.text().len(),
             _ => 0,
@@ -200,17 +214,27 @@ impl ExtractChain {
         // Remember whether the *caller* supplied an eligibility restriction.
         // This is captured before any chain seeding so we know whether to
         // enforce span presence on Gating outputs (Finding 2 fix): if the
-        // caller passed a non-empty `eligible_spans`, Gating outputs with
-        // `source_span: None` are dropped just like Augmenting ones.
-        let caller_restricted_eligibility = !input.eligible_spans.is_empty();
+        // caller passed `Some(spans)` with non-empty spans, Gating outputs
+        // with `source_span: None` are dropped just like Augmenting ones.
+        let caller_restricted_eligibility =
+            matches!(&input.eligible_spans, Some(s) if !s.is_empty());
 
         // Cast is safe: MAX_BODY_LEN_FOR_REGEX is 64 KiB << u32::MAX.
         #[allow(clippy::cast_possible_truncation)]
         let body_len_u32 = body_len as u32;
-        let mut eligible: Vec<TextSpan> = if input.eligible_spans.is_empty() && body_len > 0 {
-            vec![TextSpan::new(0, body_len_u32)]
-        } else {
-            input.eligible_spans.clone()
+        let mut eligible: Vec<TextSpan> = match &input.eligible_spans {
+            None => {
+                // No restriction: seed with full-body span when body is non-empty.
+                if body_len > 0 {
+                    vec![TextSpan::new(0, body_len_u32)]
+                } else {
+                    vec![]
+                }
+            }
+            Some(spans) => {
+                // Non-empty (we already returned above on Some([])).
+                spans.clone()
+            }
         };
 
         let mut outputs: Vec<ExtractOutput> = Vec::new();
@@ -222,7 +246,13 @@ impl ExtractChain {
             let sub_input = ExtractInput {
                 event: input.event,
                 body: input.body.clone(),
-                eligible_spans: eligible.clone(),
+                // Always pass `Some(...)` to workers: the chain has already
+                // resolved the three-state `input.eligible_spans` into a
+                // concrete running set. Workers inside the chain always
+                // receive an explicit span list — `None` (full-body) is
+                // only ever seen by `ExtractChain::run` itself from an
+                // external caller.
+                eligible_spans: Some(eligible.clone()),
             };
             match w.extract(&sub_input).await {
                 Ok(r) => {
@@ -238,11 +268,10 @@ impl ExtractChain {
                     //
                     // Gating workers: None provenance is tolerated ONLY when the
                     // caller did NOT supply a restriction (i.e. the caller passed
-                    // empty `eligible_spans`, meaning "everywhere is allowed").
-                    // When the caller DID supply a restriction (`eligible_spans`
-                    // was non-empty), Gating outputs with `source_span: None`
-                    // are similarly dropped + recorded — they bypass the
-                    // consent/policy fence set by the caller.
+                    // `None` for `eligible_spans`, meaning "full body is allowed").
+                    // When the caller DID supply a non-empty `Some(spans)` restriction,
+                    // Gating outputs with `source_span: None` are similarly dropped +
+                    // recorded — they bypass the consent/policy fence set by the caller.
                     let role = w.role();
                     for out in r.outputs {
                         let none_span = out.source_span().is_none();
@@ -625,7 +654,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None, // no restriction
         };
         let res = chain.run(&input).await.expect("empty chain should succeed");
         assert!(res.outputs.is_empty());
@@ -662,7 +691,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None, // no restriction
         };
         let res = chain.run(&input).await;
         assert!(matches!(res, Err(ChainRunError::GatingFailed { .. })));
@@ -715,7 +744,8 @@ mod tests {
                 discards: vec![],
                 truncated: TruncationReason::None,
                 // Echo the input spans so downstream workers see non-empty eligibility.
-                llm_eligible_spans: input.eligible_spans.clone(),
+                // Chain always passes Some(...) to workers, so unwrap_or_default is safe.
+                llm_eligible_spans: input.eligible_spans.clone().unwrap_or_default(),
             })
         }
     }
@@ -731,8 +761,8 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            // Non-empty so PassthroughGate forwards it and FailingAug is reached.
-            eligible_spans: vec![TextSpan::new(0, 10)],
+            // Non-empty restriction so PassthroughGate forwards it and FailingAug is reached.
+            eligible_spans: Some(vec![TextSpan::new(0, 10)]),
         };
         let res = chain.run(&input).await.expect("augmenting failure -> Ok");
         assert_eq!(res.failures.len(), 1);
@@ -761,10 +791,41 @@ mod tests {
         }
 
         async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            // Chain always passes Some(spans) to workers; unwrap_or_default for safety.
             self.received
                 .lock()
                 .expect("mutex not poisoned")
-                .push(input.eligible_spans.clone());
+                .push(input.eligible_spans.clone().unwrap_or_default());
+            Ok(ExtractResult {
+                outputs: vec![],
+                discards: vec![],
+                truncated: TruncationReason::None,
+                llm_eligible_spans: vec![],
+            })
+        }
+    }
+
+    struct CountingSpyAug {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExtractorWorker for CountingSpyAug {
+        fn name(&self) -> &'static str {
+            "counting_aug"
+        }
+
+        fn role(&self) -> WorkerRole {
+            WorkerRole::Augmenting
+        }
+
+        fn budget(&self) -> ExtractBudget {
+            ExtractBudget::llm_default()
+        }
+
+        async fn extract(&self, _: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            let mut calls = self.calls.lock().expect("mutex not poisoned");
+            *calls += 1;
             Ok(ExtractResult {
                 outputs: vec![],
                 discards: vec![],
@@ -846,7 +907,7 @@ mod tests {
             event: &event,
             body: BodyResolution::NotApplicable,
             // Provide an initial window that the gate can narrow into.
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
         chain.run(&input).await.expect("ok");
         let calls = received.lock().expect("mutex not poisoned");
@@ -870,7 +931,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(3, 7)],
+            eligible_spans: Some(vec![TextSpan::new(3, 7)]),
         };
         chain.run(&input).await.expect("ok");
         let calls = received.lock().expect("mutex not poisoned");
@@ -935,7 +996,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(0, 10)], // eligibility 0..10
+            eligible_spans: Some(vec![TextSpan::new(0, 10)]), // eligibility 0..10
         };
         let res = chain.run(&input).await.expect("ok");
         // Only the in-span output (2..8) survives; out-of-span (20..30) is dropped.
@@ -1005,7 +1066,9 @@ mod tests {
         }
 
         async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
-            *self.received.lock().expect("mutex not poisoned") = input.eligible_spans.clone();
+            // Chain always passes Some(spans) to workers; unwrap_or_default for safety.
+            *self.received.lock().expect("mutex not poisoned") =
+                input.eligible_spans.clone().unwrap_or_default();
             Ok(ExtractResult {
                 outputs: vec![],
                 discards: vec![],
@@ -1018,7 +1081,8 @@ mod tests {
     #[tokio::test]
     async fn gate_returning_empty_eligibility_blocks_downstream_aug() {
         // A gate that succeeds but returns empty llm_eligible_spans should
-        // narrow downstream to nothing — the augmenter must see eligible_spans = [].
+        // suppress downstream augmentation entirely. The chain breaks before
+        // invoking the augmenter so no worker can inspect suppressed body text.
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let chain = ExtractChain::new(vec![
             Box::new(GateReturnsEmpty),
@@ -1032,16 +1096,40 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            // Start with a non-empty eligible span (would be inherited by first worker).
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            // Start with a non-empty restriction (would be inherited by first worker).
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
 
         let _ = chain.run(&input).await.expect("chain should succeed");
         let received_spans = recorded.lock().expect("mutex not poisoned").clone();
         assert!(
             received_spans.is_empty(),
-            "augmenter should have received empty eligible_spans, got {received_spans:?}"
+            "augmenter should not run after gate suppression; got {received_spans:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn chain_with_some_empty_eligibility_suppresses_all() {
+        let calls = Arc::new(Mutex::new(0_usize));
+        let chain = ExtractChain::new(vec![
+            Box::new(PassthroughGate),
+            Box::new(CountingSpyAug {
+                calls: Arc::clone(&calls),
+            }),
+        ])
+        .expect("valid chain");
+        let event = fixture_event();
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::NotApplicable,
+            eligible_spans: Some(vec![]),
+        };
+
+        let res = chain.run(&input).await.expect("chain should succeed");
+
+        assert!(res.outputs.is_empty());
+        assert!(res.failures.is_empty());
+        assert_eq!(*calls.lock().expect("mutex not poisoned"), 0);
     }
 
     // ── Task 11: regex→LLM chain integration tests ────────────────────────────
@@ -1097,7 +1185,7 @@ mod tests {
         ExtractInput {
             event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![],
+            eligible_spans: None, // no restriction — full body authorised
         }
     }
 
@@ -1409,7 +1497,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None, // no restriction
         };
         let res = chain.run(&input).await;
         assert!(
@@ -1474,9 +1562,9 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            // Start with a non-empty span so the gate's suppression is
+            // Start with a non-empty restriction so the gate's suppression is
             // meaningful (it narrows from something to nothing).
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
         let res = chain.run(&input).await;
         // The chain must succeed (gate did not error).
@@ -1550,7 +1638,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(0, 10)], // eligibility 0..10
+            eligible_spans: Some(vec![TextSpan::new(0, 10)]), // eligibility 0..10
         };
         let res = chain.run(&input).await.expect("ok");
         // Only the in-bounds discard (2..8) survives; out-of-bounds (20..30) is dropped.
@@ -1635,7 +1723,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
         let res = chain.run(&input).await.expect("chain should succeed");
 
@@ -1686,10 +1774,11 @@ mod tests {
         }
 
         async fn extract(&self, input: &ExtractInput<'_>) -> Result<ExtractResult, ExtractError> {
+            // Chain always passes Some(spans) to workers; unwrap_or_default for safety.
             self.received
                 .lock()
                 .expect("mutex not poisoned")
-                .push(input.eligible_spans.clone());
+                .push(input.eligible_spans.clone().unwrap_or_default());
             // Return empty llm_eligible_spans — this previously collapsed
             // eligibility to empty, starving any subsequent augmenter.
             Ok(ExtractResult {
@@ -1726,7 +1815,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
         chain.run(&input).await.expect("ok");
 
@@ -1790,7 +1879,8 @@ mod tests {
                 })],
                 discards: vec![],
                 truncated: TruncationReason::None,
-                llm_eligible_spans: input.eligible_spans.clone(),
+                // Chain always passes Some(spans) to workers; unwrap_or_default for safety.
+                llm_eligible_spans: input.eligible_spans.clone().unwrap_or_default(),
             })
         }
     }
@@ -1806,8 +1896,8 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            // Non-empty: caller explicitly restricted eligibility.
-            eligible_spans: vec![TextSpan::new(0, 20)],
+            // Some(spans): caller explicitly restricted eligibility.
+            eligible_spans: Some(vec![TextSpan::new(0, 20)]),
         };
         let res = chain
             .run(&input)
@@ -1849,8 +1939,8 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            // Empty: caller imposed no eligibility restriction.
-            eligible_spans: vec![],
+            // None: caller imposed no eligibility restriction (full body authorised).
+            eligible_spans: None,
         };
         let res = chain.run(&input).await.expect("chain should succeed");
 
@@ -1930,7 +2020,7 @@ mod tests {
             event: &event,
             body: BodyResolution::NotApplicable,
             // Eligibility 0..10; the augmenting worker emits 50..60.
-            eligible_spans: vec![TextSpan::new(0, 10)],
+            eligible_spans: Some(vec![TextSpan::new(0, 10)]),
         };
         let res = chain.run(&input).await.expect("chain should succeed");
 

@@ -55,10 +55,26 @@ pub struct ExtractInput<'a> {
     pub body: BodyResolution<'a>,
     /// Byte ranges of `body` (in original-body coordinates, inclusive
     /// of nothing-fenced) that this extractor is permitted to inspect.
-    /// Initialised by `ExtractChain` and narrowed by each `Gating`
-    /// worker. An empty `Vec` means "nothing eligible — extractor
-    /// should return `Ok(empty)` without doing work".
-    pub eligible_spans: Vec<TextSpan>,
+    ///
+    /// Three-state semantics:
+    ///
+    /// - `None` — no restriction; the full body is authorised for
+    ///   inspection. `ExtractChain` seeds the internal running eligibility
+    ///   from the full body span; workers MUST treat this as "scan
+    ///   everything".
+    /// - `Some(vec![])` — nothing is eligible; the caller (or an upstream
+    ///   gating worker) has suppressed all extraction. Workers MUST return
+    ///   `Ok(empty)` immediately without doing any scanning or I/O.
+    /// - `Some(spans)` where `spans` is non-empty — restrict extraction
+    ///   to exactly those byte ranges. Workers MUST NOT produce outputs
+    ///   whose `source_span` falls outside the union of these ranges, and
+    ///   MUST NOT pass body bytes outside these ranges to downstream
+    ///   systems (e.g., an LLM prompt).
+    ///
+    /// Callers that want to suppress extraction MUST use `Some(vec![])`,
+    /// not `None`. Passing `None` is equivalent to granting full-body
+    /// authorisation.
+    pub eligible_spans: Option<Vec<TextSpan>>,
 }
 
 /// Per-extractor budget.
@@ -489,9 +505,10 @@ mod mod_tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![TextSpan::new(0, 5)],
+            eligible_spans: Some(vec![TextSpan::new(0, 5)]),
         };
-        assert_eq!(input.eligible_spans.len(), 1);
-        assert_eq!(input.eligible_spans[0], TextSpan::new(0, 5));
+        let spans = input.eligible_spans.as_deref().expect("Some spans");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0], TextSpan::new(0, 5));
     }
 }

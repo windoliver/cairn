@@ -87,27 +87,52 @@ pub(crate) async fn dispatch(
     }
     let user_count_after_a = outputs.len() - baseline_pre_user_a;
 
+    // Resolve the three-state `eligible_spans` into a concrete span list:
+    // - `None`         → full-body (no restriction); use `[]` as the local
+    //                    `eligible_spans` sentinel so existing helpers interpret
+    //                    it as "scan everywhere". The body's `0..body_len` span
+    //                    is enforced at scanning time via the branch below.
+    // - `Some([])`     → nothing eligible; suppress all text scanning (return
+    //                    empty immediately after hook/tool-frame rules run).
+    // - `Some(spans)`  → restrict to those spans (existing behavior).
+    let eligible_spans_slice: &[TextSpan] = match &input.eligible_spans {
+        None => &[],                     // full body — existing "empty = no filter" path below
+        Some(spans) => spans.as_slice(), // may be empty (suppress) or non-empty (restrict)
+    };
+
+    // When caller explicitly suppressed all text extraction (`Some([])`),
+    // skip the entire text-scanning block.  Hook/tool-frame rules above ran
+    // already (they are not text-based); the rest of the function is all text.
+    if matches!(&input.eligible_spans, Some(spans) if spans.is_empty()) {
+        return Ok(ExtractResult {
+            outputs,
+            discards: vec![],
+            truncated,
+            llm_eligible_spans: llm_spans,
+        });
+    }
+
     if let Some(text) = body_text {
         // Enforce caller-supplied eligibility fence before any text scanning.
-        // When `input.eligible_spans` is non-empty, only prefilter hits whose
-        // start offset falls inside an eligible span are admitted; hits outside
-        // authorised ranges are discarded before window construction so that no
-        // output (draft, forget, or `llm_eligible_spans` entry) can reference
-        // disallowed bytes (consent / policy boundary).
+        // When `eligible_spans_slice` is non-empty (caller restriction), only
+        // prefilter hits whose start offset falls inside an eligible span are
+        // admitted; hits outside authorised ranges are discarded before window
+        // construction so that no output (draft, forget, or
+        // `llm_eligible_spans` entry) can reference disallowed bytes
+        // (consent / policy boundary).
         //
-        // When `eligible_spans` is empty the chain has already seeded it with
-        // the full-body span (see `ExtractChain::run`), so empty here means
-        // "no restriction from caller" and we keep the current full-body scan.
+        // When `eligible_spans_slice` is empty, `input.eligible_spans` is
+        // `None` (full body), so we keep the current full-body scan.
         let scan = prefilter.scan(text);
-        let scan = if input.eligible_spans.is_empty() {
+        let scan = if eligible_spans_slice.is_empty() {
             scan
         } else {
-            filter_scan_to_eligible(scan, &input.eligible_spans)
+            filter_scan_to_eligible(scan, eligible_spans_slice)
         };
-        let windows = if input.eligible_spans.is_empty() {
+        let windows = if eligible_spans_slice.is_empty() {
             build_phrase_windows(text, &scan)
         } else {
-            clip_windows_to_eligible(build_phrase_windows(text, &scan), &input.eligible_spans)
+            clip_windows_to_eligible(build_phrase_windows(text, &scan), eligible_spans_slice)
         };
 
         let body_too_large = text.len() > MAX_BODY_LEN_FOR_REGEX;
@@ -126,7 +151,7 @@ pub(crate) async fn dispatch(
                 event,
                 text,
                 window,
-                &input.eligible_spans,
+                eligible_spans_slice,
                 &mut outputs,
                 &mut covered,
             );
@@ -198,7 +223,7 @@ pub(crate) async fn dispatch(
                         event,
                         text,
                         window,
-                        &input.eligible_spans,
+                        eligible_spans_slice,
                         &mut outputs,
                         &mut covered,
                     );
@@ -241,14 +266,15 @@ pub(crate) async fn dispatch(
             // confidence regex coverage. Replacing with `0..body_len`
             // would re-expose explicit `remember`/`forget` clauses to
             // the LLM and risk duplicate or conflicting outputs.
-            // When caller supplied eligible_spans, seed from those
-            // authorised ranges rather than the full body so disallowed
+            // When caller supplied eligible_spans (`Some(spans)`), seed from
+            // those authorised ranges rather than the full body so disallowed
             // bytes are never handed to the LLM extractor.
             let body_len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-            let mut full = if input.eligible_spans.is_empty() {
+            let mut full = if eligible_spans_slice.is_empty() {
+                // `None` (full body) — seed with the whole body span.
                 vec![TextSpan::new(0, body_len)]
             } else {
-                input.eligible_spans.clone()
+                eligible_spans_slice.to_vec()
             };
             subtract_covered(&mut full, &covered);
             llm_spans.extend(full);
@@ -274,8 +300,10 @@ pub(crate) async fn dispatch(
     // guards are required because `compute_llm_eligible_spans` seeds from
     // the phrase windows (which are already restricted) but also fills
     // inter-window gaps — those gaps must still respect the fence.
-    if !input.eligible_spans.is_empty() {
-        intersect_spans_with_eligible(&mut llm_spans, &input.eligible_spans);
+    // Only apply when caller supplied a restriction (`Some(non-empty)`);
+    // `None` (full body) requires no intersection.
+    if !eligible_spans_slice.is_empty() {
+        intersect_spans_with_eligible(&mut llm_spans, eligible_spans_slice);
     }
 
     Ok(ExtractResult {
@@ -827,7 +855,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -849,7 +877,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let err = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -875,7 +903,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -898,7 +926,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".to_owned())),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -921,7 +949,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -945,7 +973,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -1004,7 +1032,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&rules, &prefilter, &budget, &input)
             .await
@@ -1049,7 +1077,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&ruleset, &prefilter, &budget, &input)
             .await
@@ -1111,7 +1139,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let result = dispatch(&ruleset, &prefilter, &budget, &input)
             .await
@@ -1179,7 +1207,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![eligible_span],
+            eligible_spans: Some(vec![eligible_span]),
         };
 
         let result = dispatch(&rules, &prefilter, &budget, &input)
@@ -1235,10 +1263,10 @@ mod tests {
         }
     }
 
-    /// Preserves current full-body behavior when `eligible_spans` is empty
+    /// Preserves current full-body behavior when `eligible_spans` is `None`
     /// (no caller restriction): both triggers in the body must produce outputs.
     #[tokio::test]
-    async fn regex_gate_full_body_when_caller_eligibility_empty() {
+    async fn regex_extractor_with_none_eligibility_runs_full_body() {
         let body_text = "remember my preferred editor. remember my shell alias";
         let rules = RuleSet::builtin();
         let prefilter = TriggerPrefilter::new();
@@ -1257,11 +1285,11 @@ mod tests {
             crate::pipeline::extract::UserIngestPayloadKind::Cli,
         )
         .expect("matching variant");
-        // Empty eligible_spans → no restriction → full body must be scanned.
+        // None → no restriction → full body must be scanned.
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
 
         let result = dispatch(&rules, &prefilter, &budget, &input)
@@ -1293,6 +1321,40 @@ mod tests {
             "second trigger must fire with empty eligible_spans; outputs: {:?}",
             result.outputs
         );
+    }
+
+    #[tokio::test]
+    async fn regex_extractor_with_some_empty_eligibility_suppresses_all() {
+        let body_text = "remember my preferred editor. remember my shell alias";
+        let rules = RuleSet::builtin();
+        let prefilter = TriggerPrefilter::new();
+        let budget = ExtractBudget {
+            max_wall_ms: 500,
+            max_drafts: 16,
+            max_prompt_bytes: None,
+            max_response_tokens: None,
+        };
+        let event = make_event(CapturePayload::Cli {
+            kind_hint: "user".into(),
+        });
+        let resolved = ResolvedBody::from_user_ingest(
+            body_text,
+            &event.payload,
+            crate::pipeline::extract::UserIngestPayloadKind::Cli,
+        )
+        .expect("matching variant");
+        let input = ExtractInput {
+            event: &event,
+            body: BodyResolution::Resolved(resolved),
+            eligible_spans: Some(vec![]),
+        };
+
+        let result = dispatch(&rules, &prefilter, &budget, &input)
+            .await
+            .expect("ok");
+
+        assert!(result.outputs.is_empty());
+        assert!(result.llm_eligible_spans.is_empty());
     }
 
     /// Regression: phrase window must be clipped to the eligibility boundary.
@@ -1340,7 +1402,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Resolved(resolved),
-            eligible_spans: vec![eligible_span],
+            eligible_spans: Some(vec![eligible_span]),
         };
 
         let result = dispatch(&rules, &prefilter, &budget, &input)

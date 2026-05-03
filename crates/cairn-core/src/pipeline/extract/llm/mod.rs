@@ -353,15 +353,23 @@ impl ExtractorWorker for LLMExtractor {
             return Ok(empty_result());
         }
 
-        if input.eligible_spans.is_empty() {
-            return Ok(empty_result());
-        }
+        let eligible_spans = match &input.eligible_spans {
+            None => {
+                let body_len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+                if body_len == 0 {
+                    return Ok(empty_result());
+                }
+                vec![TextSpan::new(0, body_len)]
+            }
+            Some(spans) if spans.is_empty() => return Ok(empty_result()),
+            Some(spans) => spans.clone(),
+        };
 
         // Merge contiguous/overlapping eligible spans before any estimation or
         // region building. A 64 KiB body fragmented into thousands of 1-byte
         // spans passes a naive byte-count cap but would explode the region
         // count (and the rendered prompt). Merging first closes that bypass.
-        let eligible_spans = merge_contiguous_spans(&input.eligible_spans);
+        let eligible_spans = merge_contiguous_spans(&eligible_spans);
 
         // Pre-render byte-cap guard: compute an upper-bound estimate from
         // merged eligible-span byte counts + per-region overhead + fixed
@@ -620,7 +628,7 @@ mod tests {
     fn make_input<'a>(
         event: &'a crate::domain::CaptureEvent,
         body: &'a str,
-        spans: Vec<TextSpan>,
+        spans: Option<Vec<TextSpan>>,
     ) -> ExtractInput<'a> {
         use crate::pipeline::extract::body::{ResolvedBody, UserIngestPayloadKind};
         let resolved =
@@ -657,7 +665,7 @@ mod tests {
         let event = fixture_event();
         let body = "user prefers tabs over spaces";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert_eq!(res.outputs.len(), 1);
         assert_eq!(provider.calls(), 1);
@@ -672,7 +680,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(res.outputs.is_empty());
     }
@@ -684,7 +692,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(res.outputs.is_empty());
         assert!(matches!(res.truncated, TruncationReason::MaxWallMs { .. }));
@@ -703,7 +711,7 @@ mod tests {
         let event = fixture_event();
         let body = "user prefers tabs over spaces";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert_eq!(res.outputs.len(), 1);
         assert_eq!(provider.calls(), 2);
@@ -725,7 +733,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let err = extractor.extract(&input).await.unwrap_err();
         assert!(
             matches!(
@@ -748,7 +756,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let err = extractor.extract(&input).await.unwrap_err();
         assert!(
             matches!(
@@ -770,7 +778,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let err = extractor.extract(&input).await.unwrap_err();
         assert!(
             matches!(
@@ -789,13 +797,41 @@ mod tests {
         let provider = StubProvider::with_responses(vec![]);
         let extractor = LLMExtractor::new(provider.clone());
         let event = fixture_event();
-        // For empty / not-applicable body, use NotApplicable so eligible_spans = []
+        // For empty / not-applicable body, use NotApplicable.
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::NotApplicable,
-            eligible_spans: vec![],
+            eligible_spans: None,
         };
         let res = extractor.extract(&input).await.expect("should succeed");
+        assert!(res.outputs.is_empty());
+        assert_eq!(provider.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn llm_extractor_with_none_eligibility_runs_full_body() {
+        let provider = StubProvider::with_responses(vec![Ok(good_response_json())]);
+        let extractor = LLMExtractor::new(provider.clone());
+        let event = fixture_event();
+        let body = "user prefers tabs over spaces";
+        let input = make_input(&event, body, None);
+
+        let res = extractor.extract(&input).await.expect("should succeed");
+
+        assert_eq!(res.outputs.len(), 1);
+        assert_eq!(provider.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn llm_extractor_with_some_empty_eligibility_suppresses_all() {
+        let provider = StubProvider::with_responses(vec![Ok(good_response_json())]);
+        let extractor = LLMExtractor::new(provider.clone());
+        let event = fixture_event();
+        let body = "user prefers tabs over spaces";
+        let input = make_input(&event, body, Some(vec![]));
+
+        let res = extractor.extract(&input).await.expect("should succeed");
+
         assert!(res.outputs.is_empty());
         assert_eq!(provider.calls(), 0);
     }
@@ -809,7 +845,7 @@ mod tests {
         let extractor = LLMExtractor::new(provider.clone());
         let event = fixture_event();
         let (_, spans) = fixture_input_with_body(&event, &huge_body);
-        let input = make_input(&event, &huge_body, spans);
+        let input = make_input(&event, &huge_body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(res.outputs.is_empty());
         assert!(
@@ -869,7 +905,7 @@ mod tests {
             });
         let event = fixture_event();
         let (_, spans) = fixture_input_with_body(&event, &body);
-        let input = make_input(&event, &body, spans);
+        let input = make_input(&event, &body, Some(spans));
         // If the pre-render check doesn't fire, PanicProvider::complete panics.
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(
@@ -929,7 +965,7 @@ mod tests {
 
         let event = fixture_event();
         let spans = vec![crate::pipeline::extract::TextSpan::new(0, 10)];
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
 
         // If headroom reservation is missing the provider would be called
         // (PanicProvider panics). With the fix the preflight rejects early.
@@ -982,7 +1018,7 @@ mod tests {
             });
 
         let event = fixture_event();
-        let input = make_input(&event, &body, eligible_spans);
+        let input = make_input(&event, &body, Some(eligible_spans));
 
         // PanicProvider panics if called; the preflight must reject first.
         let res = extractor
@@ -1045,7 +1081,7 @@ mod tests {
         let event = fixture_event();
         let body = "body content here please";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(res.outputs.is_empty());
         assert!(
@@ -1073,7 +1109,7 @@ mod tests {
         let event = fixture_event();
         let body = "user prefers tabs over spaces";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
         assert!(res.outputs.is_empty());
         assert_eq!(res.discards.len(), 1);
@@ -1088,7 +1124,7 @@ mod tests {
         let input = ExtractInput {
             event: &event,
             body: BodyResolution::Failed(BodyResolutionError::NotFound("nope".into())),
-            eligible_spans: vec![TextSpan::new(0, 10)],
+            eligible_spans: Some(vec![TextSpan::new(0, 10)]),
         };
         let err = extractor.extract(&input).await.unwrap_err();
         assert!(
@@ -1170,7 +1206,7 @@ mod tests {
         let event = fixture_event();
         let body = "user prefers tabs over spaces";
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let _ = extractor.extract(&input).await.expect("should succeed");
 
         let captured = provider.captured.lock().expect("mutex not poisoned");
@@ -1255,7 +1291,7 @@ mod tests {
 
         let event = fixture_event();
         let (_, spans) = fixture_input_with_body(&event, body);
-        let input = make_input(&event, body, spans);
+        let input = make_input(&event, body, Some(spans));
         let res = extractor.extract(&input).await.expect("should succeed");
 
         assert!(
