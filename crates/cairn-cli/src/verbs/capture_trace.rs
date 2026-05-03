@@ -406,7 +406,33 @@ pub async fn run_handler(
 /// - SHA-256 mismatch between the stored hash and the computed hash.
 /// - Bytes not valid UTF-8.
 async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<String> {
-    let path = vault_root.join(&event.payload_ref);
+    // Trust boundary: `payload_ref` is caller-supplied (the JSONL on disk).
+    // A matching `payload_hash` is integrity, not authorization — without a
+    // path containment check, a crafted entry like `../../../etc/passwd`
+    // plus its real SHA-256 would be ingested as a "trace" body. Test
+    // fixtures already supply `payload_ref` rooted at `sources/...`, so we
+    // canonicalize the resolved path and require it to remain under the
+    // canonical `vault_root/sources/` subtree.
+    let raw_path = vault_root.join(&event.payload_ref);
+    let canon_sources = tokio::fs::canonicalize(vault_root.join("sources"))
+        .await
+        .with_context(|| {
+            format!(
+                "canonicalize vault sources root {}",
+                vault_root.join("sources").display()
+            )
+        })?;
+    let canon_path = tokio::fs::canonicalize(&raw_path)
+        .await
+        .with_context(|| format!("canonicalize payload path {}", raw_path.display()))?;
+    if !canon_path.starts_with(&canon_sources) {
+        anyhow::bail!(
+            "payload_ref escapes vault sources/ (resolved {} not under {})",
+            canon_path.display(),
+            canon_sources.display(),
+        );
+    }
+    let path = canon_path;
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("read payload at {}", path.display()))?;
