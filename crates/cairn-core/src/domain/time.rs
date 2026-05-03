@@ -1,6 +1,6 @@
 //! Wall-clock abstraction for code that needs an injectable `now()`.
 //!
-//! Production code uses [`SystemClock`]; tests use [`FixedClock`] (gated
+//! Production code uses [`SystemClock`]; tests use `FixedClock` (gated
 //! behind the `test-helpers` feature so it ships only in dev builds).
 
 use chrono::{DateTime, Utc};
@@ -40,7 +40,9 @@ mod tests {
 
     #[test]
     fn fixed_clock_returns_its_instant() {
-        let t: DateTime<Utc> = "2026-05-02T12:00:00Z".parse().unwrap();
+        let t: DateTime<Utc> = "2026-05-02T12:00:00Z"
+            .parse()
+            .expect("invariant: hard-coded RFC-3339 literal must parse");
         let c = FixedClock(t);
         assert_eq!(c.now(), t);
     }
