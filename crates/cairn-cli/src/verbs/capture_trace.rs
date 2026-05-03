@@ -183,12 +183,11 @@ pub async fn run_handler(
         for event in &group {
             // Classify the event. P0 only recognizes the four hook payloads
             // (UserPromptSubmit / PreToolUse / PostToolUse / Stop). Other
-            // event shapes (`AgentMessage`, `ToolOutput`) await sensor
-            // adapters (#84). Skip unrecognized events with a per-event
-            // diagnostic instead of aborting the whole turn — the rest of
-            // the turn's known events still persist correctly, and the
-            // skipped event id surfaces in `failed_turns` so callers can
-            // act on it.
+            // shapes (`AgentMessage`, `ToolOutput`) await sensor adapters
+            // (#84). Fail the whole turn on the first unclassifiable event
+            // rather than persisting a partial set: the summary record
+            // would otherwise be built from incomplete data and become
+            // hard-to-detect data loss.
             let classified = match classify(event) {
                 Ok(c) => c,
                 Err(e) => {
@@ -197,7 +196,8 @@ pub async fn run_handler(
                         turn_str.clone(),
                         format!("classify {}: {e}", event.event_id),
                     ));
-                    continue;
+                    group_failed = true;
+                    break;
                 }
             };
             if classified == TraceEvent::Stop {
