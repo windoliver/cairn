@@ -492,3 +492,171 @@ async fn link_entity_episode_idempotent_returns_true_then_false() {
         .expect("second link");
     assert!(!second, "second link returns false");
 }
+
+async fn seed_two_entities(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    suffix: &str,
+) -> (
+    cairn_core::domain::graph::EntityId,
+    cairn_core::domain::graph::EntityId,
+) {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EntityId, EntityNode};
+    let n1 = EntityNode {
+        id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}A").as_str()),
+        name: "Alice".into(),
+        name_norm: format!("alice-{suffix}"),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let n2 = EntityNode {
+        id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}B").as_str()),
+        name: "Acme".into(),
+        name_norm: format!("acme-{suffix}"),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+    let id1 = store.upsert_entity(&n1).await.expect("n1");
+    let id2 = store.upsert_entity(&n2).await.expect("n2");
+    (id1, id2)
+}
+
+#[tokio::test]
+async fn upsert_entity_edge_simple_insert() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (src, tgt) = seed_two_entities(&store, "40").await;
+
+    let edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N0000000000000050"),
+        source_id: src.clone(),
+        target_id: tgt.clone(),
+        relation: "works_at".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 100,
+        source_record_id: None,
+    };
+    let outcome = store.upsert_entity_edge(&edge).await.expect("upsert");
+    assert_eq!(outcome.new_edge_id, edge.id);
+    assert_eq!(outcome.invalidated_edge_id, None);
+    assert!(!outcome.body_was_unchanged);
+}
+
+#[tokio::test]
+async fn upsert_entity_edge_idempotent_reupsert_no_op() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (src, tgt) = seed_two_entities(&store, "60").await;
+    let edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N0000000000000060"),
+        source_id: src,
+        target_id: tgt,
+        relation: "works_at".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 100,
+        source_record_id: None,
+    };
+    let first = store.upsert_entity_edge(&edge).await.expect("first");
+
+    // Count wal_ops before the re-upsert.
+    let pre_op_count = {
+        let conn = store.raw_conn().expect("conn");
+        conn.call(|c| {
+            c.query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get::<_, i64>(0))
+                .map_err(Into::into)
+        })
+        .await
+        .expect("count")
+    };
+
+    // Re-upsert with a different supplied id but identical body fields.
+    let mut second_edge = edge.clone();
+    second_edge.id = EntityEdgeId::from("01HZE7JV5N0000000000000061");
+    let second = store
+        .upsert_entity_edge(&second_edge)
+        .await
+        .expect("second");
+
+    assert_eq!(second.new_edge_id, first.new_edge_id, "returns existing id");
+    assert!(second.body_was_unchanged, "marks unchanged");
+    assert_eq!(second.invalidated_edge_id, None);
+
+    let post_op_count = {
+        let conn = store.raw_conn().expect("conn");
+        conn.call(|c| {
+            c.query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get::<_, i64>(0))
+                .map_err(Into::into)
+        })
+        .await
+        .expect("count")
+    };
+    assert_eq!(
+        pre_op_count, post_op_count,
+        "no new wal_ops row on idempotent re-upsert"
+    );
+}
+
+#[tokio::test]
+async fn upsert_entity_edge_contradiction_invalidates_old() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (src, tgt) = seed_two_entities(&store, "70").await;
+    let old = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N0000000000000070"),
+        source_id: src.clone(),
+        target_id: tgt.clone(),
+        relation: "works_at".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 100,
+        source_record_id: None,
+    };
+    let first = store.upsert_entity_edge(&old).await.expect("first");
+
+    let new_edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N0000000000000071"),
+        source_id: src,
+        target_id: tgt,
+        relation: "works_at".into(),
+        confidence: EdgeConfidence::Inferred, // different body
+        confidence_score: 0.7,                // different body
+        valid_at: 200,
+        invalid_at: None,
+        created_at: 200,
+        source_record_id: None,
+    };
+    let second = store.upsert_entity_edge(&new_edge).await.expect("second");
+
+    assert_eq!(second.new_edge_id, new_edge.id);
+    assert_eq!(second.invalidated_edge_id, Some(first.new_edge_id.clone()));
+    assert!(!second.body_was_unchanged);
+
+    let invalid_at: Option<i64> = {
+        let conn = store.raw_conn().expect("conn");
+        let old_id = first.new_edge_id.as_str().to_owned();
+        conn.call(move |c| {
+            c.query_row(
+                "SELECT invalid_at FROM entity_edges WHERE id = ?1",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .expect("query")
+    };
+    assert_eq!(invalid_at, Some(200), "old edge invalid_at = new.valid_at");
+}

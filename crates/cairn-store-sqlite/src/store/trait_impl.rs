@@ -150,4 +150,14 @@ impl MemoryStore for SqliteMemoryStore {
             .await
             .map_err(Into::into)
     }
+
+    async fn upsert_entity_edge(
+        &self,
+        edge: &cairn_core::domain::graph::EntityEdge,
+    ) -> Result<cairn_core::domain::graph::EntityEdgeOutcome, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("upsert_entity_edge");
+        }
+        self.do_upsert_entity_edge(edge).await.map_err(Into::into)
+    }
 }

@@ -603,6 +603,7 @@ name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "blake3",
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-store-sqlite",

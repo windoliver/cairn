@@ -6,5 +6,6 @@
 
 pub mod wal;
 
+mod edge;
 mod episode;
 mod node;
