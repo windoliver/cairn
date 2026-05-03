@@ -38,8 +38,30 @@ fn ingest_returns_aborted_internal() {
 }
 
 #[test]
-fn search_returns_aborted_internal() {
-    assert_aborted_internal(&["search", "test query", "--json"]);
+fn search_keyword_json_exits_zero_with_hits() {
+    // Search is now wired to `cairn_core::verbs::search::run`. Keyword mode
+    // (the default) works without an embedder — it opens (or creates) the
+    // SQLite store and runs FTS5. Against an empty vault the result is an
+    // empty `hits` array; the exit code is 0 (success).
+    let out = {
+        let mut cmd = cli();
+        cmd.args(["search", "test query", "--json"]);
+        cmd.output()
+            .expect("cairn search test query --json should run")
+    };
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "keyword search against an empty vault must exit 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("search JSON parse failed: {e}\nstdout: {stdout:?}"));
+    assert!(
+        v["hits"].is_array(),
+        "search JSON must contain a 'hits' array; got {v}"
+    );
 }
 
 #[test]

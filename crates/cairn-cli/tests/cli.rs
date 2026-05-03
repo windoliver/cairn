@@ -89,9 +89,10 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
+    // `search` is excluded: the dispatcher now rejects an empty query with
+    //   `InvalidArgs` → exit 64 (EX_USAGE); see `search_empty_query_exits_64` below.
     for args in [
-        &["search"][..],
-        &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"],
+        &["summarize", "01ARYZ6S41TSV4RRFFQ69G5FAV"][..],
         &["assemble_hot"],
         &["capture_trace"],
         &["lint"],
@@ -113,6 +114,25 @@ fn simple_verb_human_mode_exits_one_with_internal() {
             "verb {verb} stderr missing Internal error code: {stderr:?}",
         );
     }
+}
+
+#[test]
+fn search_empty_query_exits_64() {
+    // `cairn search` with no query (empty string default) is now wired to the
+    // dispatcher, which rejects an empty query with `InvalidArgs` → EX_USAGE (64).
+    // This replaced the old stub behaviour (exit 1 + "Internal").
+    let out = cli().arg("search").output().expect("cairn search");
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "search with empty query must exit 64 (EX_USAGE / InvalidArgs); got {:?}",
+        out.status
+    );
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("InvalidArgs") || stderr.contains("invalid args"),
+        "stderr must surface InvalidArgs: {stderr:?}",
+    );
 }
 
 #[test]
