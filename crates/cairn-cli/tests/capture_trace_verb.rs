@@ -5,8 +5,8 @@ use std::path::Path;
 
 use cairn_cli::verbs::capture_trace::{read_jsonl_events, run_handler};
 use cairn_core::domain::{
-    ActorChainEntry, ChainRole, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload,
-    CaptureRefs, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily,
+    ActorChainEntry, CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs,
+    ChainRole, Identity, PayloadHash, Rfc3339Timestamp, SessionId, SourceFamily,
 };
 
 /// Build a minimal valid `Hook` [`CaptureEvent`] for use in tests.
@@ -238,49 +238,61 @@ async fn open_test_store_in_memory() -> cairn_store_sqlite::SqliteMemoryStore {
 fn write_fixture(vault: &Path, jsonl_path: &Path) {
     // ULIDs for each event.
     let id_user = "01ARZ3NDEKTSV4RRFFQ69G5FAA";
-    let id_pre  = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
+    let id_pre = "01ARZ3NDEKTSV4RRFFQ69G5FAB";
     let id_post = "01ARZ3NDEKTSV4RRFFQ69G5FAC";
     let id_stop = "01ARZ3NDEKTSV4RRFFQ69G5FAD";
 
     let session = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-    let turn    = "turn-1";
+    let turn = "turn-1";
     let tool_id = "toolu_test_01";
 
     // Write sources and compute hashes.
-    let user_body  = "Hello, please run ls";
-    let pre_body   = r#"{"tool":"bash","input":{"command":"ls"}}"#;
-    let post_body  = r#"{"tool":"bash","output":"file.txt\ndir/"}"#;
-    let stop_body  = "session ended";
+    let user_body = "Hello, please run ls";
+    let pre_body = r#"{"tool":"bash","input":{"command":"ls"}}"#;
+    let post_body = r#"{"tool":"bash","output":"file.txt\ndir/"}"#;
+    let stop_body = "session ended";
 
-    let user_ref  = write_source(vault, &format!("{id_user}.txt"), user_body);
-    let pre_ref   = write_source(vault, &format!("{id_pre}.txt"),  pre_body);
-    let post_ref  = write_source(vault, &format!("{id_post}.txt"), post_body);
-    let stop_ref  = write_source(vault, &format!("{id_stop}.txt"), stop_body);
+    let user_ref = write_source(vault, &format!("{id_user}.txt"), user_body);
+    let pre_ref = write_source(vault, &format!("{id_pre}.txt"), pre_body);
+    let post_ref = write_source(vault, &format!("{id_post}.txt"), post_body);
+    let stop_ref = write_source(vault, &format!("{id_stop}.txt"), stop_body);
 
     let events = vec![
         make_event(
-            id_user, "UserPromptSubmit", session, turn,
+            id_user,
+            "UserPromptSubmit",
+            session,
+            turn,
             "2026-05-02T00:00:01Z",
             None,
             &user_ref,
             &sha256_hex(user_body),
         ),
         make_event(
-            id_pre, "PreToolUse", session, turn,
+            id_pre,
+            "PreToolUse",
+            session,
+            turn,
             "2026-05-02T00:00:02Z",
             Some(tool_id.to_owned()),
             &pre_ref,
             &sha256_hex(pre_body),
         ),
         make_event(
-            id_post, "PostToolUse", session, turn,
+            id_post,
+            "PostToolUse",
+            session,
+            turn,
             "2026-05-02T00:00:03Z",
             Some(tool_id.to_owned()),
             &post_ref,
             &sha256_hex(post_body),
         ),
         make_event(
-            id_stop, "Stop", session, turn,
+            id_stop,
+            "Stop",
+            session,
+            turn,
             "2026-05-02T00:00:04Z",
             None,
             &stop_ref,
@@ -559,10 +571,20 @@ async fn multi_turn_each_summarized_independently() {
             move |tx| {
                 // Each turn should have exactly 4 non-summary events persisted.
                 let t1_rows = tx.list_trace_events(&session_id, "turn-1")?;
-                assert_eq!(t1_rows.len(), 4, "turn-1 should have 4 events, got {}", t1_rows.len());
+                assert_eq!(
+                    t1_rows.len(),
+                    4,
+                    "turn-1 should have 4 events, got {}",
+                    t1_rows.len()
+                );
 
                 let t2_rows = tx.list_trace_events(&session_id, "turn-2")?;
-                assert_eq!(t2_rows.len(), 4, "turn-2 should have 4 events, got {}", t2_rows.len());
+                assert_eq!(
+                    t2_rows.len(),
+                    4,
+                    "turn-2 should have 4 events, got {}",
+                    t2_rows.len()
+                );
 
                 // Both turns must have a summary (both had a Stop event).
                 assert!(
@@ -671,8 +693,7 @@ async fn capture_trace_response_envelope_snapshot() {
 
     // `trace_id` is a fresh ULID per invocation — substitute a stable
     // placeholder before snapshotting so the snapshot pins shape, not value.
-    let mut value =
-        serde_json::to_value(&resp).expect("serialize CaptureTraceResponse");
+    let mut value = serde_json::to_value(&resp).expect("serialize CaptureTraceResponse");
     value["trace_id"] = serde_json::Value::String("[trace_id]".into());
 
     insta::assert_json_snapshot!("capture_trace_response_envelope", value);
@@ -806,7 +827,12 @@ async fn replay_is_idempotent() {
             let session_id = session_id.clone();
             move |tx| {
                 let rows = tx.list_trace_events(&session_id, "turn-1")?;
-                assert_eq!(rows.len(), 4, "no duplicate events from replay: got {}", rows.len());
+                assert_eq!(
+                    rows.len(),
+                    4,
+                    "no duplicate events from replay: got {}",
+                    rows.len()
+                );
 
                 // Summary must exist and remain a single row.  The
                 // UNIQUE INDEX on (session_id, turn_id) for turn_summary
@@ -889,7 +915,11 @@ async fn late_event_after_close_resummarizes() {
                             .expect("sequence must be u64")
                     })
                     .collect();
-                assert_eq!(seqs, vec![0, 1, 2, 3, 4], "sequences must be contiguous 0..4");
+                assert_eq!(
+                    seqs,
+                    vec![0, 1, 2, 3, 4],
+                    "sequences must be contiguous 0..4"
+                );
 
                 // The summary must have been updated to cover all 5 events.
                 assert!(

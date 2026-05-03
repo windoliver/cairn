@@ -97,10 +97,7 @@ pub fn project(
         Json::String(link.session_id.as_str().to_owned()),
     );
     trace_obj.insert("turn_id".into(), Json::String(link.turn_id.clone()));
-    trace_obj.insert(
-        "sequence".into(),
-        Json::Number(link.sequence.into()),
-    );
+    trace_obj.insert("sequence".into(), Json::Number(link.sequence.into()));
     trace_obj.insert(
         "capture_event_id".into(),
         Json::String(link.capture_event_id.to_string()),
@@ -211,8 +208,9 @@ fn provenance_from_event(event: &CaptureEvent) -> Provenance {
 /// all-`a`s for a *test record*; we use all-`0`s here to distinguish
 /// a *pending-signature* record from a *test fixture* record).
 fn placeholder_signature() -> Ed25519Signature {
-    Ed25519Signature::parse(format!("ed25519:{}", "0".repeat(128)))
-        .unwrap_or_else(|_| unreachable!("'0'.repeat(128) always satisfies Ed25519Signature::parse"))
+    Ed25519Signature::parse(format!("ed25519:{}", "0".repeat(128))).unwrap_or_else(|_| {
+        unreachable!("'0'.repeat(128) always satisfies Ed25519Signature::parse")
+    })
 }
 
 /// Render the textual body for a given event type. Pure; no I/O.
@@ -239,11 +237,11 @@ fn truncate(s: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::domain::{
+        ActorChainEntry, ChainRole, Identity, Rfc3339Timestamp, SessionId,
         capture::{
             CaptureEvent, CaptureEventId, CaptureMode, CapturePayload, CaptureRefs, PayloadHash,
             SourceFamily,
         },
-        ActorChainEntry, ChainRole, Identity, Rfc3339Timestamp, SessionId,
     };
     use crate::pipeline::extract::body;
 
@@ -335,10 +333,7 @@ mod tests {
 
     #[test]
     fn classifies_stop() {
-        assert_eq!(
-            classify(&mk_hook_event("Stop")).unwrap(),
-            TraceEvent::Stop
-        );
+        assert_eq!(classify(&mk_hook_event("Stop")).unwrap(), TraceEvent::Stop);
     }
 
     #[test]

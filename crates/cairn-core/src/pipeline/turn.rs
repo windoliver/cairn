@@ -428,8 +428,8 @@ mod tests {
             _ => TE::UserMessage,
         };
 
-        let ts = Rfc3339Timestamp::parse("2026-05-02T00:00:00Z")
-            .expect("invariant: fixed timestamp");
+        let ts =
+            Rfc3339Timestamp::parse("2026-05-02T00:00:00Z").expect("invariant: fixed timestamp");
         let event = CaptureEvent {
             event_id: CaptureEventId::parse(capture_event_id_str)
                 .expect("invariant: test capture_event_id must be valid ULID"),

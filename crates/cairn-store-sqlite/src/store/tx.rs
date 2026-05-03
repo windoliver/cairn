@@ -126,10 +126,9 @@ impl StoreTx<'_> {
                 AND tombstoned = 0 \
               ORDER BY trace_sequence ASC",
         )?;
-        let rows = stmt.query_map(
-            params![session_id.as_str(), turn_id],
-            |row| row.get::<_, String>(0),
-        )?;
+        let rows = stmt.query_map(params![session_id.as_str(), turn_id], |row| {
+            row.get::<_, String>(0)
+        })?;
         rows.map(|r| {
             let json = r?;
             record_from_json(&json)
@@ -223,9 +222,7 @@ impl StoreTx<'_> {
                 return Err(StoreError::TraceLinkOrphan {
                     child_id: child_id.to_owned(),
                     parent_id: parent_id.to_owned(),
-                    reason: format!(
-                        "parent has trace_event={parent_evt}, expected pre_tool"
-                    ),
+                    reason: format!("parent has trace_event={parent_evt}, expected pre_tool"),
                 });
             }
             let parent_tcid = parent_tcid.unwrap_or("");
@@ -327,8 +324,7 @@ impl StoreTx<'_> {
             params.push(rusqlite::types::Value::Text((*id).to_owned()));
         }
         let mut stmt = self.tx.prepare(&sql)?;
-        let n: i64 =
-            stmt.query_row(rusqlite::params_from_iter(params), |row| row.get(0))?;
+        let n: i64 = stmt.query_row(rusqlite::params_from_iter(params), |row| row.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
     }
 
@@ -368,10 +364,8 @@ impl StoreTx<'_> {
             == Some("turn_summary");
 
         if is_summary {
-            let new_json = serde_json::to_string(record).map_err(|e| {
-                StoreError::Invariant {
-                    what: format!("serialize summary record: {e}"),
-                }
+            let new_json = serde_json::to_string(record).map_err(|e| StoreError::Invariant {
+                what: format!("serialize summary record: {e}"),
             })?;
             let target_id = record.target_id.as_str();
             let n = self.tx.execute(
@@ -402,9 +396,7 @@ impl StoreTx<'_> {
             // trace_turn_id, trace_sequence.  SQLite error message:
             // "UNIQUE constraint failed: records.trace_session_id,
             //  records.trace_turn_id, records.trace_sequence"
-            Err(StoreError::Sqlite(ref e))
-                if is_unique_constraint(e, "records.trace_sequence") =>
-            {
+            Err(StoreError::Sqlite(ref e)) if is_unique_constraint(e, "records.trace_sequence") => {
                 Err(extract_seq_conflict(record))
             }
             // `records_trace_event_id` index column: trace_capture_event_id.
@@ -467,9 +459,7 @@ impl StoreTx<'_> {
             )?;
             if n == 0 {
                 return Err(StoreError::Invariant {
-                    what: format!(
-                        "renumber park: no active row found for record_id `{record_id}`"
-                    ),
+                    what: format!("renumber park: no active row found for record_id `{record_id}`"),
                 });
             }
         }
@@ -492,8 +482,7 @@ impl StoreTx<'_> {
         let existing_ids: std::collections::HashSet<&str> =
             existing.iter().map(|r| r.id.as_str()).collect();
 
-        let mut all: Vec<MemoryRecord> =
-            Vec::with_capacity(existing.len() + incoming.len());
+        let mut all: Vec<MemoryRecord> = Vec::with_capacity(existing.len() + incoming.len());
         all.extend(existing.iter().cloned());
         all.extend(
             incoming
@@ -567,10 +556,7 @@ fn with_sequence(row: &MemoryRecord, sequence: i64) -> Result<MemoryRecord, Stor
 /// Uses [`cairn_core::domain::Rfc3339Timestamp::cmp_chronological`] for the
 /// timestamp comparison, which accounts for timezone offsets correctly — lexical
 /// `as_str()` comparison is wrong once offsets are involved.
-fn compare_by_captured_at_and_event_id(
-    a: &MemoryRecord,
-    b: &MemoryRecord,
-) -> std::cmp::Ordering {
+fn compare_by_captured_at_and_event_id(a: &MemoryRecord, b: &MemoryRecord) -> std::cmp::Ordering {
     let cap_id = |r: &MemoryRecord| -> String {
         r.extra_frontmatter
             .get("trace")
@@ -605,10 +591,7 @@ fn is_unique_constraint(e: &rusqlite::Error, column_signature: &str) -> bool {
 /// and return a [`StoreError::TraceSequenceConflict`]. Falls back to empty
 /// strings / 0 if the keys are absent (caller-side bug; still typed).
 fn extract_seq_conflict(r: &MemoryRecord) -> StoreError {
-    let trace = r
-        .extra_frontmatter
-        .get("trace")
-        .and_then(|v| v.as_object());
+    let trace = r.extra_frontmatter.get("trace").and_then(|v| v.as_object());
     let session_id = trace
         .and_then(|t| t.get("session_id"))
         .and_then(|v| v.as_str())

@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use cairn_core::contract::memory_store::TombstoneReason;
-use cairn_core::domain::{MemoryRecord, RecordId, SessionId, TargetId};
 use cairn_core::domain::record::tests_export::sample_record;
+use cairn_core::domain::{MemoryRecord, RecordId, SessionId, TargetId};
 use cairn_store_sqlite::error::StoreError;
 use cairn_store_sqlite::open_in_memory;
 use serde_json::{Map as JsonMap, Value as Json};
@@ -28,7 +28,12 @@ use serde_json::{Map as JsonMap, Value as Json};
     clippy::expect_used,
     reason = "fixture helpers: panic on invalid input is intentional"
 )]
-fn mk_trace_record(session_id: &SessionId, turn_id: &str, sequence: u64, capture_event_id: &str) -> MemoryRecord {
+fn mk_trace_record(
+    session_id: &SessionId,
+    turn_id: &str,
+    sequence: u64,
+    capture_event_id: &str,
+) -> MemoryRecord {
     let mut r = sample_record();
     // Use the capture_event_id as both record_id and target_id so every
     // inserted row has a distinct identity.
@@ -37,20 +42,32 @@ fn mk_trace_record(session_id: &SessionId, turn_id: &str, sequence: u64, capture
 
     // Build the trace linkage object.
     let mut trace_obj = JsonMap::new();
-    trace_obj.insert("session_id".into(), Json::String(session_id.as_str().to_owned()));
+    trace_obj.insert(
+        "session_id".into(),
+        Json::String(session_id.as_str().to_owned()),
+    );
     trace_obj.insert("turn_id".into(), Json::String(turn_id.to_owned()));
     trace_obj.insert("sequence".into(), Json::Number(sequence.into()));
-    trace_obj.insert("capture_event_id".into(), Json::String(capture_event_id.to_owned()));
+    trace_obj.insert(
+        "capture_event_id".into(),
+        Json::String(capture_event_id.to_owned()),
+    );
     trace_obj.insert(
         "payload_hash".into(),
         Json::String(
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
         ),
     );
-    trace_obj.insert("payload_ref".into(), Json::String(format!("sources/hook/{capture_event_id}.txt")));
+    trace_obj.insert(
+        "payload_ref".into(),
+        Json::String(format!("sources/hook/{capture_event_id}.txt")),
+    );
 
     let mut extra: BTreeMap<String, Json> = BTreeMap::new();
-    extra.insert("trace_event".into(), Json::String("user_message".to_owned()));
+    extra.insert(
+        "trace_event".into(),
+        Json::String("user_message".to_owned()),
+    );
     extra.insert("trace".into(), Json::Object(trace_obj));
     r.extra_frontmatter = extra;
 
@@ -89,7 +106,11 @@ fn mk_trace_record_with_hash(
     clippy::expect_used,
     reason = "fixture helpers: panic on invalid input is intentional"
 )]
-fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[&str]) -> MemoryRecord {
+fn mk_summary_record(
+    session_id: &SessionId,
+    turn_id: &str,
+    member_event_ids: &[&str],
+) -> MemoryRecord {
     // Derive the deterministic summary id exactly as the real pipeline does.
     let summary_id = cairn_core::domain::trace::summary_record_id(session_id, turn_id);
     let summary_id_str = summary_id.as_str().to_owned();
@@ -99,10 +120,16 @@ fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[
     r.target_id = TargetId::parse(summary_id_str.clone()).expect("test: summary_id is valid ULID");
 
     let mut trace_obj = JsonMap::new();
-    trace_obj.insert("session_id".into(), Json::String(session_id.as_str().to_owned()));
+    trace_obj.insert(
+        "session_id".into(),
+        Json::String(session_id.as_str().to_owned()),
+    );
     trace_obj.insert("turn_id".into(), Json::String(turn_id.to_owned()));
     // Summary rows have no sequence; sequence column will be NULL.
-    trace_obj.insert("capture_event_id".into(), Json::String(summary_id_str.clone()));
+    trace_obj.insert(
+        "capture_event_id".into(),
+        Json::String(summary_id_str.clone()),
+    );
     let members: Vec<Json> = member_event_ids
         .iter()
         .map(|s| Json::String((*s).to_owned()))
@@ -114,10 +141,16 @@ fn mk_summary_record(session_id: &SessionId, turn_id: &str, member_event_ids: &[
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
         ),
     );
-    trace_obj.insert("payload_ref".into(), Json::String(format!("sources/hook/{summary_id_str}.txt")));
+    trace_obj.insert(
+        "payload_ref".into(),
+        Json::String(format!("sources/hook/{summary_id_str}.txt")),
+    );
 
     let mut extra: BTreeMap<String, Json> = BTreeMap::new();
-    extra.insert("trace_event".into(), Json::String("turn_summary".to_owned()));
+    extra.insert(
+        "trace_event".into(),
+        Json::String("turn_summary".to_owned()),
+    );
     extra.insert("trace".into(), Json::Object(trace_obj));
     r.extra_frontmatter = extra;
 
@@ -210,7 +243,12 @@ async fn list_trace_events_orders_by_sequence() {
                 ("01ARZ3NDEKTSV4RRFFQ69G5FAB", 0),
                 ("01ARZ3NDEKTSV4RRFFQ69G5FAC", 1),
             ] {
-                tx.upsert(&mk_trace_record(&session_id, "turn-1", seq, capture_event_id))?;
+                tx.upsert(&mk_trace_record(
+                    &session_id,
+                    "turn-1",
+                    seq,
+                    capture_event_id,
+                ))?;
             }
             let rows = tx.list_trace_events(&session_id, "turn-1")?;
             let seqs: Vec<u64> = rows
@@ -221,7 +259,11 @@ async fn list_trace_events_orders_by_sequence() {
                         .expect("sequence present")
                 })
                 .collect();
-            assert_eq!(seqs, vec![0, 1, 2], "records must be ordered by trace_sequence ASC");
+            assert_eq!(
+                seqs,
+                vec![0, 1, 2],
+                "records must be ordered by trace_sequence ASC"
+            );
             Ok(())
         })
         .await
@@ -369,13 +411,17 @@ async fn payload_hash_count_in_scope_basic() {
             assert_eq!(n, 1, "expected 1 after excluding r1");
 
             // Wrong scope → 0.
-            let n =
-                tx.payload_hash_count_in_scope(hash, Some("other-tenant"), None, None, &[])?;
+            let n = tx.payload_hash_count_in_scope(hash, Some("other-tenant"), None, None, &[])?;
             assert_eq!(n, 0, "wrong tenant scope should match 0");
 
             // Different hash → 0.
-            let n =
-                tx.payload_hash_count_in_scope("sha256:other", None, Some("hmn:tafeng"), None, &[])?;
+            let n = tx.payload_hash_count_in_scope(
+                "sha256:other",
+                None,
+                Some("hmn:tafeng"),
+                None,
+                &[],
+            )?;
             assert_eq!(n, 0, "different hash should match 0");
             Ok(())
         })

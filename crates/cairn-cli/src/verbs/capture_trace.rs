@@ -62,9 +62,7 @@ pub struct CaptureTraceResponse {
 ///
 /// - File open / read failure (with path context).
 /// - Any line that fails to parse as [`CaptureEvent`].
-pub async fn read_jsonl_events(
-    path: impl AsRef<Path>,
-) -> anyhow::Result<Vec<CaptureEvent>> {
+pub async fn read_jsonl_events(path: impl AsRef<Path>) -> anyhow::Result<Vec<CaptureEvent>> {
     let path = path.as_ref();
     let f = File::open(path)
         .await
@@ -128,7 +126,9 @@ pub async fn run_handler(
 
     let events = read_jsonl_events(from).await?;
     for event in &events {
-        event.validate().context("CaptureEvent envelope validation")?;
+        event
+            .validate()
+            .context("CaptureEvent envelope validation")?;
     }
 
     // Group by (session_id, turn_id). Events missing either ref are reported
@@ -138,11 +138,7 @@ pub async fn run_handler(
 
     for event in &events {
         let Some(refs) = event.refs.as_ref() else {
-            failed_turns.push((
-                String::new(),
-                String::new(),
-                "event missing refs".into(),
-            ));
+            failed_turns.push((String::new(), String::new(), "event missing refs".into()));
             continue;
         };
         let (Some(s), Some(t)) = (refs.session_id.as_deref(), refs.turn_id.as_deref()) else {
@@ -171,8 +167,7 @@ pub async fn run_handler(
         // Resolve bodies from sources/ and project records *before* entering
         // the sync tx closure — tokio::fs reads must not run on the DB
         // worker thread.
-        let mut projected: Vec<cairn_core::domain::MemoryRecord> =
-            Vec::with_capacity(group.len());
+        let mut projected: Vec<cairn_core::domain::MemoryRecord> = Vec::with_capacity(group.len());
         let mut had_stop = false;
         let mut group_failed = false;
 
@@ -342,15 +337,13 @@ pub async fn run_handler(
 
                     for (idx, tool_call_id) in &needs_parent_from_store {
                         let Some(parent_ceid) = pre_tool_by_tcid.get(tool_call_id) else {
-                            return Err(
-                                cairn_store_sqlite::error::StoreError::Invariant {
-                                    what: format!(
-                                        "PostTool/ToolOutput at projected[{idx}] has no \
+                            return Err(cairn_store_sqlite::error::StoreError::Invariant {
+                                what: format!(
+                                    "PostTool/ToolOutput at projected[{idx}] has no \
                                          PreTool (in-batch or store) for \
                                          tool_call_id={tool_call_id:?}"
-                                    ),
-                                },
-                            );
+                                ),
+                            });
                         };
                         // Patch `extra_frontmatter.trace.parent_event_id`.
                         if let Some(trace_obj) = projected[*idx]
@@ -371,16 +364,12 @@ pub async fn run_handler(
 
                 // Summarize if Stop landed in this batch OR a summary already
                 // exists (closed-turn re-summarize per spec §4).
-                if had_stop
-                    || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)?
-                {
-                    let final_rows =
-                        tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
-                    let summary =
-                        summarize_turn(&session_id_tx, &turn_str_tx, &final_rows)
-                            .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
-                                what: format!("summarize_turn: {e}"),
-                            })?;
+                if had_stop || tx.turn_summary_exists(&session_id_tx, &turn_str_tx)? {
+                    let final_rows = tx.list_trace_events(&session_id_tx, &turn_str_tx)?;
+                    let summary = summarize_turn(&session_id_tx, &turn_str_tx, &final_rows)
+                        .map_err(|e| cairn_store_sqlite::error::StoreError::Invariant {
+                            what: format!("summarize_turn: {e}"),
+                        })?;
                     tx.upsert_trace(&summary)?;
                 }
                 Ok::<(), cairn_store_sqlite::error::StoreError>(())
@@ -410,10 +399,7 @@ pub async fn run_handler(
 /// - I/O error reading the file.
 /// - SHA-256 mismatch between the stored hash and the computed hash.
 /// - Bytes not valid UTF-8.
-async fn resolve_body_text(
-    vault_root: &Path,
-    event: &CaptureEvent,
-) -> anyhow::Result<String> {
+async fn resolve_body_text(vault_root: &Path, event: &CaptureEvent) -> anyhow::Result<String> {
     let path = vault_root.join(&event.payload_ref);
     let bytes = tokio::fs::read(&path)
         .await
@@ -421,9 +407,7 @@ async fn resolve_body_text(
 
     let actual = sha256_hex(&bytes);
     let raw_expected = event.payload_hash.as_str();
-    let expected_hex = raw_expected
-        .strip_prefix("sha256:")
-        .unwrap_or(raw_expected);
+    let expected_hex = raw_expected.strip_prefix("sha256:").unwrap_or(raw_expected);
 
     if actual != expected_hex {
         anyhow::bail!(

@@ -1,7 +1,7 @@
 //! Trace-record domain types (issue #77, brief §5.0, §9.3).
 
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
@@ -144,9 +144,8 @@ pub fn summary_record_id(session_id: &SessionId, turn_id: &str) -> RecordId {
     let ulid = Ulid::from_bytes(bytes);
     // invariant: Ulid::to_string() always produces 26 valid Crockford-base32
     // characters by construction; RecordId::parse cannot fail on this input.
-    RecordId::parse(ulid.to_string()).unwrap_or_else(|_| {
-        unreachable!("ulid::to_string always yields valid RecordId")
-    })
+    RecordId::parse(ulid.to_string())
+        .unwrap_or_else(|_| unreachable!("ulid::to_string always yields valid RecordId"))
 }
 
 #[cfg(test)]
@@ -187,7 +186,9 @@ mod tests {
 
     #[test]
     fn user_message_link_is_valid() {
-        link_template().validate(TraceEvent::UserMessage).expect("valid");
+        link_template()
+            .validate(TraceEvent::UserMessage)
+            .expect("valid");
     }
 
     #[test]
