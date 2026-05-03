@@ -289,3 +289,59 @@ fn migration_0033_fk_set_null_on_record_delete() {
         .expect("query");
     assert!(fk.is_none(), "FK should be SET NULL after record delete");
 }
+
+#[test]
+fn migration_0034_entity_episodes_idempotent_pk_and_cascade() {
+    let conn = open_in_memory_sync().expect("open");
+
+    // Seed an entity.
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('n1', 'Alice', 'alice', 1)",
+        [],
+    )
+    .expect("node");
+
+    // Seed a minimal records row. The records table has NOT NULL
+    // constraints on record_json/tags_json (DEFAULTs '{}' / '[]'
+    // from migration 0008) and GENERATED columns that json_extract
+    // from record_json (migration 0012), so we must provide valid JSON.
+    conn.execute(
+        "INSERT INTO records \
+         (record_id, target_id, version, path, kind, class, visibility, \
+          scope, actor_chain, body, body_hash, created_at, updated_at) \
+         VALUES \
+         ('rec-1', 't-1', 1, 'p', 'fact', 'episodic', 'private', \
+          '{}', '[]', '', 'h', 1, 1)",
+        [],
+    )
+    .expect("seed record");
+
+    // First link succeeds.
+    conn.execute(
+        "INSERT INTO entity_episodes (episode_id, entity_node_id, linked_at) \
+         VALUES ('rec-1', 'n1', 1)",
+        [],
+    )
+    .expect("first link");
+
+    // Second link with same PK is rejected (caller must use OR IGNORE).
+    let dup = conn.execute(
+        "INSERT INTO entity_episodes (episode_id, entity_node_id, linked_at) \
+         VALUES ('rec-1', 'n1', 2)",
+        [],
+    );
+    assert!(dup.is_err(), "PK uniqueness must reject duplicate link");
+
+    // Cascade on record delete.
+    conn.execute("DELETE FROM records WHERE record_id = 'rec-1'", [])
+        .expect("delete");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entity_episodes WHERE episode_id = 'rec-1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(count, 0, "cascade must remove orphan episode link");
+}

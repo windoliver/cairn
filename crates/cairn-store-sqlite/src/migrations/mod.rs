@@ -41,6 +41,7 @@ const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weig
 const M0031_WAL_KIND_WIDENING: &str = include_str!("sql/0031_wal_kind_widening.sql");
 const M0032_ENTITY_NODES: &str = include_str!("sql/0032_entity_nodes.sql");
 const M0033_ENTITY_EDGES: &str = include_str!("sql/0033_entity_edges.sql");
+const M0034_ENTITY_EPISODES: &str = include_str!("sql/0034_entity_episodes.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -111,6 +112,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (31, "0031_wal_kind_widening", M0031_WAL_KIND_WIDENING),
     (32, "0032_entity_nodes", M0032_ENTITY_NODES),
     (33, "0033_entity_edges", M0033_ENTITY_EDGES),
+    (34, "0034_entity_episodes", M0034_ENTITY_EPISODES),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -144,5 +146,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0031_WAL_KIND_WIDENING),
         M::up(M0032_ENTITY_NODES),
         M::up(M0033_ENTITY_EDGES),
+        M::up(M0034_ENTITY_EPISODES),
     ])
 }

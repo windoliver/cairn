@@ -191,6 +191,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "entity_edges_source_relation_idx"),
     ("index", "entity_edges_target_relation_idx"),
     ("trigger", "entity_edges_shrink_guard"),
+    // 0034_entity_episodes (issue #186 §3.4: record ↔ entity link table).
+    // The composite PK creates an implicit sqlite_autoindex_* which is
+    // filtered by the `sqlite_%` clause — do NOT add it here.
+    ("table", "entity_episodes"),
+    ("index", "entity_episodes_entity_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {
