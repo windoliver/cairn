@@ -21,11 +21,12 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{MemoryRecord, RecordId};
+use cairn_core::domain::{MemoryRecord, RecordId, SessionId};
 use rusqlite::{Transaction, params};
 use tracing::instrument;
 
 use crate::error::StoreError;
+use crate::store::projection::record_from_json;
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
 
@@ -92,6 +93,48 @@ impl StoreTx<'_> {
             ],
         )?;
         Ok(())
+    }
+
+    /// Read every non-tombstoned, non-summary trace record for a turn,
+    /// ordered by `trace_sequence` ASC.
+    ///
+    /// Uses the canonical [`record_from_json`] decoder from
+    /// [`crate::store::projection`], so the hydration path is identical
+    /// to all other read paths in this adapter.
+    ///
+    /// Rows with `trace_event = 'turn_summary'` are excluded — they are
+    /// aggregated records, not individual events. Tombstoned rows are
+    /// excluded via `tombstoned = 0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] for SQL failures or
+    /// [`StoreError::Codec`] if a stored `record_json` cannot be
+    /// deserialized.
+    pub fn list_trace_events(
+        &self,
+        session_id: &SessionId,
+        turn_id: &str,
+    ) -> Result<Vec<MemoryRecord>, StoreError> {
+        let mut stmt = self.tx.prepare(
+            "SELECT record_json \
+               FROM records \
+              WHERE trace_session_id = ?1 \
+                AND trace_turn_id = ?2 \
+                AND trace_event IS NOT NULL \
+                AND trace_event != 'turn_summary' \
+                AND tombstoned = 0 \
+              ORDER BY trace_sequence ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![session_id.as_str(), turn_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        rows.map(|r| {
+            let json = r?;
+            record_from_json(&json)
+        })
+        .collect()
     }
 
     /// Synchronous edge removal. Returns `true` if a row was deleted,
