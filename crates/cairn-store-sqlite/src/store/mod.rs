@@ -1,8 +1,10 @@
 //! `SqliteMemoryStore` impl modules.
 
 pub(crate) mod edges;
+pub(crate) mod hybrid;
 pub(crate) mod projection;
 pub(crate) mod read;
+pub(crate) mod reindex;
 pub(crate) mod search;
 pub mod sessions;
 pub(crate) mod tombstone;
@@ -12,7 +14,10 @@ pub(crate) mod upsert;
 
 use std::sync::Arc;
 
+use cairn_core::contract::memory_store::MemoryStoreCapabilities;
+use cairn_embeddings_local::EmbeddingModel;
 use tokio_rusqlite::Connection as AsyncConn;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::StoreError;
 
@@ -23,15 +28,50 @@ use crate::error::StoreError;
 /// - [`SqliteMemoryStore::default`] — unconnected registry stub used by
 ///   the `register_plugin!` macro for identity/capability advertisement.
 ///   Trait verb methods return a "not initialized" error.
-/// - [`crate::open()`] / [`crate::open_in_memory()`] — connected store with
-///   pragmas + migrations applied. Trait verb methods route through the
-///   wrapped `tokio_rusqlite::Connection` on a dedicated DB thread.
+/// - [`crate::open()`] / [`crate::open_in_memory()`] / [`crate::open_with_embedder()`] —
+///   connected store with pragmas + migrations applied. Trait verb methods
+///   route through the wrapped `tokio_rusqlite::Connection` on a dedicated
+///   DB thread. When an embedder is supplied, the `vector` capability is
+///   enabled and a background drain loop is spawned.
 ///
 /// Construction is side-effect free per brief §4.1; the `open` path is
 /// the only side-effecting one.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct SqliteMemoryStore {
     pub(crate) conn: Option<Arc<AsyncConn>>,
+    /// Optional local embedding model. Presence enables `caps.vector`.
+    /// Used by `do_search_semantic` (Task 7) and embed-on-write in `do_upsert` (Task 8).
+    pub(crate) embedder: Option<Arc<dyn EmbeddingModel>>,
+    /// Dynamic capability advertisement. Set at open time based on whether
+    /// an embedder was supplied.
+    pub(crate) caps: MemoryStoreCapabilities,
+    /// Cancellation token for the background reindex drain loop. Dropped when
+    /// the store is dropped, signalling the drain task to exit gracefully.
+    pub(crate) _cancel: Option<CancellationToken>,
+    /// Per-column BM25 weights for `records_fts` `(kind, class, scope, body)`.
+    /// Threaded into the `bm25(records_fts, w0, w1, w2, w3)` SQL call inside
+    /// `do_search_keyword`. Defaults to `[10.0, 10.0, 5.0, 1.0]` — kind/class
+    /// dominate, scope is mid-tier, body anchors the long-prose match.
+    /// Set at open time via `open_with_embedder_and_config`; the registry
+    /// stub built by `Default::default` carries the defaults.
+    pub(crate) fts_column_weights: [f64; 4],
+}
+
+impl Default for SqliteMemoryStore {
+    fn default() -> Self {
+        Self {
+            conn: None,
+            embedder: None,
+            caps: MemoryStoreCapabilities {
+                fts: true,
+                vector: false,
+                graph_edges: true,
+                transactions: true,
+            },
+            _cancel: None,
+            fts_column_weights: [10.0, 10.0, 5.0, 1.0],
+        }
+    }
 }
 
 impl SqliteMemoryStore {
@@ -48,6 +88,29 @@ impl SqliteMemoryStore {
         self.conn
             .as_ref()
             .ok_or(StoreError::NotInitialized { method })
+    }
+}
+
+impl SqliteMemoryStore {
+    /// Expose the underlying async connection for integration tests that need
+    /// to insert raw rows (e.g., to seed `record_vectors` before Task 8 lands
+    /// embed-on-write). Gated behind `test-helpers` so this surface never
+    /// appears in production builds.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn raw_conn(&self) -> Option<&Arc<AsyncConn>> {
+        self.conn.as_ref()
+    }
+
+    /// Borrow the underlying async connection for admin verbs (e.g.
+    /// `cairn admin reindex`) that need to call `drain_once` directly.
+    ///
+    /// Returns `None` when the store was constructed via `Default::default`
+    /// (registry stub — no connection). Production callers should treat
+    /// `None` as an internal error.
+    #[must_use]
+    pub fn raw_conn_for_admin(&self) -> Option<&Arc<AsyncConn>> {
+        self.conn.as_ref()
     }
 }
 

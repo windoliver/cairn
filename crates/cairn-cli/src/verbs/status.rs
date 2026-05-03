@@ -3,16 +3,19 @@
 //! Returns the contract version, advertised capabilities, and server info.
 //! For P0 (no daemon), a fresh incarnation ULID is minted per invocation.
 //! When the store adapter lands, read the incarnation from the daemon table.
-//! P0 advertises **no** capabilities: the IDL declares
-//! `cairn.mcp.v1.policy_trace` (#95) and the store-driven search /
-//! retrieve / forget mode capabilities, but verb runtime does not yet
-//! emit traces or honor those modes (work tracked in #9 / #61 / #62).
-//! Advertising a capability the runtime cannot back would mislead
-//! clients that negotiate from `status.capabilities`, so this list stays
-//! empty until each capability is honored end-to-end.
+//!
+//! Capabilities are advertised only when the runtime can honor them
+//! end-to-end. The IDL declares `cairn.mcp.v1.policy_trace` (#95) and
+//! store-driven search / retrieve / forget mode capabilities; verb
+//! runtime emits the keyword/semantic search capabilities once the
+//! store is wired and gates the others (#9 / #61 / #62) until each is
+//! honored. Advertising a capability the runtime cannot back would
+//! mislead clients that negotiate from `status.capabilities`.
 
+use std::path::Path;
 use std::process::ExitCode;
 
+use cairn_core::config::{CairnConfig, EmbeddingModelKind};
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
 
@@ -21,8 +24,26 @@ use super::envelope::{emit_json, new_operation_id};
 /// Run `cairn status`. Exits 0 on success.
 #[must_use]
 pub fn run(json: bool) -> ExitCode {
+    run_with_context(json, None, None)
+}
+
+/// Run `cairn status` with optional vault root and config for capability probing.
+///
+/// When `vault_root` and `config` are supplied, the embedding-model presence
+/// is stat-checked and `CapabilitySet::semantic_search` is wired accordingly.
+/// Without them (e.g. the `bootstrap` / `vault` / `mcp` fast paths) the old
+/// P0 empty list is returned.
+#[must_use]
+pub fn run_with_context(
+    json: bool,
+    vault_root: Option<&Path>,
+    config: Option<&CairnConfig>,
+) -> ExitCode {
     let incarnation = new_operation_id();
     let started_at = chrono_like_now();
+
+    let caps = compute_capabilities(vault_root, config);
+
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),
         server_info: StatusResponseServerInfo {
@@ -31,7 +52,7 @@ pub fn run(json: bool) -> ExitCode {
             started_at: started_at.clone(),
             incarnation: incarnation.clone(),
         },
-        capabilities: p0_capabilities(),
+        capabilities: caps,
         extensions: vec![],
     };
 
@@ -44,7 +65,7 @@ pub fn run(json: bool) -> ExitCode {
         println!("started_at:  {started_at}");
         println!("incarnation: {}", incarnation.0);
         if resp.capabilities.is_empty() {
-            println!("capabilities: (none advertised)");
+            println!("capabilities: (none advertised — store not wired in this build)");
         } else {
             for cap in &resp.capabilities {
                 println!(
@@ -57,16 +78,39 @@ pub fn run(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Advertised P0 capabilities — currently empty.
+/// Derive the `Capabilities` list from the active config and filesystem state.
 ///
-/// Negotiable capabilities are advertised only when the runtime can honor
-/// them end-to-end. P0 verbs return the unimplemented stub envelope, so
-/// no capability is advertised yet. `cairn.mcp.v1.policy_trace` (#95)
-/// and the store-driven search / retrieve / forget mode capabilities
-/// land here as their respective verb-runtime issues close (#9 / #61 /
-/// #62).
-fn p0_capabilities() -> Vec<Capabilities> {
-    vec![]
+/// `vault_root` is used only to stat-check the embedding-model directory;
+/// no I/O is performed when it is `None`. When `config` is `None` we fall
+/// back to the empty list — the IDL declares `cairn.mcp.v1.policy_trace`
+/// (#95) and store-driven mode capabilities, but they're advertised only
+/// once verb runtime can honor them end-to-end (#9 / #61 / #62).
+fn compute_capabilities(
+    vault_root: Option<&Path>,
+    config: Option<&CairnConfig>,
+) -> Vec<Capabilities> {
+    let Some(config) = config else {
+        // No config available — return empty list (P0 stub path).
+        return vec![];
+    };
+
+    let model_present = vault_root.is_some_and(|root| {
+        let models_root = root.join(".cairn").join("models");
+        let cache = cairn_embeddings_local::ModelCache::new(&models_root);
+        let kind: EmbeddingModelKind = config.search.embedding_model;
+        cache.is_present(kind)
+    });
+
+    let cap_set = config.capabilities(model_present);
+
+    let mut out = vec![Capabilities::CairnMcpV1SearchKeyword];
+    if cap_set.semantic_search {
+        out.push(Capabilities::CairnMcpV1SearchSemantic);
+    }
+    if cap_set.hybrid_search {
+        out.push(Capabilities::CairnMcpV1SearchHybrid);
+    }
+    out
 }
 
 /// True if `capability` is in the current `status.capabilities` list.
@@ -75,7 +119,12 @@ fn p0_capabilities() -> Vec<Capabilities> {
 /// (CLAUDE.md §4.6).
 #[must_use]
 pub fn p0_capabilities_advertises(capability: &str) -> bool {
-    p0_capabilities().iter().any(|c| {
+    // Compute against the empty-context fast path: no vault, no config →
+    // matches the conservative status response that the legacy `p0_*`
+    // helper used to return. Verb-time gates fail closed when the
+    // requested capability is absent, even if the runtime *would*
+    // advertise it under a fully-configured open.
+    compute_capabilities(None, None).iter().any(|c| {
         serde_json::to_value(c)
             .ok()
             .and_then(|v| v.as_str().map(str::to_owned))
@@ -234,11 +283,36 @@ mod tests {
     }
 
     #[test]
-    fn p0_capabilities_is_empty_until_runtime_honors_them() {
-        let caps = p0_capabilities();
+    fn compute_capabilities_no_config_returns_empty() {
+        let caps = compute_capabilities(None, None);
+        assert!(caps.is_empty(), "no config → no capabilities");
+    }
+
+    #[test]
+    fn compute_capabilities_default_config_no_vault_includes_keyword() {
+        let config = CairnConfig::default();
+        // No vault_root → model_present = false → no semantic
+        let caps = compute_capabilities(None, Some(&config));
         assert!(
-            caps.is_empty(),
-            "P0 advertises no capabilities until verb runtime can honor them; got {caps:?}"
+            caps.contains(&Capabilities::CairnMcpV1SearchKeyword),
+            "keyword always present when config supplied"
+        );
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1SearchSemantic),
+            "semantic absent when model not on disk"
+        );
+    }
+
+    #[test]
+    fn compute_capabilities_local_embeddings_off_no_semantic() {
+        let mut config = CairnConfig::default();
+        config.search.local_embeddings = false;
+        // Even with a vault_root, local_embeddings: false → no semantic
+        let tmp = tempfile::tempdir().unwrap();
+        let caps = compute_capabilities(Some(tmp.path()), Some(&config));
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1SearchSemantic),
+            "semantic absent when local_embeddings: false"
         );
     }
 }

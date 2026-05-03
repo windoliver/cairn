@@ -3,6 +3,11 @@ audience = "user"
 page = "usage/cli.md"
 generated_reference = "reference/generated/cli.md"
 
+[packages.cairn-embeddings-local]
+audience = "internal"
+page = ""
+generated_reference = ""
+
 [packages.cairn-core]
 audience = "sdk-author"
 page = "reference/rust-api.md"
@@ -52,3 +57,13 @@ generated_reference = ""
 audience = "operator"
 page = "usage/plugins.md"
 generated_reference = "reference/generated/plugins.md"
+
+[packages.cairn-bench]
+audience = "internal"
+page = ""
+generated_reference = ""
+
+[packages.cairn-embeddings-openai]
+audience = "internal"
+page = ""
+generated_reference = ""

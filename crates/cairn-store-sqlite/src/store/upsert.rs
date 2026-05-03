@@ -18,6 +18,8 @@
 //! mutating any row, which is intentionally cheap but still keeps the read
 //! lock semantics consistent across the three branches.
 
+use std::sync::Arc;
+
 use cairn_core::contract::memory_store::UpsertOutcome;
 use cairn_core::domain::{BodyHash, MemoryRecord, RecordId};
 use rusqlite::{Transaction, params};
@@ -26,6 +28,19 @@ use tracing::instrument;
 use crate::error::StoreError;
 use crate::store::projection::{ProjectedRow, body_hash_from_str};
 use crate::store::{SqliteMemoryStore, current_unix_ms};
+
+/// Outcome of the pre-transaction embedding step.
+enum EmbedOutcome {
+    /// Embedding computed successfully. Contains LE bytes + model label.
+    Succeeded {
+        vector: Vec<u8>,
+        model_label: String,
+    },
+    /// Embedder errored. Record is written; queued in `pending_embeddings`.
+    Failed { error: String },
+    /// No embedder configured; skip vector entirely.
+    Skipped,
+}
 
 /// Active-row tuple as read out of the `records` table:
 /// `(record_id, version, body_hash)`. Only the active row for a given
@@ -66,15 +81,94 @@ impl SqliteMemoryStore {
         // `StoreError::Worker(Other(_))` by the `tokio_rusqlite` worker.
         record.validate()?;
         let conn = self.require_conn("upsert")?.clone();
-        let record = record.clone();
 
+        // 1. Compute embedding outside the SQL transaction (CPU-bound, may be slow).
+        //    This keeps the transaction short and avoids holding DB locks during
+        //    inference. On failure the record is still written; a `pending_embeddings`
+        //    row is inserted atomically with the record commit.
+        let embed_outcome: EmbedOutcome = if let Some(embedder) = &self.embedder {
+            let body = record.body.clone();
+            let emb = Arc::clone(embedder);
+            let model_label = emb.kind().as_str().to_owned();
+            match tokio::task::spawn_blocking(move || emb.embed_document(&body)).await {
+                Ok(Ok(vec)) => EmbedOutcome::Succeeded {
+                    vector: vec.iter().flat_map(|&f| f.to_le_bytes()).collect(),
+                    model_label,
+                },
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        error = %e,
+                        "embed failed before upsert tx; will queue in pending_embeddings",
+                    );
+                    EmbedOutcome::Failed {
+                        error: e.to_string(),
+                    }
+                }
+                Err(join_err) => {
+                    tracing::warn!(
+                        error = %join_err,
+                        "embed task panicked before upsert tx; will queue in pending_embeddings",
+                    );
+                    EmbedOutcome::Failed {
+                        error: join_err.to_string(),
+                    }
+                }
+            }
+        } else {
+            EmbedOutcome::Skipped
+        };
+
+        let record = record.clone();
         let outcome = conn
             .call(move |c| {
                 let mut tx = c.transaction()?;
-                let outcome = upsert_in_tx(&mut tx, &record)
+                let upsert_outcome = upsert_in_tx(&mut tx, &record)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+
+                let rid = upsert_outcome.record_id.as_str();
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+
+                match &embed_outcome {
+                    EmbedOutcome::Succeeded {
+                        vector,
+                        model_label,
+                    } => {
+                        // sqlite-vec vec0 virtual tables do not support UPSERT syntax.
+                        // Use DELETE + INSERT to replace an existing row atomically.
+                        tx.execute(
+                            "DELETE FROM record_vectors WHERE record_id = ?",
+                            params![rid],
+                        )?;
+                        tx.execute(
+                            "INSERT INTO record_vectors(record_id, embedding, model) \
+                               VALUES (?, ?, ?)",
+                            params![rid, vector, model_label],
+                        )?;
+                        // Clear any pending entry (no-op if none exists).
+                        tx.execute(
+                            "DELETE FROM pending_embeddings WHERE record_id = ?",
+                            params![rid],
+                        )?;
+                    }
+                    EmbedOutcome::Failed { error } => {
+                        tx.execute(
+                            "INSERT INTO pending_embeddings \
+                                 (record_id, reason, attempt_count, last_error, enqueued_at) \
+                               VALUES (?, 'embed_failed', 0, ?, ?) \
+                               ON CONFLICT(record_id) DO UPDATE \
+                                 SET attempt_count   = attempt_count + 1, \
+                                     last_error      = excluded.last_error, \
+                                     last_attempt_at = ?",
+                            params![rid, error, now_secs, now_secs],
+                        )?;
+                    }
+                    EmbedOutcome::Skipped => {}
+                }
+
                 tx.commit()?;
-                Ok::<_, tokio_rusqlite::Error>(outcome)
+                Ok::<_, tokio_rusqlite::Error>(upsert_outcome)
             })
             .await?;
 

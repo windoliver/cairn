@@ -229,6 +229,151 @@ string_enum! {
     unknown_msg: "expected regex | llm | agent | custom:<name>",
 }
 
+// ── Search ────────────────────────────────────────────────────────────────
+
+/// Embedding model selection for local semantic search (brief §3.0).
+///
+/// Variant strings are kebab-case to match the brief's model identifiers.
+/// Lives in `cairn-core` (not in `cairn-embeddings-local`) so `CairnConfig`
+/// can reference it without a workspace-dep direction violation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[non_exhaustive]
+pub enum EmbeddingModelKind {
+    /// BGE-small-en-v1.5, 384-dim, MIT license. Default.
+    /// Applies asymmetric query prefix for retrieval.
+    #[default]
+    #[serde(rename = "bge-small-en-v1.5")]
+    BgeSmallEnV1_5,
+    /// all-MiniLM-L6-v2, 384-dim, Apache 2.0.
+    #[serde(rename = "all-MiniLM-L6-v2")]
+    AllMiniLmL6V2,
+    /// `OpenAI` `text-embedding-3-large` (1536 dim). Requires the `openai`
+    /// embedding provider; cannot be loaded by `ModelCache`.
+    #[serde(rename = "openai-text-embedding-3-large")]
+    OpenAiTextEmbedding3Large,
+    /// `OpenAI` `text-embedding-3-small` (1536 dim).
+    #[serde(rename = "openai-text-embedding-3-small")]
+    OpenAiTextEmbedding3Small,
+}
+
+impl EmbeddingModelKind {
+    /// Stable kebab-case label used in file-system paths and DB rows.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BgeSmallEnV1_5 => "bge-small-en-v1.5",
+            Self::AllMiniLmL6V2 => "all-MiniLM-L6-v2",
+            Self::OpenAiTextEmbedding3Large => "openai-text-embedding-3-large",
+            Self::OpenAiTextEmbedding3Small => "openai-text-embedding-3-small",
+        }
+    }
+
+    /// `HuggingFace` repo id for fetchable models. `None` for cloud providers.
+    #[must_use]
+    pub fn hf_repo(self) -> Option<&'static str> {
+        match self {
+            Self::BgeSmallEnV1_5 => Some("BAAI/bge-small-en-v1.5"),
+            Self::AllMiniLmL6V2 => Some("sentence-transformers/all-MiniLM-L6-v2"),
+            Self::OpenAiTextEmbedding3Large | Self::OpenAiTextEmbedding3Small => None,
+        }
+    }
+
+    /// Expected output dimension of the model.
+    ///
+    /// Uses an explicit `match` so the compiler forces this to be updated
+    /// whenever a new variant is added.
+    #[must_use]
+    #[allow(clippy::match_same_arms)] // intentional: exhaustive match forces updates on new variants
+    pub fn dim(self) -> usize {
+        match self {
+            Self::BgeSmallEnV1_5 | Self::AllMiniLmL6V2 => 384,
+            Self::OpenAiTextEmbedding3Large | Self::OpenAiTextEmbedding3Small => 1536,
+        }
+    }
+}
+
+/// Retrieval mode selected at search time (CLI flag, config default, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum SearchMode {
+    /// Keyword-only retrieval via FTS5 BM25.
+    Bm25,
+    /// Vector-only retrieval via sqlite-vec ANN.
+    Vector,
+    /// FTS5 + vector + RRF fusion + cosine re-rank.
+    #[default]
+    Hybrid,
+}
+
+/// Source of embedding vectors at runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum EmbeddingProvider {
+    /// Local candle inference (BGE / `MiniLM`).
+    #[default]
+    Local,
+    /// `OpenAI` HTTP embedding endpoint. Requires the `openai` Cargo feature
+    /// in `cairn-cli` and an `OPENAI_API_KEY` resolvable at runtime.
+    #[serde(rename = "openai")]
+    OpenAi,
+}
+
+/// Local semantic search configuration (brief §3.0).
+///
+/// `local_embeddings: false` drops `cairn.mcp.v1.search.semantic` and
+/// `cairn.mcp.v1.search.hybrid` from `status.capabilities`. Those modes
+/// return `CapabilityUnavailable` — no silent fallback (brief §3.0 fail-closed).
+//
+// Note: `Eq` was intentionally dropped from the derive list when `f32`/`f64`
+// retrieval-tuning fields landed in Task 3 of the hybrid-retrieval branch.
+// Floats can't be `Eq`. Pre-1.0 codebase, no external SDK consumers yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Enable local embedding runtime. Default `true`.
+    pub local_embeddings: bool,
+    /// Which embedding model to use. Default `bge-small-en-v1.5`.
+    pub embedding_model: EmbeddingModelKind,
+    /// Default retrieval mode when no `--mode` flag is supplied. Default `hybrid`.
+    pub default_mode: SearchMode,
+    /// Default embedding provider for query-time vectorization. Default `local`.
+    //
+    // TODO(task 8): when `cairn search` flag dispatch lands, validate at
+    // verb-time that `default_provider == Local` is consistent with
+    // `local_embeddings == true`, and `default_provider == OpenAi` requires
+    // the `openai` Cargo feature + `OPENAI_API_KEY`. Fail-closed per
+    // CLAUDE.md §4 invariant 6.
+    pub default_provider: EmbeddingProvider,
+    /// Blend coefficient α for cosine re-rank: final = α * rrf + (1-α) * cos.
+    /// Range `[0.0, 1.0]`. Default `0.7`.
+    pub rerank_blend: f32,
+    /// Weights passed to FTS5 `bm25(records_fts, w0, w1, w2, w3)` over the
+    /// four indexed columns: `[kind, class, scope, body]`. Default
+    /// `[10.0, 10.0, 5.0, 1.0]`.
+    pub fts_column_weights: [f64; 4],
+    /// RRF constant `k`. Default `60`.
+    pub rrf_k: usize,
+    /// Number of top RRF candidates to second-pass cosine re-rank. Default `20`.
+    pub rerank_topk: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            local_embeddings: true,
+            embedding_model: EmbeddingModelKind::default(),
+            default_mode: SearchMode::default(),
+            default_provider: EmbeddingProvider::default(),
+            rerank_blend: 0.7,
+            fts_column_weights: [10.0, 10.0, 5.0, 1.0],
+            rrf_k: 60,
+            rerank_topk: 20,
+        }
+    }
+}
+
 // ── Top-level ─────────────────────────────────────────────────────────────
 
 /// Root config type. Deserialized from `.cairn/config.yaml` (brief §3.1).
@@ -406,24 +551,6 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
 }
 
-// ── Search ───────────────────────────────────────────────────────────────
-
-/// Search and local embedding configuration (§3.0, ADR 0001).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SearchConfig {
-    /// Enable the bundled local embedding runtime for semantic/hybrid search.
-    pub local_embeddings: bool,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            local_embeddings: true,
-        }
-    }
-}
-
 // ── Sensors ───────────────────────────────────────────────────────────────
 
 /// Sensor enablement (§3.1 sensors block).
@@ -557,7 +684,7 @@ pub struct ExtractBudget {
 
 /// Derived capability set, computed from `CairnConfig` (no I/O).
 ///
-/// The verb layer calls `config.capabilities()` before dispatching to
+/// The verb layer calls `config.capabilities(model_present)` before dispatching to
 /// gate features that require capabilities that may not be present.
 // Six orthogonal capability flags; a bitflags type would obscure the intent.
 #[allow(clippy::struct_excessive_bools)]
@@ -565,9 +692,9 @@ pub struct ExtractBudget {
 pub struct CapabilitySet {
     /// Always true at P0 (`FTS5` always present).
     pub keyword_search: bool,
-    /// True iff local embeddings are enabled and available.
+    /// True iff `search.local_embeddings` is true and embedding model files exist on disk.
     pub semantic_search: bool,
-    /// True iff `semantic_search` (requires vector embeddings).
+    /// True iff `search.local_embeddings` is true (hybrid uses keyword+semantic legs).
     pub hybrid_search: bool,
     /// True iff `llm.provider` is `Some`.
     pub llm_extract: bool,
@@ -663,26 +790,41 @@ impl CairnConfig {
 
     /// Derive the active capability set from this config (pure, no I/O).
     ///
+    /// `model_present` should be `true` when the configured embedding model
+    /// files exist on disk (stat-checked at startup).
+    ///
     /// The verb layer uses this to gate features before dispatch.
     #[must_use]
-    pub fn capabilities(&self) -> CapabilitySet {
+    pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
+        let semantic = self.search.local_embeddings && model_present;
         let embeddings_on = self.search.local_embeddings;
         let agent_extract = self
             .pipeline
             .extract
             .chain
             .iter()
-            .any(|e| e.worker == ExtractorWorkerKind::Agent);
+            .any(|e| matches!(e.worker, ExtractorWorkerKind::Agent));
 
         CapabilitySet {
             keyword_search: true,
-            semantic_search: embeddings_on,
+            // Semantic gates on model presence; hybrid uses both legs and
+            // gates on `local_embeddings` only — the keyword leg works
+            // even without an embedding model on disk and degrades to
+            // keyword-equivalent results.
+            semantic_search: semantic,
             hybrid_search: embeddings_on,
             llm_extract: llm_on,
             agent_extract,
-            graph_edges: false, // P0: sqlite always false; P1+ gates on store capability
+            graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
         }
+    }
+
+    /// Convenience: equivalent to `capabilities(false)`.
+    /// Use when filesystem access is unavailable (e.g., pure config tests).
+    #[must_use]
+    pub fn capabilities_no_model(&self) -> CapabilitySet {
+        self.capabilities(false)
     }
 }
 
@@ -949,10 +1091,13 @@ mod tests {
 
     #[test]
     fn capabilities_llm_off_by_default() {
-        let caps = CairnConfig::default().capabilities();
+        let caps = CairnConfig::default().capabilities(false);
         assert!(caps.keyword_search, "keyword_search always true");
-        assert!(caps.semantic_search, "local embeddings enable semantic");
-        assert!(caps.hybrid_search, "local embeddings enable hybrid");
+        assert!(!caps.semantic_search, "model absent → no semantic");
+        assert!(
+            caps.hybrid_search,
+            "hybrid gates only on local_embeddings; keyword leg works without model"
+        );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
         assert!(!caps.graph_edges, "sqlite → no graph edges");
@@ -962,7 +1107,7 @@ mod tests {
     fn capabilities_local_embeddings_off() {
         let mut config = CairnConfig::default();
         config.search.local_embeddings = false;
-        let caps = config.capabilities();
+        let caps = config.capabilities(false);
         assert!(caps.keyword_search);
         assert!(!caps.semantic_search);
         assert!(!caps.hybrid_search);
@@ -973,10 +1118,16 @@ mod tests {
     fn capabilities_llm_on() {
         let mut config = CairnConfig::default();
         config.llm.provider = Some(LlmProvider::OpenaiCompatible);
-        let caps = config.capabilities();
+        let caps = config.capabilities(false);
         assert!(caps.keyword_search);
-        assert!(caps.semantic_search);
-        assert!(caps.hybrid_search);
+        assert!(
+            !caps.semantic_search,
+            "model absent → no semantic even with LLM"
+        );
+        assert!(
+            caps.hybrid_search,
+            "hybrid gates on local_embeddings only (model presence not required)"
+        );
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);
     }
@@ -990,7 +1141,7 @@ mod tests {
             trigger: None,
             budget: ExtractBudget::default(),
         });
-        let caps = config.capabilities();
+        let caps = config.capabilities(false);
         assert!(caps.agent_extract);
     }
 
@@ -999,6 +1150,156 @@ mod tests {
         let json = serde_json::to_string_pretty(&CairnConfig::default())
             .expect("CairnConfig::default() must be serializable");
         insta::assert_snapshot!(json);
+    }
+
+    #[test]
+    fn semantic_on_when_local_embeddings_and_model_present() {
+        let config = CairnConfig::default();
+        let caps = config.capabilities(true);
+        assert!(caps.semantic_search);
+        assert!(caps.hybrid_search, "hybrid on when local_embeddings: true");
+    }
+
+    #[test]
+    fn semantic_off_when_local_embeddings_false() {
+        let mut config = CairnConfig::default();
+        config.search.local_embeddings = false;
+        let caps = config.capabilities(true); // model present but opt-out
+        assert!(!caps.semantic_search);
+    }
+
+    #[test]
+    fn semantic_off_when_model_absent() {
+        let config = CairnConfig::default(); // local_embeddings: true
+        let caps = config.capabilities(false); // model not on disk
+        assert!(!caps.semantic_search);
+    }
+
+    #[test]
+    fn semantic_not_tied_to_llm_provider() {
+        let mut config = CairnConfig::default();
+        // LLM present but model absent → semantic still false.
+        config.llm.provider = Some(LlmProvider::OpenaiCompatible);
+        let caps = config.capabilities(false);
+        assert!(!caps.semantic_search);
+        // Model present → semantic true regardless of LLM.
+        let caps2 = config.capabilities(true);
+        assert!(caps2.semantic_search);
+    }
+
+    #[test]
+    fn embedding_model_kind_as_str() {
+        assert_eq!(
+            EmbeddingModelKind::BgeSmallEnV1_5.as_str(),
+            "bge-small-en-v1.5"
+        );
+        assert_eq!(
+            EmbeddingModelKind::AllMiniLmL6V2.as_str(),
+            "all-MiniLM-L6-v2"
+        );
+    }
+
+    #[test]
+    fn search_config_default() {
+        let c = SearchConfig::default();
+        assert!(c.local_embeddings);
+        assert_eq!(c.embedding_model, EmbeddingModelKind::BgeSmallEnV1_5);
+    }
+
+    #[test]
+    fn embedding_model_kind_serde_round_trip() {
+        let json = serde_json::to_string(&EmbeddingModelKind::AllMiniLmL6V2).unwrap();
+        assert_eq!(json, r#""all-MiniLM-L6-v2""#);
+        let back: EmbeddingModelKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, EmbeddingModelKind::AllMiniLmL6V2);
+        // Also verify BgeSmallEnV1_5
+        let json2 = serde_json::to_string(&EmbeddingModelKind::BgeSmallEnV1_5).unwrap();
+        assert_eq!(json2, r#""bge-small-en-v1.5""#);
+    }
+
+    #[test]
+    fn search_mode_default_is_hybrid() {
+        assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn search_mode_serde_kebab() {
+        let modes = [SearchMode::Bm25, SearchMode::Vector, SearchMode::Hybrid];
+        let strs = ["bm25", "vector", "hybrid"];
+        for (m, s) in modes.iter().zip(strs.iter()) {
+            let yaml = yaml_serde::to_string(m).unwrap();
+            assert!(yaml.trim() == *s, "mode {m:?} serialized to {yaml:?}");
+            let back: SearchMode = yaml_serde::from_str(s).unwrap();
+            assert_eq!(*m, back);
+        }
+    }
+
+    #[test]
+    fn embedding_provider_default_is_local() {
+        assert_eq!(EmbeddingProvider::default(), EmbeddingProvider::Local);
+    }
+
+    #[test]
+    fn embedding_provider_serde_kebab() {
+        let yaml = yaml_serde::to_string(&EmbeddingProvider::OpenAi).unwrap();
+        assert_eq!(yaml.trim(), "openai");
+        let back: EmbeddingProvider = yaml_serde::from_str("openai").unwrap();
+        assert_eq!(back, EmbeddingProvider::OpenAi);
+    }
+
+    #[test]
+    fn openai_embedding_model_kinds_have_dim_1536() {
+        assert_eq!(EmbeddingModelKind::OpenAiTextEmbedding3Large.dim(), 1536);
+        assert_eq!(EmbeddingModelKind::OpenAiTextEmbedding3Small.dim(), 1536);
+    }
+
+    #[test]
+    fn openai_embedding_model_kinds_have_no_hf_repo() {
+        assert_eq!(
+            EmbeddingModelKind::OpenAiTextEmbedding3Large.hf_repo(),
+            None
+        );
+        assert_eq!(
+            EmbeddingModelKind::OpenAiTextEmbedding3Small.hf_repo(),
+            None
+        );
+        assert_eq!(
+            EmbeddingModelKind::BgeSmallEnV1_5.hf_repo(),
+            Some("BAAI/bge-small-en-v1.5"),
+        );
+    }
+
+    #[test]
+    fn search_config_default_includes_new_fields() {
+        let c = SearchConfig::default();
+        assert_eq!(c.default_mode, SearchMode::Hybrid);
+        assert_eq!(c.default_provider, EmbeddingProvider::Local);
+        assert!((c.rerank_blend - 0.7).abs() < 1e-6);
+        // Compare element-wise with epsilon to avoid clippy::float_cmp on arrays.
+        let expected = [10.0_f64, 10.0, 5.0, 1.0];
+        for (got, want) in c.fts_column_weights.iter().zip(expected.iter()) {
+            assert!((got - want).abs() < 1e-9, "got {got}, want {want}");
+        }
+        assert_eq!(c.rrf_k, 60);
+        assert_eq!(c.rerank_topk, 20);
+    }
+
+    #[test]
+    fn search_config_yaml_round_trip() {
+        let yaml = "
+local_embeddings: true
+embedding_model: bge-small-en-v1.5
+default_mode: hybrid
+default_provider: local
+rerank_blend: 0.7
+fts_column_weights: [10.0, 10.0, 5.0, 1.0]
+rrf_k: 60
+rerank_topk: 20
+";
+        let c: SearchConfig = yaml_serde::from_str(yaml).unwrap();
+        let back = yaml_serde::to_string(&c).unwrap();
+        let again: SearchConfig = yaml_serde::from_str(&back).unwrap();
+        assert_eq!(c, again);
     }
 
     proptest! {

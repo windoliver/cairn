@@ -48,11 +48,29 @@ blake3 = { version = "1.5", default-features = false }
 bon = "3.7"
 fs4 = { version = "0.13", default-features = false, features = ["sync"] }
 tokio_rusqlite = { package = "tokio-rusqlite", version = "0.6", default-features = false, features = ["bundled"] }
+tokio-util = { version = "0.7", default-features = false }
 walkdir = "2"
+# sqlite-vec ANN extension — statically compiled; the crate's build.rs
+# compiles sqlite-vec.c with -DSQLITE_CORE so the vec0 module is always
+# linked. Version pinned at 0.1.9 (last stable; 0.1.10-alpha series broke
+# on macOS aarch64 during compilation).
+sqlite-vec = "0.1.9"
+
+# Embedding runtime — cairn-embeddings-local only
+candle-core = { version = "0.10", default-features = false }
+candle-nn = { version = "0.10", default-features = false }
+candle-transformers = { version = "0.10", default-features = false }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
+safetensors = { version = "0.7", default-features = false }
+
+# OpenAI-compat — cairn-llm-openai-compat
 async-openai = { version = "0.36", default-features = false, features = ["rustls", "chat-completion"] }
-# Direct `reqwest` because `async-openai` discards HTTP status on
+# HTTP client shared by cairn-embeddings-openai (direct calls) and
+# cairn-llm-openai-compat (alongside async-openai). The latter needs
+# direct reqwest because `async-openai` discards HTTP status on
 # `JSONDeserialize` errors (e.g. empty bodies), which blocks accurate
-# 401/429/5xx disambiguation. We use `async-openai` for typed structs only.
+# 401/429/5xx disambiguation. async-openai is used for typed structs only.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
 futures-util = { version = "0.3", default-features = false }
 wiremock = "0.6"
@@ -79,6 +97,8 @@ cairn-workflows = { path = "crates/cairn-workflows", version = "0.0.1" }
 cairn-idl = { path = "crates/cairn-idl", version = "0.0.1" }
 cairn-test-fixtures = { path = "crates/cairn-test-fixtures", version = "0.0.1" }
 cairn-sdk = { path = "crates/cairn-sdk", version = "0.0.1" }
+cairn-embeddings-local = { path = "crates/cairn-embeddings-local", version = "0.0.1" }
+cairn-embeddings-openai = { path = "crates/cairn-embeddings-openai", version = "0.0.1" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

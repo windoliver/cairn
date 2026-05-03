@@ -43,6 +43,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(mcp_subcommand())
         .subcommand(vault_subcommand())
         .subcommand(skill_subcommand())
+        .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(identity::cli::identity_subcommand())
 }
@@ -224,6 +225,59 @@ fn vault_subcommand() -> clap::Command {
                         .value_name("NAME")
                         .required(true)
                         .help("Name of the vault to remove"),
+                )
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                ),
+        )
+}
+
+fn admin_subcommand() -> clap::Command {
+    clap::Command::new("admin")
+        .about("Administrative operations (model management, reindex)")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("model")
+                .about("Embedding model management")
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommand(
+                    clap::Command::new("fetch")
+                        .about(
+                            "Download the configured embedding model (~25 MB) from HuggingFace Hub",
+                        )
+                        .arg(
+                            clap::Arg::new("force")
+                                .long("force")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Re-fetch even if model files are already on disk"),
+                        )
+                        .arg(
+                            clap::Arg::new("json")
+                                .long("json")
+                                .action(clap::ArgAction::SetTrue)
+                                .help("Emit JSON output"),
+                        ),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("reindex")
+                .about("Re-embed records into the ANN index")
+                .arg(
+                    clap::Arg::new("semantic")
+                        .long("semantic")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Reindex semantic (ANN) vectors"),
+                )
+                .arg(
+                    clap::Arg::new("all")
+                        .long("all")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Enqueue ALL active records before draining (use after model swap)"),
                 )
                 .arg(
                     clap::Arg::new("json")

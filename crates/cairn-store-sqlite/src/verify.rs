@@ -153,10 +153,6 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // above; index name unchanged. Adds the empty-string guards.)
     ("trigger", "sessions_project_root_no_empty_insert"),
     ("trigger", "sessions_project_root_no_empty_update"),
-    // 0021_consent_kind_not_null (mirror cursor reset marker — round-5
-    // review follow-up; consumed by cairn-workflows::ConsentLogMaterializer
-    // on first tick after upgrade so legacy promoted rows get replayed).
-    ("table", "consent_mirror_resets"),
     // 0020_workflow_jobs
     ("table", "workflow_jobs"),
     ("index", "workflow_jobs_ready_idx"),
@@ -168,6 +164,16 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "workflow_jobs_terminal_absorbing"),
     ("trigger", "workflow_jobs_state_transition"),
     ("trigger", "workflow_jobs_no_delete"),
+    // 0021_consent_kind_not_null (mirror cursor reset marker — round-5
+    // review follow-up; consumed by cairn-workflows::ConsentLogMaterializer
+    // on first tick after upgrade so legacy promoted rows get replayed).
+    ("table", "consent_mirror_resets"),
+    // 0022_record_vectors (brief §3.0: sqlite-vec ANN + embedding backfill;
+    // renumbered from 0020 on the bench-branch merge).
+    ("table", "record_vectors"),
+    ("table", "pending_embeddings"),
+    ("index", "pending_embeddings_enqueued_idx"),
+    ("trigger", "records_vector_cleanup"),
 ];
 
 fn hash_hex(content: &str) -> String {
@@ -178,6 +184,155 @@ fn hash_hex(content: &str) -> String {
         let _ = write!(&mut s, "{b:02x}");
     }
     s
+}
+
+/// Pre-flight check: verify already-applied migration rows have hashes
+/// matching the compiled-in manifest, BEFORE `to_latest` runs.
+///
+/// This catches a tampered `schema_migrations.sql_hash` on a pre-head
+/// database — without it, `to_latest` would happily apply pending
+/// migrations against an untrusted store and only the post-migration
+/// `verify_migration_history` would refuse the open. Read-only:
+/// performs no stamps, no mutations.
+///
+/// **Watermark semantics (Codex round-9 finding #1).** We compute the
+/// applied-history watermark as `MAX(migration_id)` from
+/// `schema_migrations`. For every `id <= watermark`:
+///   - the row MUST exist (gaps from a DELETE are rejected);
+///   - the name MUST match the manifest;
+///   - the hash MUST be non-empty AND match the expected hash
+///     (a blanked `''` row would otherwise let the post-check
+///     re-stamp the expected hash and silently re-trust the row).
+///
+/// For `id > watermark`: the row is allowed to be absent — those are
+/// genuinely pending migrations that `to_latest` will append.
+pub(crate) fn preflight_migration_history(conn: &Connection) -> Result<(), StoreError> {
+    // The table itself may not exist on a fresh DB — that's fine.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_schema \
+             WHERE type = 'table' AND name = 'schema_migrations'",
+            [],
+            |r| r.get::<_, i64>(0).map(|v| v == 1),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+    // Pre-0006 databases hold the hash in a column called `sql_blake3`;
+    // migration 0006 renames it to `sql_hash`. Detect which one this
+    // store is at so legitimate upgrades from older versions still pass
+    // preflight (Codex round-10 finding #1).
+    let hash_col: &str = if column_exists(conn, "schema_migrations", "sql_hash")? {
+        "sql_hash"
+    } else if column_exists(conn, "schema_migrations", "sql_blake3")? {
+        "sql_blake3"
+    } else {
+        return Err(StoreError::SchemaDrift(
+            "schema_migrations is missing both sql_hash and sql_blake3 columns".into(),
+        ));
+    };
+    // Watermark: highest applied migration_id, or 0 if the table is empty.
+    let watermark: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(migration_id), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    // Distinguish "fresh post-to_latest, pre-stamp" from "tampered".
+    // Right after migrations apply, every row has the hash column = ''
+    // and we permit blank hashes. Once `verify_migration_history` has
+    // run even once, NO row should have a blank hash (the stamp-once
+    // trigger forbids reverting). So an open where SOME rows are
+    // stamped and SOME are blank below the watermark indicates
+    // tampering, and we treat blanks as drift.
+    let all_below_blank: bool = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) = 0 FROM schema_migrations \
+                 WHERE migration_id <= ? AND length({hash_col}) > 0"
+            ),
+            [watermark],
+            |r| r.get::<_, i64>(0).map(|v| v == 1),
+        )
+        .unwrap_or(false);
+    for &(id, name, sql) in MIGRATION_SOURCES {
+        let expected = hash_hex(sql);
+        let row: Option<(String, String)> = conn
+            .query_row(
+                &format!(
+                    "SELECT name, {hash_col} FROM schema_migrations \
+                     WHERE migration_id = ?"
+                ),
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        if id > watermark {
+            // Genuinely pending — absence is fine, `to_latest` appends.
+            // A row above the watermark is a contradiction in terms,
+            // but if one somehow exists we still validate it below.
+            let Some((on_disk_name, on_disk_hash)) = row else {
+                continue;
+            };
+            if on_disk_name != name {
+                return Err(StoreError::SchemaDrift(format!(
+                    "migration {id} name mismatch above watermark: on-disk {on_disk_name:?} vs binary {name:?}",
+                )));
+            }
+            if !on_disk_hash.is_empty() && on_disk_hash != expected {
+                return Err(StoreError::SchemaDrift(format!(
+                    "migration {id} ({name}) hash mismatch above watermark: \
+                     on-disk {on_disk_hash} vs binary {expected}",
+                )));
+            }
+            continue;
+        }
+        // id <= watermark: row MUST exist, hash MUST be non-empty,
+        // hash MUST match. Anything else is tampering.
+        let Some((on_disk_name, on_disk_hash)) = row else {
+            return Err(StoreError::SchemaDrift(format!(
+                "migration {id} ({name}) missing from schema_migrations \
+                 below watermark={watermark}: history has been tampered with",
+            )));
+        };
+        if on_disk_name != name {
+            return Err(StoreError::SchemaDrift(format!(
+                "migration {id} name mismatch: on-disk {on_disk_name:?} vs binary {name:?}",
+            )));
+        }
+        if on_disk_hash.is_empty() {
+            // Permit blanks ONLY in the all-blank "fresh post-to_latest,
+            // pre-stamp" state. Mixed blanks-and-stamps below the
+            // watermark indicates a stamp was undone — treat as drift.
+            if all_below_blank {
+                continue;
+            }
+            return Err(StoreError::SchemaDrift(format!(
+                "migration {id} ({name}) sql_hash blanked below watermark={watermark}: \
+                 cannot re-stamp without applying the original migration body",
+            )));
+        }
+        if on_disk_hash != expected {
+            return Err(StoreError::SchemaDrift(format!(
+                "migration {id} ({name}) hash mismatch: \
+                 on-disk {on_disk_hash} vs binary {expected}",
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `true` iff `table` has a column named `column`. Used by
+/// [`preflight_migration_history`] to switch between the legacy
+/// `sql_blake3` column and the post-0006 `sql_hash` column.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, StoreError> {
+    let mut stmt = conn.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name = ? LIMIT 1")?;
+    let found: Option<i64> = stmt
+        .query_row(rusqlite::params![table, column], |r| r.get(0))
+        .ok();
+    Ok(found.is_some())
 }
 
 /// Stamp `sql_hash` for any rows still set to `''`, then verify every
@@ -264,7 +419,17 @@ fn verify_consent_journal_kind_check(conn: &Connection) -> Result<(), StoreError
 }
 
 /// Verify that the set of app-owned schema objects matches `EXPECTED_OBJECTS`.
-pub(crate) fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreError> {
+///
+/// `vec_dim`: when `Some(n)` and `n != 384`, the expected DDL digest is
+/// re-computed against a connection where `record_vectors` has been
+/// resized to dim `n` — same operation `crate::open::record_vectors_create_sql`
+/// applies on the live connection. Without this, an `OpenAI`
+/// (`dim()=1536`) embedder would fail the digest check immediately on
+/// open even though the resized table is exactly what we asked for.
+pub(crate) fn verify_schema_fingerprint(
+    conn: &Connection,
+    vec_dim: Option<usize>,
+) -> Result<(), StoreError> {
     // Run the named-substring check for `consent_journal.kind` BEFORE
     // the EXPECTED_OBJECTS / DDL-digest sweep so that a missing CHECK
     // surfaces under its specific error message rather than as part of
@@ -281,6 +446,7 @@ pub(crate) fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreEr
          WHERE name NOT LIKE 'sqlite_%' \
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;
@@ -327,7 +493,7 @@ pub(crate) fn verify_schema_fingerprint(conn: &Connection) -> Result<(), StoreEr
     // from the same database immediately after `to_latest()` on a fresh
     // in-memory store. This catches same-name drift (e.g. a trigger
     // dropped and recreated with weaker predicates).
-    let expected_digest = expected_ddl_digest()?;
+    let expected_digest = expected_ddl_digest(vec_dim)?;
     let actual_digest = finalize_hex(on_disk_digest);
     if actual_digest != expected_digest {
         return Err(StoreError::SchemaDrift(format!(
@@ -370,16 +536,31 @@ fn finalize_hex(digest: Sha256) -> String {
 /// Compute the expected DDL digest by applying the migration set to a
 /// fresh in-memory store. This is the canonical fingerprint the binary
 /// claims, derived from the compiled-in SQL without hand-maintained tables.
-fn expected_ddl_digest() -> Result<String, StoreError> {
+fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
     use rusqlite::Connection;
+    // Register sqlite-vec before opening the connection so migration 0020
+    // (CREATE VIRTUAL TABLE USING vec0) can succeed on the digest-path.
+    crate::vec_ext::register_vec0();
     let mut conn = Connection::open_in_memory()?;
     crate::migrations::migrations().to_latest(&mut conn)?;
+    // Apply the same resize bootstrap performs so the digest reflects
+    // the post-bootstrap schema, not the migration-default 384-dim one.
+    //
+    // `Some(d)` means "the live `record_vectors` is in *recreated* form at
+    // dim `d`" — including `d == 384` after a 1536→384 resize, where the
+    // on-disk DDL string is the bare CREATE we emit and not the comment-
+    // bearing migration 0020 form. Always replay the recreate when `Some(_)`.
+    if let Some(dim) = vec_dim {
+        conn.execute_batch("DROP TABLE record_vectors;")?;
+        conn.execute_batch(&crate::open::record_vectors_create_sql(dim))?;
+    }
 
     let mut stmt = conn.prepare(
         "SELECT type, name, sql FROM sqlite_schema \
          WHERE name NOT LIKE 'sqlite_%' \
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;

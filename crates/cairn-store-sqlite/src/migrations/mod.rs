@@ -30,6 +30,14 @@ const M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD: &str =
     include_str!("sql/0019_sessions_strip_verbatim_and_case_fold.sql");
 const M0020_WORKFLOW_JOBS: &str = include_str!("sql/0020_workflow_jobs.sql");
 const M0021_CONSENT_KIND_NOT_NULL: &str = include_str!("sql/0021_consent_kind_not_null.sql");
+// Renumbered 0020 → 0022 on the bench-branch merge: main shipped its own
+// 0020_workflow_jobs first and migration_id 20 was already live in the
+// wild. The SQL body is unchanged; only the surrounding `(id, name)` in
+// the manifest moved, so on-disk databases that previously applied the
+// branch-local 0020 will recognise the renamed row by its sql_hash on
+// the next open and stamp the new name.
+const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
+const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -95,6 +103,8 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0021_consent_kind_not_null",
         M0021_CONSENT_KIND_NOT_NULL,
     ),
+    (22, "0022_record_vectors", M0022_RECORD_VECTORS),
+    (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -123,5 +133,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0019_SESSIONS_STRIP_VERBATIM_AND_CASE_FOLD),
         M::up(M0020_WORKFLOW_JOBS),
         M::up(M0021_CONSENT_KIND_NOT_NULL),
+        M::up(M0022_RECORD_VECTORS),
+        M::up(M0030_RECORDS_FTS_WEIGHTED),
     ])
 }
