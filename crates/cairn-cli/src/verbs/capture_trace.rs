@@ -204,8 +204,13 @@ pub async fn run_handler(
                 had_stop = true;
             }
 
-            // Resolve body from sources/.
-            let text = match resolve_body_text(vault_root, event).await {
+            // Resolve body from sources/, then run the standard pre-persist
+            // PII / secret redactor (CLAUDE.md §4.9 "privacy by construction":
+            // raw record bodies must be redacted before they reach storage).
+            // Trace records flow into both per-event rows and turn summaries
+            // built from those rows, so redacting once at the boundary covers
+            // both surfaces.
+            let raw_text = match resolve_body_text(vault_root, event).await {
                 Ok(t) => t,
                 Err(e) => {
                     failed_turns.push((
@@ -217,6 +222,7 @@ pub async fn run_handler(
                     break;
                 }
             };
+            let text = cairn_core::pipeline::filter::redact(&raw_text).text;
 
             let refs = event
                 .refs

@@ -116,6 +116,12 @@ impl StoreTx<'_> {
         session_id: &SessionId,
         turn_id: &str,
     ) -> Result<Vec<MemoryRecord>, StoreError> {
+        // `active = 1` excludes superseded version rows; without it,
+        // any future re-upsert of the same target_id would let
+        // turn-reconstruction read both the live and the superseded
+        // copies (defence-in-depth — the trace_capture_event_id UNIQUE
+        // index makes this hard to trigger today, but the read should
+        // not depend on that).
         let mut stmt = self.tx.prepare(
             "SELECT record_json \
                FROM records \
@@ -123,6 +129,7 @@ impl StoreTx<'_> {
                 AND trace_turn_id = ?2 \
                 AND trace_event IS NOT NULL \
                 AND trace_event != 'turn_summary' \
+                AND active = 1 \
                 AND tombstoned = 0 \
               ORDER BY trace_sequence ASC",
         )?;

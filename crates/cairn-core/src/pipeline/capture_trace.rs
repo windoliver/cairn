@@ -45,8 +45,15 @@ pub enum TraceProjectError {
 
 /// Map a [`CaptureEvent`] to a [`TraceEvent`]. Static rules; no LLM.
 ///
-/// Hook payloads route by hook name (brief §9.3). Non-hook payloads are
-/// rejected with [`TraceProjectError::Unclassifiable`] in P0.
+/// **P0 supports only the four hook payloads** routed by hook name
+/// (brief §9.3): `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`.
+/// The remaining `TraceEvent` variants — `AgentMessage`, `ToolOutput`,
+/// `TurnSummary` — are produced by other paths: `AgentMessage` and
+/// `ToolOutput` await sensor adapters (issue #84); `TurnSummary` is
+/// generated post-hoc by [`crate::pipeline::turn::summarize_turn`] and
+/// never reaches `classify`. Until those land, JSONL streams that
+/// include them will fail their entire turn at the importer (the
+/// importer fails closed rather than persisting a partial set).
 ///
 /// # Errors
 ///
