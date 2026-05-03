@@ -34,7 +34,7 @@ Options:
       --cursor <STRING>
 
 
-      --turn <U64>
+      --turn <STRING>
 
 
       --folder <STRING>
