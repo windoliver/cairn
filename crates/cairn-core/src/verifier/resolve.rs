@@ -38,8 +38,13 @@ pub async fn resolve_issuer(
             });
         }
         Err(e) => {
+            tracing::error!(
+                identity = %identity,
+                error = ?e,
+                "resolve_issuer: registry get_identity failed"
+            );
             return Err(DomainError::Unauthorized {
-                message: format!("registry get_identity failed: {e}"),
+                message: "registry unavailable".into(),
             });
         }
     };
@@ -54,8 +59,13 @@ pub async fn resolve_issuer(
             });
         }
         Err(e) => {
+            tracing::error!(
+                identity = %identity,
+                error = ?e,
+                "resolve_issuer: registry list_keys failed"
+            );
             return Err(DomainError::Unauthorized {
-                message: format!("registry list_keys failed: {e}"),
+                message: "registry unavailable".into(),
             });
         }
     };
@@ -67,10 +77,17 @@ pub async fn resolve_issuer(
     };
 
     // 3. Decode the verifying key bytes.
-    let verifying_key =
-        VerifyingKey::from_bytes(&key_row.public_key).map_err(|e| DomainError::Unauthorized {
-            message: format!("registry public_key bytes invalid: {e}"),
-        })?;
+    let verifying_key = VerifyingKey::from_bytes(&key_row.public_key).map_err(|e| {
+        tracing::error!(
+            identity = %identity,
+            key_version = %key_version,
+            error = ?e,
+            "resolve_issuer: stored public_key bytes failed VerifyingKey::from_bytes"
+        );
+        DomainError::Unauthorized {
+            message: "issuer key material is corrupt".into(),
+        }
+    })?;
 
     Ok(ResolvedIssuer::from_registry_row(
         identity.clone(),

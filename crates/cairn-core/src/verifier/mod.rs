@@ -206,6 +206,10 @@ impl<'a> EnvelopeVerifier<'a> {
             .0
             .strip_prefix("ed25519:")
             .ok_or(DomainError::InvalidSignature)?;
+        // Defensive: Ed25519Signature exposes pub String, so an in-process caller
+        // (test, SDK) can construct an invalid value bypassing the IDL deserializer.
+        // chunks_exact(2) below would silently truncate an odd-length tail; explicit
+        // length check makes the failure deterministic.
         if hex_tail.len() != 128 {
             return Err(DomainError::InvalidSignature);
         }
