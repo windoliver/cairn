@@ -232,11 +232,15 @@ impl<'a> EnvelopeVerifier<'a> {
             });
         }
 
-        // Bounded TTL: cap the validity window to prevent an attacker
-        // who has obtained a signing key from minting forever-valid
-        // bearer envelopes. P0 hard-codes 5 minutes; configurable in a
-        // follow-up issue.
-        if expires_chrono - issued_chrono > max_ttl_chrono {
+        // Bounded acceptance — measured from the verifier's wall clock,
+        // not from the signer's `issued_at`. Caps real validity at
+        // `P0_MAX_TTL` regardless of whether the signer chose an
+        // `issued_at` in the past, present, or (within `skew`) future.
+        // Anchoring on `issued_at` would let a future-issued envelope
+        // (issued_at = now + skew, expires_at = issued_at + P0_MAX_TTL)
+        // extend real acceptance to `P0_MAX_TTL + skew`, defeating the
+        // leaked-key blast-radius cap that this check exists for.
+        if expires_chrono > now + max_ttl_chrono {
             return Err(DomainError::ExpiredIntent {
                 issued_at: intent.issued_at.clone(),
                 expires_at: intent.expires_at.clone(),

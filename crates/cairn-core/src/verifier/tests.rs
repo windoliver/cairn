@@ -313,6 +313,31 @@ fn rejects_ttl_exceeds_p0_max(signing_key: SigningKey, policy: ScopePolicy, cloc
 }
 
 #[rstest]
+fn rejects_skew_extended_acceptance_window(signing_key: SigningKey, policy: ScopePolicy) {
+    // Round-9 finding 17: anchoring the TTL cap on `issued_at` would
+    // let a future-issued envelope (within skew) extend real
+    // acceptance past P0_MAX_TTL. With `issued_at = now + 59s` and
+    // `expires_at = issued_at + 5 min`, the signed duration equals
+    // P0_MAX_TTL exactly, but `expires_at - now = 5 min + 59 s` —
+    // beyond the security cap. The wall-clock anchor must reject this.
+    let now: DateTime<Utc> = NOW.parse().unwrap();
+    let clock = FixedClock(now);
+    let mut intent = unsigned_intent();
+    let future_issued = now + chrono::Duration::seconds(59);
+    let future_expires = future_issued + chrono::Duration::minutes(5);
+    intent.issued_at = future_issued.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    intent.expires_at = future_expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, resolved).unwrap_err();
+    assert!(
+        matches!(err, DomainError::ExpiredIntent { .. }),
+        "skew-extended acceptance window must reject, got {err:?}"
+    );
+}
+
+#[rstest]
 fn accepts_ttl_at_exactly_p0_max(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock) {
     // Boundary: expires_at - issued_at == P0_MAX_TTL (5 min) is OK.
     // The fixture window is exactly 5 min (14:02:11 → 14:07:11), and
