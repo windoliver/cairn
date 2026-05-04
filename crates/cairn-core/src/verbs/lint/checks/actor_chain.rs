@@ -196,6 +196,7 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states,
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
         }
     }
 
@@ -223,6 +224,10 @@ mod tests {
         assert_eq!(findings[0].severity, Severity::Error);
         assert!(findings[0].target.is_some());
     }
+
+    // (Original deferred-info stub test removed: actor_chain is now a
+    // real check. The reorganized cases above already cover empty
+    // records / missing-from-registry / lifecycle states.)
 
     #[test]
     fn active_author_with_states_yields_no_finding() {

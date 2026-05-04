@@ -24,12 +24,18 @@ const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA mmap_size=268435456;";
 
 /// Build the base capability set based on whether an embedder is present.
+///
+/// `per_record_consent_model: true` since migration 0031 adds the
+/// per-row column and 0032 adds the timeline table — lint can rely on
+/// `list_consent_models` returning one entry per active row (Issue
+/// #253).
 fn base_caps(vector: bool) -> MemoryStoreCapabilities {
     MemoryStoreCapabilities {
         fts: true,
         vector,
         graph_edges: true,
         transactions: true,
+        per_record_consent_model: true,
     }
 }
 

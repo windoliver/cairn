@@ -181,6 +181,38 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "records_trace_seq"),
     ("index", "records_trace_parent"),
     ("index", "records_trace_payload_hash"),
+    // 0031_records_consent_model — Phase-A per-row consent gate (#253, brief §14).
+    ("index", "records_consent_model_idx"),
+    // 0032_consent_timeline — append-only receipt event log (#253, brief §14).
+    ("table", "consent_timeline"),
+    ("index", "consent_timeline_sensor_idx"),
+    ("index", "consent_timeline_decided_idx"),
+    ("trigger", "consent_timeline_immutable"),
+    ("trigger", "consent_timeline_no_delete"),
+    // 0033_consent_timeline_grant_immutable — per-consent_ref grant
+    // immutability trigger (#253 round 2).
+    ("trigger", "consent_timeline_grant_immutable"),
+    // 0034_consent_timeline_lifecycle — first-event/seq-monotonic/
+    // decided_at-non-decreasing triggers (#253 round 8).
+    ("trigger", "consent_timeline_first_event_issued"),
+    ("trigger", "consent_timeline_seq_strictly_monotonic"),
+    ("trigger", "consent_timeline_decided_at_non_decreasing"),
+    // 0035_consent_timeline_lifecycle_tighten — UTC-form + fresh-seq=1
+    // guards that close the offset-form bypass and the seq!=1 first-row
+    // hole left by 0034 (#253 round 9).
+    ("trigger", "consent_timeline_decided_at_utc_only"),
+    ("trigger", "consent_timeline_expires_at_utc_only"),
+    ("trigger", "consent_timeline_fresh_must_start_at_seq_1"),
+    // 0037_consent_timeline_canonical_nanos — pin timestamps to the
+    // 30-char nanosecond form so lexical TEXT order matches
+    // chronological order without losing sub-second precision (#253
+    // round 10+2). 0037 drops 0036's seconds-only triggers.
+    ("trigger", "consent_timeline_decided_at_canonical_nanos"),
+    ("trigger", "consent_timeline_expires_at_canonical_nanos"),
+    // 0040_consent_timeline_scope_canonical — restrict scope column to
+    // the canonical wire alphabet so the lint exact-match join cannot
+    // be defeated by encoding drift (#253 loop 3 round 5).
+    ("trigger", "consent_timeline_scope_canonical_chars"),
 ];
 
 fn hash_hex(content: &str) -> String {

@@ -54,6 +54,7 @@
 ///             vector: false,
 ///             graph_edges: false,
 ///             transactions: false,
+///             per_record_consent_model: false,
 ///         };
 ///         &CAPS
 ///     }
@@ -128,6 +129,7 @@
 ///             vector: false,
 ///             graph_edges: false,
 ///             transactions: false,
+///             per_record_consent_model: false,
 ///         };
 ///         &CAPS
 ///     }
@@ -406,7 +408,7 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///     fn name(&self) -> &str { Self::NAME }
 ///     fn capabilities(&self) -> &MemoryStoreCapabilities {
 ///         static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
-///             fts: false, vector: false, graph_edges: false, transactions: false,
+///             fts: false, vector: false, graph_edges: false, transactions: false, per_record_consent_model: false,
 ///         };
 ///         &CAPS
 ///     }

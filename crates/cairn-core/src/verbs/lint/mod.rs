@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::config::CairnConfig;
+use crate::contract::consent_lookup::ConsentLookup;
 use crate::contract::memory_store::{IndexStats, StoredRecord};
 use crate::domain::Identity;
 use crate::domain::record::RecordId;
@@ -29,16 +30,7 @@ pub struct LintRecord {
     pub consent_model: ConsentModel,
 }
 
-/// Per-record consent-storage model. PR-1 always sees `LegacyEvent`;
-/// `ReceiptTimeline` is wired in #253.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ConsentModel {
-    /// Pre-#253 storage model: generic consent events.
-    LegacyEvent,
-    /// Post-#253 storage model: per-grant timeline.
-    ReceiptTimeline,
-}
+pub use crate::domain::consent_timeline::ConsentModel;
 
 /// Snapshot the check engine operates over. Pure inputs; no I/O.
 ///
@@ -52,7 +44,6 @@ pub enum ConsentModel {
 /// resolvable identities", not "skip the check." An identity present on
 /// a record but absent from the map is treated as `MissingFromRegistry`
 /// (fail-closed, brief invariant 6).
-#[derive(Debug)]
 pub struct LintInputs<'a> {
     /// Active records under audit.
     pub records: &'a [LintRecord],
@@ -71,6 +62,24 @@ pub struct LintInputs<'a> {
     /// `MissingFromRegistry` Errors for these — that would manufacture
     /// false corruption findings out of an infrastructure fault.
     pub unresolvable_authors: &'a HashSet<Identity>,
+    /// `ConsentLookup` adapter (Issue #253). `None` when the CLI hasn't
+    /// wired one — the §6.5 check downgrades to a no-op so `lint` stays
+    /// useful in fixture-only / pre-#253 contexts.
+    pub consent_lookup: Option<&'a (dyn ConsentLookup + 'a)>,
+}
+
+impl std::fmt::Debug for LintInputs<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LintInputs")
+            .field("records", &self.records)
+            .field("config", &"<CairnConfig>")
+            .field("index_stats", &self.index_stats)
+            .field("schema_version", &self.schema_version)
+            .field("author_states", &self.author_states.len())
+            .field("unresolvable_authors", &self.unresolvable_authors.len())
+            .field("consent_lookup", &self.consent_lookup.is_some())
+            .finish()
+    }
 }
 
 /// Major.minor schema version for the §6.4 staleness check. Patch is
@@ -116,8 +125,7 @@ pub(crate) fn empty_unresolvable_authors() -> &'static HashSet<Identity> {
 }
 
 /// Run every check, aggregate findings, return the canonical `LintData`.
-#[must_use]
-pub fn run_checks(inputs: &LintInputs<'_>) -> LintData {
+pub async fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     let mut findings: Vec<Finding> = Vec::new();
     findings.extend(checks::malformed::run(inputs));
     findings.extend(checks::actor_chain::run(inputs));
@@ -125,7 +133,7 @@ pub fn run_checks(inputs: &LintInputs<'_>) -> LintData {
     findings.extend(checks::schema::run(inputs));
     findings.extend(checks::hot_memory::run(inputs));
     findings.extend(checks::index_drift::run(inputs));
-    findings.extend(checks::consent_deferred::run(inputs));
+    findings.extend(checks::consent::run(inputs).await);
     let summary = summarize(&findings);
     LintData {
         findings,
@@ -232,8 +240,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn run_checks_on_empty_inputs_returns_no_findings_yet() {
+    #[tokio::test]
+    async fn run_checks_on_empty_inputs_returns_no_findings_yet() {
         let cfg = CairnConfig::default();
         let inputs = LintInputs {
             records: &[],
@@ -242,12 +250,15 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
         };
-        let data = run_checks(&inputs);
-        // provenance (#257), schema (#258), consent (#253), and
-        // hot_memory (#259) each emit one deferred-info finding.
-        // actor_chain (#256) is now a real check (registry required at
-        // the API boundary), so it no longer emits a deferred.
+        let data = run_checks(&inputs).await;
+        // With empty records and no ConsentLookup wired, consent (#253)
+        // returns no findings, and actor_chain (#256) is now a real
+        // check that emits no deferred coverage finding when there are
+        // no records to classify. The remaining stubs each emit one
+        // info finding: provenance (#257), schema (#258), hot_memory
+        // (#259) → 3 total.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
@@ -256,13 +267,13 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            4
+            3
         );
-        assert_eq!(data.summary.by_severity.info, 4);
+        assert_eq!(data.summary.by_severity.info, 3);
     }
 
-    #[test]
-    fn run_checks_is_record_order_independent() {
+    #[tokio::test]
+    async fn run_checks_is_record_order_independent() {
         fn canonicalize(findings: &[crate::generated::verbs::lint::Finding]) -> Vec<String> {
             let mut keys: Vec<String> = findings
                 .iter()
@@ -302,6 +313,7 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
         };
         let inputs_rev = LintInputs {
             records: &reversed,
@@ -310,15 +322,16 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
         };
 
-        let fwd = canonicalize(&run_checks(&inputs_fwd).findings);
-        let rev = canonicalize(&run_checks(&inputs_rev).findings);
+        let fwd = canonicalize(&run_checks(&inputs_fwd).await.findings);
+        let rev = canonicalize(&run_checks(&inputs_rev).await.findings);
         assert_eq!(fwd, rev, "run_checks is record-order-dependent");
     }
 
-    #[test]
-    fn run_checks_with_one_record_aggregates_summary_correctly() {
+    #[tokio::test]
+    async fn run_checks_with_one_record_aggregates_summary_correctly() {
         let cfg = CairnConfig::default();
         let r = legacy_lint_record();
         let inputs = LintInputs {
@@ -328,15 +341,18 @@ mod tests {
             schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
+            consent_lookup: None,
         };
-        let data = run_checks(&inputs);
+        let data = run_checks(&inputs).await;
         assert_eq!(data.summary.total, data.findings.len() as u64);
         // §6.2 actor_chain runs the real check now (registry required
         // at the API boundary). With an empty author_states map the
         // sample record's author resolves to MissingFromRegistry →
-        // BrokenActorChain Error. The other four checks
-        // (provenance/schema/consent/hot_memory) each emit one
-        // deferred-info finding.
+        // BrokenActorChain Error. consent (#253) is also live but
+        // returns no findings for a LegacyEvent record without a
+        // ConsentLookup wired. The remaining stub checks
+        // (provenance/schema/hot_memory) each emit one deferred-info
+        // finding → 3 total.
         assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
@@ -344,8 +360,8 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            4
+            3
         );
-        assert_eq!(data.summary.by_severity.info, 4);
+        assert_eq!(data.summary.by_severity.info, 3);
     }
 }

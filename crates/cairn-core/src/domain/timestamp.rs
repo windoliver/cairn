@@ -40,6 +40,48 @@ impl Rfc3339Timestamp {
         &self.0
     }
 
+    /// Construct a UTC timestamp from seconds since the Unix epoch
+    /// (1970-01-01T00:00:00Z). Negative values are rejected — Cairn has no
+    /// pre-1970 use case and accepting them would require widening the
+    /// year-component validator.
+    ///
+    /// The output is always rendered in `YYYY-MM-DDTHH:MM:SSZ` form so it
+    /// round-trips through [`Self::parse`].
+    pub fn from_unix_secs(secs: i64) -> Result<Self, DomainError> {
+        if secs < 0 {
+            return Err(DomainError::InvalidTimestamp {
+                message: format!("`{secs}`: negative unix seconds not supported"),
+            });
+        }
+        let days = secs / 86_400;
+        let time_of_day = secs % 86_400;
+        let hour = time_of_day / 3_600;
+        let minute = (time_of_day % 3_600) / 60;
+        let second = time_of_day % 60;
+
+        // Inverse of Hinnant "days from civil": Unix epoch 1970-01-01 lives
+        // 719_468 days after the civil-day-zero (0000-03-01). We work in
+        // that civil-zero frame so the algorithm matches the forward
+        // version used for ordering.
+        let z = days + 719_468;
+        let era = if z >= 0 {
+            z / 146_097
+        } else {
+            (z - 146_096) / 146_097
+        };
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = y + i64::from(month <= 2);
+
+        let raw = format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z");
+        Self::parse(raw)
+    }
+
     /// Compare two timestamps chronologically, accounting for timezone
     /// offsets. Lexical comparison of `as_str()` is wrong once offsets are
     /// involved (`2026-04-22T15:00:00+02:00` happens *before*
@@ -370,6 +412,40 @@ mod tests {
     #[test]
     fn accepts_400_year_leap() {
         Rfc3339Timestamp::parse("2000-02-29T00:00:00Z").expect("400-year leap");
+    }
+
+    #[test]
+    fn from_unix_secs_round_trips() {
+        // Epoch.
+        let epoch = Rfc3339Timestamp::from_unix_secs(0).expect("invariant: epoch is valid");
+        assert_eq!(epoch.as_str(), "1970-01-01T00:00:00Z");
+
+        // A reference instant (2026-04-22T14:02:11Z).
+        let parsed =
+            Rfc3339Timestamp::parse("2026-04-22T14:02:11Z").expect("invariant: literal valid");
+        // Compute the secs the forward algorithm gives, then invert.
+        let key = chronological_key("2026-04-22T14:02:11Z");
+        let built =
+            Rfc3339Timestamp::from_unix_secs(key.0 - chronological_key("1970-01-01T00:00:00Z").0)
+                .expect("invariant: built timestamp is valid");
+        assert_eq!(built, parsed);
+        assert_eq!(built.cmp_chronological(&parsed), std::cmp::Ordering::Equal,);
+
+        // Cross a leap-day boundary to exercise the civil-day inverse.
+        let leap = Rfc3339Timestamp::parse("2024-02-29T12:34:56Z")
+            .expect("invariant: leap day literal valid");
+        let leap_secs = chronological_key("2024-02-29T12:34:56Z").0
+            - chronological_key("1970-01-01T00:00:00Z").0;
+        let leap_built = Rfc3339Timestamp::from_unix_secs(leap_secs)
+            .expect("invariant: leap-day built timestamp is valid");
+        assert_eq!(leap_built, leap);
+    }
+
+    #[test]
+    fn from_unix_secs_rejects_negative() {
+        let err = Rfc3339Timestamp::from_unix_secs(-1)
+            .expect_err("invariant: negative unix seconds rejected");
+        assert!(matches!(err, DomainError::InvalidTimestamp { .. }));
     }
 
     #[test]
