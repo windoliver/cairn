@@ -6,8 +6,15 @@ use crate::search::ScoreExplain;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
-/// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs` landed.
-/// Bumped 0.3 → 0.4 in #49 when search args/pages gained explain plumbing.
+/// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs`
+/// landed. Co-evolved within 0.3 in #253 when
+/// `MemoryStoreCapabilities::per_record_consent_model` and
+/// `MemoryStore::list_consent_models` were added for the §6.5
+/// receipt-timeline gate; both extensions shipped under the same 0.3
+/// surface.
+/// Bumped 0.3 → 0.4 in #49 when search args/pages gained explain
+/// plumbing (`with_explain` bool on `*SearchArgs`,
+/// `Option<Vec<ScoreExplain>>` on each matching page struct).
 pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
@@ -35,6 +42,13 @@ pub struct MemoryStoreCapabilities {
     pub graph_edges: bool,
     /// Whether ACID transactions are supported.
     pub transactions: bool,
+    /// Whether the adapter persists per-record `consent_model` and
+    /// returns it via [`MemoryStore::list_consent_models`] (Issue #253).
+    /// `false` means lint cannot enforce §6.5 per-row gating on this
+    /// adapter and must surface that as a coverage gap; `true` means
+    /// `list_consent_models` is the authoritative read path and any
+    /// active record missing from its result is corruption.
+    pub per_record_consent_model: bool,
 }
 
 /// A `MemoryRecord` at a specific store version.
@@ -266,6 +280,44 @@ pub trait MemoryStore: Send + Sync {
     /// override.
     async fn index_stats(&self) -> Result<IndexStats, StoreError> {
         Err("index_stats: not supported by this store adapter".into())
+    }
+
+    /// Per-record consent storage model (Issue #253).
+    ///
+    /// The default impl returns the literal `"not supported by this store
+    /// adapter"` error so adapters that have not opted in cannot silently
+    /// downgrade every record to `LegacyEvent` and disable §6.5
+    /// enforcement. Callers in `lint` recognize this sentinel and surface
+    /// it as an error-severity finding rather than treating the empty
+    /// state as authoritative — see `cairn-cli::verbs::lint::lint_handler`.
+    /// Adapters that genuinely have no per-record consent metadata (test
+    /// fixtures, legacy-only stores) override this to return
+    /// `Ok(HashMap::new())` and accept the legacy-only posture explicitly.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the underlying read fails, or the
+    /// "not supported" sentinel for adapters that have not opted in.
+    async fn list_consent_models(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<RecordId, crate::domain::consent_timeline::ConsentModel>,
+        StoreError,
+    > {
+        Err("list_consent_models: not supported by this store adapter".into())
+    }
+
+    /// Borrow the adapter's consent-timeline reader, when it ships one.
+    ///
+    /// Issue #253 (round 4): `ConsentLookup` is a separate trait, but
+    /// the plugin registry only stores `Arc<dyn MemoryStore>` — once a
+    /// store is registered, the host has no way to recover a
+    /// `&dyn ConsentLookup` from that erased object. This default
+    /// returns `None` so adapters built against the 0.2 surface remain
+    /// dyn-compatible; adapters that implement `ConsentLookup` (e.g.
+    /// `SqliteMemoryStore`) override this to return `Some(self)` so
+    /// `lint` can resolve covering grants without a side channel.
+    fn as_consent_lookup(&self) -> Option<&dyn crate::contract::consent_lookup::ConsentLookup> {
+        None
     }
 }
 
@@ -686,6 +738,7 @@ mod tests {
                 vector: false,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: false,
             };
             &CAPS
         }

@@ -341,6 +341,7 @@ mod tests {
                 vector: false,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: true,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -390,6 +391,7 @@ mod tests {
                 vector: true,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: true,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -431,6 +433,7 @@ mod tests {
                 vector: true,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: true,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -462,6 +465,7 @@ mod tests {
                 vector: true,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: true,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -526,6 +530,7 @@ mod tests {
                     vector: false,
                     graph_edges: false,
                     transactions: true,
+                    per_record_consent_model: true,
                 };
                 &CAPS
             }

@@ -41,6 +41,7 @@ impl MemoryStore for EmptyStore {
             vector: true,
             graph_edges: false,
             transactions: true,
+            per_record_consent_model: true,
         };
         &CAPS
     }

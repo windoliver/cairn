@@ -143,11 +143,11 @@ cairn retrieve --session SESSION_ID --cursor CURSOR
 ```
 
 ```bash
-cairn retrieve --session SESSION_ID --turn 0
+cairn retrieve --session SESSION_ID --turn TURN_ID
 ```
 
 ```bash
-cairn retrieve --session SESSION_ID --turn 0 --include tool_calls
+cairn retrieve --session SESSION_ID --turn TURN_ID --include tool_calls
 ```
 
 ```bash

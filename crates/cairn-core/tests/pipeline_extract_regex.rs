@@ -61,6 +61,7 @@ fn body_input<'a>(event: &'a CaptureEvent, body: &'a str) -> ExtractInput<'a> {
     ExtractInput {
         event,
         body: BodyResolution::Resolved(resolved),
+        eligible_spans: None,
     }
 }
 
@@ -157,6 +158,7 @@ async fn missing_body_for_cli_payload_is_typed_error() {
     let input = ExtractInput {
         event: &event,
         body: BodyResolution::NotApplicable,
+        eligible_spans: None,
     };
     let err = extractor.extract(&input).await.unwrap_err();
     assert!(matches!(err, ExtractError::MissingBody { .. }));
@@ -196,6 +198,7 @@ async fn body_resolution_failure_surfaces_typed_error() {
             expected: "abc".into(),
             got: "def".into(),
         }),
+        eligible_spans: None,
     };
     let err = extractor.extract(&input).await.unwrap_err();
     let s = format!("{err}");
@@ -409,6 +412,7 @@ async fn hook_body_resolution_failure_does_not_abort_hook_extraction() {
     let input = ExtractInput {
         event: &event,
         body: BodyResolution::Failed(BodyResolutionError::NotFound("missing".into())),
+        eligible_spans: None,
     };
     let res = extractor.extract(&input).await.expect("must not abort");
     assert!(

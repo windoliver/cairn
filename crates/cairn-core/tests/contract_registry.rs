@@ -49,6 +49,7 @@ mod compatible_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -116,6 +117,7 @@ mod future_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -221,7 +223,7 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 
 [contract_version_range.max_exclusive]
@@ -244,6 +246,7 @@ patch = 0
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -324,6 +327,7 @@ mod incompatible_factory_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -399,6 +403,7 @@ mod config_driven_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -471,6 +476,7 @@ mod name_mismatch_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -810,6 +816,7 @@ mod factory_error_plugin {
                 vector: false,
                 graph_edges: false,
                 transactions: false,
+                per_record_consent_model: false,
             };
             &CAPS
         }
