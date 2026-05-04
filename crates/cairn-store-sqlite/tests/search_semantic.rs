@@ -34,6 +34,7 @@ async fn search_semantic_capability_unavailable_without_embedder() {
             visibility_allowlist: vec![],
             limit: 5,
             model_label: "bge-small-en-v1.5".into(),
+            with_explain: false,
         })
         .await;
 
@@ -66,6 +67,7 @@ async fn search_semantic_returns_results_after_upsert() {
             visibility_allowlist: vec![],
             limit: 10,
             model_label: EmbeddingModelKind::BgeSmallEnV1_5.as_str().into(),
+            with_explain: false,
         })
         .await
         .unwrap();
@@ -102,6 +104,7 @@ async fn search_semantic_with_vector_returns_results() {
             visibility_allowlist: vec![],
             limit: 10,
             model_label: "bge-small-en-v1.5".into(),
+            with_explain: false,
         })
         .await
         .unwrap();

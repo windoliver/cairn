@@ -525,7 +525,7 @@ fn is_identity(s: &str) -> bool {
 /// length >= 20, separators at fixed positions, digits everywhere else,
 /// and each numeric field within its RFC-3339 range:
 /// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,
-/// minute 00-59, second 00-60 (leap second), offset hour 00-23,
+/// minute 00-59, second 00-59 (leap seconds unsupported), offset hour 00-23,
 /// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is
 /// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)
 /// || year % 400 == 0`).
@@ -561,8 +561,8 @@ fn is_rfc3339_datetime(s: &str) -> bool {
     let minute = two_digit(14);
     if minute > 59 { return false; }
     let second = two_digit(17);
-    // RFC-3339 §5.6 permits 60 for leap seconds.
-    if second > 60 { return false; }
+    // Cairn rejects `:60` until a real leap-second-aware parser is wired in.
+    if second > 59 { return false; }
     // Optional fractional seconds + mandatory offset (Z or ±HH:MM).
     let mut idx = 19;
     if idx < b.len() && b[idx] == b'.' {

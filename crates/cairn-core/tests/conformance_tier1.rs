@@ -32,7 +32,7 @@ patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 4
+minor = 5
 patch = 0
 
 [features]
@@ -62,7 +62,7 @@ impl MemoryStore for StubStore {
         &CAPS
     }
     fn supported_contract_versions(&self) -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 4, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 5, 0))
     }
     async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
         Err("stub: upsert not implemented".into())

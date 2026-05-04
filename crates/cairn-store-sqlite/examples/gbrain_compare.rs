@@ -369,6 +369,7 @@ async fn run_queries(
                 visibility_allowlist: vec![MemoryVisibility::Private],
                 limit: 10,
                 cursor: None,
+                with_explain: false,
             };
             let page = store.search_keyword(&args).await?;
             page.candidates
@@ -401,6 +402,7 @@ async fn run_semantic(
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             model_label: model_label.to_owned(),
+            with_explain: false,
         };
         let page = store.search_semantic(&args).await?;
         let hits: Vec<String> = page
