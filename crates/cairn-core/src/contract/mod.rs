@@ -17,6 +17,8 @@
 //! - Identity provisioning contract (§4.1): [`Keystore`] / [`KeystoreError`],
 //!   [`IdentityRegistry`] / [`RegistryError`] / [`IdentityVisibility`] /
 //!   [`MaintenanceMode`] / [`PurgeAcknowledgement`] / [`PurgeReason`].
+//! - Key-resolver contract (§4.2 narrowed view): [`IssuerKeyResolver`],
+//!   [`ResolvedKey`], [`KeyLifecycle`], [`ResolverError`].
 //! - Forward stubs (P1/P2, hidden until #113 / #124): `FrontendAdapter`, `AgentProvider`.
 
 pub mod agent_provider;
