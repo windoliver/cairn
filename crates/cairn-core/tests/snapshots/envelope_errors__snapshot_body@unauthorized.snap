@@ -4,8 +4,8 @@ expression: body
 ---
 {
   "code": "Unauthorized",
-  "message": "unauthorized: issuer mismatch",
+  "message": "unauthorized",
   "data": {
-    "required": "issuer mismatch"
+    "required": "authorization"
   }
 }

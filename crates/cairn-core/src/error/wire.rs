@@ -79,11 +79,27 @@ pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
             })),
         },
 
-        DomainError::ScopeDenied { message } | DomainError::Unauthorized { message } => ErrorBody {
-            code: ErrorCode::Unauthorized,
-            message: err.to_string(),
-            data: Some(serde_json::json!({ "required": message })),
-        },
+        // Brief §14 (privacy by construction): the public envelope must
+        // not enumerate vault scope policy or registry detail to a
+        // (possibly authenticated-but-unauthorized) caller. Emit a stable
+        // generic `required` value; raw detail is logged server-side via
+        // `tracing::debug!` so operators can still diagnose.
+        DomainError::ScopeDenied { message } => {
+            tracing::debug!(detail = %message, "scope denied");
+            ErrorBody {
+                code: ErrorCode::Unauthorized,
+                message: "scope denied".to_owned(),
+                data: Some(serde_json::json!({ "required": "scope" })),
+            }
+        }
+        DomainError::Unauthorized { message } => {
+            tracing::debug!(detail = %message, "unauthorized");
+            ErrorBody {
+                code: ErrorCode::Unauthorized,
+                message: "unauthorized".to_owned(),
+                data: Some(serde_json::json!({ "required": "authorization" })),
+            }
+        }
 
         // Fall-through: every remaining DomainError variant maps to
         // InvalidArgs with the error's Display in the reason field.
@@ -155,13 +171,41 @@ mod tests {
     }
 
     #[test]
-    fn scope_denied_maps_to_unauthorized() {
+    fn scope_denied_returns_generic_required_no_policy_leak() {
+        // Brief §14: the public envelope must not embed expected
+        // tenant/workspace/tier values from vault policy.
         let body = envelope_error_for(&DomainError::ScopeDenied {
-            message: "tenant".into(),
+            message: "tenant: expected acme-internal, got other-corp".into(),
         });
         assert!(matches!(body.code, ErrorCode::Unauthorized));
-        let data = body.data.unwrap();
-        assert_eq!(data.get("required").unwrap().as_str().unwrap(), "tenant");
+        assert_eq!(body.message, "scope denied");
+        let data = body.data.as_ref().unwrap();
+        assert_eq!(data.get("required").unwrap().as_str().unwrap(), "scope");
+        // Defense-in-depth: assert raw detail is absent from the wire body.
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains("acme-internal") && !serialized.contains("other-corp"),
+            "policy detail leaked into wire body: {serialized}"
+        );
+    }
+
+    #[test]
+    fn unauthorized_returns_generic_required_no_identity_leak() {
+        let body = envelope_error_for(&DomainError::Unauthorized {
+            message: "envelope issuer hmn:alice does not match resolved hmn:bob".into(),
+        });
+        assert!(matches!(body.code, ErrorCode::Unauthorized));
+        assert_eq!(body.message, "unauthorized");
+        let data = body.data.as_ref().unwrap();
+        assert_eq!(
+            data.get("required").unwrap().as_str().unwrap(),
+            "authorization"
+        );
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains("hmn:alice") && !serialized.contains("hmn:bob"),
+            "identity detail leaked into wire body: {serialized}"
+        );
     }
 
     #[test]

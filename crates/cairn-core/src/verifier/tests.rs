@@ -279,6 +279,86 @@ fn rejects_invalid_wire_shape_neither_sequence_nor_challenge(
 }
 
 #[rstest]
+fn rejects_invalid_wire_shape_oversized_chain_parents(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    // Crockford ULID alphabet (no I, L, O, U). 32 chars → 65 distinct
+    // 26-char ULIDs by varying char index 24 (low-order). All start with
+    // '0' so the 128-bit cap holds.
+    const ULID_ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    // RawSignedIntent::try_from caps chain_parents at 64 entries.
+    // In-memory caller bypasses serde and could push thousands.
+    let mut intent = unsigned_intent();
+    intent.chain_parents = (0..65)
+        .map(|i| {
+            let a = char::from(ULID_ALPHABET[i / 32]);
+            let b = char::from(ULID_ALPHABET[i % 32]);
+            common::Ulid(format!("01HQZX9F5N000000000000000{a}{b}"))
+        })
+        .collect();
+    // Need exactly 26-char ULIDs. Truncate the format above to 26.
+    intent.chain_parents = intent
+        .chain_parents
+        .into_iter()
+        .map(|u| common::Ulid(u.0.chars().take(26).collect()))
+        .collect();
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
+fn rejects_invalid_wire_shape_malformed_target_hash(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    let mut intent = unsigned_intent();
+    intent.target_hash = "not-a-sha256".into();
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
+fn rejects_invalid_wire_shape_empty_scope_entity(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    let mut intent = unsigned_intent();
+    intent.scope.entity = String::new();
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
+fn rejects_invalid_wire_shape_sequence_above_safe_integer(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    // sequence > 2^53 - 1 is rejected by RawSignedIntent::try_from to
+    // prevent JSON-decoder disagreement on the represented value.
+    let mut intent = unsigned_intent();
+    intent.sequence = Some(9_007_199_254_740_992_u64);
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
 fn signature_check_runs_before_scope(signing_key: SigningKey, clock: FixedClock) {
     // Brief §14: an unauthenticated caller with the wrong tenant must not
     // observe scope-policy detail through the error envelope. After the

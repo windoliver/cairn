@@ -221,6 +221,68 @@ async fn superseded_key_after_rotation_is_rejected() {
 }
 
 #[tokio::test]
+async fn resolve_then_verify_pattern_rejects_post_rotation_v1_envelope() {
+    // Demonstrates the per-envelope freshness contract documented on
+    // [`cairn_core::verifier::ResolvedIssuer`]: every envelope is
+    // re-resolved against the registry, so a rotation between
+    // envelopes is reflected in the next snapshot. An envelope claiming
+    // v1 after rotation is rejected at resolve time, before the verifier
+    // ever sees it.
+    let v1_key = SigningKey::generate(&mut OsRng);
+    let v2_key = SigningKey::generate(&mut OsRng);
+    let (reg, id, _dir) = registry_with_identity(ProvisioningState::Active, &v1_key).await;
+
+    // First envelope flow: resolve at v1 succeeds (Active, current).
+    let snap1 = resolve_issuer(&reg, &id, KeyVersion::FIRST)
+        .await
+        .expect("pre-rotation resolve");
+    assert_eq!(snap1.key_version(), KeyVersion::FIRST);
+
+    // Apply rotation v1 -> v2.
+    let v2 = KeyVersion::FIRST.next().expect("KeyVersion::next");
+    let payload = ReceiptPayload {
+        op_kind: ReceiptOpKind::Rotation,
+        target: id.clone(),
+        signer: id.clone(),
+        signer_key_version: KeyVersion::FIRST,
+        old_key_version: Some(KeyVersion::FIRST),
+        new_key_version: Some(v2),
+        issued_at: Utc::now(),
+    };
+    let sig = payload.sign(&v1_key).expect("sign rotation payload");
+    let receipt = RotationReceipt {
+        id: ReceiptId(0),
+        payload,
+        signature: sig.to_bytes().to_vec(),
+        pending_eviction: false,
+    };
+    let new_key_entry = IdentityKeyEntry {
+        identity_id: id.clone(),
+        key_version: v2,
+        public_key: v2_key.verifying_key().to_bytes(),
+        signed_predecessor: None,
+        created_at: Utc::now(),
+        superseded_at: None,
+    };
+    reg.insert_pending_rotation(&id, v2, "kc:test:v2")
+        .await
+        .expect("insert_pending_rotation");
+    reg.apply_rotation(&receipt, KeyVersion::FIRST, &new_key_entry)
+        .await
+        .expect("apply_rotation");
+
+    // Second envelope flow: re-resolving v1 now fails — the recommended
+    // pattern catches the stale-key attack at resolve time.
+    let err = resolve_issuer(&reg, &id, KeyVersion::FIRST)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, DomainError::KeyVersionMismatch { .. }),
+        "post-rotation resolve at v1 should fail KeyVersionMismatch, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn revoked_issuer_is_resolved_state_revoked() {
     let key = SigningKey::generate(&mut OsRng);
     let (reg, id, _dir) = registry_with_identity(ProvisioningState::Revoked, &key).await;

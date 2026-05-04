@@ -19,6 +19,26 @@ use crate::domain::identity::records::ProvisioningState;
 /// preventing forged snapshots that would let a malicious in-process
 /// caller mint a `VerifiedSignedIntent` with attacker-chosen identity
 /// or key bytes.
+///
+/// # Per-envelope freshness contract — load-bearing
+///
+/// Snapshots **must** be obtained immediately before each
+/// `EnvelopeVerifier::verify` call. The verifier trusts every field on
+/// the snapshot — `key_version`, `verifying_key`, `state` — and never
+/// re-checks the registry. Reusing a snapshot across envelopes (e.g.,
+/// caching it on a long-lived adapter handle) is **unsafe**: a rotation
+/// or revocation between resolve and verify would leave the verifier
+/// accepting envelopes signed by a now-superseded private key.
+///
+/// The recommended pattern is the resolve-then-verify pair:
+///
+/// ```ignore
+/// let resolved = cairn_core::verifier::resolve_issuer(&registry, &id, kv).await?;
+/// let verified = verifier.verify(intent, &resolved)?;
+/// ```
+///
+/// Anything stronger (revision-witnessed snapshots, registry passed
+/// directly into verify) is a follow-up issue.
 pub struct ResolvedIssuer {
     pub(crate) identity: Identity,
     pub(crate) key_version: KeyVersion,

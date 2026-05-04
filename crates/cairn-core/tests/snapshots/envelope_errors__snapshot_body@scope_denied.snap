@@ -4,8 +4,8 @@ expression: body
 ---
 {
   "code": "Unauthorized",
-  "message": "scope denied: tenant: expected acme, got other",
+  "message": "scope denied",
   "data": {
-    "required": "tenant: expected acme, got other"
+    "required": "scope"
   }
 }

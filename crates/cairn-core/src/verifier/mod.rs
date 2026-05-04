@@ -63,19 +63,28 @@ impl<'a> EnvelopeVerifier<'a> {
     /// One of [`DomainError::Unauthorized`], [`DomainError::RevokedKey`],
     /// [`DomainError::ExpiredIntent`], [`DomainError::ScopeDenied`],
     /// [`DomainError::InvalidSignature`].
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "intent ownership is consumed via shadowing — the round-trip below replaces \
+                  the binding with a wire-validated SignedIntent, and the validated value is \
+                  moved into VerifiedSignedIntent on success"
+    )]
     pub fn verify(
         &self,
         intent: SignedIntent,
         resolved: &ResolvedIssuer,
     ) -> Result<VerifiedSignedIntent, DomainError> {
-        // Wire-shape sanity: cheap structural check that catches
-        // in-process callers who constructed a [`SignedIntent`] without
-        // going through serde::Deserialize (which runs the full IDL
-        // [`RawSignedIntent::try_from`] guards). #52 tightens this with
-        // replay/sequence/server_challenge enforcement.
-        intent
-            .validate()
-            .map_err(|_| DomainError::InvalidSignature)?;
+        // Full wire-shape validation: in-process callers can construct a
+        // `SignedIntent` directly, bypassing the IDL's
+        // `RawSignedIntent::try_from` guards (ULID shape, base64 nonce
+        // shape, sha256 target_hash, scope.entity non-empty, sequence
+        // JSON safe-integer cap, chain_parents bounds + uniqueness, etc.).
+        // Round-trip through serde to run every guard exactly as a
+        // wire-deserialized envelope would.
+        let intent: SignedIntent = serde_json::to_string(&intent)
+            .ok()
+            .and_then(|json| serde_json::from_str::<SignedIntent>(&json).ok())
+            .ok_or(DomainError::InvalidSignature)?;
 
         // Authn first: bind the envelope to the resolved key, then verify
         // the signature, before any policy or lifecycle check. Order
