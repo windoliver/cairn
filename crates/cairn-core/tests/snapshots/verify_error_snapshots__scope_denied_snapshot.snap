@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/tests/verify_error_snapshots.rs
+assertion_line: 55
+expression: e.to_string()
+---
+scope denied: issuer kind Agent cannot sign tier Team

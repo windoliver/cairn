@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/tests/verify_error_snapshots.rs
+assertion_line: 74
+expression: e.to_string()
+---
+revoked key: issuer=hmn:tafeng key_version=1 effective_at=2026-04-22T14:00:00Z

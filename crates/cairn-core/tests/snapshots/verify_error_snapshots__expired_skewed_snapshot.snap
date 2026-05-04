@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/tests/verify_error_snapshots.rs
+assertion_line: 24
+expression: e.to_string()
+---
+expired intent (Skewed): issued_at=2026-04-22T14:02:11Z expires_at=2026-04-22T14:07:11Z now=2026-04-22T14:30:00Z

@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/tests/verify_error_snapshots.rs
+assertion_line: 13
+expression: e.to_string()
+---
+malformed envelope: issuer: bad prefix

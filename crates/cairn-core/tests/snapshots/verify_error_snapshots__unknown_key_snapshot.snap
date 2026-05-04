@@ -1,0 +1,6 @@
+---
+source: crates/cairn-core/tests/verify_error_snapshots.rs
+assertion_line: 64
+expression: e.to_string()
+---
+unknown key: issuer=hmn:tafeng key_version=1
