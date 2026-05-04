@@ -19,6 +19,12 @@ use super::ResolvedIssuer;
 /// - [`DomainError::KeyVersionMismatch`] if no key row exists at
 ///   `key_version`.
 /// - [`DomainError::Unauthorized`] for opaque registry backend errors.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear pipeline (identity → keys → superseded check → TOCTOU re-check → \
+              decode key) is best read top-to-bottom; splitting helpers would obscure the \
+              ordering invariants comment authors are documenting per-step"
+)]
 pub async fn resolve_issuer(
     registry: &dyn IdentityRegistry,
     identity: &Identity,
@@ -90,6 +96,42 @@ pub async fn resolve_issuer(
             id: identity.clone(),
             intent: key_version,
             current: Some(record.current_key_version),
+        });
+    }
+
+    // 2b. TOCTOU re-check: the IdentityRegistry contract does not
+    //     guarantee that `get_identity` and `list_keys` observe a single
+    //     atomic snapshot of the registry. A concurrent revocation that
+    //     lands after step 1 but before step 2 would leave us with a
+    //     stale `Active` state, which the verifier would then trust.
+    //     Re-read the identity row and reject if any field that affects
+    //     authentication moved underneath us. Issue #55 closes the
+    //     surviving resolve-to-WAL window at PREPARE time.
+    let Ok(Some(record_after)) = registry
+        .get_identity(identity, IdentityVisibility::IncludingPurgePending)
+        .await
+    else {
+        tracing::error!(
+            identity = %identity,
+            "resolve_issuer: identity vanished or registry failed during TOCTOU re-check"
+        );
+        return Err(DomainError::Unauthorized {
+            message: "registry unavailable".into(),
+        });
+    };
+    if record_after.provisioning_state != record.provisioning_state
+        || record_after.current_key_version != record.current_key_version
+    {
+        tracing::warn!(
+            identity = %identity,
+            before_state = ?record.provisioning_state,
+            after_state = ?record_after.provisioning_state,
+            before_key = %record.current_key_version,
+            after_key = %record_after.current_key_version,
+            "resolve_issuer: concurrent registry change detected — failing closed"
+        );
+        return Err(DomainError::Unauthorized {
+            message: "concurrent registry change during resolve".into(),
         });
     }
 
