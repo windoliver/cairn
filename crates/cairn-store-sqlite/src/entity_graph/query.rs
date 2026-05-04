@@ -12,6 +12,119 @@ use tracing::instrument;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
+/// Build the dynamic SELECT for `do_graph_edges`. Pulled out to keep the
+/// async worker closure under the workspace `clippy::too_many_lines` cap.
+///
+/// Two independent dimensions:
+///   - `include_invalidated`: history-view flag. true = also return rows
+///     whose end-bound has fired. false = only rows currently valid in
+///     the requested time-slice.
+///   - `as_of_*`: which point in time to view. None = "now".
+///
+/// The "live now" filter applies only when no as-of slice was requested
+/// AND the caller wants the production view. For each as-of dimension we
+/// always apply the start-bound (`valid_at`/`created_at` ≤ T), but the
+/// end-bound (`invalid_at`/`expired_at` not yet fired) is conditional on
+/// `!include_invalidated`: history-view callers (lint --fix-graph,
+/// audit) need to see edges that were already invalidated by T as well
+/// as edges that survived past T.
+fn build_query(
+    node_id: &str,
+    direction: EdgeDir,
+    relation: Option<&str>,
+    as_event: Option<i64>,
+    as_ingest: Option<i64>,
+    include_invalid: bool,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut sql = String::from(
+        "SELECT id, source_id, target_id, relation, confidence, \
+         confidence_score, valid_at, invalid_at, created_at, source_record_id \
+         FROM entity_edges WHERE 1=1",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    match direction {
+        EdgeDir::Out => {
+            sql.push_str(" AND source_id = ?");
+            params.push(Box::new(node_id.to_owned()));
+        }
+        EdgeDir::In => {
+            sql.push_str(" AND target_id = ?");
+            params.push(Box::new(node_id.to_owned()));
+        }
+        EdgeDir::Both => {
+            sql.push_str(" AND (source_id = ? OR target_id = ?)");
+            params.push(Box::new(node_id.to_owned()));
+            params.push(Box::new(node_id.to_owned()));
+        }
+    }
+    if let Some(rel) = relation {
+        sql.push_str(" AND relation = ?");
+        params.push(Box::new(rel.to_owned()));
+    }
+    if !include_invalid && as_event.is_none() && as_ingest.is_none() {
+        sql.push_str(" AND invalid_at IS NULL AND expired_at IS NULL");
+    }
+    if let Some(t) = as_event {
+        sql.push_str(" AND valid_at <= ?");
+        params.push(Box::new(t));
+        if !include_invalid {
+            sql.push_str(" AND (invalid_at IS NULL OR invalid_at > ?)");
+            params.push(Box::new(t));
+        }
+    }
+    if let Some(t) = as_ingest {
+        sql.push_str(" AND created_at <= ?");
+        params.push(Box::new(t));
+        if !include_invalid {
+            sql.push_str(" AND (expired_at IS NULL OR expired_at > ?)");
+            params.push(Box::new(t));
+        }
+    }
+    (sql, params)
+}
+
+/// Decode one row from the `entity_edges` SELECT into an `EntityEdge`.
+fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntityEdge> {
+    let conf_str: String = r.get(4)?;
+    let confidence = EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown confidence tier: {conf_str}"),
+            )),
+        )
+    })?;
+    let src_rec: Option<String> = r.get(9)?;
+    let source_record_id = match src_rec {
+        Some(s) => Some(RecordId::parse(&s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid stored RecordId: {e}"),
+                )),
+            )
+        })?),
+        None => None,
+    };
+    Ok(EntityEdge {
+        id: EntityEdgeId::from(r.get::<_, String>(0)?),
+        source_id: EntityId::from(r.get::<_, String>(1)?),
+        target_id: EntityId::from(r.get::<_, String>(2)?),
+        relation: r.get(3)?,
+        confidence,
+        confidence_score: r.get(5)?,
+        valid_at: r.get(6)?,
+        invalid_at: r.get(7)?,
+        created_at: r.get(8)?,
+        source_record_id,
+    })
+}
+
 impl SqliteMemoryStore {
     /// Inherent `graph_edges` implementation; the trait method
     /// [`MemoryStore::graph_edges`] guards `self.conn` then delegates here.
@@ -37,96 +150,18 @@ impl SqliteMemoryStore {
 
         let edges = conn
             .call(move |c| -> Result<Vec<EntityEdge>, tokio_rusqlite::Error> {
-                let mut sql = String::from(
-                    "SELECT id, source_id, target_id, relation, confidence, \
-                     confidence_score, valid_at, invalid_at, created_at, source_record_id \
-                     FROM entity_edges WHERE 1=1",
+                let (sql, params) = build_query(
+                    &node_id,
+                    direction,
+                    relation.as_deref(),
+                    as_event,
+                    as_ingest,
+                    include_invalid,
                 );
-                let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-                match direction {
-                    EdgeDir::Out => {
-                        sql.push_str(" AND source_id = ?");
-                        params.push(Box::new(node_id.clone()));
-                    }
-                    EdgeDir::In => {
-                        sql.push_str(" AND target_id = ?");
-                        params.push(Box::new(node_id.clone()));
-                    }
-                    EdgeDir::Both => {
-                        sql.push_str(" AND (source_id = ? OR target_id = ?)");
-                        params.push(Box::new(node_id.clone()));
-                        params.push(Box::new(node_id.clone()));
-                    }
-                }
-                if let Some(rel) = relation {
-                    sql.push_str(" AND relation = ?");
-                    params.push(Box::new(rel));
-                }
-                // The "live now" filter applies ONLY when no as-of slice
-                // is requested. With an as-of predicate, the time-slice
-                // window itself is the source of truth: an edge that was
-                // valid at event-time T but later contradicted (invalid_at
-                // set) MUST still surface for as_of_event_time = T-or-earlier.
-                // Pre-fix this clause AND'd `invalid_at IS NULL` with the
-                // as-of predicate, silently hiding contradicted history.
-                if !include_invalid && as_event.is_none() && as_ingest.is_none() {
-                    sql.push_str(" AND invalid_at IS NULL AND expired_at IS NULL");
-                }
-                if let Some(t) = as_event {
-                    sql.push_str(" AND valid_at <= ? AND (invalid_at IS NULL OR invalid_at > ?)");
-                    params.push(Box::new(t));
-                    params.push(Box::new(t));
-                }
-                if let Some(t) = as_ingest {
-                    sql.push_str(" AND created_at <= ? AND (expired_at IS NULL OR expired_at > ?)");
-                    params.push(Box::new(t));
-                    params.push(Box::new(t));
-                }
-
                 let mut stmt = c.prepare(&sql)?;
                 let param_refs: Vec<&dyn rusqlite::ToSql> =
                     params.iter().map(std::convert::AsRef::as_ref).collect();
-                let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), |r| {
-                    let conf_str: String = r.get(4)?;
-                    let confidence = EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("unknown confidence tier: {conf_str}"),
-                            )),
-                        )
-                    })?;
-                    let src_rec: Option<String> = r.get(9)?;
-                    let source_record_id = match src_rec {
-                        Some(s) => Some(RecordId::parse(&s).map_err(|e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                9,
-                                rusqlite::types::Type::Text,
-                                Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("invalid stored RecordId: {e}"),
-                                )),
-                            )
-                        })?),
-                        None => None,
-                    };
-                    Ok(EntityEdge {
-                        id: EntityEdgeId::from(r.get::<_, String>(0)?),
-                        source_id: EntityId::from(r.get::<_, String>(1)?),
-                        target_id: EntityId::from(r.get::<_, String>(2)?),
-                        relation: r.get(3)?,
-                        confidence,
-                        confidence_score: r.get(5)?,
-                        valid_at: r.get(6)?,
-                        invalid_at: r.get(7)?,
-                        created_at: r.get(8)?,
-                        source_record_id,
-                    })
-                })?;
-
+                let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), map_row)?;
                 let mut out = Vec::new();
                 for row in rows {
                     out.push(row?);

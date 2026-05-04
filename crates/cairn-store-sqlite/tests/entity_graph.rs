@@ -1263,3 +1263,137 @@ async fn graph_edges_as_of_returns_invalidated_edges_in_their_window() {
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].valid_at, 200);
 }
+
+/// Round-3 review fix: confirms `include_invalidated=true` (history view)
+/// is honored even when an as-of slice is requested. Pre-fix the as-of
+/// predicate always applied the end-bound filter, so history-view callers
+/// (lint --fix-graph, audit) couldn't see edges that were invalidated
+/// before the as-of point.
+#[allow(clippy::too_many_lines)] // Four parallel scenarios share one fixture; splitting into per-scenario tests just duplicates the seed.
+#[tokio::test]
+async fn graph_edges_include_invalidated_with_as_of_returns_full_history() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "F0").await;
+
+    // Edge 1 valid [100, 200) — closed by edge 2 at t=200.
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000F1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed e1");
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000F2"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Inferred,
+            confidence_score: 0.7,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed e2 (closes e1)");
+
+    // History view at t=250 (after e1.invalid_at): production view shows
+    // only e2; history view must show both.
+    let production = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(250),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("production view");
+    assert_eq!(production.len(), 1, "production view at t=250 = e2 only");
+
+    let history = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(250),
+            as_of_ingest_time: None,
+            include_invalidated: true,
+        })
+        .await
+        .expect("history view event-only");
+    assert_eq!(
+        history.len(),
+        2,
+        "history view at t=250 must include closed e1 + live e2"
+    );
+
+    // Same for ingest-only as-of.
+    let history_ingest = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: Some(250),
+            include_invalidated: true,
+        })
+        .await
+        .expect("history view ingest-only");
+    assert_eq!(
+        history_ingest.len(),
+        2,
+        "ingest as-of t=250 history must include both rows"
+    );
+
+    // Both as-of dimensions, history view.
+    let history_both = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(250),
+            as_of_ingest_time: Some(250),
+            include_invalidated: true,
+        })
+        .await
+        .expect("history view both as-ofs");
+    assert_eq!(
+        history_both.len(),
+        2,
+        "both as-of dimensions, history view, must include both rows"
+    );
+
+    // Sanity: history view with as-of *before* either edge → none.
+    let history_too_early = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(50),
+            as_of_ingest_time: None,
+            include_invalidated: true,
+        })
+        .await
+        .expect("history view t=50");
+    assert_eq!(
+        history_too_early.len(),
+        0,
+        "neither edge had come into existence by t=50, even in history view"
+    );
+}
