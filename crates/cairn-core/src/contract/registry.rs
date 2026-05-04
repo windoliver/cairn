@@ -764,7 +764,7 @@ patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 4
+minor = 5
 patch = 0
 "#
     }

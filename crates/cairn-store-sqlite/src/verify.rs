@@ -213,6 +213,32 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // the canonical wire alphabet so the lint exact-match join cannot
     // be defeated by encoding drift (#253 loop 3 round 5).
     ("trigger", "consent_timeline_scope_canonical_chars"),
+    // 0042_entity_nodes (issue #186 §3.2: bitemporal knowledge-graph schema).
+    // The implicit unique index from UNIQUE(name_norm) is auto-named
+    // `sqlite_autoindex_*` and excluded by the `sqlite_%` filter below.
+    ("table", "entity_nodes"),
+    ("table", "entity_nodes_fts"),
+    ("trigger", "entity_nodes_shrink_guard"),
+    ("trigger", "entity_nodes_fts_ai"),
+    ("trigger", "entity_nodes_fts_au"),
+    ("trigger", "entity_nodes_fts_ad"),
+    // 0043_entity_edges (issue #186 §3.3: bitemporal knowledge-graph schema).
+    ("table", "entity_edges"),
+    ("index", "entity_edges_live_triple"),
+    ("index", "entity_edges_valid_at_idx"),
+    ("index", "entity_edges_invalid_at_idx"),
+    ("index", "entity_edges_source_relation_idx"),
+    ("index", "entity_edges_target_relation_idx"),
+    ("trigger", "entity_edges_shrink_guard"),
+    // 0045_entity_edges_no_overlap_trigger (issue #186 round-9 fix:
+    // schema-level defense in depth against bounded-overlap writes).
+    ("trigger", "entity_edges_no_overlap_insert"),
+    ("trigger", "entity_edges_no_overlap_update"),
+    // 0044_entity_episodes (issue #186 §3.4: record ↔ entity link table).
+    // The composite PK creates an implicit sqlite_autoindex_* which is
+    // filtered by the `sqlite_%` clause — do NOT add it here.
+    ("table", "entity_episodes"),
+    ("index", "entity_episodes_entity_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {
@@ -486,6 +512,7 @@ pub(crate) fn verify_schema_fingerprint(
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
            AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'entity_nodes_fts_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;
@@ -600,6 +627,7 @@ fn expected_ddl_digest(vec_dim: Option<usize>) -> Result<String, StoreError> {
            AND name <> '_rusqlite_migration' \
            AND NOT (name LIKE 'records_fts_%' AND type IN ('table','index')) \
            AND NOT (name LIKE 'record_vectors_%' AND type IN ('table','index')) \
+           AND NOT (name LIKE 'entity_nodes_fts_%' AND type IN ('table','index')) \
            AND type IN ('table','index','trigger','view') \
            AND sql IS NOT NULL",
     )?;

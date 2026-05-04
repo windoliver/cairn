@@ -11,6 +11,7 @@
 
 pub mod consent;
 pub mod consent_timeline;
+pub mod entity_graph;
 pub mod error;
 mod identity;
 pub mod migrations;

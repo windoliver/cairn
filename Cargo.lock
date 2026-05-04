@@ -604,6 +604,7 @@ name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "blake3",
  "cairn-cli",
  "cairn-core",
  "cairn-embeddings-local",
@@ -611,6 +612,7 @@ dependencies = [
  "cairn-test-fixtures",
  "chrono",
  "ed25519-dalek",
+ "insta",
  "parking_lot",
  "proptest",
  "rand_core 0.6.4",
