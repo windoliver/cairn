@@ -68,12 +68,29 @@ impl<'a> EnvelopeVerifier<'a> {
         intent: SignedIntent,
         resolved: &ResolvedIssuer,
     ) -> Result<VerifiedSignedIntent, DomainError> {
+        // Wire-shape sanity: cheap structural check that catches
+        // in-process callers who constructed a [`SignedIntent`] without
+        // going through serde::Deserialize (which runs the full IDL
+        // [`RawSignedIntent::try_from`] guards). #52 tightens this with
+        // replay/sequence/server_challenge enforcement.
+        intent
+            .validate()
+            .map_err(|_| DomainError::InvalidSignature)?;
+
+        // Authn first: bind the envelope to the resolved key, then verify
+        // the signature, before any policy or lifecycle check. Order
+        // matters — running scope/lifecycle/expiry first would let an
+        // unauthenticated caller observe policy/key-rotation detail
+        // through error-envelope `data` payloads (brief §14).
         Self::check_issuer_match(&intent, resolved)?;
         Self::check_key_version(&intent, resolved)?;
+        Self::check_signature(&intent, resolved)?;
+
+        // Authz: only after the caller has proven control of the issuer
+        // key do we surface lifecycle/expiry/scope detail.
         Self::check_lifecycle(resolved)?;
         self.check_expiry(&intent)?;
         self.check_scope(&intent)?;
-        Self::check_signature(&intent, resolved)?;
         Ok(<Self as SignedIntentVerifier>::__from_verified(
             intent,
             VerifierWitness::new(),

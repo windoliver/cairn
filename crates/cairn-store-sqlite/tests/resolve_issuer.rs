@@ -11,7 +11,9 @@ use cairn_core::domain::identity::IdentityKind;
 use cairn_core::domain::identity::keys::{
     IdentityRevision, KeyVersion, SigningKey, VaultId, WitnessHash,
 };
-use cairn_core::domain::identity::receipts::{ReceiptOpKind, ReceiptPayload, RevocationReceipt};
+use cairn_core::domain::identity::receipts::{
+    ReceiptOpKind, ReceiptPayload, RevocationReceipt, RotationReceipt,
+};
 use cairn_core::domain::identity::records::{
     IdentityKeyEntry, ProvisioningState, PublicIdentityRecord, ReceiptId,
 };
@@ -117,11 +119,11 @@ async fn resolves_active_issuer() {
     let key = SigningKey::generate(&mut OsRng);
     let (reg, id, _dir) = registry_with_identity(ProvisioningState::Active, &key).await;
     let resolved = resolve_issuer(&reg, &id, KeyVersion::FIRST).await.unwrap();
-    assert_eq!(resolved.identity, id);
-    assert_eq!(resolved.key_version, KeyVersion::FIRST);
-    assert!(matches!(resolved.state, ProvisioningState::Active));
+    assert_eq!(resolved.identity(), &id);
+    assert_eq!(resolved.key_version(), KeyVersion::FIRST);
+    assert!(matches!(resolved.state(), ProvisioningState::Active));
     assert_eq!(
-        resolved.verifying_key.to_bytes(),
+        resolved.verifying_key().to_bytes(),
         key.verifying_key().to_bytes()
     );
 }
@@ -153,10 +155,76 @@ async fn unknown_key_version_returns_mismatch() {
 }
 
 #[tokio::test]
+async fn superseded_key_after_rotation_is_rejected() {
+    // After rotation v1 → v2, the v1 key row remains in `identity_keys`
+    // for audit but with `superseded_at = Some(_)`. resolve_issuer must
+    // reject any envelope claiming to be signed under v1, even though
+    // the row still exists and the public key still decodes — otherwise
+    // an attacker who captured the rotated-away private key could keep
+    // forging envelopes indefinitely.
+    let v1_key = SigningKey::generate(&mut OsRng);
+    let v2_key = SigningKey::generate(&mut OsRng);
+    let (reg, id, _dir) = registry_with_identity(ProvisioningState::Active, &v1_key).await;
+
+    let v2 = KeyVersion::FIRST.next().expect("KeyVersion::next");
+    let payload = ReceiptPayload {
+        op_kind: ReceiptOpKind::Rotation,
+        target: id.clone(),
+        signer: id.clone(),
+        signer_key_version: KeyVersion::FIRST,
+        old_key_version: Some(KeyVersion::FIRST),
+        new_key_version: Some(v2),
+        issued_at: Utc::now(),
+    };
+    let sig = payload.sign(&v1_key).expect("sign rotation payload");
+    let receipt = RotationReceipt {
+        id: ReceiptId(0),
+        payload,
+        signature: sig.to_bytes().to_vec(),
+        pending_eviction: false,
+    };
+    let new_key_entry = IdentityKeyEntry {
+        identity_id: id.clone(),
+        key_version: v2,
+        public_key: v2_key.verifying_key().to_bytes(),
+        signed_predecessor: None,
+        created_at: Utc::now(),
+        superseded_at: None,
+    };
+    reg.insert_pending_rotation(&id, v2, "kc:test:v2")
+        .await
+        .expect("insert_pending_rotation");
+    reg.apply_rotation(&receipt, KeyVersion::FIRST, &new_key_entry)
+        .await
+        .expect("apply_rotation");
+
+    // Resolving v1 must now fail — old key is superseded, current is v2.
+    let err = resolve_issuer(&reg, &id, KeyVersion::FIRST)
+        .await
+        .unwrap_err();
+    let DomainError::KeyVersionMismatch {
+        intent, current, ..
+    } = err
+    else {
+        panic!("expected KeyVersionMismatch for superseded key, got {err:?}");
+    };
+    assert_eq!(intent, KeyVersion::FIRST);
+    assert_eq!(current, Some(v2));
+
+    // Resolving v2 succeeds.
+    let resolved = resolve_issuer(&reg, &id, v2).await.expect("resolve v2");
+    assert_eq!(resolved.key_version(), v2);
+    assert_eq!(
+        resolved.verifying_key().to_bytes(),
+        v2_key.verifying_key().to_bytes()
+    );
+}
+
+#[tokio::test]
 async fn revoked_issuer_is_resolved_state_revoked() {
     let key = SigningKey::generate(&mut OsRng);
     let (reg, id, _dir) = registry_with_identity(ProvisioningState::Revoked, &key).await;
     // resolve_issuer succeeds; the verifier is what rejects on state.
     let resolved = resolve_issuer(&reg, &id, KeyVersion::FIRST).await.unwrap();
-    assert!(matches!(resolved.state, ProvisioningState::Revoked));
+    assert!(matches!(resolved.state(), ProvisioningState::Revoked));
 }

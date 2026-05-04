@@ -13,17 +13,17 @@ use crate::domain::identity::records::ProvisioningState;
 
 /// Snapshot of an issuer's verifying key + lifecycle state at the time
 /// the registry was queried. Pass to [`super::EnvelopeVerifier::verify`].
+///
+/// Fields are private — out-of-crate callers cannot construct or mutate
+/// a [`ResolvedIssuer`] except via [`super::resolve::resolve_issuer`],
+/// preventing forged snapshots that would let a malicious in-process
+/// caller mint a `VerifiedSignedIntent` with attacker-chosen identity
+/// or key bytes.
 pub struct ResolvedIssuer {
-    /// The identity this snapshot describes.
-    pub identity: Identity,
-    /// Key version represented by `verifying_key`.
-    pub key_version: KeyVersion,
-    /// Public Ed25519 key bytes already validated by
-    /// [`ed25519_dalek::VerifyingKey::from_bytes`].
-    pub verifying_key: VerifyingKey,
-    /// Lifecycle state of the identity at lookup time. Verifier rejects
-    /// anything other than [`ProvisioningState::Active`].
-    pub state: ProvisioningState,
+    pub(crate) identity: Identity,
+    pub(crate) key_version: KeyVersion,
+    pub(crate) verifying_key: VerifyingKey,
+    pub(crate) state: ProvisioningState,
 }
 
 impl ResolvedIssuer {
@@ -43,6 +43,32 @@ impl ResolvedIssuer {
             verifying_key,
             state,
         }
+    }
+
+    /// Identity this snapshot describes.
+    #[must_use]
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Key version represented by [`Self::verifying_key`].
+    #[must_use]
+    pub fn key_version(&self) -> KeyVersion {
+        self.key_version
+    }
+
+    /// Public Ed25519 key bytes (already validated by
+    /// [`ed25519_dalek::VerifyingKey::from_bytes`] at resolve time).
+    #[must_use]
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        &self.verifying_key
+    }
+
+    /// Lifecycle state of the identity at lookup time. The verifier
+    /// rejects anything other than [`ProvisioningState::Active`].
+    #[must_use]
+    pub fn state(&self) -> ProvisioningState {
+        self.state
     }
 }
 

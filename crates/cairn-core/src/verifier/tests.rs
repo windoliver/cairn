@@ -245,6 +245,68 @@ fn rejects_issuer_mismatch(signing_key: SigningKey, policy: ScopePolicy, clock: 
 }
 
 #[rstest]
+fn rejects_invalid_wire_shape_both_sequence_and_challenge(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    // In-memory caller bypasses serde::Deserialize (which would catch this
+    // via RawSignedIntent::try_from). Verifier must independently reject
+    // intents that violate the IDL XOR group.
+    let mut intent = unsigned_intent();
+    intent.server_challenge = Some(common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".into()));
+    let intent = sign(&signing_key, intent); // sequence Some + server_challenge Some
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
+fn rejects_invalid_wire_shape_neither_sequence_nor_challenge(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    let mut intent = unsigned_intent();
+    intent.sequence = None;
+    intent.server_challenge = None;
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(matches!(err, DomainError::InvalidSignature));
+}
+
+#[rstest]
+fn signature_check_runs_before_scope(signing_key: SigningKey, clock: FixedClock) {
+    // Brief §14: an unauthenticated caller with the wrong tenant must not
+    // observe scope-policy detail through the error envelope. After the
+    // authn-first reordering, a tampered signature with mismatched tenant
+    // surfaces InvalidSignature, never ScopeDenied.
+    let policy = ScopePolicy::new("other-tenant", "ws", ScopePolicy::all_tiers()).unwrap();
+    let mut intent = sign(&signing_key, unsigned_intent());
+    let hex_tail = intent
+        .signature
+        .0
+        .strip_prefix("ed25519:")
+        .unwrap()
+        .to_owned();
+    let mut chars: Vec<char> = hex_tail.chars().collect();
+    let last = chars.last_mut().unwrap();
+    *last = if *last == 'a' { 'b' } else { 'a' };
+    let mutated: String = chars.into_iter().collect();
+    intent.signature = common::Ed25519Signature(format!("ed25519:{mutated}"));
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, &resolved).unwrap_err();
+    assert!(
+        matches!(err, DomainError::InvalidSignature),
+        "expected InvalidSignature (authn-first), got {err:?}"
+    );
+}
+
+#[rstest]
 fn rejects_wrong_key_version(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock) {
     let intent = sign(&signing_key, unsigned_intent()); // intent.key_version = 1
     let resolved = ResolvedIssuer::for_test(

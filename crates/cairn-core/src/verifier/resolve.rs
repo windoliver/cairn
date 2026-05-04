@@ -78,6 +78,21 @@ pub async fn resolve_issuer(
         });
     };
 
+    // 2a. Reject superseded keys. After rotation, prior key rows are kept
+    //     in `identity_keys` for audit but are signed off with
+    //     `superseded_at = Some(_)` — accepting them here would let
+    //     envelopes signed by a rotated-away private key still verify.
+    //     Belt-and-braces: also require the requested version equal
+    //     `current_key_version` so an out-of-band invariant violation
+    //     (key row not marked superseded after rotation) still fails closed.
+    if key_row.superseded_at.is_some() || key_row.key_version != record.current_key_version {
+        return Err(DomainError::KeyVersionMismatch {
+            id: identity.clone(),
+            intent: key_version,
+            current: Some(record.current_key_version),
+        });
+    }
+
     // 3. Decode the verifying key bytes.
     let verifying_key = VerifyingKey::from_bytes(&key_row.public_key).map_err(|e| {
         tracing::error!(
