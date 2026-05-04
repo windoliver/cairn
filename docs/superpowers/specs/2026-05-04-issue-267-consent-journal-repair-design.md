@@ -78,7 +78,10 @@ The CLI opens the SQLite DB path directly for maintenance instead of going
 through the normal store `open()` path, because `open()` may run migration 0021
 and fail before the operator can repair. The repair helper applies conservative
 pragmas (`foreign_keys=ON`, `busy_timeout=5000`) and uses `BEGIN IMMEDIATE` for
-mutations.
+mutations. Because a vault blocked before 0021 cannot have later migrations
+applied yet, the helper also creates the repair audit table idempotently during
+maintenance. A normal append-only migration declares the same table for healthy
+vaults so schema verification still knows about it.
 
 ## Controlled Trigger Bypass
 
@@ -104,7 +107,8 @@ generic SQL execution and does not accept arbitrary table names or predicates.
 
 ## Audit Table
 
-Add a new append-only migration:
+Add a new append-only migration, and reuse the same SQL idempotently from the
+maintenance helper:
 
 ```sql
 CREATE TABLE consent_journal_repair_audit (
