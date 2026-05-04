@@ -15,7 +15,7 @@ fn fresh_in_memory_opens_to_head() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 45);
+    assert_eq!(head, 46);
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn fresh_vault_opens_and_reopens_idempotent() {
             r.get(0)
         })
         .expect("query head");
-    assert_eq!(head, 45);
+    assert_eq!(head, 46);
 }
 
 #[test]
@@ -187,6 +187,35 @@ fn schema_drift_detected_on_relaxed_consent_journal_kind_check() {
         msg.contains("consent_journal kind CHECK") || msg.contains("DDL digest mismatch"),
         "kind CHECK drift should be detected by name, got: {err}"
     );
+}
+
+#[test]
+fn consent_journal_repair_audit_is_append_only() {
+    let conn = open_in_memory().expect("open");
+    conn.execute(
+        "INSERT INTO consent_journal_repair_audit \
+          (repair_id, action, target_rowid, blocker_codes, operator, reason, row_snapshot, repaired_at) \
+         VALUES ('repair-1', 'delete', 0, '[\"non_positive_rowid\"]', 'hmn:operator', \
+                 'manual recovery', '{\"rowid\":0}', 0)",
+        [],
+    )
+    .expect("insert audit row");
+
+    let update = conn
+        .execute(
+            "UPDATE consent_journal_repair_audit SET reason = 'changed' WHERE repair_id = 'repair-1'",
+            [],
+        )
+        .unwrap_err();
+    assert!(format!("{update}").contains("append-only"));
+
+    let delete = conn
+        .execute(
+            "DELETE FROM consent_journal_repair_audit WHERE repair_id = 'repair-1'",
+            [],
+        )
+        .unwrap_err();
+    assert!(format!("{delete}").contains("append-only"));
 }
 
 #[test]

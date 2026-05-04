@@ -239,6 +239,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // filtered by the `sqlite_%` clause — do NOT add it here.
     ("table", "entity_episodes"),
     ("index", "entity_episodes_entity_idx"),
+    // 0046_consent_journal_repair_audit (issue #267): operator-driven
+    // recovery audit table for legacy consent_journal rows blocking 0021.
+    ("table", "consent_journal_repair_audit"),
+    ("trigger", "consent_journal_repair_audit_immutable"),
+    ("trigger", "consent_journal_repair_audit_no_delete"),
 ];
 
 fn hash_hex(content: &str) -> String {
