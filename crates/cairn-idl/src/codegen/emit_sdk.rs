@@ -2732,15 +2732,16 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     // obviously-out-of-range values (month=99, hour=25, offset=+99:99) are
     // rejected at the wire boundary. Day-of-month is calendar-aware —
     // 30-/31-day months and leap-year February resolve here, including the
-    // 100/400-year leap-year rule. Leap-second `60` is accepted on any day
-    // (a true leap-second table belongs to a dedicated parser; the IDL
-    // doesn't carry that data). We avoid pulling chrono into cairn-core.
+    // 100/400-year leap-year rule. Leap-second `60` is rejected to match
+    // cairn-core's domain timestamp parser until a dedicated parser can
+    // validate real leap-second instants. We avoid pulling chrono into
+    // cairn-core.
     w.line("/// Return true iff `s` is an RFC-3339 date-time:");
     w.line("/// `YYYY-MM-DDTHH:MM:SS(.fraction)?(Z|+HH:MM|-HH:MM)`. ASCII-only,");
     w.line("/// length >= 20, separators at fixed positions, digits everywhere else,");
     w.line("/// and each numeric field within its RFC-3339 range:");
     w.line("/// month 01-12, day 01-(28|29|30|31) per the calendar, hour 00-23,");
-    w.line("/// minute 00-59, second 00-60 (leap second), offset hour 00-23,");
+    w.line("/// minute 00-59, second 00-59 (leap seconds unsupported), offset hour 00-23,");
     w.line("/// offset minute 00-59. Day-of-month is calendar-aware — Feb 29 is");
     w.line("/// accepted only in leap years (`(year % 4 == 0 && year % 100 != 0)");
     w.line("/// || year % 400 == 0`).");
@@ -2762,9 +2763,7 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("if !(1..=12).contains(&month) { return false; }");
     w.line("let day = two_digit(8);");
     w.line("if day < 1 { return false; }");
-    // Calendar-aware month-length check. Leap-second 60 still permitted on
-    // any timestamp (RFC-3339 §5.6); calendar correctness here is
-    // independent of leap-second handling.
+    // Calendar-aware month-length check.
     w.line("let max_day: u32 = match month {");
     w.indent();
     w.line("1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,");
@@ -2784,8 +2783,8 @@ fn write_ulid_shape_helper(w: &mut RustWriter) {
     w.line("let minute = two_digit(14);");
     w.line("if minute > 59 { return false; }");
     w.line("let second = two_digit(17);");
-    w.line("// RFC-3339 §5.6 permits 60 for leap seconds.");
-    w.line("if second > 60 { return false; }");
+    w.line("// Cairn rejects `:60` until a real leap-second-aware parser is wired in.");
+    w.line("if second > 59 { return false; }");
     w.line("// Optional fractional seconds + mandatory offset (Z or ±HH:MM).");
     w.line("let mut idx = 19;");
     w.line("if idx < b.len() && b[idx] == b'.' {");

@@ -1469,15 +1469,20 @@ fn signed_intent_accepts_fractional_offset_datetime() {
 }
 
 #[test]
-fn signed_intent_accepts_leap_second() {
-    // RFC-3339 §5.6 allows seconds=60.
+fn signed_intent_rejects_unsupported_leap_second() {
+    // Cairn's domain timestamp parser deliberately rejects `:60` until a
+    // real leap-second-aware parser is wired in. The generated wire contract
+    // must fail closed the same way.
     let mut m = signed_intent_minimum();
     m.insert(
         "issued_at".into(),
         serde_json::json!("2026-12-31T23:59:60Z"),
     );
-    let parsed: SignedIntent = serde_json::from_value(serde_json::Value::Object(m)).unwrap();
-    assert_eq!(parsed.issued_at, "2026-12-31T23:59:60Z");
+    let err = serde_json::from_value::<SignedIntent>(serde_json::Value::Object(m)).unwrap_err();
+    assert!(
+        err.to_string().contains("issued_at"),
+        "expected issued_at leap-second rejection, got: {err}"
+    );
 }
 
 // ── F1 (round 7): Tagged-union variants reject cross-variant / unknown keys ──
