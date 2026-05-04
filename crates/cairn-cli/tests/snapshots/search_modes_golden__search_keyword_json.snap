@@ -2,6 +2,4 @@
 source: crates/cairn-cli/tests/search_modes_golden.rs
 expression: stdout
 ---
-{
-  "hits": []
-}
+{"contract":"cairn.mcp.v1","data":{"hits":[]},"operation_id":"01XXXXXXXXXXXXXXXXXXXXXXXX","policy_trace":[],"status":"committed","verb":"search"}

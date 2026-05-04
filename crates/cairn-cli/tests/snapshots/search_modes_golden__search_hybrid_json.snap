@@ -2,31 +2,4 @@
 source: crates/cairn-cli/tests/search_modes_golden.rs
 expression: stdout
 ---
-{
-  "hits": [
-    {
-      "bm25": 0.0,
-      "record_id": "01HQZX9F5N0000000000000001",
-      "semantic_distance": 1.4027096033096313,
-      "snippet": ""
-    },
-    {
-      "bm25": 0.0,
-      "record_id": "01HQZX9F5N0000000000000002",
-      "semantic_distance": 1.4055731296539307,
-      "snippet": ""
-    },
-    {
-      "bm25": 0.0,
-      "record_id": "01HQZX9F5N0000000000000000",
-      "semantic_distance": 1.420060157775879,
-      "snippet": ""
-    },
-    {
-      "bm25": 0.0,
-      "record_id": "01HQZX9F5N0000000000000003",
-      "semantic_distance": 1.42350435256958,
-      "snippet": ""
-    }
-  ]
-}
+{"contract":"cairn.mcp.v1","data":{"hits":[{"record_id":"01HQZX9F5N0000000000000001","score":1.0,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000002","score":0.5,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000000","score":0.3333333333333333,"snippet":"","trust":"unknown"},{"record_id":"01HQZX9F5N0000000000000003","score":0.25,"snippet":"","trust":"unknown"}]},"operation_id":"01XXXXXXXXXXXXXXXXXXXXXXXX","policy_trace":[],"status":"committed","verb":"search"}

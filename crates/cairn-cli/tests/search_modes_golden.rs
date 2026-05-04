@@ -38,7 +38,32 @@ fn run_cli_search(vault_root: &std::path::Path, mode: &str) -> String {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout),
     );
-    String::from_utf8(output.stdout).expect("utf8 stdout")
+    redact_operation_id(&String::from_utf8(output.stdout).expect("utf8 stdout"))
+}
+
+/// Replace the per-call `operation_id` ULID in the IDL response envelope
+/// with a fixed placeholder so the golden snapshot stays deterministic
+/// across runs. The envelope shape is the unit under test; the ULID
+/// value is intentionally unique per call (round-8 review #1).
+fn redact_operation_id(json: &str) -> String {
+    const KEY: &str = "\"operation_id\":\"";
+    const ULID_LEN: usize = 26;
+    const PLACEHOLDER: &str = "01XXXXXXXXXXXXXXXXXXXXXXXX";
+    let mut out = String::with_capacity(json.len());
+    let mut rest = json;
+    while let Some(idx) = rest.find(KEY) {
+        out.push_str(&rest[..idx + KEY.len()]);
+        let value_start = idx + KEY.len();
+        if rest[value_start..].len() >= ULID_LEN {
+            out.push_str(PLACEHOLDER);
+            rest = &rest[value_start + ULID_LEN..];
+        } else {
+            // Shouldn't happen with valid envelopes — fall through.
+            rest = &rest[value_start..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[tokio::test(flavor = "multi_thread")]

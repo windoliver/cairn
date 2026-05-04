@@ -806,7 +806,6 @@ impl CairnConfig {
     pub fn capabilities(&self, model_present: bool) -> CapabilitySet {
         let llm_on = self.llm.provider.is_some();
         let semantic = self.search.local_embeddings && model_present;
-        let embeddings_on = self.search.local_embeddings;
         let agent_extract = self
             .pipeline
             .extract
@@ -816,12 +815,16 @@ impl CairnConfig {
 
         CapabilitySet {
             keyword_search: true,
-            // Semantic gates on model presence; hybrid uses both legs and
-            // gates on `local_embeddings` only — the keyword leg works
-            // even without an embedding model on disk and degrades to
-            // keyword-equivalent results.
+            // Semantic and hybrid both require an embedding model on disk:
+            // the runtime resolves an embedder for both modes (see
+            // `cairn-cli/src/verbs/search.rs`) and fails with `Internal`
+            // if `ModelCache::ensure` returns `ModelNotFetched`. Advertising
+            // hybrid without a model would therefore violate fail-closed
+            // capability semantics. Keyword-only graceful degradation for
+            // hybrid is a separate runtime change (track in #9-ish);
+            // until then the gate matches what the runtime can honor.
             semantic_search: semantic,
-            hybrid_search: embeddings_on,
+            hybrid_search: semantic,
             llm_extract: llm_on,
             agent_extract,
             graph_edges: !matches!(self.store.kind, StoreKind::Sqlite), // P0: sqlite always false; P1+ gates on store capability
@@ -1107,8 +1110,9 @@ mod tests {
         assert!(caps.keyword_search, "keyword_search always true");
         assert!(!caps.semantic_search, "model absent → no semantic");
         assert!(
-            caps.hybrid_search,
-            "hybrid gates only on local_embeddings; keyword leg works without model"
+            !caps.hybrid_search,
+            "model absent → no hybrid: runtime resolves an embedder for hybrid \
+             mode and fails closed without one (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(!caps.llm_extract, "no LLM → no llm_extract");
         assert!(!caps.agent_extract, "default chain has no agent worker");
@@ -1138,8 +1142,9 @@ mod tests {
             "model absent → no semantic even with LLM"
         );
         assert!(
-            caps.hybrid_search,
-            "hybrid gates on local_embeddings only (model presence not required)"
+            !caps.hybrid_search,
+            "model absent → no hybrid: hybrid requires the embedder the runtime \
+             resolves for both legs (see crates/cairn-cli/src/verbs/search.rs)"
         );
         assert!(caps.llm_extract);
         assert!(!caps.agent_extract);

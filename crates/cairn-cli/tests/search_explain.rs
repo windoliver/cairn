@@ -11,6 +11,29 @@
 use assert_cmd::Command;
 use cairn_test_fixtures::{RecordSpec, build_hybrid_test_vault};
 
+/// Replace the per-call `operation_id` ULID in the IDL response envelope
+/// with a fixed placeholder so the golden snapshot stays deterministic
+/// across runs (round-8 review #1).
+fn redact_operation_id(json: &str) -> String {
+    const KEY: &str = "\"operation_id\":\"";
+    const ULID_LEN: usize = 26;
+    const PLACEHOLDER: &str = "01XXXXXXXXXXXXXXXXXXXXXXXX";
+    let mut out = String::with_capacity(json.len());
+    let mut rest = json;
+    while let Some(idx) = rest.find(KEY) {
+        out.push_str(&rest[..idx + KEY.len()]);
+        let value_start = idx + KEY.len();
+        if rest[value_start..].len() >= ULID_LEN {
+            out.push_str(PLACEHOLDER);
+            rest = &rest[value_start + ULID_LEN..];
+        } else {
+            rest = &rest[value_start..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn hybrid_explain_block_snapshot() {
     let vault = build_hybrid_test_vault(&[
@@ -47,15 +70,31 @@ async fn hybrid_explain_block_snapshot() {
         "exit non-zero. stderr: {stderr}\nstdout: {stdout}"
     );
 
-    // Structural sanity before snapshot.
+    // Structural sanity before snapshot. The committed wire shape is
+    // the IDL `Response` envelope (round-8 review #1): `data` carries
+    // the `SearchData` payload, so `hits` and `score_explain` live one
+    // level deeper than the legacy bespoke shape.
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("invalid json: {e}\nstdout: {stdout}"));
-    assert!(
-        parsed.get("score_explain").is_some(),
-        "score_explain absent from JSON output: {stdout}"
+    assert_eq!(
+        parsed["contract"], "cairn.mcp.v1",
+        "search must emit the cairn.mcp.v1 envelope; got {stdout}"
     );
-    let hits = parsed["hits"].as_array().expect("hits must be an array");
-    let exps = parsed["score_explain"]
+    assert_eq!(
+        parsed["status"], "committed",
+        "successful search must be status=committed; got {stdout}"
+    );
+    assert_eq!(
+        parsed["verb"], "search",
+        "verb must be search; got {stdout}"
+    );
+    let data = parsed.get("data").expect("envelope.data is required");
+    assert!(
+        data.get("score_explain").is_some(),
+        "score_explain absent from data payload: {stdout}"
+    );
+    let hits = data["hits"].as_array().expect("hits must be an array");
+    let exps = data["score_explain"]
         .as_array()
         .expect("score_explain must be an array");
     assert_eq!(
@@ -66,6 +105,6 @@ async fn hybrid_explain_block_snapshot() {
         hits.len()
     );
 
-    insta::assert_snapshot!("search_explain_json", stdout);
+    insta::assert_snapshot!("search_explain_json", redact_operation_id(&stdout));
     drop(dir);
 }

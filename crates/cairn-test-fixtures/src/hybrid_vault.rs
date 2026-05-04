@@ -53,6 +53,12 @@ pub async fn build_hybrid_test_vault(records: &[RecordSpec]) -> HybridTestVault 
     let root = dir.path().to_path_buf();
     let cairn = root.join(".cairn");
     std::fs::create_dir_all(&cairn).expect("mkdir .cairn");
+    // Write the vault.id sentinel so `cairn search`'s vault-binding gate
+    // accepts this fixture as a real vault. Without it the CLI exits 78
+    // (EX_CONFIG) before opening the store. The id is a deterministic
+    // ULID — fixtures don't need a per-test value.
+    std::fs::write(cairn.join("vault.id"), b"01HZZ0000000000000000000AB\n")
+        .expect("write vault.id sentinel");
     let db_path = cairn.join("cairn.db");
 
     let kind = EmbeddingModelKind::default();

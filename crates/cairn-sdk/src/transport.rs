@@ -143,6 +143,17 @@ impl<T: Transport> Sdk<T> {
     /// Returns the contract version, advertised capabilities, and server
     /// info. `incarnation` and `started_at` are minted per-call to match
     /// the CLI's P0 behavior (no daemon table yet — see issue #9).
+    ///
+    /// Capabilities reflect what the SDK can execute end-to-end:
+    /// - [`Sdk::new`] (no store wired) advertises an empty list — every
+    ///   verb returns [`SdkError::Unimplemented`], so promising any
+    ///   capability would mislead negotiating clients.
+    /// - [`Sdk::with_store`] gates each capability on the store's own
+    ///   advertisement (`MemoryStore::capabilities`), the wired config,
+    ///   and the embedding-model presence implied by store FTS+vector
+    ///   support. Search modes rely on FTS / vector indexes; advertising
+    ///   them when the store cannot back them would allow the dispatcher
+    ///   to surface `Internal` instead of fail-closed `CapabilityUnavailable`.
     #[must_use]
     pub fn status(&self) -> StatusResponse {
         StatusResponse {
@@ -153,9 +164,44 @@ impl<T: Transport> Sdk<T> {
                 started_at: now_rfc3339_seconds(),
                 incarnation: crate::stub::new_operation_id(),
             },
-            capabilities: p0_capabilities(),
+            capabilities: self.advertised_capabilities(),
             extensions: vec![],
         }
+    }
+
+    /// Project the SDK's executable state into a wire-format capability list.
+    ///
+    /// The single source of truth for capability advertisement; both
+    /// [`Self::status`] and [`Self::require_capability`] read from here
+    /// so they cannot drift.
+    fn advertised_capabilities(&self) -> Vec<Capabilities> {
+        let Some(store) = self.store.as_ref() else {
+            // No store wired → every verb returns Unimplemented. Advertising
+            // any capability here would invite clients to negotiate against
+            // a dead surface. Empty list matches the original P0 contract.
+            return vec![];
+        };
+        let store_caps = store.capabilities();
+        // Search modes require the store's FTS / vector indexes. Treat
+        // `model_present` as `store_caps.vector` — a store that exposes a
+        // vector index has the embedder + model wired (sqlite-vec only
+        // populates `record_vectors` after the embedding pipeline drains).
+        let model_present = store_caps.vector;
+        let cap_set = self.config.capabilities(model_present);
+        let mut out = Vec::new();
+        if cap_set.keyword_search && store_caps.fts {
+            out.push(Capabilities::CairnMcpV1SearchKeyword);
+        }
+        if cap_set.semantic_search && store_caps.vector {
+            out.push(Capabilities::CairnMcpV1SearchSemantic);
+        }
+        if cap_set.hybrid_search && store_caps.fts && store_caps.vector {
+            out.push(Capabilities::CairnMcpV1SearchHybrid);
+        }
+        if cap_set.policy_trace {
+            out.push(Capabilities::CairnMcpV1PolicyTrace);
+        }
+        out
     }
 
     /// `handshake` — challenge mint (brief §8.0.a point d).
@@ -217,15 +263,15 @@ impl<T: Transport> Sdk<T> {
             _ => return Err(unimplemented("search")),
         };
 
-        // Derive the capability set from config. We assume model present =
-        // `config.search.local_embeddings`; true here because the dispatcher's
-        // mode gate already passed via `require_capability` above, which consults
-        // the P0 capability advertisement. A fully wired SDK (Task 14+) will
-        // stat the model file; for now this keeps the capability derivation
-        // consistent with what was advertised.
-        let caps = self
-            .config
-            .capabilities(self.config.search.local_embeddings);
+        // Derive the capability set the dispatcher will fail-closed
+        // against, masked by the same store-capability signals
+        // `advertised_capabilities` uses. Dispatcher gate ⊆ advertised
+        // gate ⊆ status capabilities — three views, one truth.
+        let store_caps = store.capabilities();
+        let mut caps = self.config.capabilities(store_caps.vector);
+        caps.keyword_search = caps.keyword_search && store_caps.fts;
+        caps.semantic_search = caps.semantic_search && store_caps.vector;
+        caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
 
         // `args.limit` is validated in range [1, 1000] by `validate_search`,
         // so the `try_from` should not fail. Fall back to 10 on error.
@@ -325,44 +371,18 @@ impl<T: Transport> Sdk<T> {
     /// capability (`None`) are unconditionally allowed.
     ///
     /// When a store is wired (via [`Sdk::with_store`]), capability gating
-    /// consults the config-derived [`CapabilitySet`] so that keyword / hybrid /
-    /// semantic searches are accepted once the store is present. When no
-    /// store is wired, only the static P0 capability list is consulted (empty
-    /// in P0), giving `CapabilityUnavailable` for all search modes — the same
-    /// behavior as before Task 12.
+    /// gating reads from the single `advertised_capabilities()` source so
+    /// the gate cannot disagree with what `status` published. A capability
+    /// missing from the advertised list is rejected with
+    /// `CapabilityUnavailable` regardless of whether a store is wired —
+    /// this prevents the previous drift where the store-wired branch
+    /// consulted only config booleans and let modes through that
+    /// `status` did not advertise (e.g. on a store with `vector=false`).
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
-
-        // When a store is wired, derive capabilities from config.
-        if self.store.is_some() {
-            let caps = self
-                .config
-                .capabilities(self.config.search.local_embeddings);
-            let is_advertised = match cap {
-                "cairn.mcp.v1.search.keyword" => caps.keyword_search,
-                "cairn.mcp.v1.search.semantic" => caps.semantic_search,
-                "cairn.mcp.v1.search.hybrid" => caps.hybrid_search,
-                "cairn.mcp.v1.policy_trace" => caps.policy_trace,
-                _ => false,
-            };
-            if is_advertised {
-                return Ok(());
-            }
-            return Err(SdkError::CapabilityUnavailable {
-                capability: cap.to_owned(),
-                reason: "not advertised by `status` in this incarnation".to_owned(),
-                operation_id: crate::stub::new_operation_id(),
-            });
-        }
-
-        // No store wired: fall back to the static P0 capability list
-        // (empty in P0 — all capability-gated verbs return
-        // CapabilityUnavailable until the store lands).
-        // Read capabilities directly instead of routing through `status()`,
-        // which would mint a fresh `incarnation`/`started_at` per call.
-        let advertised = p0_capabilities();
+        let advertised = self.advertised_capabilities();
         let is_advertised = advertised.iter().any(|c| {
             serde_json::to_value(c)
                 .ok()
@@ -1038,15 +1058,6 @@ fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
 /// can fail fast instead of retrying.
 fn unimplemented(verb: &'static str) -> SdkError {
     store_not_wired(verb)
-}
-
-fn p0_capabilities() -> Vec<Capabilities> {
-    // Mirrors `cairn-cli::verbs::status::p0_capabilities`. Empty in P0:
-    // capabilities are advertised only when the runtime can honor them
-    // end-to-end. `cairn.mcp.v1.policy_trace` (#95) and the store-driven
-    // search / retrieve / forget mode capabilities arrive as their
-    // respective verb-runtime issues close (#9 / #61 / #62).
-    vec![]
 }
 
 fn build_profile() -> String {

@@ -159,16 +159,18 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 }
 
 #[test]
-fn status_advertises_no_capabilities_in_p0() {
+fn sdk_new_advertises_no_capabilities() {
     let resp = sdk().status();
-    // Mirrors `cairn status` — P0 advertises no capabilities until verb
-    // runtime can honor them (#9 / #61 / #62). The IDL declares
-    // `cairn.mcp.v1.policy_trace` (#95) and the store-driven mode
-    // capabilities; advertising them before they are honored would
-    // mislead negotiating clients.
+    // `Sdk::new` has no store wired: every verb returns
+    // SdkError::Unimplemented, so advertising any capability would
+    // mislead clients negotiating from `status`. The shared
+    // `advertised_capabilities` helper enforces fail-closed gating —
+    // `Sdk::with_store` is the surface that opts capabilities back in
+    // (see `sdk_with_store_advertises_caps_from_store_and_config`).
     assert!(
         resp.capabilities.is_empty(),
-        "P0 SDK status must advertise an empty capabilities list; got {:?}",
+        "Sdk::new must advertise an empty capabilities list (no backing \
+         store → every verb returns Unimplemented); got {:?}",
         resp.capabilities
     );
     assert!(resp.extensions.is_empty());
@@ -462,11 +464,13 @@ async fn search_rejects_out_of_range_limit_with_invalid_args() {
 
 #[tokio::test]
 async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
-    // P0 advertises no capabilities. `args.explain == Some(true)` is
-    // gated on `cairn.mcp.v1.policy_trace` per the
+    // `Sdk::new` advertises no capabilities (see
+    // `sdk_new_advertises_no_capabilities`). `args.explain == Some(true)`
+    // is gated on `cairn.mcp.v1.policy_trace` per the
     // `x-cairn-capability-when-true` annotation in
-    // `crates/cairn-idl/schema/verbs/search.json`. Mirrors the CLI
-    // fail-closed path; together they enforce the gate end-to-end.
+    // `crates/cairn-idl/schema/verbs/search.json`; the dispatcher
+    // additionally requires the search-mode capability. Either missing
+    // capability is a valid fail-closed signal.
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -480,29 +484,25 @@ async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
     let err = sdk()
         .search(&args)
         .await
-        .expect_err("must fail closed in P0");
+        .expect_err("no store wired → must fail closed");
     match err {
-        SdkError::CapabilityUnavailable {
-            capability,
-            operation_id,
-            ..
-        } => {
+        SdkError::CapabilityUnavailable { capability, .. } => {
             assert!(
                 capability == "cairn.mcp.v1.search.keyword"
                     || capability == "cairn.mcp.v1.policy_trace",
                 "expected mode or policy_trace capability error; got {capability}"
             );
-            assert_eq!(operation_id.0.len(), 26);
         }
         other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn search_explain_false_does_not_require_policy_trace() {
-    // The default `explain: None` (and explicit `Some(false)`) must NOT
-    // require the policy_trace capability. Only `Some(true)` triggers
-    // the gate.
+async fn search_explain_false_rejects_unadvertised_keyword_mode() {
+    // `explain: Some(false)` must NOT trigger the policy_trace gate
+    // (only `Some(true)` does). With no store wired, the keyword mode
+    // is also unadvertised, so the call still fails closed — but the
+    // failing capability must be the search mode, not policy_trace.
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -516,21 +516,25 @@ async fn search_explain_false_does_not_require_policy_trace() {
     let err = sdk()
         .search(&args)
         .await
-        .expect_err("must fail closed in P0");
+        .expect_err("no store wired → must fail closed");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {
-            // Should be the search mode capability, not policy_trace —
-            // explain=false must not trigger the policy_trace gate.
-            assert_eq!(capability, "cairn.mcp.v1.search.keyword");
+            assert_eq!(
+                capability, "cairn.mcp.v1.search.keyword",
+                "explain=false must surface the mode capability, not policy_trace"
+            );
         }
-        other => panic!("expected CapabilityUnavailable for keyword mode, got {other:?}"),
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }
 }
 
 #[tokio::test]
 async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
-    // P0 advertises no capabilities, so every search mode must fail closed
-    // with CapabilityUnavailable rather than the generic Internal stub.
+    // `Sdk::new` advertises no capabilities (no store wired). Every
+    // search mode must therefore fail closed with CapabilityUnavailable
+    // rather than the generic Internal/Unimplemented stub. Mirrors the
+    // original P0 contract restored after the round-1 review found that
+    // `Sdk::new` was over-advertising defaults.
     for (mode, expected) in [
         (SearchArgsMode::Keyword, "cairn.mcp.v1.search.keyword"),
         (SearchArgsMode::Semantic, "cairn.mcp.v1.search.semantic"),
@@ -549,7 +553,7 @@ async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
         let err = sdk()
             .search(&args)
             .await
-            .expect_err("must fail closed in P0");
+            .expect_err("no store wired → must fail closed");
         match err {
             SdkError::CapabilityUnavailable {
                 capability,
@@ -679,8 +683,9 @@ async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
 async fn search_accepts_extended_filter_operators() {
     // Mirrors the generated grammar: between, array_contains,
     // array_contains_any/all, and array_size_eq must validate cleanly.
-    // With no capability advertised in P0 the call lands on
-    // CapabilityUnavailable — the point is leaf validation passed.
+    // `Sdk::new` advertises no capabilities, so the call lands on
+    // CapabilityUnavailable — the point is that leaf validation passed
+    // before the fail-closed gate triggered.
     let valid_leaves = [
         serde_json::json!({"field": "score", "op": "between", "value": [0, 10]}),
         serde_json::json!({"field": "tags", "op": "array_contains", "value": "rust"}),
@@ -700,7 +705,11 @@ async fn search_accepts_extended_filter_operators() {
             scope: None,
             explain: None,
         };
-        match sdk().search(&args).await.expect_err("P0 has no capability") {
+        match sdk()
+            .search(&args)
+            .await
+            .expect_err("no store wired → CapabilityUnavailable")
+        {
             SdkError::CapabilityUnavailable { .. } => {}
             other => panic!("expected CapabilityUnavailable for {leaf:?}, got {other:?}"),
         }
