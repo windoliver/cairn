@@ -7,7 +7,7 @@
 use cairn_store_sqlite::open_in_memory_sync;
 
 #[test]
-fn migration_0031_widens_wal_ops_kind_and_preserves_existing_rows() {
+fn migration_0041_widens_wal_ops_kind_and_preserves_existing_rows() {
     let conn = open_in_memory_sync().expect("open");
 
     // Insert one wal_ops row using a pre-existing kind to simulate
@@ -76,7 +76,7 @@ fn migration_0031_widens_wal_ops_kind_and_preserves_existing_rows() {
 }
 
 #[test]
-fn migration_0032_creates_entity_nodes_with_constraints() {
+fn migration_0042_creates_entity_nodes_with_constraints() {
     let conn = open_in_memory_sync().expect("open");
 
     // Insert a row.
@@ -100,7 +100,7 @@ fn migration_0032_creates_entity_nodes_with_constraints() {
 }
 
 #[test]
-fn migration_0032_fts_round_trips_inserts_updates_deletes() {
+fn migration_0042_fts_round_trips_inserts_updates_deletes() {
     let conn = open_in_memory_sync().expect("open");
 
     // Insert with summary — both columns indexed.
@@ -169,7 +169,7 @@ fn migration_0032_fts_round_trips_inserts_updates_deletes() {
 }
 
 #[test]
-fn migration_0032_shrink_guard_rejects_silent_expiry() {
+fn migration_0042_shrink_guard_rejects_silent_expiry() {
     let conn = open_in_memory_sync().expect("open");
     conn.execute(
         "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
@@ -199,7 +199,7 @@ fn migration_0032_shrink_guard_rejects_silent_expiry() {
 }
 
 #[test]
-fn migration_0033_partial_unique_blocks_concurrent_live_triple() {
+fn migration_0043_partial_unique_blocks_concurrent_live_triple() {
     let conn = open_in_memory_sync().expect("open");
 
     // Seed two entities.
@@ -244,7 +244,7 @@ fn migration_0033_partial_unique_blocks_concurrent_live_triple() {
 }
 
 #[test]
-fn migration_0033_fk_set_null_on_record_delete() {
+fn migration_0043_fk_set_null_on_record_delete() {
     let conn = open_in_memory_sync().expect("open");
 
     conn.execute_batch(
@@ -291,7 +291,7 @@ fn migration_0033_fk_set_null_on_record_delete() {
 }
 
 #[test]
-fn migration_0034_entity_episodes_idempotent_pk_and_cascade() {
+fn migration_0044_entity_episodes_idempotent_pk_and_cascade() {
     let conn = open_in_memory_sync().expect("open");
 
     // Seed an entity.
@@ -1014,7 +1014,7 @@ async fn upsert_entity_edge_change_in_invalid_at_is_not_idempotent() {
 /// rows in TEMP tables, drops the child triggers, lets the cascade fire
 /// silently, then restores child rows and recreates the triggers.
 #[test]
-fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
+fn migration_0041_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
     use cairn_store_sqlite::migrations::migrations;
     use cairn_store_sqlite::vec_ext::register_vec0;
 
@@ -1026,12 +1026,12 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .expect("enable FK");
 
-    // Apply migrations up to (and including) 0030 — i.e. the world before 0031.
-    // After the main-branch merge added 0023_trace_links the count is 24
-    // through 0030 (was 23 in the isolated branch).
+    // Apply migrations up to (and including) 0040 — i.e. the world
+    // before our 0041_wal_kind_widening. Post-merge count is 34
+    // (0001-0022 + 0023 + 0030..0040 = 22 + 1 + 11 = 34).
     migrations()
-        .to_version(&mut conn, 24)
-        .expect("apply through 0030 (24th applied migration)");
+        .to_version(&mut conn, 34)
+        .expect("apply through 0040 (34th applied migration)");
 
     // Seed the parent and both child tables. issued_seq must strictly
     // advance, so we hand-pick disjoint sequences.
@@ -1075,11 +1075,11 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
     )
     .expect("seed wal_op_deps row");
 
-    // Now apply migration 0031. Pre-fix this aborted with the child
-    // append-only triggers.
+    // Now apply our 0041_wal_kind_widening. Pre-fix this aborted with
+    // the child append-only triggers. Position 35 = 34 prior + 0041.
     migrations()
-        .to_version(&mut conn, 25)
-        .expect("apply 0031 with pre-existing children");
+        .to_version(&mut conn, 35)
+        .expect("apply 0041 with pre-existing children");
 
     let parent_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get(0))
@@ -1124,7 +1124,7 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
 /// `wal_op_deps`. Pre-fix the rebuild would either silently fire the
 /// trigger during the cascade or replay rows through it during restore.
 #[test]
-fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
+fn migration_0041_aborts_on_unrelated_wal_steps_trigger() {
     use cairn_store_sqlite::migrations::migrations;
     use cairn_store_sqlite::vec_ext::register_vec0;
 
@@ -1132,10 +1132,10 @@ fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
     let mut conn = rusqlite::Connection::open_in_memory().expect("open");
     conn.execute_batch("PRAGMA foreign_keys = ON;").expect("FK");
     migrations()
-        .to_version(&mut conn, 24)
-        .expect("apply through 0030");
+        .to_version(&mut conn, 34)
+        .expect("apply through 0040");
 
-    // Inject a foreign DELETE trigger on wal_steps before 0031 runs.
+    // Inject a foreign DELETE trigger on wal_steps before 0041 runs.
     conn.execute_batch(
         "CREATE TRIGGER wal_steps_audit_delete \
          BEFORE DELETE ON wal_steps \
@@ -1143,8 +1143,8 @@ fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
     )
     .expect("seed unrelated trigger");
 
-    let res = migrations().to_version(&mut conn, 25);
-    let err = res.expect_err("migration 0031 must abort on unexpected trigger");
+    let res = migrations().to_version(&mut conn, 35);
+    let err = res.expect_err("migration 0041 must abort on unexpected trigger");
     // The CHECK violation surfaces SQLite's CHECK error containing the
     // offending trigger name — verify the diagnostic gets through.
     let msg = format!("{err:?}");
@@ -2623,23 +2623,23 @@ fn entity_edges_schema_trigger_rejects_overlap_update() {
     );
 }
 
-/// Round-9 review fix (finding 3): migration 0035 must reject installation
+/// Round-9 review fix (finding 3): migration 0045 must reject installation
 /// when pre-existing data already violates the no-overlap invariant.
-/// Construct a vault at v0034, inject overlap, then attempt to apply 0035.
+/// Construct a vault at v0044, inject overlap, then attempt to apply 0045.
 #[test]
-fn migration_0035_precheck_rejects_pre_existing_overlap() {
+fn migration_0045_precheck_rejects_pre_existing_overlap() {
     use cairn_store_sqlite::migrations::migrations;
     use cairn_store_sqlite::vec_ext::register_vec0;
 
     register_vec0();
     let mut conn = rusqlite::Connection::open_in_memory().expect("open");
     // `to_version` indexes by *count of migrations applied*, not
-    // migration_id. The set has 28 migrations through 0034 (0001-0022,
-    // 0023, 0030-0034 — main added 0023_trace_links on the merge), so
-    // version 28 is the world before 0035.
+    // migration_id. The set has 38 migrations through 0044 (0001-0022,
+    // 0023, 0030-0040, 0041-0044 = 22 + 1 + 11 + 4), so version 38 is
+    // the world before 0045.
     migrations()
-        .to_version(&mut conn, 28)
-        .expect("apply through 0034");
+        .to_version(&mut conn, 38)
+        .expect("apply through 0044");
 
     conn.execute_batch(
         "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
@@ -2649,10 +2649,10 @@ fn migration_0035_precheck_rejects_pre_existing_overlap() {
          VALUES ('e1', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 100, 300, 100, X'00'), \
                 ('e2', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 200, 400, 200, X'01');",
     )
-    .expect("seed pre-existing overlap before 0035 runs");
+    .expect("seed pre-existing overlap before 0045 runs");
 
-    let res = migrations().to_version(&mut conn, 29);
-    let err = res.expect_err("0035 precheck must reject pre-existing overlap");
+    let res = migrations().to_version(&mut conn, 39);
+    let err = res.expect_err("0045 precheck must reject pre-existing overlap");
     let msg = format!("{err:?}");
     assert!(
         msg.contains("pre-existing overlap") || msg.contains("CHECK"),

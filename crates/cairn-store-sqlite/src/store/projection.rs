@@ -90,6 +90,14 @@ pub(crate) struct ProjectedRow {
     pub target_id_explicit: Option<String>,
     /// Serialized `tags` array (canonical JSON; empty array when no tags).
     pub tags_json: String,
+    /// Per-row consent storage model (Issue #253). Phase-A always writes
+    /// `"legacy_event"`; Phase-B (#255) replaces this with the value
+    /// computed by the ingest writer. Plumbed through here rather than
+    /// relying on the migration default so that supersession upserts
+    /// preserve the column explicitly — the previous "default-on-insert"
+    /// shape would silently revert any `'receipt_timeline'` row to
+    /// `'legacy_event'` on the next rewrite.
+    pub consent_model: &'static str,
 }
 
 impl ProjectedRow {
@@ -139,6 +147,9 @@ impl ProjectedRow {
             salience: f64::from(record.salience),
             target_id_explicit: Some(record.target_id.as_str().to_owned()),
             tags_json,
+            // Phase-A: every row is legacy_event. Phase-B (#255) flips
+            // this based on whether ingest stamped a consent_timeline.
+            consent_model: "legacy_event",
         })
     }
 }

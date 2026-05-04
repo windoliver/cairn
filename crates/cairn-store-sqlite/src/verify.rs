@@ -181,7 +181,39 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "records_trace_seq"),
     ("index", "records_trace_parent"),
     ("index", "records_trace_payload_hash"),
-    // 0032_entity_nodes (issue #186 §3.2: bitemporal knowledge-graph schema).
+    // 0031_records_consent_model — Phase-A per-row consent gate (#253, brief §14).
+    ("index", "records_consent_model_idx"),
+    // 0032_consent_timeline — append-only receipt event log (#253, brief §14).
+    ("table", "consent_timeline"),
+    ("index", "consent_timeline_sensor_idx"),
+    ("index", "consent_timeline_decided_idx"),
+    ("trigger", "consent_timeline_immutable"),
+    ("trigger", "consent_timeline_no_delete"),
+    // 0033_consent_timeline_grant_immutable — per-consent_ref grant
+    // immutability trigger (#253 round 2).
+    ("trigger", "consent_timeline_grant_immutable"),
+    // 0034_consent_timeline_lifecycle — first-event/seq-monotonic/
+    // decided_at-non-decreasing triggers (#253 round 8).
+    ("trigger", "consent_timeline_first_event_issued"),
+    ("trigger", "consent_timeline_seq_strictly_monotonic"),
+    ("trigger", "consent_timeline_decided_at_non_decreasing"),
+    // 0035_consent_timeline_lifecycle_tighten — UTC-form + fresh-seq=1
+    // guards that close the offset-form bypass and the seq!=1 first-row
+    // hole left by 0034 (#253 round 9).
+    ("trigger", "consent_timeline_decided_at_utc_only"),
+    ("trigger", "consent_timeline_expires_at_utc_only"),
+    ("trigger", "consent_timeline_fresh_must_start_at_seq_1"),
+    // 0037_consent_timeline_canonical_nanos — pin timestamps to the
+    // 30-char nanosecond form so lexical TEXT order matches
+    // chronological order without losing sub-second precision (#253
+    // round 10+2). 0037 drops 0036's seconds-only triggers.
+    ("trigger", "consent_timeline_decided_at_canonical_nanos"),
+    ("trigger", "consent_timeline_expires_at_canonical_nanos"),
+    // 0040_consent_timeline_scope_canonical — restrict scope column to
+    // the canonical wire alphabet so the lint exact-match join cannot
+    // be defeated by encoding drift (#253 loop 3 round 5).
+    ("trigger", "consent_timeline_scope_canonical_chars"),
+    // 0042_entity_nodes (issue #186 §3.2: bitemporal knowledge-graph schema).
     // The implicit unique index from UNIQUE(name_norm) is auto-named
     // `sqlite_autoindex_*` and excluded by the `sqlite_%` filter below.
     ("table", "entity_nodes"),
@@ -190,7 +222,7 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("trigger", "entity_nodes_fts_ai"),
     ("trigger", "entity_nodes_fts_au"),
     ("trigger", "entity_nodes_fts_ad"),
-    // 0033_entity_edges (issue #186 §3.3: bitemporal knowledge-graph schema).
+    // 0043_entity_edges (issue #186 §3.3: bitemporal knowledge-graph schema).
     ("table", "entity_edges"),
     ("index", "entity_edges_live_triple"),
     ("index", "entity_edges_valid_at_idx"),
@@ -198,11 +230,11 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "entity_edges_source_relation_idx"),
     ("index", "entity_edges_target_relation_idx"),
     ("trigger", "entity_edges_shrink_guard"),
-    // 0035_entity_edges_no_overlap_trigger (issue #186 round-9 fix:
+    // 0045_entity_edges_no_overlap_trigger (issue #186 round-9 fix:
     // schema-level defense in depth against bounded-overlap writes).
     ("trigger", "entity_edges_no_overlap_insert"),
     ("trigger", "entity_edges_no_overlap_update"),
-    // 0034_entity_episodes (issue #186 §3.4: record ↔ entity link table).
+    // 0044_entity_episodes (issue #186 §3.4: record ↔ entity link table).
     // The composite PK creates an implicit sqlite_autoindex_* which is
     // filtered by the `sqlite_%` clause — do NOT add it here.
     ("table", "entity_episodes"),

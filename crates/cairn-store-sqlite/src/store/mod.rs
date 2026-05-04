@@ -67,6 +67,7 @@ impl Default for SqliteMemoryStore {
                 vector: false,
                 graph_edges: true,
                 transactions: true,
+                per_record_consent_model: true,
             },
             _cancel: None,
             fts_column_weights: [10.0, 10.0, 5.0, 1.0],

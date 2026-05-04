@@ -1,4 +1,4 @@
--- Migration 0032: entity_nodes + FTS5 mirror + shrink-guard.
+-- Migration 0042: entity_nodes + FTS5 mirror + shrink-guard.
 -- Issue #186 — bitemporal knowledge-graph schema. Spec §3.2.
 
 CREATE TABLE entity_nodes (
@@ -54,4 +54,4 @@ CREATE TRIGGER entity_nodes_fts_ad AFTER DELETE ON entity_nodes BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (32, '0032_entity_nodes', '', strftime('%s','now') * 1000);
+  VALUES (42, '0042_entity_nodes', '', strftime('%s','now') * 1000);

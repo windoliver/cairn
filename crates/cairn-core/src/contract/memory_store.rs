@@ -5,9 +5,18 @@ use crate::domain::record::MemoryRecord;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
-/// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs` landed.
-/// Bumped 0.3 → 0.4 in #186 when bitemporal-KG methods landed.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
+/// Bumped 0.2 → 0.3 in #48 when `search_semantic` + `SemanticSearchArgs`
+/// landed. Co-evolved within 0.3 in #253 when
+/// `MemoryStoreCapabilities::per_record_consent_model` and
+/// `MemoryStore::list_consent_models` were added for the §6.5
+/// receipt-timeline gate; both extensions ship under the same 0.3
+/// surface so the handshake range stays `[0.3.0, 0.4.0)`. Co-evolved
+/// again within 0.3 in #186 when the bitemporal knowledge-graph methods
+/// (`upsert_entity`, `upsert_entity_edge`, `graph_edges`,
+/// `resolve_contradiction`, `link_entity_episode`) landed with
+/// default-error implementations — same handshake range, same opt-in
+/// model.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -34,6 +43,13 @@ pub struct MemoryStoreCapabilities {
     pub graph_edges: bool,
     /// Whether ACID transactions are supported.
     pub transactions: bool,
+    /// Whether the adapter persists per-record `consent_model` and
+    /// returns it via [`MemoryStore::list_consent_models`] (Issue #253).
+    /// `false` means lint cannot enforce §6.5 per-row gating on this
+    /// adapter and must surface that as a coverage gap; `true` means
+    /// `list_consent_models` is the authoritative read path and any
+    /// active record missing from its result is corruption.
+    pub per_record_consent_model: bool,
 }
 
 /// A `MemoryRecord` at a specific store version.
@@ -265,6 +281,44 @@ pub trait MemoryStore: Send + Sync {
     /// override.
     async fn index_stats(&self) -> Result<IndexStats, StoreError> {
         Err("index_stats: not supported by this store adapter".into())
+    }
+
+    /// Per-record consent storage model (Issue #253).
+    ///
+    /// The default impl returns the literal `"not supported by this store
+    /// adapter"` error so adapters that have not opted in cannot silently
+    /// downgrade every record to `LegacyEvent` and disable §6.5
+    /// enforcement. Callers in `lint` recognize this sentinel and surface
+    /// it as an error-severity finding rather than treating the empty
+    /// state as authoritative — see `cairn-cli::verbs::lint::lint_handler`.
+    /// Adapters that genuinely have no per-record consent metadata (test
+    /// fixtures, legacy-only stores) override this to return
+    /// `Ok(HashMap::new())` and accept the legacy-only posture explicitly.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] when the underlying read fails, or the
+    /// "not supported" sentinel for adapters that have not opted in.
+    async fn list_consent_models(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<RecordId, crate::domain::consent_timeline::ConsentModel>,
+        StoreError,
+    > {
+        Err("list_consent_models: not supported by this store adapter".into())
+    }
+
+    /// Borrow the adapter's consent-timeline reader, when it ships one.
+    ///
+    /// Issue #253 (round 4): `ConsentLookup` is a separate trait, but
+    /// the plugin registry only stores `Arc<dyn MemoryStore>` — once a
+    /// store is registered, the host has no way to recover a
+    /// `&dyn ConsentLookup` from that erased object. This default
+    /// returns `None` so adapters built against the 0.2 surface remain
+    /// dyn-compatible; adapters that implement `ConsentLookup` (e.g.
+    /// `SqliteMemoryStore`) override this to return `Some(self)` so
+    /// `lint` can resolve covering grants without a side channel.
+    fn as_consent_lookup(&self) -> Option<&dyn crate::contract::consent_lookup::ConsentLookup> {
+        None
     }
 
     // ── Bitemporal knowledge graph (#186) ─────────────────────────────────
@@ -741,6 +795,7 @@ mod tests {
                 vector: false,
                 graph_edges: false,
                 transactions: true,
+                per_record_consent_model: false,
             };
             &CAPS
         }
@@ -785,7 +840,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 5, 0));
+            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
     }
 
     #[tokio::test]
@@ -912,8 +967,15 @@ mod tests {
         assert!(err.to_string().contains("bitemporal_graph"));
     }
 
+    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.3.0
+    /// after the issue #186 merge: bitemporal-KG methods were originally
+    /// proposed as a 0.3 → 0.4 bump, but main shipped issue #253
+    /// (consent timeline) as additive co-evolution within 0.3 first.
+    /// Following that precedent, #186's additions also ship under 0.3
+    /// with default-error implementations so the handshake range
+    /// `[0.3.0, 0.4.0)` stays compatible across both extensions.
     #[test]
-    fn issue_186_contract_version_is_0_4_0() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 4, 0));
+    fn issue_186_contract_version_locked_to_0_3_0_co_evolution() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 3, 0));
     }
 }

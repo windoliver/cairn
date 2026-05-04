@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cairn_core::contract::memory_store::{
     CONTRACT_VERSION, Edge, EdgeDir, EdgeKey, KeywordSearchArgs, KeywordSearchPage, ListArgs,
@@ -33,6 +34,11 @@ pub use cairn_core::domain::record::tests_export::{sample_record, sample_stored_
 pub struct FixtureStore {
     inner: Mutex<HashMap<String, RowEntry>>,
     index_stats_override: Mutex<Option<cairn_core::contract::memory_store::IndexStats>>,
+    /// When true, `capabilities()` reports `per_record_consent_model = false`
+    /// and `list_consent_models()` returns the "not supported" sentinel.
+    /// Lets the §6.5 gate 2×2 matrix tests exercise the capability=false
+    /// quadrants without needing a second `MemoryStore` impl.
+    legacy_only_override: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +71,14 @@ impl FixtureStore {
             .lock()
             .expect("fixture store mutex poisoned") = Some(stats);
     }
+
+    /// Flip the adapter into "capability=false" mode for §6.5 gate tests.
+    /// Subsequent `capabilities()` calls report
+    /// `per_record_consent_model = false` and `list_consent_models()`
+    /// returns the not-supported sentinel.
+    pub fn set_legacy_only_override(&self, on: bool) {
+        self.legacy_only_override.store(on, Ordering::SeqCst);
+    }
 }
 
 #[allow(
@@ -83,8 +97,20 @@ impl MemoryStore for FixtureStore {
             vector: false,
             graph_edges: false,
             transactions: false,
+            per_record_consent_model: true,
         };
-        &CAPS
+        static CAPS_LEGACY_ONLY: MemoryStoreCapabilities = MemoryStoreCapabilities {
+            fts: false,
+            vector: false,
+            graph_edges: false,
+            transactions: false,
+            per_record_consent_model: false,
+        };
+        if self.legacy_only_override.load(Ordering::SeqCst) {
+            &CAPS_LEGACY_ONLY
+        } else {
+            &CAPS
+        }
     }
 
     fn supported_contract_versions(&self) -> VersionRange {
@@ -267,6 +293,33 @@ impl MemoryStore for FixtureStore {
         _args: &KeywordSearchArgs<'_>,
     ) -> Result<KeywordSearchPage, StoreError> {
         Err("FixtureStore: search_keyword is not implemented (capability fts=false)".into())
+    }
+
+    /// Test fixtures certify per-row consent state authoritatively:
+    /// every active record is `LegacyEvent`. Returning a populated
+    /// map (rather than the `Ok(empty)` escape hatch) matches the
+    /// fail-closed posture lint requires for non-empty vaults under
+    /// `per_record_consent_model = true`.
+    async fn list_consent_models(
+        &self,
+    ) -> Result<
+        std::collections::HashMap<RecordId, cairn_core::domain::consent_timeline::ConsentModel>,
+        StoreError,
+    > {
+        if self.legacy_only_override.load(Ordering::SeqCst) {
+            return Err("list_consent_models: not supported by this store adapter".into());
+        }
+        let guard = self.inner.lock().expect("fixture store mutex poisoned");
+        Ok(guard
+            .values()
+            .filter(|e| e.active)
+            .map(|e| {
+                (
+                    e.record.id.clone(),
+                    cairn_core::domain::consent_timeline::ConsentModel::LegacyEvent,
+                )
+            })
+            .collect())
     }
 }
 

@@ -21,6 +21,7 @@
 
 pub mod agent_provider;
 pub mod conformance;
+pub mod consent_lookup;
 pub mod frontend_adapter;
 pub mod identity_registry;
 pub mod job_store;
@@ -45,6 +46,7 @@ pub use registry::{PluginError, PluginName, PluginRegistry};
 pub use version::{ContractVersion, VersionRange};
 
 pub use agent_provider::{AgentProvider, AgentProviderCapabilities, AgentProviderPlugin};
+pub use consent_lookup::{ConsentLookup, ConsentLookupError};
 pub use frontend_adapter::{FrontendAdapter, FrontendAdapterCapabilities, FrontendAdapterPlugin};
 pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,

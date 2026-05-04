@@ -1,4 +1,4 @@
--- Migration 0033: entity_edges with bitemporal validity windows.
+-- Migration 0043: entity_edges with bitemporal validity windows.
 -- Issue #186 — bitemporal knowledge-graph schema. Spec §3.3.
 
 CREATE TABLE entity_edges (
@@ -60,4 +60,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (33, '0033_entity_edges', '', strftime('%s','now') * 1000);
+  VALUES (43, '0043_entity_edges', '', strftime('%s','now') * 1000);

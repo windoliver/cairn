@@ -1,4 +1,4 @@
--- Migration 0035: schema-level overlap protection on entity_edges.
+-- Migration 0045: schema-level overlap protection on entity_edges.
 -- Issue #186 round-9 review fix.
 --
 -- Round-7 added an API guard against bounded-overlap upserts; round-8
@@ -22,11 +22,11 @@
 -- pre-round-7 corruption). Use the same INSERT-into-CHECK-constrained
 -- TEMP table idiom as 0031 to surface a typed error from top-level SQL.
 
-CREATE TEMP TABLE _mig0035_overlap_precheck (
+CREATE TEMP TABLE _mig0045_overlap_precheck (
   msg TEXT NOT NULL CHECK (msg = 'no overlap')
 );
-INSERT INTO _mig0035_overlap_precheck (msg)
-  SELECT 'migration 0035: pre-existing overlap on entity_edges id=' || a.id
+INSERT INTO _mig0045_overlap_precheck (msg)
+  SELECT 'migration 0045: pre-existing overlap on entity_edges id=' || a.id
          || ' overlaps id=' || b.id
   FROM entity_edges a
   JOIN entity_edges b
@@ -39,7 +39,7 @@ INSERT INTO _mig0035_overlap_precheck (msg)
    AND (b.invalid_at IS NULL OR a.valid_at < b.invalid_at)
    AND (a.invalid_at IS NULL OR a.invalid_at > b.valid_at)
   LIMIT 1;
-DROP TABLE _mig0035_overlap_precheck;
+DROP TABLE _mig0045_overlap_precheck;
 
 CREATE TRIGGER entity_edges_no_overlap_insert
   BEFORE INSERT ON entity_edges
@@ -80,4 +80,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (35, '0035_entity_edges_no_overlap_trigger', '', strftime('%s','now') * 1000);
+  VALUES (45, '0045_entity_edges_no_overlap_trigger', '', strftime('%s','now') * 1000);

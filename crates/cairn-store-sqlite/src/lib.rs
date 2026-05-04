@@ -10,6 +10,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod consent;
+pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
 mod identity;
@@ -42,11 +43,14 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts (`[0.2.0, 0.5.0)`). Shared by
-/// the trait impl and the compile-time guard below so the manifest range
-/// and the trait surface derive from one binding.
+/// Contract-version range this crate accepts (`[0.3.0, 0.4.0)`). Shared
+/// by the trait impl and the compile-time guard below so the manifest
+/// range and the trait surface derive from one binding. Lower bound
+/// raised to 0.3.0 in #253: 0.2 callers cannot advertise
+/// `MemoryStoreCapabilities::per_record_consent_model`, so the §6.5
+/// gate would silently fail-open against a 0.2 host.
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 2, 0), ContractVersion::new(0, 5, 0));
+    VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

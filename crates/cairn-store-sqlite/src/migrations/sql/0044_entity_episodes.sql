@@ -1,4 +1,4 @@
--- Migration 0034: entity_episodes (record ↔ entity link).
+-- Migration 0044: entity_episodes (record ↔ entity link).
 -- Issue #186 — bitemporal knowledge-graph schema. Spec §3.4.
 
 CREATE TABLE entity_episodes (
@@ -11,4 +11,4 @@ CREATE TABLE entity_episodes (
 CREATE INDEX entity_episodes_entity_idx ON entity_episodes(entity_node_id);
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (34, '0034_entity_episodes', '', strftime('%s','now') * 1000);
+  VALUES (44, '0044_entity_episodes', '', strftime('%s','now') * 1000);

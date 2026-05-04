@@ -307,11 +307,12 @@ mod tests {
                     vector: false,
                     graph_edges: false,
                     transactions: false,
+                    per_record_consent_model: false,
                 };
                 &CAPS
             }
             fn supported_contract_versions(&self) -> VersionRange {
-                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 5, 0))
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 4, 0))
             }
             async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
                 Err("stub: upsert not implemented".into())
@@ -405,11 +406,12 @@ mod tests {
                     vector: false,
                     graph_edges: false,
                     transactions: false,
+                    per_record_consent_model: false,
                 };
                 &CAPS
             }
             fn supported_contract_versions(&self) -> VersionRange {
-                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 5, 0))
+                VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 4, 0))
             }
             async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
                 Err("stub: upsert not implemented".into())
@@ -481,7 +483,7 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 
 [contract_version_range.max_exclusive]

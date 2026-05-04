@@ -1,4 +1,4 @@
--- Migration 0031: widen wal_ops.kind CHECK to admit graph mutations.
+-- Migration 0041: widen wal_ops.kind CHECK to admit graph mutations.
 -- Issue #186 — bitemporal knowledge-graph schema.
 --
 -- SQLite CHECK constraints are immutable, so we table-rebuild wal_ops:
@@ -42,11 +42,11 @@ PRAGMA defer_foreign_keys = ON;
 -- from top-level SQL we INSERT into a CHECK-constrained TEMP table; if
 -- the drift query returns any row, the CHECK fails with a message that
 -- carries the offending trigger name back to the caller.
-CREATE TEMP TABLE _mig0031_drift_guard (
+CREATE TEMP TABLE _mig0041_drift_guard (
   msg TEXT NOT NULL CHECK (msg = 'ok')
 );
-INSERT INTO _mig0031_drift_guard (msg)
-  SELECT 'migration 0031: unexpected trigger on wal_steps: ' || name
+INSERT INTO _mig0041_drift_guard (msg)
+  SELECT 'migration 0041: unexpected trigger on wal_steps: ' || name
   FROM sqlite_schema
   WHERE type = 'trigger'
     AND tbl_name = 'wal_steps'
@@ -55,8 +55,8 @@ INSERT INTO _mig0031_drift_guard (msg)
       'wal_steps_identity_immutable',
       'wal_steps_no_delete'
     );
-INSERT INTO _mig0031_drift_guard (msg)
-  SELECT 'migration 0031: unexpected trigger on wal_op_deps: ' || name
+INSERT INTO _mig0041_drift_guard (msg)
+  SELECT 'migration 0041: unexpected trigger on wal_op_deps: ' || name
   FROM sqlite_schema
   WHERE type = 'trigger'
     AND tbl_name = 'wal_op_deps'
@@ -65,7 +65,7 @@ INSERT INTO _mig0031_drift_guard (msg)
       'wal_op_deps_immutable',
       'wal_op_deps_no_delete'
     );
-DROP TABLE _mig0031_drift_guard;
+DROP TABLE _mig0041_drift_guard;
 
 -- Stage children before the cascade wipes them.
 CREATE TEMP TABLE _wal_steps_save AS SELECT * FROM wal_steps;
@@ -191,4 +191,4 @@ END;
 PRAGMA legacy_alter_table = OFF;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (31, '0031_wal_kind_widening', '', strftime('%s','now') * 1000);
+  VALUES (41, '0041_wal_kind_widening', '', strftime('%s','now') * 1000);

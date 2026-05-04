@@ -377,6 +377,7 @@ pub struct LintHandlerResult {
 pub async fn lint_handler(
     store: &dyn cairn_core::contract::memory_store::MemoryStore,
     identity_registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
+    consent_lookup: Option<&dyn cairn_core::contract::consent_lookup::ConsentLookup>,
     config: &cairn_core::config::CairnConfig,
     schema_version: cairn_core::verbs::lint::SchemaVersion,
     write_report: bool,
@@ -419,34 +420,43 @@ pub async fn lint_handler(
     // crash) propagate, because hiding them would convert a real
     // index-corruption signal into a falsely clean run — exactly the
     // posture §6.7 is meant to expose.
-    let stored_count = u64::try_from(stored.len()).unwrap_or(u64::MAX);
-    let (index_stats, index_stats_skipped) = match store.index_stats().await {
-        Ok(s) => (s, false),
-        Err(e)
-            if e.to_string()
-                .contains("not supported by this store adapter") =>
-        {
-            (
-                cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
-                true,
-            )
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("store: index_stats: {e}")).context("lint: index_stats");
-        }
-    };
+    let (index_stats, index_stats_skipped) = load_index_stats(store, stored.len()).await?;
 
-    // PR-1: every row carries LegacyEvent. Per-record gating lands in #253.
+    let supports_consent_model_gate = store.capabilities().per_record_consent_model;
+    // Always observe `list_consent_models` so legacy-only adapters
+    // (capability=false + explicit `Ok(empty)`) are distinguishable
+    // from adapters that don't implement the escape hatch at all
+    // (Err sentinel). Round 1 reorder: this is the documented
+    // compatibility contract.
+    let (consent_models, consent_models_unsupported) = load_consent_models(store).await?;
+
+    // Keep `stored` borrowable for the post-run gap audit. Gaps in
+    // `consent_models` (one-entry-per-active-row contract violation)
+    // would otherwise be silently coerced to `LegacyEvent` below.
     let lint_records: Vec<LintRecord> = stored
-        .into_iter()
-        .map(|s| LintRecord {
-            stored: s,
-            consent_model: ConsentModel::LegacyEvent,
+        .iter()
+        .map(|s| {
+            let model = consent_models
+                .get(&s.record.id)
+                .copied()
+                .unwrap_or(ConsentModel::LegacyEvent);
+            LintRecord {
+                stored: s.clone(),
+                consent_model: model,
+            }
         })
         .collect();
 
     let unresolvable_authors: std::collections::HashSet<cairn_core::domain::Identity> =
         prefetch_failures.keys().cloned().collect();
+    // Round 4: prefer the store-provided consent_lookup so plugin-
+    // registered adapters (which the registry only sees as
+    // `Arc<dyn MemoryStore>`) can satisfy §6.5 without the caller
+    // having to thread a side-channel reference. The explicit
+    // `consent_lookup` parameter still wins when provided so tests
+    // can inject a static fixture.
+    let store_lookup = store.as_consent_lookup();
+    let effective_lookup = consent_lookup.or(store_lookup);
     let inputs = LintInputs {
         records: &lint_records,
         config,
@@ -454,8 +464,9 @@ pub async fn lint_handler(
         schema_version,
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
+        consent_lookup: effective_lookup,
     };
-    let mut data = run_checks(&inputs);
+    let mut data = run_checks(&inputs).await;
 
     if index_stats_skipped {
         push_index_stats_skipped(&mut data);
@@ -477,6 +488,14 @@ pub async fn lint_handler(
 
     push_section_6_2_advisories(&mut data, &lint_records);
 
+    push_consent_model_findings(
+        &mut data,
+        supports_consent_model_gate,
+        consent_models_unsupported,
+        &stored,
+        &consent_models,
+    );
+
     let has_error = data.findings.iter().any(|f| {
         matches!(
             f.severity,
@@ -485,34 +504,7 @@ pub async fn lint_handler(
     });
 
     let report_path = if write_report {
-        let body = cairn_core::verbs::lint::report::render(&data);
-        let rel = PathBuf::from(".cairn/lint-report.md");
-        let abs = vault_root.join(&rel);
-        if let Some(parent) = abs.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create_dir_all {}", parent.display()))?;
-        }
-        let parent = abs
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        let dest = abs.clone();
-        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            use std::io::Write as _;
-            let mut tmp = tempfile::Builder::new()
-                .suffix(".md.tmp")
-                .tempfile_in(&parent)
-                .with_context(|| format!("create temp file in {}", parent.display()))?;
-            tmp.write_all(body.as_bytes())
-                .with_context(|| format!("write temp {}", tmp.path().display()))?;
-            tmp.persist(&dest)
-                .map_err(|e| anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error))?;
-            Ok(())
-        })
-        .await
-        .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
-        data.report_path = Some(rel.display().to_string());
-        Some(rel)
+        Some(write_lint_report(&mut data, vault_root).await?)
     } else {
         None
     };
@@ -522,6 +514,44 @@ pub async fn lint_handler(
         report_path,
         has_error,
     })
+}
+
+/// Render the lint report and persist it atomically under
+/// `<vault_root>/.cairn/lint-report.md`. Pulled out of `lint_handler` so
+/// the async shell stays under the workspace's `clippy::too_many_lines`
+/// limit. Returns the vault-relative path that was written.
+async fn write_lint_report(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    vault_root: &Path,
+) -> anyhow::Result<PathBuf> {
+    let body = cairn_core::verbs::lint::report::render(data);
+    let rel = PathBuf::from(".cairn/lint-report.md");
+    let abs = vault_root.join(&rel);
+    if let Some(parent) = abs.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+    let parent = abs
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let dest = abs.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        use std::io::Write as _;
+        let mut tmp = tempfile::Builder::new()
+            .suffix(".md.tmp")
+            .tempfile_in(&parent)
+            .with_context(|| format!("create temp file in {}", parent.display()))?;
+        tmp.write_all(body.as_bytes())
+            .with_context(|| format!("write temp {}", tmp.path().display()))?;
+        tmp.persist(&dest)
+            .map_err(|e| anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error))?;
+        Ok(())
+    })
+    .await
+    .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
+    data.report_path = Some(rel.display().to_string());
+    Ok(rel)
 }
 
 /// Pre-fetch the `ProvisioningState` of every distinct chain-author
@@ -884,6 +914,326 @@ fn push_registry_unavailable(
     }
 }
 
+/// Load `index_stats`, swallowing the "not supported by this store
+/// adapter" sentinel so the §6.7 `index_drift` check can downgrade to a
+/// deferred-info finding instead of aborting the whole lint run. Real
+/// operational failures from an adapter that *does* support
+/// `index_stats` propagate.
+async fn load_index_stats(
+    store: &dyn cairn_core::contract::memory_store::MemoryStore,
+    stored_len: usize,
+) -> anyhow::Result<(cairn_core::contract::memory_store::IndexStats, bool)> {
+    let stored_count = u64::try_from(stored_len).unwrap_or(u64::MAX);
+    match store.index_stats().await {
+        Ok(s) => Ok((s, false)),
+        Err(e)
+            if e.to_string()
+                .contains("not supported by this store adapter") =>
+        {
+            Ok((
+                cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
+                true,
+            ))
+        }
+        Err(e) => Err(anyhow::anyhow!("store: index_stats: {e}")).context("lint: index_stats"),
+    }
+}
+
+/// Load per-record consent models, swallowing the "not supported by
+/// this store adapter" sentinel so the caller can emit a finding rather
+/// than aborting the whole lint run. Real I/O failures propagate.
+async fn load_consent_models(
+    store: &dyn cairn_core::contract::memory_store::MemoryStore,
+) -> anyhow::Result<(
+    std::collections::HashMap<
+        cairn_core::domain::RecordId,
+        cairn_core::domain::consent_timeline::ConsentModel,
+    >,
+    bool,
+)> {
+    match store.list_consent_models().await {
+        Ok(m) => Ok((m, false)),
+        Err(e)
+            if e.to_string()
+                .contains("not supported by this store adapter") =>
+        {
+            Ok((std::collections::HashMap::new(), true))
+        }
+        Err(e) => Err(anyhow::anyhow!("store: list_consent_models: {e}"))
+            .context("lint: list_consent_models"),
+    }
+}
+
+/// Append an error-severity finding noting that the store adapter has
+/// not opted into per-record consent-model lookup. Issue #253 fails
+/// closed: an adapter that returns the trait's "not supported" sentinel
+/// cannot tell us whether any record carries `consent_model =
+/// 'receipt_timeline'`, and silently coercing every row to legacy
+/// semantics is a fail-open authorization hole. Adapters that
+/// genuinely have no per-record metadata (test fixtures, legacy-only
+/// stores) opt in by overriding `list_consent_models` to return
+/// `Ok(HashMap::new())` — that path bypasses this finding entirely.
+fn push_consent_models_unsupported(data: &mut cairn_core::generated::verbs::lint::LintData) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
+        message: "store adapter does not implement list_consent_models; \
+                  cannot enforce §6.5 per-record consent gating. Failing \
+                  closed: lint refuses to certify a vault whose adapter \
+                  cannot read the consent_model column."
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Error,
+        suggested_fix: Some(
+            "ship MemoryStore::list_consent_models on this adapter, or \
+             explicitly opt into legacy-only by overriding to return \
+             Ok(HashMap::new()) (acknowledges the adapter has no \
+             receipt-timeline rows and silences this finding)"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(253),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.error += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("missing_provenance".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Dispatch the §6.5 adapter-capability findings (Issue #253). Pulled
+/// out of `lint_handler` so the async shell stays under the workspace's
+/// `clippy::too_many_lines` limit.
+fn push_consent_model_findings(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    supports_gate: bool,
+    consent_models_unsupported: bool,
+    stored: &[cairn_core::contract::memory_store::StoredRecord],
+    consent_models: &std::collections::HashMap<
+        cairn_core::domain::RecordId,
+        cairn_core::domain::consent_timeline::ConsentModel,
+    >,
+) {
+    if !supports_gate {
+        // Loop 3 round 1: capability=false on a non-empty vault is
+        // fail-open territory regardless of whether
+        // `list_consent_models` returned the Err sentinel or
+        // Ok(empty). Both signals are advisory: a stale or rolled-back
+        // adapter could return Ok(empty) while the underlying store
+        // genuinely contains receipt_timeline rows. Lint can only
+        // certify §6.5 when the adapter advertises capability=true
+        // and provides authoritative per-row enumeration. Empty vault
+        // remains a benign deferred-info coverage gap.
+        if stored.is_empty() {
+            push_consent_model_gate_deferred(data);
+        } else {
+            push_consent_model_gate_blocked_non_empty(data);
+        }
+        return;
+    }
+    if consent_models_unsupported {
+        push_consent_models_unsupported(data);
+        return;
+    }
+    // Capability says supported AND list_consent_models returned data:
+    // result is authoritative. Validate completeness — any active
+    // record missing from the map is corruption. Empty map on a
+    // non-empty vault is fail-open territory; emit an explicit error
+    // (Round 8).
+    push_consent_model_gaps(data, stored, consent_models);
+    if !stored.is_empty() && consent_models.is_empty() {
+        push_consent_models_empty_with_records(data);
+    }
+}
+
+/// Append an info-severity deferred-check finding for adapters that
+/// declare `MemoryStoreCapabilities::per_record_consent_model = false`.
+///
+/// **Round 6 posture.** Until #255 ships the Phase-B privileged
+/// transition writer, no `ReceiptTimeline` rows can be created through
+/// supported APIs — every `upsert` forces `legacy_event` and the store
+/// ignores caller-supplied `consent_model`. The §6.5 gate is therefore
+/// not yet load-bearing, so a non-supporting adapter is a coverage gap
+/// rather than a fail-open trust-boundary bypass. When #255 lands
+/// writers, this branch flips to data-dependent error severity (the
+/// round-2/10 posture). The trust boundary is held in this branch by
+/// the read+write path forcing `legacy_event`, plus migration 0024's
+/// `consent_timeline_grant_immutable` trigger preventing widening
+/// inside any single `consent_ref`.
+fn push_consent_model_gate_deferred(data: &mut cairn_core::generated::verbs::lint::LintData) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
+        message: "store adapter declares \
+                  capabilities.per_record_consent_model = false; the \
+                  §6.5 per-row consent gate is deferred in this \
+                  branch (no supported API can yet produce \
+                  receipt_timeline rows — that lands in Phase-B, \
+                  #255). When #255 ships, this finding flips to \
+                  error severity for adapters that still cannot \
+                  enumerate the column."
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Info,
+        suggested_fix: Some(
+            "if this adapter persists records in the consent_timeline \
+             era, set capabilities.per_record_consent_model = true and \
+             implement MemoryStore::list_consent_models"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(253),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.info += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("deferred_check".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Append an error finding when an adapter declares
+/// `per_record_consent_model = false` on a non-empty vault. With no way
+/// to enumerate per-row consent state, lint cannot prove that any row
+/// is `legacy_event` — version skew, rollback, or out-of-band writes
+/// could leave `receipt_timeline` rows the adapter is blind to, and
+/// downgrading the gate to info would let those rows pass unchecked.
+fn push_consent_model_gate_blocked_non_empty(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
+        message: "store adapter declares \
+                  capabilities.per_record_consent_model = false on a \
+                  non-empty vault; refusing to certify §6.5 because \
+                  the adapter cannot prove every row is legacy_event \
+                  (rollback / version skew / out-of-band write could \
+                  leave receipt_timeline rows unenumerable)."
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Error,
+        suggested_fix: Some(
+            "implement MemoryStore::list_consent_models and set \
+             capabilities.per_record_consent_model = true on this \
+             adapter, or run lint against an empty vault"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(253),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.error += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("missing_provenance".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Append an error finding when an adapter that *claims* to track
+/// per-row `consent_model` returns an empty map for a non-empty vault.
+/// Treating an empty result as authoritative would silently downgrade
+/// every row to `legacy_event` (Round 8 review).
+fn push_consent_models_empty_with_records(data: &mut cairn_core::generated::verbs::lint::LintData) {
+    let f = cairn_core::generated::verbs::lint::Finding {
+        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
+        message: "store adapter declares per_record_consent_model = true \
+                  but list_consent_models returned an empty map for a \
+                  non-empty vault. Refusing to coerce all rows to \
+                  legacy_event — likely adapter bug or partial read."
+            .to_owned(),
+        severity: cairn_core::generated::verbs::lint::Severity::Error,
+        suggested_fix: Some(
+            "verify the adapter's list_consent_models query returns \
+             every active record; investigate schema drift / partial reads"
+                .to_owned(),
+        ),
+        target: None,
+        tracking_issue: Some(253),
+    };
+    data.findings.push(f);
+    data.summary.total += 1;
+    data.summary.by_severity.error += 1;
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry("missing_provenance".to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+}
+
+/// Append error findings for any active record that the adapter's
+/// `list_consent_models` result omitted. The contract is one entry per
+/// active row; a missing entry is corruption / adapter bug, not an
+/// implicit `legacy_event` downgrade. Returns the set of `record_id`s
+/// that *were* covered so the caller can branch on completeness.
+fn push_consent_model_gaps(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    stored: &[cairn_core::contract::memory_store::StoredRecord],
+    consent_models: &std::collections::HashMap<
+        cairn_core::domain::RecordId,
+        cairn_core::domain::consent_timeline::ConsentModel,
+    >,
+) {
+    // Only validate completeness when the adapter returned at least one
+    // entry — an entirely empty map is the explicit legacy-only opt-in
+    // (see `push_consent_models_unsupported`'s suggested_fix), not a
+    // gap to flag.
+    if consent_models.is_empty() {
+        return;
+    }
+    for s in stored {
+        if !consent_models.contains_key(&s.record.id) {
+            let f = cairn_core::generated::verbs::lint::Finding {
+                kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
+                message: format!(
+                    "active record {id} is missing from list_consent_models result; \
+                     contract requires one entry per active row. Treating as adapter \
+                     bug rather than implicit legacy_event downgrade.",
+                    id = s.record.id.as_str(),
+                ),
+                severity: cairn_core::generated::verbs::lint::Severity::Error,
+                suggested_fix: Some(
+                    "verify the adapter's list_consent_models query returns every \
+                     active record; investigate schema drift / partial reads"
+                        .to_owned(),
+                ),
+                target: Some(cairn_core::generated::verbs::lint::Target {
+                    operation_id: None,
+                    path: None,
+                    record_id: Some(cairn_core::generated::common::Ulid(
+                        s.record.id.as_str().to_owned(),
+                    )),
+                }),
+                tracking_issue: Some(253),
+            };
+            data.findings.push(f);
+            data.summary.total += 1;
+            data.summary.by_severity.error += 1;
+            if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+                let entry = map
+                    .entry("missing_provenance".to_owned())
+                    .or_insert(serde_json::Value::from(0_u64));
+                if let Some(n) = entry.as_u64() {
+                    *entry = serde_json::Value::from(n.saturating_add(1));
+                }
+            }
+        }
+    }
+}
+
 /// Run `cairn lint`.
 #[must_use]
 pub fn run(sub: &ArgMatches) -> ExitCode {
@@ -996,6 +1346,7 @@ mod tests {
         let result = lint_handler(
             &store,
             &registry,
+            None,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             true,
@@ -1004,6 +1355,15 @@ mod tests {
         .await
         .expect("handler");
 
+        // Post-rebase posture: §6.2 actor_chain is live. The empty
+        // registry means the sample record's author resolves to
+        // MissingFromRegistry → BrokenActorChain Error, tripping
+        // has_error. §6.5 consent runs against FixtureStore (cap=true,
+        // every record LegacyEvent) but FixtureStore does not
+        // implement ConsentLookup, so consent.rs returns no findings.
+        // Info findings: §6.3 + §6.4 + §6.6 deferred-info coverage
+        // gaps + the §6.2 signature-verification-deferred advisory =
+        // 4.
         let info_count = result
             .data
             .findings
@@ -1016,8 +1376,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 5,
-            "expect §6.3 + §6.4 + §6.5 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory"
+            info_count, 4,
+            "expect §6.3 + §6.4 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory"
         );
         assert!(
             result.has_error,
@@ -1031,6 +1391,178 @@ mod tests {
             .await
             .expect("read lint-report.md");
         assert!(body.contains("# Lint report"));
+    }
+
+    /// §6.5 capability gate 2×2 matrix. Pins the four quadrants of
+    /// `(per_record_consent_model: true|false) × (vault: empty|non-empty)`
+    /// so the persistent fail-open/fail-closed oscillation gets caught
+    /// the next time someone flips the gate posture.
+    mod consent_model_gate_matrix {
+        use super::*;
+        use cairn_core::config::CairnConfig;
+        use cairn_core::generated::verbs::lint::{Kind, Severity};
+        use cairn_core::verbs::lint::SchemaVersion;
+        use cairn_test_fixtures::store::{FixtureStore, sample_record};
+
+        async fn run_lint(store: &FixtureStore) -> LintHandlerResult {
+            use cairn_store_sqlite::SqliteIdentityRegistry;
+            let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+            let cfg = CairnConfig::default();
+            let vault = tempfile::tempdir().expect("tempdir");
+            lint_handler(
+                store,
+                &registry,
+                None,
+                &cfg,
+                SchemaVersion { major: 0, minor: 1 },
+                false,
+                vault.path(),
+            )
+            .await
+            .expect("handler")
+        }
+
+        fn count_kind(result: &LintHandlerResult, kind: Kind, severity: Severity) -> usize {
+            result
+                .data
+                .findings
+                .iter()
+                .filter(|f| f.kind == kind && f.severity == severity)
+                .count()
+        }
+
+        // Quadrant 1: capability=true + vault=non-empty.
+        // §6.5 sub-checks run; FixtureStore reports every record as
+        // LegacyEvent so the covering-grant resolver is never engaged
+        // and no §6.5 errors fire. The Phase-A "no receipt_timeline
+        // records yet" deferred-info finding still emits.
+        #[tokio::test]
+        async fn cap_true_non_empty_runs_subchecks_no_errors() {
+            let store = FixtureStore::default();
+            store.upsert(&sample_record()).await.expect("upsert");
+            let result = run_lint(&store).await;
+
+            // §6.2 actor_chain is now a real check (post-rebase): the
+            // empty stub registry will produce a BrokenActorChain
+            // Error for the sample record's author, so result.has_error
+            // is true regardless of §6.5. Scope the gate-matrix
+            // invariant to §6.5-specific findings (tracking_issue=253).
+            let consent_errors = result
+                .data
+                .findings
+                .iter()
+                .filter(|f| f.severity == Severity::Error && f.tracking_issue == Some(253))
+                .count();
+            assert_eq!(
+                consent_errors, 0,
+                "LegacyEvent rows must not produce §6.5 errors"
+            );
+            // Gate findings (errors) for capability=false MUST NOT fire.
+            let blocked = result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::MissingProvenance
+                        && f.severity == Severity::Error
+                        && f.tracking_issue == Some(253)
+                })
+                .count();
+            assert_eq!(blocked, 0, "no gate-blocked finding under cap=true");
+        }
+
+        // Quadrant 2: capability=true + vault=empty.
+        // No records to check; gate is satisfied. Phase-A deferred-info
+        // still fires for the §6.5 sub-checks coverage gap.
+        #[tokio::test]
+        async fn cap_true_empty_no_errors() {
+            let store = FixtureStore::default();
+            let result = run_lint(&store).await;
+
+            assert!(
+                !result.has_error,
+                "empty vault must not error under cap=true"
+            );
+            let blocked = result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::MissingProvenance
+                        && f.severity == Severity::Error
+                        && f.tracking_issue == Some(253)
+                })
+                .count();
+            assert_eq!(blocked, 0);
+        }
+
+        // Quadrant 3: capability=false + vault=empty.
+        // Coverage gap, not a trust-boundary breach. push_consent_model_gate_deferred
+        // emits an Info finding with tracking_issue=253. Must not error.
+        #[tokio::test]
+        async fn cap_false_empty_emits_info_not_error() {
+            let store = FixtureStore::default();
+            store.set_legacy_only_override(true);
+            let result = run_lint(&store).await;
+
+            assert!(
+                !result.has_error,
+                "cap=false on empty vault is a coverage gap, not an error",
+            );
+            let deferred_gate = result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::DeferredCheck
+                        && f.severity == Severity::Info
+                        && f.tracking_issue == Some(253)
+                        && f.message.contains("per_record_consent_model = false")
+                })
+                .count();
+            assert_eq!(
+                deferred_gate, 1,
+                "gate_deferred info must fire exactly once on cap=false empty vault",
+            );
+        }
+
+        // Quadrant 4: capability=false + vault=non-empty.
+        // Trust-boundary breach. push_consent_model_gate_blocked_non_empty
+        // emits an Error: lint cannot prove every row is legacy_event when
+        // the adapter is blind to the consent_model column.
+        #[tokio::test]
+        async fn cap_false_non_empty_emits_error() {
+            let store = FixtureStore::default();
+            store.upsert(&sample_record()).await.expect("upsert");
+            store.set_legacy_only_override(true);
+            let result = run_lint(&store).await;
+
+            assert!(
+                result.has_error,
+                "cap=false on non-empty vault must fail closed",
+            );
+            let blocked = count_kind(&result, Kind::MissingProvenance, Severity::Error);
+            assert!(
+                blocked >= 1,
+                "missing_provenance error from gate_blocked_non_empty must fire",
+            );
+            // And the deferred-info from quadrant 3 must NOT also fire.
+            let deferred_gate = result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::DeferredCheck
+                        && f.severity == Severity::Info
+                        && f.tracking_issue == Some(253)
+                        && f.message.contains("per_record_consent_model = false")
+                })
+                .count();
+            assert_eq!(
+                deferred_gate, 0,
+                "gate_deferred info must not fire on cap=false non-empty vault",
+            );
+        }
     }
 
     #[tokio::test]
@@ -1052,6 +1584,7 @@ mod tests {
         let result = lint_handler(
             &store,
             &registry,
+            None,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             false,
@@ -1127,6 +1660,7 @@ mod tests {
         let result = lint_handler(
             &store,
             &registry,
+            None,
             &cfg,
             SchemaVersion { major: 0, minor: 1 },
             false,

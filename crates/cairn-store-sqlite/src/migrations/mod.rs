@@ -41,12 +41,34 @@ const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
 // first. SQL body unchanged.
 const M0023_TRACE_LINKS: &str = include_str!("sql/0023_trace_links.sql");
 const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
-const M0031_WAL_KIND_WIDENING: &str = include_str!("sql/0031_wal_kind_widening.sql");
-const M0032_ENTITY_NODES: &str = include_str!("sql/0032_entity_nodes.sql");
-const M0033_ENTITY_EDGES: &str = include_str!("sql/0033_entity_edges.sql");
-const M0034_ENTITY_EPISODES: &str = include_str!("sql/0034_entity_episodes.sql");
-const M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
-    include_str!("sql/0035_entity_edges_no_overlap_trigger.sql");
+// Issue #253 (consent receipt timeline) — main shipped 0031..0040.
+const M0031_RECORDS_CONSENT_MODEL: &str = include_str!("sql/0031_records_consent_model.sql");
+const M0032_CONSENT_TIMELINE: &str = include_str!("sql/0032_consent_timeline.sql");
+const M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE: &str =
+    include_str!("sql/0033_consent_timeline_grant_immutable.sql");
+const M0034_CONSENT_TIMELINE_LIFECYCLE: &str =
+    include_str!("sql/0034_consent_timeline_lifecycle.sql");
+const M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN: &str =
+    include_str!("sql/0035_consent_timeline_lifecycle_tighten.sql");
+const M0036_CONSENT_TIMELINE_CANONICAL_UTC: &str =
+    include_str!("sql/0036_consent_timeline_canonical_utc.sql");
+const M0037_CONSENT_TIMELINE_CANONICAL_NANOS: &str =
+    include_str!("sql/0037_consent_timeline_canonical_nanos.sql");
+const M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS: &str =
+    include_str!("sql/0038_consent_timeline_assert_canonical_nanos.sql");
+const M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS: &str =
+    include_str!("sql/0039_consent_timeline_audit_legacy_invariants.sql");
+const M0040_CONSENT_TIMELINE_SCOPE_CANONICAL: &str =
+    include_str!("sql/0040_consent_timeline_scope_canonical.sql");
+// Issue #186 (bitemporal KG substrate) — renumbered onto 0041..0045
+// during the rebase onto main, which had already taken 0031..0040 for
+// the consent receipt timeline.
+const M0041_WAL_KIND_WIDENING: &str = include_str!("sql/0041_wal_kind_widening.sql");
+const M0042_ENTITY_NODES: &str = include_str!("sql/0042_entity_nodes.sql");
+const M0043_ENTITY_EDGES: &str = include_str!("sql/0043_entity_edges.sql");
+const M0044_ENTITY_EPISODES: &str = include_str!("sql/0044_entity_episodes.sql");
+const M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
+    include_str!("sql/0045_entity_edges_no_overlap_trigger.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -115,14 +137,60 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (22, "0022_record_vectors", M0022_RECORD_VECTORS),
     (23, "0023_trace_links", M0023_TRACE_LINKS),
     (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
-    (31, "0031_wal_kind_widening", M0031_WAL_KIND_WIDENING),
-    (32, "0032_entity_nodes", M0032_ENTITY_NODES),
-    (33, "0033_entity_edges", M0033_ENTITY_EDGES),
-    (34, "0034_entity_episodes", M0034_ENTITY_EPISODES),
+    (
+        31,
+        "0031_records_consent_model",
+        M0031_RECORDS_CONSENT_MODEL,
+    ),
+    (32, "0032_consent_timeline", M0032_CONSENT_TIMELINE),
+    (
+        33,
+        "0033_consent_timeline_grant_immutable",
+        M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE,
+    ),
+    (
+        34,
+        "0034_consent_timeline_lifecycle",
+        M0034_CONSENT_TIMELINE_LIFECYCLE,
+    ),
     (
         35,
-        "0035_entity_edges_no_overlap_trigger",
-        M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER,
+        "0035_consent_timeline_lifecycle_tighten",
+        M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN,
+    ),
+    (
+        36,
+        "0036_consent_timeline_canonical_utc",
+        M0036_CONSENT_TIMELINE_CANONICAL_UTC,
+    ),
+    (
+        37,
+        "0037_consent_timeline_canonical_nanos",
+        M0037_CONSENT_TIMELINE_CANONICAL_NANOS,
+    ),
+    (
+        38,
+        "0038_consent_timeline_assert_canonical_nanos",
+        M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS,
+    ),
+    (
+        39,
+        "0039_consent_timeline_audit_legacy_invariants",
+        M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS,
+    ),
+    (
+        40,
+        "0040_consent_timeline_scope_canonical",
+        M0040_CONSENT_TIMELINE_SCOPE_CANONICAL,
+    ),
+    (41, "0041_wal_kind_widening", M0041_WAL_KIND_WIDENING),
+    (42, "0042_entity_nodes", M0042_ENTITY_NODES),
+    (43, "0043_entity_edges", M0043_ENTITY_EDGES),
+    (44, "0044_entity_episodes", M0044_ENTITY_EPISODES),
+    (
+        45,
+        "0045_entity_edges_no_overlap_trigger",
+        M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER,
     ),
 ];
 
@@ -155,10 +223,20 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0022_RECORD_VECTORS),
         M::up(M0023_TRACE_LINKS),
         M::up(M0030_RECORDS_FTS_WEIGHTED),
-        M::up(M0031_WAL_KIND_WIDENING),
-        M::up(M0032_ENTITY_NODES),
-        M::up(M0033_ENTITY_EDGES),
-        M::up(M0034_ENTITY_EPISODES),
-        M::up(M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
+        M::up(M0031_RECORDS_CONSENT_MODEL),
+        M::up(M0032_CONSENT_TIMELINE),
+        M::up(M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE),
+        M::up(M0034_CONSENT_TIMELINE_LIFECYCLE),
+        M::up(M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN),
+        M::up(M0036_CONSENT_TIMELINE_CANONICAL_UTC),
+        M::up(M0037_CONSENT_TIMELINE_CANONICAL_NANOS),
+        M::up(M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS),
+        M::up(M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS),
+        M::up(M0040_CONSENT_TIMELINE_SCOPE_CANONICAL),
+        M::up(M0041_WAL_KIND_WIDENING),
+        M::up(M0042_ENTITY_NODES),
+        M::up(M0043_ENTITY_EDGES),
+        M::up(M0044_ENTITY_EPISODES),
+        M::up(M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
     ])
 }

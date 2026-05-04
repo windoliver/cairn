@@ -63,6 +63,7 @@ fn record() -> MemoryRecord {
             "obsidian_color".to_owned(),
             serde_json::json!("blue"),
         )]),
+        consent_model: None,
     }
 }
 
