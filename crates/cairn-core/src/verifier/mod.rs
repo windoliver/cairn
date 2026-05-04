@@ -232,14 +232,28 @@ impl<'a> EnvelopeVerifier<'a> {
             });
         }
 
-        // Bounded acceptance — measured from the verifier's wall clock,
-        // not from the signer's `issued_at`. Caps real validity at
-        // `P0_MAX_TTL` regardless of whether the signer chose an
-        // `issued_at` in the past, present, or (within `skew`) future.
-        // Anchoring on `issued_at` would let a future-issued envelope
-        // (issued_at = now + skew, expires_at = issued_at + P0_MAX_TTL)
-        // extend real acceptance to `P0_MAX_TTL + skew`, defeating the
-        // leaked-key blast-radius cap that this check exists for.
+        // Two complementary cap checks. Both are required — they close
+        // different attacks against the leaked-key blast-radius bound.
+        //
+        // (a) Signed-duration cap. Without this, an attacker with
+        //     transient signing-key access can pre-mint many envelopes
+        //     (`issued_at = T0`, `expires_at = T0 + 24h`) and present
+        //     them in arbitrary future 5-minute windows after the key
+        //     has been rotated/revoked. Each envelope would still pass
+        //     the wall-clock cap when presented near its `expires_at`.
+        if expires_chrono - issued_chrono > max_ttl_chrono {
+            return Err(DomainError::ExpiredIntent {
+                issued_at: intent.issued_at.clone(),
+                expires_at: intent.expires_at.clone(),
+                now: now.to_rfc3339(),
+            });
+        }
+        // (b) Wall-clock cap, anchored on the verifier's `now` rather
+        //     than the signer's `issued_at`. Without this, a
+        //     future-issued envelope (`issued_at = now + skew`,
+        //     `expires_at = issued_at + P0_MAX_TTL`) would have a real
+        //     acceptance window of `P0_MAX_TTL + skew`, defeating the
+        //     leaked-key cap from the verifier's perspective.
         if expires_chrono > now + max_ttl_chrono {
             return Err(DomainError::ExpiredIntent {
                 issued_at: intent.issued_at.clone(),

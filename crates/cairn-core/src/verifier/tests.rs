@@ -338,6 +338,38 @@ fn rejects_skew_extended_acceptance_window(signing_key: SigningKey, policy: Scop
 }
 
 #[rstest]
+fn rejects_long_signed_window_presented_near_expiry(signing_key: SigningKey, policy: ScopePolicy) {
+    // Round-10 finding 18: the wall-clock cap alone is not sufficient.
+    // A pre-minted envelope with `issued_at = T0` (long ago) and
+    // `expires_at = T0 + 24h` would, when presented at `now ≈ expires_at`,
+    // satisfy `expires_at <= now + 5min` and slip through. With transient
+    // signing-key access, an attacker could mint thousands of such
+    // envelopes and present them in any 5-minute window over 24 hours
+    // — long after the key has been rotated/revoked. The
+    // signed-duration cap `expires_at - issued_at <= P0_MAX_TTL` closes
+    // this future-timebomb attack.
+    //
+    // Concrete witness: issued_at 24h before now, expires_at 4 min after
+    // now → signed lifetime ≈ 24h4m, wall-clock window = 4 min. The
+    // wall-clock check passes; the signed-duration check must fail.
+    let now: DateTime<Utc> = NOW.parse().unwrap();
+    let clock = FixedClock(now);
+    let mut intent = unsigned_intent();
+    let long_ago_issued = now - chrono::Duration::hours(24);
+    let near_expiry = now + chrono::Duration::minutes(4);
+    intent.issued_at = long_ago_issued.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    intent.expires_at = near_expiry.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, resolved).unwrap_err();
+    assert!(
+        matches!(err, DomainError::ExpiredIntent { .. }),
+        "long signed window near expiry must reject (signed-duration cap), got {err:?}"
+    );
+}
+
+#[rstest]
 fn accepts_ttl_at_exactly_p0_max(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock) {
     // Boundary: expires_at - issued_at == P0_MAX_TTL (5 min) is OK.
     // The fixture window is exactly 5 min (14:02:11 → 14:07:11), and
