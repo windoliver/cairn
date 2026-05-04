@@ -12,6 +12,7 @@
 pub mod consent;
 pub mod error;
 mod identity;
+pub mod issuer_key_resolver;
 pub mod migrations;
 pub mod open;
 pub mod store;
@@ -20,6 +21,7 @@ mod verify;
 
 pub use error::StoreError;
 pub use identity::SqliteIdentityRegistry;
+pub use issuer_key_resolver::SqliteIssuerKeyResolver;
 pub use open::{
     open, open_in_memory, open_in_memory_with_embedder, open_in_memory_with_embedder_and_config,
     open_with_embedder, open_with_embedder_and_config,
