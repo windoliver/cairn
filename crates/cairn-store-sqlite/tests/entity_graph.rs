@@ -1878,3 +1878,84 @@ fn entity_edges_and_nodes_reject_expired_without_tombstone_reason() {
         "clearing tombstone_reason while expired_at NOT NULL must violate CHECK"
     );
 }
+
+/// Round-6 review fix: silently inserting a bounded edge whose event-time
+/// window overlaps an existing bounded row for the same triple breaks the
+/// bitemporal invariant — a single as-of read at a point inside the
+/// overlap returns BOTH rows. Pre-fix Probe B only matched live rows, so
+/// `[100,200)` followed by `[150,250)` for the same triple both took the
+/// fresh-insert path. Post-fix, the overlap probe rejects with a typed
+/// `StoreError::Invariant` and the caller must use
+/// `resolve_contradiction` with explicit timestamps.
+#[tokio::test]
+async fn upsert_entity_edge_overlapping_bounded_window_rejected() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "N0").await;
+
+    // Bounded window [100, 200).
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000N1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: Some(200),
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed first bounded");
+
+    // Overlapping bounded window [150, 250).
+    let overlap = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000N2"),
+        source_id: a.clone(),
+        target_id: b.clone(),
+        relation: "r".into(),
+        confidence: EdgeConfidence::Inferred,
+        confidence_score: 0.5,
+        valid_at: 150,
+        invalid_at: Some(250),
+        created_at: 150,
+        source_record_id: None,
+    };
+    let err = store
+        .upsert_entity_edge(&overlap)
+        .await
+        .expect_err("overlapping bounded upsert must be rejected");
+    let concrete = err
+        .downcast::<StoreError>()
+        .expect("must downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("overlapping bounded")),
+        "expected overlapping-bounded Invariant, got: {concrete:?}",
+    );
+
+    // History view at the overlap mid-point t=175 — only one row exists
+    // (the second insert was rejected), so no duplicate facts.
+    let edges = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(175),
+            as_of_ingest_time: None,
+            include_invalidated: true,
+        })
+        .await
+        .expect("history view t=175");
+    assert_eq!(
+        edges.len(),
+        1,
+        "no duplicate facts at as-of t=175 inside the would-be overlap"
+    );
+}

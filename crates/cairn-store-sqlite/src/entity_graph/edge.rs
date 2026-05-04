@@ -165,20 +165,36 @@ impl SqliteMemoryStore {
                         });
                     }
 
-                    // Probe B — live triple. Used for fresh-insert vs
-                    // contradiction routing. Body-hash differs by Probe A,
-                    // so a Some(...) here always means a contradiction.
-                    let live: Option<(String, Vec<u8>, i64)> = tx
+                    // Probe B — any non-expired row whose event-time
+                    // window overlaps the new edge's window. Subsumes the
+                    // narrower live-triple lookup. Open-interval overlap
+                    // for `[v, i)` semantics with NULL = +∞:
+                    //
+                    //   old.valid_at < COALESCE(new.invalid_at, +∞)
+                    //   COALESCE(old.invalid_at, +∞) > new.valid_at
+                    //
+                    // Pre-fix Probe B only matched live (invalid_at IS NULL)
+                    // rows, so two bounded upserts for the same triple
+                    // with overlapping windows (e.g. [100,200) then
+                    // [150,250)) both took the fresh-insert path and a
+                    // single as-of read at t=175 returned duplicates,
+                    // breaking the bitemporal invariant.
+                    let overlap: Option<(String, Vec<u8>, i64, Option<i64>)> = tx
                         .query_row(
-                            "SELECT id, body_hash, valid_at FROM entity_edges \
+                            "SELECT id, body_hash, valid_at, invalid_at FROM entity_edges \
                              WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
-                               AND invalid_at IS NULL AND expired_at IS NULL",
+                               AND expired_at IS NULL \
+                               AND valid_at < COALESCE(?5, 9223372036854775807) \
+                               AND COALESCE(invalid_at, 9223372036854775807) > ?4 \
+                             LIMIT 1",
                             rusqlite::params![
                                 edge.source_id.as_str(),
                                 edge.target_id.as_str(),
                                 &edge.relation,
+                                edge.valid_at,
+                                edge.invalid_at,
                             ],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                         )
                         .map(Some)
                         .or_else(|e| match e {
@@ -186,7 +202,7 @@ impl SqliteMemoryStore {
                             other => Err(other),
                         })?;
 
-                    let outcome = match live {
+                    let outcome = match overlap {
                         None => {
                             // Branch 1: fresh insert.
                             let op_id = wal::issue_op(&tx, "graph_upsert_edge", edge.id.as_str())
@@ -203,11 +219,45 @@ impl SqliteMemoryStore {
                                 body_was_unchanged: false,
                             }
                         }
-                        Some((existing_id, existing_hash, existing_valid_at)) => {
-                            // Branch 2: contradiction. UPDATE old then
-                            // INSERT new so at no point are there two rows
-                            // matching the partial UNIQUE on the live
-                            // triple.
+                        Some((existing_id, existing_hash, existing_valid_at, existing_invalid_at)) => {
+                            // Branch 2: an overlapping non-expired row
+                            // exists. Routing depends on whether it's the
+                            // single live row (invalid_at IS NULL — the
+                            // contradiction case) or a bounded historical
+                            // row (invalid_at IS NOT NULL — caller must
+                            // resolve explicitly).
+                            //
+                            // Bounded-overlap reject: silently splitting
+                            // a bounded historical window via a fresh
+                            // upsert would violate the bitemporal "at
+                            // most one fact per (triple, event-time T)"
+                            // invariant. Force the caller to use
+                            // resolve_contradiction with explicit
+                            // timestamps so the intent is auditable.
+                            if existing_invalid_at.is_some() {
+                                return Err(tokio_rusqlite::Error::Other(Box::new(
+                                    StoreError::Invariant {
+                                        what: format!(
+                                            "overlapping bounded edge for triple {}→{}/{}: \
+                                             existing id={} window=[{},{}] overlaps new \
+                                             window=[{},{:?}]; use resolve_contradiction",
+                                            edge.source_id.as_str(),
+                                            edge.target_id.as_str(),
+                                            edge.relation,
+                                            existing_id,
+                                            existing_valid_at,
+                                            existing_invalid_at.unwrap_or(i64::MAX),
+                                            edge.valid_at,
+                                            edge.invalid_at,
+                                        ),
+                                    },
+                                )));
+                            }
+                            // From here: existing_invalid_at IS NULL,
+                            // i.e. live triple. Standard contradiction:
+                            // UPDATE old then INSERT new so the partial
+                            // UNIQUE on the live triple is never
+                            // violated mid-tx.
                             //
                             // Backdated guard: contradiction sets
                             // `old.invalid_at = new.valid_at`. If
