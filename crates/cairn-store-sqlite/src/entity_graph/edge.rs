@@ -56,6 +56,34 @@ pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+/// Reject caller-asserted edges whose declared event-time window is
+/// degenerate (`invalid_at == valid_at`) or strictly negative
+/// (`invalid_at < valid_at`). The schema CHECK allows the degenerate
+/// case so the contradiction branch can produce instantaneous-replace
+/// rows internally; callers asserting empty windows is almost always a
+/// mistake (the row would be inert in every as-of query) and was used
+/// in the round-7 finding to bypass overlap routing — a `[T, T)` upsert
+/// against a live `[100, NULL)` row matched the overlap probe and
+/// silently set the live row's `invalid_at = T`, killing it.
+pub(super) fn reject_degenerate_or_negative_window(
+    edge: &EntityEdge,
+) -> Result<(), StoreError> {
+    if let Some(invalid_at) = edge.invalid_at
+        && invalid_at <= edge.valid_at
+    {
+        return Err(StoreError::Invariant {
+            what: format!(
+                "caller-asserted empty or negative edge window: \
+                 valid_at={} invalid_at={} for edge id={}",
+                edge.valid_at,
+                invalid_at,
+                edge.id.as_str(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Insert one `entity_edges` row using a pre-computed `body_hash`.
 ///
 /// Shared between the fresh-insert and contradiction branches; also reused
@@ -119,6 +147,7 @@ impl SqliteMemoryStore {
         &self,
         edge: &EntityEdge,
     ) -> Result<EntityEdgeOutcome, StoreError> {
+        reject_degenerate_or_negative_window(edge)?;
         let conn = self.require_conn("upsert_entity_edge")?.clone();
         let edge = edge.clone();
         let bh = body_hash(&edge);
@@ -168,10 +197,21 @@ impl SqliteMemoryStore {
                     // Probe B — any non-expired row whose event-time
                     // window overlaps the new edge's window. Subsumes the
                     // narrower live-triple lookup. Open-interval overlap
-                    // for `[v, i)` semantics with NULL = +∞:
+                    // for `[v, i)` semantics, NULL-aware (no sentinel —
+                    // a sentinel like 9223372036854775807 would collide
+                    // with a legitimate live edge anchored at i64::MAX).
                     //
-                    //   old.valid_at < COALESCE(new.invalid_at, +∞)
-                    //   COALESCE(old.invalid_at, +∞) > new.valid_at
+                    // Old window `[old.valid_at, old.invalid_at)` and
+                    // new window `[new.valid_at, new.invalid_at)` overlap
+                    // iff
+                    //   (new.invalid_at IS NULL OR old.valid_at < new.invalid_at)
+                    //   AND (old.invalid_at IS NULL OR old.invalid_at > new.valid_at).
+                    //
+                    // The reject_degenerate_or_negative_window guard above
+                    // ensures the new window has positive length, so we
+                    // do not need to filter degenerate stored rows here
+                    // (a stored `[T, T)` window matches no overlap with a
+                    // strictly-positive new window).
                     //
                     // Pre-fix Probe B only matched live (invalid_at IS NULL)
                     // rows, so two bounded upserts for the same triple
@@ -184,8 +224,8 @@ impl SqliteMemoryStore {
                             "SELECT id, body_hash, valid_at, invalid_at FROM entity_edges \
                              WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
                                AND expired_at IS NULL \
-                               AND valid_at < COALESCE(?5, 9223372036854775807) \
-                               AND COALESCE(invalid_at, 9223372036854775807) > ?4 \
+                               AND (?5 IS NULL OR valid_at < ?5) \
+                               AND (invalid_at IS NULL OR invalid_at > ?4) \
                              LIMIT 1",
                             rusqlite::params![
                                 edge.source_id.as_str(),

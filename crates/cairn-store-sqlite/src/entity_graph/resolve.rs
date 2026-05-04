@@ -30,11 +30,18 @@ impl SqliteMemoryStore {
             new_edge_id = %new_edge.id.as_str(),
         ),
     )]
+    // The closure body sequences four guards (degenerate-window, NotFound,
+    // backdated, overlap) plus the WAL-step apply. Splitting helpers would
+    // either require passing an &mut Transaction across them (more wiring,
+    // less locality) or make the WAL-step ordering harder to audit in one
+    // read.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn do_resolve_contradiction(
         &self,
         old_id: &EntityEdgeId,
         new_edge: &EntityEdge,
     ) -> Result<EntityEdgeOutcome, StoreError> {
+        super::edge::reject_degenerate_or_negative_window(new_edge)?;
         let conn = self.require_conn("resolve_contradiction")?.clone();
         let old_id_owned = old_id.as_str().to_owned();
         let new_edge = new_edge.clone();
@@ -81,6 +88,57 @@ impl SqliteMemoryStore {
                                     new_edge.valid_at,
                                     old_valid_at,
                                     old_id_owned,
+                                ),
+                            },
+                        )));
+                    }
+
+                    // Overlap guard: another non-expired bounded row for
+                    // this triple (excluding the one we're about to
+                    // invalidate) whose window overlaps the new edge's
+                    // window would create duplicate facts at any as-of
+                    // read inside the overlap. Same NULL-aware predicate
+                    // as upsert_entity_edge::Probe B. Pre-fix this method
+                    // verified only old_id's liveness, leaving lint /
+                    // repair callers free to introduce overlap.
+                    let triple: (String, String, String) = tx.query_row(
+                        "SELECT source_id, target_id, relation \
+                         FROM entity_edges WHERE id = ?1",
+                        [&old_id_owned],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?;
+                    let conflicting: Option<(String, i64, Option<i64>)> = tx
+                        .query_row(
+                            "SELECT id, valid_at, invalid_at FROM entity_edges \
+                             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
+                               AND id != ?4 \
+                               AND expired_at IS NULL \
+                               AND (?6 IS NULL OR valid_at < ?6) \
+                               AND (invalid_at IS NULL OR invalid_at > ?5) \
+                             LIMIT 1",
+                            rusqlite::params![
+                                triple.0,
+                                triple.1,
+                                triple.2,
+                                &old_id_owned,
+                                new_edge.valid_at,
+                                new_edge.invalid_at,
+                            ],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .map(Some)
+                        .or_else(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                            other => Err(other),
+                        })?;
+                    if let Some((cid, cv, ci)) = conflicting {
+                        return Err(tokio_rusqlite::Error::Other(Box::new(
+                            StoreError::Invariant {
+                                what: format!(
+                                    "resolve_contradiction would introduce overlap: \
+                                     existing id={} window=[{},{:?}] overlaps new \
+                                     window=[{},{:?}]",
+                                    cid, cv, ci, new_edge.valid_at, new_edge.invalid_at,
                                 ),
                             },
                         )));
