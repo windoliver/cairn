@@ -883,3 +883,234 @@ async fn resolve_contradiction_invalidates_caller_chosen_edge() {
     );
     assert_eq!(outcome.new_edge_id, new_edge.id);
 }
+
+/// Round-1 review fix: confirms the old-edge lookup miss surfaces as the
+/// typed [`StoreError::NotFound`] the docstring promises, not as the
+/// generic [`StoreError::Worker`] (which would conflate stale input with
+/// an infrastructure failure). See `entity_graph/resolve.rs` and the
+/// `unpack_worker_err` helper.
+#[tokio::test]
+async fn resolve_contradiction_missing_old_edge_returns_not_found() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, EntityId};
+    use cairn_store_sqlite::error::StoreError;
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let new_edge = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000C1"),
+        source_id: EntityId::from("01HZE7JV5N00000000000000C2"),
+        target_id: EntityId::from("01HZE7JV5N00000000000000C3"),
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 100,
+        source_record_id: None,
+    };
+    let bogus = EntityEdgeId::from("01HZE7JV5N00000000000000ZZ");
+    let err = store
+        .resolve_contradiction(&bogus, &new_edge)
+        .await
+        .expect_err("missing old edge must error");
+    // The trait-level error is `Box<dyn Error + Send + Sync>`; downcast
+    // to the concrete adapter enum to inspect the typed variant.
+    let concrete = err
+        .downcast::<StoreError>()
+        .expect("error must be the concrete cairn_store_sqlite StoreError");
+    assert!(
+        matches!(*concrete, StoreError::NotFound { ref id } if id == bogus.as_str()),
+        "expected NotFound, got: {concrete:?}",
+    );
+}
+
+/// Round-1 review fix: confirms `body_hash` includes `invalid_at` so a
+/// re-upsert of the same triple + `confidence` + `confidence_score` +
+/// `valid_at` + `source_record_id` but with a new `invalid_at` falls
+/// through to the contradiction branch instead of silently no-opping.
+/// Without `invalid_at` in the hash domain, the old row would stay
+/// queryable past the requested close-time.
+#[tokio::test]
+async fn upsert_entity_edge_change_in_invalid_at_is_not_idempotent() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "D0").await;
+
+    // Live edge.
+    let first = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000D1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+    assert!(!first.body_was_unchanged, "fresh insert is not unchanged");
+    assert!(first.invalidated_edge_id.is_none(), "no prior to invalidate");
+
+    // Re-upsert with same triple+fact-fields but `invalid_at = Some(150)`.
+    // Pre-fix this returned body_was_unchanged=true and the row stayed
+    // live. Post-fix it must take the contradiction branch.
+    let second = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000D2"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: Some(150),
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("re-upsert with invalid_at");
+    assert!(
+        !second.body_was_unchanged,
+        "differing invalid_at must NOT be idempotent",
+    );
+    assert!(
+        second.invalidated_edge_id.is_some(),
+        "differing invalid_at must invalidate the prior live edge",
+    );
+
+    // Original edge must no longer be live at t=200; the row that fell
+    // out of the live window via contradiction is now closed.
+    let live_after = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(200),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query at t=200");
+    assert_eq!(
+        live_after.len(),
+        0,
+        "no edge should be live at t=200 — old was closed at 100, new closed at 150",
+    );
+}
+
+/// Round-1 review fix: regression for migration 0031 cascade behavior.
+/// Pre-fix, applying 0031 against a database that already contained
+/// `wal_steps` or `wal_op_deps` rows would fail because `DROP TABLE
+/// wal_ops` cascades into the children, whose append-only `no_delete`
+/// triggers ABORT the migration. Post-fix, the migration stages those
+/// rows in TEMP tables, drops the child triggers, lets the cascade fire
+/// silently, then restores child rows and recreates the triggers.
+#[test]
+fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
+    use cairn_store_sqlite::migrations::migrations;
+    use cairn_store_sqlite::vec_ext::register_vec0;
+
+    // Migration 0022 (record_vectors) requires the sqlite-vec extension —
+    // register it before opening so to_version(_, 22+) doesn't ABORT with
+    // "no such module: vec0".
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("enable FK");
+
+    // Apply migrations up to (and including) 0030 — i.e. the world before 0031.
+    migrations()
+        .to_version(&mut conn, 23)
+        .expect("apply through 0030 (23rd applied migration)");
+
+    // Seed the parent and both child tables. issued_seq must strictly
+    // advance, so we hand-pick disjoint sequences.
+    conn.execute(
+        "INSERT INTO wal_ops (operation_id, issued_seq, kind, state, envelope, \
+         issuer, principal, target_hash, scope_json, expires_at, signature, \
+         issued_at, updated_at) VALUES \
+         ('op-parent-A', 1, 'upsert', 'COMMITTED', '{}', 'sys', NULL, 'h', '{}', \
+          9999999999, 'sig', 1, 1)",
+        [],
+    )
+    .expect("seed wal_ops A");
+    conn.execute(
+        "INSERT INTO wal_ops (operation_id, issued_seq, kind, state, envelope, \
+         issuer, principal, target_hash, scope_json, expires_at, signature, \
+         issued_at, updated_at) VALUES \
+         ('op-parent-B', 2, 'upsert', 'COMMITTED', '{}', 'sys', NULL, 'h', '{}', \
+          9999999999, 'sig', 1, 1)",
+        [],
+    )
+    .expect("seed wal_ops B");
+
+    conn.execute(
+        "INSERT INTO wal_steps (operation_id, step_ord, step_kind, state) \
+         VALUES ('op-parent-A', 0, 'put_record', 'DONE')",
+        [],
+    )
+    .expect("seed wal_steps row");
+    conn.execute(
+        "INSERT INTO wal_steps (operation_id, step_ord, step_kind, state) \
+         VALUES ('op-parent-A', 1, 'index_fts', 'DONE')",
+        [],
+    )
+    .expect("seed second wal_steps row");
+
+    // wal_op_deps: A precedes B (issued_seq 1 < 2 satisfies acyclicity).
+    conn.execute(
+        "INSERT INTO wal_op_deps (operation_id, depends_on_op_id) \
+         VALUES ('op-parent-B', 'op-parent-A')",
+        [],
+    )
+    .expect("seed wal_op_deps row");
+
+    // Now apply migration 0031. Pre-fix this aborted with the child
+    // append-only triggers.
+    migrations()
+        .to_version(&mut conn, 24)
+        .expect("apply 0031 with pre-existing children");
+
+    let parent_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get(0))
+        .expect("count wal_ops");
+    assert_eq!(parent_count, 2, "wal_ops rows must survive rebuild");
+
+    let steps_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_steps WHERE operation_id = 'op-parent-A'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count wal_steps");
+    assert_eq!(steps_count, 2, "both wal_steps rows must be restored");
+
+    let deps_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_op_deps \
+             WHERE operation_id = 'op-parent-B' AND depends_on_op_id = 'op-parent-A'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count wal_op_deps");
+    assert_eq!(deps_count, 1, "wal_op_deps row must be restored");
+
+    // Append-only triggers must still fire on the restored children.
+    let steps_del = conn.execute("DELETE FROM wal_steps", []);
+    assert!(
+        steps_del.is_err(),
+        "wal_steps_no_delete trigger must be reinstated after migration 0031"
+    );
+    let deps_del = conn.execute("DELETE FROM wal_op_deps", []);
+    assert!(
+        deps_del.is_err(),
+        "wal_op_deps_no_delete trigger must be reinstated after migration 0031"
+    );
+}

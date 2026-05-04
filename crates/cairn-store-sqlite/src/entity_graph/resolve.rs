@@ -11,6 +11,21 @@ use crate::entity_graph::wal;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
+/// Translate a worker-side error into a typed [`StoreError`], preserving
+/// any [`StoreError`] previously wrapped via `tokio_rusqlite::Error::Other`.
+/// Without this, the blanket `From<tokio_rusqlite::Error>` collapses every
+/// inner error into [`StoreError::Worker`], hiding domain variants like
+/// [`StoreError::NotFound`] that the worker closure deliberately wrapped.
+fn unpack_worker_err(err: tokio_rusqlite::Error) -> StoreError {
+    match err {
+        tokio_rusqlite::Error::Other(boxed) => match boxed.downcast::<StoreError>() {
+            Ok(inner) => *inner,
+            Err(other) => StoreError::Worker(tokio_rusqlite::Error::Other(other)),
+        },
+        other => StoreError::from(other),
+    }
+}
+
 impl SqliteMemoryStore {
     /// Inherent resolve-contradiction implementation; the trait method
     /// [`MemoryStore::resolve_contradiction`] guards `self.conn` then delegates here.
@@ -46,12 +61,25 @@ impl SqliteMemoryStore {
                     let tx = c.transaction()?;
 
                     // Verify old edge exists and is live; capture pre_image body_hash.
-                    let pre_image: Vec<u8> = tx.query_row(
-                        "SELECT body_hash FROM entity_edges \
-                         WHERE id = ?1 AND invalid_at IS NULL AND expired_at IS NULL",
-                        [&old_id_owned],
-                        |r| r.get(0),
-                    )?;
+                    // Map QueryReturnedNoRows to a typed StoreError::NotFound — without
+                    // this, await? converts the bare rusqlite error into the generic
+                    // StoreError::Worker variant, hiding the deterministic stale/missing
+                    // input from retry/recovery callers.
+                    let pre_image: Vec<u8> = tx
+                        .query_row(
+                            "SELECT body_hash FROM entity_edges \
+                             WHERE id = ?1 AND invalid_at IS NULL AND expired_at IS NULL",
+                            [&old_id_owned],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => {
+                                tokio_rusqlite::Error::Other(Box::new(StoreError::NotFound {
+                                    id: old_id_owned.clone(),
+                                }))
+                            }
+                            other => tokio_rusqlite::Error::from(other),
+                        })?;
 
                     let op_id = wal::issue_op(&tx, "graph_contradict", new_edge.id.as_str())
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
@@ -76,7 +104,8 @@ impl SqliteMemoryStore {
                     })
                 },
             )
-            .await?;
+            .await
+            .map_err(unpack_worker_err)?;
 
         Ok(outcome)
     }

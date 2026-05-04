@@ -19,14 +19,30 @@ use crate::store::SqliteMemoryStore;
 
 /// Compute the body-hash used to detect substantive edge changes.
 ///
-/// Includes only fields that constitute the *fact*: confidence tier, score,
-/// event-time start, and source record. Excludes id, ingestion-time fields,
-/// and the conflict key itself (source/target/relation).
+/// Includes every field that constitutes the *fact* and is persisted on
+/// the row: confidence tier, score, the full event-time window (`valid_at`
+/// and `invalid_at`), and source record. Excludes id (PK), ingestion-time
+/// columns (`created_at`, `expired_at`), and the conflict key itself
+/// (source/target/relation, covered by the live-row SELECT).
+///
+/// `invalid_at` MUST be in the domain: a re-upsert with the same triple
+/// and otherwise-identical fields but a different `invalid_at` (e.g. live
+/// → bounded) would otherwise hash equal to the live row, return
+/// `body_was_unchanged = true`, and silently leave the row queryable past
+/// the requested close-time. Including it in the hash forces such a
+/// re-upsert into the contradiction branch.
 pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(edge.confidence.as_db_str().as_bytes());
     h.update(&edge.confidence_score.to_le_bytes());
     h.update(&edge.valid_at.to_le_bytes());
+    // invalid_at: tagged Option encoding so None ≠ Some(0).
+    if let Some(t) = edge.invalid_at {
+        h.update(&[1u8]);
+        h.update(&t.to_le_bytes());
+    } else {
+        h.update(&[0u8]);
+    }
     if let Some(rid) = &edge.source_record_id {
         h.update(b"|");
         h.update(rid.as_str().as_bytes());

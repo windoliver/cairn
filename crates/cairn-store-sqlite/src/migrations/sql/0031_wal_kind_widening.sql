@@ -3,23 +3,42 @@
 --
 -- SQLite CHECK constraints are immutable, so we table-rebuild wal_ops:
 -- copy data into a new table with the widened CHECK, then swap names.
--- All triggers and indexes are recreated verbatim. FK references from
--- wal_op_deps and wal_steps to wal_ops(operation_id) survive the rename
--- because SQLite resolves FK targets by name at validation time.
+-- All triggers and indexes are recreated verbatim.
+--
+-- Why we save and restore wal_steps and wal_op_deps:
+--   `wal_steps.operation_id` and `wal_op_deps.operation_id` reference
+--   `wal_ops(operation_id)` with `ON DELETE CASCADE`. SQLite docs:
+--   "DROP TABLE performs an implicit DELETE on each row of the table
+--    being dropped … and does invoke foreign key actions". So when we
+--   DROP wal_ops the cascade fires and tries to delete every child row.
+--   The append-only `wal_steps_no_delete` and `wal_op_deps_no_delete`
+--   triggers from migration 0002 then ABORT the migration on any
+--   database that has prior WAL history. We preserve child rows via
+--   TEMP staging tables, allow the cascade to wipe them, then re-INSERT
+--   them — net data preservation, no trigger ABORT.
 --
 -- Why these PRAGMAs:
 --   * defer_foreign_keys = ON  — the runner wraps each migration in a
 --     transaction; PRAGMA foreign_keys=OFF is a documented no-op inside
 --     a transaction, so we must defer FK validation to commit time
---     instead. Live rows in wal_op_deps / wal_steps would otherwise
---     reject the DROP TABLE wal_ops below. defer_foreign_keys auto-
---     resets at transaction end, so no explicit OFF is needed.
+--     instead. Live rows that briefly orphan during the rebuild would
+--     otherwise be rejected. defer_foreign_keys auto-resets at
+--     transaction end, so no explicit OFF is needed.
 --   * legacy_alter_table = ON  — modern SQLite (3.26+) rewrites trigger
 --     bodies during ALTER TABLE … RENAME TO. wal_op_deps_must_be_acyclic
 --     references wal_ops in its WHEN clause, and the rewrite path can
 --     fail mid-rename. Disabling the rewrite is the documented escape.
 PRAGMA legacy_alter_table = ON;
 PRAGMA defer_foreign_keys = ON;
+
+-- Stage children before the cascade wipes them.
+CREATE TEMP TABLE _wal_steps_save AS SELECT * FROM wal_steps;
+CREATE TEMP TABLE _wal_op_deps_save AS SELECT * FROM wal_op_deps;
+
+-- Drop child no_delete triggers so the cascade can fire silently.
+-- Recreated verbatim below after children are restored.
+DROP TRIGGER IF EXISTS wal_steps_no_delete;
+DROP TRIGGER IF EXISTS wal_op_deps_no_delete;
 
 CREATE TABLE wal_ops_new (
   operation_id   TEXT NOT NULL PRIMARY KEY,
@@ -54,6 +73,12 @@ DROP TRIGGER IF EXISTS wal_ops_no_delete;
 DROP INDEX IF EXISTS wal_ops_open_idx;
 DROP TABLE wal_ops;
 ALTER TABLE wal_ops_new RENAME TO wal_ops;
+
+-- Restore children from staging.
+INSERT INTO wal_steps SELECT * FROM _wal_steps_save;
+INSERT INTO wal_op_deps SELECT * FROM _wal_op_deps_save;
+DROP TABLE _wal_steps_save;
+DROP TABLE _wal_op_deps_save;
 
 CREATE INDEX wal_ops_open_idx
   ON wal_ops(state, issued_at)
@@ -111,6 +136,20 @@ CREATE TRIGGER wal_ops_no_delete
   FOR EACH ROW
 BEGIN
   SELECT RAISE(ABORT, 'wal_ops is append-only; DELETE not permitted');
+END;
+
+CREATE TRIGGER wal_steps_no_delete
+  BEFORE DELETE ON wal_steps
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_steps is append-only; DELETE not permitted');
+END;
+
+CREATE TRIGGER wal_op_deps_no_delete
+  BEFORE DELETE ON wal_op_deps
+  FOR EACH ROW
+BEGIN
+  SELECT RAISE(ABORT, 'wal_op_deps is append-only');
 END;
 
 PRAGMA legacy_alter_table = OFF;
