@@ -1,6 +1,30 @@
 //! [`resolve_issuer`] — async helper that turns
 //! `(IdentityRegistry, Identity, KeyVersion)` into a [`super::ResolvedIssuer`]
 //! ready for the synchronous [`super::EnvelopeVerifier::verify`].
+//!
+//! # Freshness model — load-bearing
+//!
+//! `resolve_issuer` answers a single question: at the moment the
+//! registry was queried, what was the issuer's authentication state and
+//! what was the registered verifying key for the requested
+//! `key_version`? It is **not** a fresh-state authorization check. The
+//! TOCTOU re-check below narrows the window where the resolver itself
+//! could observe an inconsistent state-vs-key snapshot, but a revocation
+//! or rotation that lands after `resolve_issuer` returns and before the
+//! state-changing consumer commits is structurally **not** in scope
+//! here. The architectural split is intentional, per spec §5.6:
+//!
+//! - **Verifier (this module + EnvelopeVerifier):** authentication —
+//!   "the envelope was signed by the holder of the registered private
+//!   key for this issuer, at the time the registry was read."
+//!
+//! - **WAL state machine (issue #55):** fresh-state authorization —
+//!   "this issuer is *still* permitted to write at PREPARE/COMMIT time."
+//!   The WAL transaction re-reads identity state inside its own
+//!   transaction and rejects on any change since the verified envelope
+//!   was minted. That is where the resolve-to-write race window is
+//!   closed; doing it here would conflate authn with authz and force
+//!   the verifier to be async, breaking spec decision Q1.
 
 use ed25519_dalek::VerifyingKey;
 
