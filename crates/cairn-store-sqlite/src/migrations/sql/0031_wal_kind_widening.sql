@@ -31,6 +31,42 @@
 PRAGMA legacy_alter_table = ON;
 PRAGMA defer_foreign_keys = ON;
 
+-- Trigger drift pre-check: this migration's safety reasoning enumerates
+-- the triggers it must drop and recreate around the wal_ops rebuild. If
+-- a future migration (or out-of-band patch) added a DELETE trigger on
+-- wal_steps / wal_op_deps the cascade below would silently fire it
+-- (data corruption, audit-table leak, or ABORT). Fail loudly here so
+-- whoever introduced the trigger updates this rebuild explicitly.
+--
+-- Idiom: SQLite's `RAISE()` only works inside a trigger body. To raise
+-- from top-level SQL we INSERT into a CHECK-constrained TEMP table; if
+-- the drift query returns any row, the CHECK fails with a message that
+-- carries the offending trigger name back to the caller.
+CREATE TEMP TABLE _mig0031_drift_guard (
+  msg TEXT NOT NULL CHECK (msg = 'ok')
+);
+INSERT INTO _mig0031_drift_guard (msg)
+  SELECT 'migration 0031: unexpected trigger on wal_steps: ' || name
+  FROM sqlite_schema
+  WHERE type = 'trigger'
+    AND tbl_name = 'wal_steps'
+    AND name NOT IN (
+      'wal_steps_state_transition',
+      'wal_steps_identity_immutable',
+      'wal_steps_no_delete'
+    );
+INSERT INTO _mig0031_drift_guard (msg)
+  SELECT 'migration 0031: unexpected trigger on wal_op_deps: ' || name
+  FROM sqlite_schema
+  WHERE type = 'trigger'
+    AND tbl_name = 'wal_op_deps'
+    AND name NOT IN (
+      'wal_op_deps_must_be_acyclic',
+      'wal_op_deps_immutable',
+      'wal_op_deps_no_delete'
+    );
+DROP TABLE _mig0031_drift_guard;
+
 -- Stage children before the cascade wipes them.
 CREATE TEMP TABLE _wal_steps_save AS SELECT * FROM wal_steps;
 CREATE TEMP TABLE _wal_op_deps_save AS SELECT * FROM wal_op_deps;

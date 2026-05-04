@@ -63,7 +63,14 @@ impl SqliteMemoryStore {
                     sql.push_str(" AND relation = ?");
                     params.push(Box::new(rel));
                 }
-                if !include_invalid {
+                // The "live now" filter applies ONLY when no as-of slice
+                // is requested. With an as-of predicate, the time-slice
+                // window itself is the source of truth: an edge that was
+                // valid at event-time T but later contradicted (invalid_at
+                // set) MUST still surface for as_of_event_time = T-or-earlier.
+                // Pre-fix this clause AND'd `invalid_at IS NULL` with the
+                // as-of predicate, silently hiding contradicted history.
+                if !include_invalid && as_event.is_none() && as_ingest.is_none() {
                     sql.push_str(" AND invalid_at IS NULL AND expired_at IS NULL");
                 }
                 if let Some(t) = as_event {

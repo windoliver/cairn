@@ -1114,3 +1114,152 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
         "wal_op_deps_no_delete trigger must be reinstated after migration 0031"
     );
 }
+
+/// Round-2 review fix: verifies the migration-0031 trigger drift
+/// pre-check fails loud rather than silently mutating audit state if a
+/// future migration adds an unrelated trigger to `wal_steps` or
+/// `wal_op_deps`. Pre-fix the rebuild would either silently fire the
+/// trigger during the cascade or replay rows through it during restore.
+#[test]
+fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
+    use cairn_store_sqlite::migrations::migrations;
+    use cairn_store_sqlite::vec_ext::register_vec0;
+
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+    conn.execute_batch("PRAGMA foreign_keys = ON;").expect("FK");
+    migrations()
+        .to_version(&mut conn, 23)
+        .expect("apply through 0030");
+
+    // Inject a foreign DELETE trigger on wal_steps before 0031 runs.
+    conn.execute_batch(
+        "CREATE TRIGGER wal_steps_audit_delete \
+         BEFORE DELETE ON wal_steps \
+         FOR EACH ROW BEGIN SELECT 1; END;",
+    )
+    .expect("seed unrelated trigger");
+
+    let res = migrations().to_version(&mut conn, 24);
+    let err = res.expect_err("migration 0031 must abort on unexpected trigger");
+    // The CHECK violation surfaces SQLite's CHECK error containing the
+    // offending trigger name — verify the diagnostic gets through.
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("CHECK") || msg.contains("constraint"),
+        "expected CHECK constraint failure, got: {msg}"
+    );
+}
+
+/// Round-2 review fix: confirms the bitemporal as-of contract — an edge
+/// that was valid from `valid_at` until later contradicted at `t_close`
+/// MUST surface for queries with `as_of_event_time` between those two
+/// points. Pre-fix the live-now predicate (`invalid_at IS NULL`) was
+/// AND'd with the as-of window, silently hiding contradicted history.
+#[tokio::test]
+async fn graph_edges_as_of_returns_invalidated_edges_in_their_window() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "E0").await;
+
+    // Edge live from t=100 → contradicted at t=200 (closed by new edge).
+    let live = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000E1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000E2"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Inferred,
+            confidence_score: 0.7,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed contradiction");
+
+    // Without as-of, include_invalidated=false → only the live (post-200) edge.
+    let now = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query now");
+    assert_eq!(now.len(), 1, "live-now must filter out closed E1");
+    assert!(now[0].invalid_at.is_none());
+
+    // As-of t=150 (within E1's [100, 200) window), include_invalidated=false →
+    // E1 must be returned even though it's now closed.
+    let then = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(150),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query t=150");
+    assert_eq!(
+        then.len(),
+        1,
+        "E1 must surface for as_of_event_time=150 (was valid from 100)"
+    );
+    assert_eq!(then[0].id, live.new_edge_id);
+    assert_eq!(then[0].invalid_at, Some(200));
+
+    // As-of t=99 → no edge has begun yet.
+    let before = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(99),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query t=99");
+    assert_eq!(before.len(), 0);
+
+    // As-of t=250 → only the post-contradiction edge.
+    let after = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(250),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("query t=250");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].valid_at, 200);
+}
