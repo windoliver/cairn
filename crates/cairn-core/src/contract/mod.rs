@@ -23,6 +23,7 @@ pub mod agent_provider;
 pub mod conformance;
 pub mod frontend_adapter;
 pub mod identity_registry;
+pub mod issuer_key_resolver;
 pub mod job_store;
 pub mod keystore;
 pub mod llm_provider;
