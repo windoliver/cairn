@@ -534,10 +534,15 @@ fn validate_subject_code(field: &'static str, value: &str) -> Result<(), Consent
     Ok(())
 }
 
-/// `scope` slot — closed class `[a-z0-9._:=,-]{1,256}`. Permits canonical
-/// scope tuple wire forms (`team:platform`, `private:agent=agt:foo:v1`,
-/// comma-joined keys). Bounded length, no whitespace, no quotes — user
-/// content cannot ride through.
+/// `scope` slot — closed class `[A-Za-z0-9._:=,-]{1,256}`. Permits
+/// canonical scope tuple wire forms (`team:platform`,
+/// `private:agent=agt:foo:v1`, comma-joined keys) including uppercase
+/// components such as ULID-shaped `session_id`s. The grammar mirrors
+/// [`crate::domain::scope::ScopeTuple::validate`]'s component grammar
+/// (`[A-Za-z0-9._:-]`) plus the `=` and `,` separators emitted by
+/// [`crate::domain::scope::ScopeTuple::canonical_wire`], so any
+/// validated `ScopeTuple` round-trips through this slot. Bounded length,
+/// no whitespace, no quotes — user content cannot ride through.
 fn validate_scope(value: &str) -> Result<(), ConsentEventError> {
     if value.is_empty() || value.len() > 256 {
         return Err(ConsentEventError::InvalidCode {
@@ -548,12 +553,12 @@ fn validate_scope(value: &str) -> Result<(), ConsentEventError> {
     if !value.bytes().all(|b| {
         matches!(
             b,
-            b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'=' | b',' | b'-'
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'=' | b',' | b'-'
         )
     }) {
         return Err(ConsentEventError::InvalidCode {
             field: "scope",
-            message: "chars must be in [a-z0-9._:=,-]".to_owned(),
+            message: "chars must be in [A-Za-z0-9._:=,-]".to_owned(),
         });
     }
     Ok(())
@@ -966,5 +971,24 @@ mod tests {
         event.op_id = None;
         let s = serde_json::to_string(&event).expect("ser");
         assert!(!s.contains("\"op_id\""), "{s}");
+    }
+
+    /// Pin the §6.5 grammar unification (Issue #253): a `ScopeTuple`
+    /// `canonical_wire` output containing uppercase ULID-shaped components
+    /// (e.g. `session_id=01HQZX9F5N...`) must be acceptable to
+    /// [`super::validate_scope`] so that records with such scopes can be
+    /// authorized through the consent journal.
+    #[test]
+    fn validate_scope_accepts_ulid_uppercase_session_id() {
+        // Mirrors a `canonical_wire` emitted by ScopeTuple {
+        //   tenant: "acme", session_id: "01HQZX9F5N0AB..." }.
+        super::validate_scope("session_id=01HQZX9F5N0ABCDEF,tenant=acme")
+            .expect("uppercase ULID-shaped session_id must validate");
+    }
+
+    #[test]
+    fn validate_scope_still_rejects_quotes_and_whitespace() {
+        assert!(super::validate_scope("\"a\"=b").is_err());
+        assert!(super::validate_scope("a=b ").is_err());
     }
 }

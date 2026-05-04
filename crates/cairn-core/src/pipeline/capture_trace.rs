@@ -170,6 +170,7 @@ pub fn project(
         signature: placeholder_signature(),
         tags: Vec::new(),
         extra_frontmatter: extra,
+        consent_model: None,
     })
 }
 

@@ -21,7 +21,14 @@ async fn upsert_then_get_returns_same_record() {
     let r = base();
     store.upsert(&r).await.expect("upsert");
     let got = store.get(&r.id).await.expect("get").expect("present");
-    assert_eq!(got, r);
+    // After persistence, consent_model carries the resolved value
+    // (the authoritative column), not the caller's `None` "store
+    // decides" sentinel. Stamp the expected value onto the input
+    // before equality to reflect the post-store canonical form
+    // (Issue #253: record_json must agree with the hot column).
+    let mut expected = r.clone();
+    expected.consent_model = Some(cairn_core::domain::consent_timeline::ConsentModel::LegacyEvent);
+    assert_eq!(got, expected);
 }
 
 #[tokio::test]

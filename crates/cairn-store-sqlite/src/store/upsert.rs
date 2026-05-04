@@ -43,9 +43,12 @@ enum EmbedOutcome {
 }
 
 /// Active-row tuple as read out of the `records` table:
-/// `(record_id, version, body_hash)`. Only the active row for a given
-/// `target_id` is ever returned (partial unique index `records_active_target_idx`).
-type PriorActive = (String, i64, String);
+/// `(record_id, version, body_hash, consent_model)`. Only the active
+/// row for a given `target_id` is ever returned (partial unique index
+/// `records_active_target_idx`). `consent_model` is preserved across
+/// supersession so a row stamped `'receipt_timeline'` by Phase-B (#255)
+/// does not silently revert to `'legacy_event'` on the next rewrite.
+type PriorActive = (String, i64, String, String);
 
 impl SqliteMemoryStore {
     /// Inherent upsert implementation; the trait method [`MemoryStore::upsert`]
@@ -201,26 +204,57 @@ pub(crate) fn upsert_in_tx(
     let prior = read_active(tx, record.target_id.as_str())?;
     let now_ms = current_unix_ms();
 
-    if let Some((prior_id, prior_version, prior_hash_str)) = prior.as_ref() {
+    // Consent model resolution (Issue #253):
+    //   On supersession: inherit the prior row's value.
+    //   On fresh insert: default to 'legacy_event'.
+    //
+    // `record.consent_model` is intentionally **ignored on write** —
+    // it is excluded from the signed record bytes (`#[serde(skip)]`),
+    // so accepting it here would let any caller flip §6.5 enforcement
+    // by re-submitting the same signed record with a different model.
+    // Round 9: trust-boundary bypass. Phase-B (#255) introduces a
+    // separate privileged transition API that derives the new model
+    // from trusted consent-timeline state inside the same transaction
+    // as the timeline append.
+    if let Some((prior_id, prior_version, prior_hash_str, prior_consent_model)) = prior.as_ref() {
+        // Strictly parse the prior row's consent_model — schema drift,
+        // manual SQL repair, or other corruption must fail closed
+        // rather than ride forward.
+        let _: cairn_core::domain::consent_timeline::ConsentModel =
+            parse_consent_model(prior_consent_model)?;
         let prior_hash = body_hash_from_str(prior_hash_str)?;
         if prior_hash == body_hash {
             return idempotent_outcome(record, prior_id, *prior_version, prior_hash);
         }
     }
 
-    let (version, prior_hash, new_record_id) = match prior.as_ref() {
-        Some((prior_id, prior_version, prior_hash_str)) => {
-            // Body changed: deactivate prior + mint a fresh PK for the new row.
-            tx.execute(
-                "UPDATE records SET active = 0, updated_at = ?1 \
-                  WHERE record_id = ?2",
-                params![now_ms, prior_id],
-            )?;
-            let next_version = next_version(*prior_version)?;
-            let prior_hash = body_hash_from_str(prior_hash_str)?;
-            (next_version, Some(prior_hash), Some(mint_record_id()?))
-        }
-        None => (1u32, None, None),
+    let (version, prior_hash, new_record_id, consent_model_to_persist) = if let Some((
+        prior_id,
+        prior_version,
+        prior_hash_str,
+        prior_consent_model,
+    )) = prior.as_ref()
+    {
+        // Body changed: deactivate prior + mint a fresh PK for the new row.
+        tx.execute(
+            "UPDATE records SET active = 0, updated_at = ?1 \
+              WHERE record_id = ?2",
+            params![now_ms, prior_id],
+        )?;
+        let next_version = next_version(*prior_version)?;
+        let prior_hash = body_hash_from_str(prior_hash_str)?;
+        // Inherit prior consent_model — only the privileged transition
+        // API (Phase-B / #255) can change it.
+        (
+            next_version,
+            Some(prior_hash),
+            Some(mint_record_id()?),
+            prior_consent_model.clone(),
+        )
+    } else {
+        // Fresh insert: always 'legacy_event' until #255's transition
+        // API stamps a different value via a dedicated path.
+        (1u32, None, None, "legacy_event".to_owned())
     };
 
     // `record_id` is the version-row PK; supersession requires a fresh one.
@@ -228,11 +262,26 @@ pub(crate) fn upsert_in_tx(
     // re-used)") explicitly permits the store to synthesize. The first
     // version of a `target_id` keeps the caller-provided id (matches
     // `target_id == id` for fresh records, brief §3).
+    //
+    // `consent_model` deliberately does NOT enter `record_json`
+    // (`#[serde(skip)]` on `MemoryRecord::consent_model`): the field
+    // carries store-side authorization metadata, not signed payload.
+    // Persisting it inside the canonical bytes would invalidate any
+    // signature computed before #253 landed. The hot column is the
+    // sole on-disk authority; reads re-hydrate the field from the
+    // column after JSON deserialize.
     let mut row_record = record.clone();
     if let Some(ref synthesized) = new_record_id {
         row_record.id = synthesized.clone();
     }
-    insert_row(tx, &row_record, version, now_ms, &body_hash)?;
+    insert_row(
+        tx,
+        &row_record,
+        version,
+        now_ms,
+        &body_hash,
+        &consent_model_to_persist,
+    )?;
 
     let outcome_id = new_record_id.unwrap_or_else(|| record.id.clone());
     Ok(UpsertOutcome {
@@ -249,7 +298,7 @@ pub(crate) fn upsert_in_tx(
 fn read_active(tx: &Transaction<'_>, target_id: &str) -> Result<Option<PriorActive>, StoreError> {
     let row = tx
         .query_row(
-            "SELECT record_id, version, body_hash \
+            "SELECT record_id, version, body_hash, consent_model \
                FROM records \
               WHERE target_id = ?1 AND active = 1 \
               LIMIT 1",
@@ -259,6 +308,7 @@ fn read_active(tx: &Transaction<'_>, target_id: &str) -> Result<Option<PriorActi
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
@@ -294,6 +344,31 @@ fn idempotent_outcome(
     })
 }
 
+/// Parse a stored `consent_model` string against the closed enum,
+/// rejecting anything else as `StoreError::Invariant`. Used on both
+/// the prior-row read path and the about-to-write path so schema drift
+/// / manual SQL corruption cannot silently downgrade to `legacy_event`
+/// on the next rewrite.
+pub(crate) fn parse_consent_model(
+    raw: &str,
+) -> Result<cairn_core::domain::consent_timeline::ConsentModel, StoreError> {
+    match raw {
+        "legacy_event" => Ok(cairn_core::domain::consent_timeline::ConsentModel::LegacyEvent),
+        "receipt_timeline" => {
+            Ok(cairn_core::domain::consent_timeline::ConsentModel::ReceiptTimeline)
+        }
+        other => Err(StoreError::Invariant {
+            what: format!(
+                "records.consent_model has unknown value `{other}`; \
+                 expected one of: legacy_event, receipt_timeline. \
+                 This indicates schema drift or manual SQL corruption \
+                 — refusing to rewrite the row to avoid a silent \
+                 downgrade of consent enforcement."
+            ),
+        }),
+    }
+}
+
 /// Compute the next version, returning typed errors for both the i64
 /// overflow on `+ 1` and the u32 narrowing.
 fn next_version(prior_version: i64) -> Result<u32, StoreError> {
@@ -315,17 +390,37 @@ fn insert_row(
     version: u32,
     now_ms: i64,
     body_hash: &BodyHash,
+    consent_model: &str,
 ) -> Result<(), StoreError> {
-    let row = ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, true, false)?;
+    // Reject anything outside the closed enum *before* projecting, so
+    // schema drift / manual SQL corruption cannot ride forward into a
+    // silently-downgraded `legacy_event` rewrite. This mirrors the
+    // strict parse in `upsert_in_tx` for prior rows.
+    let _: cairn_core::domain::consent_timeline::ConsentModel = parse_consent_model(consent_model)?;
+    let mut row =
+        ProjectedRow::from_record(record, version, now_ms, now_ms, body_hash, true, false)?;
+    // Caller-supplied consent_model overrides the Phase-A default in
+    // `from_record` so supersession preserves the prior row's value.
+    row.consent_model = match consent_model {
+        "receipt_timeline" => "receipt_timeline",
+        "legacy_event" => "legacy_event",
+        // Unreachable — parse_consent_model above already rejected
+        // anything outside the closed enum.
+        other => {
+            return Err(StoreError::Invariant {
+                what: format!("consent_model `{other}` survived parse_consent_model gate"),
+            });
+        }
+    };
     tx.execute(
         "INSERT INTO records ( \
             record_id, target_id, version, path, kind, class, visibility, \
             scope, actor_chain, body, body_hash, created_at, updated_at, \
             active, tombstoned, is_static, record_json, confidence, \
-            salience, target_id_explicit, tags_json \
+            salience, target_id_explicit, tags_json, consent_model \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21 \
+            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22 \
          )",
         params![
             row.record_id,
@@ -349,6 +444,7 @@ fn insert_row(
             row.salience,
             row.target_id_explicit,
             row.tags_json,
+            row.consent_model,
         ],
     )?;
     Ok(())
@@ -366,4 +462,288 @@ fn mint_record_id() -> Result<RecordId, StoreError> {
     RecordId::parse(raw.clone()).map_err(|e| StoreError::Invariant {
         what: format!("ulid produced invalid RecordId `{raw}`: {e}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::record::tests_export::sample_record;
+
+    use crate::open_in_memory;
+
+    /// Issue #253: supersession must preserve `consent_model`. Without
+    /// preservation, a row stamped `'receipt_timeline'` by Phase-B (#255)
+    /// would silently revert to `'legacy_event'` on the next
+    /// content-changing upsert — disabling §6.5 enforcement on the new
+    /// active version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_supersession_preserves_consent_model() {
+        let store = open_in_memory().await.expect("open in-memory store");
+
+        let mut r = sample_record();
+        r.body = "v1".to_owned();
+        let outcome1 = store.upsert(&r).await.expect("upsert v1");
+        assert!(outcome1.content_changed);
+
+        let conn = store
+            .require_conn("test.consent_model.preserve")
+            .expect("invariant: connected store")
+            .clone();
+
+        // Phase-B simulation: stamp the active row 'receipt_timeline' by
+        // direct SQL (Phase-A writers don't yet stamp). Stands in for the
+        // future ingest writer so we can prove the supersession path
+        // round-trips the column.
+        conn.call(|c| {
+            let n = c.execute(
+                "UPDATE records SET consent_model = 'receipt_timeline' WHERE active = 1",
+                [],
+            )?;
+            assert_eq!(n, 1, "expected one active row to stamp");
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("stamp receipt_timeline");
+
+        // Content-changing upsert that supersedes.
+        r.body = "v2 — different body".to_owned();
+        let outcome2 = store.upsert(&r).await.expect("upsert v2");
+        assert!(outcome2.content_changed);
+        assert_eq!(outcome2.version, 2);
+
+        // New active row must carry over 'receipt_timeline', not revert
+        // to the migration default 'legacy_event'.
+        let active_consent_model: String = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT consent_model FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query active consent_model");
+        assert_eq!(
+            active_consent_model, "receipt_timeline",
+            "supersession must preserve consent_model from prior active row",
+        );
+    }
+
+    /// First-version inserts (no prior row) explicitly persist
+    /// `'legacy_event'` rather than relying on the migration default.
+    /// Pins the Phase-A behavior; Phase-B (#255) will source this from
+    /// the record itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_first_version_writes_legacy_event_explicitly() {
+        let store = open_in_memory().await.expect("open in-memory store");
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert");
+
+        let conn = store
+            .require_conn("test.consent_model.first_version")
+            .expect("invariant: connected store")
+            .clone();
+        let model: String = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT consent_model FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query");
+        assert_eq!(model, "legacy_event");
+    }
+
+    /// Round 8 (signature safety): `consent_model` is store-side
+    /// authorization metadata, NOT signed payload. Persisting it inside
+    /// `record_json` would silently invalidate any signature computed
+    /// over the canonical bytes. Pin the contract: the column carries
+    /// the value, JSON does not. Reads (`get`/`list`) re-hydrate the
+    /// field from the column after JSON deserialize, so callers see a
+    /// consistent post-store record without paying a signature break.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_keeps_consent_model_out_of_record_json() {
+        use cairn_core::contract::memory_store::MemoryStore;
+        use cairn_core::domain::consent_timeline::ConsentModel;
+
+        let store = open_in_memory().await.expect("open in-memory store");
+
+        // Round 9: ordinary upsert ignores caller-supplied
+        // consent_model. Use direct SQL to simulate Phase-B's
+        // privileged transition API stamping receipt_timeline.
+        let r = sample_record();
+        let _ = store.upsert(&r).await.expect("upsert");
+
+        let conn = store
+            .require_conn("test.consent_model.json_excluded")
+            .expect("invariant: connected store")
+            .clone();
+        conn.call(|c| {
+            c.execute(
+                "UPDATE records SET consent_model = 'receipt_timeline' WHERE active = 1",
+                [],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("stamp");
+
+        let (col, json_str): (String, String) = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT consent_model, record_json FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query");
+        assert_eq!(col, "receipt_timeline", "hot column carries the value");
+        assert!(
+            !json_str.contains("consent_model"),
+            "record_json must NOT include consent_model (signature-safety): {json_str}"
+        );
+        // And the read path stamps the column value back onto the
+        // hydrated record so callers see the authoritative model.
+        let got = store.get(&r.id).await.expect("get").expect("present");
+        assert_eq!(got.consent_model, Some(ConsentModel::ReceiptTimeline));
+    }
+
+    /// Round 7: a corrupted `consent_model` value in the prior active
+    /// row must surface as `StoreError::Invariant`, not be silently
+    /// rewritten to `legacy_event`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_rejects_corrupt_prior_consent_model() {
+        use cairn_core::contract::memory_store::MemoryStore;
+
+        let store = open_in_memory().await.expect("open in-memory store");
+        let mut r = sample_record();
+        r.body = "v1".to_owned();
+        store.upsert(&r).await.expect("upsert v1");
+
+        // Bypass the CHECK constraint with PRAGMA writable_schema =
+        // OFF; we can't actually inject an unknown enum into a CHECK'd
+        // column, so simulate corruption by dropping the CHECK first.
+        // (This mirrors what schema drift / manual SQL repair would do
+        // before subsequently rewriting the row.)
+        let conn = store
+            .require_conn("test.consent_model.corrupt_prior")
+            .expect("invariant: connected store")
+            .clone();
+        conn.call(|c| {
+            // Disable the CHECK by recreating the column without it,
+            // then write a bogus value. SQLite ALTER TABLE cannot drop
+            // a CHECK in-place without a full table rewrite, so we use
+            // sqlite_master rewrite under writable_schema.
+            c.execute("PRAGMA writable_schema = ON", [])?;
+            c.execute(
+                "UPDATE sqlite_master SET sql = REPLACE(sql, \
+                 'CHECK (consent_model IN (''legacy_event'', ''receipt_timeline''))', '') \
+                 WHERE type = 'table' AND name = 'records'",
+                [],
+            )?;
+            c.execute("PRAGMA writable_schema = OFF", [])?;
+            // Force the schema change to take effect on this conn.
+            c.execute_batch("VACUUM")?;
+            // Now corrupt the active row.
+            let n = c.execute(
+                "UPDATE records SET consent_model = 'banana' WHERE active = 1",
+                [],
+            )?;
+            assert_eq!(n, 1, "expected one active row to corrupt");
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("inject corruption");
+
+        // Body-changing upsert should now fail rather than silently
+        // rewriting the corrupt row to legacy_event.
+        r.body = "v2".to_owned();
+        let res = store.upsert(&r).await;
+        assert!(
+            res.is_err(),
+            "upsert against corrupt prior consent_model must fail; got {res:?}",
+        );
+    }
+
+    /// Round 9 (trust boundary): an ordinary upsert must NOT let a
+    /// caller flip the `consent_model` gate. The field sits outside the
+    /// signed bytes, so accepting `record.consent_model = Some(...)`
+    /// would let anyone resubmit the same signed record with a
+    /// different model and downgrade enforcement. The store ignores
+    /// caller-supplied intent on write — transitions go through the
+    /// Phase-B (#255) privileged transition API.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_ignores_caller_supplied_consent_model_on_write() {
+        use cairn_core::contract::memory_store::MemoryStore;
+        use cairn_core::domain::consent_timeline::ConsentModel;
+
+        let store = open_in_memory().await.expect("open in-memory store");
+
+        // v1: caller tries to stamp ReceiptTimeline. The store must
+        // ignore this and persist legacy_event (the fresh-insert
+        // default).
+        let mut r = sample_record();
+        r.consent_model = Some(ConsentModel::ReceiptTimeline);
+        store.upsert(&r).await.expect("upsert v1");
+
+        let conn = store
+            .require_conn("test.consent_model.ignored_on_write")
+            .expect("invariant: connected store")
+            .clone();
+        let model_after_v1: String = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT consent_model FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query v1");
+        assert_eq!(
+            model_after_v1, "legacy_event",
+            "caller-supplied consent_model must be ignored on fresh insert",
+        );
+
+        // Stamp the row receipt_timeline via direct SQL (simulating
+        // Phase-B's privileged transition API).
+        conn.call(|c| {
+            c.execute(
+                "UPDATE records SET consent_model = 'receipt_timeline' WHERE active = 1",
+                [],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("stamp via privileged path");
+
+        // v2: caller tries to flip back to legacy_event via ordinary
+        // upsert. Must be ignored — supersession inherits prior.
+        r.body = "v2 body".to_owned();
+        r.consent_model = Some(ConsentModel::LegacyEvent);
+        store.upsert(&r).await.expect("upsert v2");
+
+        let model_after_v2: String = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT consent_model FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query v2");
+        assert_eq!(
+            model_after_v2, "receipt_timeline",
+            "supersession must inherit prior consent_model, ignoring caller downgrade",
+        );
+    }
 }

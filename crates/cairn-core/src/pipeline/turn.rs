@@ -153,6 +153,7 @@ pub fn summarize_turn(
         signature,
         tags: Vec::new(),
         extra_frontmatter: extra,
+        consent_model: None,
     })
 }
 

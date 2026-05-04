@@ -179,6 +179,29 @@ pub struct MemoryRecord {
     /// re-emission via `BTreeMap`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_frontmatter: BTreeMap<String, serde_json::Value>,
+    /// Per-record consent storage model (Issue #253, brief §14).
+    ///
+    /// **Read-only metadata, ignored on `MemoryStore::upsert`.**
+    ///
+    /// Excluded from the canonical record bytes (`#[serde(skip)]`):
+    /// the field carries store-side authorization metadata, not signed
+    /// payload. Because it sits outside the signature, accepting it
+    /// from ordinary upserts would let any caller flip §6.5
+    /// enforcement by re-submitting the same signed record with a
+    /// different model — a trust-boundary bypass. The store therefore
+    /// **ignores any value the caller supplies on write**: fresh
+    /// inserts get `legacy_event`; supersessions inherit the prior
+    /// active row's column value.
+    ///
+    /// Transitions between models go through a separate privileged
+    /// API in Phase-B (#255) that derives the new value from trusted
+    /// `consent_timeline` state inside the same transaction as the
+    /// timeline append.
+    ///
+    /// On read: the adapter populates `Some(stored_value)` from the
+    /// `records.consent_model` hot column.
+    #[serde(skip)]
+    pub consent_model: Option<crate::domain::consent_timeline::ConsentModel>,
 }
 
 impl MemoryRecord {
@@ -789,6 +812,7 @@ pub mod tests_export {
                 .expect("valid"),
             tags: vec!["pref".to_owned()],
             extra_frontmatter: BTreeMap::new(),
+            consent_model: None,
         }
     }
 }

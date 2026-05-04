@@ -17,9 +17,12 @@
 //! same accessor here keeps the column ↔ enum mapping in lock-step without
 //! re-stating the wire spelling in the `SQLite` adapter.
 
+use std::collections::HashMap;
+
 use cairn_core::contract::memory_store::{
     IndexStats, ListArgs, ListCursor, ListPage, RecordVersion, TombstoneReason,
 };
+use cairn_core::domain::consent_timeline::ConsentModel;
 use cairn_core::domain::{MemoryRecord, RecordId, TargetId};
 use rusqlite::params;
 use tracing::instrument;
@@ -59,23 +62,32 @@ impl SqliteMemoryStore {
 
         let record = conn
             .call(move |c| {
-                let json: Option<String> = c
+                let row: Option<(String, String)> = c
                     .query_row(
-                        "SELECT record_json FROM records \
+                        "SELECT record_json, consent_model FROM records \
                           WHERE record_id = ?1 AND tombstoned = 0",
                         params![key],
-                        |row| row.get::<_, String>(0),
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                     )
                     .map(Some)
                     .or_else(|e| match e {
                         rusqlite::Error::QueryReturnedNoRows => Ok(None),
                         other => Err(other),
                     })?;
-                match json {
+                match row {
                     None => Ok::<_, tokio_rusqlite::Error>(None),
-                    Some(s) => record_from_json(&s)
-                        .map(Some)
-                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e))),
+                    Some((json, consent_model)) => {
+                        let mut r = record_from_json(&json)
+                            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                        // Hydrate consent_model from the hot column —
+                        // it's `#[serde(skip)]` on MemoryRecord so it
+                        // doesn't ride through record_json (Issue #253).
+                        r.consent_model = Some(
+                            crate::store::upsert::parse_consent_model(&consent_model)
+                                .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?,
+                        );
+                        Ok(Some(r))
+                    }
                 }
             })
             .await?;
@@ -134,6 +146,7 @@ impl SqliteMemoryStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)?,
                             row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -141,12 +154,16 @@ impl SqliteMemoryStore {
                 let has_more = rows.len() > limit;
                 let mut records = Vec::with_capacity(rows.len().min(limit));
                 let mut last: Option<(i64, String)> = None;
-                for (i, (json, updated_at, rid)) in rows.into_iter().enumerate() {
+                for (i, (json, updated_at, rid, consent_model)) in rows.into_iter().enumerate() {
                     if i >= limit {
                         break;
                     }
-                    let r = record_from_json(&json)
+                    let mut r = record_from_json(&json)
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    r.consent_model = Some(
+                        crate::store::upsert::parse_consent_model(&consent_model)
+                            .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?,
+                    );
                     records.push(r);
                     last = Some((updated_at, rid));
                 }
@@ -279,6 +296,59 @@ impl SqliteMemoryStore {
             .await?;
         Ok(stats)
     }
+
+    /// Inherent `list_consent_models` implementation; the trait method
+    /// [`MemoryStore::list_consent_models`] guards `self.conn` then
+    /// delegates here. Returns one entry per active, non-tombstoned record
+    /// keyed by `record_id`, with the `consent_model` column projected to
+    /// the typed [`ConsentModel`] enum.
+    ///
+    /// [`MemoryStore::list_consent_models`]: cairn_core::contract::memory_store::MemoryStore::list_consent_models
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Worker`] / [`StoreError::Sqlite`] for SQL
+    /// failures, or [`StoreError::Invariant`] when a stored `record_id` or
+    /// `consent_model` value is unrecognised (corruption / schema drift).
+    #[instrument(skip(self), err, fields(verb = "list_consent_models"))]
+    pub(crate) async fn do_list_consent_models(
+        &self,
+    ) -> Result<HashMap<RecordId, ConsentModel>, StoreError> {
+        let conn = self.require_conn("list_consent_models")?.clone();
+        let out = conn
+            .call(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT record_id, consent_model FROM records \
+                      WHERE active = 1 AND tombstoned = 0",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let mut out = HashMap::with_capacity(rows.len());
+                for (id_s, model_s) in rows {
+                    let id = record_id_from_str(&id_s)
+                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    let model = match model_s.as_str() {
+                        "legacy_event" => ConsentModel::LegacyEvent,
+                        "receipt_timeline" => ConsentModel::ReceiptTimeline,
+                        other => {
+                            return Err(tokio_rusqlite::Error::Other(Box::new(
+                                StoreError::Invariant {
+                                    what: format!("records.consent_model unknown variant: {other}"),
+                                },
+                            )));
+                        }
+                    };
+                    out.insert(id, model);
+                }
+                Ok::<_, tokio_rusqlite::Error>(out)
+            })
+            .await?;
+        Ok(out)
+    }
 }
 
 /// Tuple shape returned by the `versions` `query_map` row mapper. Pulled
@@ -337,7 +407,7 @@ fn build_list_query(
     limit: usize,
 ) -> Result<(String, Vec<rusqlite::types::Value>), StoreError> {
     let mut sql = String::from(
-        "SELECT record_json, updated_at, record_id FROM records \
+        "SELECT record_json, updated_at, record_id, consent_model FROM records \
           WHERE active = 1 AND tombstoned = 0",
     );
     let mut p: Vec<rusqlite::types::Value> = Vec::new();
@@ -371,4 +441,65 @@ fn build_list_query(
     })?;
     p.push(bound.into());
     Ok((sql, p))
+}
+
+#[cfg(test)]
+mod tests {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::MemoryRecord;
+
+    use crate::open_in_memory;
+
+    fn base() -> MemoryRecord {
+        cairn_core::domain::record::tests_export::sample_record()
+    }
+
+    #[tokio::test]
+    async fn list_consent_models_returns_one_entry_per_active_record_with_correct_tag() {
+        let store = open_in_memory().await.expect("open in-memory store");
+
+        // Seed two active rows; both default to legacy_event under 0022.
+        let r1 = base();
+        let mut r2 = base();
+        r2.id = cairn_core::domain::RecordId::parse("01HQZX9F5N0000000000000002")
+            .expect("invariant: valid ulid");
+        r2.target_id = cairn_core::domain::TargetId::parse("01HQZX9F5N0000000000000002")
+            .expect("invariant: valid ulid for target_id");
+
+        store.upsert(&r1).await.expect("upsert r1");
+        store.upsert(&r2).await.expect("upsert r2");
+
+        // Flip r2's consent_model to receipt_timeline via raw SQL.
+        let conn = store
+            .require_conn("test.flip")
+            .expect("invariant: connected store")
+            .clone();
+        let r2_id = r2.id.as_str().to_owned();
+        conn.call(move |c| {
+            let n = c.execute(
+                "UPDATE records SET consent_model = 'receipt_timeline' \
+                  WHERE record_id = ?1",
+                rusqlite::params![r2_id],
+            )?;
+            assert_eq!(n, 1, "expected exactly one row flipped");
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("flip consent_model");
+
+        let map = super::SqliteMemoryStore::do_list_consent_models(&store)
+            .await
+            .expect("list_consent_models");
+        assert_eq!(map.len(), 2, "one entry per active record");
+        assert_eq!(
+            map.get(&r1.id),
+            Some(&super::ConsentModel::LegacyEvent),
+            "r1 stays at the migration default",
+        );
+        assert_eq!(
+            map.get(&r2.id),
+            Some(&super::ConsentModel::ReceiptTimeline),
+            "r2 reflects the flipped column value",
+        );
+    }
 }

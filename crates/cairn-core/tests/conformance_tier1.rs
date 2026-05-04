@@ -27,7 +27,7 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 2
+minor = 3
 patch = 0
 
 [contract_version_range.max_exclusive]
@@ -57,6 +57,7 @@ impl MemoryStore for StubStore {
             vector: false,
             graph_edges: false,
             transactions: false,
+            per_record_consent_model: false,
         };
         &CAPS
     }
