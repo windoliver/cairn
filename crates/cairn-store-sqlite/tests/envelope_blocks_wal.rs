@@ -119,7 +119,7 @@ async fn tampered_signature_blocks_verify() {
         .expect("resolve_issuer");
 
     let before = identity_wal_count(&reg);
-    let result = verifier.verify(intent, &resolved);
+    let result = verifier.verify(intent, resolved);
     let after = identity_wal_count(&reg);
 
     assert!(
@@ -148,7 +148,7 @@ async fn expired_intent_blocks_verify() {
         .expect("resolve_issuer");
 
     let before = identity_wal_count(&reg);
-    let result = verifier.verify(intent, &resolved);
+    let result = verifier.verify(intent, resolved);
     let after = identity_wal_count(&reg);
 
     assert!(
@@ -179,7 +179,7 @@ async fn scope_denied_blocks_verify() {
         .expect("resolve_issuer");
 
     let before = identity_wal_count(&reg);
-    let result = verifier.verify(intent, &resolved);
+    let result = verifier.verify(intent, resolved);
     let after = identity_wal_count(&reg);
 
     assert!(

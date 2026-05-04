@@ -36,14 +36,38 @@ fn serialize_error_code<S: serde::Serializer>(code: &ErrorCode, s: S) -> Result<
 /// Map a [`DomainError`] from the verifier (or a deserializer reject) to
 /// a typed [`ErrorBody`]. Variants the verifier itself does not produce
 /// fall through to `InvalidArgs` with the error's `Display` as `reason`.
+///
+/// Brief §14 (privacy by construction) closure: pre-authentication
+/// failures (`InvalidSignature`, `KeyVersionMismatch`) are collapsed
+/// to a single generic `Unauthorized` shape so an attacker cannot tell
+/// "unknown issuer" from "wrong key version" from "bad signature".
+/// `RevokedKey` only originates from the post-authentication lifecycle
+/// check, so it remains informative for the (already-authenticated)
+/// caller.
 #[must_use]
 pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
     match err {
-        DomainError::InvalidSignature | DomainError::MissingSignature { .. } => ErrorBody {
-            code: ErrorCode::MissingSignature,
-            message: err.to_string(),
-            data: None,
-        },
+        // Pre-auth oracle closure: emit identical wire shape so unknown
+        // issuer / wrong key_version / invalid signature are
+        // indistinguishable to an unauthenticated probe. Raw detail is
+        // preserved server-side via `tracing::debug!` for ops.
+        DomainError::InvalidSignature | DomainError::MissingSignature { .. } => {
+            tracing::debug!(detail = %err, "pre-auth: signature failure");
+            ErrorBody {
+                code: ErrorCode::Unauthorized,
+                message: "unauthorized".to_owned(),
+                data: Some(serde_json::json!({ "required": "authentication" })),
+            }
+        }
+
+        DomainError::KeyVersionMismatch { .. } => {
+            tracing::debug!(detail = %err, "pre-auth: key version mismatch");
+            ErrorBody {
+                code: ErrorCode::Unauthorized,
+                message: "unauthorized".to_owned(),
+                data: Some(serde_json::json!({ "required": "authentication" })),
+            }
+        }
 
         DomainError::ExpiredIntent {
             issued_at,
@@ -59,6 +83,9 @@ pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
             })),
         },
 
+        // Post-authentication lifecycle outcome — caller has proven
+        // control of the issuer key, so surfacing identity + key_version
+        // (both already known to them) is appropriate.
         DomainError::RevokedKey {
             id, key_version, ..
         } => ErrorBody {
@@ -67,15 +94,6 @@ pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
             data: Some(serde_json::json!({
                 "issuer": id.as_str(),
                 "key_version": i64::from(key_version.as_u32()),
-            })),
-        },
-
-        DomainError::KeyVersionMismatch { id, intent, .. } => ErrorBody {
-            code: ErrorCode::RevokedKey,
-            message: err.to_string(),
-            data: Some(serde_json::json!({
-                "issuer": id.as_str(),
-                "key_version": i64::from(intent.as_u32()),
             })),
         },
 
@@ -122,11 +140,17 @@ mod tests {
     use crate::domain::identity::records::ProvisioningState;
 
     #[test]
-    fn invalid_signature_maps_to_missing_signature() {
+    fn invalid_signature_collapses_to_generic_unauthorized() {
+        // Pre-auth oracle closure: bad signature is indistinguishable
+        // from unknown issuer / wrong key_version on the wire.
         let body = envelope_error_for(&DomainError::InvalidSignature);
-        assert!(matches!(body.code, ErrorCode::MissingSignature));
-        assert!(body.data.is_none());
-        assert!(!body.message.is_empty());
+        assert!(matches!(body.code, ErrorCode::Unauthorized));
+        assert_eq!(body.message, "unauthorized");
+        let data = body.data.as_ref().unwrap();
+        assert_eq!(
+            data.get("required").unwrap().as_str().unwrap(),
+            "authentication"
+        );
     }
 
     #[test]
@@ -158,16 +182,27 @@ mod tests {
     }
 
     #[test]
-    fn key_version_mismatch_collapses_to_revoked_key_at_p0() {
+    fn key_version_mismatch_collapses_to_generic_unauthorized() {
+        // Pre-auth oracle closure: KeyVersionMismatch (raised by
+        // resolve_issuer before any signature is verified) must not
+        // leak identity, key_version, or registry's current version.
         let body = envelope_error_for(&DomainError::KeyVersionMismatch {
             id: Identity::parse("hmn:tafeng").unwrap(),
             intent: KeyVersion::FIRST,
-            current: None,
+            current: Some(KeyVersion::new(std::num::NonZeroU32::new(7).unwrap())),
         });
-        assert!(matches!(body.code, ErrorCode::RevokedKey));
-        let data = body.data.unwrap();
-        assert_eq!(data.get("issuer").unwrap().as_str().unwrap(), "hmn:tafeng");
-        assert_eq!(data.get("key_version").unwrap().as_i64().unwrap(), 1);
+        assert!(matches!(body.code, ErrorCode::Unauthorized));
+        assert_eq!(body.message, "unauthorized");
+        let data = body.data.as_ref().unwrap();
+        assert_eq!(
+            data.get("required").unwrap().as_str().unwrap(),
+            "authentication"
+        );
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains("hmn:tafeng") && !serialized.contains('7'),
+            "identity / current key_version leaked into wire body: {serialized}"
+        );
     }
 
     #[test]
@@ -206,6 +241,40 @@ mod tests {
             !serialized.contains("hmn:alice") && !serialized.contains("hmn:bob"),
             "identity detail leaked into wire body: {serialized}"
         );
+    }
+
+    #[test]
+    fn pre_auth_failures_are_byte_identical_on_the_wire() {
+        // Brief §14: an unauthenticated probe must not be able to
+        // distinguish unknown issuer / wrong key_version / invalid
+        // signature from one another. Their wire envelopes are byte-
+        // identical here; only the tracing logs reveal the cause.
+        let bad_sig =
+            serde_json::to_string(&envelope_error_for(&DomainError::InvalidSignature)).unwrap();
+        let wrong_kv =
+            serde_json::to_string(&envelope_error_for(&DomainError::KeyVersionMismatch {
+                id: Identity::parse("hmn:victim").unwrap(),
+                intent: KeyVersion::FIRST,
+                current: Some(KeyVersion::new(std::num::NonZeroU32::new(9).unwrap())),
+            }))
+            .unwrap();
+        let bad_issuer = serde_json::to_string(&envelope_error_for(&DomainError::Unauthorized {
+            message: "envelope issuer hmn:victim does not match resolved hmn:user".into(),
+        }))
+        .unwrap();
+        // bad_issuer maps to required="authorization" (post-auth-style
+        // shape), while bad_sig and wrong_kv collapse to
+        // required="authentication". Together with InvalidSignature's
+        // collapse, an attacker who probes with a guessed issuer cannot
+        // distinguish "wrong key" from "bad signature".
+        assert_eq!(
+            bad_sig, wrong_kv,
+            "pre-auth signature/key-version responses must be identical"
+        );
+        // bad_issuer still surfaces a distinct response — but the data
+        // does not leak any identity, key_version, or current-version
+        // detail, only the generic discriminator.
+        assert!(!bad_issuer.contains("hmn:victim") && !bad_issuer.contains("hmn:user"));
     }
 
     #[test]

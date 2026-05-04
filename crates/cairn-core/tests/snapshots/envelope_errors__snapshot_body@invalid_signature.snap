@@ -3,6 +3,9 @@ source: crates/cairn-core/tests/envelope_errors.rs
 expression: body
 ---
 {
-  "code": "MissingSignature",
-  "message": "signature: cryptographic verification failed"
+  "code": "Unauthorized",
+  "message": "unauthorized",
+  "data": {
+    "required": "authentication"
+  }
 }

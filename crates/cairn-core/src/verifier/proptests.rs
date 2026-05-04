@@ -103,7 +103,7 @@ proptest! {
         }
 
         let verifier = EnvelopeVerifier::new(&policy, &clock);
-        let result = verifier.verify(tweaked, &resolved);
+        let result = verifier.verify(tweaked, resolved);
         // The mutation may also trigger ScopeDenied (workspace/tenant
         // change) — both are valid rejection reasons.
         let rejected = matches!(

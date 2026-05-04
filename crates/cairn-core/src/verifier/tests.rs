@@ -93,7 +93,7 @@ fn accepts_valid(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let verified = verifier.verify(intent, &resolved).expect("valid envelope");
+    let verified = verifier.verify(intent, resolved).expect("valid envelope");
     assert_eq!(verified.as_inner().issuer.0, ISSUER_WIRE);
 }
 
@@ -113,7 +113,7 @@ fn rejects_tampered_signature(signing_key: SigningKey, policy: ScopePolicy, cloc
     intent.signature = common::Ed25519Signature(format!("ed25519:{mutated}"));
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -123,7 +123,7 @@ fn rejects_tampered_payload(signing_key: SigningKey, policy: ScopePolicy, clock:
     intent.scope.entity = "different".into();
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -134,7 +134,7 @@ fn rejects_expired(signing_key: SigningKey, policy: ScopePolicy) {
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::ExpiredIntent { .. }));
 }
 
@@ -145,7 +145,7 @@ fn rejects_pre_issued(signing_key: SigningKey, policy: ScopePolicy) {
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::ExpiredIntent { .. }));
 }
 
@@ -159,7 +159,7 @@ fn rejects_revoked(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClo
         ProvisioningState::Revoked,
     );
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(
         err,
         DomainError::RevokedKey {
@@ -179,7 +179,7 @@ fn rejects_pending(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClo
         ProvisioningState::Pending,
     );
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(
         err,
         DomainError::RevokedKey {
@@ -195,7 +195,7 @@ fn rejects_scope_tenant(signing_key: SigningKey, clock: FixedClock) {
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     let DomainError::ScopeDenied { message } = err else {
         panic!("expected ScopeDenied, got {err:?}");
     };
@@ -208,7 +208,7 @@ fn rejects_scope_workspace(signing_key: SigningKey, clock: FixedClock) {
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     let DomainError::ScopeDenied { message } = err else {
         panic!("expected ScopeDenied, got {err:?}");
     };
@@ -223,7 +223,7 @@ fn rejects_scope_tier(signing_key: SigningKey, clock: FixedClock) {
     let intent = sign(&signing_key, unsigned_intent());
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     let DomainError::ScopeDenied { message } = err else {
         panic!("expected ScopeDenied, got {err:?}");
     };
@@ -240,7 +240,7 @@ fn rejects_issuer_mismatch(signing_key: SigningKey, policy: ScopePolicy, clock: 
         ProvisioningState::Active,
     );
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::Unauthorized { .. }));
 }
 
@@ -258,7 +258,7 @@ fn rejects_invalid_wire_shape_both_sequence_and_challenge(
     let intent = sign(&signing_key, intent); // sequence Some + server_challenge Some
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -274,7 +274,7 @@ fn rejects_invalid_wire_shape_neither_sequence_nor_challenge(
     let intent = sign(&signing_key, intent);
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -307,7 +307,7 @@ fn rejects_invalid_wire_shape_oversized_chain_parents(
     let intent = sign(&signing_key, intent);
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -322,7 +322,7 @@ fn rejects_invalid_wire_shape_malformed_target_hash(
     let intent = sign(&signing_key, intent);
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -337,7 +337,7 @@ fn rejects_invalid_wire_shape_empty_scope_entity(
     let intent = sign(&signing_key, intent);
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -354,7 +354,7 @@ fn rejects_invalid_wire_shape_sequence_above_safe_integer(
     let intent = sign(&signing_key, intent);
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::InvalidSignature));
 }
 
@@ -379,7 +379,7 @@ fn signature_check_runs_before_scope(signing_key: SigningKey, clock: FixedClock)
     intent.signature = common::Ed25519Signature(format!("ed25519:{mutated}"));
     let resolved = resolved_active(&signing_key);
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(
         matches!(err, DomainError::InvalidSignature),
         "expected InvalidSignature (authn-first), got {err:?}"
@@ -396,6 +396,6 @@ fn rejects_wrong_key_version(signing_key: SigningKey, policy: ScopePolicy, clock
         ProvisioningState::Active,
     );
     let verifier = EnvelopeVerifier::new(&policy, &clock);
-    let err = verifier.verify(intent, &resolved).unwrap_err();
+    let err = verifier.verify(intent, resolved).unwrap_err();
     assert!(matches!(err, DomainError::Unauthorized { .. }));
 }

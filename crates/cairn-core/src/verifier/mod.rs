@@ -59,6 +59,12 @@ impl<'a> EnvelopeVerifier<'a> {
     /// Verify a [`SignedIntent`] against the resolved issuer key + the
     /// vault's scope policy and the wall-clock window.
     ///
+    /// `resolved` is consumed by value: the snapshot is single-use, by
+    /// design, to make the per-envelope freshness contract on
+    /// [`ResolvedIssuer`] hard to misuse — a caller cannot reuse the
+    /// snapshot across envelopes without explicitly re-resolving from
+    /// the registry.
+    ///
     /// # Errors
     /// One of [`DomainError::Unauthorized`], [`DomainError::RevokedKey`],
     /// [`DomainError::ExpiredIntent`], [`DomainError::ScopeDenied`],
@@ -72,7 +78,7 @@ impl<'a> EnvelopeVerifier<'a> {
     pub fn verify(
         &self,
         intent: SignedIntent,
-        resolved: &ResolvedIssuer,
+        resolved: ResolvedIssuer,
     ) -> Result<VerifiedSignedIntent, DomainError> {
         // Full wire-shape validation: in-process callers can construct a
         // `SignedIntent` directly, bypassing the IDL's
@@ -91,13 +97,13 @@ impl<'a> EnvelopeVerifier<'a> {
         // matters — running scope/lifecycle/expiry first would let an
         // unauthenticated caller observe policy/key-rotation detail
         // through error-envelope `data` payloads (brief §14).
-        Self::check_issuer_match(&intent, resolved)?;
-        Self::check_key_version(&intent, resolved)?;
-        Self::check_signature(&intent, resolved)?;
+        Self::check_issuer_match(&intent, &resolved)?;
+        Self::check_key_version(&intent, &resolved)?;
+        Self::check_signature(&intent, &resolved)?;
 
         // Authz: only after the caller has proven control of the issuer
         // key do we surface lifecycle/expiry/scope detail.
-        Self::check_lifecycle(resolved)?;
+        Self::check_lifecycle(&resolved)?;
         self.check_expiry(&intent)?;
         self.check_scope(&intent)?;
         Ok(<Self as SignedIntentVerifier>::__from_verified(
