@@ -41,9 +41,7 @@ const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
 // first. SQL body unchanged.
 const M0023_TRACE_LINKS: &str = include_str!("sql/0023_trace_links.sql");
 const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
-// Issue #253 (consent receipt timeline) — renumbered onto 0031..0040
-// during the rebase onto main, which had already taken 0022 (record
-// vectors) and 0030 (records_fts_weighted).
+// Issue #253 (consent receipt timeline) — main shipped 0031..0040.
 const M0031_RECORDS_CONSENT_MODEL: &str = include_str!("sql/0031_records_consent_model.sql");
 const M0032_CONSENT_TIMELINE: &str = include_str!("sql/0032_consent_timeline.sql");
 const M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE: &str =
@@ -62,6 +60,15 @@ const M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS: &str =
     include_str!("sql/0039_consent_timeline_audit_legacy_invariants.sql");
 const M0040_CONSENT_TIMELINE_SCOPE_CANONICAL: &str =
     include_str!("sql/0040_consent_timeline_scope_canonical.sql");
+// Issue #186 (bitemporal KG substrate) — renumbered onto 0041..0045
+// during the rebase onto main, which had already taken 0031..0040 for
+// the consent receipt timeline.
+const M0041_WAL_KIND_WIDENING: &str = include_str!("sql/0041_wal_kind_widening.sql");
+const M0042_ENTITY_NODES: &str = include_str!("sql/0042_entity_nodes.sql");
+const M0043_ENTITY_EDGES: &str = include_str!("sql/0043_entity_edges.sql");
+const M0044_ENTITY_EPISODES: &str = include_str!("sql/0044_entity_episodes.sql");
+const M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
+    include_str!("sql/0045_entity_edges_no_overlap_trigger.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -176,6 +183,15 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0040_consent_timeline_scope_canonical",
         M0040_CONSENT_TIMELINE_SCOPE_CANONICAL,
     ),
+    (41, "0041_wal_kind_widening", M0041_WAL_KIND_WIDENING),
+    (42, "0042_entity_nodes", M0042_ENTITY_NODES),
+    (43, "0043_entity_edges", M0043_ENTITY_EDGES),
+    (44, "0044_entity_episodes", M0044_ENTITY_EPISODES),
+    (
+        45,
+        "0045_entity_edges_no_overlap_trigger",
+        M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -217,5 +233,10 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS),
         M::up(M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS),
         M::up(M0040_CONSENT_TIMELINE_SCOPE_CANONICAL),
+        M::up(M0041_WAL_KIND_WIDENING),
+        M::up(M0042_ENTITY_NODES),
+        M::up(M0043_ENTITY_EDGES),
+        M::up(M0044_ENTITY_EPISODES),
+        M::up(M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
     ])
 }

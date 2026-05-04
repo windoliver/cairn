@@ -143,4 +143,60 @@ impl MemoryStore for SqliteMemoryStore {
     ) -> Option<&dyn cairn_core::contract::consent_lookup::ConsentLookup> {
         Some(self)
     }
+
+    async fn upsert_entity(
+        &self,
+        node: &cairn_core::domain::graph::EntityNode,
+    ) -> Result<cairn_core::domain::graph::EntityId, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("upsert_entity");
+        }
+        self.do_upsert_entity(node).await.map_err(Into::into)
+    }
+
+    async fn link_entity_episode(
+        &self,
+        entity_id: &cairn_core::domain::graph::EntityId,
+        record_id: &cairn_core::domain::RecordId,
+    ) -> Result<bool, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("link_entity_episode");
+        }
+        self.do_link_entity_episode(entity_id, record_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn upsert_entity_edge(
+        &self,
+        edge: &cairn_core::domain::graph::EntityEdge,
+    ) -> Result<cairn_core::domain::graph::EntityEdgeOutcome, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("upsert_entity_edge");
+        }
+        self.do_upsert_entity_edge(edge).await.map_err(Into::into)
+    }
+
+    async fn resolve_contradiction(
+        &self,
+        old_edge_id: &cairn_core::domain::graph::EntityEdgeId,
+        new_edge: &cairn_core::domain::graph::EntityEdge,
+    ) -> Result<cairn_core::domain::graph::EntityEdgeOutcome, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("resolve_contradiction");
+        }
+        self.do_resolve_contradiction(old_edge_id, new_edge)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn graph_edges(
+        &self,
+        args: &cairn_core::domain::graph::GraphEdgesArgs<'_>,
+    ) -> Result<Vec<cairn_core::domain::graph::EntityEdge>, StoreError> {
+        if self.conn.is_none() {
+            return not_initialized("graph_edges");
+        }
+        self.do_graph_edges(args).await.map_err(Into::into)
+    }
 }
