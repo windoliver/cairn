@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn malformed_display() {
-        let e = VerifyError::Malformed { field: "issuer", reason: "bad prefix".to_owned() };
+        let e = VerifyError::Malformed {
+            field: "issuer",
+            reason: "bad prefix".to_owned(),
+        };
         assert_eq!(e.to_string(), "malformed envelope: issuer: bad prefix");
     }
 

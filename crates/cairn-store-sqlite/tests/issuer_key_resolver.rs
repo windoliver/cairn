@@ -67,10 +67,7 @@ async fn first_bound_registry() -> (SqliteIdentityRegistry, tempfile::TempDir) {
 
 /// Reserve + activate `id` on `r` with a fresh keypair. Returns the public
 /// key bytes so tests can compare against `ResolvedKey.public_key`.
-async fn seed_active(
-    r: &SqliteIdentityRegistry,
-    id: &Identity,
-) -> ([u8; 32], SigningKey) {
+async fn seed_active(r: &SqliteIdentityRegistry, id: &Identity) -> ([u8; 32], SigningKey) {
     let mut rng = rand_core::OsRng;
     let sk = SigningKey::generate(&mut rng);
     let pubkey = sk.verifying_key().to_bytes();

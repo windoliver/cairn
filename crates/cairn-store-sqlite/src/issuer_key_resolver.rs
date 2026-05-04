@@ -53,7 +53,9 @@ impl<R: IdentityRegistry + 'static> IssuerKeyResolver for SqliteIssuerKeyResolve
             .get_identity(issuer, IdentityVisibility::Audit)
             .await
             .map_err(|e| ResolverError::Backend(Box::new(e)))?;
-        let Some(record) = record else { return Ok(None) };
+        let Some(record) = record else {
+            return Ok(None);
+        };
 
         let keys = self
             .registry
@@ -81,6 +83,9 @@ impl<R: IdentityRegistry + 'static> IssuerKeyResolver for SqliteIssuerKeyResolve
             ProvisioningState::Purged => KeyLifecycle::Purged,
         };
 
-        Ok(Some(ResolvedKey { public_key: entry.public_key, lifecycle }))
+        Ok(Some(ResolvedKey {
+            public_key: entry.public_key,
+            lifecycle,
+        }))
     }
 }

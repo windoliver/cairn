@@ -29,7 +29,9 @@ async fn snapshot_counts(store: &cairn_store_sqlite::SqliteMemoryStore) -> Vec<(
         let mut out = Vec::with_capacity(tables.len());
         for t in tables {
             let count: i64 =
-                c.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), params![], |r| r.get(0))?;
+                c.query_row(&format!("SELECT COUNT(*) FROM \"{t}\""), params![], |r| {
+                    r.get(0)
+                })?;
             out.push((t, count));
         }
         Ok(out)
@@ -47,9 +49,15 @@ async fn assert_no_writes(
     let store = cairn_test_fixtures::memstore().await;
     let before = snapshot_counts(&store).await;
     let outcome = verify_signed_intent(intent, resolver, now).await;
-    assert!(outcome.is_err(), "[{label}] expected verify to reject, got Ok");
+    assert!(
+        outcome.is_err(),
+        "[{label}] expected verify to reject, got Ok"
+    );
     let after = snapshot_counts(&store).await;
-    assert_eq!(before, after, "[{label}] DB row counts changed after a rejection");
+    assert_eq!(
+        before, after,
+        "[{label}] DB row counts changed after a rejection"
+    );
 }
 
 #[tokio::test]
@@ -134,4 +142,3 @@ async fn rejects_scope_denied_no_writes() {
     .build();
     assert_no_writes("scope", intent, &resolver, now).await;
 }
-

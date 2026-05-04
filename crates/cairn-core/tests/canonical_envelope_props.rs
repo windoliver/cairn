@@ -37,7 +37,12 @@ fn arb_intent() -> impl Strategy<Value = SignedIntent> {
             key_version: kv,
             nonce: common::Nonce16Base64("AAAAAAAAAAAAAAAAAAAAAA==".to_owned()),
             operation_id: common::Ulid("01HQZX9F5N0000000000000000".to_owned()),
-            scope: SignedIntentScope { tenant, workspace: ws, entity: ent, tier },
+            scope: SignedIntentScope {
+                tenant,
+                workspace: ws,
+                entity: ent,
+                tier,
+            },
             sequence: Some(seq),
             server_challenge: None,
             signature: common::Ed25519Signature(format!("ed25519:{}", "a".repeat(128))),

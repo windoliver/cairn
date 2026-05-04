@@ -9,7 +9,10 @@ use cairn_core::intent::{ExpiryReason, VerifyError};
 
 #[test]
 fn malformed_snapshot() {
-    let e = VerifyError::Malformed { field: "issuer", reason: "bad prefix".to_owned() };
+    let e = VerifyError::Malformed {
+        field: "issuer",
+        reason: "bad prefix".to_owned(),
+    };
     insta::assert_snapshot!(e.to_string());
 }
 

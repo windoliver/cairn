@@ -25,27 +25,45 @@ use crate::intent::VerifyError;
 /// — guarded purely as defense in depth.
 pub fn canonicalize_signed_payload(intent: &SignedIntent) -> Result<Vec<u8>, VerifyError> {
     let mut map = serde_json::Map::new();
-    map.insert("chain_parents".into(), serde_json::to_value(&intent.chain_parents).map_err(envelope_err)?);
-    map.insert("expires_at".into(), Value::String(intent.expires_at.clone()));
+    map.insert(
+        "chain_parents".into(),
+        serde_json::to_value(&intent.chain_parents).map_err(envelope_err)?,
+    );
+    map.insert(
+        "expires_at".into(),
+        Value::String(intent.expires_at.clone()),
+    );
     map.insert("issued_at".into(), Value::String(intent.issued_at.clone()));
     map.insert("issuer".into(), Value::String(intent.issuer.0.clone()));
     map.insert("key_version".into(), json!(intent.key_version));
     map.insert("nonce".into(), Value::String(intent.nonce.0.clone()));
-    map.insert("operation_id".into(), Value::String(intent.operation_id.0.clone()));
-    map.insert("scope".into(), serde_json::to_value(&intent.scope).map_err(envelope_err)?);
+    map.insert(
+        "operation_id".into(),
+        Value::String(intent.operation_id.0.clone()),
+    );
+    map.insert(
+        "scope".into(),
+        serde_json::to_value(&intent.scope).map_err(envelope_err)?,
+    );
     if let Some(seq) = intent.sequence {
         map.insert("sequence".into(), json!(seq));
     }
     if let Some(c) = &intent.server_challenge {
         map.insert("server_challenge".into(), Value::String(c.0.clone()));
     }
-    map.insert("target_hash".into(), Value::String(intent.target_hash.clone()));
+    map.insert(
+        "target_hash".into(),
+        Value::String(intent.target_hash.clone()),
+    );
     let value = Value::Object(map);
     serde_jcs::to_vec(&value).map_err(envelope_err)
 }
 
 fn envelope_err<E: std::fmt::Display>(e: E) -> VerifyError {
-    VerifyError::Malformed { field: "envelope", reason: e.to_string() }
+    VerifyError::Malformed {
+        field: "envelope",
+        reason: e.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -80,7 +98,10 @@ mod tests {
     fn canonical_output_excludes_signature() {
         let bytes = canonicalize_signed_payload(&good_intent()).expect("ok");
         let s = std::str::from_utf8(&bytes).expect("utf8");
-        assert!(!s.contains("signature"), "canonical payload must not contain signature; got: {s}");
+        assert!(
+            !s.contains("signature"),
+            "canonical payload must not contain signature; got: {s}"
+        );
         assert!(!s.contains("ed25519:"));
     }
 
@@ -110,7 +131,10 @@ mod tests {
         let bytes = canonicalize_signed_payload(&i).expect("ok");
         let s = std::str::from_utf8(&bytes).expect("utf8");
         assert!(!s.contains("\"sequence\""), "sequence absent");
-        assert!(s.contains("\"server_challenge\""), "server_challenge present");
+        assert!(
+            s.contains("\"server_challenge\""),
+            "server_challenge present"
+        );
     }
 
     #[test]
@@ -119,6 +143,9 @@ mod tests {
         let mut mutated = good_intent();
         mutated.target_hash = format!("sha256:{}", "b".repeat(64));
         let after = canonicalize_signed_payload(&mutated).expect("mutated");
-        assert_ne!(baseline, after, "canonical bytes must change when target_hash changes");
+        assert_ne!(
+            baseline, after,
+            "canonical bytes must change when target_hash changes"
+        );
     }
 }
