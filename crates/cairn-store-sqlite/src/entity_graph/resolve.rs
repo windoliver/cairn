@@ -21,7 +21,8 @@ impl SqliteMemoryStore {
     ///
     /// Returns [`StoreError::Worker`] when the background `tokio_rusqlite`
     /// worker fails, [`StoreError::Sqlite`] for SQL errors, or
-    /// [`StoreError::NotFound`] when `old_id` does not name a live edge.
+    /// [`StoreError::NotFound`] when `old_id` does not name a non-expired
+    /// edge (live or bounded).
     #[instrument(
         skip(self, old_id, new_edge),
         err,
@@ -52,18 +53,40 @@ impl SqliteMemoryStore {
                 move |c| -> Result<EntityEdgeOutcome, tokio_rusqlite::Error> {
                     let tx = c.transaction()?;
 
-                    // Verify old edge exists and is live; capture pre_image body_hash
-                    // and valid_at for the backdated-contradiction guard below.
-                    // Map QueryReturnedNoRows to a typed StoreError::NotFound — without
-                    // this, await? converts the bare rusqlite error into the generic
-                    // StoreError::Worker variant, hiding the deterministic stale/missing
-                    // input from retry/recovery callers.
-                    let (pre_image, old_valid_at): (Vec<u8>, i64) = tx
+                    // Lookup old edge: any non-expired row (live OR bounded).
+                    // Pre-round-8 this clause was `invalid_at IS NULL` —
+                    // `upsert_entity_edge` rejects overlap with bounded rows
+                    // and points callers at this method, so refusing bounded
+                    // targets here makes those overlaps unrepairable through
+                    // the public API. Capture source/target/relation for the
+                    // cross-triple guard below; capture the existing
+                    // `invalid_at` so we can enforce that a bounded target's
+                    // window is being shrunk (not extended or zeroed) by the
+                    // contradiction.
+                    let (pre_image, old_valid_at, old_invalid_at, old_src, old_tgt, old_rel): (
+                        Vec<u8>,
+                        i64,
+                        Option<i64>,
+                        String,
+                        String,
+                        String,
+                    ) = tx
                         .query_row(
-                            "SELECT body_hash, valid_at FROM entity_edges \
-                             WHERE id = ?1 AND invalid_at IS NULL AND expired_at IS NULL",
+                            "SELECT body_hash, valid_at, invalid_at, \
+                                    source_id, target_id, relation \
+                             FROM entity_edges \
+                             WHERE id = ?1 AND expired_at IS NULL",
                             [&old_id_owned],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
+                            |r| {
+                                Ok((
+                                    r.get(0)?,
+                                    r.get(1)?,
+                                    r.get(2)?,
+                                    r.get(3)?,
+                                    r.get(4)?,
+                                    r.get(5)?,
+                                ))
+                            },
                         )
                         .map_err(|e| match e {
                             rusqlite::Error::QueryReturnedNoRows => {
@@ -73,6 +96,34 @@ impl SqliteMemoryStore {
                             }
                             other => tokio_rusqlite::Error::from(other),
                         })?;
+
+                    // Cross-triple guard: a stale or buggy repair caller
+                    // could pair `old_id` with a `new_edge` belonging to
+                    // a *different* triple. Pre-round-8 the body of the
+                    // op then closed the unrelated live fact and inserted
+                    // an unrelated new one in the same WAL op, and the
+                    // overlap probe ran against the old triple, leaving
+                    // the new triple unchecked. Reject up front.
+                    if new_edge.source_id.as_str() != old_src
+                        || new_edge.target_id.as_str() != old_tgt
+                        || new_edge.relation != old_rel
+                    {
+                        return Err(tokio_rusqlite::Error::Other(Box::new(
+                            StoreError::Invariant {
+                                what: format!(
+                                    "resolve_contradiction triple mismatch: \
+                                     old=({},{},{}) new=({},{},{}) for edge id={}",
+                                    old_src,
+                                    old_tgt,
+                                    old_rel,
+                                    new_edge.source_id.as_str(),
+                                    new_edge.target_id.as_str(),
+                                    new_edge.relation,
+                                    old_id_owned,
+                                ),
+                            },
+                        )));
+                    }
 
                     // Backdated guard: contradiction sets `old.invalid_at = new.valid_at`.
                     // The CHECK on entity_edges (invalid_at >= valid_at) would otherwise
@@ -85,28 +136,45 @@ impl SqliteMemoryStore {
                                 what: format!(
                                     "backdated contradiction not supported: \
                                      new.valid_at={} < old.valid_at={} for edge id={}",
-                                    new_edge.valid_at,
-                                    old_valid_at,
-                                    old_id_owned,
+                                    new_edge.valid_at, old_valid_at, old_id_owned,
                                 ),
                             },
                         )));
                     }
 
-                    // Overlap guard: another non-expired bounded row for
-                    // this triple (excluding the one we're about to
-                    // invalidate) whose window overlaps the new edge's
+                    // Bounded-target guard: when the old row is already
+                    // bounded [old.valid_at, old.invalid_at), the
+                    // contradiction shrinks the upper bound to
+                    // new.valid_at. That requires new.valid_at strictly
+                    // inside the existing window — otherwise the
+                    // operation is a no-op (new.valid_at >=
+                    // old.invalid_at) or would extend old's lifetime
+                    // (impossible by the backdated guard, but defended
+                    // here for clarity). Reject with a typed error
+                    // rather than silently rewriting the bound.
+                    if let Some(old_inv) = old_invalid_at
+                        && new_edge.valid_at >= old_inv
+                    {
+                        return Err(tokio_rusqlite::Error::Other(Box::new(
+                            StoreError::Invariant {
+                                what: format!(
+                                    "resolve_contradiction would not shrink bounded \
+                                     window: new.valid_at={} >= old.invalid_at={} for \
+                                     edge id={}",
+                                    new_edge.valid_at, old_inv, old_id_owned,
+                                ),
+                            },
+                        )));
+                    }
+
+                    // Overlap guard: another non-expired row for this
+                    // triple (excluding the one we're about to
+                    // invalidate) whose window overlaps the *new* edge's
                     // window would create duplicate facts at any as-of
                     // read inside the overlap. Same NULL-aware predicate
                     // as upsert_entity_edge::Probe B. Pre-fix this method
                     // verified only old_id's liveness, leaving lint /
                     // repair callers free to introduce overlap.
-                    let triple: (String, String, String) = tx.query_row(
-                        "SELECT source_id, target_id, relation \
-                         FROM entity_edges WHERE id = ?1",
-                        [&old_id_owned],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )?;
                     let conflicting: Option<(String, i64, Option<i64>)> = tx
                         .query_row(
                             "SELECT id, valid_at, invalid_at FROM entity_edges \
@@ -117,9 +185,9 @@ impl SqliteMemoryStore {
                                AND (invalid_at IS NULL OR invalid_at > ?5) \
                              LIMIT 1",
                             rusqlite::params![
-                                triple.0,
-                                triple.1,
-                                triple.2,
+                                old_src,
+                                old_tgt,
+                                old_rel,
                                 &old_id_owned,
                                 new_edge.valid_at,
                                 new_edge.invalid_at,

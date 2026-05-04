@@ -933,9 +933,7 @@ async fn resolve_contradiction_missing_old_edge_returns_not_found() {
 #[tokio::test]
 async fn upsert_entity_edge_change_in_invalid_at_is_not_idempotent() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "D0").await;
 
@@ -956,7 +954,10 @@ async fn upsert_entity_edge_change_in_invalid_at_is_not_idempotent() {
         .await
         .expect("seed live");
     assert!(!first.body_was_unchanged, "fresh insert is not unchanged");
-    assert!(first.invalidated_edge_id.is_none(), "no prior to invalidate");
+    assert!(
+        first.invalidated_edge_id.is_none(),
+        "no prior to invalidate"
+    );
 
     // Re-upsert with same triple+fact-fields but `invalid_at = Some(150)`.
     // Pre-fix this returned body_was_unchanged=true and the row stayed
@@ -1159,9 +1160,7 @@ fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
 #[tokio::test]
 async fn graph_edges_as_of_returns_invalidated_edges_in_their_window() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "E0").await;
 
@@ -1269,13 +1268,12 @@ async fn graph_edges_as_of_returns_invalidated_edges_in_their_window() {
 /// predicate always applied the end-bound filter, so history-view callers
 /// (lint --fix-graph, audit) couldn't see edges that were invalidated
 /// before the as-of point.
-#[allow(clippy::too_many_lines)] // Four parallel scenarios share one fixture; splitting into per-scenario tests just duplicates the seed.
+#[allow(clippy::too_many_lines)]
+// Four parallel scenarios share one fixture; splitting into per-scenario tests just duplicates the seed.
 #[tokio::test]
 async fn graph_edges_include_invalidated_with_as_of_returns_full_history() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "F0").await;
 
@@ -1406,9 +1404,7 @@ async fn graph_edges_include_invalidated_with_as_of_returns_full_history() {
 #[tokio::test]
 async fn graph_edges_production_view_with_single_axis_as_of_excludes_other_dim_ended_rows() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "G0").await;
 
@@ -1533,9 +1529,7 @@ async fn entity_edges_schema_rejects_backdated_invalid_at() {
 #[tokio::test]
 async fn graph_edges_corrupt_source_record_id_surfaces_typed_invariant() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     use cairn_store_sqlite::error::StoreError;
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "I0").await;
@@ -1741,9 +1735,7 @@ async fn resolve_contradiction_backdated_returns_typed_invariant() {
         .resolve_contradiction(&live.new_edge_id, &backdated)
         .await
         .expect_err("backdated resolve must be rejected");
-    let concrete = err
-        .downcast::<StoreError>()
-        .expect("must downcast");
+    let concrete = err.downcast::<StoreError>().expect("must downcast");
     assert!(
         matches!(*concrete, StoreError::Invariant { ref what }
             if what.contains("backdated contradiction")),
@@ -1892,9 +1884,7 @@ fn entity_edges_and_nodes_reject_expired_without_tombstone_reason() {
 #[tokio::test]
 async fn upsert_entity_edge_overlapping_bounded_window_rejected() {
     use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
-    use cairn_core::domain::graph::{
-        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
-    };
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs};
     use cairn_store_sqlite::error::StoreError;
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let (a, b) = seed_two_entities(&store, "N0").await;
@@ -1933,9 +1923,7 @@ async fn upsert_entity_edge_overlapping_bounded_window_rejected() {
         .upsert_entity_edge(&overlap)
         .await
         .expect_err("overlapping bounded upsert must be rejected");
-    let concrete = err
-        .downcast::<StoreError>()
-        .expect("must downcast");
+    let concrete = err.downcast::<StoreError>().expect("must downcast");
     assert!(
         matches!(*concrete, StoreError::Invariant { ref what }
             if what.contains("overlapping bounded")),
@@ -2161,5 +2149,186 @@ async fn resolve_contradiction_rejects_overlap_with_other_bounded_row() {
         matches!(*concrete, StoreError::Invariant { ref what }
             if what.contains("overlap")),
         "expected overlap Invariant, got: {concrete:?}"
+    );
+}
+
+/// Round-8 review fix: `resolve_contradiction` must reject a `new_edge`
+/// whose triple does not match `old_id`'s triple. Pre-fix the method
+/// closed an unrelated live fact and inserted an unrelated new fact in
+/// the same WAL op, and the overlap probe ran against the *old* triple
+/// leaving the *new* triple unguarded.
+#[tokio::test]
+async fn resolve_contradiction_rejects_cross_triple_replacement() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "S0").await;
+    let (c, d) = seed_two_entities(&store, "S2").await;
+
+    // Live fact on triple (a, r, b).
+    let live = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000S1"),
+            source_id: a,
+            target_id: b,
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live (a, r, b)");
+
+    // Replacement points at a totally different triple (c, q, d).
+    let cross_triple = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000S3"),
+        source_id: c,
+        target_id: d,
+        relation: "q".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 200,
+        invalid_at: None,
+        created_at: 200,
+        source_record_id: None,
+    };
+    let err = store
+        .resolve_contradiction(&live.new_edge_id, &cross_triple)
+        .await
+        .expect_err("cross-triple replacement must be rejected");
+    let concrete = err.downcast::<StoreError>().expect("downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("triple mismatch")),
+        "expected triple-mismatch Invariant, got: {concrete:?}"
+    );
+}
+
+/// Round-8 review fix: `resolve_contradiction` must accept a bounded
+/// (non-live) target so callers can repair overlaps that
+/// `upsert_entity_edge` itself rejects. Pre-fix the lookup keyed on
+/// `invalid_at IS NULL`, returning `NotFound` for any bounded historical
+/// row and stranding the caller with no public-API fix path.
+#[tokio::test]
+async fn resolve_contradiction_can_shrink_bounded_historical_row() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "T0").await;
+
+    // Bounded historical row [50, 300). Insert via raw SQL — the
+    // upsert API would fight us about overlap if any other row existed,
+    // but here it's the only row.
+    let a_id = a.as_str().to_owned();
+    let b_id = b.as_str().to_owned();
+    store
+        .raw_conn()
+        .expect("conn present after open_in_memory")
+        .call(move |c| {
+            c.execute(
+                "INSERT INTO entity_edges (\
+                   id, source_id, target_id, relation, \
+                   confidence, confidence_score, \
+                   valid_at, invalid_at, created_at, body_hash) \
+                 VALUES (?1, ?2, ?3, 'r', 'EXTRACTED', 1.0, 50, 300, 50, X'AA')",
+                rusqlite::params!["01HZE7JV5N00000000000000T1", a_id, b_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("inject bounded row");
+
+    // Caller repairs by shrinking the bounded window to [50, 200) and
+    // inserting a corrected fact at [200, 300). new.valid_at=200 sits
+    // strictly inside [50, 300) so the bounded-target guard accepts.
+    let outcome = store
+        .resolve_contradiction(
+            &EntityEdgeId::from("01HZE7JV5N00000000000000T1"),
+            &EntityEdge {
+                id: EntityEdgeId::from("01HZE7JV5N00000000000000T2"),
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                confidence: EdgeConfidence::Inferred,
+                confidence_score: 0.7,
+                valid_at: 200,
+                invalid_at: Some(300),
+                created_at: 200,
+                source_record_id: None,
+            },
+        )
+        .await
+        .expect("bounded-target shrink must be accepted");
+    assert_eq!(
+        outcome
+            .invalidated_edge_id
+            .as_ref()
+            .map(EntityEdgeId::as_str),
+        Some("01HZE7JV5N00000000000000T1"),
+    );
+    assert_eq!(outcome.new_edge_id.as_str(), "01HZE7JV5N00000000000000T2");
+}
+
+/// Round-8 sibling: when the bounded target's window has already passed
+/// `new.valid_at`, the contradiction would extend (not shrink) the
+/// existing bound. Reject with a typed Invariant rather than silently
+/// rewriting the bound.
+#[tokio::test]
+async fn resolve_contradiction_rejects_no_shrink_on_bounded_target() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "U0").await;
+
+    // Bounded historical [50, 100).
+    let a_id = a.as_str().to_owned();
+    let b_id = b.as_str().to_owned();
+    store
+        .raw_conn()
+        .expect("conn present after open_in_memory")
+        .call(move |c| {
+            c.execute(
+                "INSERT INTO entity_edges (\
+                   id, source_id, target_id, relation, \
+                   confidence, confidence_score, \
+                   valid_at, invalid_at, created_at, body_hash) \
+                 VALUES (?1, ?2, ?3, 'r', 'EXTRACTED', 1.0, 50, 100, 50, X'AA')",
+                rusqlite::params!["01HZE7JV5N00000000000000U1", a_id, b_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("inject bounded row");
+
+    // new.valid_at=150 sits *after* old.invalid_at=100, so the
+    // contradiction would extend, not shrink, the window.
+    let err = store
+        .resolve_contradiction(
+            &EntityEdgeId::from("01HZE7JV5N00000000000000U1"),
+            &EntityEdge {
+                id: EntityEdgeId::from("01HZE7JV5N00000000000000U2"),
+                source_id: a,
+                target_id: b,
+                relation: "r".into(),
+                confidence: EdgeConfidence::Extracted,
+                confidence_score: 1.0,
+                valid_at: 150,
+                invalid_at: None,
+                created_at: 150,
+                source_record_id: None,
+            },
+        )
+        .await
+        .expect_err("no-shrink contradiction must be rejected");
+    let concrete = err.downcast::<StoreError>().expect("downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("would not shrink bounded window")),
+        "expected no-shrink Invariant, got: {concrete:?}"
     );
 }

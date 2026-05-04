@@ -65,9 +65,7 @@ pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
 /// in the round-7 finding to bypass overlap routing — a `[T, T)` upsert
 /// against a live `[100, NULL)` row matched the overlap probe and
 /// silently set the live row's `invalid_at = T`, killing it.
-pub(super) fn reject_degenerate_or_negative_window(
-    edge: &EntityEdge,
-) -> Result<(), StoreError> {
+pub(super) fn reject_degenerate_or_negative_window(edge: &EntityEdge) -> Result<(), StoreError> {
     if let Some(invalid_at) = edge.invalid_at
         && invalid_at <= edge.valid_at
     {
@@ -259,7 +257,12 @@ impl SqliteMemoryStore {
                                 body_was_unchanged: false,
                             }
                         }
-                        Some((existing_id, existing_hash, existing_valid_at, existing_invalid_at)) => {
+                        Some((
+                            existing_id,
+                            existing_hash,
+                            existing_valid_at,
+                            existing_invalid_at,
+                        )) => {
                             // Branch 2: an overlapping non-expired row
                             // exists. Routing depends on whether it's the
                             // single live row (invalid_at IS NULL — the
@@ -313,9 +316,7 @@ impl SqliteMemoryStore {
                                         what: format!(
                                             "backdated contradiction not supported: \
                                              new.valid_at={} < old.valid_at={} for edge id={}",
-                                            edge.valid_at,
-                                            existing_valid_at,
-                                            existing_id,
+                                            edge.valid_at, existing_valid_at, existing_id,
                                         ),
                                     },
                                 )));

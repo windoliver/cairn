@@ -117,11 +117,10 @@ fn map_row(r: &rusqlite::Row<'_>) -> Result<EntityEdge, StoreError> {
     let created_at: i64 = r.get(8)?;
     let src_rec: Option<String> = r.get(9)?;
 
-    let confidence = EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| {
-        StoreError::Invariant {
+    let confidence =
+        EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| StoreError::Invariant {
             what: format!("entity_edges row {id}: unknown confidence tier `{conf_str}`"),
-        }
-    })?;
+        })?;
     let source_record_id = match src_rec {
         Some(s) => Some(RecordId::parse(&s).map_err(|e| StoreError::Invariant {
             what: format!("entity_edges row {id}: invalid source_record_id `{s}`: {e}"),
@@ -141,7 +140,6 @@ fn map_row(r: &rusqlite::Row<'_>) -> Result<EntityEdge, StoreError> {
         source_record_id,
     })
 }
-
 
 impl SqliteMemoryStore {
     /// Inherent `graph_edges` implementation; the trait method
@@ -182,8 +180,8 @@ impl SqliteMemoryStore {
                 let mut rows = stmt.query(rusqlite::params_from_iter(param_refs))?;
                 let mut out = Vec::new();
                 while let Some(row) = rows.next()? {
-                    let edge = map_row(row)
-                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    let edge =
+                        map_row(row).map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                     out.push(edge);
                 }
                 Ok(out)
