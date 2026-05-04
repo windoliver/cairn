@@ -39,6 +39,7 @@ test-helpers = []
 
 [dev-dependencies]
 cairn-core = { workspace = true, features = ["test-fixtures", "test-helpers"] }
+cairn-cli = { path = "../cairn-cli" }
 cairn-store-sqlite = { path = ".", features = ["test-helpers"] }
 cairn-test-fixtures = { workspace = true }
 proptest = { workspace = true }

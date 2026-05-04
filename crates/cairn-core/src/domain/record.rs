@@ -288,10 +288,19 @@ impl MemoryRecord {
         //     to `provenance.source_sensor` (otherwise the signature does
         //     not prove sensor participation; unsigned `Sensor` chain
         //     entries are claims, not proof, until P2 countersignatures).
-        //   - Sensor authors are *only* legal for `SensorObservation`. A
-        //     sensor key has narrow trust (raw event capture); allowing it
-        //     to author derived kinds like `Rule`, `Fact`, or `Reasoning`
-        //     would let a low-trust signer mint high-trust memories.
+        //   - Sensor authors are *only* legal for `SensorObservation` and
+        //     `Trace` records. A sensor key has narrow trust (raw event
+        //     capture); allowing it to author derived kinds like `Rule`,
+        //     `Fact`, or `Reasoning` would let a low-trust signer mint
+        //     high-trust memories.
+        //   - `Trace` records are raw-event captures produced by sensors in
+        //     `Auto` mode (brief §5.0, §9.3). `Auto` mode binds the chain
+        //     Author to the sensor_id (`bind_auto_author`), so a sensor
+        //     author on a Trace record is expected and legitimate — the
+        //     sensor captured the agent's activity verbatim. `Trace` records
+        //     can also carry non-sensor authors (e.g. `Proactive` / `Explicit`
+        //     mode events), so the rule is permissive rather than requiring
+        //     `author == source_sensor`.
         let author_is_sensor =
             matches!(author, Some(a) if a.identity.kind() == IdentityKind::Sensor);
         match self.kind {
@@ -307,10 +316,14 @@ impl MemoryRecord {
                     });
                 }
             }
+            // Trace records are raw-event captures: a sensor author is
+            // legitimate (Auto-mode hook events) alongside non-sensor authors
+            // (Proactive/Explicit-mode events). No additional constraint here.
+            MemoryKind::Trace => {}
             other if author_is_sensor => {
                 return Err(DomainError::InvalidIdentity {
                     message: format!(
-                        "sensor identities may only author `sensor_observation` records, not `{}` (derived kinds need a human or agent author)",
+                        "sensor identities may only author `sensor_observation` or `trace` records, not `{}` (derived kinds need a human or agent author)",
                         other.as_str()
                     ),
                 });

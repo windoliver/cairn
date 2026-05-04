@@ -185,16 +185,18 @@ impl<'de> ::serde::Deserialize<'de> for DataSession {
 #[serde(deny_unknown_fields)]
 pub struct DataTurn {
     pub session_id: String,
-    pub turn: TurnItem,
-    pub turn_id: u64,
+    /// Ordered TurnItems for the turn — one per trace event (user/agent message, pre/post tool, tool output, stop, summary). Sorted by (captured_at, capture_event_id).
+    pub turn: Vec<TurnItem>,
+    pub turn_id: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawDataTurn {
     session_id: String,
-    turn: TurnItem,
-    turn_id: u64,
+    /// Ordered TurnItems for the turn — one per trace event (user/agent message, pre/post tool, tool output, stop, summary). Sorted by (captured_at, capture_event_id).
+    turn: Vec<TurnItem>,
+    turn_id: String,
 }
 
 impl ::core::convert::TryFrom<RawDataTurn> for DataTurn {
@@ -275,7 +277,7 @@ pub struct TurnItem {
     pub role: TurnItemRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
-    pub turn_id: u64,
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -327,7 +329,7 @@ pub enum RetrieveArgs {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         include: Option<Vec<RetrieveArgsTurnInclude>>,
         session_id: String,
-        turn_id: u64,
+        turn_id: String,
     },
     Folder {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -380,7 +382,7 @@ struct RawRetrieveArgsTurn {
     #[serde(default)]
     include: Option<Vec<RetrieveArgsTurnInclude>>,
     session_id: String,
-    turn_id: u64,
+    turn_id: String,
 }
 
 #[derive(Deserialize)]

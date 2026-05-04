@@ -436,6 +436,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -603,6 +604,7 @@ name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "cairn-cli",
  "cairn-core",
  "cairn-embeddings-local",
  "cairn-store-sqlite",
