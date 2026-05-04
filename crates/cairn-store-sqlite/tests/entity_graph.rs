@@ -1027,9 +1027,11 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
         .expect("enable FK");
 
     // Apply migrations up to (and including) 0030 — i.e. the world before 0031.
+    // After the main-branch merge added 0023_trace_links the count is 24
+    // through 0030 (was 23 in the isolated branch).
     migrations()
-        .to_version(&mut conn, 23)
-        .expect("apply through 0030 (23rd applied migration)");
+        .to_version(&mut conn, 24)
+        .expect("apply through 0030 (24th applied migration)");
 
     // Seed the parent and both child tables. issued_seq must strictly
     // advance, so we hand-pick disjoint sequences.
@@ -1076,7 +1078,7 @@ fn migration_0031_preserves_wal_steps_and_wal_op_deps_with_existing_rows() {
     // Now apply migration 0031. Pre-fix this aborted with the child
     // append-only triggers.
     migrations()
-        .to_version(&mut conn, 24)
+        .to_version(&mut conn, 25)
         .expect("apply 0031 with pre-existing children");
 
     let parent_count: i64 = conn
@@ -1130,7 +1132,7 @@ fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
     let mut conn = rusqlite::Connection::open_in_memory().expect("open");
     conn.execute_batch("PRAGMA foreign_keys = ON;").expect("FK");
     migrations()
-        .to_version(&mut conn, 23)
+        .to_version(&mut conn, 24)
         .expect("apply through 0030");
 
     // Inject a foreign DELETE trigger on wal_steps before 0031 runs.
@@ -1141,7 +1143,7 @@ fn migration_0031_aborts_on_unrelated_wal_steps_trigger() {
     )
     .expect("seed unrelated trigger");
 
-    let res = migrations().to_version(&mut conn, 24);
+    let res = migrations().to_version(&mut conn, 25);
     let err = res.expect_err("migration 0031 must abort on unexpected trigger");
     // The CHECK violation surfaces SQLite's CHECK error containing the
     // offending trigger name — verify the diagnostic gets through.
@@ -2632,10 +2634,11 @@ fn migration_0035_precheck_rejects_pre_existing_overlap() {
     register_vec0();
     let mut conn = rusqlite::Connection::open_in_memory().expect("open");
     // `to_version` indexes by *count of migrations applied*, not
-    // migration_id. The set has 27 migrations through 0034 (0001-0022,
-    // 0030-0034), so version 27 is the world before 0035.
+    // migration_id. The set has 28 migrations through 0034 (0001-0022,
+    // 0023, 0030-0034 — main added 0023_trace_links on the merge), so
+    // version 28 is the world before 0035.
     migrations()
-        .to_version(&mut conn, 27)
+        .to_version(&mut conn, 28)
         .expect("apply through 0034");
 
     conn.execute_batch(
@@ -2648,7 +2651,7 @@ fn migration_0035_precheck_rejects_pre_existing_overlap() {
     )
     .expect("seed pre-existing overlap before 0035 runs");
 
-    let res = migrations().to_version(&mut conn, 28);
+    let res = migrations().to_version(&mut conn, 29);
     let err = res.expect_err("0035 precheck must reject pre-existing overlap");
     let msg = format!("{err:?}");
     assert!(

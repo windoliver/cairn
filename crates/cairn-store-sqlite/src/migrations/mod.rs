@@ -37,6 +37,9 @@ const M0021_CONSENT_KIND_NOT_NULL: &str = include_str!("sql/0021_consent_kind_no
 // branch-local 0020 will recognise the renamed row by its sql_hash on
 // the next open and stamp the new name.
 const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
+// Renumbered 0022 → 0023 on rebase since main shipped 0022_record_vectors
+// first. SQL body unchanged.
+const M0023_TRACE_LINKS: &str = include_str!("sql/0023_trace_links.sql");
 const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
 const M0031_WAL_KIND_WIDENING: &str = include_str!("sql/0031_wal_kind_widening.sql");
 const M0032_ENTITY_NODES: &str = include_str!("sql/0032_entity_nodes.sql");
@@ -110,6 +113,7 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         M0021_CONSENT_KIND_NOT_NULL,
     ),
     (22, "0022_record_vectors", M0022_RECORD_VECTORS),
+    (23, "0023_trace_links", M0023_TRACE_LINKS),
     (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
     (31, "0031_wal_kind_widening", M0031_WAL_KIND_WIDENING),
     (32, "0032_entity_nodes", M0032_ENTITY_NODES),
@@ -149,6 +153,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0020_WORKFLOW_JOBS),
         M::up(M0021_CONSENT_KIND_NOT_NULL),
         M::up(M0022_RECORD_VECTORS),
+        M::up(M0023_TRACE_LINKS),
         M::up(M0030_RECORDS_FTS_WEIGHTED),
         M::up(M0031_WAL_KIND_WIDENING),
         M::up(M0032_ENTITY_NODES),

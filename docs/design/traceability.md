@@ -72,12 +72,13 @@ until automated enforcement is added.
 | §4 Contracts / plugins / identity | #3, #7, #10, #23, #27, #50–#53, #113, #124, #143 | — | Plugin registry and conformance covered. |
 | §4.1 Plugin architecture | #177 | — | `XxxPlugin` companion traits with `NAME` and `SUPPORTED_VERSIONS` static pre-construction checks; `register_plugin_with!` factory variant. |
 | §4.2 Actor-chain / identity provisioning | #50 | — | Ed25519 identity domain (`hmn:`/`agt:`/`snr:` prefixes), `IdentityRegistry` contract, vault-binding protocol, two-phase key rotation, revoke, purge, `IdentityService`, default-identity provisioning, keystore integration, status sweep, and `usr:` → `hmn:` rename. Privacy-by-construction invariant (no plaintext key bytes on disk) verified in E2 acceptance suite. |
-| §5 Pipeline / WAL / sessions | #8, #12, #13, #16, #54–#58, #71–#79, #89–#92 | #146 (resolved) | Capture, extract, filter, classify, plan/apply, WAL, hooks, and session capture covered. |
+| §5 Pipeline / WAL / sessions | #8, #12, #13, #16, #54–#58, #71–#79, #89–#92 | #146 (resolved) | Capture, extract, filter, classify, plan/apply, WAL, hooks, and session capture covered. #77 persists the seven trace event types as `MemoryKind::Trace` records (per-turn transactional, idempotent on `capture_event_id`, two-phase renumber on out-of-order backfill, closed-turn resummarize); see `crates/cairn-core/src/pipeline/capture_trace.rs` and migration `0023_trace_links.sql`. |
+| §5.2.a `LLMExtractor` + `ExtractChain` | #73, #74 | — | Region+text-excerpt-derived spans, role-aware fail-closed chain, structured discard candidates. |
 | §6 Taxonomy / provenance | #4, #37–#40 | — | Canonical kinds, classes, visibility, and provenance owned by core schema. |
 | §6.a Multi-modal memory | #15, #29, #84–#88, #130–#132 | — | P0 local sensors plus P2 connectors and aggregate memory. |
 | §7 Hot memory / profile | #14, #80–#83 | — | Budgeted hot prefix, profile, cache, and lint coverage. |
 | §8 CLI / MCP / SDK / skill contract | #9, #10, #11, #59–#70 | — | IDL-generated surfaces and parity checks covered. |
-| §8.1 Session lifecycle | #13, #76–#79 | — | Auto-discovery, trace storage, retrieve variants, and hooks. |
+| §8.1 Session lifecycle | #13, #76–#79 | — | Auto-discovery, trace storage, retrieve variants, and hooks. #77 lands the persistence half (records + linkage + summaries); public `retrieve(target=Turn\|Session)` IDL evolution to expose them is tracked as a follow-up. |
 | §9 Sensors | #15, #84–#88 | #150 (resolved) | Local hooks, IDE, terminal, clipboard, voice, screen, recording. |
 | §10 Continuous learning | #16, #22, #24, #27, #28, #89–#92, #110–#112, #124–#127 | — | P0 rolling workflows, P1 reflection and dreaming, P2 agent and evolution. |
 | §11 Evolution | #28, #127–#129 | — | EvolutionWorkflow, Skillify, and skill graph covered. |

@@ -29,6 +29,6 @@ pub mod visibility;
 
 pub use audit::BlockedAuditEntry;
 pub use decision::{Decision, DiscardReason, FilterInputs, should_memorize};
-pub use fence::{FenceMark, FencedPayload, fence};
+pub use fence::{FenceMark, FenceMarkKind, FencedPayload, fence};
 pub use redact::{RedactedPayload, RedactionSpan, RedactionTag, redact};
 pub use visibility::{VisibilityPolicy, default_visibility};
