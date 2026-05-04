@@ -171,6 +171,29 @@ impl<'a> ResolvedBody<'a> {
         })
     }
 
+    /// Construct from hash-verified bytes read from `sources/` by the
+    /// trace-capture pipeline (brief §5.0). The caller must have already
+    /// verified `sha256(bytes) == event.payload_hash` before calling this
+    /// constructor. Intended for hook events that are **not** user-utterance
+    /// hooks (e.g. `PreToolUse`, `PostToolUse`, `Stop`) — those hooks carry
+    /// tool/agent content rather than direct user text, so `HookUtterance`
+    /// is not an appropriate source tag. The source is recorded as
+    /// `HookUtterance` because that is the closest match for
+    /// harness-captured hook payload bytes; a future task will introduce a
+    /// dedicated `HookCapture` or `TracePayload` variant.
+    ///
+    /// **Do not use outside the `capture_trace` verb pipeline.** Every other
+    /// body resolution path should go through the typed constructors
+    /// (`from_user_ingest`, `from_hook_utterance`) which enforce
+    /// payload-variant invariants.
+    #[must_use]
+    pub fn from_trace_hook(text: &'a str) -> Self {
+        Self {
+            text,
+            source: BodySource::HookUtterance,
+        }
+    }
+
     /// The resolved body text.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -181,6 +204,18 @@ impl<'a> ResolvedBody<'a> {
     #[must_use]
     pub fn source(&self) -> BodySource {
         self.source
+    }
+}
+
+/// Construct a `ResolvedBody` for **unit tests only**, bypassing the
+/// payload-variant checks. This is `pub(crate)` so `pipeline::capture_trace`
+/// tests can build a body for non-user-utterance hooks (e.g. `PreTool`)
+/// without duplicating its fields into a `CapturePayload::Hook`.
+#[cfg(test)]
+pub(crate) fn for_test(text: &str) -> ResolvedBody<'_> {
+    ResolvedBody {
+        text,
+        source: BodySource::HookUtterance,
     }
 }
 

@@ -55,8 +55,81 @@ pub struct ScopeTuple {
 }
 
 impl ScopeTuple {
+    /// Canonical wire encoding of this scope tuple.
+    ///
+    /// Comma-separated `key=value` pairs sorted alphabetically by key,
+    /// with `None` dimensions elided. Empty tuples serialize to the
+    /// empty string. Examples:
+    ///
+    ///   * `{user: "hmn:tafeng"}`              → `"user=hmn:tafeng"`
+    ///   * `{tenant: "acme", user: "alice"}`   → `"tenant=acme,user=alice"`
+    ///
+    /// Stable across processes, byte-equal for equal scopes, and intended
+    /// as the join key between records and consent grants (Issue #253,
+    /// brief §14). The output stays inside the
+    /// `[A-Za-z0-9._:=,-]` character class used by
+    /// [`crate::domain::consent::ConsentEvent::scope`] so the same
+    /// representation can flow through both the receipt timeline and the
+    /// existing consent journal without an encoding split. Brace / quote
+    /// characters from a JSON encoding would have collided with that
+    /// grammar.
+    ///
+    /// Validation by [`ScopeTuple::validate`] rejects values containing
+    /// `=`, `,`, or other reserved characters, so this serializer cannot
+    /// produce ambiguous output for any value-input that survived
+    /// validation.
+    #[must_use]
+    pub fn canonical_wire(&self) -> String {
+        let mut parts: Vec<(&'static str, &str)> = Vec::with_capacity(7);
+        if let Some(v) = &self.tenant {
+            parts.push(("tenant", v));
+        }
+        if let Some(v) = &self.workspace {
+            parts.push(("workspace", v));
+        }
+        if let Some(v) = &self.project {
+            parts.push(("project", v));
+        }
+        if let Some(v) = &self.session_id {
+            parts.push(("session_id", v));
+        }
+        if let Some(v) = &self.entity {
+            parts.push(("entity", v));
+        }
+        if let Some(v) = &self.user {
+            parts.push(("user", v));
+        }
+        if let Some(v) = &self.agent {
+            parts.push(("agent", v));
+        }
+        parts.sort_by_key(|(k, _)| *k);
+        parts
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// Validate that at least one IDL-addressable dimension is present, no
-    /// present component is empty, and `project` is not set.
+    /// present component is empty, no component carries reserved
+    /// characters, and `project` is not set.
+    ///
+    /// **Reserved characters (`=` and `,`) are rejected** because
+    /// [`Self::canonical_wire`] uses them as the field-separator and
+    /// pair-separator in the consent-grant join key (§14, Issue #253).
+    /// Without this check, two distinct scopes could serialize to the
+    /// same wire string (e.g. `{tenant: "a,b", user: "c"}` and
+    /// `{tenant: "a", user: "b,c"}` both → `tenant=a,b,user=c` /
+    /// `tenant=a,user=b,c`), letting a receipt-timeline grant for one
+    /// scope appear to cover another. Migration 0024's
+    /// `consent_timeline_grant_immutable` is not a substitute: it
+    /// pins one `(sensor_id, scope)` per `consent_ref`, but it cannot
+    /// stop two distinct tuples from colliding to the same wire
+    /// string under different `consent_ref` values. Components are
+    /// restricted to `[A-Za-z0-9._:-]` so the canonical form stays
+    /// injective and inside the consent grant scope grammar
+    /// `[a-z0-9._:=,-]` (`crate::domain::consent::validate_scope`)
+    /// under any case.
     ///
     /// `project` is a brief-§6 scope dimension but the IDL `ScopeFilter`
     /// does not yet expose a `project` predicate. Even when paired with
@@ -94,16 +167,45 @@ impl ScopeTuple {
             ("user", &self.user),
             ("agent", &self.agent),
         ] {
-            if let Some(v) = value
-                && v.is_empty()
-            {
-                return Err(DomainError::MalformedScope {
-                    message: format!("`{name}` must not be empty if present"),
-                });
+            if let Some(v) = value {
+                if v.is_empty() {
+                    return Err(DomainError::MalformedScope {
+                        message: format!("`{name}` must not be empty if present"),
+                    });
+                }
+                if let Some(bad) = v.chars().find(|c| !is_scope_component_char(*c)) {
+                    return Err(DomainError::MalformedScope {
+                        message: format!(
+                            "`{name}` contains reserved character {bad:?}; allowed: \
+                             ASCII alphanumerics and `._:-` (no `=` or `,`, which \
+                             would make canonical_wire ambiguous and let a grant \
+                             for one scope cover a record under a different scope)"
+                        ),
+                    });
+                }
             }
         }
         Ok(())
     }
+}
+
+/// Allowed ASCII set for a single scope component: alphanumerics plus
+/// `.`, `_`, `:`, `-`. Excludes `=` and `,` so [`ScopeTuple::canonical_wire`]
+/// is unambiguous, and excludes whitespace / control chars so the wire
+/// form is safe to log and round-trip through line-oriented stores.
+///
+/// Round 5 reverts round 4's widening: admitting `=` and `,` would let
+/// two distinct scopes serialize to the same wire string and silently
+/// authorize each other. Migration 0024's
+/// `consent_timeline_grant_immutable` only enforces that one
+/// `consent_ref` keeps one `(sensor_id, scope)` tuple; it cannot
+/// distinguish two tuples whose `canonical_wire` already collides
+/// under different `consent_ref` values, so it is not a substitute for
+/// an injective wire encoding. Cairn is pre-release 0.0.1 with no
+/// persisted vaults to migrate (see scope.rs:38), so the global
+/// rejection is acceptable.
+fn is_scope_component_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-')
 }
 
 #[cfg(test)]
@@ -179,6 +281,114 @@ mod tests {
         let json = r#"{"session": "01HQZ"}"#;
         let res: Result<ScopeTuple, _> = serde_json::from_str(json);
         assert!(res.is_err(), "legacy `session` key must not deserialize");
+    }
+
+    #[test]
+    fn canonical_wire_emits_sorted_kv_pairs_inside_consent_grammar() {
+        let scope = ScopeTuple {
+            user: Some("hmn:tafeng".to_owned()),
+            tenant: Some("acme".to_owned()),
+            ..ScopeTuple::default()
+        };
+        // Sorted alphabetically by key, comma-separated, no JSON braces or
+        // quotes — stays inside the consent grant scope grammar
+        // `[a-z0-9._:=,-]`.
+        assert_eq!(scope.canonical_wire(), "tenant=acme,user=hmn:tafeng");
+    }
+
+    #[test]
+    fn canonical_wire_single_dimension_round_trip() {
+        let scope = ScopeTuple {
+            user: Some("hmn:tafeng".to_owned()),
+            ..ScopeTuple::default()
+        };
+        assert_eq!(scope.canonical_wire(), "user=hmn:tafeng");
+    }
+
+    #[test]
+    fn canonical_wire_empty_tuple_is_empty_string() {
+        assert_eq!(ScopeTuple::default().canonical_wire(), "");
+    }
+
+    /// Round 5: `=` and `,` must be rejected so `canonical_wire` is
+    /// injective. The migration 0024 trigger pins one
+    /// `(sensor_id, scope)` per `consent_ref` but cannot stop two
+    /// distinct tuples from colliding to the same wire string under
+    /// different `consent_ref` values, so it is not a substitute for
+    /// an injective wire encoding.
+    #[test]
+    fn validate_rejects_equals_in_component() {
+        let scope = ScopeTuple {
+            user: Some("a=b".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let err = scope.validate().unwrap_err();
+        let DomainError::MalformedScope { message } = err else {
+            panic!("expected MalformedScope");
+        };
+        assert!(
+            message.contains("reserved character") && message.contains("'='"),
+            "expected reserved-character error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_comma_in_component() {
+        let scope = ScopeTuple {
+            tenant: Some("a,b".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let err = scope.validate().unwrap_err();
+        assert!(
+            matches!(err, DomainError::MalformedScope { .. }),
+            "expected MalformedScope"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_in_component() {
+        let scope = ScopeTuple {
+            user: Some("a b".to_owned()),
+            ..ScopeTuple::default()
+        };
+        assert!(matches!(
+            scope.validate().unwrap_err(),
+            DomainError::MalformedScope { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_alphanum_and_dot_underscore_colon_dash() {
+        let scope = ScopeTuple {
+            tenant: Some("acme-corp".to_owned()),
+            workspace: Some("ws_1.dev".to_owned()),
+            user: Some("hmn:tafeng".to_owned()),
+            session_id: Some("01HQZ".to_owned()),
+            ..ScopeTuple::default()
+        };
+        scope.validate().expect("alphanum + ._:- should validate");
+    }
+
+    /// Pin the no-collision invariant: any two scopes that differ on
+    /// at least one dimension produce different `canonical_wire`
+    /// strings, because every component is restricted to a character
+    /// set that cannot contain the `=` field-separator or the `,`
+    /// pair-separator.
+    #[test]
+    fn canonical_wire_is_injective_for_validated_scopes() {
+        let a = ScopeTuple {
+            tenant: Some("acme".to_owned()),
+            user: Some("alice".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let b = ScopeTuple {
+            tenant: Some("acme".to_owned()),
+            user: Some("bob".to_owned()),
+            ..ScopeTuple::default()
+        };
+        a.validate().expect("a valid");
+        b.validate().expect("b valid");
+        assert_ne!(a.canonical_wire(), b.canonical_wire());
     }
 
     /// Field names that overlap with the IDL `ScopeFilter` predicate set

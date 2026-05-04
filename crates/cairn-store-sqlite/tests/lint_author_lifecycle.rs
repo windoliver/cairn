@@ -538,9 +538,10 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         schema_version: SchemaVersion { major: 0, minor: 1 },
         author_states: &states,
         unresolvable_authors: &std::collections::HashSet::new(),
+        consent_lookup: None,
     };
 
-    let data = run_checks(&inputs);
+    let data = run_checks(&inputs).await;
 
     // Round-6 resolution: chain.at-derived verdicts (Revoked,
     // PostRevocationWrite, PreActivationWrite) gate as Warning at P0

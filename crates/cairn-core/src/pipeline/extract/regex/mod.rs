@@ -11,7 +11,9 @@ pub use rule::{CompiledRule, CompiledRuleKind, RegexRule, RuleOrigin, RuleSet, T
 
 use async_trait::async_trait;
 
-use super::{ExtractBudget, ExtractError, ExtractInput, ExtractResult, ExtractorWorker};
+use super::{
+    ExtractBudget, ExtractError, ExtractInput, ExtractResult, ExtractorWorker, WorkerRole,
+};
 
 /// Built-in + user-rule extractor. Implements `ExtractorWorker` over a
 /// pre-compiled `RuleSet` and `TriggerPrefilter`.
@@ -48,6 +50,10 @@ impl RegexExtractor {
 impl ExtractorWorker for RegexExtractor {
     fn name(&self) -> &'static str {
         "regex"
+    }
+
+    fn role(&self) -> WorkerRole {
+        WorkerRole::Gating
     }
 
     fn budget(&self) -> ExtractBudget {

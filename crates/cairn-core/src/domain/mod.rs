@@ -24,6 +24,7 @@ pub mod capture;
 pub mod capture_attribution;
 pub mod capture_manifest;
 pub mod consent;
+pub mod consent_timeline;
 pub mod error;
 pub mod evidence;
 pub mod filter;
@@ -39,6 +40,7 @@ pub mod target_id;
 pub mod taxonomy;
 pub mod time;
 pub mod timestamp;
+pub mod trace;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
 pub use body_hash::BodyHash;
@@ -50,6 +52,9 @@ pub use capture::{
 pub use capture_attribution::attribute;
 pub use capture_manifest::{P0_SENSOR_LABEL_PREFIXES, validate_label};
 pub use consent::{ConsentEvent, ConsentEventError, ConsentKind, ConsentPayload};
+pub use consent_timeline::{
+    ConsentModel, ConsentTimelineEvent, ConsentTimelineEventKind, CoveringGrant,
+};
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use identity::{Identity, IdentityKind};
@@ -68,3 +73,4 @@ pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
+pub use trace::{TraceEvent, TraceLink, TraceLinkError};

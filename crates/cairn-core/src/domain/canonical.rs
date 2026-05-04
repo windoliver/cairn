@@ -231,6 +231,7 @@ mod tests {
                 .expect("valid"),
             tags: vec!["pref".to_owned()],
             extra_frontmatter: BTreeMap::new(),
+            consent_model: None,
         }
     }
 

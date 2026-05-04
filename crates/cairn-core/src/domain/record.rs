@@ -179,6 +179,29 @@ pub struct MemoryRecord {
     /// re-emission via `BTreeMap`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_frontmatter: BTreeMap<String, serde_json::Value>,
+    /// Per-record consent storage model (Issue #253, brief §14).
+    ///
+    /// **Read-only metadata, ignored on `MemoryStore::upsert`.**
+    ///
+    /// Excluded from the canonical record bytes (`#[serde(skip)]`):
+    /// the field carries store-side authorization metadata, not signed
+    /// payload. Because it sits outside the signature, accepting it
+    /// from ordinary upserts would let any caller flip §6.5
+    /// enforcement by re-submitting the same signed record with a
+    /// different model — a trust-boundary bypass. The store therefore
+    /// **ignores any value the caller supplies on write**: fresh
+    /// inserts get `legacy_event`; supersessions inherit the prior
+    /// active row's column value.
+    ///
+    /// Transitions between models go through a separate privileged
+    /// API in Phase-B (#255) that derives the new value from trusted
+    /// `consent_timeline` state inside the same transaction as the
+    /// timeline append.
+    ///
+    /// On read: the adapter populates `Some(stored_value)` from the
+    /// `records.consent_model` hot column.
+    #[serde(skip)]
+    pub consent_model: Option<crate::domain::consent_timeline::ConsentModel>,
 }
 
 impl MemoryRecord {
@@ -288,10 +311,19 @@ impl MemoryRecord {
         //     to `provenance.source_sensor` (otherwise the signature does
         //     not prove sensor participation; unsigned `Sensor` chain
         //     entries are claims, not proof, until P2 countersignatures).
-        //   - Sensor authors are *only* legal for `SensorObservation`. A
-        //     sensor key has narrow trust (raw event capture); allowing it
-        //     to author derived kinds like `Rule`, `Fact`, or `Reasoning`
-        //     would let a low-trust signer mint high-trust memories.
+        //   - Sensor authors are *only* legal for `SensorObservation` and
+        //     `Trace` records. A sensor key has narrow trust (raw event
+        //     capture); allowing it to author derived kinds like `Rule`,
+        //     `Fact`, or `Reasoning` would let a low-trust signer mint
+        //     high-trust memories.
+        //   - `Trace` records are raw-event captures produced by sensors in
+        //     `Auto` mode (brief §5.0, §9.3). `Auto` mode binds the chain
+        //     Author to the sensor_id (`bind_auto_author`), so a sensor
+        //     author on a Trace record is expected and legitimate — the
+        //     sensor captured the agent's activity verbatim. `Trace` records
+        //     can also carry non-sensor authors (e.g. `Proactive` / `Explicit`
+        //     mode events), so the rule is permissive rather than requiring
+        //     `author == source_sensor`.
         let author_is_sensor =
             matches!(author, Some(a) if a.identity.kind() == IdentityKind::Sensor);
         match self.kind {
@@ -307,10 +339,14 @@ impl MemoryRecord {
                     });
                 }
             }
+            // Trace records are raw-event captures: a sensor author is
+            // legitimate (Auto-mode hook events) alongside non-sensor authors
+            // (Proactive/Explicit-mode events). No additional constraint here.
+            MemoryKind::Trace => {}
             other if author_is_sensor => {
                 return Err(DomainError::InvalidIdentity {
                     message: format!(
-                        "sensor identities may only author `sensor_observation` records, not `{}` (derived kinds need a human or agent author)",
+                        "sensor identities may only author `sensor_observation` or `trace` records, not `{}` (derived kinds need a human or agent author)",
                         other.as_str()
                     ),
                 });
@@ -776,6 +812,7 @@ pub mod tests_export {
                 .expect("valid"),
             tags: vec!["pref".to_owned()],
             extra_frontmatter: BTreeMap::new(),
+            consent_model: None,
         }
     }
 }

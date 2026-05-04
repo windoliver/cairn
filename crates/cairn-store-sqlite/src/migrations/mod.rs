@@ -37,7 +37,31 @@ const M0021_CONSENT_KIND_NOT_NULL: &str = include_str!("sql/0021_consent_kind_no
 // branch-local 0020 will recognise the renamed row by its sql_hash on
 // the next open and stamp the new name.
 const M0022_RECORD_VECTORS: &str = include_str!("sql/0022_record_vectors.sql");
+// Renumbered 0022 → 0023 on rebase since main shipped 0022_record_vectors
+// first. SQL body unchanged.
+const M0023_TRACE_LINKS: &str = include_str!("sql/0023_trace_links.sql");
 const M0030_RECORDS_FTS_WEIGHTED: &str = include_str!("sql/0030_records_fts_weighted.sql");
+// Issue #253 (consent receipt timeline) — renumbered onto 0031..0040
+// during the rebase onto main, which had already taken 0022 (record
+// vectors) and 0030 (records_fts_weighted).
+const M0031_RECORDS_CONSENT_MODEL: &str = include_str!("sql/0031_records_consent_model.sql");
+const M0032_CONSENT_TIMELINE: &str = include_str!("sql/0032_consent_timeline.sql");
+const M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE: &str =
+    include_str!("sql/0033_consent_timeline_grant_immutable.sql");
+const M0034_CONSENT_TIMELINE_LIFECYCLE: &str =
+    include_str!("sql/0034_consent_timeline_lifecycle.sql");
+const M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN: &str =
+    include_str!("sql/0035_consent_timeline_lifecycle_tighten.sql");
+const M0036_CONSENT_TIMELINE_CANONICAL_UTC: &str =
+    include_str!("sql/0036_consent_timeline_canonical_utc.sql");
+const M0037_CONSENT_TIMELINE_CANONICAL_NANOS: &str =
+    include_str!("sql/0037_consent_timeline_canonical_nanos.sql");
+const M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS: &str =
+    include_str!("sql/0038_consent_timeline_assert_canonical_nanos.sql");
+const M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS: &str =
+    include_str!("sql/0039_consent_timeline_audit_legacy_invariants.sql");
+const M0040_CONSENT_TIMELINE_SCOPE_CANONICAL: &str =
+    include_str!("sql/0040_consent_timeline_scope_canonical.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -104,7 +128,54 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         M0021_CONSENT_KIND_NOT_NULL,
     ),
     (22, "0022_record_vectors", M0022_RECORD_VECTORS),
+    (23, "0023_trace_links", M0023_TRACE_LINKS),
     (30, "0030_records_fts_weighted", M0030_RECORDS_FTS_WEIGHTED),
+    (
+        31,
+        "0031_records_consent_model",
+        M0031_RECORDS_CONSENT_MODEL,
+    ),
+    (32, "0032_consent_timeline", M0032_CONSENT_TIMELINE),
+    (
+        33,
+        "0033_consent_timeline_grant_immutable",
+        M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE,
+    ),
+    (
+        34,
+        "0034_consent_timeline_lifecycle",
+        M0034_CONSENT_TIMELINE_LIFECYCLE,
+    ),
+    (
+        35,
+        "0035_consent_timeline_lifecycle_tighten",
+        M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN,
+    ),
+    (
+        36,
+        "0036_consent_timeline_canonical_utc",
+        M0036_CONSENT_TIMELINE_CANONICAL_UTC,
+    ),
+    (
+        37,
+        "0037_consent_timeline_canonical_nanos",
+        M0037_CONSENT_TIMELINE_CANONICAL_NANOS,
+    ),
+    (
+        38,
+        "0038_consent_timeline_assert_canonical_nanos",
+        M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS,
+    ),
+    (
+        39,
+        "0039_consent_timeline_audit_legacy_invariants",
+        M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS,
+    ),
+    (
+        40,
+        "0040_consent_timeline_scope_canonical",
+        M0040_CONSENT_TIMELINE_SCOPE_CANONICAL,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -134,6 +205,17 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0020_WORKFLOW_JOBS),
         M::up(M0021_CONSENT_KIND_NOT_NULL),
         M::up(M0022_RECORD_VECTORS),
+        M::up(M0023_TRACE_LINKS),
         M::up(M0030_RECORDS_FTS_WEIGHTED),
+        M::up(M0031_RECORDS_CONSENT_MODEL),
+        M::up(M0032_CONSENT_TIMELINE),
+        M::up(M0033_CONSENT_TIMELINE_GRANT_IMMUTABLE),
+        M::up(M0034_CONSENT_TIMELINE_LIFECYCLE),
+        M::up(M0035_CONSENT_TIMELINE_LIFECYCLE_TIGHTEN),
+        M::up(M0036_CONSENT_TIMELINE_CANONICAL_UTC),
+        M::up(M0037_CONSENT_TIMELINE_CANONICAL_NANOS),
+        M::up(M0038_CONSENT_TIMELINE_ASSERT_CANONICAL_NANOS),
+        M::up(M0039_CONSENT_TIMELINE_AUDIT_LEGACY_INVARIANTS),
+        M::up(M0040_CONSENT_TIMELINE_SCOPE_CANONICAL),
     ])
 }
