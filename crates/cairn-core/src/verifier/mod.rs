@@ -53,6 +53,13 @@ use crate::generated::envelope::SignedIntent;
 /// Hard-coded P0 clock-skew tolerance. Configurable in a follow-up issue.
 const P0_SKEW: Duration = Duration::from_mins(1);
 
+/// Hard-coded P0 maximum envelope time-to-live: `expires_at - issued_at`
+/// must not exceed five minutes. Caps the blast radius of a leaked
+/// signing key — even with the private key, an attacker cannot mint
+/// envelopes that remain valid for hours or days. Configurable in a
+/// follow-up issue alongside `P0_SKEW`.
+const P0_MAX_TTL: Duration = Duration::from_mins(5);
+
 /// Long-lived envelope verifier. Cheap to construct (borrows config).
 pub struct EnvelopeVerifier<'a> {
     policy: &'a ScopePolicy,
@@ -209,6 +216,34 @@ impl<'a> EnvelopeVerifier<'a> {
             chrono::Duration::from_std(self.skew).map_err(|_| DomainError::Unauthorized {
                 message: "skew duration overflowed chrono::Duration".into(),
             })?;
+        let max_ttl_chrono =
+            chrono::Duration::from_std(P0_MAX_TTL).map_err(|_| DomainError::Unauthorized {
+                message: "max_ttl duration overflowed chrono::Duration".into(),
+            })?;
+
+        // Well-formed window: expires_at must lie strictly after
+        // issued_at. Caller-supplied timestamps are untrusted; an
+        // empty or inverted window is a fail-closed signal.
+        if expires_chrono <= issued_chrono {
+            return Err(DomainError::ExpiredIntent {
+                issued_at: intent.issued_at.clone(),
+                expires_at: intent.expires_at.clone(),
+                now: now.to_rfc3339(),
+            });
+        }
+
+        // Bounded TTL: cap the validity window to prevent an attacker
+        // who has obtained a signing key from minting forever-valid
+        // bearer envelopes. P0 hard-codes 5 minutes; configurable in a
+        // follow-up issue.
+        if expires_chrono - issued_chrono > max_ttl_chrono {
+            return Err(DomainError::ExpiredIntent {
+                issued_at: intent.issued_at.clone(),
+                expires_at: intent.expires_at.clone(),
+                now: now.to_rfc3339(),
+            });
+        }
+
         let earliest = issued_chrono - skew_chrono;
         if now < earliest || now >= expires_chrono {
             return Err(DomainError::ExpiredIntent {

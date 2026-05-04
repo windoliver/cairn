@@ -279,6 +279,54 @@ fn rejects_invalid_wire_shape_neither_sequence_nor_challenge(
 }
 
 #[rstest]
+fn rejects_inverted_window_expires_at_le_issued_at(
+    signing_key: SigningKey,
+    policy: ScopePolicy,
+    clock: FixedClock,
+) {
+    // Caller-supplied timestamps are untrusted: an inverted or empty
+    // (issued_at, expires_at) window is fail-closed.
+    let mut intent = unsigned_intent();
+    intent.expires_at.clone_from(&intent.issued_at); // window of length 0
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, resolved).unwrap_err();
+    assert!(matches!(err, DomainError::ExpiredIntent { .. }));
+}
+
+#[rstest]
+fn rejects_ttl_exceeds_p0_max(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock) {
+    // P0 caps `expires_at - issued_at` at 5 minutes. A 1-hour TTL
+    // (typical attacker pattern: stolen key, mint long-lived bearer)
+    // must be rejected even though the signature is otherwise valid.
+    let mut intent = unsigned_intent();
+    // issued_at stays at fixture value; bump expires_at by an hour past it.
+    let issued: DateTime<Utc> = ISSUED_AT.parse().unwrap();
+    let too_far = issued + chrono::Duration::hours(1);
+    intent.expires_at = too_far.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let intent = sign(&signing_key, intent);
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    let err = verifier.verify(intent, resolved).unwrap_err();
+    assert!(matches!(err, DomainError::ExpiredIntent { .. }));
+}
+
+#[rstest]
+fn accepts_ttl_at_exactly_p0_max(signing_key: SigningKey, policy: ScopePolicy, clock: FixedClock) {
+    // Boundary: expires_at - issued_at == P0_MAX_TTL (5 min) is OK.
+    // The fixture window is exactly 5 min (14:02:11 → 14:07:11), and
+    // the fixture clock is inside it. accepts_valid already covers
+    // this implicitly; this test pins the boundary explicitly.
+    let intent = sign(&signing_key, unsigned_intent());
+    let resolved = resolved_active(&signing_key);
+    let verifier = EnvelopeVerifier::new(&policy, &clock);
+    verifier
+        .verify(intent, resolved)
+        .expect("5-min TTL must pass");
+}
+
+#[rstest]
 fn rejects_invalid_wire_shape_oversized_chain_parents(
     signing_key: SigningKey,
     policy: ScopePolicy,
