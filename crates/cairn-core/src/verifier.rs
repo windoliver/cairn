@@ -21,7 +21,7 @@ use crate::domain::{
     intent::{SignedIntentVerifier, sealed::VerifierWitness},
 };
 use crate::generated::envelope::SignedIntent;
-use crate::intent::VerifyError;
+use crate::intent::{ExpiryReason, VerifyError};
 
 /// Concrete verifier impl. Empty by design — the trait method is
 /// default-implemented in [`SignedIntentVerifier`] and the witness is
@@ -44,10 +44,11 @@ impl SignedIntentVerifier for CoreSignedIntentVerifier {}
 pub async fn verify_signed_intent(
     intent: SignedIntent,
     _resolver: &dyn IssuerKeyResolver,
-    _now: SystemTime,
+    now: SystemTime,
 ) -> Result<VerifiedSignedIntent, VerifyError> {
     step1_syntactic(&intent)?;
-    // Steps 2-5 land in subsequent tasks.
+    step2_timestamp_window(&intent, now)?;
+    // Steps 3-5 land in subsequent tasks.
     Ok(<CoreSignedIntentVerifier as SignedIntentVerifier>::__from_verified(
         intent,
         VerifierWitness::new(),
@@ -77,6 +78,51 @@ fn step1_syntactic(intent: &SignedIntent) -> Result<(), VerifyError> {
     Ok(())
 }
 
+const MAX_SKEW_SECS: i64 = 120; // ±2 min, brief §4.2
+const MAX_TTL_SECS: i64 = 5 * 60; // 5 min flat at P0; brief §4.2
+
+/// Step 2: timestamp window. `issued_at` ±2 min of `now`,
+/// `expires_at − issued_at ≤ 5 min`, `now ≤ expires_at`.
+fn step2_timestamp_window(intent: &SignedIntent, now: SystemTime) -> Result<(), VerifyError> {
+    use chrono::{DateTime, Utc};
+    let issued = DateTime::parse_from_rfc3339(&intent.issued_at)
+        .map_err(|e| VerifyError::Malformed { field: "issued_at", reason: e.to_string() })?
+        .with_timezone(&Utc);
+    let expires = DateTime::parse_from_rfc3339(&intent.expires_at)
+        .map_err(|e| VerifyError::Malformed { field: "expires_at", reason: e.to_string() })?
+        .with_timezone(&Utc);
+    let now_dt: DateTime<Utc> = now.into();
+    let now_str = now_dt.to_rfc3339();
+
+    let skew = (now_dt - issued).num_seconds().abs();
+    if skew > MAX_SKEW_SECS {
+        return Err(VerifyError::ExpiredIntent {
+            issued_at: intent.issued_at.clone(),
+            expires_at: intent.expires_at.clone(),
+            now: now_str,
+            kind: ExpiryReason::Skewed,
+        });
+    }
+    let ttl = (expires - issued).num_seconds();
+    if ttl > MAX_TTL_SECS {
+        return Err(VerifyError::ExpiredIntent {
+            issued_at: intent.issued_at.clone(),
+            expires_at: intent.expires_at.clone(),
+            now: now_str,
+            kind: ExpiryReason::TtlExceeded,
+        });
+    }
+    if now_dt >= expires {
+        return Err(VerifyError::ExpiredIntent {
+            issued_at: intent.issued_at.clone(),
+            expires_at: intent.expires_at.clone(),
+            now: now_str,
+            kind: ExpiryReason::Past,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,9 +131,10 @@ mod tests {
     use crate::generated::common;
     use crate::generated::envelope::{SignedIntentScope, SignedIntentScopeTier};
     use async_trait::async_trait;
+    use chrono::{DateTime, Utc};
 
-    /// Always-Ok resolver returning a fixed active pubkey. Steps 2-5
-    /// are stubs in this task, so the resolver is unused — kept to
+    /// Always-Ok resolver returning a fixed active pubkey. Steps 3-5
+    /// are stubs at this point, so the resolver is unused — kept to
     /// match the function signature.
     struct OkResolver;
 
@@ -127,11 +174,18 @@ mod tests {
         }
     }
 
+    fn rfc3339_to_systemtime(s: &str) -> SystemTime {
+        DateTime::parse_from_rfc3339(s)
+            .expect("rfc3339")
+            .with_timezone(&Utc)
+            .into()
+    }
+
     #[tokio::test]
     async fn rejects_bad_issuer_identity() {
         let mut i = good_intent();
         i.issuer = common::Identity("not-a-prefix:foo".to_owned());
-        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+        let err = verify_signed_intent(i, &OkResolver, rfc3339_to_systemtime("2026-04-22T14:02:30Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Malformed { field: "issuer", .. }));
@@ -141,7 +195,7 @@ mod tests {
     async fn rejects_both_sequence_and_challenge() {
         let mut i = good_intent();
         i.server_challenge = Some(common::Nonce16Base64("BBBBBBBBBBBBBBBBBBBBBA==".to_owned()));
-        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+        let err = verify_signed_intent(i, &OkResolver, rfc3339_to_systemtime("2026-04-22T14:02:30Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Malformed { field: "sequence_or_challenge", .. }));
@@ -151,7 +205,7 @@ mod tests {
     async fn rejects_neither_sequence_nor_challenge() {
         let mut i = good_intent();
         i.sequence = None;
-        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+        let err = verify_signed_intent(i, &OkResolver, rfc3339_to_systemtime("2026-04-22T14:02:30Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Malformed { field: "sequence_or_challenge", .. }));
@@ -161,9 +215,52 @@ mod tests {
     async fn rejects_zero_key_version() {
         let mut i = good_intent();
         i.key_version = 0;
-        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+        let err = verify_signed_intent(i, &OkResolver, rfc3339_to_systemtime("2026-04-22T14:02:30Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, VerifyError::Malformed { field: "key_version", .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_skewed_issued_at_in_future() {
+        let mut i = good_intent();
+        // issued_at is 14:02:11; set now = 13:55:11 (7min in past) → Skewed
+        i.issued_at = "2026-04-22T14:02:11Z".to_owned();
+        i.expires_at = "2026-04-22T14:07:11Z".to_owned();
+        let now = rfc3339_to_systemtime("2026-04-22T13:55:11Z");
+        let err = verify_signed_intent(i, &OkResolver, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ExpiredIntent { kind: ExpiryReason::Skewed, .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_past_expires_at() {
+        let mut i = good_intent();
+        i.issued_at = "2026-04-22T14:02:11Z".to_owned();
+        i.expires_at = "2026-04-22T14:03:11Z".to_owned();
+        // now is 82s after issued (within ±2min skew) but after expires_at → Past
+        let now = rfc3339_to_systemtime("2026-04-22T14:03:33Z");
+        let err = verify_signed_intent(i, &OkResolver, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ExpiredIntent { kind: ExpiryReason::Past, .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_overlong_ttl() {
+        let mut i = good_intent();
+        i.issued_at = "2026-04-22T14:02:11Z".to_owned();
+        // 6-min TTL > 5-min cap
+        i.expires_at = "2026-04-22T14:08:11Z".to_owned();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &OkResolver, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ExpiredIntent { kind: ExpiryReason::TtlExceeded, .. }));
+    }
+
+    #[tokio::test]
+    async fn accepts_window_within_bounds() {
+        let i = good_intent();
+        // good_intent: issued=14:02:11, expires=14:07:11 (5min flat).
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        // Steps 3-5 are stubs at this point, so this should reach the
+        // stubbed Ok branch.
+        verify_signed_intent(i, &OkResolver, now).await.expect("within bounds");
     }
 }
