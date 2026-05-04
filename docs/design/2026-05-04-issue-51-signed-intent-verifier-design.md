@@ -1,6 +1,6 @@
 # Signed-intent envelope verifier (issue #51)
 
-**Status:** draft (proposed scope)
+**Status:** implemented (2026-05-04)
 **Issue:** [#51](https://github.com/windoliver/cairn/issues/51) — Validate
 signed intent envelopes before disk writes
 **Parent epic:** [#7](https://github.com/windoliver/cairn/issues/7) — Identity,
