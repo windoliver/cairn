@@ -16,6 +16,7 @@ async fn no_embedder_returns_capability_unavailable() {
             visibility_allowlist: vec![],
             limit: 5,
             model_label: "bge-small-en-v1.5".into(),
+            with_explain: false,
         })
         .await
         .unwrap_err();

@@ -78,6 +78,13 @@
         },
         "next_cursor": {
           "$ref": "../common/primitives.json#/$defs/Cursor"
+        },
+        "score_explain": {
+          "description": "Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).",
+          "items": {
+            "$ref": "#/$defs/ScoreExplain"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -113,6 +120,37 @@
         "record_id",
         "score",
         "trust"
+      ],
+      "type": "object"
+    },
+    "ScoreExplain": {
+      "additionalProperties": false,
+      "properties": {
+        "bm25_rank": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "cosine": {
+          "type": "number"
+        },
+        "final_score": {
+          "type": "number"
+        },
+        "record_id": {
+          "$ref": "../common/primitives.json#/$defs/Ulid"
+        },
+        "rrf_score": {
+          "type": "number"
+        },
+        "semantic_rank": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "record_id",
+        "rrf_score",
+        "final_score"
       ],
       "type": "object"
     },

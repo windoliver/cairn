@@ -78,7 +78,7 @@
 ///     const NAME: &'static str = "acme-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 4, 0),
+///         ContractVersion::new(0, 5, 0),
 ///     );
 /// }
 ///
@@ -153,7 +153,7 @@
 ///     const NAME: &'static str = "acme-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 4, 0),
+///         ContractVersion::new(0, 5, 0),
 ///     );
 /// }
 ///
@@ -432,7 +432,7 @@ macro_rules! __register_plugin_with_manifest_helper {
 ///     const NAME: &'static str = "config-store";
 ///     const SUPPORTED_VERSIONS: VersionRange = VersionRange::new(
 ///         ContractVersion::new(0, 1, 0),
-///         ContractVersion::new(0, 4, 0),
+///         ContractVersion::new(0, 5, 0),
 ///     );
 /// }
 ///

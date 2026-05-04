@@ -48,6 +48,7 @@ async fn hybrid_returns_results() {
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 5,
             model_label: kind.as_str().to_owned(),
+            with_explain: false,
         })
         .await
         .expect("semantic search");
@@ -65,6 +66,7 @@ async fn hybrid_returns_results() {
         blend: 0.7,
         rrf_k: 60,
         rerank_topk: 20,
+        with_explain: false,
     };
     let page = store.search_hybrid(&args).await.expect("hybrid search");
     assert!(!page.candidates.is_empty(), "hybrid returned 0 results");
@@ -98,6 +100,7 @@ async fn hybrid_capability_unavailable_without_embedder() {
         blend: 0.7,
         rrf_k: 60,
         rerank_topk: 20,
+        with_explain: false,
     };
     let result = store.search_hybrid(&args).await;
     assert!(result.is_err(), "expected CapabilityUnavailable");

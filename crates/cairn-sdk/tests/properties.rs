@@ -124,6 +124,15 @@ const CANONICAL_OPS: &[&str] = &[
     "array_size_eq",
 ];
 
+fn search_sync(
+    args: &SearchArgs,
+) -> Result<cairn_sdk::VerbResponse<cairn_sdk::generated::verbs::search::SearchData>, SdkError> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("tokio rt")
+        .block_on(sdk().search(args))
+}
+
 proptest! {
     #[test]
     fn unknown_filter_ops_reject(
@@ -135,7 +144,7 @@ proptest! {
             "op": op,
             "value": "v"
         }));
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 
     #[test]
@@ -146,7 +155,7 @@ proptest! {
         let mut leaf = serde_json::json!({"field": "x", "op": "eq", "value": "v"});
         leaf.as_object_mut().unwrap().insert(extra, serde_json::json!(1));
         let args = search_with_filter(leaf);
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 
     #[test]
@@ -158,7 +167,7 @@ proptest! {
             "op": CANONICAL_OPS[op_idx],
             "value": "v"
         }));
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 }
 
@@ -226,8 +235,8 @@ proptest! {
 // ScopeFilter — at least one field must be set.
 // ────────────────────────────────────────────────────────────────────
 
-#[test]
-fn empty_scope_filter_rejects() {
+#[tokio::test]
+async fn empty_scope_filter_rejects() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -250,7 +259,7 @@ fn empty_scope_filter_rejects() {
         explain: None,
     };
     assert!(matches!(
-        sdk().search(&args).expect_err("must reject"),
+        sdk().search(&args).await.expect_err("must reject"),
         SdkError::InvalidArgs { .. }
     ));
 }
@@ -272,7 +281,7 @@ proptest! {
             scope: None,
             explain: None,
         };
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 }
 

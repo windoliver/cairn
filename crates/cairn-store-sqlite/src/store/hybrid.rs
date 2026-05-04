@@ -26,7 +26,10 @@ use cairn_core::contract::memory_store::{
     HybridSearchArgs, HybridSearchPage, KeywordSearchArgs, SearchCandidate, SemanticSearchArgs,
 };
 use cairn_core::domain::RecordId;
-use cairn_core::search::{HybridSearchInputs, HybridSearchParams, ScoredCandidate, hybrid_search};
+use cairn_core::search::{
+    HybridSearchInputs, HybridSearchParams, RerankedCandidate, ScoreExplain, ScoredCandidate,
+    hybrid_search,
+};
 use cairn_embeddings_local::EmbeddingModel;
 use rusqlite::types::Value as SqlVal;
 use tracing::instrument;
@@ -81,6 +84,7 @@ impl SqliteMemoryStore {
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             cursor: None,
+            with_explain: false,
         };
         let sem_args = SemanticSearchArgs {
             query: args.query.clone(),
@@ -88,6 +92,7 @@ impl SqliteMemoryStore {
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             model_label: args.model_label.clone(),
+            with_explain: false,
         };
         let (keyword, semantic) = tokio::try_join!(
             self.do_search_keyword(&kw_args),
@@ -96,6 +101,19 @@ impl SqliteMemoryStore {
 
         let kw_list = scored_from_keyword(&keyword.candidates);
         let sem_list = scored_from_semantic(&semantic.candidates);
+
+        // Build 1-based rank lookup maps for the explain block. Constructed
+        // here while `kw_list` / `sem_list` are in leg-order (rank order).
+        let kw_ranks: HashMap<RecordId, usize> = kw_list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.record_id.clone(), i + 1))
+            .collect();
+        let sem_ranks: HashMap<RecordId, usize> = sem_list
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.record_id.clone(), i + 1))
+            .collect();
 
         // Embed the query for cosine re-rank. `do_search_semantic` already
         // embedded once internally; the v0.1 hybrid path accepts the second
@@ -129,12 +147,46 @@ impl SqliteMemoryStore {
         // snippets / bm25 / staleness exactly as those legs produced them.
         let mut by_id = hydrate_candidates(keyword.candidates, semantic.candidates);
         let candidates: Vec<SearchCandidate> = reranked
-            .into_iter()
+            .iter()
             .take(args.limit)
             .filter_map(|r| by_id.remove(&r.record_id))
             .collect();
 
-        Ok(HybridSearchPage { candidates })
+        // Build the explain block aligned with `candidates`. We iterate the
+        // surviving candidates (after filter_map + take) and look up each
+        // record's reranker output — this guarantees `explain[i].record_id ==
+        // candidates[i].record_id` even when hydration defensively drops a row.
+        let explain = if args.with_explain {
+            let reranked_map: HashMap<&RecordId, &RerankedCandidate> =
+                reranked.iter().map(|r| (&r.record_id, r)).collect();
+            Some(
+                candidates
+                    .iter()
+                    .filter_map(|c| {
+                        // A candidate that survived hydration must be in
+                        // `reranked`; filter_map here is defensive — if somehow
+                        // the invariant breaks we emit no explain row rather
+                        // than panicking at runtime.
+                        let r = reranked_map.get(&c.record_id)?;
+                        Some(ScoreExplain {
+                            record_id: c.record_id.clone(),
+                            bm25_rank: kw_ranks.get(&c.record_id).copied(),
+                            semantic_rank: sem_ranks.get(&c.record_id).copied(),
+                            rrf_score: r.rrf_score,
+                            cosine: r.cosine,
+                            final_score: r.final_score,
+                        })
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        Ok(HybridSearchPage {
+            candidates,
+            explain,
+        })
     }
 }
 

@@ -30,6 +30,7 @@ pub use open::{
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
 pub use store::reindex::{DrainStats, drain_once};
+pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 

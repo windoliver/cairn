@@ -280,6 +280,15 @@ fn admin_subcommand() -> clap::Command {
                         .help("Enqueue ALL active records before draining (use after model swap)"),
                 )
                 .arg(
+                    clap::Arg::new("from-db")
+                        .long("from-db")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Rebuild FTS5 + vector indexes from the authoritative records table \
+                             (use after derived indexes are deleted or corrupted).",
+                        ),
+                )
+                .arg(
                     clap::Arg::new("json")
                         .long("json")
                         .action(clap::ArgAction::SetTrue)
