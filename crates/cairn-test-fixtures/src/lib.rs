@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod keystore;
+pub mod signed_intent;
 pub mod store;
 pub use keystore::MemoryKeystore;
 
