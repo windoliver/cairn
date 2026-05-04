@@ -13,13 +13,15 @@
 //! Replay/sequence consumption is *not* in this pipeline — it lives in
 //! the `SQLite` WAL transaction (#52, #55).
 
+use std::num::NonZeroU32;
 use std::time::SystemTime;
 
-use crate::contract::issuer_key_resolver::IssuerKeyResolver;
+use crate::contract::issuer_key_resolver::{IssuerKeyResolver, KeyLifecycle, ResolvedKey};
 use crate::domain::{
     Identity, VerifiedSignedIntent,
     intent::{SignedIntentVerifier, sealed::VerifierWitness},
 };
+use crate::domain::identity::keys::KeyVersion;
 use crate::generated::envelope::SignedIntent;
 use crate::intent::{ExpiryReason, VerifyError};
 
@@ -37,19 +39,16 @@ impl SignedIntentVerifier for CoreSignedIntentVerifier {}
 ///
 /// # Errors
 /// Returns the appropriate [`VerifyError`] variant.
-#[allow(
-    clippy::unused_async,
-    reason = "steps 2-5 add resolver/timestamp awaits; async signature is stable now"
-)]
 pub async fn verify_signed_intent(
     intent: SignedIntent,
-    _resolver: &dyn IssuerKeyResolver,
+    resolver: &dyn IssuerKeyResolver,
     now: SystemTime,
 ) -> Result<VerifiedSignedIntent, VerifyError> {
     step1_syntactic(&intent)?;
     step2_timestamp_window(&intent, now)?;
     step3_scope_fit(&intent)?;
-    // Steps 4-5 land in subsequent tasks.
+    let _resolved = step4_resolver_lookup(&intent, resolver).await?;
+    // Step 5 lands in the subsequent task.
     Ok(<CoreSignedIntentVerifier as SignedIntentVerifier>::__from_verified(
         intent,
         VerifierWitness::new(),
@@ -150,6 +149,61 @@ fn step3_scope_fit(intent: &SignedIntent) -> Result<(), VerifyError> {
         });
     }
     Ok(())
+}
+
+/// Step 4: resolver lookup. Returns the resolved key on success;
+/// maps `None` / `NonOperational` / `Purged` → `UnknownKey`,
+/// `Revoked` w/ `effective_at ≤ issued_at` → `RevokedKey`.
+async fn step4_resolver_lookup(
+    intent: &SignedIntent,
+    resolver: &dyn IssuerKeyResolver,
+) -> Result<ResolvedKey, VerifyError> {
+    let issuer = Identity::parse(intent.issuer.0.clone())
+        .map_err(|e| VerifyError::Malformed { field: "issuer", reason: e.to_string() })?;
+    let kv_u32 = u32::try_from(intent.key_version).map_err(|_| VerifyError::Malformed {
+        field: "key_version",
+        reason: format!("out of u32 range: {}", intent.key_version),
+    })?;
+    let key_version = NonZeroU32::new(kv_u32)
+        .map(KeyVersion::new)
+        .ok_or(VerifyError::Malformed {
+            field: "key_version",
+            reason: "must be >= 1".to_owned(),
+        })?;
+    let resolved_key = resolver
+        .lookup(&issuer, key_version)
+        .await
+        .map_err(VerifyError::ResolverFailure)?
+        .ok_or_else(|| VerifyError::UnknownKey {
+            issuer: issuer.clone(),
+            key_version,
+        })?;
+    match &resolved_key.lifecycle {
+        KeyLifecycle::Active => Ok(resolved_key),
+        KeyLifecycle::Revoked { effective_at } => {
+            // Typed comparison — survives RFC3339 sub-second / timezone variation.
+            let issued_dt =
+                chrono::DateTime::parse_from_rfc3339(&intent.issued_at).map_err(|e| {
+                    VerifyError::Malformed { field: "issued_at", reason: e.to_string() }
+                })?;
+            let effective_dt =
+                chrono::DateTime::parse_from_rfc3339(effective_at.as_str()).map_err(|e| {
+                    VerifyError::Malformed { field: "effective_at", reason: e.to_string() }
+                })?;
+            if effective_dt <= issued_dt {
+                Err(VerifyError::RevokedKey {
+                    issuer,
+                    key_version,
+                    effective_at: effective_at.as_str().to_owned(),
+                })
+            } else {
+                Ok(resolved_key)
+            }
+        }
+        KeyLifecycle::NonOperational | KeyLifecycle::Purged => {
+            Err(VerifyError::UnknownKey { issuer, key_version })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +390,128 @@ mod tests {
         i.scope.tier = SignedIntentScopeTier::Public;
         let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
         verify_signed_intent(i, &OkResolver, now).await.expect("ok");
+    }
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use crate::domain::timestamp::Rfc3339Timestamp;
+
+    /// Programmable fake resolver — returns whatever the test puts in
+    /// the table for a given (issuer string, `key_version`) pair.
+    struct FakeResolver {
+        table: Mutex<HashMap<(String, u32), Option<ResolvedKey>>>,
+        fail_with: Mutex<Option<&'static str>>,
+    }
+
+    impl FakeResolver {
+        fn new() -> Self {
+            Self {
+                table: Mutex::new(HashMap::new()),
+                fail_with: Mutex::new(None),
+            }
+        }
+        fn set(&self, issuer: &str, ver: u32, value: Option<ResolvedKey>) {
+            self.table
+                .lock()
+                .expect("lock")
+                .insert((issuer.to_owned(), ver), value);
+        }
+        fn fail_with(&self, msg: &'static str) {
+            *self.fail_with.lock().expect("lock") = Some(msg);
+        }
+    }
+
+    #[async_trait]
+    impl IssuerKeyResolver for FakeResolver {
+        async fn lookup(
+            &self,
+            issuer: &Identity,
+            key_version: KeyVersion,
+        ) -> Result<Option<ResolvedKey>, ResolverError> {
+            if let Some(msg) = *self.fail_with.lock().expect("lock") {
+                return Err(ResolverError::Backend(msg.into()));
+            }
+            let key = (issuer.to_string(), key_version.as_u32());
+            Ok(self.table.lock().expect("lock").get(&key).cloned().flatten())
+        }
+    }
+
+    fn rfc3339(s: &str) -> Rfc3339Timestamp {
+        Rfc3339Timestamp::parse(s.to_owned()).expect("rfc3339")
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_key() {
+        let r = FakeResolver::new();
+        let i = good_intent();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &r, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::UnknownKey { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_operational_lifecycle() {
+        let r = FakeResolver::new();
+        r.set("hmn:tafeng", 1, Some(ResolvedKey {
+            public_key: [0u8; 32],
+            lifecycle: KeyLifecycle::NonOperational,
+        }));
+        let i = good_intent();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &r, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::UnknownKey { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_purged_lifecycle() {
+        let r = FakeResolver::new();
+        r.set("hmn:tafeng", 1, Some(ResolvedKey {
+            public_key: [0u8; 32],
+            lifecycle: KeyLifecycle::Purged,
+        }));
+        let i = good_intent();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &r, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::UnknownKey { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_revoked_before_issued_at() {
+        let r = FakeResolver::new();
+        r.set("hmn:tafeng", 1, Some(ResolvedKey {
+            public_key: [0u8; 32],
+            lifecycle: KeyLifecycle::Revoked {
+                effective_at: rfc3339("2026-04-22T14:02:00Z"),
+            },
+        }));
+        let i = good_intent(); // issued_at = 2026-04-22T14:02:11Z
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &r, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::RevokedKey { .. }));
+    }
+
+    #[tokio::test]
+    async fn accepts_revoked_after_issued_at() {
+        let r = FakeResolver::new();
+        r.set("hmn:tafeng", 1, Some(ResolvedKey {
+            public_key: [0u8; 32],
+            lifecycle: KeyLifecycle::Revoked {
+                effective_at: rfc3339("2026-04-22T15:00:00Z"),
+            },
+        }));
+        let i = good_intent();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        // step 5 (signature verify) is still a stub at this point.
+        verify_signed_intent(i, &r, now).await.expect("revocation post-dates op");
+    }
+
+    #[tokio::test]
+    async fn surfaces_resolver_io_error() {
+        let r = FakeResolver::new();
+        r.fail_with("synthetic backend failure");
+        let i = good_intent();
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &r, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ResolverFailure(_)));
     }
 }
