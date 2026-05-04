@@ -9,8 +9,24 @@
 //! [`crate::domain::intent::SignedIntentVerifier`] sealed-witness mint
 //! path without forcing every caller to be `async`.
 //!
-//! Replay / nonce / sequence / handshake-challenge enforcement is **not**
-//! handled here — see issue #52.
+//! # Out of scope for #51
+//!
+//! - **Replay / nonce / sequence / handshake-challenge** — see issue #52.
+//! - **WAL-transaction-level freshness** (close the resolve-then-write
+//!   race window for revocation/rotation) — see issue #55. The verifier
+//!   guarantees authenticity at resolve time; the WAL state machine
+//!   re-checks at PREPARE/COMMIT.
+//! - **Constant-time / timing-oracle resistance.** Pre-auth failures
+//!   take measurably different code paths (unknown issuer returns after
+//!   `get_identity`; wrong key after `list_keys`; bad signature after
+//!   the Ed25519 verify). The wire envelope is uniform — bytes are
+//!   indistinguishable — but elapsed time is not. Brief §14 covers
+//!   privacy-by-construction; closing the timing oracle requires
+//!   uniform work (dummy verifications on unknown identities, padding,
+//!   or rate limiting) that is out of scope at P0. Tracked as a
+//!   follow-up; reconsider when remote unauthenticated callers become
+//!   reachable (today the verifier sits behind in-process adapters
+//!   only).
 
 mod policy;
 mod resolve;

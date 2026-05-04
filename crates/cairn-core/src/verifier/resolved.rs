@@ -106,12 +106,19 @@ impl ResolvedIssuer {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 impl ResolvedIssuer {
-    /// Test-only constructor. Only available behind `cfg(test)` and
-    /// `feature = "test-helpers"`.
+    /// Test-only constructor — gated behind `#[cfg(test)]` so this
+    /// path is **only** reachable from cairn-core's own unit and
+    /// proptest binaries. It is **not** behind any Cargo feature: an
+    /// additive feature flag could be enabled accidentally by a
+    /// downstream crate's dev-dep graph and turn this into a public
+    /// constructor that bypasses [`super::resolve::resolve_issuer`],
+    /// minting `VerifiedSignedIntent` for arbitrary identities. Any
+    /// cross-crate test that needs a `ResolvedIssuer` must go through
+    /// the real registry via [`super::resolve::resolve_issuer`].
     #[must_use]
-    pub fn for_test(
+    pub(crate) fn for_test(
         identity: Identity,
         key_version: KeyVersion,
         verifying_key: VerifyingKey,
