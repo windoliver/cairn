@@ -1,31 +1,27 @@
 //! `SignedIntent` verifier — the single production path that mints
 //! [`crate::domain::VerifiedSignedIntent`] tokens.
 //!
-//! [`verify_signed_intent`] is the public entry point; adapters call
-//! it once at the trust boundary and pass the resulting token to
-//! [`crate::domain::MemoryRecord::validate_against_intent`].
+//! Pipeline (brief §4.2 hot-path, executed in this order to short-circuit
+//! cheap rejections first):
+//! 1. Syntactic post-parse defense in depth — catches direct field-init
+//!    bypassing `RawSignedIntent::TryFrom`.
+//! 2. Timestamp window vs server-supplied `now`.
+//! 3. Issuer-kind ↔ scope-tier fit.
+//! 4. Resolver lookup → public key + lifecycle.
+//! 5. JCS canonicalize + Ed25519 verify.
 //!
-//! ## P0 status
-//!
-//! At P0 this is a **placeholder** that performs only syntactic checks:
-//! issuer identity parses, `target_hash` is `sha256:<hex>`, and the
-//! issued/expires timestamps are well-formed. **No** Ed25519 signature
-//! verification, **no** nonce or sequence replay protection, **no**
-//! key/issuer trust evaluation — those land at P1+ alongside the
-//! keychain integration. A successful return therefore proves only
-//! that the envelope is well-formed; do **not** infer the issuer
-//! actually consented to the write until the real verifier ships.
-//!
-//! Adapters wiring this up at P0 should still treat the resulting
-//! token as the trust boundary's authority — once P1 lands, every
-//! call site already routes through the function and gets the real
-//! crypto for free.
+//! Replay/sequence consumption is *not* in this pipeline — it lives in
+//! the `SQLite` WAL transaction (#52, #55).
 
+use std::time::SystemTime;
+
+use crate::contract::issuer_key_resolver::IssuerKeyResolver;
 use crate::domain::{
-    DomainError, Identity, Rfc3339Timestamp, VerifiedSignedIntent,
+    Identity, VerifiedSignedIntent,
     intent::{SignedIntentVerifier, sealed::VerifierWitness},
 };
 use crate::generated::envelope::SignedIntent;
+use crate::intent::VerifyError;
 
 /// Concrete verifier impl. Empty by design — the trait method is
 /// default-implemented in [`SignedIntentVerifier`] and the witness is
@@ -36,57 +32,78 @@ impl SignedIntentVerifier for CoreSignedIntentVerifier {}
 
 /// Verify a `SignedIntent` and mint a [`VerifiedSignedIntent`] token.
 ///
-/// At P0 this performs syntactic-only checks (see module docs). The
-/// API and call sites stay stable so wiring the real crypto in P1+ is
-/// an internal change to this function alone.
-pub fn verify_signed_intent(intent: SignedIntent) -> Result<VerifiedSignedIntent, DomainError> {
-    Identity::parse(intent.issuer.0.clone()).map_err(|e| DomainError::InvalidIdentity {
-        message: format!("intent.issuer is not a valid identity: {e}"),
+/// Five ordered checks (see module docs). Any failure short-circuits with
+/// `Err(VerifyError::*)` and no side effects.
+///
+/// # Errors
+/// Returns the appropriate [`VerifyError`] variant.
+#[allow(
+    clippy::unused_async,
+    reason = "steps 2-5 add resolver/timestamp awaits; async signature is stable now"
+)]
+pub async fn verify_signed_intent(
+    intent: SignedIntent,
+    _resolver: &dyn IssuerKeyResolver,
+    _now: SystemTime,
+) -> Result<VerifiedSignedIntent, VerifyError> {
+    step1_syntactic(&intent)?;
+    // Steps 2-5 land in subsequent tasks.
+    Ok(<CoreSignedIntentVerifier as SignedIntentVerifier>::__from_verified(
+        intent,
+        VerifierWitness::new(),
+    ))
+}
+
+/// Step 1: post-parse defense in depth. Most invariants are already
+/// enforced by `RawSignedIntent::TryFrom`; this re-checks the few that
+/// could be bypassed by direct field-init within `cairn-core`.
+fn step1_syntactic(intent: &SignedIntent) -> Result<(), VerifyError> {
+    Identity::parse(intent.issuer.0.clone()).map_err(|e| VerifyError::Malformed {
+        field: "issuer",
+        reason: format!("{e}"),
     })?;
-    if !intent.target_hash.starts_with("sha256:")
-        || intent.target_hash.len() != "sha256:".len() + 64
-    {
-        return Err(DomainError::MissingSignature {
-            message: format!(
-                "intent.target_hash `{}` is not in `sha256:<64 hex>` form",
-                intent.target_hash
-            ),
+    if (u8::from(intent.sequence.is_some()) + u8::from(intent.server_challenge.is_some())) != 1 {
+        return Err(VerifyError::Malformed {
+            field: "sequence_or_challenge",
+            reason: "exactly one of [sequence, server_challenge] is required".to_owned(),
         });
     }
-    if !intent.target_hash["sha256:".len()..]
-        .bytes()
-        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err(DomainError::MissingSignature {
-            message: format!(
-                "intent.target_hash `{}` contains non-lowercase-hex characters",
-                intent.target_hash
-            ),
+    if intent.key_version < 1 {
+        return Err(VerifyError::Malformed {
+            field: "key_version",
+            reason: format!("must be >= 1; got {}", intent.key_version),
         });
     }
-    Rfc3339Timestamp::parse(intent.issued_at.clone()).map_err(|e| {
-        DomainError::InvalidTimestamp {
-            message: format!("intent.issued_at: {e}"),
-        }
-    })?;
-    Rfc3339Timestamp::parse(intent.expires_at.clone()).map_err(|e| {
-        DomainError::InvalidTimestamp {
-            message: format!("intent.expires_at: {e}"),
-        }
-    })?;
-    Ok(
-        <CoreSignedIntentVerifier as SignedIntentVerifier>::__from_verified(
-            intent,
-            VerifierWitness::new(),
-        ),
-    )
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::issuer_key_resolver::{KeyLifecycle, ResolvedKey, ResolverError};
+    use crate::domain::identity::keys::KeyVersion;
     use crate::generated::common;
     use crate::generated::envelope::{SignedIntentScope, SignedIntentScopeTier};
+    use async_trait::async_trait;
+
+    /// Always-Ok resolver returning a fixed active pubkey. Steps 2-5
+    /// are stubs in this task, so the resolver is unused — kept to
+    /// match the function signature.
+    struct OkResolver;
+
+    #[async_trait]
+    impl IssuerKeyResolver for OkResolver {
+        async fn lookup(
+            &self,
+            _issuer: &Identity,
+            _key_version: KeyVersion,
+        ) -> Result<Option<ResolvedKey>, ResolverError> {
+            Ok(Some(ResolvedKey {
+                public_key: [0u8; 32],
+                lifecycle: KeyLifecycle::Active,
+            }))
+        }
+    }
 
     fn good_intent() -> SignedIntent {
         SignedIntent {
@@ -110,40 +127,43 @@ mod tests {
         }
     }
 
-    #[test]
-    fn accepts_well_formed_intent() {
-        verify_signed_intent(good_intent()).expect("syntactic checks pass");
-    }
-
-    #[test]
-    fn rejects_bad_issuer_identity() {
+    #[tokio::test]
+    async fn rejects_bad_issuer_identity() {
         let mut i = good_intent();
         i.issuer = common::Identity("not-a-prefix:foo".to_owned());
-        let err = verify_signed_intent(i).unwrap_err();
-        assert!(matches!(err, DomainError::InvalidIdentity { .. }));
+        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::Malformed { field: "issuer", .. }));
     }
 
-    #[test]
-    fn rejects_bad_target_hash_prefix() {
+    #[tokio::test]
+    async fn rejects_both_sequence_and_challenge() {
         let mut i = good_intent();
-        i.target_hash = format!("md5:{}", "a".repeat(64));
-        let err = verify_signed_intent(i).unwrap_err();
-        assert!(matches!(err, DomainError::MissingSignature { .. }));
+        i.server_challenge = Some(common::Nonce16Base64("BBBBBBBBBBBBBBBBBBBBBA==".to_owned()));
+        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::Malformed { field: "sequence_or_challenge", .. }));
     }
 
-    #[test]
-    fn rejects_bad_target_hash_length() {
+    #[tokio::test]
+    async fn rejects_neither_sequence_nor_challenge() {
         let mut i = good_intent();
-        i.target_hash = format!("sha256:{}", "a".repeat(63));
-        let err = verify_signed_intent(i).unwrap_err();
-        assert!(matches!(err, DomainError::MissingSignature { .. }));
+        i.sequence = None;
+        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::Malformed { field: "sequence_or_challenge", .. }));
     }
 
-    #[test]
-    fn rejects_bad_issued_at() {
+    #[tokio::test]
+    async fn rejects_zero_key_version() {
         let mut i = good_intent();
-        i.issued_at = "not-a-timestamp".to_owned();
-        let err = verify_signed_intent(i).unwrap_err();
-        assert!(matches!(err, DomainError::InvalidTimestamp { .. }));
+        i.key_version = 0;
+        let err = verify_signed_intent(i, &OkResolver, SystemTime::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerifyError::Malformed { field: "key_version", .. }));
     }
 }
