@@ -20,7 +20,7 @@
 //! is reported as failed; the remaining events in the turn are not
 //! persisted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -132,7 +132,6 @@ pub async fn run_handler(
     // that contains *any* invalid event is poisoned — its valid siblings
     // are dropped too so the store never sees a truncated turn that
     // would summarize against incomplete data.
-    use std::collections::BTreeSet;
     let mut groups: BTreeMap<(String, String), Vec<&CaptureEvent>> = BTreeMap::new();
     let mut failed_turns: Vec<(String, String, String)> = Vec::new();
     let mut poisoned: BTreeSet<(String, String)> = BTreeSet::new();

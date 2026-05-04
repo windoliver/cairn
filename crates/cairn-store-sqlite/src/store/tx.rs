@@ -98,9 +98,9 @@ impl StoreTx<'_> {
     /// Read every non-tombstoned, non-summary trace record for a turn,
     /// ordered by `trace_sequence` ASC.
     ///
-    /// Uses the canonical [`record_from_json`] decoder from
-    /// [`crate::store::projection`], so the hydration path is identical
-    /// to all other read paths in this adapter.
+    /// Uses the canonical `record_from_json` decoder from the projection
+    /// module, so the hydration path is identical to all other read
+    /// paths in this adapter.
     ///
     /// Rows with `trace_event = 'turn_summary'` are excluded — they are
     /// aggregated records, not individual events. Tombstoned rows are
