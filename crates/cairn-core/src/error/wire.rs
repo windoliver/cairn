@@ -110,12 +110,18 @@ pub fn envelope_error_for(err: &DomainError) -> ErrorBody {
                 data: Some(serde_json::json!({ "required": "scope" })),
             }
         }
+        // `Unauthorized` is raised pre-auth by `resolve_issuer` (unknown
+        // identity, registry backend error) and by the verifier's
+        // issuer-match / key-version checks before signature verification.
+        // Collapse to the same body as `InvalidSignature` /
+        // `KeyVersionMismatch` so a pre-auth probe cannot tell unknown
+        // issuer from wrong key from bad signature.
         DomainError::Unauthorized { message } => {
-            tracing::debug!(detail = %message, "unauthorized");
+            tracing::debug!(detail = %message, "pre-auth: unauthorized");
             ErrorBody {
                 code: ErrorCode::Unauthorized,
                 message: "unauthorized".to_owned(),
-                data: Some(serde_json::json!({ "required": "authorization" })),
+                data: Some(serde_json::json!({ "required": "authentication" })),
             }
         }
 
@@ -225,7 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_returns_generic_required_no_identity_leak() {
+    fn unauthorized_collapses_to_generic_authentication_no_identity_leak() {
+        // `Unauthorized` is pre-auth (raised by resolve_issuer before any
+        // signature is verified). Must serialize byte-identically to
+        // InvalidSignature / KeyVersionMismatch so the wire body cannot
+        // be used as an oracle to enumerate known vs unknown issuers.
         let body = envelope_error_for(&DomainError::Unauthorized {
             message: "envelope issuer hmn:alice does not match resolved hmn:bob".into(),
         });
@@ -234,7 +244,7 @@ mod tests {
         let data = body.data.as_ref().unwrap();
         assert_eq!(
             data.get("required").unwrap().as_str().unwrap(),
-            "authorization"
+            "authentication"
         );
         let serialized = serde_json::to_string(&body).unwrap();
         assert!(
@@ -244,11 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn pre_auth_failures_are_byte_identical_on_the_wire() {
+    fn all_pre_auth_failures_are_byte_identical_on_the_wire() {
         // Brief §14: an unauthenticated probe must not be able to
         // distinguish unknown issuer / wrong key_version / invalid
-        // signature from one another. Their wire envelopes are byte-
-        // identical here; only the tracing logs reveal the cause.
+        // signature / mismatched issuer from one another. Every pre-auth
+        // failure path produces the exact same serialized body — only
+        // tracing logs reveal the cause.
         let bad_sig =
             serde_json::to_string(&envelope_error_for(&DomainError::InvalidSignature)).unwrap();
         let wrong_kv =
@@ -258,23 +269,34 @@ mod tests {
                 current: Some(KeyVersion::new(std::num::NonZeroU32::new(9).unwrap())),
             }))
             .unwrap();
-        let bad_issuer = serde_json::to_string(&envelope_error_for(&DomainError::Unauthorized {
-            message: "envelope issuer hmn:victim does not match resolved hmn:user".into(),
-        }))
-        .unwrap();
-        // bad_issuer maps to required="authorization" (post-auth-style
-        // shape), while bad_sig and wrong_kv collapse to
-        // required="authentication". Together with InvalidSignature's
-        // collapse, an attacker who probes with a guessed issuer cannot
-        // distinguish "wrong key" from "bad signature".
+        let unknown_issuer =
+            serde_json::to_string(&envelope_error_for(&DomainError::Unauthorized {
+                message: "identity hmn:victim not in registry".into(),
+            }))
+            .unwrap();
+        let mismatched_issuer =
+            serde_json::to_string(&envelope_error_for(&DomainError::Unauthorized {
+                message: "envelope issuer hmn:victim does not match resolved hmn:user".into(),
+            }))
+            .unwrap();
+
         assert_eq!(
             bad_sig, wrong_kv,
-            "pre-auth signature/key-version responses must be identical"
+            "InvalidSignature and KeyVersionMismatch must be wire-identical"
         );
-        // bad_issuer still surfaces a distinct response — but the data
-        // does not leak any identity, key_version, or current-version
-        // detail, only the generic discriminator.
-        assert!(!bad_issuer.contains("hmn:victim") && !bad_issuer.contains("hmn:user"));
+        assert_eq!(
+            bad_sig, unknown_issuer,
+            "InvalidSignature and Unauthorized(unknown issuer) must be wire-identical"
+        );
+        assert_eq!(
+            bad_sig, mismatched_issuer,
+            "InvalidSignature and Unauthorized(mismatched issuer) must be wire-identical"
+        );
+        // Defense-in-depth: assert no leaky identifier escapes any path.
+        for body in [&bad_sig, &wrong_kv, &unknown_issuer, &mismatched_issuer] {
+            assert!(!body.contains("hmn:victim"));
+            assert!(!body.contains("hmn:user"));
+        }
     }
 
     #[test]

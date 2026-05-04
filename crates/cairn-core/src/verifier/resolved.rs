@@ -30,15 +30,29 @@ use crate::domain::identity::records::ProvisioningState;
 /// or revocation between resolve and verify would leave the verifier
 /// accepting envelopes signed by a now-superseded private key.
 ///
+/// To make reuse hard to do by accident,
+/// [`super::EnvelopeVerifier::verify`] consumes `ResolvedIssuer` by
+/// value — every verification requires a fresh snapshot.
+///
 /// The recommended pattern is the resolve-then-verify pair:
 ///
 /// ```ignore
 /// let resolved = cairn_core::verifier::resolve_issuer(&registry, &id, kv).await?;
-/// let verified = verifier.verify(intent, &resolved)?;
+/// let verified = verifier.verify(intent, resolved)?;
 /// ```
 ///
-/// Anything stronger (revision-witnessed snapshots, registry passed
-/// directly into verify) is a follow-up issue.
+/// # Known race window — closed by issue #55 (WAL state machine)
+///
+/// Even with single-use snapshots, a rotation or revocation that lands
+/// **between** `resolve_issuer` (at time T0) and the eventual WAL
+/// commit (at T1) creates a TOCTOU window in which an envelope signed
+/// by stale-but-then-current authority can be minted into a
+/// `VerifiedSignedIntent` and reach WAL prepare. Per spec design, full
+/// closure requires re-checking identity state inside the WAL
+/// transaction itself (issue #55, §5.6 step PREPARE). The verifier's
+/// guarantee here is: "this envelope was authentic at T0 against the
+/// registry snapshot". The WAL state machine at T1 owns the freshness
+/// re-check before COMMIT.
 pub struct ResolvedIssuer {
     pub(crate) identity: Identity,
     pub(crate) key_version: KeyVersion,

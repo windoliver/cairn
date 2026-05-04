@@ -6,6 +6,6 @@ expression: body
   "code": "Unauthorized",
   "message": "unauthorized",
   "data": {
-    "required": "authorization"
+    "required": "authentication"
   }
 }
