@@ -2656,3 +2656,139 @@ fn migration_0035_precheck_rejects_pre_existing_overlap() {
         "expected migration-time precheck rejection, got: {msg}"
     );
 }
+
+/// Round-10 review fix: contradiction must recompute the OLD row's
+/// `body_hash` after mutating its `invalid_at`. Pre-fix, a stale
+/// re-upsert of the original `[t, NULL)` fact (the one that was just
+/// contradicted) hit Probe A by matching the old row's now-stale hash
+/// and returned `body_was_unchanged = true` — silently telling the
+/// caller a no-longer-present fact is still present.
+#[tokio::test]
+async fn upsert_post_contradiction_stale_reupsert_does_not_match_probe_a() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "X0").await;
+
+    // Live edge [100, NULL).
+    let live = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000X1"),
+        source_id: a.clone(),
+        target_id: b.clone(),
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 100,
+        source_record_id: None,
+    };
+    store.upsert_entity_edge(&live).await.expect("seed live");
+
+    // Contradiction at t=200 → live is shrunk to [100, 200).
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000X2"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Inferred,
+            confidence_score: 0.5,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("contradiction");
+
+    // Stale re-upsert of the ORIGINAL [100, NULL) fact. Pre-fix this
+    // matched the bounded old row's stored hash via Probe A and
+    // returned body_was_unchanged=true. Post-fix the bounded row's
+    // hash reflects [100, 200), so Probe A misses; the upsert falls
+    // through to Probe B which finds the bounded [100, 200) and
+    // rejects with "use resolve_contradiction" (the new edge would
+    // overlap a bounded row).
+    let stale = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000X3"),
+        ..live
+    };
+    let res = store.upsert_entity_edge(&stale).await;
+    assert!(
+        res.is_err(),
+        "stale reupsert of original open-ended fact must not be \
+         classified as unchanged; got: {res:?}",
+    );
+}
+
+/// Round-10 review fix: re-upserting the bounded row that was just
+/// produced by a contradiction must hit body-hash idempotency
+/// (Probe A) and return `body_was_unchanged = true` — proving the
+/// stored hash now reflects the post-mutation `invalid_at`.
+#[tokio::test]
+async fn upsert_post_contradiction_replay_of_bounded_row_is_idempotent() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "Y0").await;
+
+    let live_id = EntityEdgeId::from("01HZE7JV5N00000000000000Y1");
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: live_id.clone(),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+
+    // Contradict — old row becomes [100, 200) with confidence=Extracted,
+    // confidence_score=1.0, created_at=100, source_record_id=None.
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000Y2"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Inferred,
+            confidence_score: 0.5,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("contradiction");
+
+    // Re-upsert the OLD row exactly as it now exists (id matches the
+    // bounded row, fields reflect post-contradiction state). With the
+    // round-10 fix the stored hash matches; Probe A returns
+    // body_was_unchanged=true.
+    let outcome = store
+        .upsert_entity_edge(&EntityEdge {
+            id: live_id.clone(),
+            source_id: a,
+            target_id: b,
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: Some(200),
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("idempotent replay of bounded row");
+    assert!(
+        outcome.body_was_unchanged,
+        "post-contradiction bounded row must be hash-idempotent on replay; got: {outcome:?}",
+    );
+    assert_eq!(outcome.new_edge_id, live_id);
+}

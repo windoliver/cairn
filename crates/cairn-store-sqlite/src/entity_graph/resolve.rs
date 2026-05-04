@@ -11,6 +11,22 @@ use crate::entity_graph::{unpack_worker_err, wal};
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
+/// Old-row capture for `do_resolve_contradiction`: every field needed by
+/// the cross-triple guard, the backdated/bounded-target guards, the
+/// overlap probe, the `body_hash` recomputation, and the WAL `pre_image`.
+type OldRow = (
+    i64,
+    Option<i64>,
+    String,
+    String,
+    String,
+    String,
+    f32,
+    i64,
+    Option<String>,
+    String,
+);
+
 impl SqliteMemoryStore {
     /// Inherent resolve-contradiction implementation; the trait method
     /// [`MemoryStore::resolve_contradiction`] guards `self.conn` then delegates here.
@@ -65,7 +81,9 @@ impl SqliteMemoryStore {
                     // contradiction.
                     let lookup_sql = format!(
                         "SELECT valid_at, invalid_at, \
-                                source_id, target_id, relation, {pre_image} \
+                                source_id, target_id, relation, \
+                                confidence, confidence_score, created_at, \
+                                source_record_id, {pre_image} \
                          FROM entity_edges \
                          WHERE id = ?1 AND expired_at IS NULL",
                         pre_image = super::ENTITY_EDGE_PRE_IMAGE_JSON,
@@ -76,8 +94,12 @@ impl SqliteMemoryStore {
                         old_src,
                         old_tgt,
                         old_rel,
+                        old_confidence_db,
+                        old_confidence_score,
+                        old_created_at,
+                        old_source_record_id,
                         pre_image_json,
-                    ): (i64, Option<i64>, String, String, String, String) = tx
+                    ): OldRow = tx
                         .query_row(&lookup_sql, [&old_id_owned], |r| {
                             Ok((
                                 r.get(0)?,
@@ -86,6 +108,10 @@ impl SqliteMemoryStore {
                                 r.get(3)?,
                                 r.get(4)?,
                                 r.get(5)?,
+                                r.get(6)?,
+                                r.get(7)?,
+                                r.get(8)?,
+                                r.get(9)?,
                             ))
                         })
                         .map_err(|e| match e {
@@ -226,11 +252,28 @@ impl SqliteMemoryStore {
                         )));
                     }
 
+                    // Recompute the OLD row's body_hash with its new
+                    // (post-contradiction) `invalid_at`. body_hash
+                    // includes invalid_at in its domain, so leaving the
+                    // stored hash as the pre-mutation value would let
+                    // a stale re-upsert of the original fact match
+                    // Probe A and return body_was_unchanged=true even
+                    // though that fact is no longer present. Same fix
+                    // as in the upsert contradiction branch.
+                    let new_old_hash = super::edge::body_hash_components(
+                        &old_confidence_db,
+                        old_confidence_score,
+                        old_valid_at,
+                        Some(new_edge.valid_at),
+                        old_created_at,
+                        old_source_record_id.as_deref(),
+                    );
                     let op_id = wal::issue_op(&tx, "graph_contradict", new_edge.id.as_str())
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                     tx.execute(
-                        "UPDATE entity_edges SET invalid_at = ?1 WHERE id = ?2",
-                        rusqlite::params![new_edge.valid_at, &old_id_owned],
+                        "UPDATE entity_edges SET invalid_at = ?1, body_hash = ?2 \
+                         WHERE id = ?3",
+                        rusqlite::params![new_edge.valid_at, &new_old_hash[..], &old_id_owned],
                     )?;
                     wal::write_step(
                         &tx,

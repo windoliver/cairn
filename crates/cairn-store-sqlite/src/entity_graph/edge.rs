@@ -17,10 +17,32 @@ use crate::entity_graph::wal;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
-/// Probe-B SELECT row: `(id, body_hash, valid_at, invalid_at,
-/// pre_image_json)`. Lifted to a type alias to satisfy
-/// `clippy::type_complexity` on the closure SELECT below.
-type OverlapRow = (String, Vec<u8>, i64, Option<i64>, String);
+/// Probe-B SELECT row capturing every field needed by the
+/// contradiction branch. Lifted to a type alias to satisfy
+/// `clippy::type_complexity` and to keep the SELECT column list
+/// in lockstep with the destructuring binding.
+///
+/// Fields, in order:
+/// - `id` (PK)
+/// - `body_hash` (used to detect re-upsert idempotency by Probe A; we
+///   currently discard it on Probe B but reserve the column for parity)
+/// - `valid_at`, `invalid_at` (window — backdated guard, overlap
+///   routing, and `body_hash` recomputation)
+/// - `confidence` (DB string), `confidence_score`, `created_at`,
+///   `source_record_id` (the OLD row's fact fields used to recompute
+///   `body_hash` after we mutate `invalid_at`)
+/// - `pre_image_json` (the WAL-step `pre_image` blob)
+type OverlapRow = (
+    String,
+    Vec<u8>,
+    i64,
+    Option<i64>,
+    String,
+    f32,
+    i64,
+    Option<String>,
+    String,
+);
 
 /// Compute the body-hash used to detect substantive edge changes.
 ///
@@ -42,21 +64,47 @@ type OverlapRow = (String, Vec<u8>, i64, Option<i64>, String);
 /// corrected ingestion-time start hit the unchanged path and keep the
 /// stale value without any WAL signal.
 pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
+    body_hash_components(
+        edge.confidence.as_db_str(),
+        edge.confidence_score,
+        edge.valid_at,
+        edge.invalid_at,
+        edge.created_at,
+        edge.source_record_id
+            .as_ref()
+            .map(cairn_core::domain::RecordId::as_str),
+    )
+}
+
+/// Lower-level `body_hash` used when only the in-domain fact fields are
+/// in scope (e.g. the contradiction path recomputing the hash of an
+/// already-stored row whose `invalid_at` we are about to mutate, where
+/// we never construct a full [`EntityEdge`] for the OLD row in memory).
+/// MUST stay byte-equivalent to [`body_hash`] for any inputs derived
+/// from the same edge — drift would break body-hash idempotency.
+pub(super) fn body_hash_components(
+    confidence_db_str: &str,
+    confidence_score: f32,
+    valid_at: i64,
+    invalid_at: Option<i64>,
+    created_at: i64,
+    source_record_id: Option<&str>,
+) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
-    h.update(edge.confidence.as_db_str().as_bytes());
-    h.update(&edge.confidence_score.to_le_bytes());
-    h.update(&edge.valid_at.to_le_bytes());
+    h.update(confidence_db_str.as_bytes());
+    h.update(&confidence_score.to_le_bytes());
+    h.update(&valid_at.to_le_bytes());
     // invalid_at: tagged Option encoding so None ≠ Some(0).
-    if let Some(t) = edge.invalid_at {
+    if let Some(t) = invalid_at {
         h.update(&[1u8]);
         h.update(&t.to_le_bytes());
     } else {
         h.update(&[0u8]);
     }
-    h.update(&edge.created_at.to_le_bytes());
-    if let Some(rid) = &edge.source_record_id {
+    h.update(&created_at.to_le_bytes());
+    if let Some(rid) = source_record_id {
         h.update(b"|");
-        h.update(rid.as_str().as_bytes());
+        h.update(rid.as_bytes());
     }
     *h.finalize().as_bytes()
 }
@@ -230,7 +278,9 @@ impl SqliteMemoryStore {
                     // window where another writer could rewrite the
                     // row between probe and capture.
                     let overlap_sql = format!(
-                        "SELECT id, body_hash, valid_at, invalid_at, {pre_image} \
+                        "SELECT id, body_hash, valid_at, invalid_at, confidence, \
+                                confidence_score, created_at, source_record_id, \
+                                {pre_image} \
                          FROM entity_edges \
                          WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
                            AND expired_at IS NULL \
@@ -249,7 +299,19 @@ impl SqliteMemoryStore {
                                 edge.valid_at,
                                 edge.invalid_at,
                             ],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                            |r| {
+                                Ok((
+                                    r.get(0)?,
+                                    r.get(1)?,
+                                    r.get(2)?,
+                                    r.get(3)?,
+                                    r.get(4)?,
+                                    r.get(5)?,
+                                    r.get(6)?,
+                                    r.get(7)?,
+                                    r.get(8)?,
+                                ))
+                            },
                         )
                         .map(Some)
                         .or_else(|e| match e {
@@ -279,6 +341,10 @@ impl SqliteMemoryStore {
                             _existing_hash,
                             existing_valid_at,
                             existing_invalid_at,
+                            existing_confidence_db,
+                            existing_confidence_score,
+                            existing_created_at,
+                            existing_source_record_id,
                             existing_pre_image_json,
                         )) => {
                             // Branch 2: an overlapping non-expired row
@@ -339,11 +405,33 @@ impl SqliteMemoryStore {
                                     },
                                 )));
                             }
+                            // Recompute the OLD row's body_hash with
+                            // its new (post-contradiction)
+                            // `invalid_at`. body_hash includes
+                            // invalid_at in its domain, so leaving the
+                            // stored hash as the pre-mutation value
+                            // would (a) make a stale re-upsert of the
+                            // original open-ended fact match Probe A
+                            // and return body_was_unchanged=true even
+                            // though that fact is no longer present,
+                            // and (b) make a re-upsert of the
+                            // contradiction-shaped row miss Probe A
+                            // and either trip a PK conflict or
+                            // duplicate the historical row.
+                            let new_old_hash = body_hash_components(
+                                &existing_confidence_db,
+                                existing_confidence_score,
+                                existing_valid_at,
+                                Some(edge.valid_at),
+                                existing_created_at,
+                                existing_source_record_id.as_deref(),
+                            );
                             let op_id = wal::issue_op(&tx, "graph_contradict", edge.id.as_str())
                                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                             tx.execute(
-                                "UPDATE entity_edges SET invalid_at = ?1 WHERE id = ?2",
-                                rusqlite::params![edge.valid_at, &existing_id],
+                                "UPDATE entity_edges SET invalid_at = ?1, body_hash = ?2 \
+                                 WHERE id = ?3",
+                                rusqlite::params![edge.valid_at, &new_old_hash[..], &existing_id],
                             )?;
                             // Pre-image is the full pre-mutation row
                             // serialized as JSON (see
