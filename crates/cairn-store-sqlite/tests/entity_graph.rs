@@ -2097,19 +2097,25 @@ async fn resolve_contradiction_rejects_overlap_with_other_bounded_row() {
         .await
         .expect("seed live");
 
-    // Inject a bounded row [200, 400) directly. We bypass `upsert_entity_edge`
-    // because its own overlap probe (Probe B) would reject this as
-    // overlapping the live row [100, NULL). The point of this test is to
-    // model a corrupted-but-historically-valid state that a repair caller
-    // (`lint --fix-graph`) might encounter, then prove
-    // `resolve_contradiction` won't add to the corruption by inserting
-    // its own overlapping row.
+    // Inject a bounded row [200, 400) directly. We bypass both
+    // `upsert_entity_edge` (its API-layer overlap probe rejects this)
+    // *and* the round-9 schema trigger
+    // `entity_edges_no_overlap_insert` (which now rejects the raw
+    // INSERT itself). Drop the trigger for the duration of injection
+    // and recreate it afterwards so the rest of the test still sees
+    // schema-level defense in depth.
+    //
+    // Models a corrupted-but-historically-valid state that a repair
+    // caller (`lint --fix-graph`) might encounter; this test proves
+    // `resolve_contradiction` does not *add* to the corruption by
+    // inserting its own overlapping row.
     let a_id = a.as_str().to_owned();
     let b_id = b.as_str().to_owned();
     store
         .raw_conn()
         .expect("conn present after open_in_memory")
         .call(move |c| {
+            c.execute_batch("DROP TRIGGER entity_edges_no_overlap_insert;")?;
             c.execute(
                 "INSERT INTO entity_edges (\
                    id, source_id, target_id, relation, \
@@ -2117,6 +2123,26 @@ async fn resolve_contradiction_rejects_overlap_with_other_bounded_row() {
                    valid_at, invalid_at, created_at, body_hash) \
                  VALUES (?1, ?2, ?3, 'r', 'EXTRACTED', 1.0, 200, 400, 200, X'AA')",
                 rusqlite::params!["01HZE7JV5N00000000000000R1", a_id, b_id],
+            )?;
+            c.execute_batch(
+                "CREATE TRIGGER entity_edges_no_overlap_insert \
+                   BEFORE INSERT ON entity_edges \
+                   FOR EACH ROW \
+                   WHEN NEW.expired_at IS NULL \
+                 BEGIN \
+                   SELECT RAISE(ABORT, \
+                     'entity_edges overlap: another non-expired row exists for this triple in window') \
+                   WHERE EXISTS ( \
+                     SELECT 1 FROM entity_edges \
+                     WHERE id != NEW.id \
+                       AND source_id = NEW.source_id \
+                       AND target_id = NEW.target_id \
+                       AND relation  = NEW.relation \
+                       AND expired_at IS NULL \
+                       AND (NEW.invalid_at IS NULL OR valid_at < NEW.invalid_at) \
+                       AND (invalid_at IS NULL OR invalid_at > NEW.valid_at) \
+                   ); \
+                 END;",
             )?;
             Ok(())
         })
@@ -2330,5 +2356,303 @@ async fn resolve_contradiction_rejects_no_shrink_on_bounded_target() {
         matches!(*concrete, StoreError::Invariant { ref what }
             if what.contains("would not shrink bounded window")),
         "expected no-shrink Invariant, got: {concrete:?}"
+    );
+}
+
+/// Round-9 review fix (finding 1): bounded-target contradiction must
+/// preserve `old.invalid_at` as the replacement's endpoint. Pre-fix the
+/// guard only checked `new.valid_at` was inside the window, so a caller
+/// could repair `[50,100)` with `[75,NULL)` — silently extending the
+/// fact past its original endpoint of 100.
+#[tokio::test]
+async fn resolve_contradiction_rejects_extending_invalid_at_on_bounded_target() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "V0").await;
+
+    // Bounded historical [50, 100).
+    let a_id = a.as_str().to_owned();
+    let b_id = b.as_str().to_owned();
+    store
+        .raw_conn()
+        .expect("conn present after open_in_memory")
+        .call(move |c| {
+            c.execute(
+                "INSERT INTO entity_edges (\
+                   id, source_id, target_id, relation, \
+                   confidence, confidence_score, \
+                   valid_at, invalid_at, created_at, body_hash) \
+                 VALUES (?1, ?2, ?3, 'r', 'EXTRACTED', 1.0, 50, 100, 50, X'AA')",
+                rusqlite::params!["01HZE7JV5N00000000000000V1", a_id, b_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("inject bounded row");
+
+    // Replacement [75, NULL) extends the fact's lifetime past the
+    // original endpoint of 100. Reject — the contradiction primitive
+    // is not a split/merge.
+    let extend_via_null = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000V2"),
+        source_id: a.clone(),
+        target_id: b.clone(),
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 75,
+        invalid_at: None,
+        created_at: 75,
+        source_record_id: None,
+    };
+    let err = store
+        .resolve_contradiction(
+            &EntityEdgeId::from("01HZE7JV5N00000000000000V1"),
+            &extend_via_null,
+        )
+        .await
+        .expect_err("NULL invalid_at on bounded target must be rejected");
+    let concrete = err.downcast::<StoreError>().expect("downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("must preserve bounded endpoint")),
+        "expected preserve-endpoint Invariant, got: {concrete:?}"
+    );
+
+    // Replacement [75, 200) also extends past the original 100.
+    let extend_via_later = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000V3"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 75,
+        invalid_at: Some(200),
+        created_at: 75,
+        source_record_id: None,
+    };
+    let err = store
+        .resolve_contradiction(
+            &EntityEdgeId::from("01HZE7JV5N00000000000000V1"),
+            &extend_via_later,
+        )
+        .await
+        .expect_err("later invalid_at on bounded target must be rejected");
+    let concrete = err.downcast::<StoreError>().expect("downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("must preserve bounded endpoint")),
+        "expected preserve-endpoint Invariant, got: {concrete:?}"
+    );
+}
+
+/// Round-9 review fix (finding 2): the contradiction WAL `pre_image`
+/// must be a recoverable serialization of the old row, not just a
+/// 32-byte `body_hash`. Without this, a compensating UPDATE has no way
+/// to restore `old.invalid_at` (the field that was actually changed)
+/// and no way to audit what edge was overwritten.
+#[tokio::test]
+async fn contradiction_wal_pre_image_is_recoverable_json() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let pre_image_store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&pre_image_store, "W0").await;
+
+    // Seed a live edge.
+    let live_id = "01HZE7JV5N00000000000000W1";
+    pre_image_store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from(live_id),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 0.9,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+
+    // Trigger contradiction via upsert with overlapping new edge.
+    pre_image_store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000W2"),
+            source_id: a,
+            target_id: b,
+            relation: "r".into(),
+            confidence: EdgeConfidence::Inferred,
+            confidence_score: 0.7,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("contradiction upsert");
+
+    // Read the invalidate_edge step's pre_image and decode as JSON.
+    let pre_image_bytes: Vec<u8> = pre_image_store
+        .raw_conn()
+        .expect("conn")
+        .call(|c| {
+            let bytes: Vec<u8> = c.query_row(
+                "SELECT pre_image FROM wal_steps \
+                 WHERE step_kind = 'invalidate_edge' \
+                 ORDER BY started_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(bytes)
+        })
+        .await
+        .expect("fetch pre_image");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&pre_image_bytes).expect("pre_image must be JSON");
+    assert_eq!(
+        json.get("id").and_then(|v| v.as_str()),
+        Some(live_id),
+        "pre_image must contain the old row's id"
+    );
+    assert_eq!(
+        json.get("valid_at").and_then(serde_json::Value::as_i64),
+        Some(100),
+        "pre_image must contain the old row's valid_at"
+    );
+    assert!(
+        json.get("invalid_at").is_some(),
+        "pre_image must include invalid_at field (the value being mutated)"
+    );
+    assert_eq!(
+        json.get("confidence").and_then(|v| v.as_str()),
+        Some("EXTRACTED"),
+        "pre_image must capture confidence tier for audit"
+    );
+    let score = json
+        .get("confidence_score")
+        .and_then(serde_json::Value::as_f64)
+        .expect("pre_image must capture confidence_score for audit");
+    // confidence_score is stored as f32 (REAL); the JSON round-trip
+    // widens to f64 with the f32 representation of 0.9.
+    assert!(
+        (score - 0.9).abs() < 1e-6,
+        "pre_image confidence_score not approx 0.9: got {score}"
+    );
+    assert!(
+        json.get("body_hash_hex").and_then(|v| v.as_str()).is_some(),
+        "pre_image must capture body_hash (hex) for audit"
+    );
+}
+
+/// Round-9 review fix (finding 3): schema-level overlap protection.
+/// A raw INSERT of a non-expired row that overlaps an existing
+/// non-expired row for the same triple must be rejected by the
+/// `entity_edges_no_overlap_insert` trigger, even when the API guards
+/// are bypassed.
+#[test]
+fn entity_edges_schema_trigger_rejects_overlap_insert() {
+    let conn = open_in_memory_sync().expect("open");
+    conn.execute_batch(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
+           ('n1', 'A', 'a', 1), ('n2', 'B', 'b', 1);",
+    )
+    .expect("seed nodes");
+
+    // Live edge [100, NULL).
+    conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, created_at, body_hash) \
+         VALUES ('e1', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 100, 100, X'00')",
+        [],
+    )
+    .expect("seed live");
+
+    // Overlap [200, 400) — trigger rejects.
+    let res = conn.execute(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+         confidence, confidence_score, valid_at, invalid_at, created_at, body_hash) \
+         VALUES ('e2', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 200, 400, 200, X'00')",
+        [],
+    );
+    let err = res.expect_err("overlap insert must be rejected by trigger");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("entity_edges overlap"),
+        "expected schema-trigger overlap error, got: {msg}"
+    );
+}
+
+/// Round-9 review fix (finding 3): the same trigger must fire on UPDATE
+/// when the post-update row would overlap another non-expired row.
+#[test]
+fn entity_edges_schema_trigger_rejects_overlap_update() {
+    let conn = open_in_memory_sync().expect("open");
+    conn.execute_batch(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
+           ('n1', 'A', 'a', 1), ('n2', 'B', 'b', 1);",
+    )
+    .expect("seed nodes");
+
+    // Two non-overlapping bounded rows.
+    conn.execute_batch(
+        "INSERT INTO entity_edges (id, source_id, target_id, relation, \
+           confidence, confidence_score, valid_at, invalid_at, created_at, body_hash) \
+         VALUES ('e1', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 100, 200, 100, X'00'), \
+                ('e2', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 200, 300, 200, X'01');",
+    )
+    .expect("seed two adjacent rows");
+
+    // Mutate e1 to extend into e2's window — must fire trigger.
+    let res = conn.execute(
+        "UPDATE entity_edges SET invalid_at = 250 WHERE id = 'e1'",
+        [],
+    );
+    let err = res.expect_err("update creating overlap must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("entity_edges overlap"),
+        "expected schema-trigger overlap error, got: {msg}"
+    );
+}
+
+/// Round-9 review fix (finding 3): migration 0035 must reject installation
+/// when pre-existing data already violates the no-overlap invariant.
+/// Construct a vault at v0034, inject overlap, then attempt to apply 0035.
+#[test]
+fn migration_0035_precheck_rejects_pre_existing_overlap() {
+    use cairn_store_sqlite::migrations::migrations;
+    use cairn_store_sqlite::vec_ext::register_vec0;
+
+    register_vec0();
+    let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+    // `to_version` indexes by *count of migrations applied*, not
+    // migration_id. The set has 27 migrations through 0034 (0001-0022,
+    // 0030-0034), so version 27 is the world before 0035.
+    migrations()
+        .to_version(&mut conn, 27)
+        .expect("apply through 0034");
+
+    conn.execute_batch(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) VALUES \
+           ('n1', 'A', 'a', 1), ('n2', 'B', 'b', 1); \
+         INSERT INTO entity_edges (id, source_id, target_id, relation, \
+           confidence, confidence_score, valid_at, invalid_at, created_at, body_hash) \
+         VALUES ('e1', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 100, 300, 100, X'00'), \
+                ('e2', 'n1', 'n2', 'r', 'EXTRACTED', 1.0, 200, 400, 200, X'01');",
+    )
+    .expect("seed pre-existing overlap before 0035 runs");
+
+    let res = migrations().to_version(&mut conn, 28);
+    let err = res.expect_err("0035 precheck must reject pre-existing overlap");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("pre-existing overlap") || msg.contains("CHECK"),
+        "expected migration-time precheck rejection, got: {msg}"
     );
 }

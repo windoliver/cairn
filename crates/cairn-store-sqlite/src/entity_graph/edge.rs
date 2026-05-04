@@ -17,6 +17,11 @@ use crate::entity_graph::wal;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
+/// Probe-B SELECT row: `(id, body_hash, valid_at, invalid_at,
+/// pre_image_json)`. Lifted to a type alias to satisfy
+/// `clippy::type_complexity` on the closure SELECT below.
+type OverlapRow = (String, Vec<u8>, i64, Option<i64>, String);
+
 /// Compute the body-hash used to detect substantive edge changes.
 ///
 /// Includes every field that constitutes the *fact* and is persisted on
@@ -217,14 +222,26 @@ impl SqliteMemoryStore {
                     // [150,250)) both took the fresh-insert path and a
                     // single as-of read at t=175 returned duplicates,
                     // breaking the bitemporal invariant.
-                    let overlap: Option<(String, Vec<u8>, i64, Option<i64>)> = tx
+                    // The pre-image JSON column is a recoverable
+                    // serialization of the candidate row, used by the
+                    // contradiction branch as the WAL `pre_image` blob.
+                    // Selecting it inline keeps the row capture
+                    // atomic with the overlap probe — there's no
+                    // window where another writer could rewrite the
+                    // row between probe and capture.
+                    let overlap_sql = format!(
+                        "SELECT id, body_hash, valid_at, invalid_at, {pre_image} \
+                         FROM entity_edges \
+                         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
+                           AND expired_at IS NULL \
+                           AND (?5 IS NULL OR valid_at < ?5) \
+                           AND (invalid_at IS NULL OR invalid_at > ?4) \
+                         LIMIT 1",
+                        pre_image = super::ENTITY_EDGE_PRE_IMAGE_JSON,
+                    );
+                    let overlap: Option<OverlapRow> = tx
                         .query_row(
-                            "SELECT id, body_hash, valid_at, invalid_at FROM entity_edges \
-                             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
-                               AND expired_at IS NULL \
-                               AND (?5 IS NULL OR valid_at < ?5) \
-                               AND (invalid_at IS NULL OR invalid_at > ?4) \
-                             LIMIT 1",
+                            &overlap_sql,
                             rusqlite::params![
                                 edge.source_id.as_str(),
                                 edge.target_id.as_str(),
@@ -232,7 +249,7 @@ impl SqliteMemoryStore {
                                 edge.valid_at,
                                 edge.invalid_at,
                             ],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                         )
                         .map(Some)
                         .or_else(|e| match e {
@@ -259,9 +276,10 @@ impl SqliteMemoryStore {
                         }
                         Some((
                             existing_id,
-                            existing_hash,
+                            _existing_hash,
                             existing_valid_at,
                             existing_invalid_at,
+                            existing_pre_image_json,
                         )) => {
                             // Branch 2: an overlapping non-expired row
                             // exists. Routing depends on whether it's the
@@ -327,13 +345,20 @@ impl SqliteMemoryStore {
                                 "UPDATE entity_edges SET invalid_at = ?1 WHERE id = ?2",
                                 rusqlite::params![edge.valid_at, &existing_id],
                             )?;
-                            // Pre-image of old edge's body_hash for compensation.
+                            // Pre-image is the full pre-mutation row
+                            // serialized as JSON (see
+                            // `ENTITY_EDGE_PRE_IMAGE_JSON` in
+                            // entity_graph::mod). A bare body_hash is
+                            // not enough to reverse the UPDATE — the
+                            // hash domain excludes the row's prior
+                            // `invalid_at`, so a compensating UPDATE
+                            // would have to guess at it.
                             wal::write_step(
                                 &tx,
                                 &op_id,
                                 0,
                                 "invalidate_edge",
-                                Some(&existing_hash),
+                                Some(existing_pre_image_json.as_bytes()),
                             )
                             .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                             insert_edge(&tx, &edge, &bh)

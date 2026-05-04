@@ -191,6 +191,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     ("index", "entity_edges_source_relation_idx"),
     ("index", "entity_edges_target_relation_idx"),
     ("trigger", "entity_edges_shrink_guard"),
+    // 0035_entity_edges_no_overlap_trigger (issue #186 round-9 fix:
+    // schema-level defense in depth against bounded-overlap writes).
+    ("trigger", "entity_edges_no_overlap_insert"),
+    ("trigger", "entity_edges_no_overlap_update"),
     // 0034_entity_episodes (issue #186 §3.4: record ↔ entity link table).
     // The composite PK creates an implicit sqlite_autoindex_* which is
     // filtered by the `sqlite_%` clause — do NOT add it here.

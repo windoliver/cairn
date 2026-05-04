@@ -42,6 +42,8 @@ const M0031_WAL_KIND_WIDENING: &str = include_str!("sql/0031_wal_kind_widening.s
 const M0032_ENTITY_NODES: &str = include_str!("sql/0032_entity_nodes.sql");
 const M0033_ENTITY_EDGES: &str = include_str!("sql/0033_entity_edges.sql");
 const M0034_ENTITY_EPISODES: &str = include_str!("sql/0034_entity_episodes.sql");
+const M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
+    include_str!("sql/0035_entity_edges_no_overlap_trigger.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -113,6 +115,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (32, "0032_entity_nodes", M0032_ENTITY_NODES),
     (33, "0033_entity_edges", M0033_ENTITY_EDGES),
     (34, "0034_entity_episodes", M0034_ENTITY_EPISODES),
+    (
+        35,
+        "0035_entity_edges_no_overlap_trigger",
+        M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -147,5 +154,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0032_ENTITY_NODES),
         M::up(M0033_ENTITY_EDGES),
         M::up(M0034_ENTITY_EPISODES),
+        M::up(M0035_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
     ])
 }

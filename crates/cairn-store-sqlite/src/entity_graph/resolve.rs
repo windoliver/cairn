@@ -63,31 +63,31 @@ impl SqliteMemoryStore {
                     // `invalid_at` so we can enforce that a bounded target's
                     // window is being shrunk (not extended or zeroed) by the
                     // contradiction.
-                    let (pre_image, old_valid_at, old_invalid_at, old_src, old_tgt, old_rel): (
-                        Vec<u8>,
-                        i64,
-                        Option<i64>,
-                        String,
-                        String,
-                        String,
-                    ) = tx
-                        .query_row(
-                            "SELECT body_hash, valid_at, invalid_at, \
-                                    source_id, target_id, relation \
-                             FROM entity_edges \
-                             WHERE id = ?1 AND expired_at IS NULL",
-                            [&old_id_owned],
-                            |r| {
-                                Ok((
-                                    r.get(0)?,
-                                    r.get(1)?,
-                                    r.get(2)?,
-                                    r.get(3)?,
-                                    r.get(4)?,
-                                    r.get(5)?,
-                                ))
-                            },
-                        )
+                    let lookup_sql = format!(
+                        "SELECT valid_at, invalid_at, \
+                                source_id, target_id, relation, {pre_image} \
+                         FROM entity_edges \
+                         WHERE id = ?1 AND expired_at IS NULL",
+                        pre_image = super::ENTITY_EDGE_PRE_IMAGE_JSON,
+                    );
+                    let (
+                        old_valid_at,
+                        old_invalid_at,
+                        old_src,
+                        old_tgt,
+                        old_rel,
+                        pre_image_json,
+                    ): (i64, Option<i64>, String, String, String, String) = tx
+                        .query_row(&lookup_sql, [&old_id_owned], |r| {
+                            Ok((
+                                r.get(0)?,
+                                r.get(1)?,
+                                r.get(2)?,
+                                r.get(3)?,
+                                r.get(4)?,
+                                r.get(5)?,
+                            ))
+                        })
                         .map_err(|e| match e {
                             rusqlite::Error::QueryReturnedNoRows => {
                                 tokio_rusqlite::Error::Other(Box::new(StoreError::NotFound {
@@ -142,29 +142,43 @@ impl SqliteMemoryStore {
                         )));
                     }
 
-                    // Bounded-target guard: when the old row is already
-                    // bounded [old.valid_at, old.invalid_at), the
-                    // contradiction shrinks the upper bound to
-                    // new.valid_at. That requires new.valid_at strictly
-                    // inside the existing window — otherwise the
-                    // operation is a no-op (new.valid_at >=
-                    // old.invalid_at) or would extend old's lifetime
-                    // (impossible by the backdated guard, but defended
-                    // here for clarity). Reject with a typed error
-                    // rather than silently rewriting the bound.
-                    if let Some(old_inv) = old_invalid_at
-                        && new_edge.valid_at >= old_inv
-                    {
-                        return Err(tokio_rusqlite::Error::Other(Box::new(
-                            StoreError::Invariant {
-                                what: format!(
-                                    "resolve_contradiction would not shrink bounded \
-                                     window: new.valid_at={} >= old.invalid_at={} for \
-                                     edge id={}",
-                                    new_edge.valid_at, old_inv, old_id_owned,
-                                ),
-                            },
-                        )));
+                    // Bounded-target guards: when the old row is
+                    // already bounded `[old.valid_at, old.invalid_at)`,
+                    // the contradiction must (a) place `new.valid_at`
+                    // strictly inside the existing window so we are
+                    // actually shrinking the tail, and (b) preserve
+                    // `old.invalid_at` as the replacement's `invalid_at`
+                    // so we do not silently extend the fact's lifetime
+                    // past the original endpoint. A live (NULL) or
+                    // later-bounded `new.invalid_at` would mutate
+                    // history outside the selected target — that
+                    // belongs to a separate split/merge policy, not the
+                    // contradiction primitive.
+                    if let Some(old_inv) = old_invalid_at {
+                        if new_edge.valid_at >= old_inv {
+                            return Err(tokio_rusqlite::Error::Other(Box::new(
+                                StoreError::Invariant {
+                                    what: format!(
+                                        "resolve_contradiction would not shrink bounded \
+                                         window: new.valid_at={} >= old.invalid_at={} for \
+                                         edge id={}",
+                                        new_edge.valid_at, old_inv, old_id_owned,
+                                    ),
+                                },
+                            )));
+                        }
+                        if new_edge.invalid_at != Some(old_inv) {
+                            return Err(tokio_rusqlite::Error::Other(Box::new(
+                                StoreError::Invariant {
+                                    what: format!(
+                                        "resolve_contradiction must preserve bounded \
+                                         endpoint: new.invalid_at={:?} != old.invalid_at={} \
+                                         for edge id={}",
+                                        new_edge.invalid_at, old_inv, old_id_owned,
+                                    ),
+                                },
+                            )));
+                        }
                     }
 
                     // Overlap guard: another non-expired row for this
@@ -218,8 +232,14 @@ impl SqliteMemoryStore {
                         "UPDATE entity_edges SET invalid_at = ?1 WHERE id = ?2",
                         rusqlite::params![new_edge.valid_at, &old_id_owned],
                     )?;
-                    wal::write_step(&tx, &op_id, 0, "invalidate_edge", Some(&pre_image))
-                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    wal::write_step(
+                        &tx,
+                        &op_id,
+                        0,
+                        "invalidate_edge",
+                        Some(pre_image_json.as_bytes()),
+                    )
+                    .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                     super::edge::insert_edge(&tx, &new_edge, &bh)
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                     wal::write_step(&tx, &op_id, 1, "insert_edge", None)
