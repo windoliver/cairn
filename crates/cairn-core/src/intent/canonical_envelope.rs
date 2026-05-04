@@ -18,9 +18,11 @@ use crate::intent::VerifyError;
 /// any future signer in `cairn-core`.
 ///
 /// # Errors
-/// Returns [`VerifyError::Malformed`] with `field = "envelope"` if
-/// `serde_jcs::to_vec` fails (extremely unlikely — only on serializer
-/// internal bugs).
+/// Returns [`VerifyError::Malformed`] with `field = "envelope"` if any
+/// intermediate `serde_json::to_value` call (for `chain_parents` or
+/// `scope`) or the final `serde_jcs::to_vec` call fails. All three
+/// paths are unreachable for structurally valid `SignedIntent` values
+/// — guarded purely as defense in depth.
 pub fn canonicalize_signed_payload(intent: &SignedIntent) -> Result<Vec<u8>, VerifyError> {
     let mut map = serde_json::Map::new();
     map.insert("chain_parents".into(), serde_json::to_value(&intent.chain_parents).map_err(envelope_err)?);
