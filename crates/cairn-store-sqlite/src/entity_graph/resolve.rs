@@ -7,24 +7,9 @@
 use cairn_core::domain::graph::{EntityEdge, EntityEdgeId, EntityEdgeOutcome};
 use tracing::instrument;
 
-use crate::entity_graph::wal;
+use crate::entity_graph::{unpack_worker_err, wal};
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
-
-/// Translate a worker-side error into a typed [`StoreError`], preserving
-/// any [`StoreError`] previously wrapped via `tokio_rusqlite::Error::Other`.
-/// Without this, the blanket `From<tokio_rusqlite::Error>` collapses every
-/// inner error into [`StoreError::Worker`], hiding domain variants like
-/// [`StoreError::NotFound`] that the worker closure deliberately wrapped.
-fn unpack_worker_err(err: tokio_rusqlite::Error) -> StoreError {
-    match err {
-        tokio_rusqlite::Error::Other(boxed) => match boxed.downcast::<StoreError>() {
-            Ok(inner) => *inner,
-            Err(other) => StoreError::Worker(tokio_rusqlite::Error::Other(other)),
-        },
-        other => StoreError::from(other),
-    }
-}
 
 impl SqliteMemoryStore {
     /// Inherent resolve-contradiction implementation; the trait method
@@ -60,17 +45,18 @@ impl SqliteMemoryStore {
                 move |c| -> Result<EntityEdgeOutcome, tokio_rusqlite::Error> {
                     let tx = c.transaction()?;
 
-                    // Verify old edge exists and is live; capture pre_image body_hash.
+                    // Verify old edge exists and is live; capture pre_image body_hash
+                    // and valid_at for the backdated-contradiction guard below.
                     // Map QueryReturnedNoRows to a typed StoreError::NotFound — without
                     // this, await? converts the bare rusqlite error into the generic
                     // StoreError::Worker variant, hiding the deterministic stale/missing
                     // input from retry/recovery callers.
-                    let pre_image: Vec<u8> = tx
+                    let (pre_image, old_valid_at): (Vec<u8>, i64) = tx
                         .query_row(
-                            "SELECT body_hash FROM entity_edges \
+                            "SELECT body_hash, valid_at FROM entity_edges \
                              WHERE id = ?1 AND invalid_at IS NULL AND expired_at IS NULL",
                             [&old_id_owned],
-                            |r| r.get(0),
+                            |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .map_err(|e| match e {
                             rusqlite::Error::QueryReturnedNoRows => {
@@ -80,6 +66,25 @@ impl SqliteMemoryStore {
                             }
                             other => tokio_rusqlite::Error::from(other),
                         })?;
+
+                    // Backdated guard: contradiction sets `old.invalid_at = new.valid_at`.
+                    // The CHECK on entity_edges (invalid_at >= valid_at) would otherwise
+                    // abort with a generic SQL error. Reject here with a typed domain
+                    // error so callers can distinguish "retroactive correction not
+                    // supported" from infrastructure failure.
+                    if new_edge.valid_at < old_valid_at {
+                        return Err(tokio_rusqlite::Error::Other(Box::new(
+                            StoreError::Invariant {
+                                what: format!(
+                                    "backdated contradiction not supported: \
+                                     new.valid_at={} < old.valid_at={} for edge id={}",
+                                    new_edge.valid_at,
+                                    old_valid_at,
+                                    old_id_owned,
+                                ),
+                            },
+                        )));
+                    }
 
                     let op_id = wal::issue_op(&tx, "graph_contradict", new_edge.id.as_str())
                         .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;

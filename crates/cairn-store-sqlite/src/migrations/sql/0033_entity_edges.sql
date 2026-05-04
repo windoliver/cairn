@@ -25,7 +25,13 @@ CREATE TABLE entity_edges (
     -- as-of predicate (`valid_at <= T AND invalid_at > T` rejects
     -- T = valid_at = invalid_at), so it sits inert.
     CHECK (invalid_at IS NULL OR invalid_at >= valid_at),
-    CHECK (expired_at IS NULL OR expired_at >= created_at)
+    CHECK (expired_at IS NULL OR expired_at >= created_at),
+    -- Tombstone audit invariant: any expired row MUST carry a reason.
+    -- The shrink_guard trigger below only catches UPDATE OF expired_at;
+    -- this CHECK closes the INSERT path and the "clear tombstone_reason
+    -- without touching expired_at" UPDATE path. A row with an audit
+    -- reason but no expired_at is allowed (in-progress tombstone work).
+    CHECK (expired_at IS NULL OR tombstone_reason IS NOT NULL)
 );
 
 CREATE UNIQUE INDEX entity_edges_live_triple

@@ -9,7 +9,13 @@ CREATE TABLE entity_nodes (
     created_at      INTEGER NOT NULL,
     expired_at      INTEGER,
     tombstone_reason TEXT,
-    embedding_id    TEXT
+    embedding_id    TEXT,
+    -- Tombstone audit invariant: any expired row MUST carry a reason.
+    -- The shrink_guard trigger below only catches UPDATE OF expired_at;
+    -- this CHECK closes the INSERT path and the "clear tombstone_reason
+    -- without touching expired_at" UPDATE path. A row with an audit
+    -- reason but no expired_at is allowed (in-progress tombstone work).
+    CHECK (expired_at IS NULL OR tombstone_reason IS NOT NULL)
 );
 
 -- UNIQUE(name_norm) on the column above already creates an implicit

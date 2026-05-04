@@ -9,6 +9,7 @@ use cairn_core::domain::graph::{
 use cairn_core::domain::record::RecordId;
 use tracing::instrument;
 
+use crate::entity_graph::unpack_worker_err;
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
@@ -141,18 +142,6 @@ fn map_row(r: &rusqlite::Row<'_>) -> Result<EntityEdge, StoreError> {
     })
 }
 
-/// Translate a worker-side error into a typed [`StoreError`], preserving
-/// any [`StoreError`] previously wrapped via `tokio_rusqlite::Error::Other`.
-/// Mirrors `entity_graph::resolve::unpack_worker_err` and `store::search`.
-fn unpack_worker_err(err: tokio_rusqlite::Error) -> StoreError {
-    match err {
-        tokio_rusqlite::Error::Other(boxed) => match boxed.downcast::<StoreError>() {
-            Ok(inner) => *inner,
-            Err(other) => StoreError::Worker(tokio_rusqlite::Error::Other(other)),
-        },
-        other => StoreError::from(other),
-    }
-}
 
 impl SqliteMemoryStore {
     /// Inherent `graph_edges` implementation; the trait method

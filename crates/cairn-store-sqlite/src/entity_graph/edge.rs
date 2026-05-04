@@ -20,17 +20,22 @@ use crate::store::SqliteMemoryStore;
 /// Compute the body-hash used to detect substantive edge changes.
 ///
 /// Includes every field that constitutes the *fact* and is persisted on
-/// the row: confidence tier, score, the full event-time window (`valid_at`
-/// and `invalid_at`), and source record. Excludes id (PK), ingestion-time
-/// columns (`created_at`, `expired_at`), and the conflict key itself
-/// (source/target/relation, covered by the live-row SELECT).
+/// the row: confidence tier, score, the full event-time window
+/// (`valid_at` and `invalid_at`), the ingestion-time start
+/// (`created_at`), and source record. Excludes id (PK), `expired_at`
+/// (set on tombstone, not asserted by the caller), and the conflict key
+/// itself (source/target/relation, covered by the SELECT).
 ///
 /// `invalid_at` MUST be in the domain: a re-upsert with the same triple
-/// and otherwise-identical fields but a different `invalid_at` (e.g. live
-/// → bounded) would otherwise hash equal to the live row, return
-/// `body_was_unchanged = true`, and silently leave the row queryable past
-/// the requested close-time. Including it in the hash forces such a
-/// re-upsert into the contradiction branch.
+/// and otherwise-identical fields but a different `invalid_at` (e.g.
+/// live → bounded) would otherwise hash equal to the live row, return
+/// `body_was_unchanged = true`, and silently leave the row queryable
+/// past the requested close-time.
+///
+/// `created_at` is also in the domain: `as_of_ingest_time` slicing
+/// reads it directly. Excluding it would let a re-upsert with a
+/// corrected ingestion-time start hit the unchanged path and keep the
+/// stale value without any WAL signal.
 pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(edge.confidence.as_db_str().as_bytes());
@@ -43,6 +48,7 @@ pub(super) fn body_hash(edge: &EntityEdge) -> [u8; 32] {
     } else {
         h.update(&[0u8]);
     }
+    h.update(&edge.created_at.to_le_bytes());
     if let Some(rid) = &edge.source_record_id {
         h.update(b"|");
         h.update(rid.as_str().as_bytes());
@@ -94,6 +100,12 @@ impl SqliteMemoryStore {
     /// Returns [`StoreError::Worker`] when the background `tokio_rusqlite`
     /// worker fails (channel closed, panic in worker), and [`StoreError::Sqlite`]
     /// for SQL errors surfaced through the worker.
+    // Body: probe A (body-hash idempotency) → probe B (live triple) →
+    // fresh-insert / backdated-guard / contradiction. Splitting the
+    // branches into helpers would require threading `tx` through async
+    // closures and surface no real reuse, so the workspace
+    // too_many_lines cap is suppressed here with a reason.
+    #[allow(clippy::too_many_lines)]
     #[instrument(
         skip(self, edge),
         err,
@@ -116,18 +128,57 @@ impl SqliteMemoryStore {
                 move |c| -> Result<EntityEdgeOutcome, tokio_rusqlite::Error> {
                     let tx = c.transaction()?;
 
-                    // Probe for live edge with same triple.
-                    let existing: Option<(String, Vec<u8>)> = tx
+                    // Probe A — content idempotency. Any non-purged
+                    // (expired_at IS NULL) row with this exact body hash
+                    // for this triple is the SAME fact, regardless of
+                    // whether it has been event-time invalidated. Without
+                    // this, a retry of an `invalid_at: Some(...)` upsert
+                    // would skip past the live-only probe below, take the
+                    // fresh-insert path, and either trip a PK conflict
+                    // (same id) or duplicate the historical row (different
+                    // id) — violating the upsert contract.
+                    let dup_id: Option<String> = tx
                         .query_row(
-                            "SELECT id, body_hash FROM entity_edges \
-                         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
-                           AND invalid_at IS NULL AND expired_at IS NULL",
+                            "SELECT id FROM entity_edges \
+                             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
+                               AND body_hash = ?4 AND expired_at IS NULL \
+                             LIMIT 1",
+                            rusqlite::params![
+                                edge.source_id.as_str(),
+                                edge.target_id.as_str(),
+                                &edge.relation,
+                                &bh[..],
+                            ],
+                            |r| r.get(0),
+                        )
+                        .map(Some)
+                        .or_else(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                            other => Err(other),
+                        })?;
+                    if let Some(found) = dup_id {
+                        tx.commit()?;
+                        return Ok(EntityEdgeOutcome {
+                            new_edge_id: EntityEdgeId::from(found),
+                            invalidated_edge_id: None,
+                            body_was_unchanged: true,
+                        });
+                    }
+
+                    // Probe B — live triple. Used for fresh-insert vs
+                    // contradiction routing. Body-hash differs by Probe A,
+                    // so a Some(...) here always means a contradiction.
+                    let live: Option<(String, Vec<u8>, i64)> = tx
+                        .query_row(
+                            "SELECT id, body_hash, valid_at FROM entity_edges \
+                             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
+                               AND invalid_at IS NULL AND expired_at IS NULL",
                             rusqlite::params![
                                 edge.source_id.as_str(),
                                 edge.target_id.as_str(),
                                 &edge.relation,
                             ],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                         )
                         .map(Some)
                         .or_else(|e| match e {
@@ -135,7 +186,7 @@ impl SqliteMemoryStore {
                             other => Err(other),
                         })?;
 
-                    let outcome = match existing {
+                    let outcome = match live {
                         None => {
                             // Branch 1: fresh insert.
                             let op_id = wal::issue_op(&tx, "graph_upsert_edge", edge.id.as_str())
@@ -152,18 +203,33 @@ impl SqliteMemoryStore {
                                 body_was_unchanged: false,
                             }
                         }
-                        Some((existing_id, existing_hash)) if existing_hash == bh => {
-                            // Branch 2: idempotent re-upsert. Empty tx, no WAL row.
-                            EntityEdgeOutcome {
-                                new_edge_id: EntityEdgeId::from(existing_id),
-                                invalidated_edge_id: None,
-                                body_was_unchanged: true,
+                        Some((existing_id, existing_hash, existing_valid_at)) => {
+                            // Branch 2: contradiction. UPDATE old then
+                            // INSERT new so at no point are there two rows
+                            // matching the partial UNIQUE on the live
+                            // triple.
+                            //
+                            // Backdated guard: contradiction sets
+                            // `old.invalid_at = new.valid_at`. If
+                            // new.valid_at < old.valid_at, the schema CHECK
+                            // would abort the transaction with a generic
+                            // SQL error. Reject up front with a typed
+                            // domain error so callers can distinguish
+                            // "retroactive correction not supported" from
+                            // an infrastructure failure.
+                            if edge.valid_at < existing_valid_at {
+                                return Err(tokio_rusqlite::Error::Other(Box::new(
+                                    StoreError::Invariant {
+                                        what: format!(
+                                            "backdated contradiction not supported: \
+                                             new.valid_at={} < old.valid_at={} for edge id={}",
+                                            edge.valid_at,
+                                            existing_valid_at,
+                                            existing_id,
+                                        ),
+                                    },
+                                )));
                             }
-                        }
-                        Some((existing_id, existing_hash)) => {
-                            // Branch 3: contradiction. UPDATE old then INSERT new
-                            // so at no point are there two rows matching the
-                            // partial UNIQUE on the live triple.
                             let op_id = wal::issue_op(&tx, "graph_contradict", edge.id.as_str())
                                 .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
                             tx.execute(
@@ -197,7 +263,8 @@ impl SqliteMemoryStore {
                     Ok(outcome)
                 },
             )
-            .await?;
+            .await
+            .map_err(super::unpack_worker_err)?;
 
         Ok(outcome)
     }

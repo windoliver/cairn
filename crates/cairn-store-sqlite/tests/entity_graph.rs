@@ -1592,3 +1592,289 @@ async fn graph_edges_corrupt_source_record_id_surfaces_typed_invariant() {
         "expected StoreError::Invariant for stored corruption, got: {concrete:?}",
     );
 }
+
+/// Round-5 review fix: a retry of an `invalid_at: Some(...)` upsert must
+/// be idempotent. Pre-fix the live-only probe missed the prior bounded
+/// row, took the fresh-insert path, and hit a PK conflict on the same id.
+/// Post-fix, the body-hash idempotency probe (any non-purged row with
+/// matching `body_hash`) returns the existing id with `body_was_unchanged`.
+#[tokio::test]
+async fn upsert_entity_edge_bounded_window_retry_is_idempotent() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "J0").await;
+
+    let bounded = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000J1"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 100,
+        invalid_at: Some(200),
+        created_at: 100,
+        source_record_id: None,
+    };
+
+    let first = store
+        .upsert_entity_edge(&bounded)
+        .await
+        .expect("first insert of bounded edge");
+    assert!(!first.body_was_unchanged, "fresh insert is not unchanged");
+    assert!(first.invalidated_edge_id.is_none());
+
+    // Retry the EXACT same edge — must hit the body-hash idempotency
+    // path and report unchanged.
+    let retry = store
+        .upsert_entity_edge(&bounded)
+        .await
+        .expect("retry must be idempotent");
+    assert!(
+        retry.body_was_unchanged,
+        "retry of identical bounded edge must report body_was_unchanged"
+    );
+    assert_eq!(retry.new_edge_id, first.new_edge_id);
+}
+
+/// Round-5 review fix: backdated contradiction (`new.valid_at` <
+/// `old.valid_at`) must surface as a typed `StoreError::Invariant`, not
+/// a generic SQL CHECK abort or a worker error. The contradiction logic
+/// sets `old.invalid_at = new.valid_at`, which the schema CHECK now
+/// rejects; catching at the API boundary keeps callers' retry/recovery
+/// paths sane.
+#[tokio::test]
+async fn upsert_entity_edge_backdated_contradiction_returns_typed_invariant() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "K0").await;
+
+    // Live edge at t=200.
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000K1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+
+    // Try to upsert with new.valid_at=100 < old.valid_at=200.
+    let backdated = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000K2"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Inferred,
+        confidence_score: 0.5,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 200,
+        source_record_id: None,
+    };
+    let err = store
+        .upsert_entity_edge(&backdated)
+        .await
+        .expect_err("backdated contradiction must be rejected");
+    let concrete = err
+        .downcast::<StoreError>()
+        .expect("error must downcast to concrete StoreError");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("backdated contradiction")),
+        "expected StoreError::Invariant about backdated contradiction, got: {concrete:?}",
+    );
+}
+
+/// Round-5 review fix: same backdated guard must apply on
+/// `resolve_contradiction` — its UPDATE pattern is identical and would
+/// otherwise crash on the schema CHECK.
+#[tokio::test]
+async fn resolve_contradiction_backdated_returns_typed_invariant() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "L0").await;
+
+    let live = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000L1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 200,
+            invalid_at: None,
+            created_at: 200,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed");
+
+    let backdated = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000L2"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Inferred,
+        confidence_score: 0.5,
+        valid_at: 100,
+        invalid_at: None,
+        created_at: 200,
+        source_record_id: None,
+    };
+    let err = store
+        .resolve_contradiction(&live.new_edge_id, &backdated)
+        .await
+        .expect_err("backdated resolve must be rejected");
+    let concrete = err
+        .downcast::<StoreError>()
+        .expect("must downcast");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { ref what }
+            if what.contains("backdated contradiction")),
+        "expected backdated Invariant, got: {concrete:?}",
+    );
+}
+
+/// Round-5 review fix: a re-upsert with a corrected `created_at`
+/// (everything else identical) must NOT take the unchanged path. Pre-fix
+/// `body_hash` excluded ingestion-time columns, so the change was
+/// silently dropped while `as_of_ingest_time` queries kept reading the
+/// stale value.
+#[tokio::test]
+async fn upsert_entity_edge_change_in_created_at_is_not_idempotent() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "M0").await;
+
+    let first = store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000M1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed");
+    assert!(!first.body_was_unchanged);
+
+    // Same triple, same valid_at and other fact-fields, but corrected
+    // created_at. Body hash now differs → contradiction branch fires.
+    let new_id = EntityEdgeId::from("01HZE7JV5N00000000000000M2");
+    let second = store
+        .upsert_entity_edge(&EntityEdge {
+            id: new_id.clone(),
+            source_id: a,
+            target_id: b,
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 150, // corrected ingestion-time start
+            source_record_id: None,
+        })
+        .await
+        .expect("re-upsert with corrected created_at");
+    assert!(
+        !second.body_was_unchanged,
+        "differing created_at must NOT be idempotent"
+    );
+    assert!(
+        second.invalidated_edge_id.is_some(),
+        "differing created_at must invalidate the prior live edge"
+    );
+}
+
+/// Round-5 review fix: the table-level CHECK (`expired_at IS NULL OR
+/// tombstone_reason IS NOT NULL`) closes the INSERT and "clear reason"
+/// holes that the `shrink_guard` trigger (BEFORE UPDATE OF
+/// `expired_at`) missed. Verified for both `entity_edges` and
+/// `entity_nodes`.
+#[test]
+fn entity_edges_and_nodes_reject_expired_without_tombstone_reason() {
+    use cairn_store_sqlite::open_in_memory_sync;
+    let conn = open_in_memory_sync().expect("open");
+
+    // Seed prerequisites for the edge insert.
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('01HZE7JV5N0000000000000NA1', 'A', 'a-shrink', 1)",
+        [],
+    )
+    .expect("seed node A");
+    conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at) \
+         VALUES ('01HZE7JV5N0000000000000NB1', 'B', 'b-shrink', 1)",
+        [],
+    )
+    .expect("seed node B");
+
+    // entity_nodes: INSERT with expired_at and NULL reason — must fail.
+    let bad_node = conn.execute(
+        "INSERT INTO entity_nodes (id, name, name_norm, created_at, expired_at) \
+         VALUES ('01HZE7JV5N0000000000000NX1', 'X', 'x-bad', 1, 100)",
+        [],
+    );
+    assert!(
+        bad_node.is_err(),
+        "INSERT with expired_at and no tombstone_reason must violate CHECK"
+    );
+
+    // entity_edges: INSERT with expired_at and NULL reason — must fail.
+    let bad_edge = conn.execute(
+        "INSERT INTO entity_edges \
+         (id, source_id, target_id, relation, confidence, confidence_score, \
+          valid_at, created_at, expired_at, body_hash) VALUES \
+         ('01HZE7JV5N0000000000000EX1', '01HZE7JV5N0000000000000NA1', \
+          '01HZE7JV5N0000000000000NB1', 'r', 'EXTRACTED', 1.0, 1, 1, 100, \
+          x'00000000000000000000000000000000000000000000000000000000000000ff')",
+        [],
+    );
+    assert!(
+        bad_edge.is_err(),
+        "INSERT entity_edges with expired_at and no tombstone_reason must violate CHECK"
+    );
+
+    // Insert one valid live edge, then try to UPDATE clearing
+    // tombstone_reason while keeping expired_at — must fail.
+    conn.execute(
+        "INSERT INTO entity_edges \
+         (id, source_id, target_id, relation, confidence, confidence_score, \
+          valid_at, created_at, expired_at, tombstone_reason, body_hash) VALUES \
+         ('01HZE7JV5N0000000000000EY1', '01HZE7JV5N0000000000000NA1', \
+          '01HZE7JV5N0000000000000NB1', 'r2', 'EXTRACTED', 1.0, 1, 1, 100, \
+          'test', x'00')",
+        [],
+    )
+    .expect("seed expired edge with reason");
+    let bad_update = conn.execute(
+        "UPDATE entity_edges SET tombstone_reason = NULL \
+         WHERE id = '01HZE7JV5N0000000000000EY1'",
+        [],
+    );
+    assert!(
+        bad_update.is_err(),
+        "clearing tombstone_reason while expired_at NOT NULL must violate CHECK"
+    );
+}
