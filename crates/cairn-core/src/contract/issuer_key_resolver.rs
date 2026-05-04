@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::identity::{Identity, keys::KeyVersion};
+use crate::domain::timestamp::Rfc3339Timestamp;
 
 /// Single-method contract: look up the pubkey + lifecycle for an
 /// `(issuer, key_version)` pair.
@@ -23,7 +24,7 @@ pub trait IssuerKeyResolver: Send + Sync {
     ///
     /// Returns `Ok(None)` when no row exists for the `(issuer,
     /// key_version)` pair — verifier maps that to
-    /// [`crate::intent::VerifyError::UnknownKey`].
+    /// `VerifyError::UnknownKey`.
     ///
     /// # Errors
     /// Returns [`ResolverError::Backend`] when the underlying store
@@ -56,16 +57,15 @@ pub struct ResolvedKey {
 pub enum KeyLifecycle {
     /// Active — the issuer is operational and signing is permitted.
     Active,
-    /// Revoked at `effective_at` (RFC3339). Earlier ops remain valid;
+    /// Revoked at `effective_at`. Earlier ops remain valid;
     /// the verifier compares `effective_at` against `intent.issued_at`.
     Revoked {
-        /// When the revocation took effect (RFC3339).
-        effective_at: String,
+        /// When the revocation took effect.
+        effective_at: Rfc3339Timestamp,
     },
     /// Identity row exists but is in a non-operational lifecycle
     /// (`Pending`, `RevokePending`, `PurgePending`). Verifier maps to
-    /// [`crate::intent::VerifyError::UnknownKey`] same as a missing
-    /// row.
+    /// `VerifyError::UnknownKey` same as a missing row.
     NonOperational,
     /// Identity row was purged. Verifier maps to `UnknownKey`.
     Purged,
@@ -77,8 +77,12 @@ pub enum KeyLifecycle {
 pub enum ResolverError {
     /// The backing store failed (`SQLite` I/O error, in-memory map
     /// poisoned, etc.).
-    #[error("backend failure: {0}")]
-    Backend(Box<dyn std::error::Error + Send + Sync>),
+    #[error("backend error: {0}")]
+    Backend(
+        /// The underlying backend error.
+        #[source]
+        Box<dyn std::error::Error + Send + Sync>,
+    ),
 }
 
 #[cfg(test)]
@@ -93,9 +97,16 @@ mod tests {
 
     #[test]
     fn key_lifecycle_revoked_carries_effective_at() {
-        let lc = KeyLifecycle::Revoked { effective_at: "2026-01-01T00:00:00Z".to_owned() };
+        let lc = KeyLifecycle::Revoked {
+            effective_at: crate::domain::timestamp::Rfc3339Timestamp::parse(
+                "2026-01-01T00:00:00Z".to_owned(),
+            )
+            .expect("valid rfc3339"),
+        };
         match lc {
-            KeyLifecycle::Revoked { effective_at } => assert_eq!(effective_at, "2026-01-01T00:00:00Z"),
+            KeyLifecycle::Revoked { effective_at } => {
+                assert_eq!(effective_at.as_str(), "2026-01-01T00:00:00Z");
+            }
             _ => panic!("expected revoked"),
         }
     }
@@ -104,6 +115,6 @@ mod tests {
     fn resolver_error_backend_wraps() {
         let inner: Box<dyn std::error::Error + Send + Sync> = "io error".into();
         let e = ResolverError::Backend(inner);
-        assert_eq!(e.to_string(), "backend failure: io error");
+        assert_eq!(e.to_string(), "backend error: io error");
     }
 }

@@ -51,6 +51,7 @@ pub use identity_registry::{
     IdentityRegistry, IdentityVisibility, MaintenanceMode, PurgeAcknowledgement, PurgeReason,
     RegistryError,
 };
+pub use issuer_key_resolver::{IssuerKeyResolver, KeyLifecycle, ResolvedKey, ResolverError};
 pub use job_store::{
     EnqueueRequest, FailDisposition, JobId, JobKind, JobPayload, JobState, JobStore, JobStoreError,
     LeaseToken, LeasedJob, RetryPolicy,
