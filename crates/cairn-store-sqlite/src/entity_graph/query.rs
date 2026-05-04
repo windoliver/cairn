@@ -62,9 +62,16 @@ fn build_query(
         sql.push_str(" AND relation = ?");
         params.push(Box::new(rel.to_owned()));
     }
-    if !include_invalid && as_event.is_none() && as_ingest.is_none() {
-        sql.push_str(" AND invalid_at IS NULL AND expired_at IS NULL");
-    }
+    // Per-dimension predicates are independent. Each dimension contributes
+    // a start-bound (only when as-of given) and an end-bound (only in the
+    // production view, !include_invalid):
+    //   * with as-of T: end-bound is `(end_col IS NULL OR end_col > T)`
+    //   * without as-of: end-bound is `end_col IS NULL` (live now in
+    //     this dimension)
+    // Pre-fix this branch skipped the end-bound entirely for a dimension
+    // when no as-of was provided AND the OTHER dimension had as-of, which
+    // could leak event-invalidated rows into ingest-only as-of queries
+    // and ingest-expired rows into event-only as-of queries.
     if let Some(t) = as_event {
         sql.push_str(" AND valid_at <= ?");
         params.push(Box::new(t));
@@ -72,6 +79,8 @@ fn build_query(
             sql.push_str(" AND (invalid_at IS NULL OR invalid_at > ?)");
             params.push(Box::new(t));
         }
+    } else if !include_invalid {
+        sql.push_str(" AND invalid_at IS NULL");
     }
     if let Some(t) = as_ingest {
         sql.push_str(" AND created_at <= ?");
@@ -80,49 +89,69 @@ fn build_query(
             sql.push_str(" AND (expired_at IS NULL OR expired_at > ?)");
             params.push(Box::new(t));
         }
+    } else if !include_invalid {
+        sql.push_str(" AND expired_at IS NULL");
     }
     (sql, params)
 }
 
 /// Decode one row from the `entity_edges` SELECT into an `EntityEdge`.
-fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntityEdge> {
+///
+/// Stored-state corruption (unknown confidence tier, malformed `RecordId`)
+/// is surfaced as a typed [`StoreError::Invariant`] rather than as a
+/// generic `rusqlite::Error::FromSqlConversionFailure`. Without this,
+/// the caller saw `StoreError::Worker(...)` (an infrastructure failure)
+/// for what is actually persistent data corruption — masking it from
+/// alerting and recovery code paths. Mirrors the typed-error idiom in
+/// `entity_graph/resolve.rs` and `store/upsert.rs`.
+fn map_row(r: &rusqlite::Row<'_>) -> Result<EntityEdge, StoreError> {
+    let id: String = r.get(0)?;
+    let source_id: String = r.get(1)?;
+    let target_id: String = r.get(2)?;
+    let relation: String = r.get(3)?;
     let conf_str: String = r.get(4)?;
-    let confidence = EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            4,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unknown confidence tier: {conf_str}"),
-            )),
-        )
-    })?;
+    let confidence_score: f32 = r.get(5)?;
+    let valid_at: i64 = r.get(6)?;
+    let invalid_at: Option<i64> = r.get(7)?;
+    let created_at: i64 = r.get(8)?;
     let src_rec: Option<String> = r.get(9)?;
+
+    let confidence = EdgeConfidence::from_db_str(&conf_str).ok_or_else(|| {
+        StoreError::Invariant {
+            what: format!("entity_edges row {id}: unknown confidence tier `{conf_str}`"),
+        }
+    })?;
     let source_record_id = match src_rec {
-        Some(s) => Some(RecordId::parse(&s).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                9,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid stored RecordId: {e}"),
-                )),
-            )
+        Some(s) => Some(RecordId::parse(&s).map_err(|e| StoreError::Invariant {
+            what: format!("entity_edges row {id}: invalid source_record_id `{s}`: {e}"),
         })?),
         None => None,
     };
     Ok(EntityEdge {
-        id: EntityEdgeId::from(r.get::<_, String>(0)?),
-        source_id: EntityId::from(r.get::<_, String>(1)?),
-        target_id: EntityId::from(r.get::<_, String>(2)?),
-        relation: r.get(3)?,
+        id: EntityEdgeId::from(id),
+        source_id: EntityId::from(source_id),
+        target_id: EntityId::from(target_id),
+        relation,
         confidence,
-        confidence_score: r.get(5)?,
-        valid_at: r.get(6)?,
-        invalid_at: r.get(7)?,
-        created_at: r.get(8)?,
+        confidence_score,
+        valid_at,
+        invalid_at,
+        created_at,
         source_record_id,
     })
+}
+
+/// Translate a worker-side error into a typed [`StoreError`], preserving
+/// any [`StoreError`] previously wrapped via `tokio_rusqlite::Error::Other`.
+/// Mirrors `entity_graph::resolve::unpack_worker_err` and `store::search`.
+fn unpack_worker_err(err: tokio_rusqlite::Error) -> StoreError {
+    match err {
+        tokio_rusqlite::Error::Other(boxed) => match boxed.downcast::<StoreError>() {
+            Ok(inner) => *inner,
+            Err(other) => StoreError::Worker(tokio_rusqlite::Error::Other(other)),
+        },
+        other => StoreError::from(other),
+    }
 }
 
 impl SqliteMemoryStore {
@@ -161,14 +190,17 @@ impl SqliteMemoryStore {
                 let mut stmt = c.prepare(&sql)?;
                 let param_refs: Vec<&dyn rusqlite::ToSql> =
                     params.iter().map(std::convert::AsRef::as_ref).collect();
-                let rows = stmt.query_map(rusqlite::params_from_iter(param_refs), map_row)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(param_refs))?;
                 let mut out = Vec::new();
-                for row in rows {
-                    out.push(row?);
+                while let Some(row) = rows.next()? {
+                    let edge = map_row(row)
+                        .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))?;
+                    out.push(edge);
                 }
                 Ok(out)
             })
-            .await?;
+            .await
+            .map_err(unpack_worker_err)?;
 
         Ok(edges)
     }

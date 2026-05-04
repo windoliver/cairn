@@ -14,7 +14,18 @@ CREATE TABLE entity_edges (
     expired_at        INTEGER,
     tombstone_reason  TEXT,
     source_record_id  TEXT REFERENCES records(record_id) ON DELETE SET NULL,
-    body_hash         BLOB NOT NULL
+    body_hash         BLOB NOT NULL,
+    -- Bitemporal window integrity: end-bounds may not precede their
+    -- start. Without these, a backdated upsert or contradiction can
+    -- persist `invalid_at < valid_at` and corrupt as-of slicing.
+    -- We allow the degenerate `invalid_at = valid_at` (empty window)
+    -- because the contradiction branch sets `old.invalid_at =
+    -- new.valid_at` when both edges' valid_at agree — semantically
+    -- "instantaneous replacement". A degenerate window matches no
+    -- as-of predicate (`valid_at <= T AND invalid_at > T` rejects
+    -- T = valid_at = invalid_at), so it sits inert.
+    CHECK (invalid_at IS NULL OR invalid_at >= valid_at),
+    CHECK (expired_at IS NULL OR expired_at >= created_at)
 );
 
 CREATE UNIQUE INDEX entity_edges_live_triple

@@ -1397,3 +1397,198 @@ async fn graph_edges_include_invalidated_with_as_of_returns_full_history() {
         "neither edge had come into existence by t=50, even in history view"
     );
 }
+
+/// Round-4 review fix: production view (`include_invalidated=false`)
+/// must apply BOTH dimensions' end-bounds independently. Pre-fix, with
+/// only `as_of_event_time` set, the ingest-time end-bound was dropped,
+/// so a row whose `expired_at` had fired could leak into an event-time
+/// production query — and symmetrically for the ingest-only direction.
+#[tokio::test]
+async fn graph_edges_production_view_with_single_axis_as_of_excludes_other_dim_ended_rows() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "G0").await;
+
+    // Insert one edge, then directly stamp expired_at via the test-helpers
+    // raw connection — there's no public API to expire-without-tombstone
+    // outside lint/forget paths, so we go through SQL directly.
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000G1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed live");
+
+    // Stamp expired_at + tombstone_reason directly so the shrink_guard
+    // trigger doesn't fire.
+    store
+        .raw_conn()
+        .expect("conn present after open_in_memory")
+        .call(|c| {
+            c.execute(
+                "UPDATE entity_edges \
+                 SET expired_at = 200, tombstone_reason = 'test_purge' \
+                 WHERE id = '01HZE7JV5N00000000000000G1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("stamp expired_at");
+
+    // Production view, event-only as-of at t=150 (within event-time
+    // window). Pre-fix this returned the row even though it's
+    // ingest-time-expired. Post-fix the implicit `expired_at IS NULL`
+    // end-bound on the ingest dimension excludes it.
+    let event_only = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(150),
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect("event-only as-of production view");
+    assert_eq!(
+        event_only.len(),
+        0,
+        "ingest-expired row must NOT leak into event-only production query"
+    );
+
+    // History view (include_invalidated=true) DOES return it — the
+    // expired_at end-bound is suppressed. Sanity check the row still
+    // exists and the production exclusion was specifically due to the
+    // end-bound, not the start-bound.
+    let history = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: Some(150),
+            as_of_ingest_time: None,
+            include_invalidated: true,
+        })
+        .await
+        .expect("event-only as-of history view");
+    assert_eq!(history.len(), 1, "history view sees the ingest-expired row");
+}
+
+/// Round-4 review fix: schema CHECK on `entity_edges` rejects backdated
+/// `invalid_at` / `expired_at`. Without it, contradiction or backfill
+/// could persist `invalid_at < valid_at`, corrupting as-of slicing
+/// without breaking the live-triple unique index (which keys on `IS
+/// NULL`).
+#[tokio::test]
+async fn entity_edges_schema_rejects_backdated_invalid_at() {
+    use cairn_core::contract::memory_store::MemoryStore;
+    use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "H0").await;
+
+    // valid_at=200, invalid_at=100 — strictly negative window (end
+    // before start). The CHECK allows the degenerate invalid_at = valid_at
+    // (used by simultaneous contradictions), but rejects this strictly
+    // negative case.
+    let bad = EntityEdge {
+        id: EntityEdgeId::from("01HZE7JV5N00000000000000H1"),
+        source_id: a,
+        target_id: b,
+        relation: "r".into(),
+        confidence: EdgeConfidence::Extracted,
+        confidence_score: 1.0,
+        valid_at: 200,
+        invalid_at: Some(100),
+        created_at: 200,
+        source_record_id: None,
+    };
+    let res = store.upsert_entity_edge(&bad).await;
+    let err = res.expect_err("backdated invalid_at must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("CHECK") || msg.contains("constraint"),
+        "expected CHECK constraint failure, got: {msg}"
+    );
+}
+
+/// Round-4 review fix: a corrupt stored `RecordId` surfaces as the typed
+/// [`StoreError::Invariant`] (data-corruption) rather than the generic
+/// [`StoreError::Worker`] (infrastructure failure). This keeps alerting
+/// paths able to distinguish "DB is broken" from "stored data is bad".
+#[tokio::test]
+async fn graph_edges_corrupt_source_record_id_surfaces_typed_invariant() {
+    use cairn_core::contract::memory_store::{EdgeDir, MemoryStore};
+    use cairn_core::domain::graph::{
+        EdgeConfidence, EntityEdge, EntityEdgeId, GraphEdgesArgs,
+    };
+    use cairn_store_sqlite::error::StoreError;
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+    let (a, b) = seed_two_entities(&store, "I0").await;
+
+    store
+        .upsert_entity_edge(&EntityEdge {
+            id: EntityEdgeId::from("01HZE7JV5N00000000000000I1"),
+            source_id: a.clone(),
+            target_id: b.clone(),
+            relation: "r".into(),
+            confidence: EdgeConfidence::Extracted,
+            confidence_score: 1.0,
+            valid_at: 100,
+            invalid_at: None,
+            created_at: 100,
+            source_record_id: None,
+        })
+        .await
+        .expect("seed");
+
+    // Inject a corrupt source_record_id directly. FK is `ON DELETE SET
+    // NULL` so we cannot reference a missing record via the FK; bypass
+    // by temporarily disabling FK enforcement just for this UPDATE.
+    store
+        .raw_conn()
+        .expect("conn present after open_in_memory")
+        .call(|c| {
+            c.execute_batch("PRAGMA foreign_keys = OFF;")?;
+            c.execute(
+                "UPDATE entity_edges SET source_record_id = 'NOT-A-ULID' \
+                 WHERE id = '01HZE7JV5N00000000000000I1'",
+                [],
+            )?;
+            c.execute_batch("PRAGMA foreign_keys = ON;")?;
+            Ok(())
+        })
+        .await
+        .expect("inject corrupt id");
+
+    let err = store
+        .graph_edges(&GraphEdgesArgs {
+            node_id: &a,
+            direction: EdgeDir::Out,
+            relation_filter: None,
+            as_of_event_time: None,
+            as_of_ingest_time: None,
+            include_invalidated: false,
+        })
+        .await
+        .expect_err("corrupt RecordId must error");
+    let concrete = err
+        .downcast::<StoreError>()
+        .expect("error must be the concrete StoreError");
+    assert!(
+        matches!(*concrete, StoreError::Invariant { .. }),
+        "expected StoreError::Invariant for stored corruption, got: {concrete:?}",
+    );
+}
