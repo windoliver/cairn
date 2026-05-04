@@ -55,6 +55,7 @@ bon = { workspace = true }
 ulid = { workspace = true }
 zeroize = { workspace = true }
 ed25519-dalek = { workspace = true }
+hex = { workspace = true }
 rand_core = { workspace = true }
 chrono = { workspace = true }
 jsonschema = { workspace = true }
