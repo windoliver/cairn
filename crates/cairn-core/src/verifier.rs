@@ -48,7 +48,8 @@ pub async fn verify_signed_intent(
 ) -> Result<VerifiedSignedIntent, VerifyError> {
     step1_syntactic(&intent)?;
     step2_timestamp_window(&intent, now)?;
-    // Steps 3-5 land in subsequent tasks.
+    step3_scope_fit(&intent)?;
+    // Steps 4-5 land in subsequent tasks.
     Ok(<CoreSignedIntentVerifier as SignedIntentVerifier>::__from_verified(
         intent,
         VerifierWitness::new(),
@@ -118,6 +119,34 @@ fn step2_timestamp_window(intent: &SignedIntent, now: SystemTime) -> Result<(), 
             expires_at: intent.expires_at.clone(),
             now: now_str,
             kind: ExpiryReason::Past,
+        });
+    }
+    Ok(())
+}
+
+/// Step 3: identity-kind ↔ tier fit. P0 baseline (brief §4.2):
+/// `snr:` → tier == private; `agt:` → tier ∈ {private, session, project};
+/// `hmn:` → all tiers. Closes the "agent self-promotes to public" attack
+/// without per-agent policy infrastructure.
+fn step3_scope_fit(intent: &SignedIntent) -> Result<(), VerifyError> {
+    use crate::domain::identity::IdentityKind;
+    use crate::generated::envelope::SignedIntentScopeTier as Tier;
+
+    let kind = Identity::parse(intent.issuer.0.clone())
+        .map_err(|e| VerifyError::Malformed { field: "issuer", reason: e.to_string() })?
+        .kind();
+
+    let allowed = matches!(
+        (kind, intent.scope.tier),
+        (IdentityKind::Sensor, Tier::Private)
+            | (IdentityKind::Agent, Tier::Private | Tier::Session | Tier::Project)
+            | (IdentityKind::Human, _),
+    );
+
+    if !allowed {
+        return Err(VerifyError::ScopeDenied {
+            issuer_kind: kind,
+            requested_tier: intent.scope.tier,
         });
     }
     Ok(())
@@ -259,8 +288,53 @@ mod tests {
         let i = good_intent();
         // good_intent: issued=14:02:11, expires=14:07:11 (5min flat).
         let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
-        // Steps 3-5 are stubs at this point, so this should reach the
-        // stubbed Ok branch.
         verify_signed_intent(i, &OkResolver, now).await.expect("within bounds");
+    }
+
+    #[tokio::test]
+    async fn rejects_sensor_writing_session_tier() {
+        let mut i = good_intent();
+        i.issuer = common::Identity("snr:local:screen:host:v1".to_owned());
+        i.scope.tier = SignedIntentScopeTier::Session;
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &OkResolver, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ScopeDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn accepts_sensor_writing_private_tier() {
+        let mut i = good_intent();
+        i.issuer = common::Identity("snr:local:screen:host:v1".to_owned());
+        i.scope.tier = SignedIntentScopeTier::Private;
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        verify_signed_intent(i, &OkResolver, now).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn rejects_agent_writing_team_tier() {
+        let mut i = good_intent();
+        i.issuer = common::Identity("agt:claude-code:opus-4-7:reviewer:v1".to_owned());
+        i.scope.tier = SignedIntentScopeTier::Team;
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        let err = verify_signed_intent(i, &OkResolver, now).await.unwrap_err();
+        assert!(matches!(err, VerifyError::ScopeDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn accepts_agent_writing_project_tier() {
+        let mut i = good_intent();
+        i.issuer = common::Identity("agt:claude-code:opus-4-7:reviewer:v1".to_owned());
+        i.scope.tier = SignedIntentScopeTier::Project;
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        verify_signed_intent(i, &OkResolver, now).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn accepts_human_writing_public_tier() {
+        let mut i = good_intent();
+        i.issuer = common::Identity("hmn:tafeng".to_owned());
+        i.scope.tier = SignedIntentScopeTier::Public;
+        let now = rfc3339_to_systemtime("2026-04-22T14:02:30Z");
+        verify_signed_intent(i, &OkResolver, now).await.expect("ok");
     }
 }
