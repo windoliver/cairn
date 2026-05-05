@@ -231,13 +231,16 @@ mod tests {
         };
         let data = run_checks(&inputs).await;
         // Empty records: consent (#253) is wired but has nothing to
-        // classify, actor_chain (#256) the same, schema (#258) is now
-        // real and has nothing to compare. Two stubs remain
-        // (provenance #257, hot_memory #259), each emitting one
-        // deferred-info finding → 2 total.
+        // classify, actor_chain (#256) the same, schema (#258) is
+        // live, and hot_memory (#259) is now a real canary that
+        // emits one Warning DeferredCheck because the default recipe
+        // leans on steps the canary cannot reproduce exactly
+        // (purpose, index, pinned_feedback, active_playbook,
+        // recent_user_signal). Provenance (#257) remains a stub →
+        // 2 DeferredCheck findings (1 Warning + 1 Info).
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
-        assert_eq!(data.summary.by_severity.warning, 0);
+        assert_eq!(data.summary.by_severity.warning, 1);
         assert_eq!(
             data.findings
                 .iter()
@@ -245,7 +248,7 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(data.summary.by_severity.info, 2);
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 
     #[tokio::test]
@@ -326,11 +329,13 @@ mod tests {
         // returns no findings for a LegacyEvent record without a
         // ConsentLookup wired. §6.4 schema (#258) is live: record and
         // host both stamp at `SchemaVersion::current()` so `compare`
-        // returns `Same` and no finding fires. The remaining stub
-        // checks (provenance, hot_memory) each emit one deferred-info
-        // finding → 2 total.
+        // returns `Same` and no finding fires. hot_memory (#259) is
+        // a real canary now and emits one Warning DeferredCheck for
+        // the default recipe's deferred steps. Provenance (#257)
+        // remains a stub → 2 DeferredCheck findings (1 Warning +
+        // 1 Info), 1 Error.
         assert_eq!(data.summary.by_severity.error, 1);
-        assert_eq!(data.summary.by_severity.warning, 0);
+        assert_eq!(data.summary.by_severity.warning, 1);
         assert_eq!(
             data.findings
                 .iter()
@@ -338,6 +343,6 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(data.summary.by_severity.info, 2);
+        assert_eq!(data.summary.by_severity.info, 1);
     }
 }
