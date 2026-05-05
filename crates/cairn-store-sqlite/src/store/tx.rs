@@ -118,7 +118,8 @@ impl StoreTx<'_> {
         intent: &VerifiedSignedIntent,
         inputs: &WalPrepareInputs<'_>,
     ) -> Result<(), ReplayError> {
-        crate::replay::prepare_wal_with_replay(&self.tx, intent.as_inner(), inputs)
+        let now_ms = current_unix_ms();
+        crate::replay::prepare_wal_with_replay(&self.tx, intent.as_inner(), inputs, now_ms)
     }
 
     /// Test-only escape hatch: admit a raw, unverified `SignedIntent`
@@ -136,8 +137,9 @@ impl StoreTx<'_> {
         &self,
         intent: &cairn_core::generated::envelope::SignedIntent,
         inputs: &WalPrepareInputs<'_>,
+        now_ms: i64,
     ) -> Result<(), ReplayError> {
-        crate::replay::prepare_wal_with_replay(&self.tx, intent, inputs)
+        crate::replay::prepare_wal_with_replay(&self.tx, intent, inputs, now_ms)
     }
 
     /// Drop expired rows from `outstanding_challenges`. Returns the

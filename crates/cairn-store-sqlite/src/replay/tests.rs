@@ -85,11 +85,10 @@ fn nonce_b64(suffix: u8) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn inputs(now_ms: i64) -> WalPrepareInputs<'static> {
+fn inputs() -> WalPrepareInputs<'static> {
     WalPrepareInputs {
         kind: "upsert",
         plan_ref: None,
-        now_ms,
     }
 }
 
@@ -98,7 +97,7 @@ fn sequence_mode_first_insert_creates_issuer_seq_row() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("admit");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect("admit");
     tx.commit().expect("commit");
 
     let high_water: i64 = conn
@@ -118,13 +117,15 @@ fn sequence_mode_strict_advance() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), Some(1), None),
-        &inputs(NOW_MS),
+        &inputs(),
+        NOW_MS,
     )
     .expect("first");
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(2), &nonce_b64(2), Some(2), None),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect("strict advance ok");
     tx.commit().expect("commit");
@@ -137,13 +138,15 @@ fn sequence_mode_rejects_repeat_sequence() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), Some(5), None),
-        &inputs(NOW_MS),
+        &inputs(),
+        NOW_MS,
     )
     .expect("first");
     let err = prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(2), &nonce_b64(2), Some(5), None),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect_err("repeat seq");
     match err {
@@ -166,13 +169,15 @@ fn sequence_mode_rejects_lower_sequence() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), Some(10), None),
-        &inputs(NOW_MS),
+        &inputs(),
+        NOW_MS,
     )
     .expect("first");
     let err = prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(2), &nonce_b64(2), Some(7), None),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect_err("lower seq");
     assert!(matches!(
@@ -193,13 +198,15 @@ fn sequence_mode_tolerates_gaps() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), Some(5), None),
-        &inputs(NOW_MS),
+        &inputs(),
+        NOW_MS,
     )
     .expect("first");
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(2), &nonce_b64(2), Some(100), None),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect("gap is fine");
     tx.commit().expect("commit");
@@ -210,13 +217,13 @@ fn duplicate_operation_id_rejected_as_replay() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("first");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect("first");
 
     // Same operation_id, different nonce / sequence — the wal_ops insert
     // is a no-op (ON CONFLICT) but the `used` insert hits the PK and we
     // must surface Duplicate, not Sqlite.
     let dup = intent_with(&op_id(1), &nonce_b64(2), Some(2), None);
-    let err = prepare_wal_with_replay(&tx, &dup, &inputs(NOW_MS + 1)).expect_err("replay");
+    let err = prepare_wal_with_replay(&tx, &dup, &inputs(), NOW_MS + 1).expect_err("replay");
     // Either Duplicate (same envelope retry) or OperationMismatch
     // (same op_id, different envelope content) — both are correct
     // fail-closed responses (round-1 and round-5 review fixes).
@@ -236,7 +243,8 @@ fn duplicate_nonce_rejected_as_replay() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), Some(1), None),
-        &inputs(NOW_MS),
+        &inputs(),
+        NOW_MS,
     )
     .expect("first");
 
@@ -244,7 +252,7 @@ fn duplicate_nonce_rejected_as_replay() {
     // sequence — only the (issuer, nonce) UNIQUE catches this.
     let dup_nonce = intent_with(&op_id(2), &nonce_b64(1), Some(2), None);
     let err =
-        prepare_wal_with_replay(&tx, &dup_nonce, &inputs(NOW_MS + 1)).expect_err("nonce replay");
+        prepare_wal_with_replay(&tx, &dup_nonce, &inputs(), NOW_MS + 1).expect_err("nonce replay");
     assert!(matches!(err, ReplayError::Duplicate { .. }));
 }
 
@@ -253,7 +261,7 @@ fn xor_violation_rejected_when_both_modes_present() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), Some(&nonce_b64(99)));
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("xor both");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect_err("xor both");
     assert!(matches!(err, ReplayError::ModeXorViolation));
 }
 
@@ -262,7 +270,7 @@ fn xor_violation_rejected_when_neither_mode_present() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &nonce_b64(1), None, None);
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("xor none");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect_err("xor none");
     assert!(matches!(err, ReplayError::ModeXorViolation));
 }
 
@@ -274,7 +282,7 @@ fn challenge_mode_consumes_outstanding_row() {
         nonce_b64: chal, ..
     } = mint_challenge(&tx, "hmn:tafeng", NOW_MS, TTL_MS).expect("mint");
     let intent = intent_with(&op_id(1), &nonce_b64(1), None, Some(&chal));
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS + 1)).expect("admit");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS + 1).expect("admit");
 
     let remaining: i64 = tx
         .query_row(
@@ -296,13 +304,15 @@ fn challenge_mode_single_use() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), None, Some(&chal)),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect("first");
     let err = prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(2), &nonce_b64(2), None, Some(&chal)),
-        &inputs(NOW_MS + 2),
+        &inputs(),
+        NOW_MS + 2,
     )
     .expect_err("reuse");
     assert!(matches!(err, ReplayError::ChallengeMissing { .. }));
@@ -314,7 +324,7 @@ fn challenge_mode_missing_nonce_rejected() {
     let tx = conn.transaction().expect("tx");
     // No mint — referenced challenge does not exist.
     let intent = intent_with(&op_id(1), &nonce_b64(1), None, Some(&nonce_b64(99)));
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("missing");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect_err("missing");
     assert!(matches!(err, ReplayError::ChallengeMissing { .. }));
 }
 
@@ -327,7 +337,7 @@ fn challenge_mode_expired_rejected() {
     } = mint_challenge(&tx, "hmn:tafeng", NOW_MS, 1).expect("mint short-ttl");
     // Move clock past expiry.
     let intent = intent_with(&op_id(1), &nonce_b64(1), None, Some(&chal));
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS + 100)).expect_err("expired");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS + 100).expect_err("expired");
     assert!(matches!(err, ReplayError::ChallengeExpired { .. }));
 }
 
@@ -341,7 +351,8 @@ fn challenge_mode_does_not_advance_issuer_seq() {
     prepare_wal_with_replay(
         &tx,
         &intent_with(&op_id(1), &nonce_b64(1), None, Some(&chal)),
-        &inputs(NOW_MS + 1),
+        &inputs(),
+        NOW_MS + 1,
     )
     .expect("admit");
     let row: Option<i64> = tx
@@ -383,11 +394,11 @@ fn mixed_issuers_do_not_share_state() {
     // hmn:a admits sequence 5 …
     let mut a = intent_with(&op_id(1), &nonce_b64(1), Some(5), None);
     a.issuer = Identity("hmn:a".into());
-    prepare_wal_with_replay(&tx, &a, &inputs(NOW_MS)).expect("a@5");
+    prepare_wal_with_replay(&tx, &a, &inputs(), NOW_MS).expect("a@5");
     // … and hmn:b can still admit sequence 1 because its high_water is 0.
     let mut b = intent_with(&op_id(2), &nonce_b64(2), Some(1), None);
     b.issuer = Identity("hmn:b".into());
-    prepare_wal_with_replay(&tx, &b, &inputs(NOW_MS + 1)).expect("b@1");
+    prepare_wal_with_replay(&tx, &b, &inputs(), NOW_MS + 1).expect("b@1");
     tx.commit().expect("commit");
 }
 
@@ -397,7 +408,7 @@ fn sequence_overflow_rejected() {
     let tx = conn.transaction().expect("tx");
     let huge = u64::MAX;
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(huge), None);
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("overflow");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect_err("overflow");
     assert!(matches!(err, ReplayError::SequenceOverflow { .. }));
 }
 
@@ -417,7 +428,7 @@ fn unpadded_nonce_admits_via_idl_shape() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &unpadded, Some(1), None);
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("unpadded nonce admits");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect("unpadded nonce admits");
     tx.commit().expect("commit");
 }
 
@@ -441,7 +452,7 @@ fn unpadded_challenge_redeems_via_idl_shape() {
     )
     .expect("insert challenge");
     let intent = intent_with(&op_id(1), &nonce_b64(1), None, Some(&unpadded));
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS + 1))
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS + 1)
         .expect("unpadded server_challenge redeems");
 }
 
@@ -454,14 +465,14 @@ fn wal_op_mismatch_rejected_on_conflict() {
     let tx = conn.transaction().expect("tx");
 
     let original = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &original, &inputs(NOW_MS)).expect("first admit");
+    prepare_wal_with_replay(&tx, &original, &inputs(), NOW_MS).expect("first admit");
 
     // Build a second intent that shares operation_id but mutates a
     // signed-payload field (target_hash) — different envelope under
     // the same op_id.
     let mut tampered = intent_with(&op_id(1), &nonce_b64(2), Some(2), None);
     tampered.target_hash = format!("sha256:{}", "b".repeat(64));
-    let err = prepare_wal_with_replay(&tx, &tampered, &inputs(NOW_MS + 1)).expect_err("mismatch");
+    let err = prepare_wal_with_replay(&tx, &tampered, &inputs(), NOW_MS + 1).expect_err("mismatch");
     assert!(
         matches!(
             err,
@@ -480,9 +491,9 @@ fn chain_parents_persisted_into_wal_op_deps() {
     let tx = conn.transaction().expect("tx");
 
     let parent_a = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &parent_a, &inputs(NOW_MS)).expect("parent A");
+    prepare_wal_with_replay(&tx, &parent_a, &inputs(), NOW_MS).expect("parent A");
     let parent_b = intent_with(&op_id(2), &nonce_b64(2), Some(2), None);
-    prepare_wal_with_replay(&tx, &parent_b, &inputs(NOW_MS + 1)).expect("parent B");
+    prepare_wal_with_replay(&tx, &parent_b, &inputs(), NOW_MS + 1).expect("parent B");
 
     // Child cites both parents in chain_parents.
     let mut child = intent_with(&op_id(3), &nonce_b64(3), Some(3), None);
@@ -490,7 +501,7 @@ fn chain_parents_persisted_into_wal_op_deps() {
         cairn_core::generated::common::Ulid(op_id(1)),
         cairn_core::generated::common::Ulid(op_id(2)),
     ];
-    prepare_wal_with_replay(&tx, &child, &inputs(NOW_MS + 2)).expect("child");
+    prepare_wal_with_replay(&tx, &child, &inputs(), NOW_MS + 2).expect("child");
 
     let dep_count: i64 = tx
         .query_row(
@@ -512,7 +523,7 @@ fn chain_parents_unknown_parent_rejected() {
 
     let mut intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
     intent.chain_parents = vec![cairn_core::generated::common::Ulid(op_id(99))]; // not in wal_ops
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("unknown parent");
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect_err("unknown parent");
     // Surfaces as Sqlite (FK constraint failure); the trigger / FK
     // chain may produce different SQLite error codes across versions,
     // so just assert the failure mode is Sqlite-level (i.e., not
@@ -529,7 +540,7 @@ fn signed_payload_columns_derive_from_intent() {
     let tx = conn.transaction().expect("tx");
 
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("admit");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect("admit");
 
     let (scope_json, expires_at): (String, i64) = tx
         .query_row(
@@ -565,12 +576,12 @@ fn caller_swallowing_replay_error_cannot_commit_partial_wal_state() {
 
     // Land an initial row at sequence=10 → high_water=10.
     let baseline = intent_with(&op_id(1), &nonce_b64(1), Some(10), None);
-    prepare_wal_with_replay(&tx, &baseline, &inputs(NOW_MS)).expect("baseline admit");
+    prepare_wal_with_replay(&tx, &baseline, &inputs(), NOW_MS).expect("baseline admit");
 
     // Build a child whose op_id is fresh (so wal_ops insert succeeds)
     // but whose sequence is too low (consume_intent → OutOfOrder).
     let too_low = intent_with(&op_id(2), &nonce_b64(2), Some(5), None);
-    let err = prepare_wal_with_replay(&tx, &too_low, &inputs(NOW_MS + 1))
+    let err = prepare_wal_with_replay(&tx, &too_low, &inputs(), NOW_MS + 1)
         .expect_err("must reject out-of-order");
     assert!(matches!(err, ReplayError::OutOfOrder { .. }));
 
@@ -603,7 +614,7 @@ fn rolled_back_transaction_leaves_no_state() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
     let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
-    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("admit");
+    prepare_wal_with_replay(&tx, &intent, &inputs(), NOW_MS).expect("admit");
     drop(tx); // rollback
 
     let used: i64 = conn

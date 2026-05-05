@@ -81,11 +81,10 @@ fn intent_chal(issuer: &str, op_suffix: u8, challenge: &str, nonce_seed: u8) -> 
     i
 }
 
-fn inputs_at(now_ms: i64) -> WalPrepareInputs<'static> {
+fn inputs_at() -> WalPrepareInputs<'static> {
     WalPrepareInputs {
         kind: "upsert",
         plan_ref: None,
-        now_ms,
     }
 }
 
@@ -150,7 +149,7 @@ fn same_issuer_concurrent_sequence_only_one_wins() {
             // shared contention is `(issuer, sequence)` = (hmn:race, 1).
             let intent = intent_seq("hmn:race", i, 1, i + 1);
             let result = with_busy_retry(&conn, |tx| {
-                prepare_wal_with_replay(tx, &intent, &inputs_at(NOW_MS + i64::from(i)))
+                prepare_wal_with_replay(tx, &intent, &inputs_at(), NOW_MS + i64::from(i))
             });
             match result {
                 Ok(()) => success.fetch_add(1, Ordering::SeqCst),
@@ -193,7 +192,7 @@ fn mixed_issuers_concurrent_admit_independently() {
             let issuer = format!("hmn:user-{i}");
             let intent = intent_seq(&issuer, i, 1, i + 1);
             with_busy_retry(&conn, |tx| {
-                prepare_wal_with_replay(tx, &intent, &inputs_at(NOW_MS + i64::from(i)))
+                prepare_wal_with_replay(tx, &intent, &inputs_at(), NOW_MS + i64::from(i))
             })
         }));
     }
@@ -247,7 +246,7 @@ fn challenge_mode_single_use_under_concurrency() {
         handles.push(thread::spawn(move || {
             let intent = intent_chal("hmn:race", i, &chal.nonce_b64, i + 1);
             let result = with_busy_retry(&conn, |tx| {
-                prepare_wal_with_replay(tx, &intent, &inputs_at(NOW_MS + 1 + i64::from(i)))
+                prepare_wal_with_replay(tx, &intent, &inputs_at(), NOW_MS + 1 + i64::from(i))
             });
             match result {
                 Ok(()) => success.fetch_add(1, Ordering::SeqCst),
@@ -297,7 +296,7 @@ fn duplicate_operation_id_under_concurrency() {
             let mut intent = intent_seq("hmn:dup", 7, 1, i + 1);
             intent.sequence = Some(u64::from(i + 1));
             let result = with_busy_retry(&conn, |tx| {
-                prepare_wal_with_replay(tx, &intent, &inputs_at(NOW_MS + 1 + i64::from(i)))
+                prepare_wal_with_replay(tx, &intent, &inputs_at(), NOW_MS + 1 + i64::from(i))
             });
             match result {
                 Ok(()) => success.fetch_add(1, Ordering::SeqCst),
@@ -340,7 +339,7 @@ fn handshake_ttl_expires_unused_challenge() {
     let now_after_expiry = NOW_MS + 200;
     let intent = intent_chal("hmn:tafeng", 1, &chal.nonce_b64, 1);
     let tx = conn.transaction().expect("tx");
-    let err = prepare_wal_with_replay(&tx, &intent, &inputs_at(now_after_expiry))
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs_at(), now_after_expiry)
         .expect_err("must reject expired");
     assert!(matches!(err, ReplayError::ChallengeExpired { .. }));
     drop(tx);

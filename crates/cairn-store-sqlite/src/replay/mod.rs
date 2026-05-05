@@ -129,7 +129,12 @@ pub enum ReplayError {
 /// `envelope_json`) are **derived from the verified intent**, not
 /// taken from the caller — round-4 review #2 closed the path where a
 /// verified envelope could be staged with mismatched authorization
-/// metadata.
+/// metadata. Likewise, the admission timestamp `now_ms` is **not**
+/// in this struct: production callers go through
+/// [`crate::store::tx::StoreTx::prepare_wal_with_replay`] which
+/// derives the trusted store clock internally; tests inject a clock
+/// via [`test_helpers::prepare_wal_with_replay`].
+/// (Round-7 review #1.)
 #[derive(Debug, Clone)]
 pub struct WalPrepareInputs<'a> {
     /// `wal_ops.kind` — must be one of the closed CHECK values from
@@ -138,10 +143,6 @@ pub struct WalPrepareInputs<'a> {
     pub kind: &'a str,
     /// Optional `plan_ref` ULID — set when the verb stages a plan blob.
     pub plan_ref: Option<&'a str>,
-    /// Wall-clock unix-ms `now`. Used for `wal_ops.issued_at`,
-    /// `wal_ops.updated_at`, `used.committed_at`, and the challenge
-    /// expiry check.
-    pub now_ms: i64,
 }
 
 /// Atomically admit a verified envelope: insert the WAL `PREPARED` row,
@@ -172,6 +173,7 @@ pub(crate) fn prepare_wal_with_replay(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
     inputs: &WalPrepareInputs<'_>,
+    now_ms: i64,
 ) -> Result<(), ReplayError> {
     // Defensive XOR check before any write — see ReplayError::ModeXorViolation.
     if (u8::from(intent.sequence.is_some()) + u8::from(intent.server_challenge.is_some())) != 1 {
@@ -185,7 +187,7 @@ pub(crate) fn prepare_wal_with_replay(
     // nested transactions: `ROLLBACK TO` undoes only the savepoint's
     // changes; `RELEASE` makes them part of the parent on success.
     tx.execute_batch("SAVEPOINT replay_admit")?;
-    match prepare_wal_with_replay_body(tx, intent, inputs) {
+    match prepare_wal_with_replay_body(tx, intent, inputs, now_ms) {
         Ok(()) => {
             tx.execute_batch("RELEASE replay_admit")?;
             Ok(())
@@ -208,6 +210,7 @@ fn prepare_wal_with_replay_body(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
     inputs: &WalPrepareInputs<'_>,
+    now_ms: i64,
 ) -> Result<(), ReplayError> {
     // Round-4 review #2: derive the signed-payload columns from the
     // intent itself. Caller cannot widen the scope or extend the TTL
@@ -250,18 +253,29 @@ fn prepare_wal_with_replay_body(
             inputs.plan_ref,
             expires_at_ms,
             intent.signature.0,
-            inputs.now_ms,
+            now_ms,
         ],
     )?;
 
     if inserted == 0 {
         // Conflict — confirm the existing row is for the *same* intent
-        // before letting the consume proceed. A mismatch means another
-        // writer (or a prior aborted attempt) staged a different
-        // envelope under this `operation_id`; admitting under that row
-        // would silently consume sequence/challenge state for an
-        // unrelated WAL admission.
-        verify_existing_wal_op_matches(tx, intent, inputs.kind, &envelope_json, &scope_json)?;
+        // AND in an admissible state before letting consume proceed.
+        // Round-7 review #2: also verify state == 'PREPARED' (not
+        // committed/aborted/rejected), expires_at + plan_ref match
+        // the derived values, and the existing wal_op_deps row set
+        // matches `intent.chain_parents` exactly. A retry against a
+        // terminal-state row, a divergent plan, or a pruned dependency
+        // edge is treated as `OperationMismatch` — replay state stays
+        // unconsumed.
+        verify_existing_wal_op_matches(
+            tx,
+            intent,
+            inputs.kind,
+            &envelope_json,
+            &scope_json,
+            inputs.plan_ref,
+            expires_at_ms,
+        )?;
     } else {
         // Fresh row — persist the signed `chain_parents` DAG so the
         // §5.6 WAL recovery / commit scheduler honours the partial
@@ -277,7 +291,7 @@ fn prepare_wal_with_replay_body(
         }
     }
 
-    consume_intent(tx, intent, inputs.now_ms)
+    consume_intent(tx, intent, now_ms)
 }
 
 /// On `INSERT … ON CONFLICT DO NOTHING` no-op, ensure the row that
@@ -287,16 +301,32 @@ fn prepare_wal_with_replay_body(
 /// `envelope`, and `scope_json`. Anything else is suspicious — even
 /// a same-issuer same-`operation_id` row with a different signature
 /// is a different signed message.
+#[allow(clippy::too_many_arguments)]
 fn verify_existing_wal_op_matches(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
     expected_kind: &str,
     expected_envelope_json: &str,
     expected_scope_json: &str,
+    expected_plan_ref: Option<&str>,
+    expected_expires_at_ms: i64,
 ) -> Result<(), ReplayError> {
-    let row: Option<(String, String, String, String, String, String)> = tx
+    // Tuple form: (kind, issuer, target_hash, signature, envelope, scope_json, state, plan_ref, expires_at)
+    type ExistingWalOpRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+    );
+    let row: Option<ExistingWalOpRow> = tx
         .query_row(
-            "SELECT kind, issuer, target_hash, signature, envelope, scope_json
+            "SELECT kind, issuer, target_hash, signature, envelope, scope_json,
+                    state, plan_ref, expires_at
                FROM wal_ops
               WHERE operation_id = ?1",
             params![intent.operation_id.0],
@@ -308,27 +338,68 @@ fn verify_existing_wal_op_matches(
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((kind, issuer, target_hash, signature, envelope, scope_json)) = row else {
+    let Some((
+        kind,
+        issuer,
+        target_hash,
+        signature,
+        envelope,
+        scope_json,
+        state,
+        plan_ref,
+        expires_at,
+    )) = row
+    else {
         // Should not happen — INSERT returned 0 yet the row is gone.
         // Treat as opaque SQL anomaly so the caller's transaction
         // rolls back rather than silently advancing replay state.
         return Err(ReplayError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
     };
-    if kind != expected_kind
+    let plan_matches = match (plan_ref.as_deref(), expected_plan_ref) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    if state != "PREPARED"
+        || kind != expected_kind
         || issuer != intent.issuer.0
         || target_hash != intent.target_hash
         || signature != intent.signature.0
         || envelope != expected_envelope_json
         || scope_json != expected_scope_json
+        || expires_at != expected_expires_at_ms
+        || !plan_matches
     {
         return Err(ReplayError::OperationMismatch {
             operation_id: intent.operation_id.0.clone(),
         });
     }
+
+    // Verify the dependency edges match the signed `chain_parents`
+    // exactly — order-insensitive set comparison since the table has
+    // no inherent ordering.
+    let mut stored: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut stmt =
+        tx.prepare("SELECT depends_on_op_id FROM wal_op_deps WHERE operation_id = ?1")?;
+    let mut rows = stmt.query(params![intent.operation_id.0])?;
+    while let Some(r) = rows.next()? {
+        stored.insert(r.get(0)?);
+    }
+    let signed: std::collections::BTreeSet<String> =
+        intent.chain_parents.iter().map(|p| p.0.clone()).collect();
+    if stored != signed {
+        return Err(ReplayError::OperationMismatch {
+            operation_id: intent.operation_id.0.clone(),
+        });
+    }
+
     Ok(())
 }
 
@@ -638,7 +709,9 @@ pub mod test_helpers {
     use super::{ReplayError, WalPrepareInputs};
 
     /// Test-only: drive [`super::prepare_wal_with_replay`] without the
-    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate.
+    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate or
+    /// the trusted store clock. `now_ms` is supplied so deterministic
+    /// tests can drive the challenge-TTL boundary.
     ///
     /// # Errors
     ///
@@ -647,8 +720,9 @@ pub mod test_helpers {
         tx: &Transaction<'_>,
         intent: &SignedIntent,
         inputs: &WalPrepareInputs<'_>,
+        now_ms: i64,
     ) -> Result<(), ReplayError> {
-        super::prepare_wal_with_replay(tx, intent, inputs)
+        super::prepare_wal_with_replay(tx, intent, inputs, now_ms)
     }
 
     /// Test-only: drive [`super::consume_intent`] without the
