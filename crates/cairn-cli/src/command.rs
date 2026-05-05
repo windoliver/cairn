@@ -46,6 +46,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(identity::cli::identity_subcommand())
+        .subcommand(verbs::flush::command())
 }
 
 fn llm_subcommand() -> clap::Command {

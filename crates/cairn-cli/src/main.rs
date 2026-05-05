@@ -144,7 +144,7 @@ fn main() -> ExitCode {
     // from the top-level vault registry guard (which requires a named vault).
     let needs_vault_guard = !matches!(
         active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity"
+        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity" | "flush"
     );
 
     if needs_vault_guard {
@@ -210,6 +210,7 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("flush", sub)) => verbs::flush::run(sub),
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {

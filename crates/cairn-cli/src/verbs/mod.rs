@@ -5,6 +5,7 @@ pub mod admin_reindex;
 pub mod assemble_hot;
 pub mod capture_trace;
 pub mod envelope;
+pub mod flush;
 pub mod forget;
 pub mod handshake;
 pub mod ingest;
