@@ -445,9 +445,23 @@ fn claim_pending(
     // Resume path: if a prior attempt for this same role already claimed
     // pending and crashed before publishing, the in-flight file is still
     // there. Use it instead of trying to rename pending again — that
-    // would otherwise return NotFound and strand the claim. Caller will
-    // re-validate the content under the same gates.
+    // would otherwise return `NotFound` and strand the claim.
+    //
+    // BUT — if `pending/<id>` ALSO exists alongside the in-flight file,
+    // we have ambiguous state: rolling back the in-flight (e.g. on a
+    // validation failure) would overwrite the valid pending file. That
+    // is operator-resolvable, not auto-resolvable; fail closed with a
+    // conflict error so the operator can inspect both files before any
+    // CLI action mutates them.
     if claim.exists() {
+        if pending.exists() {
+            return ClaimOutcome::Err(std::io::Error::other(format!(
+                "conflict: both pending/{0}.plan.json and {1}/{0}.plan.json.in-flight exist; \
+                 inspect both files manually before any flush apply / reject",
+                ulid.0,
+                bucket.dir_name(),
+            )));
+        }
         return ClaimOutcome::Claimed(claim);
     }
     match std::fs::rename(&pending, &claim) {
@@ -607,6 +621,20 @@ struct PlanSummary {
     status: String,
 }
 
+/// Maximum file size we are willing to read for a `.in-flight` recovery
+/// row in `flush list`. Real plans are well under 64 KiB; anything
+/// larger is listed as `oversize` without being read.
+const MAX_PLAN_BYTES: u64 = 1024 * 1024;
+
+/// Per-bucket row cap on the recovery scan. A flooded `.in-flight`
+/// directory cannot turn `flush list` into an unbounded scan.
+const MAX_INFLIGHT_ROWS: usize = 256;
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear: bounded recovery scan + bounded normal scan + format/emit; \
+              splitting hides the row-shape contract"
+)]
 fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
     let json = m.get_flag("json");
     let buckets: Vec<Bucket> = if m.get_flag("all") {
@@ -620,41 +648,66 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
     // crashed between claim and publish. Emit a row for every matching
     // filename even if the file fails to read or parse — the most
     // recovery-critical claims are exactly the malformed / partially
-    // written ones.
+    // written ones. Defense-in-depth: validate filename stems as ULIDs,
+    // refuse to read files larger than `MAX_PLAN_BYTES`, and cap
+    // per-bucket row count.
     let inflight_buckets = [Bucket::Applied, Bucket::Rejected];
     for b in &inflight_buckets {
         let dir = bucket_dir(vault, *b);
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
         };
+        let mut bucket_rows = 0_usize;
         for entry in read.flatten() {
+            if bucket_rows >= MAX_INFLIGHT_ROWS {
+                break;
+            }
             let path = entry.path();
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             // Filename shape: `<26-char-ULID>.plan.json.in-flight`.
             let Some(stem) = name.strip_suffix(".plan.json.in-flight") else {
                 continue;
             };
+            // Refuse non-ULID stems — defends against an attacker /
+            // corrupted-vault staging arbitrary filenames in the
+            // recovery scan path.
+            if !is_valid_ulid_str(stem) {
+                continue;
+            }
             let bucket_label = match b {
                 Bucket::Applied => "in-flight (apply)",
                 Bucket::Rejected => "in-flight (reject)",
                 Bucket::Pending => "in-flight",
             };
-            let (mode, mutations, issued_at, status) = match std::fs::read(&path)
+            let oversize = entry
+                .metadata()
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<PersistedPlan>(&bytes).ok())
-            {
-                Some(p) => (
-                    format!("{:?}", p.plan.mode),
-                    p.plan.mutations.len(),
-                    p.plan.issued_at.clone(),
-                    "stranded".to_owned(),
-                ),
-                None => (
+                .is_some_and(|md| md.len() > MAX_PLAN_BYTES);
+            let (mode, mutations, issued_at, status) = if oversize {
+                (
                     "?".to_owned(),
                     0,
                     "?".to_owned(),
-                    "stranded (unreadable)".to_owned(),
-                ),
+                    "stranded (oversize)".to_owned(),
+                )
+            } else {
+                match std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<PersistedPlan>(&bytes).ok())
+                {
+                    Some(p) => (
+                        format!("{:?}", p.plan.mode),
+                        p.plan.mutations.len(),
+                        p.plan.issued_at.clone(),
+                        "stranded".to_owned(),
+                    ),
+                    None => (
+                        "?".to_owned(),
+                        0,
+                        "?".to_owned(),
+                        "stranded (unreadable)".to_owned(),
+                    ),
+                }
             };
             rows.push(PlanSummary {
                 id: stem.to_owned(),
@@ -664,6 +717,7 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
                 issued_at,
                 status,
             });
+            bucket_rows += 1;
         }
     }
     for b in buckets {

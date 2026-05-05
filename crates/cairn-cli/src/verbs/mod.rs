@@ -123,6 +123,8 @@ pub fn ingest_plan_stub(
     no_diff: bool,
     json: bool,
 ) -> std::process::ExitCode {
+    use std::io::Write as _;
+
     use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, diff_path, plan_path};
     use cairn_core::domain::flush_plan::{
         FlushMode, FlushPlan, PersistedPlan, PlanReason, PlannedMutation, diff,
@@ -249,31 +251,54 @@ pub fn ingest_plan_stub(
                         return std::process::ExitCode::from(70);
                     }
                 };
-                match std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
+                // Write to a per-process temp path first, fsync, then
+                // atomic-rename to the final pending path. This way a
+                // crash/EIO between open and fsync never leaves a
+                // truncated `pending/<id>.plan.json` at the canonical
+                // path. The `.tmp.<pid>` suffix avoids collision between
+                // concurrent stub planners (rename is the
+                // single-writer race resolver).
+                let mut tmp = path.as_os_str().to_owned();
+                tmp.push(format!(".tmp.{}", std::process::id()));
+                let tmp = std::path::PathBuf::from(tmp);
                 {
-                    Ok(mut f) => {
-                        use std::io::Write as _;
-                        if let Err(e) = f.write_all(&bytes) {
-                            eprintln!("cairn: write {}: {e}", path.display());
+                    let mut f = match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(&tmp)
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("cairn: open tmp {}: {e}", tmp.display());
                             return std::process::ExitCode::from(73);
                         }
-                        if let Err(e) = f.sync_all() {
-                            eprintln!("cairn: fsync {}: {e}", path.display());
-                            return std::process::ExitCode::from(73);
-                        }
-                        // Post-create re-check: between our pre-check and
-                        // `create_new(pending)`, a peer could have created
-                        // pending/<id>, claimed it, published it to a
-                        // terminal, and freed pending — letting us mint
-                        // pending/<id> again with the same id. If a
-                        // terminal/in-flight now exists for our id, our
-                        // pending file is orphaned (apply would short-
-                        // circuit on the existing terminal). Drop it and
-                        // retry with a fresh id.
-                        drop(f);
+                    };
+                    if let Err(e) = f.write_all(&bytes) {
+                        eprintln!("cairn: write {}: {e}", tmp.display());
+                        let _ = std::fs::remove_file(&tmp);
+                        return std::process::ExitCode::from(73);
+                    }
+                    if let Err(e) = f.sync_all() {
+                        eprintln!("cairn: fsync {}: {e}", tmp.display());
+                        let _ = std::fs::remove_file(&tmp);
+                        return std::process::ExitCode::from(73);
+                    }
+                }
+                // Atomic publish: `link` then `unlink(tmp)` is the
+                // no-clobber primitive on POSIX (`rename` would
+                // overwrite an existing pending file, breaking the
+                // single-writer contract). On EEXIST we lost the race
+                // — drop the tmp and retry with a fresh id.
+                match std::fs::hard_link(&tmp, &path) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&tmp);
+                        // Post-create re-check: between our pre-check
+                        // and `link(pending)`, a peer could have
+                        // produced + published a colliding terminal.
+                        // If so, our pending file is orphaned (apply
+                        // would short-circuit on the terminal). Drop
+                        // it and retry.
                         if id_collides_with_terminal_or_inflight(&vault, &plan.operation_id) {
                             let _ = std::fs::remove_file(&path);
                             retries += 1;
@@ -291,9 +316,7 @@ pub fn ingest_plan_stub(
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                        // A peer process raced us between the
-                        // `id_in_use_anywhere` probe and `create_new` —
-                        // mint a fresh id and retry.
+                        let _ = std::fs::remove_file(&tmp);
                         retries += 1;
                         if retries > 8 {
                             eprintln!(
@@ -306,7 +329,8 @@ pub fn ingest_plan_stub(
                         path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
                     }
                     Err(e) => {
-                        eprintln!("cairn: write {}: {e}", path.display());
+                        eprintln!("cairn: link {} → {}: {e}", tmp.display(), path.display());
+                        let _ = std::fs::remove_file(&tmp);
                         return std::process::ExitCode::from(73);
                     }
                 }

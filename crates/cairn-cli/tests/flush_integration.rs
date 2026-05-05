@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
 use cairn_test_fixtures::flush_plan::sample_pending;
 
 fn write_pending(vault: &Path, id: &str) {
@@ -339,6 +339,75 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
+/// Round 5 (#54): a pending file that coexists with an in-flight claim
+/// for the same id is ambiguous — `apply` and `reject` must fail closed
+/// rather than overwriting the pending file via rollback.
+#[test]
+fn flush_apply_refuses_when_pending_and_in_flight_both_exist() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK00000000000000D2A101";
+    // Stage both a pending file and an in-flight claim for the same id.
+    write_pending(vault.path(), id);
+    let inflight = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    std::fs::create_dir_all(inflight.parent().unwrap()).unwrap();
+    let p = sample_pending(id);
+    std::fs::write(&inflight, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        !out.status.success(),
+        "must fail closed when both files exist"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("conflict"),
+        "expected conflict message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Both files preserved for operator inspection.
+    let pending = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(pending.exists(), "pending file must be preserved");
+    assert!(inflight.exists(), "in-flight file must be preserved");
+}
+
+/// Round 5 (#54): an attacker-staged or corrupted-vault `.in-flight`
+/// file with a non-ULID stem must be ignored by the recovery scan in
+/// `flush list`. Defends against staged-filename `DoS` and prevents
+/// arbitrary names from showing up as recoverable rows.
+#[test]
+fn flush_list_ignores_non_ulid_in_flight_stems() {
+    let vault = tempfile::tempdir().unwrap();
+    let bogus = bucket_dir(vault.path(), Bucket::Applied).join("not-a-ulid.plan.json.in-flight");
+    std::fs::create_dir_all(bogus.parent().unwrap()).unwrap();
+    std::fs::write(&bogus, b"{}").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        !stdout.contains("not-a-ulid"),
+        "non-ULID stems must be ignored; stdout: {stdout}"
+    );
+}
+
 /// Round 4 (#54): a stranded in-flight claim file (process killed
 /// between claim and publish) must be recoverable — a subsequent
 /// `flush apply <id>` must finish the publish from the existing
@@ -391,7 +460,7 @@ fn flush_apply_resumes_existing_in_flight_claim() {
 #[test]
 fn flush_list_shows_unreadable_in_flight_claims() {
     let vault = tempfile::tempdir().unwrap();
-    let id = "01HQZK0000000000000NRDBL01";
+    let id = "01HQZK0000000000000NRDB001";
     // Write a malformed in-flight file directly.
     let inflight = plan_path(
         vault.path(),
