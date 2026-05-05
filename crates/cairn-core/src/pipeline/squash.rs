@@ -312,10 +312,19 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// decision (issue #218).
     ///
     /// # Stability
-    /// `pub(crate)` until the dispatch driver (#217) is the sole entry
-    /// point. The signature derives the context from the event alone —
-    /// a misbehaving caller can no longer reclassify a stored structured
-    /// payload as interactive.
+    /// `pub(crate)`. Issue #217 considered promoting this entry point
+    /// to `pub` once `SquashAdmission` gated minting, but
+    /// `try_from_terminal_event` only proves *internal*
+    /// self-consistency (event validates, payload is `Terminal`,
+    /// context is `InteractiveTty`, hash matches the supplied bytes).
+    /// It cannot prove the bytes came from a trusted capture path, so
+    /// exposing the API publicly would let an external caller
+    /// fabricate a `Terminal + InteractiveTty` envelope around
+    /// arbitrary CLI/MCP/hook bytes and drive lossy compaction. The
+    /// next issue's pipeline driver composes dispatch + squash inside
+    /// `cairn-core` so the trust chain stays owned by this crate; the
+    /// admission token still exists to make replay determinism
+    /// auditable inside that boundary.
     ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, `StructuredContextRejected`
@@ -325,13 +334,10 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// `StructuredContextRejected` so callers can distinguish "needs
     /// migration" from "deliberately structured / squash-bypass" —
     /// see [`UnstructuredBindError::LegacyMissingContext`].
-    // Only reachable from #[cfg(test)] modules until #217 wires the
-    // dispatch driver; default-feature non-test builds legitimately
-    // leave it dead.
-    #[allow(dead_code)]
     pub(crate) fn try_from_terminal_event(
         event: &CaptureEvent,
         raw: &'a [u8],
+        _admission: super::dispatch::SquashAdmission,
     ) -> Result<Self, UnstructuredBindError> {
         // Reject malformed envelopes outright — we never want to lossily
         // compact bytes whose source_family / sensor / payload disagree.
@@ -542,7 +548,12 @@ mod wrapper_tests {
     fn rejects_non_terminal_variant() {
         let bytes = b"hello\n";
         let evt = hook_event(bytes);
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::NotTerminalPayload));
     }
 
@@ -551,7 +562,12 @@ mod wrapper_tests {
         let bytes = b"hello\n";
         let mut evt = terminal_event(bytes);
         evt.payload_hash = payload_hash_of(b"different bytes");
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::HashMismatch));
     }
 
@@ -562,7 +578,12 @@ mod wrapper_tests {
         if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
             *context = Some(TerminalContext::NonInteractiveOrStructured);
         }
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             UnstructuredBindError::StructuredContextRejected
@@ -586,7 +607,12 @@ mod wrapper_tests {
         // `validate()` accepts legacy events so deserialize / replay
         // stays unbroken across upgrade.
         evt.payload.validate().expect("legacy event must validate");
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::LegacyMissingContext));
     }
 
@@ -594,8 +620,12 @@ mod wrapper_tests {
     fn accepts_terminal_interactive_tty_with_matching_hash() {
         let bytes = b"hello\n";
         let evt = terminal_event(bytes);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes)
-            .expect("valid construction");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid construction");
         assert_eq!(wrapped.as_bytes(), bytes);
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
@@ -1156,7 +1186,12 @@ mod wrapper_tests {
         let n = MAX_INPUT_BYTES / 3 + 1;
         let raw = vec![0xFFu8; n];
         let evt = terminal_event(&raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
@@ -1181,7 +1216,12 @@ mod wrapper_tests {
         // fire and stage 1 actually runs. No ANSI, no dedup, no cap.
         let raw = b"\xFF\xFF\xFFhello\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(
@@ -1204,7 +1244,12 @@ mod wrapper_tests {
         // stripped. No stage 5 or stage 6 loss.
         let raw = b"\x1b[31mred\x1b[0m\nplain\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.ansi_stripped, "ansi was stripped");
@@ -1221,7 +1266,12 @@ mod wrapper_tests {
         // Repeated line, no ANSI. Default dedup_min_run = 2.
         let raw = b"same\nsame\nsame\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.dedup_runs_collapsed > 0, "dedup acted");
@@ -1706,8 +1756,12 @@ mod wrapper_tests {
         raw.extend(std::iter::repeat_n(b'\n', n));
         raw.extend_from_slice(b"FINAL\n");
         let evt = terminal_event(&raw);
-        let wrapped =
-            UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("under byte ceiling");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("under byte ceiling");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated, "must take bypass path");
@@ -1820,8 +1874,12 @@ mod wrapper_tests {
         // payload becomes U+FFFD on lossy decode (1B → 3B expansion).
         let oversized = vec![0xFFu8; MAX_INPUT_BYTES + 1];
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
-            .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1851,8 +1909,12 @@ mod wrapper_tests {
         let n = oversized.len();
         oversized[n - 6..].copy_from_slice(b"\nYTAIL");
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
-            .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1877,7 +1939,12 @@ mod wrapper_tests {
         let mut evt = terminal_event(bytes);
         // Force source_family / payload-variant disagreement.
         evt.source_family = SourceFamily::Hook;
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, UnstructuredBindError::EventValidationFailed(_)),
             "got: {err:?}"
@@ -1891,8 +1958,12 @@ mod wrapper_tests {
     /// per-shape test stays focused on the input it constructs.
     fn cr_bearing_lines_both_paths(payload: &[u8]) -> (usize, usize) {
         let evt = terminal_event(payload);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, payload)
-            .expect("valid construction");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            payload,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid construction");
         let cfg = SquashConfig::default();
         let staged = super::squash(wrapped, &cfg);
 
@@ -2186,8 +2257,12 @@ mod wrapper_tests {
         assert!(oversized.len() >= MAX_INPUT_BYTES);
 
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
-            .expect("oversize accepted");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize accepted");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
 
@@ -5760,7 +5835,19 @@ pub fn fuzz_entrypoint(raw: &[u8], cfg: &SquashConfig) -> Option<SquashOutput> {
         },
         source_family: SourceFamily::Terminal,
     };
-    let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw).ok()?;
+    // Drive the fuzz harness through the real dispatch decision so
+    // production routing is on the fuzzed path; the synthetic event
+    // is `Terminal { context: InteractiveTty }`, so dispatch returns
+    // `Squash` and yields the admission token without any test-only
+    // shortcut.
+    let admission = match crate::pipeline::dispatch::dispatch(
+        &event,
+        &crate::pipeline::dispatch::DefaultRegistry,
+    ) {
+        crate::pipeline::dispatch::DispatchDecision::Squash(t) => t,
+        crate::pipeline::dispatch::DispatchDecision::Bypass(_) => return None,
+    };
+    let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw, admission).ok()?;
     Some(squash(wrapper, cfg))
 }
 
@@ -5847,8 +5934,12 @@ mod squash_integration_tests {
 
     fn run_squash(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper =
-            UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid wrapper");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid wrapper");
         squash(wrapper, cfg)
     }
 
@@ -6075,8 +6166,12 @@ mod squash_fixtures_tests {
     fn run_fixture(name: &str, cfg: &SquashConfig) -> String {
         let raw = fixture(name);
         let evt = terminal_event(&raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw)
-            .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
         let out = squash(wrapper, cfg);
         String::from_utf8_lossy(&out.compacted_bytes).into_owned()
     }
@@ -6166,16 +6261,24 @@ mod squash_perf {
 
         // Warm-up.
         for _ in 0..3 {
-            let w =
-                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                crate::pipeline::dispatch::SquashAdmission::for_test(),
+            )
+            .expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
 
         let iters: u32 = 50;
         let start = Instant::now();
         for _ in 0..iters {
-            let w =
-                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                crate::pipeline::dispatch::SquashAdmission::for_test(),
+            )
+            .expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
         let avg = start.elapsed() / iters;
@@ -6194,7 +6297,12 @@ mod proptest_squash {
 
     fn run_squash_for_proptest(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         squash(wrapper, cfg)
     }
 
@@ -6432,7 +6540,12 @@ mod corner_case_tests {
 
     fn squash_raw(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         squash(wrapper, cfg)
     }
 
