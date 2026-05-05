@@ -223,6 +223,18 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
     }
+    // TTL gate (brief §5.6 `expires_at`). Real plans (`!placeholder`)
+    // must be applied within their declared TTL — past expiry, refuse
+    // and roll back so the plan stays pending for re-issue. Stub-planner
+    // plans use synthetic timestamps and skip the check.
+    if !persisted.plan.placeholder && expires_at_in_past(&persisted.plan.expires_at) {
+        eprintln!(
+            "cairn flush apply: plan {id} expired at {} (now past TTL)",
+            persisted.plan.expires_at,
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
 
     // Phase 1 — drift check. Without a wired MemoryStore in this PR, the
     // check is a no-op pass-through. When #9 lands (the WAL state machine),
@@ -355,6 +367,15 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
     }
+    // Rejecting an expired non-placeholder plan is still safe (it's a
+    // cleanup operation), but we surface the staleness so an operator
+    // can audit. Don't block — let the operator complete the rejection.
+    if !persisted.plan.placeholder && expires_at_in_past(&persisted.plan.expires_at) {
+        eprintln!(
+            "cairn flush reject: NOTE — plan {id} TTL ({}) is in the past; rejection still proceeds",
+            persisted.plan.expires_at,
+        );
+    }
     persisted.status = PlanStatus::Rejected {
         at: now_rfc3339(),
         reason: reason.clone(),
@@ -485,15 +506,32 @@ fn claim_pending(
     // Crashed-owner recovery: a previous process renamed the canonical
     // in-flight file to `.in-flight.<pid>` and crashed before publish.
     // Pending and the canonical claim are both gone. Scan the bucket dir
-    // for any orphan `.in-flight.<pid>` matching this id and re-claim it
-    // by atomic rename to OUR per-pid path.
+    // for any orphan `.in-flight.<pid>` matching this id and re-claim
+    // it — but ONLY when the orphan is provably stale (mtime older than
+    // `ORPHAN_STALE_THRESHOLD_SECS`). Younger orphans are assumed to
+    // belong to a still-running peer process and we fail closed with a
+    // recovery-in-progress conflict so we don't steal a live owner's
+    // claim. Operators can wait the threshold or manually rename a
+    // verified-dead orphan back to the canonical path.
     if !pending.exists()
         && let Some(orphan) = find_orphan_owned_claim(&claim, ulid)
     {
         let owned = process_owned_claim(&claim);
-        // Skip if the orphan already belongs to this process.
         if orphan == owned {
             return ClaimOutcome::Claimed(owned);
+        }
+        if !is_orphan_stale(&orphan) {
+            return ClaimOutcome::Err(std::io::Error::other(format!(
+                "recovery for {0} held by recent owner ({1}); waited <{2}s — \
+                 retry once that process exits or rename {1} back to {0}.plan.json.in-flight \
+                 manually if you have verified the owner is dead",
+                ulid.0,
+                orphan
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("<unknown>"),
+                ORPHAN_STALE_THRESHOLD_SECS,
+            )));
         }
         match std::fs::rename(&orphan, &owned) {
             Ok(()) => return ClaimOutcome::Claimed(owned),
@@ -513,9 +551,35 @@ fn claim_pending(
     }
 }
 
+/// Mtime threshold above which an orphan `.in-flight.<pid>` is treated
+/// as stale and recoverable. Matches brief §5.6 `expires_at` 5-minute
+/// receipt TTL — a process that has held a claim longer than this is
+/// almost certainly dead. Operators can rename a verified-dead orphan
+/// back to the canonical path manually if they need to recover sooner.
+const ORPHAN_STALE_THRESHOLD_SECS: u64 = 300;
+
+/// Returns `true` when `path` exists and its mtime is older than
+/// [`ORPHAN_STALE_THRESHOLD_SECS`]. Treats unreadable metadata as
+/// non-stale (fail closed) so a transient stat error never causes us
+/// to steal a live owner's claim.
+fn is_orphan_stale(path: &Path) -> bool {
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = md.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(mtime) else {
+        return false;
+    };
+    age.as_secs() > ORPHAN_STALE_THRESHOLD_SECS
+}
+
 /// Look for any `<id>.plan.json.in-flight.<pid>` orphan in the same
-/// directory as `claim`. Returns the first match (filesystem order) so
-/// the caller can re-claim it atomically.
+/// directory as `claim`. Returns the first match in sorted order so
+/// the result is deterministic across runs. Bounded by
+/// [`MAX_INFLIGHT_SCAN`] to defend against attacker-staged or
+/// corrupted-vault directories with unbounded entries.
 fn find_orphan_owned_claim(
     claim: &Path,
     ulid: &cairn_core::generated::common::Ulid,
@@ -523,14 +587,26 @@ fn find_orphan_owned_claim(
     let dir = claim.parent()?;
     let prefix = format!("{}.plan.json.in-flight.", ulid.0);
     let read = std::fs::read_dir(dir).ok()?;
-    for entry in read.flatten() {
+    let mut best: Option<std::path::PathBuf> = None;
+    for entry in read.flatten().take(MAX_INFLIGHT_SCAN) {
         let name = entry.file_name();
-        let name = name.to_str()?.to_owned();
-        if name.starts_with(&prefix) {
-            return Some(entry.path());
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let path = entry.path();
+        match &best {
+            None => best = Some(path),
+            Some(b) => {
+                if path.file_name() < b.file_name() {
+                    best = Some(path);
+                }
+            }
         }
     }
-    None
+    best
 }
 
 /// Append a per-process suffix so two concurrent claimers cannot share
@@ -637,6 +713,16 @@ fn emit_apply_ok(json: bool, id: &str, status: &str) {
 /// Minimal RFC-3339 wall-clock formatter for the audit timestamp. Avoids
 /// pulling `chrono` for one string. When `chrono` arrives as a workspace
 /// dep elsewhere, swap this for a real formatter.
+/// Compare an `expires_at` RFC-3339 timestamp to wall-clock now via
+/// lexicographic string compare. Works because both ends use the same
+/// fixed-width `YYYY-MM-DDTHH:MM:SSZ` form. Returns `false` (i.e. NOT
+/// expired) on any parse / clock error so we never block on a faulty
+/// clock — the caller's gate is conservative either way.
+fn expires_at_in_past(expires_at: &str) -> bool {
+    let now = now_rfc3339();
+    expires_at < now.as_str()
+}
+
 fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -775,18 +861,22 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         // Sort entries so the scan is deterministic across runs (avoids
         // filesystem-order silently hiding particular ids when the cap
         // trips) and emit an `omitted=N` marker when we hit either cap.
-        let mut entries: Vec<_> = read.flatten().collect();
+        // Bound the read to `MAX_INFLIGHT_SCAN + 1` BEFORE collecting so
+        // a flooded directory cannot force unbounded memory allocation
+        // before the cap is checked.
+        let mut entries: Vec<_> = read.flatten().take(MAX_INFLIGHT_SCAN + 1).collect();
+        let read_full = entries.len() > MAX_INFLIGHT_SCAN;
+        if read_full {
+            entries.truncate(MAX_INFLIGHT_SCAN);
+        }
         entries.sort_by_key(std::fs::DirEntry::file_name);
         let mut bucket_rows = 0_usize;
-        let mut scanned = 0_usize;
-        let mut hit_scan_cap = false;
+        // `hit_scan_cap` is true whenever the streaming `take` above
+        // had to truncate — that's the canonical signal that some
+        // entries went unscanned.
+        let hit_scan_cap = read_full;
         let mut hit_row_cap = false;
         for entry in entries {
-            scanned += 1;
-            if scanned > MAX_INFLIGHT_SCAN {
-                hit_scan_cap = true;
-                break;
-            }
             if bucket_rows >= MAX_INFLIGHT_ROWS {
                 hit_row_cap = true;
                 break;

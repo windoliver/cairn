@@ -366,6 +366,18 @@ fn flush_apply_recovers_orphan_owned_in_flight() {
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     let p = sample_pending(id);
     std::fs::write(&orphan, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+    // Backdate mtime past the orphan staleness threshold (5 minutes)
+    // so the recovery path treats this orphan as recoverable rather
+    // than a still-running owner's claim.
+    let now_secs = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap();
+    let old = filetime::FileTime::from_unix_time(now_secs - 600, 0);
+    filetime::set_file_mtime(&orphan, old).unwrap();
 
     let bin = env!("CARGO_BIN_EXE_cairn");
     let out = std::process::Command::new(bin)
@@ -386,6 +398,52 @@ fn flush_apply_recovers_orphan_owned_in_flight() {
     assert!(
         applied.exists(),
         "orphan owned-claim recovery must publish the terminal"
+    );
+}
+
+/// Round 8 (#54): a fresh orphan owned-claim (mtime within the
+/// staleness threshold) must NOT be auto-recovered — it might still
+/// belong to a running owner. Apply must fail closed with a recovery
+/// conflict instead of stealing the live owner's claim.
+#[test]
+fn flush_apply_refuses_to_steal_fresh_owned_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000FRSH1";
+    let canonical = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    let orphan = {
+        let mut s = canonical.as_os_str().to_owned();
+        s.push(".999998");
+        std::path::PathBuf::from(s)
+    };
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    let p = sample_pending(id);
+    std::fs::write(&orphan, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+    // Don't backdate — fresh mtime simulates a still-running owner.
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        !out.status.success(),
+        "must refuse to recover fresh orphan; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("recovery") && stderr.contains("recent owner"),
+        "expected recovery-conflict message; got: {stderr}"
+    );
+    assert!(
+        orphan.exists(),
+        "fresh orphan must be preserved (not stolen by recovery)"
     );
 }
 

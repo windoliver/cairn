@@ -74,6 +74,7 @@ wiremock = { workspace = true }
 assert_cmd = "2"
 predicates = "3"
 tokio = { workspace = true }
+filetime = "0.2.27"
 
 [lints]
 workspace = true
