@@ -60,7 +60,8 @@ pub use consent_timeline::{
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
 pub use flush_plan::{
-    ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus, PlannedMutation,
+    ApplyKind, ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus,
+    PlannedMutation,
 };
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;

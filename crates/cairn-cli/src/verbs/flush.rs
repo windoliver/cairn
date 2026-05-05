@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
-use cairn_core::domain::flush_plan::{PersistedPlan, PlanStatus};
+use cairn_core::domain::flush_plan::{ApplyKind, PersistedPlan, PlanStatus};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 /// Build the `flush` subcommand group.
@@ -92,7 +92,8 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     let applied = plan_path(vault, Bucket::Applied, &ulid);
     let rejected = plan_path(vault, Bucket::Rejected, &ulid);
 
-    // Idempotent re-apply on Applied → success no-op.
+    // Idempotent re-apply on Applied → success no-op. We re-emit the same
+    // human / JSON shape the original apply produced.
     if applied.exists() {
         emit_apply_ok(json, id, "applied (no-op)");
         return ExitCode::SUCCESS;
@@ -119,6 +120,18 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         }
     };
 
+    // Schema-version compatibility gate. Future plan formats must round-trip
+    // through their own CLI; refuse to act on a version this binary does
+    // not understand rather than silently overwriting status fields.
+    if persisted.schema_version != PersistedPlan::SCHEMA_VERSION {
+        eprintln!(
+            "cairn flush apply: plan {id} schema_version {} unsupported (this CLI handles {})",
+            persisted.schema_version,
+            PersistedPlan::SCHEMA_VERSION,
+        );
+        return ExitCode::from(65);
+    }
+
     // Phase 1 — drift check. Without a wired MemoryStore in this PR, the
     // check is a no-op pass-through. When #9 lands (the WAL state machine),
     // replace this with a real `MemoryStore::get_active_by_target` +
@@ -127,8 +140,24 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     // Phase 2 — apply. Same story: no MemoryStore wired here. The mutation
     // walk is a no-op for now; this is the shape the WAL apply will take.
 
-    // Move pending → applied; record status.
-    persisted.status = PlanStatus::Applied { at: now_rfc3339() };
+    // Honest no-op: warn the operator that this binary moves the plan but
+    // does NOT execute mutations against MemoryStore. Persisted status
+    // captures `apply_kind = MetadataOnly` so the audit trail is truthful.
+    eprintln!(
+        "cairn flush apply: WARNING — MemoryStore mutations are not yet wired (#9). \
+         Plan {id} will be marked applied for audit only; no records were written."
+    );
+    if persisted.plan.placeholder {
+        eprintln!(
+            "cairn flush apply: NOTE — plan {id} was produced by the CLI stub planner \
+             (`cairn-cli::ingest_plan_stub`) and does NOT reflect a real ingest/forget \
+             pipeline run. Treat as a placeholder for testing the lifecycle only."
+        );
+    }
+    persisted.status = PlanStatus::Applied {
+        at: now_rfc3339(),
+        apply_kind: ApplyKind::MetadataOnly,
+    };
     if let Err(e) = persist_and_move(vault, &pending, &applied, &persisted, &ulid) {
         eprintln!("cairn flush apply: write failed: {e}");
         return ExitCode::from(70); // EX_SOFTWARE
@@ -175,6 +204,14 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
             return ExitCode::from(65);
         }
     };
+    if persisted.schema_version != PersistedPlan::SCHEMA_VERSION {
+        eprintln!(
+            "cairn flush reject: plan {id} schema_version {} unsupported (this CLI handles {})",
+            persisted.schema_version,
+            PersistedPlan::SCHEMA_VERSION,
+        );
+        return ExitCode::from(65);
+    }
     persisted.status = PlanStatus::Rejected {
         at: now_rfc3339(),
         reason: reason.clone(),
@@ -199,8 +236,20 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Write `p` to `to`, then atomically remove `from`. Best-effort delete
-/// of the diff sidecar at `<vault>/.cairn/flush/pending/<id>.diff.md`.
+/// Persist `p` to `to` and remove `from` using a write-tmp → atomic-rename
+/// pattern so the terminal file appears in one filesystem step rather than
+/// being written in place. Sequence:
+///
+/// 1. Serialize `p` and write to `<to>.tmp` (replace any prior tmp).
+/// 2. `rename(<to>.tmp, <to>)` — atomic on POSIX same-filesystem.
+/// 3. `remove_file(<from>)` — pending file gone.
+/// 4. Best-effort `remove_file(<diff sidecar>)`.
+///
+/// A crash between steps 2 and 3 leaves both `pending/` and the terminal
+/// file present for the same `operation_id`. The terminal file is
+/// authoritative — apply/reject pre-checks treat any existing
+/// `applied/<id>.plan.json` or `rejected/<id>.plan.json` as the
+/// canonical state and short-circuit accordingly.
 fn persist_and_move(
     vault: &Path,
     from: &Path,
@@ -212,7 +261,17 @@ fn persist_and_move(
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(p).map_err(std::io::Error::other)?;
-    std::fs::write(to, bytes)?;
+    let mut tmp = to.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    // Write to tmp first; atomic rename publishes the terminal file in one
+    // step. If `to` already exists, `rename` overwrites it on POSIX —
+    // callers must guard with the pre-check on `applied`/`rejected`
+    // existence to avoid clobbering a peer process's terminal file.
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, to)?;
+    // Pending now redundant; remove. A crash here leaves pending+terminal
+    // for the same id; terminal wins per the pre-check semantics above.
     std::fs::remove_file(from)?;
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,

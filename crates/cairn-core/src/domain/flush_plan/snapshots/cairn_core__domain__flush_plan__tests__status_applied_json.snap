@@ -28,6 +28,7 @@ expression: "serde_json::to_string_pretty(&p).unwrap()"
   },
   "status": {
     "state": "applied",
-    "at": "2026-05-04T12:01:00Z"
+    "at": "2026-05-04T12:01:00Z",
+    "apply_kind": "full"
   }
 }

@@ -69,6 +69,14 @@ pub struct FlushPlan {
     pub dependencies: Vec<Ulid>,
     /// 5-minute receipt TTL (§5.6). Apply past this is rejected.
     pub expires_at: String,
+    /// `true` when the plan was produced by the CLI stub planner (no live
+    /// ingest pipeline yet, awaiting #9). `apply` honors this by emitting a
+    /// prominent warning and recording `apply_kind = "metadata_only"` in
+    /// the resulting [`PlanStatus::Applied`] — the file moves but no
+    /// `MemoryStore` mutation runs. Defaults to `false` so a real planner's
+    /// plans are treated as authoritative.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub placeholder: bool,
 }
 
 impl FlushPlan {
@@ -218,6 +226,26 @@ impl PersistedPlan {
     }
 }
 
+/// How a `PlanStatus::Applied` was actually executed.
+///
+/// `MetadataOnly` indicates the plan's lifecycle marker advanced (file moved
+/// from `pending/` to `applied/`) without any `MemoryStore` mutation —
+/// the path the CLI takes today while the WAL state machine (#9) is being
+/// wired. `Full` indicates the WAL apply executed the mutations against the
+/// store. Defaults to `MetadataOnly` so historical plans deserialize as the
+/// honest no-op state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApplyKind {
+    /// File moved to `applied/` but no `MemoryStore` mutations executed.
+    /// Operator-visible warning is emitted at apply time.
+    #[default]
+    MetadataOnly,
+    /// WAL apply ran and `MemoryStore` reflects the mutations.
+    Full,
+}
+
 /// Lifecycle state of a persisted plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -229,6 +257,12 @@ pub enum PlanStatus {
     Applied {
         /// RFC 3339 timestamp of the apply operation.
         at: String,
+        /// Distinguishes a real `MemoryStore`-backed apply from a metadata-only
+        /// move that left the store untouched. The metadata-only path exists
+        /// while the WAL apply integration (#9) lands; once that wires up, all
+        /// applies are `ApplyKind::Full`.
+        #[serde(default)]
+        apply_kind: ApplyKind,
     },
     /// Plan was rejected by the human reviewer.
     Rejected {
@@ -262,6 +296,7 @@ mod tests {
             target_hashes: BTreeMap::default(),
             dependencies: vec![],
             expires_at: "2026-05-04T12:05:00Z".into(),
+            placeholder: false,
         }
     }
 
@@ -311,6 +346,7 @@ mod tests {
         let mut p = PersistedPlan::pending(plan);
         p.status = PlanStatus::Applied {
             at: "2026-05-04T12:01:00Z".into(),
+            apply_kind: ApplyKind::Full,
         };
         insta::assert_snapshot!(
             "status_applied_json",

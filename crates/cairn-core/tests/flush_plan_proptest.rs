@@ -71,6 +71,7 @@ fn arb_plan() -> impl Strategy<Value = FlushPlan> {
             target_hashes: BTreeMap::default(),
             dependencies: vec![],
             expires_at: "2026-05-04T12:05:00Z".into(),
+            placeholder: false,
         })
 }
 

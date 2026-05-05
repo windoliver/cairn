@@ -290,3 +290,115 @@ fn ingest_dry_run_and_human_review_conflict() {
         "expected clap to reject mutually exclusive flags"
     );
 }
+
+/// Forward-compat gate from review-loop round 1 (#54): `flush apply` must
+/// refuse a plan with an unsupported `schema_version` rather than overwrite
+/// the status field of a future format.
+#[test]
+fn flush_apply_rejects_unsupported_schema_version() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000SCHM1";
+    // Hand-write a v999 plan to bypass `sample_pending`'s SCHEMA_VERSION = 1.
+    let path = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = serde_json::to_value(sample_pending(id)).unwrap();
+    bytes["schema_version"] = serde_json::json!(999);
+    std::fs::write(&path, serde_json::to_vec_pretty(&bytes).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("schema_version 999 unsupported"),
+        "expected version-mismatch message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Plan stays in pending — was not advanced to applied.
+    assert!(path.exists(), "plan file should remain in pending/");
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(!applied.exists(), "must NOT have moved to applied/");
+}
+
+/// Round 1 (#54): `flush apply` against a stub-planner placeholder must
+/// emit a prominent stderr warning and record `apply_kind=metadata_only`
+/// so operators understand `MemoryStore` mutations did NOT execute.
+#[test]
+fn flush_apply_warns_on_placeholder_and_records_metadata_only() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    // Drive the stub planner end-to-end via `ingest --human-review` so
+    // the persisted plan carries `placeholder = true`.
+    let ingest_out = std::process::Command::new(bin)
+        .args([
+            "ingest",
+            "--kind",
+            "fact",
+            "--body",
+            "review me",
+            "--human-review",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(ingest_out.status.success());
+
+    // Pull the freshly-minted plan id from `flush list --json`.
+    let list_out = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    let summaries: serde_json::Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    let id = summaries[0]["id"].as_str().expect("plan id").to_owned();
+
+    let apply_out = std::process::Command::new(bin)
+        .args(["flush", "apply", &id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(apply_out.status.success());
+    let stderr = String::from_utf8_lossy(&apply_out.stderr);
+    assert!(
+        stderr.contains("WARNING") && stderr.contains("not yet wired"),
+        "expected metadata-only warning; got stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("stub planner"),
+        "expected placeholder-plan note; got stderr: {stderr}"
+    );
+
+    // Persisted status carries apply_kind = metadata_only.
+    let applied_path = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.clone()),
+    );
+    let persisted: cairn_core::domain::flush_plan::PersistedPlan =
+        serde_json::from_slice(&std::fs::read(&applied_path).unwrap()).unwrap();
+    let cairn_core::domain::flush_plan::PlanStatus::Applied { ref apply_kind, .. } =
+        persisted.status
+    else {
+        panic!("expected Applied status, got {:?}", persisted.status);
+    };
+    assert_eq!(
+        *apply_kind,
+        cairn_core::domain::flush_plan::ApplyKind::MetadataOnly
+    );
+}

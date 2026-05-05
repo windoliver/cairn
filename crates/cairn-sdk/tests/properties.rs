@@ -238,6 +238,48 @@ proptest! {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// FlushPlan modes — dry_run and human_review are mutually exclusive
+// at the wire layer (review-loop round 1, brief §5.5).
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ingest_dry_run_and_human_review_both_true_rejects() {
+    let args = IngestArgs {
+        body: Some("hello".to_owned()),
+        dry_run: Some(true),
+        file: None,
+        frontmatter: None,
+        human_review: Some(true),
+        kind: "note".to_owned(),
+        no_diff: None,
+        session_id: None,
+        tags: None,
+        url: None,
+    };
+    let err = sdk().ingest(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn forget_record_dry_run_and_human_review_both_true_rejects() {
+    use cairn_sdk::generated::verbs::forget::ForgetArgs;
+    let args = ForgetArgs::Record {
+        record_id: Ulid("01HQZX9F5N0000000000000000".to_owned()),
+        dry_run: Some(true),
+        human_review: Some(true),
+        no_diff: None,
+    };
+    let err = sdk().forget(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review on forget, got {err:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
 // ScopeFilter — at least one field must be set.
 // ────────────────────────────────────────────────────────────────────
 

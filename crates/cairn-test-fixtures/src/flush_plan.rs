@@ -33,6 +33,7 @@ pub fn sample_plan(operation_id: &str, mode: FlushMode) -> FlushPlan {
         target_hashes: std::collections::BTreeMap::new(),
         dependencies: vec![],
         expires_at: "2026-05-04T12:05:00Z".into(),
+        placeholder: false,
     }
 }
 

@@ -130,19 +130,37 @@ pub fn ingest_plan_stub(
     use cairn_core::domain::{Identity, ScopeTuple, TargetId};
     use cairn_core::generated::common::Ulid;
 
-    // Synthesize a stand-in target id so the plan has shape. Real pipeline
-    // (#9) mints this through MemoryRecord construction.
-    #[allow(
-        clippy::expect_used,
-        reason = "stub planner — fixture target id is hard-coded valid Crockford ULID"
-    )]
-    let target =
-        TargetId::parse("01HQZX9F5N0000000000000000").expect("hard-coded valid Crockford ULID");
     #[allow(
         clippy::expect_used,
         reason = "stub planner — fixture issuer is hard-coded valid"
     )]
     let issuer = Identity::parse("agt:cairn-cli:planner:v0").expect("hard-coded valid identity");
+
+    // Build a mutation that reflects the caller's actual args so a
+    // persisted human-review plan is at least *honest* about what the
+    // operator asked for, even though the WAL apply hasn't run yet
+    // (#9). For `cairn forget --record <ULID>` we honor the supplied
+    // target; otherwise we fall back to a hard-coded fixture target so
+    // the plan is well-formed but the `placeholder` flag (set below)
+    // tells `apply` to warn that this is not a real planner output.
+    #[allow(
+        clippy::expect_used,
+        reason = "stub planner — fixture target id is hard-coded valid Crockford ULID"
+    )]
+    let fallback_target =
+        TargetId::parse("01HQZX9F5N0000000000000000").expect("hard-coded valid Crockford ULID");
+    let record_arg = sub
+        .try_get_one::<String>("record_id")
+        .ok()
+        .flatten()
+        .or_else(|| sub.try_get_one::<String>("record").ok().flatten())
+        .cloned();
+    let mutation = match record_arg.as_deref().and_then(|s| TargetId::parse(s).ok()) {
+        Some(t) => PlannedMutation::ForgetRecord { target: t },
+        None => PlannedMutation::ForgetRecord {
+            target: fallback_target,
+        },
+    };
     let plan = FlushPlan {
         operation_id: Ulid(synth_ulid()),
         issued_at: synth_now(),
@@ -150,14 +168,17 @@ pub fn ingest_plan_stub(
         principal: None,
         scope: ScopeTuple::default(),
         mode,
-        // ForgetRecord — lightweight placeholder. #9 swaps in Upsert
-        // built from the captured body.
-        mutations: vec![PlannedMutation::ForgetRecord { target }],
+        mutations: vec![mutation],
         reason: PlanReason::UserIngest,
         source_events: vec![],
         target_hashes: std::collections::BTreeMap::new(),
         dependencies: vec![],
         expires_at: synth_expires(),
+        // Marks every plan produced by this stub so `cairn flush apply`
+        // can warn the operator that the plan does NOT reflect a real
+        // ingest/forget pipeline run. Cleared once #9 wires the real
+        // planner.
+        placeholder: true,
     };
     // Touch ingest-specific args if present (suppresses unused-var warnings
     // until #9 starts using them). Use try_get_one to avoid panicking when

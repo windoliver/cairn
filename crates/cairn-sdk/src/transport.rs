@@ -606,6 +606,15 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
 /// so direct Rust construction would otherwise sail past these constraints.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     args.validate().map_err(invalid)?;
+    // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive.
+    // The CLI clap layer rejects `--dry-run --human-review` together; the
+    // SDK / MCP wire path bypasses clap, so re-enforce here so a direct
+    // construction or deserialize cannot drive both modes at once.
+    if args.dry_run.unwrap_or(false) && args.human_review.unwrap_or(false) {
+        return Err(invalid(
+            "dry_run and human_review are mutually exclusive (brief §5.5)",
+        ));
+    }
     if let Some(body) = &args.body
         && body.is_empty()
     {
@@ -1039,6 +1048,32 @@ fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
 /// `TryFrom<RawForgetArgs>` plus nested type validators (`Ulid`, `ScopeFilter`).
 fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::forget::ForgetArgs as F;
+    // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive on
+    // every variant. SDK / MCP callers can construct either bool field
+    // directly, so re-enforce here.
+    let (dry_run, human_review) = match args {
+        F::Record {
+            dry_run,
+            human_review,
+            ..
+        }
+        | F::Session {
+            dry_run,
+            human_review,
+            ..
+        }
+        | F::Scope {
+            dry_run,
+            human_review,
+            ..
+        } => (dry_run.unwrap_or(false), human_review.unwrap_or(false)),
+        _ => (false, false),
+    };
+    if dry_run && human_review {
+        return Err(invalid(
+            "dry_run and human_review are mutually exclusive (brief §5.5)",
+        ));
+    }
     match args {
         F::Record { record_id, .. } => validate_ulid(record_id),
         F::Session { session_id, .. } => {
