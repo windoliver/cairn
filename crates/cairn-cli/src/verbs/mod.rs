@@ -159,10 +159,11 @@ pub fn ingest_plan_stub(
         dependencies: vec![],
         expires_at: synth_expires(),
     };
-    // Touch sub args to keep them in scope (suppresses unused-var warnings
-    // until #9 starts using them).
-    let _ = sub.get_one::<String>("kind");
-    let _ = sub.get_one::<String>("body");
+    // Touch ingest-specific args if present (suppresses unused-var warnings
+    // until #9 starts using them). Use try_get_one to avoid panicking when
+    // called from forget::run, which has no "kind" or "body" args.
+    let _ = sub.try_get_one::<String>("kind").ok();
+    let _ = sub.try_get_one::<String>("body").ok();
 
     match mode {
         FlushMode::DryRun => {

@@ -201,6 +201,46 @@ fn ingest_human_review_writes_pending_plan() {
 }
 
 #[test]
+fn forget_dry_run_writes_nothing() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let _ = std::process::Command::new(bin)
+        .args([
+            "forget",
+            "--record",
+            "01HQZX9F5N0000000000000000",
+            "--dry-run",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(!vault.path().join(".cairn/flush").exists());
+}
+
+#[test]
+fn forget_human_review_writes_pending() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args([
+            "forget",
+            "--record",
+            "01HQZX9F5N0000000000000000",
+            "--human-review",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let pending = vault.path().join(".cairn/flush/pending");
+    assert!(pending.exists());
+}
+
+#[test]
 fn ingest_dry_run_and_human_review_conflict() {
     let vault = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_cairn");

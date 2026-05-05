@@ -33,7 +33,9 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(verbs::with_fix_markdown(
             verbs::with_fix_folders(generated::verbs::lint_subcommand()),
         )))
-        .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
+        .subcommand(verbs::with_json(verbs::with_flush_modes(
+            generated::verbs::forget_subcommand(),
+        )))
         // Protocol preludes.
         .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
         .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
