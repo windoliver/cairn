@@ -241,6 +241,34 @@ fn forget_human_review_writes_pending() {
 }
 
 #[test]
+fn flush_list_json_snapshot() {
+    let vault = tempfile::tempdir().unwrap();
+    write_pending(vault.path(), "01HQZK00000000000000000030");
+    write_pending(vault.path(), "01HQZK00000000000000000031");
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    insta::assert_snapshot!("flush_list_json", String::from_utf8(out.stdout).unwrap());
+}
+
+#[test]
+fn flush_apply_human_output_snapshot() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK00000000000000000040";
+    write_pending(vault.path(), id);
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    insta::assert_snapshot!("flush_apply_human", String::from_utf8(out.stdout).unwrap());
+}
+
+#[test]
 fn ingest_dry_run_and_human_review_conflict() {
     let vault = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_cairn");

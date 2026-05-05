@@ -1,0 +1,5 @@
+---
+source: crates/cairn-cli/tests/flush_integration.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+flush apply 01HQZK00000000000000000040: applied
