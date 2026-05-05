@@ -213,9 +213,18 @@ fn main() -> ExitCode {
         Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
             Err(e) => {
-                // Fall back to env-only resolution for `flush list` so an
-                // operator can still inspect a vault that wasn't found via
-                // the registry path. Mutating subcommands re-validate.
+                // Fall back to env-only resolution ONLY for `flush list`
+                // (read-only, useful for inspecting a vault outside the
+                // registry path). For `apply` and `reject` — the
+                // lifecycle-mutating commands — fail closed: an
+                // explicit `--vault` that didn't resolve must NOT
+                // silently re-route the mutation to whatever
+                // `CAIRN_VAULT` points at.
+                let mutating = matches!(sub.subcommand_name(), Some("apply" | "reject"));
+                if mutating {
+                    eprintln!("cairn flush: vault resolution failed — {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
                 eprintln!("cairn flush: vault resolution warning — {e:#}");
                 verbs::flush::run(sub, None)
             }

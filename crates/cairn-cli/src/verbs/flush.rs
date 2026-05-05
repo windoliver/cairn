@@ -99,8 +99,7 @@ pub fn command() -> Command {
 /// can still inspect a vault outside the normal precedence chain.
 #[must_use]
 pub fn run(sub: &ArgMatches, resolved_vault: Option<PathBuf>) -> ExitCode {
-    let Some(vault) =
-        resolved_vault.or_else(|| std::env::var_os("CAIRN_VAULT").map(PathBuf::from))
+    let Some(vault) = resolved_vault.or_else(|| std::env::var_os("CAIRN_VAULT").map(PathBuf::from))
     else {
         eprintln!("cairn flush: vault root not set: pass --vault NAME_OR_PATH or CAIRN_VAULT");
         return ExitCode::from(78); // EX_CONFIG

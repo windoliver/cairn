@@ -207,8 +207,21 @@ pub fn ingest_plan_stub(
             std::process::ExitCode::SUCCESS
         }
         FlushMode::HumanReview => {
-            let Some(vault) = std::env::var_os("CAIRN_VAULT").map(std::path::PathBuf::from) else {
-                eprintln!("cairn: CAIRN_VAULT must be set for --human-review");
+            // Vault precedence: top-level `--vault NAME_OR_PATH` (a
+            // `global(true)` clap flag, so it's visible on the
+            // subcommand matches) wins over `CAIRN_VAULT`. Prevents
+            // `CAIRN_VAULT=dev cairn --vault prod ingest --human-review`
+            // from silently writing the plan into `dev`.
+            let vault = sub
+                .try_get_one::<String>("vault")
+                .ok()
+                .flatten()
+                .map(std::path::PathBuf::from)
+                .or_else(|| std::env::var_os("CAIRN_VAULT").map(std::path::PathBuf::from));
+            let Some(vault) = vault else {
+                eprintln!(
+                    "cairn: --vault NAME_OR_PATH or CAIRN_VAULT must be set for --human-review"
+                );
                 return std::process::ExitCode::from(78);
             };
             let pending_dir = bucket_dir(&vault, Bucket::Pending);

@@ -339,6 +339,95 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
+/// Round 10 (#54): explicit `--vault` must override `CAIRN_VAULT` for
+/// human-review write — silently routing the plan to the env vault
+/// when `--vault` is given is a tenant-isolation bug.
+#[test]
+fn ingest_human_review_honors_explicit_vault_over_env() {
+    let target = tempfile::tempdir().unwrap();
+    let env_decoy = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args([
+            "--vault",
+            target.path().to_str().unwrap(),
+            "ingest",
+            "--kind",
+            "fact",
+            "--body",
+            "x",
+            "--human-review",
+        ])
+        .env("CAIRN_VAULT", env_decoy.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Plan must land in the --vault target, NOT the CAIRN_VAULT decoy.
+    let target_pending = target.path().join(".cairn/flush/pending");
+    let decoy_pending = env_decoy.path().join(".cairn/flush/pending");
+    assert!(
+        target_pending.exists(),
+        "plan must land under --vault path, not CAIRN_VAULT"
+    );
+    assert!(
+        !decoy_pending.exists(),
+        "CAIRN_VAULT must NOT be touched when --vault is explicit"
+    );
+}
+
+/// Round 10 (#54): `cairn flush apply` with an explicit `--vault` that
+/// fails to resolve must fail closed (`EX_CONFIG`), not silently fall
+/// back to `CAIRN_VAULT` and mutate the wrong vault.
+#[test]
+fn flush_apply_fails_closed_on_unresolvable_explicit_vault() {
+    let env_decoy = tempfile::tempdir().unwrap();
+    // Stage a pending plan in the env vault so a misrouted apply could
+    // demonstrably mutate it.
+    let id = "01HQZK00000000000000000VT1";
+    write_pending(env_decoy.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    // Use a non-registered vault NAME (not an absolute path) so
+    // `resolve_vault_or_cwd` returns `Err(VaultError::NotFound)`.
+    // Absolute paths are accepted as direct vault refs even if they
+    // don't exist, which is correct behavior for the resolver.
+    let out = std::process::Command::new(bin)
+        .args(["--vault", "no-such-registered-vault", "flush", "apply", id])
+        .env("CAIRN_VAULT", env_decoy.path())
+        // Avoid hitting the user's real ~/.cairn registry by routing
+        // CAIRN_REGISTRY at an empty file.
+        .env(
+            "CAIRN_REGISTRY",
+            env_decoy.path().join("empty-registry.json"),
+        )
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(78),
+        "expected EX_CONFIG; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The decoy plan must remain untouched in pending — the misrouted
+    // apply did not silently terminalize it.
+    let pending = plan_path(
+        env_decoy.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let applied = plan_path(
+        env_decoy.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(pending.exists(), "decoy pending plan must be preserved");
+    assert!(!applied.exists(), "decoy must NOT have been mutated");
+}
+
 /// Round 9 (#54): auto-recovery from a `.in-flight.<pid>` orphan was
 /// removed because mtime + PID provide no reliable proof that the
 /// owner is dead. `apply` must now refuse to act on an orphan and
