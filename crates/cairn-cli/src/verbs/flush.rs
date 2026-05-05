@@ -142,7 +142,10 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
     #[allow(clippy::expect_used, reason = "clap declared this required")]
     let id = m.get_one::<String>("id").expect("clap-required");
     #[allow(clippy::expect_used, reason = "clap declared this required")]
-    let reason = m.get_one::<String>("reason").expect("clap-required").clone();
+    let reason = m
+        .get_one::<String>("reason")
+        .expect("clap-required")
+        .clone();
     let ulid = cairn_core::generated::common::Ulid(id.clone());
 
     let pending = plan_path(vault, Bucket::Pending, &ulid);

@@ -129,10 +129,17 @@ fn flush_reject_moves_pending_to_rejected_with_reason() {
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let rejected = plan_path(vault.path(), Bucket::Rejected,
-        &cairn_core::generated::common::Ulid(id.into()));
+    let rejected = plan_path(
+        vault.path(),
+        Bucket::Rejected,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
     let p: cairn_core::domain::flush_plan::PersistedPlan =
         serde_json::from_slice(&std::fs::read(&rejected).unwrap()).unwrap();
     let cairn_core::domain::flush_plan::PlanStatus::Rejected { ref reason, .. } = p.status else {
