@@ -72,15 +72,19 @@ pub fn run_with_context(json: bool, vault_root: Option<&Path>, issuer: Option<&s
 }
 
 fn mint_persisted(json: bool, vault_root: &Path, issuer: &str, now_ms: i64) -> ExitCode {
-    let db_path = vault_root.join(".cairn").join("cairn.db");
-    if !db_path.exists() {
+    let cairn_dir = vault_root.join(".cairn");
+    if !cairn_dir.exists() {
         eprintln!(
-            "cairn handshake: vault at {} is not bound (no .cairn/cairn.db) — \
+            "cairn handshake: vault at {} is not bootstrapped (no .cairn/) — \
              run `cairn bootstrap` first",
             vault_root.display()
         );
         return ExitCode::from(78); // EX_CONFIG
     }
+    // The store auto-creates `.cairn/cairn.db` on first open; do not
+    // pre-check existence here. A fresh vault should be able to mint
+    // challenges without first running an unrelated mutating verb.
+    let db_path = cairn_dir.join("cairn.db");
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
