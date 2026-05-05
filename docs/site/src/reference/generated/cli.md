@@ -30,6 +30,7 @@ Commands:
   skill          Manage the Cairn skill bundle
   admin          Administrative operations (model management, reindex)
   llm            LLM provider diagnostics (ADR 0001)
+  repair         Operator repair commands for blocked vault state
   identity       Manage vault identities (§3.5 / §4.1)
   help           Print this message or the help of the given subcommand(s)
 
@@ -63,4 +64,5 @@ Options:
 - [`cairn skill`](commands/skill.md) - Manage the Cairn skill bundle
 - [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex)
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
+- [`cairn repair`](commands/repair.md) - Operator repair commands for blocked vault state
 - [`cairn identity`](commands/identity.md) - Manage vault identities (§3.5 / §4.1)
