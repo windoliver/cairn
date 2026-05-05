@@ -70,7 +70,10 @@ Producers in this PR always emit `segments` (length == recipe length). Consumers
 **Wire-shape rationale:**
 
 - Flat `byte_start` / `byte_end` (half-open) over a nested `Range` object: lighter JSON, no extra `$defs`. The half-open invariant is asserted by tests (`segments[i].byte_end == segments[i+1].byte_start`).
-- **Cross-segment invariants are not expressible in JSON Schema 2020-12 portably** (no cross-property comparison). Per-field bounds (`byte_start`/`byte_end` ∈ `[0, 4194304]`) are in the schema; everything else is enforced at runtime by `cairn_core::verbs::assemble_hot::validate()` (§5). **This PR adds the envelope-level enforcement hook**: `cairn-core/src/generated/envelope/mod.rs` (or its hand-written extension trait) gains a post-deserialize step for `ResponseVerb::AssembleHot` that, when `segments` is non-empty, calls `validate(&data)` and converts errors into a typed envelope decode error. Mandatory at the trust boundary, not advisory. The empty/absent case bypasses validation (forward-compat, see §3).
+- **Cross-segment invariants are not expressible in JSON Schema 2020-12 portably** (no cross-property comparison). Per-field bounds (`byte_start`/`byte_end` ∈ `[0, 4194304]`) are in the schema; everything else is enforced at runtime in two layers (§5):
+    - `validate_base(&data)` — `bytes == prefix.len()`. Wire invariants of `AssembleHotData` that hold regardless of whether `segments` was emitted.
+    - `validate_segments(&data)` — per-segment monotonicity, contiguity, bounds, hash correctness. Only meaningful when `segments` is non-empty.
+- **This PR adds the envelope-level enforcement hook.** `ResponseEnvelope::try_decode_data` for `ResponseVerb::AssembleHot` calls `validate_base(&data)` **unconditionally** and `validate_segments(&data)` **iff `segments.is_empty()` is false**. Both convert errors into a typed envelope decode error. Mandatory at the trust boundary, not advisory. Legacy payloads omitting `segments` still get base-invariant enforcement; malformed `bytes`/`prefix` pairs cannot sneak past the boundary by hiding behind absent segments.
 - **Offsets are UTF-8 byte positions into `prefix`, not code-unit positions.** Wrappers in languages with non-UTF-8 string types (JavaScript / Java use UTF-16, Python `str` is opaque) MUST encode `prefix` to UTF-8 bytes before slicing. JS: `new TextEncoder().encode(prefix).slice(s, e)`. Python: `prefix.encode("utf-8")[s:e]`. Naïve `String.prototype.slice(s, e)` in JS uses UTF-16 code units and will corrupt any non-ASCII segment, including miscomputing `content_hash` against the wrong bytes. Documented on the schema and pinned by a non-ASCII unit test (§6.1).
 - Step wire values match existing `cairn-core::config::HotMemoryRecipeStep` snake_case (note: `top_salience_project`, not the issue's informal `top_salience`).
 - `content_hash` is lowercase hex sha256 (64 chars) over the segment's UTF-8 bytes. Hex over base64url because every other content-hash in the brief / Rust ecosystem is hex; 64 chars in JSON is fine.
@@ -85,10 +88,14 @@ After re-running `cargo run -p cairn-idl --bin cairn-codegen`, `crates/cairn-cor
 pub struct AssembleHotData {
     pub bytes: u64,
     pub prefix: String,
-    /// Optional for `cairn.mcp.v1` forward-compat: legacy producers that
-    /// predate this feature omit the field. New producers always emit it.
-    /// See §3 for the two empty semantics (`[]` vs N zero-length).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// `#[serde(default)]` is for **deserialize** compatibility with
+    /// legacy `cairn.mcp.v1` producers that predate this field. **New
+    /// producers always serialize `segments`**, even when it is `[]`, so
+    /// the wire distinction between "legacy-absent" (no field on input)
+    /// and "canonical empty" (`"segments": []` for an empty configured
+    /// recipe) survives the round-trip. `skip_serializing_if` is
+    /// deliberately omitted.
+    #[serde(default)]
     pub segments: Vec<HotSegment>,
 }
 
@@ -162,11 +169,24 @@ pub fn build_segments(
     bodies: &[&str],
 ) -> Result<(String, Vec<HotSegment>), AssembleHotValidationError>;
 
-/// Validate that an `AssembleHotData` payload is internally consistent:
-/// per-segment `byte_start <= byte_end`, contiguous, in `[0, prefix.len())`,
-/// `bytes == prefix.len()`, every `content_hash` matches its slice. Does
-/// NOT check recipe alignment (the payload alone does not know what recipe
-/// was configured); use `validate_with_recipe` for that.
+/// Wire invariants of `AssembleHotData` that hold regardless of whether
+/// `segments` was emitted: `data.bytes == data.prefix.len() as u64`.
+/// Always called by the envelope decode hook.
+pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
+
+/// Segment-specific invariants, only meaningful when `segments` is
+/// non-empty: per-segment `byte_start <= byte_end`, contiguous in
+/// declaration order, first start is 0, last end is `prefix.len()`,
+/// every `content_hash` matches its slice. Does NOT check recipe
+/// alignment (the payload alone does not know what recipe was
+/// configured); use `validate_with_recipe` for that.
+///
+/// On an empty `segments` slice, returns `Ok(())` (nothing to check).
+/// The envelope decode hook calls this **only** when `segments` is
+/// non-empty, but invoking it on an empty slice is harmless.
+pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
+
+/// Convenience: `validate_base` then `validate_segments` (when non-empty).
 pub fn validate(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
 
 /// Like `validate`, but also asserts `data.segments[i].step == expected[i]`
@@ -228,23 +248,26 @@ pub enum AssembleHotValidationError {
 
 **Validator unit tests** (one per error variant in `AssembleHotValidationError`):
 
-- `validate_accepts_well_formed` — happy path on a 6-slot fixture.
-- `validate_accepts_empty_segments` — `segments == []` is accepted (forward-compat case).
-- `validate_rejects_descending_range` — hand-crafted `{byte_start: 10, byte_end: 5}`.
-- `validate_rejects_non_contiguous` — gap between two segments.
-- `validate_rejects_does_not_start_at_zero`.
-- `validate_rejects_does_not_cover_prefix` — last segment ends before `prefix.len()`.
-- `validate_rejects_bytes_mismatch` — `data.bytes != prefix.len()`.
-- `validate_rejects_hash_mismatch` — flip a content_hash byte.
-- `validate_rejects_out_of_bounds` — last segment ends past `prefix.len()`.
+- `validate_base_accepts_well_formed` — `bytes == prefix.len()`, segments may be empty.
+- `validate_base_rejects_bytes_mismatch` — `data.bytes != prefix.len()`. Independent of `segments`.
+- `validate_segments_accepts_well_formed` — happy path on a 6-slot fixture.
+- `validate_segments_accepts_empty_slice` — `Ok(())` when `segments == []` (no-op for the segment layer).
+- `validate_segments_rejects_descending_range` — hand-crafted `{byte_start: 10, byte_end: 5}`.
+- `validate_segments_rejects_non_contiguous` — gap between two segments.
+- `validate_segments_rejects_does_not_start_at_zero`.
+- `validate_segments_rejects_does_not_cover_prefix` — last segment ends before `prefix.len()`.
+- `validate_segments_rejects_hash_mismatch` — flip a content_hash byte.
+- `validate_segments_rejects_out_of_bounds` — last segment ends past `prefix.len()`.
 - `validate_with_recipe_rejects_step_mismatch` — payload's step does not match expected recipe at index i.
 - `validate_with_recipe_rejects_recipe_len_mismatch` — `segments.len() != expected.len()`.
 - `build_segments_output_validates` — round-trip: `validate(&build(...).unwrap()) == Ok(())` for any `(recipe, bodies)`.
 
 **Envelope-hook integration tests** (in `cairn-core/tests/`):
 
-- `envelope_decode_rejects_malformed_assemble_hot` — craft an envelope JSON with a bad `byte_end` and assert `ResponseEnvelope::try_decode_data` returns the `AssembleHot` validation error variant, not a successful decode.
-- `envelope_decode_accepts_absent_segments` — older `cairn.mcp.v1` peer payload without `segments` decodes to `data.segments == vec![]` and returns `Ok`.
+- `envelope_decode_rejects_malformed_assemble_hot` — craft an envelope JSON with a bad `byte_end`; assert `ResponseEnvelope::try_decode_data` returns the validation error, not `Ok`.
+- `envelope_decode_rejects_legacy_with_bytes_mismatch` — legacy payload (no `segments`) where `bytes != prefix.len()`; assert decode rejects via `validate_base`. Pins that absent segments do **not** bypass base invariants.
+- `envelope_decode_accepts_legacy_well_formed` — legacy payload (no `segments`) with `bytes == prefix.len()` decodes to `data.segments == vec![]` and returns `Ok`.
+- `envelope_decode_round_trips_canonical_empty` — new producer that serialized `"segments": []` (canonical empty configured recipe) round-trips through serialize → deserialize and remains `vec![]`. Pins that the absence of `skip_serializing_if` actually keeps `[]` on the wire.
 
 ### 6.2 Property tests (`proptest`)
 
