@@ -482,11 +482,55 @@ fn claim_pending(
             Err(e) => return ClaimOutcome::Err(e),
         }
     }
+    // Crashed-owner recovery: a previous process renamed the canonical
+    // in-flight file to `.in-flight.<pid>` and crashed before publish.
+    // Pending and the canonical claim are both gone. Scan the bucket dir
+    // for any orphan `.in-flight.<pid>` matching this id and re-claim it
+    // by atomic rename to OUR per-pid path.
+    if !pending.exists()
+        && let Some(orphan) = find_orphan_owned_claim(&claim, ulid)
+    {
+        let owned = process_owned_claim(&claim);
+        // Skip if the orphan already belongs to this process.
+        if orphan == owned {
+            return ClaimOutcome::Claimed(owned);
+        }
+        match std::fs::rename(&orphan, &owned) {
+            Ok(()) => return ClaimOutcome::Claimed(owned),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Another concurrent recoverer beat us — fall through to
+                // the pending-rename attempt, which will return `NotFound`
+                // and the apply/reject caller will retry on the terminal
+                // (which the winner is in the process of publishing).
+            }
+            Err(e) => return ClaimOutcome::Err(e),
+        }
+    }
     match std::fs::rename(&pending, &claim) {
         Ok(()) => ClaimOutcome::Claimed(claim),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClaimOutcome::NotFound,
         Err(e) => ClaimOutcome::Err(e),
     }
+}
+
+/// Look for any `<id>.plan.json.in-flight.<pid>` orphan in the same
+/// directory as `claim`. Returns the first match (filesystem order) so
+/// the caller can re-claim it atomically.
+fn find_orphan_owned_claim(
+    claim: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> Option<std::path::PathBuf> {
+    let dir = claim.parent()?;
+    let prefix = format!("{}.plan.json.in-flight.", ulid.0);
+    let read = std::fs::read_dir(dir).ok()?;
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let name = name.to_str()?.to_owned();
+        if name.starts_with(&prefix) {
+            return Some(entry.path());
+        }
+    }
+    None
 }
 
 /// Append a per-process suffix so two concurrent claimers cannot share
@@ -666,6 +710,23 @@ struct PlanSummary {
     status: String,
 }
 
+/// Bucket-level scan-cap notice — surfaced in JSON output as a typed
+/// envelope field, not as a fake plan row, so consumers cannot
+/// accidentally feed a marker into automation.
+#[derive(serde::Serialize)]
+struct OmittedNotice {
+    bucket: &'static str,
+    reason: String,
+}
+
+/// JSON envelope for `flush list --json`. Splits real plan rows from
+/// scan-cap notices so machine consumers can parse `plans` cleanly.
+#[derive(serde::Serialize)]
+struct ListEnvelope<'a> {
+    plans: &'a [PlanSummary],
+    omitted: &'a [OmittedNotice],
+}
+
 /// Maximum file size we are willing to read for a `.in-flight` recovery
 /// row in `flush list`. Real plans are well under 64 KiB; anything
 /// larger is listed as `oversize` without being read.
@@ -696,6 +757,7 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         vec![Bucket::Pending]
     };
     let mut rows: Vec<PlanSummary> = Vec::new();
+    let mut omitted: Vec<OmittedNotice> = Vec::new();
     // Always scan applied/ + rejected/ for stranded `.in-flight` claim
     // files so an operator can see and recover plans whose owning process
     // crashed between claim and publish. Emit a row for every matching
@@ -802,13 +864,9 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
             } else {
                 format!("omitted (row cap {MAX_INFLIGHT_ROWS})")
             };
-            rows.push(PlanSummary {
-                id: format!("({why} more)"),
+            omitted.push(OmittedNotice {
                 bucket: bucket_label,
-                mode: "?".to_owned(),
-                mutations: 0,
-                issued_at: "?".to_owned(),
-                status: why,
+                reason: why,
             });
         }
     }
@@ -845,18 +903,22 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
     }
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&rows).unwrap_or_default()
-        );
-    } else if rows.is_empty() {
+        let env = ListEnvelope {
+            plans: &rows,
+            omitted: &omitted,
+        };
+        println!("{}", serde_json::to_string_pretty(&env).unwrap_or_default());
+    } else if rows.is_empty() && omitted.is_empty() {
         println!("(no plans)");
     } else {
         for r in &rows {
             println!(
-                "{} {:<8} {:<14} mutations={} issued={} status={}",
+                "{} {:<19} {:<14} mutations={} issued={} status={}",
                 r.id, r.bucket, r.mode, r.mutations, r.issued_at, r.status
             );
+        }
+        for o in &omitted {
+            eprintln!("note: {}: {}", o.bucket, o.reason);
         }
     }
     ExitCode::SUCCESS

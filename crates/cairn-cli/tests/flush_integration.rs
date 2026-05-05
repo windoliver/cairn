@@ -339,6 +339,78 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
+/// Round 7 (#54): a process that crashed AFTER taking exclusive
+/// ownership (renamed `<id>.in-flight` → `<id>.in-flight.<pid>`) and
+/// BEFORE publishing must still be recoverable by a later `flush
+/// apply <id>`. Without orphan-claim recovery the canonical claim
+/// path is gone, pending is gone, and apply would report `NotFound`.
+#[test]
+fn flush_apply_recovers_orphan_owned_in_flight() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000RPHN1";
+    // Stage an orphan owned-claim file as if a prior process renamed
+    // the canonical in-flight to `.in-flight.<pid>` and crashed before
+    // publish. Pending and the canonical in-flight are absent.
+    let canonical = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    let orphan = {
+        let mut s = canonical.as_os_str().to_owned();
+        // Use a pid value unlikely to collide with the test process.
+        s.push(".999999");
+        std::path::PathBuf::from(s)
+    };
+    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    let p = sample_pending(id);
+    std::fs::write(&orphan, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(
+        applied.exists(),
+        "orphan owned-claim recovery must publish the terminal"
+    );
+}
+
+/// Round 7 (#54): JSON output uses a typed envelope `{plans, omitted}`
+/// so consumers cannot mistake an omitted-scan marker for a real plan.
+#[test]
+fn flush_list_json_uses_typed_envelope() {
+    let vault = tempfile::tempdir().unwrap();
+    write_pending(vault.path(), "01HQZK000000000000000NV001");
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert!(v.get("plans").is_some(), "envelope missing `plans`: {v}");
+    assert!(
+        v.get("omitted").is_some(),
+        "envelope missing `omitted`: {v}"
+    );
+    assert!(v["plans"].is_array());
+    assert!(v["omitted"].is_array());
+}
+
 /// Round 6 (#54): two concurrent `flush apply` invocations that find an
 /// existing in-flight claim must NOT both publish a terminal — exactly
 /// one resume succeeds and the other reports "recovery already in
@@ -753,8 +825,11 @@ fn flush_apply_warns_on_placeholder_and_records_metadata_only() {
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
-    let summaries: serde_json::Value = serde_json::from_slice(&list_out.stdout).unwrap();
-    let id = summaries[0]["id"].as_str().expect("plan id").to_owned();
+    let envelope: serde_json::Value = serde_json::from_slice(&list_out.stdout).unwrap();
+    let id = envelope["plans"][0]["id"]
+        .as_str()
+        .expect("plan id in envelope.plans")
+        .to_owned();
 
     let apply_out = std::process::Command::new(bin)
         .args(["flush", "apply", &id])
