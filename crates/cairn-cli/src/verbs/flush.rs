@@ -462,13 +462,40 @@ fn claim_pending(
                 bucket.dir_name(),
             )));
         }
-        return ClaimOutcome::Claimed(claim);
+        // Take exclusive ownership of the resume by renaming the
+        // in-flight file to a per-process path. POSIX rename is
+        // atomic; concurrent resumers race race-free here — the
+        // loser sees `ENOENT` and is told another process is
+        // already recovering this claim. Without this step two
+        // concurrent retries would share the same claim path and
+        // race to publish the terminal.
+        let owned = process_owned_claim(&claim);
+        match std::fs::rename(&claim, &owned) {
+            Ok(()) => return ClaimOutcome::Claimed(owned),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return ClaimOutcome::Err(std::io::Error::other(format!(
+                    "recovery for {0} already in flight (in-flight file claimed by another \
+                     process); retry once that process exits",
+                    ulid.0,
+                )));
+            }
+            Err(e) => return ClaimOutcome::Err(e),
+        }
     }
     match std::fs::rename(&pending, &claim) {
         Ok(()) => ClaimOutcome::Claimed(claim),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClaimOutcome::NotFound,
         Err(e) => ClaimOutcome::Err(e),
     }
+}
+
+/// Append a per-process suffix so two concurrent claimers cannot share
+/// the same resume path. `<id>.plan.json.in-flight` →
+/// `<id>.plan.json.in-flight.<pid>`.
+fn process_owned_claim(claim: &Path) -> std::path::PathBuf {
+    let mut owned = claim.as_os_str().to_owned();
+    owned.push(format!(".{}", std::process::id()));
+    std::path::PathBuf::from(owned)
 }
 
 /// Publish a terminal `applied/<id>.plan.json` or `rejected/<id>.plan.json`
@@ -494,8 +521,11 @@ fn publish_terminal(
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(p).map_err(std::io::Error::other)?;
+    // Per-process tmp path so two concurrent publishers (e.g. resumers
+    // of the same in-flight claim that somehow both started) cannot
+    // truncate or interleave each other's tmp file content.
     let mut tmp = terminal.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp.{}", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp);
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -503,7 +533,22 @@ fn publish_terminal(
         // Ensure bytes hit storage before we expose the terminal name.
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, terminal)?;
+    // No-clobber publish: `link(2)` fails with `EEXIST` if the terminal
+    // file already exists (a peer published first). `rename(2)` would
+    // overwrite; that loses the peer's terminal status/reason/timestamp.
+    // On `EEXIST` we accept the peer's outcome as authoritative,
+    // discard our tmp, and clean up our claim.
+    if let Err(e) = std::fs::hard_link(&tmp, terminal) {
+        let _ = std::fs::remove_file(&tmp);
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            // Peer beat us to publish; remove our claim and surface
+            // success — the lifecycle reached a terminal state.
+            let _ = std::fs::remove_file(claim);
+            return Ok(());
+        }
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(&tmp);
     // Directory fsync — required for the rename to survive a power-loss
     // event on POSIX (POSIX rename is atomic in the running kernel but
     // the directory entry change must be flushed). Propagate the error
@@ -626,8 +671,16 @@ struct PlanSummary {
 /// larger is listed as `oversize` without being read.
 const MAX_PLAN_BYTES: u64 = 1024 * 1024;
 
-/// Per-bucket row cap on the recovery scan. A flooded `.in-flight`
-/// directory cannot turn `flush list` into an unbounded scan.
+/// Per-bucket cap on the *number of directory entries scanned* (not
+/// rows emitted). A flooded `.in-flight` directory with mostly invalid
+/// names cannot make `flush list` walk forever just because we filter
+/// them out. When this limit is hit, an `omitted=N` marker row is
+/// emitted so the operator sees that recovery state may be hidden.
+const MAX_INFLIGHT_SCAN: usize = 1024;
+
+/// Per-bucket cap on rows emitted from the recovery scan. Beyond this
+/// the operator gets an explicit `omitted` marker row rather than a
+/// silently truncated list.
 const MAX_INFLIGHT_ROWS: usize = 256;
 
 #[allow(
@@ -657,15 +710,34 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
         };
+        // Sort entries so the scan is deterministic across runs (avoids
+        // filesystem-order silently hiding particular ids when the cap
+        // trips) and emit an `omitted=N` marker when we hit either cap.
+        let mut entries: Vec<_> = read.flatten().collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
         let mut bucket_rows = 0_usize;
-        for entry in read.flatten() {
+        let mut scanned = 0_usize;
+        let mut hit_scan_cap = false;
+        let mut hit_row_cap = false;
+        for entry in entries {
+            scanned += 1;
+            if scanned > MAX_INFLIGHT_SCAN {
+                hit_scan_cap = true;
+                break;
+            }
             if bucket_rows >= MAX_INFLIGHT_ROWS {
+                hit_row_cap = true;
                 break;
             }
             let path = entry.path();
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            // Filename shape: `<26-char-ULID>.plan.json.in-flight`.
-            let Some(stem) = name.strip_suffix(".plan.json.in-flight") else {
+            // Accept either the canonical `<id>.plan.json.in-flight`
+            // or the per-process owned `<id>.plan.json.in-flight.<pid>`
+            // form so a recovering process's claim is also visible.
+            let stem_opt = name
+                .strip_suffix(".plan.json.in-flight")
+                .or_else(|| name.rfind(".plan.json.in-flight.").map(|i| &name[..i]));
+            let Some(stem) = stem_opt else {
                 continue;
             };
             // Refuse non-ULID stems — defends against an attacker /
@@ -718,6 +790,26 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
                 status,
             });
             bucket_rows += 1;
+        }
+        if hit_scan_cap || hit_row_cap {
+            let bucket_label = match b {
+                Bucket::Applied => "in-flight (apply)",
+                Bucket::Rejected => "in-flight (reject)",
+                Bucket::Pending => "in-flight",
+            };
+            let why = if hit_scan_cap {
+                format!("omitted (scan cap {MAX_INFLIGHT_SCAN})")
+            } else {
+                format!("omitted (row cap {MAX_INFLIGHT_ROWS})")
+            };
+            rows.push(PlanSummary {
+                id: format!("({why} more)"),
+                bucket: bucket_label,
+                mode: "?".to_owned(),
+                mutations: 0,
+                issued_at: "?".to_owned(),
+                status: why,
+            });
         }
     }
     for b in buckets {
