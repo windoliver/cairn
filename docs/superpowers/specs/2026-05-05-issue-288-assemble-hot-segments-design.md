@@ -33,7 +33,7 @@ This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a r
       "type": "array",
       "items": { "$ref": "#/$defs/HotSegment" },
       "default": [],
-      "description": "Recipe-step segments covering [0, bytes) contiguously, in declaration order. Optional for backward compatibility with `cairn.mcp.v1` peers that predate this feature; absent or empty means the producer did not emit segment info (treat as opaque). When non-empty, length equals the configured recipe length and segments mirror it 1:1."
+      "description": "Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy `cairn.mcp.v1` producer that predates this feature; consumers MUST treat `prefix` as opaque. (2) `\"segments\": []` — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: `prefix == \"\"` AND `bytes == 0`. (3) `\"segments\": [...]` — new producer with a configured recipe; `len()` mirrors `HotMemoryConfig.recipe.len()` 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via `Option<Vec<HotSegment>>` (None vs Some(vec![])); JSON-only consumers distinguish them by field presence."
     }
   }
 }
@@ -44,7 +44,7 @@ This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a r
 `segments` is an **optional, three-state field** (forward-compat with frozen `cairn.mcp.v1`):
 
 - **Absent on the wire** → deserializes to `None`. Legacy `cairn.mcp.v1` producer that predates this feature, or a future producer that opts out. Wrappers fall back to treating `prefix` as opaque.
-- **`"segments": []` on the wire** → deserializes to `Some(vec![])`. Canonical wire shape for "new producer ran with no recipe configured" (`HotMemoryConfig.recipe` is empty). Distinguishable from legacy absence.
+- **`"segments": []` on the wire** → deserializes to `Some(vec![])`. Canonical wire shape for "new producer ran with no recipe configured" (`HotMemoryConfig.recipe` is empty). Distinguishable from legacy absence. Validated invariant (§5): `prefix == ""` AND `bytes == 0`. The envelope hook enforces this; a payload with a non-empty `prefix` and `segments: []` is rejected at the trust boundary, not silently treated as opaque.
 - **`"segments": [...]` on the wire** → deserializes to `Some(vec![...])`. Canonical non-empty: `len()` mirrors `HotMemoryConfig.recipe.len()` 1:1, including N zero-length entries when the recipe ran but produced no content.
 
 The three states are kept distinct after deserialization by encoding `segments` as `Option<Vec<HotSegment>>` (§4). `Vec::new()` alone cannot represent absence vs configured-empty vs unconfigured — `Option` does.
@@ -181,18 +181,23 @@ pub fn build_segments(
 /// Always called by the envelope decode hook.
 pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
 
-/// Segment-specific invariants, only meaningful when the producer
-/// emitted segments at all (`data.segments.is_some()`): per-segment
-/// `byte_start <= byte_end`, contiguous in declaration order, first
-/// start is 0, last end is `prefix.len()`, every `content_hash` matches
-/// its slice. Does NOT check recipe alignment (the payload alone does
-/// not know what recipe was configured); use `validate_with_recipe`.
+/// Segment-specific invariants, applied whenever the producer emitted
+/// segments (`data.segments.is_some()`):
 ///
-/// On `None` (legacy-absent), returns `Ok(())` (nothing to check).
-/// On `Some(vec![])` (canonical empty-recipe), returns `Ok(())` — the
-/// segment list is well-formed-by-being-empty; `validate_base` already
-/// asserted `prefix == ""` indirectly via `bytes == prefix.len() == 0`.
-/// On `Some(vec![...])`, runs the per-segment checks.
+/// - On `None` (legacy-absent), returns `Ok(())` — nothing to check.
+/// - On `Some(vec![])` (canonical empty-recipe), enforces the
+///   "empty-segments-implies-empty-prefix" invariant: `data.prefix`
+///   MUST be empty and `data.bytes` MUST be 0, otherwise returns
+///   `EmptySegmentsRequiresEmptyPrefix`. Without this, a malformed
+///   producer could emit `{prefix:"abc", bytes:3, segments:[]}` and
+///   slip a non-canonical payload past the trust boundary under the
+///   "no recipe configured" state.
+/// - On `Some(vec![...])`, runs the per-segment checks: `byte_start <=
+///   byte_end`, contiguous in declaration order, first start 0, last
+///   end `prefix.len()`, every `content_hash` matches its slice.
+///
+/// Does NOT check recipe alignment (the payload alone does not know
+/// what recipe was configured); use `validate_with_recipe` for that.
 pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
 
 /// Convenience: `validate_base` then `validate_segments`.
@@ -236,6 +241,8 @@ pub enum AssembleHotValidationError {
     RecipeLenMismatch { expected: usize, got: usize },
     #[error("legacy producer did not emit segments; cannot validate against recipe")]
     LegacyProducerSegmentsAbsent,
+    #[error("Some(vec![]) requires prefix == \"\" and bytes == 0, got bytes {bytes}, prefix.len() {prefix_len}")]
+    EmptySegmentsRequiresEmptyPrefix { bytes: u64, prefix_len: u64 },
 }
 ```
 
@@ -265,7 +272,9 @@ pub enum AssembleHotValidationError {
 - `validate_base_accepts_well_formed` — `bytes == prefix.len()`, segments may be empty.
 - `validate_base_rejects_bytes_mismatch` — `data.bytes != prefix.len()`. Independent of `segments`.
 - `validate_segments_accepts_well_formed` — happy path on a 6-slot fixture.
-- `validate_segments_accepts_empty_slice` — `Ok(())` when `segments == []` (no-op for the segment layer).
+- `validate_segments_accepts_canonical_empty` — `Some(vec![])` with `prefix == ""` and `bytes == 0` returns `Ok(())`.
+- `validate_segments_rejects_empty_with_non_empty_prefix` — `Some(vec![])` with `prefix == "abc"` returns `EmptySegmentsRequiresEmptyPrefix`. Pins the invariant Codex flagged: a malformed producer cannot smuggle opaque content past the trust boundary by claiming "no recipe configured".
+- `validate_segments_accepts_none` — `None` returns `Ok(())` (legacy-absent has no segment-layer invariants to check).
 - `validate_segments_rejects_descending_range` — hand-crafted `{byte_start: 10, byte_end: 5}`.
 - `validate_segments_rejects_non_contiguous` — gap between two segments.
 - `validate_segments_rejects_does_not_start_at_zero`.
@@ -281,7 +290,8 @@ pub enum AssembleHotValidationError {
 - `envelope_decode_rejects_malformed_assemble_hot` — craft an envelope JSON with a bad `byte_end`; assert `ResponseEnvelope::try_decode_data` returns the validation error, not `Ok`.
 - `envelope_decode_rejects_legacy_with_bytes_mismatch` — legacy payload (no `segments`) where `bytes != prefix.len()`; assert decode rejects via `validate_base`. Pins that absent segments do **not** bypass base invariants.
 - `envelope_decode_accepts_legacy_well_formed` — legacy payload (no `segments`) with `bytes == prefix.len()` decodes to `data.segments == None` (not `Some(vec![])`) and returns `Ok`. Pins the legacy-absent → `None` mapping.
-- `envelope_decode_round_trips_canonical_empty` — payload with `"segments": []` round-trips as `Some(vec![])`. Pins that the absent-vs-empty distinction survives serialize → deserialize, which is the entire point of `Option<Vec<HotSegment>>` over `Vec<HotSegment>`.
+- `envelope_decode_round_trips_canonical_empty` — payload with `prefix==""`, `bytes==0`, `"segments": []` round-trips as `Some(vec![])`. Pins that the absent-vs-empty distinction survives serialize → deserialize.
+- `envelope_decode_rejects_empty_segments_with_non_empty_prefix` — payload with `prefix=="abc"`, `bytes==3`, `"segments": []` is rejected with `EmptySegmentsRequiresEmptyPrefix`, not silently treated as opaque.
 - `envelope_decode_round_trips_non_empty` — full 6-slot payload round-trips as `Some(vec![...len 6])`.
 
 ### 6.2 Property tests (`proptest`)
