@@ -264,6 +264,30 @@ pub fn ingest_plan_stub(
                             eprintln!("cairn: fsync {}: {e}", path.display());
                             return std::process::ExitCode::from(73);
                         }
+                        // Post-create re-check: between our pre-check and
+                        // `create_new(pending)`, a peer could have created
+                        // pending/<id>, claimed it, published it to a
+                        // terminal, and freed pending — letting us mint
+                        // pending/<id> again with the same id. If a
+                        // terminal/in-flight now exists for our id, our
+                        // pending file is orphaned (apply would short-
+                        // circuit on the existing terminal). Drop it and
+                        // retry with a fresh id.
+                        drop(f);
+                        if id_collides_with_terminal_or_inflight(&vault, &plan.operation_id) {
+                            let _ = std::fs::remove_file(&path);
+                            retries += 1;
+                            if retries > 8 {
+                                eprintln!(
+                                    "cairn: gave up minting unique plan id after 8 retries (last id {})",
+                                    plan.operation_id.0,
+                                );
+                                return std::process::ExitCode::from(70);
+                            }
+                            plan.operation_id = Ulid(synth_ulid());
+                            path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
+                            continue;
+                        }
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -318,6 +342,26 @@ pub fn ingest_plan_stub(
         )]
         _ => std::process::ExitCode::from(70),
     }
+}
+
+/// Returns `true` if the given operation id is already represented in a
+/// terminal bucket (`applied/`, `rejected/`) or in either bucket's
+/// `<bucket>/<id>.plan.json.in-flight` claim path. Excludes the pending
+/// bucket — the caller is the one writing pending in the post-create
+/// re-check, so seeing pending here would always trip.
+fn id_collides_with_terminal_or_inflight(
+    vault: &std::path::Path,
+    ulid: &cairn_core::generated::common::Ulid,
+) -> bool {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    let applied = plan_path(vault, Bucket::Applied, ulid);
+    let rejected = plan_path(vault, Bucket::Rejected, ulid);
+    let applied_in_flight = applied.with_extension("json.in-flight");
+    let rejected_in_flight = rejected.with_extension("json.in-flight");
+    applied.exists()
+        || rejected.exists()
+        || applied_in_flight.exists()
+        || rejected_in_flight.exists()
 }
 
 /// Returns `true` if the given operation id is already represented by a

@@ -339,6 +339,87 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
+/// Round 4 (#54): a stranded in-flight claim file (process killed
+/// between claim and publish) must be recoverable — a subsequent
+/// `flush apply <id>` must finish the publish from the existing
+/// in-flight file rather than report `NotFound`.
+#[test]
+fn flush_apply_resumes_existing_in_flight_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000RES01";
+    // Hand-stage an in-flight claim — simulate a previous apply that
+    // crashed between claim_pending and publish_terminal. Pending file
+    // does NOT exist; only the in-flight file is on disk.
+    let inflight = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    std::fs::create_dir_all(inflight.parent().unwrap()).unwrap();
+    let p = sample_pending(id);
+    std::fs::write(&inflight, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // After resume, the in-flight file is gone and the terminal is
+    // published.
+    assert!(
+        !inflight.exists(),
+        "in-flight file should be cleaned up after resume"
+    );
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(applied.exists(), "terminal applied file should exist");
+}
+
+/// Round 4 (#54): `flush list` must surface stranded in-flight files
+/// even when they are unreadable / malformed — that's exactly when an
+/// operator most needs to see them.
+#[test]
+fn flush_list_shows_unreadable_in_flight_claims() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK0000000000000NRDBL01";
+    // Write a malformed in-flight file directly.
+    let inflight = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    std::fs::create_dir_all(inflight.parent().unwrap()).unwrap();
+    std::fs::write(&inflight, b"{not valid json").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "list", "--json"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains(id),
+        "list must include the unreadable in-flight id; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("unreadable"),
+        "list must mark the row as unreadable; stdout: {stdout}"
+    );
+}
+
 /// Round 3 (#54): an id containing `..`, `/`, or any non-Crockford
 /// character must be rejected at the CLI surface BEFORE any path is
 /// constructed — defends `.cairn/flush/` against path-escape.

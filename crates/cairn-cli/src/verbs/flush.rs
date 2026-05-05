@@ -442,6 +442,14 @@ fn claim_pending(
     {
         return ClaimOutcome::Err(e);
     }
+    // Resume path: if a prior attempt for this same role already claimed
+    // pending and crashed before publishing, the in-flight file is still
+    // there. Use it instead of trying to rename pending again — that
+    // would otherwise return NotFound and strand the claim. Caller will
+    // re-validate the content under the same gates.
+    if claim.exists() {
+        return ClaimOutcome::Claimed(claim);
+    }
     match std::fs::rename(&pending, &claim) {
         Ok(()) => ClaimOutcome::Claimed(claim),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClaimOutcome::NotFound,
@@ -609,7 +617,10 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
     let mut rows: Vec<PlanSummary> = Vec::new();
     // Always scan applied/ + rejected/ for stranded `.in-flight` claim
     // files so an operator can see and recover plans whose owning process
-    // crashed between claim and publish.
+    // crashed between claim and publish. Emit a row for every matching
+    // filename even if the file fails to read or parse — the most
+    // recovery-critical claims are exactly the malformed / partially
+    // written ones.
     let inflight_buckets = [Bucket::Applied, Bucket::Rejected];
     for b in &inflight_buckets {
         let dir = bucket_dir(vault, *b);
@@ -618,28 +629,40 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         };
         for entry in read.flatten() {
             let path = entry.path();
-            // Match the `<id>.plan.json.in-flight` extension exactly.
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !name.ends_with(".plan.json.in-flight") {
-                continue;
-            }
-            let Ok(bytes) = std::fs::read(&path) else {
+            // Filename shape: `<26-char-ULID>.plan.json.in-flight`.
+            let Some(stem) = name.strip_suffix(".plan.json.in-flight") else {
                 continue;
             };
-            let Ok(p) = serde_json::from_slice::<PersistedPlan>(&bytes) else {
-                continue;
+            let bucket_label = match b {
+                Bucket::Applied => "in-flight (apply)",
+                Bucket::Rejected => "in-flight (reject)",
+                Bucket::Pending => "in-flight",
+            };
+            let (mode, mutations, issued_at, status) = match std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<PersistedPlan>(&bytes).ok())
+            {
+                Some(p) => (
+                    format!("{:?}", p.plan.mode),
+                    p.plan.mutations.len(),
+                    p.plan.issued_at.clone(),
+                    "stranded".to_owned(),
+                ),
+                None => (
+                    "?".to_owned(),
+                    0,
+                    "?".to_owned(),
+                    "stranded (unreadable)".to_owned(),
+                ),
             };
             rows.push(PlanSummary {
-                id: p.plan.operation_id.0.clone(),
-                bucket: match b {
-                    Bucket::Applied => "in-flight (apply)",
-                    Bucket::Rejected => "in-flight (reject)",
-                    Bucket::Pending => "in-flight",
-                },
-                mode: format!("{:?}", p.plan.mode),
-                mutations: p.plan.mutations.len(),
-                issued_at: p.plan.issued_at.clone(),
-                status: "stranded".into(),
+                id: stem.to_owned(),
+                bucket: bucket_label,
+                mode,
+                mutations,
+                issued_at,
+                status,
             });
         }
     }
