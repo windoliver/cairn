@@ -845,12 +845,15 @@ impl CairnConfig {
             // (`search.disable_explain: true`) can opt out for environments
             // that prohibit trace-level output.
             policy_trace: true,
-            // Both replay modes ship unconditionally at P0 (issue #52,
-            // brief §4.2). The 0046 schema admits both NULL-sequence
-            // (challenge-mode) and per-issuer-CAS (sequence-mode) rows
-            // in `used`, so a bound vault always honours them.
-            replay_sequence: true,
-            replay_challenge: true,
+            // Both replay modes have substrate support (migration 0046,
+            // `replay::prepare_wal_with_replay`, `mint_challenge`) shipped
+            // by issue #52, but the signed-verb dispatch path does not
+            // yet route through them. Advertising the capability before
+            // the dispatch is honest end-to-end would over-advertise per
+            // brief §15. These flags flip to `true` in the follow-up that
+            // wires verb dispatch — see `cairn-cli/src/verbs/status.rs`.
+            replay_sequence: false,
+            replay_challenge: false,
         }
     }
 

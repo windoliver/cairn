@@ -49,6 +49,13 @@ pub fn mint_challenge(
     now_ms: i64,
     ttl_ms: i64,
 ) -> Result<MintedChallenge, StoreError> {
+    // Round-2 review #3: sweep stale rows before each mint so the
+    // table is bounded by `(issuer count) × (concurrent unspent
+    // challenges)` rather than by the cumulative number of handshake
+    // calls ever issued. Cleanup runs in the same transaction so a
+    // mint failure also rolls back the sweep.
+    purge_expired_challenges(tx, now_ms)?;
+
     let mut bytes = [0u8; NONCE_BYTES];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let expires_at_ms = now_ms.saturating_add(ttl_ms);

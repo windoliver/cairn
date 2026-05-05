@@ -21,8 +21,7 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId};
-use cairn_core::generated::envelope::SignedIntent;
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, VerifiedSignedIntent};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
@@ -99,6 +98,16 @@ impl StoreTx<'_> {
     /// [`crate::replay::prepare_wal_with_replay`] for full semantics
     /// (issue #52, brief §4.2).
     ///
+    /// # Verification boundary
+    ///
+    /// The argument type is [`VerifiedSignedIntent`], the sealed token
+    /// minted only by [`cairn_core::verifier::EnvelopeVerifier`] —
+    /// callers must run signature, expiry, lifecycle, and scope checks
+    /// before reaching this method. The sealed witness pattern enforces
+    /// the contract at the type system: any future verb-layer code
+    /// that tries to admit a raw [`cairn_core::generated::envelope::SignedIntent`]
+    /// fails to compile (issue #51 / #52 round-2 review #1).
+    ///
     /// # Errors
     ///
     /// Returns [`ReplayError`] for replay-ledger violations (duplicate
@@ -106,7 +115,26 @@ impl StoreTx<'_> {
     /// expired challenge, or an envelope missing both modes).
     pub fn prepare_wal_with_replay(
         &self,
-        intent: &SignedIntent,
+        intent: &VerifiedSignedIntent,
+        inputs: &WalPrepareInputs<'_>,
+    ) -> Result<(), ReplayError> {
+        crate::replay::prepare_wal_with_replay(&self.tx, intent.as_inner(), inputs)
+    }
+
+    /// Test-only escape hatch: admit a raw, unverified `SignedIntent`
+    /// through the replay ledger. **Do not call from production code**
+    /// — the production [`Self::prepare_wal_with_replay`] takes a
+    /// sealed [`VerifiedSignedIntent`] specifically to forbid this. The
+    /// helper is gated behind `test-helpers` so production builds
+    /// cannot accidentally route through it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare_wal_with_replay`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn prepare_wal_with_replay_unverified(
+        &self,
+        intent: &cairn_core::generated::envelope::SignedIntent,
         inputs: &WalPrepareInputs<'_>,
     ) -> Result<(), ReplayError> {
         crate::replay::prepare_wal_with_replay(&self.tx, intent, inputs)

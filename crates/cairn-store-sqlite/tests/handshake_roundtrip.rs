@@ -79,7 +79,7 @@ async fn mint_then_consume_via_public_store_api() {
     let intent_one = intent_with_challenge("AB", 1, &chal_b64);
     store
         .with_tx(move |tx| {
-            tx.prepare_wal_with_replay(&intent_one, &inputs(now_ms + 1))
+            tx.prepare_wal_with_replay_unverified(&intent_one, &inputs(now_ms + 1))
                 .map_err(|e| replay_to_store(&e))
         })
         .await
@@ -90,7 +90,7 @@ async fn mint_then_consume_via_public_store_api() {
     let intent_two = intent_with_challenge("AC", 2, &chal_b64_again);
     let err = store
         .with_tx(move |tx| {
-            tx.prepare_wal_with_replay(&intent_two, &inputs(now_ms + 2))
+            tx.prepare_wal_with_replay_unverified(&intent_two, &inputs(now_ms + 2))
                 .map_err(|e| replay_to_store(&e))
         })
         .await
@@ -119,7 +119,7 @@ async fn ttl_expired_challenge_rejected_via_public_store_api() {
     let intent = intent_with_challenge("AD", 3, &chal_b64);
     let err = store
         .with_tx(move |tx| {
-            tx.prepare_wal_with_replay(&intent, &inputs(now_ms + 1_000))
+            tx.prepare_wal_with_replay_unverified(&intent, &inputs(now_ms + 1_000))
                 .map_err(|e| replay_to_store(&e))
         })
         .await
