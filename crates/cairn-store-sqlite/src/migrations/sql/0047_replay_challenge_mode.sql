@@ -31,11 +31,11 @@ PRAGMA legacy_alter_table = ON;
 -- Mirrors 0041's pre-rebuild guard — fail the migration loudly if a
 -- replay-ledger object exists outside the explicit allowlist below
 -- (issue #52 round-9 review #2).
-CREATE TEMP TABLE _mig0046_drift_guard (
+CREATE TEMP TABLE _mig0047_drift_guard (
   msg TEXT NOT NULL CHECK (msg = 'ok')
 );
-INSERT INTO _mig0046_drift_guard (msg)
-  SELECT 'migration 0046: unexpected schema object on used / issuer_seq / outstanding_challenges: '
+INSERT INTO _mig0047_drift_guard (msg)
+  SELECT 'migration 0047: unexpected schema object on used / issuer_seq / outstanding_challenges: '
          || type || ':' || name
     FROM sqlite_schema
    WHERE (
@@ -58,7 +58,7 @@ INSERT INTO _mig0046_drift_guard (msg)
          ('trigger', 'issuer_seq_insert_must_match_ledger'),
          ('trigger', 'issuer_seq_only_via_ledger')
      );
-DROP TABLE _mig0046_drift_guard;
+DROP TABLE _mig0047_drift_guard;
 
 -- Drop the 0003 triggers; they reference NEW.sequence as if it were
 -- NOT NULL and would fire incorrectly against a NULL-sequence row.
@@ -204,4 +204,4 @@ END;
 PRAGMA legacy_alter_table = OFF;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (46, '0046_replay_challenge_mode', '', strftime('%s','now') * 1000);
+  VALUES (47, '0047_replay_challenge_mode', '', strftime('%s','now') * 1000);

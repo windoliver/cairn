@@ -21,6 +21,15 @@ Options:
       --scope <JSON>
 
 
+      --dry-run
+          Produce a FlushPlan and emit it; write nothing to the vault (brief §5.5)
+
+      --human-review
+          Persist a FlushPlan under .cairn/flush/pending/ for explicit apply
+
+      --no-diff
+          Skip the markdown diff sidecar in human-review mode
+
       --json
           Emit machine-readable JSON response envelope to stdout
 

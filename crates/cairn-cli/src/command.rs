@@ -21,7 +21,7 @@ pub fn build_command() -> clap::Command {
         )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(verbs::with_resync(
-            generated::verbs::ingest_subcommand(),
+            verbs::with_flush_modes(generated::verbs::ingest_subcommand()),
         )))
         .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
@@ -33,7 +33,9 @@ pub fn build_command() -> clap::Command {
         .subcommand(verbs::with_json(verbs::with_fix_markdown(
             verbs::with_fix_folders(generated::verbs::lint_subcommand()),
         )))
-        .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
+        .subcommand(verbs::with_json(verbs::with_flush_modes(
+            generated::verbs::forget_subcommand(),
+        )))
         // Protocol preludes.
         .subcommand(verbs::with_json(with_issuer(
             generated::prelude::handshake_subcommand(),
@@ -48,6 +50,7 @@ pub fn build_command() -> clap::Command {
         .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(identity::cli::identity_subcommand())
+        .subcommand(verbs::flush::command())
 }
 
 /// Attach `--issuer` to the generated handshake subcommand. The IDL

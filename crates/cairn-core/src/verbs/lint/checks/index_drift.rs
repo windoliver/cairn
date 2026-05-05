@@ -40,24 +40,17 @@ mod tests {
     use super::*;
     use crate::config::CairnConfig;
     use crate::contract::memory_store::IndexStats;
-    use crate::verbs::lint::SchemaVersion;
-
-    fn inputs_with(stats: IndexStats) -> (CairnConfig, IndexStats, SchemaVersion) {
-        (
-            CairnConfig::default(),
-            stats,
-            SchemaVersion { major: 0, minor: 1 },
-        )
+    fn inputs_with(stats: IndexStats) -> (CairnConfig, IndexStats) {
+        (CairnConfig::default(), stats)
     }
 
     #[test]
     fn balanced_counts_produce_no_finding() {
-        let (cfg, stats, ver) = inputs_with(IndexStats::new(10, 10));
+        let (cfg, stats) = inputs_with(IndexStats::new(10, 10));
         let li = LintInputs {
             records: &[],
             config: &cfg,
             index_stats: stats,
-            schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -67,12 +60,11 @@ mod tests {
 
     #[test]
     fn fts_lag_flagged_with_path_target() {
-        let (cfg, stats, ver) = inputs_with(IndexStats::new(10, 8));
+        let (cfg, stats) = inputs_with(IndexStats::new(10, 8));
         let li = LintInputs {
             records: &[],
             config: &cfg,
             index_stats: stats,
-            schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -92,12 +84,11 @@ mod tests {
     fn fts_overshoot_also_flagged() {
         // FTS5 rows > records_active is also drift (e.g. a delete that
         // did not propagate to the mirror).
-        let (cfg, stats, ver) = inputs_with(IndexStats::new(10, 12));
+        let (cfg, stats) = inputs_with(IndexStats::new(10, 12));
         let li = LintInputs {
             records: &[],
             config: &cfg,
             index_stats: stats,
-            schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -109,12 +100,11 @@ mod tests {
 
     #[test]
     fn empty_balanced_vault_clean() {
-        let (cfg, stats, ver) = inputs_with(IndexStats::new(0, 0));
+        let (cfg, stats) = inputs_with(IndexStats::new(0, 0));
         let li = LintInputs {
             records: &[],
             config: &cfg,
             index_stats: stats,
-            schema_version: ver,
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,

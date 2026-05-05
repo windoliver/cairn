@@ -45,7 +45,22 @@
       },
       "properties": {
         "mode":      { "const": "record" },
-        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+        "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
+        }
       }
     },
     "ArgsSession": {
@@ -62,7 +77,22 @@
       },
       "properties": {
         "mode":       { "const": "session" },
-        "session_id": { "type": "string", "minLength": 1 }
+        "session_id": { "type": "string", "minLength": 1 },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
+        }
       }
     },
     "ArgsScope": {
@@ -79,7 +109,22 @@
       },
       "properties": {
         "mode":  { "const": "scope" },
-        "scope": { "$ref": "../common/scope_filter.json" }
+        "scope": { "$ref": "../common/scope_filter.json" },
+        "dry_run": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review."
+        },
+        "human_review": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run."
+        },
+        "no_diff": {
+          "type": "boolean",
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar."
+        }
       }
     },
     "Data": {
@@ -88,7 +133,12 @@
       "required": ["deleted_count"],
       "properties": {
         "deleted_count": { "type": "integer", "minimum": 0 },
-        "tombstones":    { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } }
+        "tombstones":    { "type": "array", "items": { "$ref": "../common/primitives.json#/$defs/Ulid" } },
+        "plan_ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise."
+        }
       }
     }
   }

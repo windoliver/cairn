@@ -179,7 +179,11 @@ mod tests {
 
     fn lint_record(record: crate::domain::MemoryRecord) -> LintRecord {
         LintRecord {
-            stored: StoredRecord { record, version: 1 },
+            stored: StoredRecord {
+                record,
+                version: 1,
+                schema_version: Some(SchemaVersion::current()),
+            },
             consent_model: ConsentModel::LegacyEvent,
         }
     }
@@ -193,7 +197,6 @@ mod tests {
             records,
             config: cfg,
             index_stats: IndexStats::new(records.len() as u64, records.len() as u64),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states,
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
