@@ -218,11 +218,29 @@ pub fn ingest_plan_stub(
             // invocations (or two within the same `synth_ulid` clock tick)
             // never silently overwrite each other's pending plan.
             // On EEXIST, mint a fresh id and retry up to a small bound
-            // before failing closed.
+            // before failing closed. Collision is checked across ALL
+            // lifecycle locations — not just `pending/<id>.plan.json` —
+            // so a `synth_ulid` collision against an existing
+            // `applied/<id>` or `rejected/<id>` (or an in-flight claim)
+            // does not produce a pending plan that the apply path will
+            // immediately treat as an idempotent no-op.
             let mut plan = plan;
             let mut path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
             let mut retries = 0_u8;
             loop {
+                if id_in_use_anywhere(&vault, &plan.operation_id) {
+                    retries += 1;
+                    if retries > 8 {
+                        eprintln!(
+                            "cairn: gave up minting unique plan id after 8 retries (last id {})",
+                            plan.operation_id.0,
+                        );
+                        return std::process::ExitCode::from(70);
+                    }
+                    plan.operation_id = Ulid(synth_ulid());
+                    path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
+                    continue;
+                }
                 let persisted = PersistedPlan::pending(plan.clone());
                 let bytes = match serde_json::to_vec_pretty(&persisted) {
                     Ok(b) => b,
@@ -249,6 +267,9 @@ pub fn ingest_plan_stub(
                         break;
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // A peer process raced us between the
+                        // `id_in_use_anywhere` probe and `create_new` —
+                        // mint a fresh id and retry.
                         retries += 1;
                         if retries > 8 {
                             eprintln!(
@@ -297,6 +318,25 @@ pub fn ingest_plan_stub(
         )]
         _ => std::process::ExitCode::from(70),
     }
+}
+
+/// Returns `true` if the given operation id is already represented by a
+/// file in any `FlushPlan` lifecycle bucket — `pending/`, `applied/`,
+/// `rejected/`, or either `<bucket>/<id>.plan.json.in-flight` claim
+/// path. Used by the stub planner to refuse minting a pending plan that
+/// would immediately collide with an existing terminal or claimed plan.
+fn id_in_use_anywhere(vault: &std::path::Path, ulid: &cairn_core::generated::common::Ulid) -> bool {
+    use cairn_core::domain::flush_plan::store::{Bucket, plan_path};
+    let pending = plan_path(vault, Bucket::Pending, ulid);
+    let applied = plan_path(vault, Bucket::Applied, ulid);
+    let rejected = plan_path(vault, Bucket::Rejected, ulid);
+    let applied_in_flight = applied.with_extension("json.in-flight");
+    let rejected_in_flight = rejected.with_extension("json.in-flight");
+    pending.exists()
+        || applied.exists()
+        || rejected.exists()
+        || applied_in_flight.exists()
+        || rejected_in_flight.exists()
 }
 
 /// Synthesize a 26-char Crockford-base32 ULID-shaped string. Not a real

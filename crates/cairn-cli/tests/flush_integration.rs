@@ -104,8 +104,11 @@ fn flush_apply_idempotent_on_applied() {
 fn flush_apply_not_found_exits_66() {
     let vault = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_cairn");
+    // Valid Crockford-base32 ULID that simply doesn't exist on disk —
+    // separates the "format invalid" path (exit 64) from the "no such
+    // pending plan" path (exit 66).
     let out = std::process::Command::new(bin)
-        .args(["flush", "apply", "01HQZK0000000000000000NONE"])
+        .args(["flush", "apply", "01HQZK00000000000000000099"])
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
@@ -334,6 +337,73 @@ fn flush_apply_rejects_unsupported_schema_version() {
         &cairn_core::generated::common::Ulid(id.into()),
     );
     assert!(!applied.exists(), "must NOT have moved to applied/");
+}
+
+/// Round 3 (#54): an id containing `..`, `/`, or any non-Crockford
+/// character must be rejected at the CLI surface BEFORE any path is
+/// constructed — defends `.cairn/flush/` against path-escape.
+#[test]
+fn flush_apply_rejects_invalid_ulid_format() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    for bad in [
+        "../../../etc/passwd",
+        "01HQZK00000000000000000U01", // contains 'U' (excluded from Crockford)
+        "01HQZK0",                    // wrong length
+        "/tmp/escape",
+        "9HQZK00000000000000000000A", // first char > 7
+    ] {
+        let out = std::process::Command::new(bin)
+            .args(["flush", "apply", bad])
+            .env("CAIRN_VAULT", vault.path())
+            .output()
+            .expect("spawn cairn");
+        assert_eq!(
+            out.status.code(),
+            Some(64),
+            "expected EX_USAGE for invalid ULID `{bad}`; got: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+}
+
+/// Round 3 (#54): post-claim error paths (read failure, malformed JSON)
+/// must roll back the in-flight claim so the pending file is recoverable.
+#[test]
+fn flush_apply_rolls_back_on_malformed_pending_after_claim() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK000000000000000RBCK1";
+    let pending = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    std::fs::write(&pending, b"{not valid json").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(out.status.code(), Some(65));
+    // Rollback: pending file is back at its original path.
+    assert!(
+        pending.exists(),
+        "rollback must restore pending/<id>.plan.json after parse failure"
+    );
+    // No stranded in-flight files.
+    let inflight = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    )
+    .with_extension("json.in-flight");
+    assert!(
+        !inflight.exists(),
+        "claim file should have been rolled back"
+    );
 }
 
 /// Round 2 (#54): `flush apply` must reject a pending file whose embedded

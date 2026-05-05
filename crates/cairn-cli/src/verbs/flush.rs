@@ -9,6 +9,34 @@ use std::process::ExitCode;
 
 use cairn_core::domain::flush_plan::store::{Bucket, bucket_dir, plan_path};
 use cairn_core::domain::flush_plan::{ApplyKind, PersistedPlan, PlanStatus};
+
+/// Validate that `s` is a canonical 26-char Crockford-base32 ULID
+/// (uppercase, no `I L O U`, leading char `0..=7`). Mirrors the
+/// `Ulid::deserialize` validator in `cairn-core::generated::common` so
+/// the CLI cannot turn an unvalidated CLI argument into a filesystem
+/// path component (`/`, `..`, absolute path) before the embedded
+/// `operation_id` gate has a chance to run.
+fn is_valid_ulid_str(s: &str) -> bool {
+    if s.len() != 26 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if !matches!(bytes[0], b'0'..=b'7') {
+        return false;
+    }
+    bytes[1..].iter().all(|b| {
+        matches!(b,
+            b'0'..=b'9'
+            | b'A'..=b'H'
+            | b'J'
+            | b'K'
+            | b'M'
+            | b'N'
+            | b'P'..=b'T'
+            | b'V'..=b'Z'
+        )
+    })
+}
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 /// Build the `flush` subcommand group.
@@ -91,6 +119,12 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     let json = m.get_flag("json");
     #[allow(clippy::expect_used, reason = "clap declared this required")]
     let id = m.get_one::<String>("id").expect("clap-required");
+    // Validate ULID grammar BEFORE constructing any filesystem path so an
+    // attacker / typo cannot smuggle `..` or `/` through `plan_path`.
+    if !is_valid_ulid_str(id) {
+        eprintln!("cairn flush apply: invalid ULID {id} (expected 26-char Crockford base32)");
+        return ExitCode::from(64); // EX_USAGE
+    }
     let ulid = cairn_core::generated::common::Ulid(id.clone());
 
     let applied = plan_path(vault, Bucket::Applied, &ulid);
@@ -138,6 +172,7 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         Ok(b) => b,
         Err(e) => {
             eprintln!("cairn flush apply: read claimed file failed: {e}");
+            rollback_claim(vault, &claim, &ulid);
             return ExitCode::from(70);
         }
     };
@@ -149,6 +184,7 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         Ok(p) => p,
         Err(e) => {
             eprintln!("cairn flush apply: malformed plan {id}: {e}");
+            rollback_claim(vault, &claim, &ulid);
             return ExitCode::from(65);
         }
     };
@@ -236,6 +272,10 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         .get_one::<String>("reason")
         .expect("clap-required")
         .clone();
+    if !is_valid_ulid_str(id) {
+        eprintln!("cairn flush reject: invalid ULID {id} (expected 26-char Crockford base32)");
+        return ExitCode::from(64);
+    }
     let ulid = cairn_core::generated::common::Ulid(id.clone());
 
     let applied = plan_path(vault, Bucket::Applied, &ulid);
@@ -274,6 +314,7 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         Ok(b) => b,
         Err(e) => {
             eprintln!("cairn flush reject: read claimed file failed: {e}");
+            rollback_claim(vault, &claim, &ulid);
             return ExitCode::from(70);
         }
     };
@@ -285,6 +326,7 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         Ok(p) => p,
         Err(e) => {
             eprintln!("cairn flush reject: malformed plan {id}: {e}");
+            rollback_claim(vault, &claim, &ulid);
             return ExitCode::from(65);
         }
     };
@@ -440,21 +482,32 @@ fn publish_terminal(
         f.sync_all()?;
     }
     std::fs::rename(&tmp, terminal)?;
-    // Best-effort directory fsync so the rename survives power loss. This
-    // is a no-op on platforms where opening a directory for sync is not
-    // supported; we ignore failures here because the rename is already
-    // committed at the inode level on the common-case Linux/macOS
-    // filesystems Cairn targets.
-    if let Some(parent) = terminal.parent()
-        && let Ok(dir) = std::fs::File::open(parent)
-    {
-        let _ = dir.sync_all();
+    // Directory fsync — required for the rename to survive a power-loss
+    // event on POSIX (POSIX rename is atomic in the running kernel but
+    // the directory entry change must be flushed). Propagate the error
+    // so a publish that cannot be made durable is not reported as
+    // success. On unsupported platforms the open will fail with
+    // `ErrorKind::PermissionDenied` or similar — surface that to the
+    // caller rather than silently swallowing it.
+    if let Some(parent) = terminal.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
     }
     // Claim file is no longer needed (terminal is the canonical record).
     let _ = std::fs::remove_file(claim);
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,
     ));
+    // Also fsync the in-flight (claim) directory to make the
+    // `remove_file(claim)` above durable across a power-loss event.
+    if let Some(parent) = claim.parent()
+        && parent != terminal.parent().unwrap_or(parent)
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        // Best-effort here only — the canonical state is the terminal
+        // file we already fsynced above. A surviving stranded claim is
+        // recoverable via `flush list`'s in-flight scan (Finding 3).
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -554,6 +607,42 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
         vec![Bucket::Pending]
     };
     let mut rows: Vec<PlanSummary> = Vec::new();
+    // Always scan applied/ + rejected/ for stranded `.in-flight` claim
+    // files so an operator can see and recover plans whose owning process
+    // crashed between claim and publish.
+    let inflight_buckets = [Bucket::Applied, Bucket::Rejected];
+    for b in &inflight_buckets {
+        let dir = bucket_dir(vault, *b);
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            // Match the `<id>.plan.json.in-flight` extension exactly.
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !name.ends_with(".plan.json.in-flight") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(p) = serde_json::from_slice::<PersistedPlan>(&bytes) else {
+                continue;
+            };
+            rows.push(PlanSummary {
+                id: p.plan.operation_id.0.clone(),
+                bucket: match b {
+                    Bucket::Applied => "in-flight (apply)",
+                    Bucket::Rejected => "in-flight (reject)",
+                    Bucket::Pending => "in-flight",
+                },
+                mode: format!("{:?}", p.plan.mode),
+                mutations: p.plan.mutations.len(),
+                issued_at: p.plan.issued_at.clone(),
+                status: "stranded".into(),
+            });
+        }
+    }
     for b in buckets {
         let dir = bucket_dir(vault, b);
         let Ok(read) = std::fs::read_dir(&dir) else {
