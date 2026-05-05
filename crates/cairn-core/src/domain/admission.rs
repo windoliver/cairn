@@ -1,26 +1,34 @@
-//! [`SignedAdmission`] — typed proof that a verified envelope's
-//! `target_hash` covers the actual `(kind, plan_ref, payload)` triple
-//! the caller is about to stage in the WAL ledger.
+//! [`SignedAdmission`] — typed proof that the caller has shown the
+//! verified envelope's `target_hash` matches the canonical bytes of
+//! the record / plan / receipt about to be staged in the WAL ledger.
 //!
-//! # Spec note: `target_hash` is domain-separated by `(kind, plan_ref)`
+//! # Spec note: `target_hash` is content-addressed (brief §4.2)
 //!
-//! Brief §4.2 originally describes `SignedIntent.target_hash` as
-//! `sha256(record / plan / receipt)` — payload-only. Issue #52
-//! tightens that contract: replay admission requires `target_hash`
-//! to be `sha256(canonical_bytes(kind, plan_ref, payload))`, so the
-//! same payload signed for `kind=upsert` cannot be replayed under
-//! `kind=delete` (round-13 review #1). [`derive_target_hash`] is the
-//! single canonical helper both signers and admission callers use to
-//! produce that hash.
+//! `SignedIntent.target_hash` is `sha256(payload)` where `payload` is
+//! the canonical bytes of the record / plan / receipt. The signature
+//! attests "I authorize the operation that produces this content
+//! addressed bytes". The store boundary recomputes that hash to
+//! catch verb-layer bugs that pass the wrong payload.
+//!
+//! # Caller contract: bind `kind` / `plan_ref` upstream
+//!
+//! The IDL `SignedIntent` does not include a verb / `kind` / `plan_ref`
+//! discriminator in the signed payload, and a downstream IDL extension
+//! is required to enforce that binding cryptographically (issue #52
+//! follow-up). Until then, **the verb-layer caller is responsible for
+//! ensuring `(intent, kind, plan_ref)` are consistent**: two distinct
+//! verbs operating on the same record body produce the same
+//! `target_hash`, so substrate-only enforcement cannot prove the
+//! issuer authorized this specific `kind`. Round-11 / round-12 /
+//! round-13 reviews documented the gap; closing it requires extending
+//! the signed envelope schema.
 //!
 //! # Construction
 //!
-//! [`SignedAdmission::new`] recomputes the canonical hash from the
-//! caller-supplied `(kind, plan_ref, payload)` and asserts equality
-//! with `intent.target_hash`. The store accepts only this type, so a
-//! buggy or adversarial verb-layer caller that mixed up `kind` or
-//! `plan_ref` cannot mint the admission token in the first place —
-//! replay state is never consumed.
+//! [`SignedAdmission::new`] recomputes `sha256(payload)` and asserts
+//! equality with `intent.target_hash`. The store accepts only this
+//! type so a payload-mismatch surfaces at admission time before any
+//! replay state is consumed.
 
 use crate::domain::VerifiedSignedIntent;
 use sha2::{Digest, Sha256};
@@ -120,7 +128,9 @@ impl SignedAdmission {
         plan_ref: Option<String>,
         payload: &[u8],
     ) -> Result<Self, AdmissionError> {
-        let computed = derive_target_hash(kind, plan_ref.as_deref(), payload);
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        let computed = format!("sha256:{}", hex_lower(&hasher.finalize()));
         let signed = &intent.as_inner().target_hash;
         if &computed != signed {
             return Err(AdmissionError::TargetHashMismatch {
@@ -153,44 +163,6 @@ impl SignedAdmission {
     pub fn plan_ref(&self) -> Option<&str> {
         self.plan_ref.as_deref()
     }
-}
-
-/// Canonical replay `target_hash` for issue #52: domain-separated
-/// `sha256` over `(kind, plan_ref, payload)`. Both signers and
-/// admission callers MUST use this helper so `target_hash` binds the
-/// WAL action plus its plan reference, not just the payload bytes.
-///
-/// Encoding (length-prefixed, ASCII-numeric for unambiguous parse):
-/// ```text
-/// "cairn.replay.target_hash.v1\n"
-/// "kind=" <kind_db_str> "\n"
-/// "plan_ref=" <"" | plan_ref_ulid> "\n"
-/// "payload_len=" <decimal> "\n"
-/// payload_bytes
-/// ```
-///
-/// The `\n` terminators + the `payload_len` line make the encoding
-/// prefix-free, so concatenation cannot collide across distinct
-/// `(kind, plan_ref, payload)` triples. Returns the IDL
-/// `Nonce16Base64`-shaped string `"sha256:<64 lowercase hex>"`.
-#[must_use]
-pub fn derive_target_hash(kind: WalActionKind, plan_ref: Option<&str>, payload: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"cairn.replay.target_hash.v1\n");
-    hasher.update(b"kind=");
-    hasher.update(kind.as_db_str().as_bytes());
-    hasher.update(b"\n");
-    hasher.update(b"plan_ref=");
-    if let Some(p) = plan_ref {
-        hasher.update(p.as_bytes());
-    }
-    hasher.update(b"\n");
-    hasher.update(b"payload_len=");
-    hasher.update(payload.len().to_string().as_bytes());
-    hasher.update(b"\n");
-    hasher.update(payload);
-    let digest = hasher.finalize();
-    format!("sha256:{}", hex_lower(&digest))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -231,11 +203,16 @@ mod tests {
         VerifiedSignedIntent::from_verified_for_test(raw)
     }
 
+    fn payload_hash(payload: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(payload);
+        format!("sha256:{}", hex_lower(&h.finalize()))
+    }
+
     #[test]
     fn new_accepts_matching_payload() {
         let payload = b"hello, world";
-        let target = derive_target_hash(WalActionKind::Upsert, None, payload);
-        let verified = intent_with_target(&target);
+        let verified = intent_with_target(&payload_hash(payload));
         let admission = SignedAdmission::new(verified, WalActionKind::Upsert, None, payload)
             .expect("matching payload must mint");
         assert_eq!(admission.kind(), WalActionKind::Upsert);
@@ -245,59 +222,29 @@ mod tests {
     #[test]
     fn new_rejects_mismatched_payload() {
         let payload = b"hello, world";
-        let target = derive_target_hash(WalActionKind::Upsert, None, b"different bytes");
-        let verified = intent_with_target(&target);
+        let verified = intent_with_target(&payload_hash(b"different bytes"));
         let err = SignedAdmission::new(verified, WalActionKind::Upsert, None, payload)
             .expect_err("mismatch must reject");
         assert!(matches!(err, AdmissionError::TargetHashMismatch { .. }));
     }
 
     #[test]
-    fn new_rejects_kind_substitution() {
-        // Round-13 review #1: same payload, signed for one kind cannot
-        // be replayed under a different kind.
-        let payload = b"some record body";
-        let signed_target = derive_target_hash(WalActionKind::Upsert, None, payload);
-        let verified = intent_with_target(&signed_target);
-        // Caller tries to admit under `Delete` for a payload signed
-        // for `Upsert` — domain separation makes the digest differ.
-        let err = SignedAdmission::new(verified, WalActionKind::Delete, None, payload)
-            .expect_err("kind substitution must reject");
-        assert!(matches!(err, AdmissionError::TargetHashMismatch { .. }));
-    }
-
-    #[test]
-    fn new_rejects_plan_ref_substitution() {
-        // Same payload, same kind, but a different plan_ref → different
-        // target_hash. Domain separation prevents an attacker from
-        // re-targeting the signed authorization to a different plan.
-        let payload = b"plan body";
-        let signed_target = derive_target_hash(
-            WalActionKind::Upsert,
-            Some("01HQZX9F5N00000000000000PA"),
-            payload,
-        );
-        let verified = intent_with_target(&signed_target);
-        let err = SignedAdmission::new(
-            verified,
-            WalActionKind::Upsert,
-            Some("01HQZX9F5N00000000000000PB".into()), // different plan
-            payload,
-        )
-        .expect_err("plan_ref substitution must reject");
-        assert!(matches!(err, AdmissionError::TargetHashMismatch { .. }));
-    }
-
-    #[test]
-    fn new_rejects_payload_length_substitution() {
-        // Belt and braces: the length prefix is part of the canonical
-        // encoding, so a payload that happens to share a prefix with
-        // a longer signed payload still fails.
-        let signed_target = derive_target_hash(WalActionKind::Upsert, None, b"longer payload");
-        let verified = intent_with_target(&signed_target);
-        let err = SignedAdmission::new(verified, WalActionKind::Upsert, None, b"longer")
-            .expect_err("length substitution must reject");
-        assert!(matches!(err, AdmissionError::TargetHashMismatch { .. }));
+    fn known_limitation_kind_substitution_is_not_substrate_enforced() {
+        // Round-14 review #2: rolling back the round-13 domain
+        // separation because brief §4.2 + existing record containment
+        // require `target_hash = sha256(payload)`. With that contract,
+        // two `kind` values for the same payload share a `target_hash`
+        // — substrate alone cannot reject kind substitution. The
+        // verb-layer caller MUST bind `(intent, kind, plan_ref)`
+        // upstream; closing this gap permanently requires extending
+        // the IDL signed payload with a `kind` field (issue #52
+        // follow-up). This test pins the current behaviour so a
+        // future tightening surfaces as an intentional change.
+        let payload = b"shared record body";
+        let verified = intent_with_target(&payload_hash(payload));
+        let admission = SignedAdmission::new(verified, WalActionKind::Delete, None, payload)
+            .expect("substrate accepts; binding is caller contract");
+        assert_eq!(admission.kind(), WalActionKind::Delete);
     }
 
     #[test]

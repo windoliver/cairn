@@ -124,6 +124,20 @@ fn mint_persisted(json: bool, vault_root: &Path, issuer: &str, now_ms: i64) -> E
 
     let resp = response(Nonce16Base64(chal.nonce_b64), chal.expires_at_ms);
 
+    // Round-14 review #1: substrate ships in this PR but no signed
+    // verb dispatch consumes the persisted nonce yet — `cairn ingest`
+    // / `forget` / `capture_trace` do not call
+    // `StoreTx::prepare_wal_with_replay`. Persistence is correct for
+    // forward compat (issue acceptance criterion); operators should
+    // see one stderr line so a falsely "redeemed" nonce is not a
+    // surprise.
+    eprintln!(
+        "warning: replay-admit dispatch is not wired in this build — \
+         the persisted challenge will only be redeemable once a \
+         follow-up issue routes signed mutating verbs through \
+         `prepare_wal_with_replay`."
+    );
+
     if json {
         emit_json(&resp);
     } else {
