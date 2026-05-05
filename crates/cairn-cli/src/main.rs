@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, identity, plugins, verbs};
+use cairn_cli::{command, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
@@ -49,7 +49,7 @@ fn main() -> ExitCode {
     // from the top-level vault registry guard (which requires a named vault).
     let needs_vault_guard = !matches!(
         active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity"
+        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity" | "repair"
     );
 
     if needs_vault_guard {
@@ -106,6 +106,7 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("repair", sub)) => repair::run(sub, explicit_vault.clone()),
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
