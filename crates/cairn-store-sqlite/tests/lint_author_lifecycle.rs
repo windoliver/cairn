@@ -506,9 +506,7 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
     use cairn_core::config::CairnConfig;
     use cairn_core::contract::memory_store::IndexStats;
     use cairn_core::generated::verbs::lint::{Kind, Severity};
-    use cairn_core::verbs::lint::{
-        ConsentModel, LintInputs, LintRecord, SchemaVersion, run_checks,
-    };
+    use cairn_core::verbs::lint::{ConsentModel, LintInputs, LintRecord, run_checks};
 
     let (store, registry, _dir) = setup().await;
 
@@ -535,7 +533,6 @@ async fn run_checks_emits_broken_actor_chain_warning_for_revoked_author() {
         records: &lint_records,
         config: &cfg,
         index_stats: IndexStats::new(lint_records.len() as u64, lint_records.len() as u64),
-        schema_version: SchemaVersion { major: 0, minor: 1 },
         author_states: &states,
         unresolvable_authors: &std::collections::HashSet::new(),
         consent_lookup: None,

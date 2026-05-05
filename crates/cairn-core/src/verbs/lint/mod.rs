@@ -51,8 +51,6 @@ pub struct LintInputs<'a> {
     pub config: &'a CairnConfig,
     /// Counts driving the index-drift check.
     pub index_stats: IndexStats,
-    /// Current contract version reported by the runtime — drives §6.4.
-    pub schema_version: SchemaVersion,
     /// Pre-fetched author identity → lifecycle state map. See struct
     /// docs.
     pub author_states: &'a HashMap<Identity, AuthorLifecycle>,
@@ -74,7 +72,6 @@ impl std::fmt::Debug for LintInputs<'_> {
             .field("records", &self.records)
             .field("config", &"<CairnConfig>")
             .field("index_stats", &self.index_stats)
-            .field("schema_version", &self.schema_version)
             .field("author_states", &self.author_states.len())
             .field("unresolvable_authors", &self.unresolvable_authors.len())
             .field("consent_lookup", &self.consent_lookup.is_some())
@@ -82,27 +79,7 @@ impl std::fmt::Debug for LintInputs<'_> {
     }
 }
 
-/// Major.minor schema version for the §6.4 staleness check. Patch is
-/// irrelevant for schema lag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SchemaVersion {
-    /// Contract major.
-    pub major: u32,
-    /// Contract minor.
-    pub minor: u32,
-}
-
-impl SchemaVersion {
-    /// Minor delta `record → current`. Returns `u32::MAX` on major
-    /// mismatch (treated as ≥2 minors behind by the schema check).
-    #[must_use]
-    pub fn minors_behind(self, record: SchemaVersion) -> u32 {
-        if record.major != self.major {
-            return u32::MAX;
-        }
-        self.minor.saturating_sub(record.minor)
-    }
-}
+pub use crate::contract::version::SchemaVersion;
 
 /// Returns a process-wide shared empty `author_states` map for tests
 /// of checks that don't exercise §6.2. Avoids repeating
@@ -235,6 +212,7 @@ mod tests {
             stored: StoredRecord {
                 record: sample_record(),
                 version: 1,
+                schema_version: Some(SchemaVersion::current()),
             },
             consent_model: ConsentModel::LegacyEvent,
         }
@@ -247,18 +225,16 @@ mod tests {
             records: &[],
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
         };
         let data = run_checks(&inputs).await;
-        // With empty records and no ConsentLookup wired, consent (#253)
-        // returns no findings, and actor_chain (#256) is now a real
-        // check that emits no deferred coverage finding when there are
-        // no records to classify. The remaining stubs each emit one
-        // info finding: provenance (#257), schema (#258), hot_memory
-        // (#259) → 3 total.
+        // Empty records: consent (#253) is wired but has nothing to
+        // classify, actor_chain (#256) the same, schema (#258) is now
+        // real and has nothing to compare. Two stubs remain
+        // (provenance #257, hot_memory #259), each emitting one
+        // deferred-info finding → 2 total.
         assert_eq!(data.summary.total, data.findings.len() as u64);
         assert_eq!(data.summary.by_severity.error, 0);
         assert_eq!(data.summary.by_severity.warning, 0);
@@ -267,9 +243,9 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            3
+            2
         );
-        assert_eq!(data.summary.by_severity.info, 3);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 
     #[tokio::test]
@@ -295,6 +271,7 @@ mod tests {
                 stored: StoredRecord {
                     record: r,
                     version: 1,
+                    schema_version: Some(SchemaVersion::current()),
                 },
                 consent_model: ConsentModel::LegacyEvent,
             }
@@ -310,7 +287,6 @@ mod tests {
             records: &forward,
             config: &cfg,
             index_stats: IndexStats::new(forward.len() as u64, forward.len() as u64),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -319,7 +295,6 @@ mod tests {
             records: &reversed,
             config: &cfg,
             index_stats: IndexStats::new(reversed.len() as u64, reversed.len() as u64),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -338,7 +313,6 @@ mod tests {
             records: std::slice::from_ref(&r),
             config: &cfg,
             index_stats: IndexStats::new(1, 1),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,
@@ -350,9 +324,11 @@ mod tests {
         // sample record's author resolves to MissingFromRegistry →
         // BrokenActorChain Error. consent (#253) is also live but
         // returns no findings for a LegacyEvent record without a
-        // ConsentLookup wired. The remaining stub checks
-        // (provenance/schema/hot_memory) each emit one deferred-info
-        // finding → 3 total.
+        // ConsentLookup wired. §6.4 schema (#258) is live: record and
+        // host both stamp at `SchemaVersion::current()` so `compare`
+        // returns `Same` and no finding fires. The remaining stub
+        // checks (provenance, hot_memory) each emit one deferred-info
+        // finding → 2 total.
         assert_eq!(data.summary.by_severity.error, 1);
         assert_eq!(data.summary.by_severity.warning, 0);
         assert_eq!(
@@ -360,8 +336,8 @@ mod tests {
                 .iter()
                 .filter(|f| matches!(f.kind, Kind::DeferredCheck))
                 .count(),
-            3
+            2
         );
-        assert_eq!(data.summary.by_severity.info, 3);
+        assert_eq!(data.summary.by_severity.info, 2);
     }
 }

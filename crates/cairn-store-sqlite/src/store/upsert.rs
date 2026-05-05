@@ -224,6 +224,7 @@ pub(crate) fn upsert_in_tx(
             parse_consent_model(prior_consent_model)?;
         let prior_hash = body_hash_from_str(prior_hash_str)?;
         if prior_hash == body_hash {
+            reproject_in_place(tx, record, prior_id, *prior_version, &body_hash, now_ms)?;
             return idempotent_outcome(record, prior_id, *prior_version, prior_hash);
         }
     }
@@ -291,6 +292,79 @@ pub(crate) fn upsert_in_tx(
         content_changed: true,
         prior_hash,
     })
+}
+
+/// Idempotent re-ingest helper: re-project the row under the current
+/// projection logic and refresh every schema-versioned hot column
+/// before advancing the stamp.
+///
+/// Codex round 7: bumping only `schema_version_*` would let a future
+/// projection change (new derived column, evolved JSON shape, updated
+/// path scheme) clear the §6.4 `stale_schema` lint without actually
+/// rewriting the row. The stamp must mean "this binary re-projected
+/// the row under its current schema," so we run the same projection
+/// the non-idempotent insert path uses and UPDATE the projected
+/// columns. `body` / `body_hash` / `version` / `created_at` /
+/// `consent_model` are deliberately preserved (body bytes are
+/// unchanged, idempotent semantics forbid bumping the version, and
+/// `consent_model` is store-side authorization metadata only mutable
+/// through the privileged Phase-B transition API).
+fn reproject_in_place(
+    tx: &Transaction<'_>,
+    record: &MemoryRecord,
+    prior_id: &str,
+    prior_version: i64,
+    body_hash: &BodyHash,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    let projection_version = u32::try_from(prior_version).map_err(|_| StoreError::Invariant {
+        what: format!("prior version overflows u32: {prior_version}"),
+    })?;
+    let row = ProjectedRow::from_record(
+        record,
+        projection_version,
+        now_ms,
+        now_ms,
+        body_hash,
+        true,
+        false,
+    )?;
+    tx.execute(
+        "UPDATE records SET \
+            target_id            = ?1, \
+            path                 = ?2, \
+            kind                 = ?3, \
+            class                = ?4, \
+            visibility           = ?5, \
+            scope                = ?6, \
+            actor_chain          = ?7, \
+            record_json          = ?8, \
+            confidence           = ?9, \
+            salience             = ?10, \
+            target_id_explicit   = ?11, \
+            tags_json            = ?12, \
+            schema_version_major = ?13, \
+            schema_version_minor = ?14 \
+          WHERE record_id = ?15",
+        params![
+            row.target_id,
+            row.path,
+            row.kind,
+            row.class,
+            row.visibility,
+            row.scope,
+            row.actor_chain,
+            row.record_json,
+            row.confidence,
+            row.salience,
+            row.target_id_explicit,
+            row.tags_json,
+            row.schema_version_major,
+            row.schema_version_minor,
+            prior_id,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Read the active row for `target_id`, if any. Returns `None` (not an
@@ -417,10 +491,11 @@ fn insert_row(
             record_id, target_id, version, path, kind, class, visibility, \
             scope, actor_chain, body, body_hash, created_at, updated_at, \
             active, tombstoned, is_static, record_json, confidence, \
-            salience, target_id_explicit, tags_json, consent_model \
+            salience, target_id_explicit, tags_json, consent_model, \
+            schema_version_major, schema_version_minor \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22 \
+            ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24 \
          )",
         params![
             row.record_id,
@@ -445,6 +520,8 @@ fn insert_row(
             row.target_id_explicit,
             row.tags_json,
             row.consent_model,
+            row.schema_version_major,
+            row.schema_version_minor,
         ],
     )?;
     Ok(())
@@ -744,6 +821,109 @@ mod tests {
         assert_eq!(
             model_after_v2, "receipt_timeline",
             "supersession must inherit prior consent_model, ignoring caller downgrade",
+        );
+    }
+
+    /// Round 6: idempotent re-ingest of a stamped-but-stale row must
+    /// restamp the schema-version columns to the host's current value.
+    /// The §6.4 lint's `suggested_fix` instructs operators to "re-ingest
+    /// the affected record(s)" — if this branch only touched NULL
+    /// legacy stamps, an operator following that remediation against a
+    /// stamped-but-stale row (e.g. row stamped at 0.0 while host is at
+    /// 0.1) would see no change and the lint would never clear.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_idempotent_restamps_stale_schema_version() {
+        let store = open_in_memory().await.expect("open in-memory store");
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert v1");
+
+        // Simulate a stale stamp: host wrote (0,1) above, force the row
+        // back to (0,0) to mimic a row authored under an older binary.
+        let conn = store
+            .require_conn("test.schema_version.restamp")
+            .expect("invariant: connected store")
+            .clone();
+        conn.call(|c| {
+            c.execute(
+                "UPDATE records SET schema_version_major = 0, schema_version_minor = 0 \
+                 WHERE active = 1",
+                [],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("force stale stamp");
+
+        // Re-ingest the same body. The hash matches, hits the
+        // idempotent branch — must restamp to current.
+        store.upsert(&r).await.expect("re-ingest");
+
+        let (major, minor): (i64, i64) = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT schema_version_major, schema_version_minor \
+                       FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query stamp");
+        let current = cairn_core::contract::version::SchemaVersion::current();
+        assert_eq!(
+            (major, minor),
+            (i64::from(current.major), i64::from(current.minor)),
+            "idempotent re-ingest must restamp stale (0,0) to current",
+        );
+    }
+
+    /// Round 6 companion: NULL legacy stamps still get backfilled by
+    /// the same path (regression for the round-3 behavior, kept after
+    /// the NULL gate was dropped in round 6).
+    #[tokio::test(flavor = "current_thread")]
+    async fn upsert_idempotent_backfills_null_legacy_stamp() {
+        let store = open_in_memory().await.expect("open in-memory store");
+        let r = sample_record();
+        store.upsert(&r).await.expect("upsert v1");
+
+        let conn = store
+            .require_conn("test.schema_version.null_backfill")
+            .expect("invariant: connected store")
+            .clone();
+        conn.call(|c| {
+            c.execute(
+                "UPDATE records SET schema_version_major = NULL, schema_version_minor = NULL \
+                 WHERE active = 1",
+                [],
+            )?;
+            Ok::<_, tokio_rusqlite::Error>(())
+        })
+        .await
+        .expect("force NULL legacy stamp");
+
+        store.upsert(&r).await.expect("re-ingest");
+
+        let (major, minor): (Option<i64>, Option<i64>) = conn
+            .call(|c| {
+                c.query_row(
+                    "SELECT schema_version_major, schema_version_minor \
+                       FROM records WHERE active = 1 LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("query stamp");
+        let current = cairn_core::contract::version::SchemaVersion::current();
+        assert_eq!(
+            (major, minor),
+            (
+                Some(i64::from(current.major)),
+                Some(i64::from(current.minor))
+            ),
+            "idempotent re-ingest must backfill NULL legacy stamp to current",
         );
     }
 }

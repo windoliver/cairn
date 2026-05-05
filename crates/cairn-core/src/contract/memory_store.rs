@@ -1,6 +1,6 @@
 //! `MemoryStore` contract (brief §4 row 1).
 
-use crate::contract::version::{ContractVersion, VersionRange};
+use crate::contract::version::{ContractVersion, SchemaVersion, VersionRange};
 use crate::domain::record::MemoryRecord;
 use crate::search::ScoreExplain;
 
@@ -17,9 +17,12 @@ use crate::search::ScoreExplain;
 /// Co-evolved again within 0.3 in #49 when search args/pages gained
 /// explain plumbing (`with_explain` bool on `*SearchArgs`,
 /// `Option<Vec<ScoreExplain>>` on each matching page struct) — all
-/// new fields default-initialize, so the handshake range stays
-/// `[0.3.0, 0.4.0)`.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
+/// new fields default-initialize.
+/// Bumped 0.3 → 0.4 in #258 when `StoredRecord.schema_version` and
+/// `RecordVersion.schema_version` landed for the §6.4 stale-schema
+/// lint — adding required public fields is a struct-construction
+/// break, so the handshake range shifts to `[0.4.0, 0.5.0)`.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -66,6 +69,13 @@ pub struct StoredRecord {
     pub record: MemoryRecord,
     /// Monotonic version counter. `1` for a record's first write.
     pub version: u32,
+    /// Schema-version stamp set by the store at write time
+    /// (`SchemaVersion::current()` for fresh writes, the historical
+    /// stamp for older rows). `None` for unstamped legacy rows
+    /// (pre-Issue #258 migration); the §6.4 `stale_schema` lint
+    /// surfaces those as `Warning` so operators can rewrite them.
+    /// Not part of the canonical record bytes.
+    pub schema_version: Option<SchemaVersion>,
 }
 
 /// Counts of derived-index rows vs canonical records, for the lint
@@ -151,6 +161,7 @@ pub trait MemoryStore: Send + Sync {
         Ok(Some(StoredRecord {
             record,
             version: v.version,
+            schema_version: v.schema_version,
         }))
     }
 
@@ -181,12 +192,14 @@ pub trait MemoryStore: Send + Sync {
         let mut out = Vec::with_capacity(records.len());
         for record in records {
             let history = self.versions(&record.target_id).await?;
-            let version = history
-                .iter()
-                .rev()
-                .find(|v| v.active)
-                .map_or(1, |v| v.version);
-            out.push(StoredRecord { record, version });
+            let active = history.iter().rev().find(|v| v.active);
+            let version = active.map_or(1, |v| v.version);
+            let schema_version = active.and_then(|v| v.schema_version);
+            out.push(StoredRecord {
+                record,
+                version,
+                schema_version,
+            });
         }
         Ok(out)
     }
@@ -554,6 +567,11 @@ pub struct RecordVersion {
     pub tombstone_reason: Option<TombstoneReason>,
     /// blake3 body hash of the persisted payload.
     pub body_hash: BodyHash,
+    /// Schema version stamped by the store at write time, or `None`
+    /// for unstamped legacy rows (pre-Issue #258 migration). Drives
+    /// the §6.4 `stale_schema` lint; not part of the canonical record
+    /// bytes.
+    pub schema_version: Option<SchemaVersion>,
 }
 
 /// Edge kinds supported at P0. Exhaustive — adding a new kind is a
@@ -866,7 +884,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 5, 0));
+            VersionRange::new(ContractVersion::new(0, 4, 0), ContractVersion::new(0, 5, 0));
     }
 
     #[tokio::test]
@@ -995,16 +1013,15 @@ mod tests {
         assert!(err.to_string().contains("bitemporal_graph"));
     }
 
-    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.3.0
-    /// across the additive-co-evolution chain (#253 consent-model gate,
-    /// #186 bitemporal-KG methods, #49 search explain plumbing). All
-    /// three extensions ship default-initializing fields / methods, so
-    /// the handshake range `[0.3.0, 0.4.0)` stays compatible across
-    /// every consumer. Bumping past 0.3 requires a removal or a
-    /// non-default-able addition; both are wire-breaking and need the
-    /// next minor.
+    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.4.0.
+    /// 0.3 hosted the additive-co-evolution chain (#253 consent-model
+    /// gate, #186 bitemporal-KG methods, #49 search explain plumbing,
+    /// all default-initializable). #258 bumped to 0.4 because adding
+    /// the required `schema_version: Option<SchemaVersion>` fields to
+    /// public `StoredRecord` / `RecordVersion` is a struct-construction
+    /// break — handshake range shifted to `[0.4.0, 0.5.0)`.
     #[test]
-    fn contract_version_locked_to_0_3_0_co_evolution() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 3, 0));
+    fn contract_version_locked_to_0_4_0() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 4, 0));
     }
 }

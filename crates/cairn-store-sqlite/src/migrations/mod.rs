@@ -69,6 +69,9 @@ const M0043_ENTITY_EDGES: &str = include_str!("sql/0043_entity_edges.sql");
 const M0044_ENTITY_EPISODES: &str = include_str!("sql/0044_entity_episodes.sql");
 const M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
     include_str!("sql/0045_entity_edges_no_overlap_trigger.sql");
+// Issue #258 — renumbered from 0041 to 0046 during rebase, since
+// #186 (KG substrate) had already taken 0041..0045 on main.
+const M0046_RECORDS_SCHEMA_VERSION: &str = include_str!("sql/0046_records_schema_version.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -192,6 +195,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0045_entity_edges_no_overlap_trigger",
         M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER,
     ),
+    (
+        46,
+        "0046_records_schema_version",
+        M0046_RECORDS_SCHEMA_VERSION,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -238,5 +246,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0043_ENTITY_EDGES),
         M::up(M0044_ENTITY_EPISODES),
         M::up(M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
+        M::up(M0046_RECORDS_SCHEMA_VERSION),
     ])
 }

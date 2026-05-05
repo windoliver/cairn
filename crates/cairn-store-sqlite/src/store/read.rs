@@ -224,7 +224,8 @@ impl SqliteMemoryStore {
             .call(move |c| {
                 let mut stmt = c.prepare(
                     "SELECT record_id, target_id, version, created_at, updated_at, \
-                            active, tombstoned, tombstone_reason, body_hash \
+                            active, tombstoned, tombstone_reason, body_hash, \
+                            schema_version_major, schema_version_minor \
                        FROM records WHERE target_id = ?1 ORDER BY version ASC",
                 )?;
                 let rows = stmt
@@ -239,6 +240,8 @@ impl SqliteMemoryStore {
                             row.get::<_, i64>(6)?,
                             row.get::<_, Option<String>>(7)?,
                             row.get::<_, String>(8)?,
+                            row.get::<_, Option<i64>>(9)?,
+                            row.get::<_, Option<i64>>(10)?,
                         ))
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -365,20 +368,57 @@ type VersionRowTuple = (
     i64,
     Option<String>,
     String,
+    Option<i64>,
+    Option<i64>,
 );
 
 /// Project one raw row of the `versions(target)` query into a
 /// [`RecordVersion`]. The synchronous worker calls this for every row;
 /// any [`StoreError`] is surfaced through `tokio_rusqlite::Error::Other`.
 fn project_version_row(row: VersionRowTuple) -> Result<RecordVersion, StoreError> {
-    let (record_id, target_id, version, created_at, updated_at, active, tombstoned, reason, hash) =
-        row;
+    let (
+        record_id,
+        target_id,
+        version,
+        created_at,
+        updated_at,
+        active,
+        tombstoned,
+        reason,
+        hash,
+        schema_major,
+        schema_minor,
+    ) = row;
     let rec_id = record_id_from_str(&record_id)?;
     let tgt = target_id_from_str(&target_id)?;
     let body_hash = body_hash_from_str(&hash)?;
     let version = u32::try_from(version).map_err(|_| StoreError::Invariant {
         what: format!("stored version overflows u32: {version}"),
     })?;
+    // NULL → unstamped legacy row (pre-0041). Surface as `None` so
+    // the §6.4 stale_schema lint can flag those rows for rewrite
+    // instead of silently treating them as current.
+    let schema_version = match (schema_major, schema_minor) {
+        (Some(major), Some(minor)) => Some(cairn_core::contract::version::SchemaVersion {
+            major: u32::try_from(major).map_err(|_| StoreError::Invariant {
+                what: format!("schema_version_major out of u32 range: {major}"),
+            })?,
+            minor: u32::try_from(minor).map_err(|_| StoreError::Invariant {
+                what: format!("schema_version_minor out of u32 range: {minor}"),
+            })?,
+        }),
+        (None, None) => None,
+        // Mixed NULL / non-NULL is corruption — both columns are written
+        // together on every fresh row, so a half-NULL pair signals
+        // manual SQL drift rather than legacy data.
+        (major, minor) => {
+            return Err(StoreError::Invariant {
+                what: format!(
+                    "records.schema_version_(major,minor) inconsistent: ({major:?}, {minor:?})"
+                ),
+            });
+        }
+    };
     Ok(RecordVersion {
         record_id: rec_id,
         target_id: tgt,
@@ -389,6 +429,7 @@ fn project_version_row(row: VersionRowTuple) -> Result<RecordVersion, StoreError
         tombstoned: tombstoned != 0,
         tombstone_reason: reason.as_deref().and_then(TombstoneReason::parse),
         body_hash,
+        schema_version,
     })
 }
 
