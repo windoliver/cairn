@@ -1861,6 +1861,326 @@ mod wrapper_tests {
             "got: {err:?}"
         );
     }
+
+    /// Helper for issue #250 parity tests: run `payload` through both the
+    /// staged path (`squash` on a small input) and the bypass path
+    /// (`oversize_bypass` invoked directly) with the same default config,
+    /// and return the two `cr_bearing_lines` values. Centralised so each
+    /// per-shape test stays focused on the input it constructs.
+    fn cr_bearing_lines_both_paths(payload: &[u8]) -> (usize, usize) {
+        let evt = terminal_event(payload);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, payload)
+            .expect("valid construction");
+        let cfg = SquashConfig::default();
+        let staged = super::squash(wrapped, &cfg);
+
+        let raw_hash = super::sha256_payload_hash(payload);
+        let bypass = super::oversize_bypass(
+            payload,
+            raw_hash,
+            payload.len(),
+            &cfg,
+            SquashStats::default(),
+            super::BypassReason::ByteCeiling,
+        );
+        (staged.stats.cr_bearing_lines, bypass.stats.cr_bearing_lines)
+    }
+
+    /// Issue #250: a terminated OSC body containing `\r` must be excluded
+    /// from `cr_bearing_lines` on BOTH the staged and the bypass path.
+    /// Pre-fix the bypass walked raw bytes without parsing escapes, so the
+    /// embedded `\r` registered as a hazard only on the bypass side —
+    /// flipping the audit signal at the size gate.
+    #[test]
+    fn cr_bearing_lines_parity_osc_body_with_embedded_cr() {
+        // OSC: ESC ] ... BEL. Body contains `\r` between `with` and `cr`.
+        let payload = b"prefix\n\x1b]0;title-with\rcr\x07\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "OSC body \\r is stripped by stage 2; staged count must be 0"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: DCS / APC / PM / SOS bodies with embedded `\r` must
+    /// match the staged-path count (zero — stage 2 quarantines all four
+    /// string-control families just like OSC).
+    #[test]
+    fn cr_bearing_lines_parity_dcs_family_bodies_with_embedded_cr() {
+        for &(intro, name) in &[(b'P', "DCS"), (b'_', "APC"), (b'^', "PM"), (b'X', "SOS")] {
+            let mut payload: Vec<u8> = Vec::new();
+            payload.extend_from_slice(b"prefix\n");
+            payload.push(0x1B);
+            payload.push(intro);
+            payload.extend_from_slice(b"body-with\rcr");
+            // Strict-ST terminator: ESC \\ (no BEL accepted for DCS-family).
+            payload.push(0x1B);
+            payload.push(0x5C);
+            payload.extend_from_slice(b"\nsuffix\n");
+
+            let (staged, bypass) = cr_bearing_lines_both_paths(&payload);
+            assert_eq!(staged, 0, "{name}: staged count must be 0");
+            assert_eq!(
+                bypass, staged,
+                "{name}: bypass parity: staged={staged} bypass={bypass}"
+            );
+        }
+    }
+
+    /// Issue #250: an UN-terminated control string drops its body up to
+    /// the next `\n` on the staged path. The bypass-side count must drop
+    /// the same bytes — a `\r` inside an unterminated OSC body must not
+    /// be counted on either path.
+    #[test]
+    fn cr_bearing_lines_parity_unterminated_osc_body_with_cr() {
+        // OSC introducer + body containing \r, no terminator before \n.
+        let payload = b"prefix\n\x1b]0;dangling-with\rcr-no-term\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "unterminated OSC body dropped to LF; staged count must be 0"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: a real bare-CR hazard (interior `\r` in a progress-bar
+    /// line) coexisting with a CR inside an OSC body must register exactly
+    /// once on both paths — the OSC-body \r excluded, the progress-line \r
+    /// counted. Pins that the parity fix did not over-strip.
+    #[test]
+    fn cr_bearing_lines_parity_mixed_real_hazard_and_osc_body_cr() {
+        let payload = b"prefix\n\x1b]0;title-with\rcr\x07\nprog 50%\rprog 100%\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 1,
+            "exactly one CR-bearing line on staged: the prog 50%... line"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity at the staged-vs-bypass gate: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: when a payload's invalid UTF-8
+    /// byte sits immediately after an unrecognized ESC, the bypass walker
+    /// previously inferred a UTF-8 codepoint length naively from the raw
+    /// byte and could swallow a following bare `\r`. Stage 1's lossy
+    /// decode would have replaced the bad byte with `U+FFFD` first, so
+    /// the staged path counts the surviving CR-bearing line — the bypass
+    /// must match by validating UTF-8 continuations (or consuming only
+    /// the bad byte when the lead is invalid).
+    #[test]
+    fn cr_bearing_lines_parity_invalid_utf8_lead_after_esc() {
+        // ESC + 0xFF (invalid lead) + bare \r + content + \n.
+        let payload: &[u8] = b"prefix\n\x1b\xff\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 1,
+            "staged path: stage 1 lossy → ESC+U+FFFD consumed by stage 2; \\r survives"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on invalid lead after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a continuation byte (`0x80..=0xBF`)
+    /// in lead position after ESC is invalid; the walker must consume only
+    /// the bad byte so a following `\r` survives.
+    #[test]
+    fn cr_bearing_lines_parity_continuation_byte_as_esc_lead() {
+        // ESC + 0xA0 (continuation byte in lead position) + \r + content.
+        let payload: &[u8] = b"prefix\n\x1b\xa0\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: surviving \\r counted");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on continuation-byte ESC lead: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a truncated multibyte after ESC
+    /// (e.g., ESC + 0xC2 followed by a non-continuation byte) must consume
+    /// only the lead so the following byte stays visible.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_multibyte_after_esc() {
+        // ESC + 0xC2 (claims a 2-byte scalar) + \r (NOT a valid continuation
+        // byte) + content. Stage 1 lossy replaces 0xC2 alone with U+FFFD;
+        // stage 2 consumes ESC + U+FFFD, leaving \r intact.
+        let payload: &[u8] = b"prefix\n\x1b\xc2\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: \\r survives the lossy-decoded scalar");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated multibyte: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a well-formed multibyte scalar
+    /// after ESC must still be fully consumed on both paths (no
+    /// over-conservative under-skip from the new validation logic).
+    #[test]
+    fn cr_bearing_lines_parity_valid_multibyte_after_esc_unchanged() {
+        // ESC + é (0xC3 0xA9) + \r + content. Stage 2 consumes the entire
+        // ESC + 2-byte scalar; the bypass walker must do the same so the
+        // surviving \r is still counted exactly once.
+        let payload: &[u8] = b"prefix\n\x1b\xc3\xa9\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "valid 2-byte scalar consumed; \\r survives");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on valid multibyte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a UTF-16 surrogate-range encoding
+    /// (`ED A0..=BF ...`) is RFC 3629-invalid. Stage 1 lossy decode rejects
+    /// it; the bypass walker's continuation-byte check would have accepted
+    /// it. Delegating to `std::str::from_utf8` catches it.
+    #[test]
+    fn cr_bearing_lines_parity_surrogate_after_esc() {
+        // ESC + ED A0 80 (encodes U+D800, a high surrogate — invalid). The
+        // surrounding `\r ... \n` shape lets the line be CR-bearing only
+        // when stage 2 / the bypass walker do NOT swallow the bad bytes
+        // wholesale. Pre-fix, the walker consumed all three and treated
+        // the LF as a CRLF; staged kept the lossy replacement bytes after
+        // the \r and counted the line.
+        let payload: &[u8] = b"prefix\r\x1b\xed\xa0\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(
+            staged >= 1,
+            "staged must register the prefix-with-\\r line as CR-bearing"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on surrogate after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: overlong 3-byte forms
+    /// (`E0 80..=9F ...`) are RFC 3629-invalid. Same parity hazard as
+    /// surrogates — `from_utf8` validation catches both.
+    #[test]
+    fn cr_bearing_lines_parity_overlong_three_byte_after_esc() {
+        // ESC + E0 80 80 (overlong encoding of U+0000 in 3 bytes).
+        let payload: &[u8] = b"prefix\r\x1b\xe0\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on overlong 3-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: scalars beyond `U+10FFFF`
+    /// (`F4 90..=BF ...`) are RFC 3629-invalid. Confirms the F4-bound
+    /// branch of validation catches out-of-range 4-byte forms.
+    #[test]
+    fn cr_bearing_lines_parity_out_of_range_four_byte_after_esc() {
+        // ESC + F4 90 80 80 (encodes U+110000, beyond U+10FFFF).
+        let payload: &[u8] = b"prefix\r\x1b\xf4\x90\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on out-of-range 4-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: when `from_utf8` rejects a
+    /// truncated *valid prefix* (e.g., `E2 82` followed by a non-
+    /// continuation), `from_utf8_lossy` collapses the whole prefix into
+    /// one `U+FFFD`. The bypass walker must advance by the same maximal
+    /// invalid subsequence length, not unconditionally one byte —
+    /// otherwise a stray `0x82` leaks past ESC, resets the trailing-CR
+    /// run, and a CRLF that the staged path collapses gets reported as
+    /// CR-bearing on the bypass.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_three_byte_prefix_after_esc() {
+        // Prefix `\r` then ESC + E2 82 + LF: maximal invalid subsequence
+        // is `E2 82` (2 bytes), replaced with one U+FFFD on the staged
+        // path. Stage 2 then drops ESC + U+FFFD, leaving CRLF — which
+        // the second pass collapses to LF, so the line is NOT CR-bearing.
+        let payload: &[u8] = b"prefix\r\x1b\xe2\x82\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses E2 82 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 3-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: same shape for a 4-byte prefix
+    /// (`F0 90 80` followed by LF). `from_utf8_lossy` replaces the 3-byte
+    /// incomplete-but-valid prefix with one `U+FFFD`.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_four_byte_prefix_after_esc() {
+        let payload: &[u8] = b"prefix\r\x1b\xf0\x90\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses F0 90 80 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 4-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: full integration via the actual `MAX_INPUT_BYTES` gate.
+    /// Builds an oversize payload (`>= MAX_INPUT_BYTES`) where both the
+    /// head and the tail carry the same OSC-body-with-embedded-CR +
+    /// progress-bar pattern, with CR-free filler in between. `squash`
+    /// routes through the real bypass path; the staged baseline runs on
+    /// the head bytes alone. Heavy (64 MiB allocation) — gated behind
+    /// `--ignored` like the other gate-crossing test in this module.
+    #[test]
+    #[ignore = "allocates MAX_INPUT_BYTES + 1 bytes; run with --ignored"]
+    fn cr_bearing_lines_parity_at_max_input_bytes_gate() {
+        let head_pattern = b"head\n\x1b]0;title-with\rcr\x07\nprog 50%\rprog 100%\n";
+        let tail_pattern = b"prog 25%\rprog 100%\n\x1b]0;t-with\rcr\x07\ntail\n";
+
+        // Staged baseline: same pattern, small payload — takes the staged
+        // path and yields the per-pattern count (one CR-bearing prog line).
+        let (staged_head, _) = cr_bearing_lines_both_paths(head_pattern);
+        let (staged_tail, _) = cr_bearing_lines_both_paths(tail_pattern);
+
+        // Build an oversize payload that crosses MAX_INPUT_BYTES naturally.
+        let filler_len = MAX_INPUT_BYTES + 1 - head_pattern.len() - tail_pattern.len();
+        let mut oversized: Vec<u8> = Vec::with_capacity(MAX_INPUT_BYTES + 1);
+        oversized.extend_from_slice(head_pattern);
+        oversized.extend(std::iter::repeat_n(b'F', filler_len));
+        oversized.extend_from_slice(tail_pattern);
+        assert!(oversized.len() >= MAX_INPUT_BYTES);
+
+        let evt = terminal_event(&oversized);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
+            .expect("oversize accepted");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+
+        // The bypass walks the FULL raw input for `cr_bearing_lines`, so the
+        // count is the sum of CR-bearing lines across head + filler + tail.
+        // Filler is CR-free; only the two prog-bar lines (head + tail) count.
+        // OSC-body \rs in head and tail are excluded by the shared parser.
+        assert_eq!(staged_head, 1, "staged head pattern → 1 CR-bearing line");
+        assert_eq!(staged_tail, 1, "staged tail pattern → 1 CR-bearing line");
+        assert_eq!(
+            out.stats.cr_bearing_lines,
+            staged_head + staged_tail,
+            "bypass full-payload count must equal sum of staged per-pattern counts"
+        );
+    }
 }
 
 /// Result of a successful squash: compacted bytes plus audit metadata.
@@ -1888,11 +2208,12 @@ pub struct SquashStats {
     pub ansi_stripped: bool,
     /// Number of `\n`-delimited lines containing at least one bare `\r`
     /// after CRLF normalize. Source-capture audit signal: counted on the
-    /// FULL input (post-stage-2 ANSI strip on the staged path; directly
-    /// from raw bytes on the oversize-bypass path, which is equivalent
-    /// since CR survives stage 1 and stage 2). Stable across the
-    /// staged-vs-bypass gate so audit/warning logic sees the same hazard
-    /// count regardless of which path the input took.
+    /// FULL input — post-stage-2 ANSI strip on the staged path, and via
+    /// `count_bare_cr_lines_after_stage2` (a raw-byte walker that mirrors
+    /// stage 2's escape-state parser and CRLF / CRCRLF rule) on the
+    /// oversize-bypass path. Stable across the staged-vs-bypass gate so
+    /// audit/warning logic sees the same hazard count regardless of
+    /// which path the input took.
     pub cr_bearing_lines: usize,
     /// Number of dedup runs collapsed in stage 4.
     pub dedup_runs_collapsed: usize,
@@ -2240,6 +2561,261 @@ fn first_safe_line_start_at_or_after(raw: &[u8], threshold: usize) -> Option<usi
 // lib-wide deny.
 #[allow(clippy::expect_used)]
 #[allow(clippy::too_many_lines)] // single coherent escape parser
+/// Stage 2 escape-state parser, exposed as a pure byte-level skip helper so
+/// the same state table can drive both `stage2_ansi_strip` (which strips
+/// escapes from a UTF-8 string) and `count_bare_cr_lines_after_stage2`
+/// (which audits CR-bearing lines on raw oversize-bypass bytes without
+/// allocating). Caller must pass `start` such that `bytes[start] == 0x1B`.
+///
+/// Returns `(consume, recovery_drop)`:
+/// - `consume`: bytes from `start` that stage 2 would drop. The next outer
+///   position is `start + consume`. For unterminated string controls
+///   (OSC / DCS / APC / PM / SOS with no terminator before the next `\n`
+///   or EOF) the consumed range stops *before* the recovery LF so the
+///   outer loop still sees it as a line separator.
+/// - `recovery_drop`: the number of bytes dropped to the OSC-recovery
+///   boundary (zero when the escape was properly terminated, equal to
+///   `consume` when it wasn't — the introducer + body are sanitization
+///   loss, not framing).
+fn stage2_skip_escape(bytes: &[u8], start: usize) -> (usize, usize) {
+    debug_assert!(
+        start < bytes.len() && bytes[start] == 0x1B,
+        "invariant: caller verified ESC at start"
+    );
+    if start + 1 >= bytes.len() {
+        // ESC at EOF: drop the introducer.
+        return (1, 0);
+    }
+    match bytes[start + 1] {
+        // CSI: ESC [ params intermediates final.
+        //
+        // Any byte in `0x40..=0x7E` is a valid CSI final per spec — covers
+        // SGR (`m`), erase (`J`/`K`), cursor moves (`A`–`H`, `f`), and the
+        // TUI/progress finals (`G`/`E`/`F`/`P`/`L`/`M`/`S`/`T`/`X`/...).
+        // Truncated sequences (no final byte before EOF) drop only the lone
+        // ESC so the outer loop can still recover surviving payload bytes.
+        0x5B => {
+            let mut j = start + 2;
+            while j < bytes.len() && (0x30..=0x3F).contains(&bytes[j]) {
+                j += 1;
+            }
+            while j < bytes.len() && (0x20..=0x2F).contains(&bytes[j]) {
+                j += 1;
+            }
+            let final_byte_present = matches!(
+                bytes.get(j).copied(),
+                Some(b) if (0x40..=0x7E).contains(&b)
+            );
+            if final_byte_present {
+                (j + 1 - start, 0)
+            } else {
+                (1, 0)
+            }
+        }
+        // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (ST).
+        //
+        // If terminated, consume the entire OSC. If not (degraded capture
+        // truncated mid-escape), the body may carry hidden control-plane
+        // content (titles, OSC-8 hyperlink URLs) that must not be promoted
+        // to extractable text — drop introducer + body up to the next LF
+        // (or to EOF). The dropped byte count is returned as `recovery_drop`
+        // so callers that track `osc_recovery_bytes_dropped` see the loss.
+        0x5D => {
+            let mut j = start + 2;
+            let term = loop {
+                if j >= bytes.len() {
+                    break None;
+                }
+                if bytes[j] == 0x07 {
+                    break Some(j + 1);
+                }
+                if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                    break Some(j + 2);
+                }
+                j += 1;
+            };
+            if let Some(end) = term {
+                (end - start, 0)
+            } else {
+                let mut k = start + 2;
+                while k < bytes.len() && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                let consume = k - start;
+                (consume, consume)
+            }
+        }
+        // DCS / APC / PM / SOS: ESC P / _ / ^ / X ... ESC \ (strict-ST;
+        // BEL is not accepted here, deliberately stricter than OSC).
+        // Same scan-or-quarantine logic as OSC: attacker-controlled bytes
+        // inside the body must never reach extractable output.
+        0x50 | 0x5F | 0x5E | 0x58 => {
+            let mut j = start + 2;
+            let term = loop {
+                if j >= bytes.len() {
+                    break None;
+                }
+                if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                    break Some(j + 2);
+                }
+                j += 1;
+            };
+            if let Some(end) = term {
+                (end - start, 0)
+            } else {
+                let mut k = start + 2;
+                while k < bytes.len() && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                let consume = k - start;
+                (consume, consume)
+            }
+        }
+        // Two-byte ESC controls (ESC 7/8 save/restore, ESC = / >, ESC c
+        // reset, ESC D index, ESC E NEL, ESC M reverse-index, ...): consume
+        // ESC + one whole UTF-8 codepoint. The classifier mirrors RFC 3629
+        // leading-byte ranges and validates continuation bytes so a broken
+        // multibyte (or an invalid lead like `0xFF`) consumes only the bad
+        // byte. That keeps the bypass walker — which sees pre-stage-1 raw
+        // bytes — byte-stable with the staged path: stage 1 replaces each
+        // invalid scalar with `U+FFFD`, then stage 2 consumes ESC + that
+        // 3-byte replacement, advancing exactly one source byte beyond ESC.
+        // For valid UTF-8 input (the contract on the staged-path call site)
+        // every well-formed scalar consumes its full encoded length.
+        _ => {
+            let lead = bytes[start + 1];
+            // Codepoint length per RFC 3629 leading-byte ranges.
+            // 0x80..=0xC1 are never valid UTF-8 leads (continuation bytes
+            // or overlong-2 starts); 0xF5..=0xFF encode code points beyond
+            // U+10FFFF. Both fall into the 1-byte branch so we consume
+            // just the bad byte and a following `\r`/`\n` stays visible.
+            let cp_len: usize = if lead < 0xC2 {
+                1
+            } else if lead < 0xE0 {
+                2
+            } else if lead < 0xF0 {
+                3
+            } else if lead < 0xF5 {
+                4
+            } else {
+                1
+            };
+            let after = start + 1;
+            let available = bytes.len() - after;
+            // For multi-byte scalars, delegate full RFC 3629 validation to
+            // `std::str::from_utf8` — that catches surrogates (D800..DFFF
+            // via ED A0..BF), overlong forms (E0 80..9F, F0 80..8F), and
+            // out-of-range scalars (F4 90..BF) that a naive continuation-
+            // byte check would let through. On validation failure, advance
+            // by the same maximal invalid subsequence length that
+            // `from_utf8_lossy` collapses into one `U+FFFD`, using
+            // `Utf8Error::{valid_up_to, error_len}`. Consuming a fixed 1
+            // byte would leave a trailing continuation byte (e.g., `0x82`
+            // in `ESC E2 82 LF`) visible to the walker as text, breaking
+            // parity with the staged path where stage 2 over the lossy
+            // decode has already absorbed the entire malformed prefix
+            // alongside the ESC.
+            let final_consume = if cp_len > 1 {
+                let end = after + cp_len.min(available);
+                let slice = &bytes[after..end];
+                match std::str::from_utf8(slice) {
+                    Ok(_) if slice.len() == cp_len => cp_len,
+                    Ok(_) => slice.len(),
+                    Err(e) => match e.error_len() {
+                        Some(n) => e.valid_up_to() + n,
+                        // `None` means the slice ends in a valid-but-
+                        // incomplete prefix; lossy decode replaces the
+                        // whole prefix with one `U+FFFD`, so advance by
+                        // the entire slice length here too.
+                        None => slice.len(),
+                    },
+                }
+            } else {
+                // 1-byte scalar (valid ASCII or invalid lead): consume the
+                // single lead byte. `available` is always >= 1 here — the
+                // `start + 1 >= bytes.len()` early-return at the top of
+                // `stage2_skip_escape` rules out the EOF case.
+                1
+            };
+            (1 + final_consume, 0)
+        }
+    }
+}
+
+/// Source-capture audit signal: counts `\n`-delimited lines that contain at
+/// least one bare `\r` *as stage 2 would see them*, walking raw bytes with
+/// `stage2_skip_escape` so CRs inside ESC-introduced control strings (OSC,
+/// DCS, APC, PM, SOS — terminated or not) are excluded the same way the
+/// staged path excludes them. Mirrors stage 2's CRLF / CRCRLF rule: an LF
+/// pops at most one preceding bare `\r` from the line, so `\r\n` and
+/// `\r\r\n` end CR-clean while `\r\r\r\n` retains one residual `\r`.
+///
+/// Keeps the bypass-side count byte-stable with the staged path's
+/// `stage2.split('\n').filter(|l| l.contains('\r')).count()` so the
+/// `cr_bearing_lines` audit signal does not flip when an input crosses
+/// `MAX_INPUT_BYTES` / `MAX_INPUT_LINES`. O(n) in `raw.len()`.
+fn count_bare_cr_lines_after_stage2(raw: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut cr_count: usize = 0;
+    let mut current_cr_run: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
+        if b == 0x1B {
+            // Skip the escape with stage 2's parser. Bytes inside a
+            // terminated control are stripped wholesale; for an unterminated
+            // string control, the body is dropped up to — but not including
+            // — the next `\n`, so the LF is still seen by the outer loop as
+            // a line separator on the next iteration.
+            let (consume, _recovery) = stage2_skip_escape(raw, i);
+            // Helper always returns >= 1 by construction; `.max(1)` keeps
+            // the loop bounded if that ever changes.
+            i += consume.max(1);
+            continue;
+        }
+        if b == b'\n' {
+            // Stage 2 collapses CRLF and CRCRLF to LF (popping at most one
+            // preceding bare `\r` in addition to the LF). Mirror by
+            // ignoring up to two trailing `\r`s. Earlier interior CRs, or a
+            // third trailing `\r` in `\r\r\r\n`, leave the line CR-bearing.
+            let trailing_strip = current_cr_run.min(2);
+            if cr_count > trailing_strip {
+                count += 1;
+            }
+            cr_count = 0;
+            current_cr_run = 0;
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\r' => {
+                cr_count += 1;
+                current_cr_run += 1;
+            }
+            // Stripped control bytes (b < 0x20 || b == 0x7F, excluding the
+            // \n / \t / \r stage 2 preserves) vanish in stage 2 output, so
+            // they do not interrupt the trailing-CR run; a `\r\x07\n` line
+            // collapses to `\r\n` then `\n`, the same as a clean `\r\n`.
+            b'\t' => current_cr_run = 0,
+            b if b < 0x20 || b == 0x7F => { /* stripped — run unchanged */ }
+            _ => current_cr_run = 0,
+        }
+        i += 1;
+    }
+    // Trailing partial line (no terminating LF): stage 2 preserves any
+    // surviving \r bytes there as bare CR.
+    if cr_count > 0 {
+        count += 1;
+    }
+    count
+}
+
+// `expect()` here is sound: stage 2 only ever pushes bytes from a valid
+// `&str` (input) plus `\n`, so the resulting `Vec<u8>` is valid UTF-8 by
+// construction. Surfacing this as a typed error would propagate through
+// every pipeline stage for a panic that is unreachable from the contract.
+// The lib-wide deny lives at `lib.rs`; allow it at the function granularity.
+#[allow(clippy::expect_used)]
 fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mut usize) -> String {
     let bytes = input.as_bytes();
     let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -2249,165 +2825,13 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
         let b = bytes[i];
 
         if b == 0x1B {
-            // ESC: look ahead for CSI or OSC
+            // ESC: delegate the state machine to `stage2_skip_escape` so
+            // the same parser drives both this stripper and the bypass-
+            // side `cr_bearing_lines` audit walker.
             *stripped = true;
-            if i + 1 < bytes.len() {
-                match bytes[i + 1] {
-                    // CSI: ESC [ params intermediates final
-                    //
-                    // Per spec, any byte in `0x40..=0x7E` is a valid
-                    // CSI final. Strip the entire complete sequence
-                    // when one is found — this includes SGR (`m`),
-                    // erase (`J`/`K`), cursor moves (`A`–`H`, `f`),
-                    // and TUI/progress finals (`G`/`E`/`F`/`P`/`L`/
-                    // `M`/`S`/`T`/`X`/...). For truncated sequences
-                    // (no valid final byte found before EOF), drop
-                    // only the lone ESC and re-enter the outer loop
-                    // so the surviving payload bytes are not eaten.
-                    0x5B => {
-                        let mut j = i + 2;
-                        while j < bytes.len() && (0x30..=0x3F).contains(&bytes[j]) {
-                            j += 1;
-                        }
-                        while j < bytes.len() && (0x20..=0x2F).contains(&bytes[j]) {
-                            j += 1;
-                        }
-                        let final_byte_present = matches!(
-                            bytes.get(j).copied(),
-                            Some(b) if (0x40..=0x7E).contains(&b)
-                        );
-                        if final_byte_present {
-                            i = j + 1;
-                        } else {
-                            // Truncated CSI (no final byte before EOF):
-                            // drop ESC only so outer loop processes
-                            // `[`, params, and surviving payload.
-                            i += 1;
-                        }
-                    }
-                    // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (0x1B 0x5C)
-                    //
-                    // Scan ahead for a proper terminator without committing.
-                    // If found, consume the entire OSC. If not (degraded
-                    // capture truncated mid-escape), the OSC body may carry
-                    // hidden control-plane content (titles, OSC-8 hyperlink
-                    // URLs) that must not be promoted to extractable text.
-                    // Recovery boundary: drop everything up to and including
-                    // the next LF, so subsequent lines (e.g., the trailing
-                    // error/status line) survive while the OSC payload does
-                    // not contaminate `compacted_bytes`.
-                    0x5D => {
-                        let mut j = i + 2;
-                        let term = loop {
-                            if j >= bytes.len() {
-                                break None;
-                            }
-                            if bytes[j] == 0x07 {
-                                break Some(j + 1);
-                            }
-                            if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
-                                break Some(j + 2);
-                            }
-                            j += 1;
-                        };
-                        if let Some(end) = term {
-                            i = end;
-                        } else {
-                            // Unterminated: drop the OSC introducer + body
-                            // up to the next LF (recovery boundary). If no
-                            // LF exists in the remainder, drop the whole
-                            // tail — the OSC body would otherwise leak
-                            // hidden bytes through extraction. Surface the
-                            // dropped count via `osc_recovery_dropped` so
-                            // audit consumers see the loss explicitly.
-                            let mut k = i + 2;
-                            while k < bytes.len() && bytes[k] != b'\n' {
-                                k += 1;
-                            }
-                            *osc_recovery_dropped = osc_recovery_dropped.saturating_add(k - i);
-                            // Stop before the LF so it gets preserved by
-                            // the outer loop as a normal line separator.
-                            i = k;
-                        }
-                    }
-                    // Round-4 (newer loop) hardening: ESC P (DCS),
-                    // ESC _ (APC), ESC ^ (PM), ESC X (SOS) all open
-                    // multi-byte string controls terminated by ST
-                    // (ESC \) just like OSC. Treat them with the
-                    // same scan-or-quarantine logic so attacker-
-                    // controlled payload inside DCS/APC/PM/SOS bodies
-                    // can't smuggle bytes past the sanitizer as plain
-                    // text. Falls through to the OSC-style logic.
-                    0x50 | 0x5F | 0x5E | 0x58 => {
-                        let mut j = i + 2;
-                        let term = loop {
-                            if j >= bytes.len() {
-                                break None;
-                            }
-                            // Per spec: ST = ESC \. Some terminals
-                            // accept BEL (0x07) for OSC; do NOT
-                            // accept it here — DCS/APC/PM/SOS spec
-                            // is strict-ST, and accepting BEL would
-                            // weaken quarantine of legitimately
-                            // ST-terminated bodies that happen to
-                            // contain a 0x07.
-                            if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
-                                break Some(j + 2);
-                            }
-                            j += 1;
-                        };
-                        if let Some(end) = term {
-                            i = end;
-                        } else {
-                            // Unterminated string control: drop the
-                            // introducer + body up to the next LF;
-                            // surface dropped byte count through the
-                            // OSC recovery counter (these share the
-                            // same audit signal — both are control-
-                            // string sanitization losses).
-                            let mut k = i + 2;
-                            while k < bytes.len() && bytes[k] != b'\n' {
-                                k += 1;
-                            }
-                            *osc_recovery_dropped = osc_recovery_dropped.saturating_add(k - i);
-                            i = k;
-                        }
-                    }
-                    // Round-8 (newer loop) hardening: real terminals
-                    // emit two-byte ESC controls (ESC 7/8 = save/
-                    // restore cursor, ESC = / >, ESC c reset, ESC D
-                    // index, ESC E NEL, ESC M reverse-index, etc.).
-                    // Dropping only the ESC byte left the second
-                    // byte (`7`, `c`, `=`, ...) in the output as
-                    // printable text — lossy corruption that could
-                    // poison preserved diagnostic tails. Treat any
-                    // unrecognised ESC as ESC + one whole UTF-8
-                    // codepoint and consume both — never split a
-                    // multi-byte char (the input is a valid `&str`
-                    // so byte-stepping past ESC into a continuation
-                    // byte would otherwise produce invalid UTF-8 in
-                    // `result` and trip the `from_utf8` invariant).
-                    _ => {
-                        i += 1; // past ESC
-                        if i < bytes.len() {
-                            let lead = bytes[i];
-                            let cp_len = if lead < 0x80 {
-                                1
-                            } else if lead < 0xE0 {
-                                2
-                            } else if lead < 0xF0 {
-                                3
-                            } else {
-                                4
-                            };
-                            i += cp_len.min(bytes.len() - i);
-                        }
-                    }
-                }
-            } else {
-                // ESC at EOF
-                i += 1;
-            }
+            let (consume, recovery_drop) = stage2_skip_escape(bytes, i);
+            *osc_recovery_dropped = osc_recovery_dropped.saturating_add(recovery_drop);
+            i += consume;
         } else if b < 0x20 || b == 0x7F {
             // Control character: preserve \n (0x0A), \t (0x09), \r (0x0D)
             if b == b'\n' || b == b'\t' || b == b'\r' {
@@ -3893,56 +4317,17 @@ fn oversize_bypass(
     // only sanitizes head/tail/suffix slices, so a huge payload with
     // CR-bearing progress lines concentrated in the dropped middle
     // would otherwise report cr_bearing_lines == 0 and hide a source-
-    // capture hazard exactly on the captures most likely to hit it
-    // (round-8 finding).
+    // capture hazard exactly on the captures most likely to hit it.
     //
-    // CRLF normalization parity (round-9 + round-10 findings): the
-    // staged path's stage 2 collapses `\r\n` to `\n` and also pops ONE
-    // preceding `\r` from its output (so `\r\r\n` → `\n`). Any further
-    // CRs before that pair are PRESERVED on the staged path: e.g.
-    // `\r\r\r\n` → stage 2 → `\r\n` (line "\r" → 1 CR-bearing) and
-    // `\r\r\r\r\n` → `\r\r\n` (line "\r\r" → 1 CR-bearing). Mirror that
-    // rule here by stripping up to two — never more — trailing `\r`s
-    // from each `\n`-terminated line before checking for residual `\r`.
-    // Stripping the entire trailing run (round 9's first attempt) would
-    // hide real bare-CR hazards on `\r\r\r\n`-style endings exactly at
-    // the bypass gate (round-10 [high] finding). An unterminated final
-    // line keeps its trailing `\r`s (stage 2 preserves them as bare CR
-    // there).
-    //
-    // Persistent gap (rounds 8/9/10): `\r` bytes appearing INSIDE an
-    // ESC-introduced control string (OSC, DCS, APC, PM, SOS — both
-    // terminated and unterminated) that stage 2 would strip remain
-    // counted here, because the bypass scan cannot affordably re-run
-    // stage 2's escape-state parser over the full input. This produces
-    // a size-dependent false positive on captures whose dropped middle
-    // contains a control-string body with embedded `\r`. Mitigating it
-    // would require porting stage 2's escape parser to operate on raw
-    // bytes — out of scope for this PR; tracked separately. The signal
-    // remains conservative-by-over-counting, which is the safer side
-    // for an audit/warning gate.
-    stats.cr_bearing_lines = {
-        let mut count = 0usize;
-        let mut start = 0usize;
-        for (i, &b) in raw_bytes.iter().enumerate() {
-            if b == b'\n' {
-                let mut end = i;
-                let mut stripped = 0usize;
-                while stripped < 2 && end > start && raw_bytes[end - 1] == b'\r' {
-                    end -= 1;
-                    stripped += 1;
-                }
-                if raw_bytes[start..end].contains(&b'\r') {
-                    count += 1;
-                }
-                start = i + 1;
-            }
-        }
-        if start < raw_bytes.len() && raw_bytes[start..].contains(&b'\r') {
-            count += 1;
-        }
-        count
-    };
+    // `count_bare_cr_lines_after_stage2` walks raw bytes with the same
+    // escape-state parser that stage 2 uses on the staged path
+    // (`stage2_skip_escape`), so `\r` bytes inside ESC-introduced control
+    // strings (OSC, DCS, APC, PM, SOS — terminated or not) are excluded
+    // here exactly the way stage 2 excludes them. CRLF / CRCRLF rule
+    // parity (`\r\n` → `\n`, `\r\r\n` → `\n`, `\r\r\r\n` keeps one
+    // residual `\r`) is mirrored line-by-line, and trailing partial
+    // lines preserve any surviving `\r` as stage 2 does.
+    stats.cr_bearing_lines = count_bare_cr_lines_after_stage2(raw_bytes);
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
