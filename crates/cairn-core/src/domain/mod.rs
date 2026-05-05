@@ -39,6 +39,7 @@ pub mod scope;
 pub mod session;
 pub mod target_id;
 pub mod taxonomy;
+pub mod time;
 pub mod timestamp;
 pub mod trace;
 
@@ -71,5 +72,6 @@ pub use session::{
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceEvent, TraceLink, TraceLinkError};

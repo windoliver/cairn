@@ -8,6 +8,7 @@
 
 pub mod fake_consent_lookup;
 pub mod hybrid_vault;
+pub mod intent;
 pub mod keystore;
 pub mod store;
 pub use fake_consent_lookup::FakeConsentLookup;

@@ -169,4 +169,99 @@ pub enum DomainError {
         /// Specific reason the project root was rejected.
         message: String,
     },
+
+    /// Cryptographic verification of [`crate::generated::envelope::SignedIntent::signature`]
+    /// against the canonical-JSON encoding of the rest of the envelope failed
+    /// (§4.2 + §8.0.b).
+    #[error("signature: cryptographic verification failed")]
+    InvalidSignature,
+
+    /// The clock's current instant is outside `[issued_at − skew, expires_at)`.
+    #[error("intent expired: issued_at={issued_at}, expires_at={expires_at}, now={now}")]
+    ExpiredIntent {
+        /// Wire-form `issued_at` from the rejected envelope.
+        issued_at: String,
+        /// Wire-form `expires_at` from the rejected envelope.
+        expires_at: String,
+        /// Wall-clock instant at the time of the check.
+        now: String,
+    },
+
+    /// The issuer's key is not in [`crate::domain::identity::records::ProvisioningState::Active`].
+    /// `Pending`, `RevokePending`, `Revoked`, `PurgePending`, and `Purged` all reject.
+    #[error("issuer key not Active for {id}@v{key_version}: state={state:?}")]
+    RevokedKey {
+        /// The rejected issuer.
+        id: crate::domain::Identity,
+        /// The key version associated with the revoked key entry.
+        key_version: crate::domain::identity::keys::KeyVersion,
+        /// The lifecycle state observed in the registry.
+        state: crate::domain::identity::records::ProvisioningState,
+    },
+
+    /// `intent.key_version` does not match the version held in the
+    /// registry for this issuer. Raised by `resolve_issuer` (registry lookup).
+    #[error("key version mismatch for {id}: intent={intent}, registry has {current:?}")]
+    KeyVersionMismatch {
+        /// The issuer the envelope referenced.
+        id: crate::domain::Identity,
+        /// Version requested by the envelope.
+        intent: crate::domain::identity::keys::KeyVersion,
+        /// Highest known version in the registry; `None` if the issuer is
+        /// unknown to the registry.
+        current: Option<crate::domain::identity::keys::KeyVersion>,
+    },
+
+    /// Envelope scope `(tenant, workspace, tier)` does not match the
+    /// vault's `ScopePolicy`.
+    #[error("scope denied: {message}")]
+    ScopeDenied {
+        /// Free-form reason describing which dimension failed.
+        message: String,
+    },
+
+    /// Envelope failed an authorization check that does not fall under any
+    /// other variant — for example, a caller-bug guard where the resolved
+    /// issuer's identity does not match the envelope issuer.
+    #[error("unauthorized: {message}")]
+    Unauthorized {
+        /// Free-form reason.
+        message: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_signature_display() {
+        let err = DomainError::InvalidSignature;
+        assert_eq!(
+            err.to_string(),
+            "signature: cryptographic verification failed"
+        );
+    }
+
+    #[test]
+    fn expired_intent_display() {
+        let err = DomainError::ExpiredIntent {
+            issued_at: "2026-04-22T14:02:11Z".into(),
+            expires_at: "2026-04-22T14:07:11Z".into(),
+            now: "2026-04-22T15:00:00Z".into(),
+        };
+        assert!(err.to_string().contains("expired"));
+        assert!(err.to_string().contains("now=2026-04-22T15:00:00Z"));
+    }
+
+    #[test]
+    fn scope_denied_display() {
+        let err = DomainError::ScopeDenied {
+            message: "tenant: expected acme, got other".into(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "scope denied: tenant: expected acme, got other"
+        );
+    }
 }
