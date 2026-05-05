@@ -252,17 +252,21 @@ fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         }
     };
 
-    // Real resolution sources must be bound. CwdFallback is a soft
-    // path (no explicit / env / registry hit) — fall back to the
-    // ephemeral path with a warning rather than minting against an
-    // unbound CWD.
+    // Real resolution sources must be bound. CwdFallback (no explicit
+    // / env / registry hit) means there is no vault to persist into.
+    // The operator passed `--issuer`, so they expect persistence — a
+    // silent downgrade to an ephemeral mint would print an
+    // indistinguishable JSON envelope on stdout that automation could
+    // sign against, only to fail at admission time. Fail closed
+    // instead (issue #52 round-4 review #2).
     if source == VaultResolutionSource::CwdFallback {
         eprintln!(
-            "cairn handshake: no vault resolved (cwd is not a Cairn vault) — \
-             cannot persist; emitting an ephemeral nonce instead. \
-             Pass `--vault PATH` to a bound vault to persist."
+            "cairn handshake: --issuer supplied but no vault could be resolved \
+             (cwd is not a Cairn vault, no --vault flag, no CAIRN_VAULT, \
+             no registry default). Pass `--vault PATH` to a bound vault, or \
+             omit `--issuer` for an ephemeral nonce."
         );
-        return verbs::handshake::run_with_context(json, None, None);
+        return ExitCode::from(78); // EX_CONFIG
     }
     match verbs::status::probe_vault_binding(&vault_root) {
         verbs::status::VaultBinding::Bound => {}
