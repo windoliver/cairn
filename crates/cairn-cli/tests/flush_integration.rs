@@ -147,3 +147,78 @@ fn flush_reject_moves_pending_to_rejected_with_reason() {
     };
     assert_eq!(reason, "operator decided no");
 }
+
+#[test]
+fn ingest_dry_run_writes_no_flush_files() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args([
+            "ingest",
+            "--kind",
+            "fact",
+            "--body",
+            "hello world",
+            "--dry-run",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    let _ = out;
+    let flush_dir = vault.path().join(".cairn").join("flush");
+    assert!(!flush_dir.exists(), "dry-run must not create .cairn/flush");
+}
+
+#[test]
+fn ingest_human_review_writes_pending_plan() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args([
+            "ingest",
+            "--kind",
+            "fact",
+            "--body",
+            "review me",
+            "--human-review",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let pending_dir = vault.path().join(".cairn").join("flush").join("pending");
+    let entries: Vec<_> = std::fs::read_dir(&pending_dir).unwrap().flatten().collect();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json")),
+        "expected at least one .plan.json in pending/"
+    );
+}
+
+#[test]
+fn ingest_dry_run_and_human_review_conflict() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args([
+            "ingest",
+            "--kind",
+            "fact",
+            "--body",
+            "x",
+            "--dry-run",
+            "--human-review",
+        ])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(
+        !out.status.success(),
+        "expected clap to reject mutually exclusive flags"
+    );
+}

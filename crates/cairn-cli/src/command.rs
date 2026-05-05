@@ -21,7 +21,7 @@ pub fn build_command() -> clap::Command {
         )
         // Eight core verbs, each with --json added.
         .subcommand(verbs::with_json(verbs::with_resync(
-            generated::verbs::ingest_subcommand(),
+            verbs::with_flush_modes(generated::verbs::ingest_subcommand()),
         )))
         .subcommand(verbs::with_json(generated::verbs::search_subcommand()))
         .subcommand(verbs::with_json(generated::verbs::retrieve_subcommand()))
