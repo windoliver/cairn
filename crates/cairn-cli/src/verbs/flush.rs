@@ -3,9 +3,6 @@
 //!
 //! Vault root resolved from `CAIRN_VAULT` env var. The plan files live
 //! under `<vault>/.cairn/flush/{pending,applied,rejected}/`.
-//!
-//! `apply` and `reject` are intentionally stubbed in this commit; later
-//! tasks (#9, #10) implement them.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -80,10 +77,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     match sub.subcommand() {
         Some(("list", m)) => list(&vault, m),
         Some(("apply", m)) => apply(&vault, m),
-        Some(("reject", _)) => {
-            eprintln!("cairn flush reject: not yet implemented in this commit");
-            ExitCode::from(70) // EX_SOFTWARE — Task 10 fills this in
-        }
+        Some(("reject", m)) => reject(&vault, m),
         _ => ExitCode::from(64),
     }
 }
@@ -113,9 +107,16 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         eprintln!("cairn flush apply: plan {id} not found in pending/");
         return ExitCode::from(66); // EX_NOINPUT
     };
-    let Ok(mut persisted) = serde_json::from_slice::<PersistedPlan>(&bytes) else {
-        eprintln!("cairn flush apply: malformed plan {id}");
-        return ExitCode::from(65);
+    #[allow(
+        clippy::single_match_else,
+        reason = "needs error detail in user-facing message"
+    )]
+    let mut persisted: PersistedPlan = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cairn flush apply: malformed plan {id}: {e}");
+            return ExitCode::from(65);
+        }
     };
 
     // Phase 1 — drift check. Without a wired MemoryStore in this PR, the
@@ -136,6 +137,65 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
+    let json = m.get_flag("json");
+    #[allow(clippy::expect_used, reason = "clap declared this required")]
+    let id = m.get_one::<String>("id").expect("clap-required");
+    #[allow(clippy::expect_used, reason = "clap declared this required")]
+    let reason = m.get_one::<String>("reason").expect("clap-required").clone();
+    let ulid = cairn_core::generated::common::Ulid(id.clone());
+
+    let pending = plan_path(vault, Bucket::Pending, &ulid);
+    let applied = plan_path(vault, Bucket::Applied, &ulid);
+    let rejected = plan_path(vault, Bucket::Rejected, &ulid);
+
+    if applied.exists() {
+        eprintln!("cairn flush reject: {id} is already terminal: applied");
+        return ExitCode::from(65);
+    }
+    if rejected.exists() {
+        eprintln!("cairn flush reject: {id} is already terminal: rejected");
+        return ExitCode::from(65);
+    }
+    let Ok(bytes) = std::fs::read(&pending) else {
+        eprintln!("cairn flush reject: plan {id} not found in pending/");
+        return ExitCode::from(66);
+    };
+    #[allow(
+        clippy::single_match_else,
+        reason = "needs error detail in user-facing message"
+    )]
+    let mut persisted: PersistedPlan = match serde_json::from_slice(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("cairn flush reject: malformed plan {id}: {e}");
+            return ExitCode::from(65);
+        }
+    };
+    persisted.status = PlanStatus::Rejected {
+        at: now_rfc3339(),
+        reason: reason.clone(),
+    };
+    if let Err(e) = persist_and_move(vault, &pending, &rejected, &persisted, &ulid) {
+        eprintln!("cairn flush reject: write failed: {e}");
+        return ExitCode::from(70);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "operation_id": id,
+                "status": "rejected",
+                "reason": reason,
+            }))
+            .unwrap_or_default()
+        );
+    } else {
+        println!("flush reject {id}: rejected ({reason})");
+    }
+    ExitCode::SUCCESS
+}
+
 /// Write `p` to `to`, then atomically remove `from`. Best-effort delete
 /// of the diff sidecar at `<vault>/.cairn/flush/pending/<id>.diff.md`.
 fn persist_and_move(
@@ -151,16 +211,19 @@ fn persist_and_move(
     let bytes = serde_json::to_vec_pretty(p).map_err(std::io::Error::other)?;
     std::fs::write(to, bytes)?;
     std::fs::remove_file(from)?;
-    let _ = std::fs::remove_file(
-        cairn_core::domain::flush_plan::store::diff_path(vault, ulid),
-    );
+    let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
+        vault, ulid,
+    ));
     Ok(())
 }
 
 fn emit_apply_ok(json: bool, id: &str, status: &str) {
     if json {
         let body = serde_json::json!({ "operation_id": id, "status": status });
-        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
     } else {
         println!("flush apply {id}: {status}");
     }
@@ -188,10 +251,7 @@ fn now_rfc3339() -> String {
     )
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "year/month/day fit in u32"
-)]
+#[allow(clippy::cast_possible_truncation, reason = "year/month/day fit in u32")]
 fn epoch_days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     let mut year = 1970_u32;
     loop {
@@ -204,12 +264,20 @@ fn epoch_days_to_ymd(mut days: u64) -> (u32, u32, u32) {
         days -= yd;
         year += 1;
     }
-    let leap =
-        (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     let months = [
         31u64,
         if leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut m = 0;
     while days >= months[m] {

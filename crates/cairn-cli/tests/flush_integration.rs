@@ -24,10 +24,20 @@ fn flush_list_outputs_pending_ids() {
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8(out.stdout).unwrap();
-    assert!(stdout.contains("01HQZK00000000000000000001"), "out: {stdout}");
-    assert!(stdout.contains("01HQZK00000000000000000002"), "out: {stdout}");
+    assert!(
+        stdout.contains("01HQZK00000000000000000001"),
+        "out: {stdout}"
+    );
+    assert!(
+        stdout.contains("01HQZK00000000000000000002"),
+        "out: {stdout}"
+    );
 }
 
 #[test]
@@ -42,19 +52,31 @@ fn flush_apply_moves_pending_to_applied() {
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let pending = plan_path(vault.path(), Bucket::Pending,
-        &cairn_core::generated::common::Ulid(id.into()));
-    let applied = plan_path(vault.path(), Bucket::Applied,
-        &cairn_core::generated::common::Ulid(id.into()));
+    let pending = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
     assert!(!pending.exists(), "pending should have been removed");
     assert!(applied.exists(), "applied should now exist");
 
     let bytes = std::fs::read(&applied).unwrap();
-    let p: cairn_core::domain::flush_plan::PersistedPlan =
-        serde_json::from_slice(&bytes).unwrap();
-    assert!(matches!(p.status, cairn_core::domain::flush_plan::PlanStatus::Applied { .. }));
+    let p: cairn_core::domain::flush_plan::PersistedPlan = serde_json::from_slice(&bytes).unwrap();
+    assert!(matches!(
+        p.status,
+        cairn_core::domain::flush_plan::PlanStatus::Applied { .. }
+    ));
 }
 
 #[test]
@@ -70,7 +92,11 @@ fn flush_apply_idempotent_on_applied() {
             .env("CAIRN_VAULT", vault.path())
             .output()
             .expect("spawn cairn");
-        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 }
 
@@ -83,5 +109,34 @@ fn flush_apply_not_found_exits_66() {
         .env("CAIRN_VAULT", vault.path())
         .output()
         .expect("spawn cairn");
-    assert_eq!(out.status.code(), Some(66), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.status.code(),
+        Some(66),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn flush_reject_moves_pending_to_rejected_with_reason() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK00000000000000000020";
+    write_pending(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "reject", id, "--reason", "operator decided no"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let rejected = plan_path(vault.path(), Bucket::Rejected,
+        &cairn_core::generated::common::Ulid(id.into()));
+    let p: cairn_core::domain::flush_plan::PersistedPlan =
+        serde_json::from_slice(&std::fs::read(&rejected).unwrap()).unwrap();
+    let cairn_core::domain::flush_plan::PlanStatus::Rejected { ref reason, .. } = p.status else {
+        panic!("expected Rejected, got {:?}", p.status);
+    };
+    assert_eq!(reason, "operator decided no");
 }
