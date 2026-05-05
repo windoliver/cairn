@@ -63,9 +63,9 @@ END;";
 pub enum BlockerCode {
     /// Legacy row has `rowid <= 0`, which cannot be preserved after 0021.
     NonPositiveRowid,
-    /// Legacy `decided_at` cannot be rendered as RFC3339 by SQLite.
+    /// Legacy `decided_at` cannot be rendered as RFC3339 by `SQLite`.
     UnrenderableDecidedAt,
-    /// Legacy `expires_at` cannot be rendered as RFC3339 by SQLite.
+    /// Legacy `expires_at` cannot be rendered as RFC3339 by `SQLite`.
     UnrenderableExpiresAt,
     /// `kind IS NULL` row carries post-0009 event-shape fields.
     KindNullEventFieldDrift,
@@ -74,7 +74,7 @@ pub enum BlockerCode {
 /// Legacy `consent_journal` row requiring operator triage.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsentJournalRepairRow {
-    /// SQLite rowid, used by the mirror cursor and by the repair command.
+    /// `SQLite` rowid, used by the mirror cursor and by the repair command.
     pub rowid: i64,
     /// Consent row primary key.
     pub consent_id: String,
@@ -128,7 +128,7 @@ pub struct ConsentJournalRepairReceipt {
 /// Enumerate legacy rows that are known to block migration 0021.
 ///
 /// # Errors
-/// Returns [`StoreError`] for SQLite failures.
+/// Returns [`StoreError`] for `SQLite` failures.
 pub fn list_blockers(conn: &Connection) -> Result<Vec<ConsentJournalRepairRow>, StoreError> {
     apply_repair_pragmas(conn)?;
     let query = format!("{BLOCKER_SELECT} WHERE kind IS NULL ORDER BY rowid ASC");
@@ -149,7 +149,7 @@ pub fn list_blockers(conn: &Connection) -> Result<Vec<ConsentJournalRepairRow>, 
 ///
 /// # Errors
 /// Returns [`StoreError::RepairNotEligible`] when `rowid` is absent or is not a
-/// row classified as a migration blocker. Other failures are SQLite, JSON codec,
+/// row classified as a migration blocker. Other failures are `SQLite`, JSON codec,
 /// or transaction errors.
 pub fn delete_blocker(
     conn: &mut Connection,

@@ -11,6 +11,7 @@ use clap::ArgMatches;
 use crate::vault::{ResolveOpts, VaultRegistryStore, resolve_vault};
 
 /// Run the `repair` command tree.
+#[must_use]
 pub fn run(matches: &ArgMatches, explicit_vault: Option<String>) -> ExitCode {
     match run_inner(matches, explicit_vault) {
         Ok(()) => ExitCode::SUCCESS,
@@ -51,7 +52,7 @@ fn run_consent_journal(
         let operator = operator_identity();
         let receipt = delete_blocker(&mut conn, rowid, reason, &operator)?;
         if json {
-            print_json(serde_json::json!({ "deleted": receipt }))?;
+            print_json(&serde_json::json!({ "deleted": receipt }))?;
         } else {
             println!(
                 "cairn repair consent-journal: deleted rowid {} (repair_id {})",
@@ -63,7 +64,7 @@ fn run_consent_journal(
 
     let blockers = list_blockers(&conn)?;
     if json {
-        print_json(serde_json::json!({ "blockers": blockers }))?;
+        print_json(&serde_json::json!({ "blockers": blockers }))?;
     } else if blockers.is_empty() {
         println!("cairn repair consent-journal: no blockers found");
     } else {
@@ -103,7 +104,7 @@ fn operator_identity() -> String {
     format!("hmn:{}", whoami::username())
 }
 
-fn print_json(value: serde_json::Value) -> Result<(), RepairCliError> {
+fn print_json(value: &serde_json::Value) -> Result<(), RepairCliError> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }

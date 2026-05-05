@@ -31,7 +31,7 @@ pub enum StoreError {
     /// classifier knows how to remediate.
     #[error("consent_journal rowid {rowid} is not repair-eligible")]
     RepairNotEligible {
-        /// The consent_journal rowid that was requested for repair.
+        /// The `consent_journal` rowid that was requested for repair.
         rowid: i64,
     },
 
