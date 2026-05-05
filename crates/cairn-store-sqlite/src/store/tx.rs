@@ -421,6 +421,11 @@ impl StoreTx<'_> {
                 false,
             )?;
 
+            // Re-stamp schema_version from the running binary on every
+            // in-place rewrite — the writer is always the current host,
+            // so leaving the prior stamp would let a contract-bumped
+            // build silently lint as stale against rows it just
+            // refreshed (Issue #258 review round 2).
             let n = self.tx.execute(
                 "UPDATE records SET \
                     record_json = ?1, \
@@ -435,8 +440,10 @@ impl StoreTx<'_> {
                     confidence = ?10, \
                     salience = ?11, \
                     tags_json = ?12, \
-                    path = ?13 \
-                  WHERE record_id = ?14",
+                    path = ?13, \
+                    schema_version_major = ?14, \
+                    schema_version_minor = ?15 \
+                  WHERE record_id = ?16",
                 params![
                     row.record_json,
                     row.body,
@@ -451,6 +458,8 @@ impl StoreTx<'_> {
                     row.salience,
                     row.tags_json,
                     row.path,
+                    row.schema_version_major,
+                    row.schema_version_minor,
                     prior_id,
                 ],
             )?;

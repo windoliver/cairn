@@ -35,7 +35,6 @@ mod tests {
     use super::*;
     use crate::config::CairnConfig;
     use crate::contract::memory_store::IndexStats;
-    use crate::verbs::lint::SchemaVersion;
 
     #[test]
     fn always_emits_one_info_finding_pointing_at_259() {
@@ -44,7 +43,6 @@ mod tests {
             records: &[],
             config: &cfg,
             index_stats: IndexStats::new(0, 0),
-            schema_version: SchemaVersion { major: 0, minor: 1 },
             author_states: crate::verbs::lint::empty_author_states(),
             unresolvable_authors: crate::verbs::lint::empty_unresolvable_authors(),
             consent_lookup: None,

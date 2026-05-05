@@ -365,10 +365,12 @@ pub struct LintHandlerResult {
 /// engine, and (when `write_report` is true) atomically writes
 /// `.cairn/lint-report.md` under `vault_root`.
 ///
-/// `schema_version` is the runtime's contract major.minor pair. Today
-/// every record runs through the legacy `consent_model` gate (see
-/// `cairn-core::verbs::lint::ConsentModel::LegacyEvent`); per-row gating
-/// arrives with #253.
+/// The §6.4 `stale_schema` check reads the current host schema version
+/// directly from `SchemaVersion::current()` (the same constant the store
+/// stamps rows with), so this handler does **not** accept a
+/// caller-supplied schema version. A second source of truth would let
+/// callers pass `SchemaVersion::from_contract(CONTRACT_VERSION)` and
+/// mark every freshly written row stale.
 ///
 /// # Errors
 ///
@@ -379,7 +381,6 @@ pub async fn lint_handler(
     identity_registry: &dyn cairn_core::contract::identity_registry::IdentityRegistry,
     consent_lookup: Option<&dyn cairn_core::contract::consent_lookup::ConsentLookup>,
     config: &cairn_core::config::CairnConfig,
-    schema_version: cairn_core::verbs::lint::SchemaVersion,
     write_report: bool,
     vault_root: &Path,
 ) -> anyhow::Result<LintHandlerResult> {
@@ -461,7 +462,6 @@ pub async fn lint_handler(
         records: &lint_records,
         config,
         index_stats,
-        schema_version,
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
         consent_lookup: effective_lookup,
@@ -1327,7 +1327,6 @@ mod tests {
     #[tokio::test]
     async fn lint_handler_writes_report_when_requested() {
         use cairn_core::config::CairnConfig;
-        use cairn_core::verbs::lint::SchemaVersion;
         use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
@@ -1343,17 +1342,9 @@ mod tests {
         let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
         let cfg = CairnConfig::default();
         let vault = tempfile::tempdir().expect("tempdir");
-        let result = lint_handler(
-            &store,
-            &registry,
-            None,
-            &cfg,
-            SchemaVersion { major: 0, minor: 1 },
-            true,
-            vault.path(),
-        )
-        .await
-        .expect("handler");
+        let result = lint_handler(&store, &registry, None, &cfg, true, vault.path())
+            .await
+            .expect("handler");
 
         // Post-rebase posture: §6.2 actor_chain is live. The empty
         // registry means the sample record's author resolves to
@@ -1376,8 +1367,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 4,
-            "expect §6.3 + §6.4 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory"
+            info_count, 3,
+            "expect §6.3 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory (§6.4 schema check went live in #258)"
         );
         assert!(
             result.has_error,
@@ -1401,7 +1392,6 @@ mod tests {
         use super::*;
         use cairn_core::config::CairnConfig;
         use cairn_core::generated::verbs::lint::{Kind, Severity};
-        use cairn_core::verbs::lint::SchemaVersion;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
         async fn run_lint(store: &FixtureStore) -> LintHandlerResult {
@@ -1409,17 +1399,9 @@ mod tests {
             let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
             let cfg = CairnConfig::default();
             let vault = tempfile::tempdir().expect("tempdir");
-            lint_handler(
-                store,
-                &registry,
-                None,
-                &cfg,
-                SchemaVersion { major: 0, minor: 1 },
-                false,
-                vault.path(),
-            )
-            .await
-            .expect("handler")
+            lint_handler(store, &registry, None, &cfg, false, vault.path())
+                .await
+                .expect("handler")
         }
 
         fn count_kind(result: &LintHandlerResult, kind: Kind, severity: Severity) -> usize {
@@ -1569,7 +1551,6 @@ mod tests {
     async fn lint_handler_flags_index_drift_with_error_severity() {
         use cairn_core::config::CairnConfig;
         use cairn_core::contract::memory_store::IndexStats;
-        use cairn_core::verbs::lint::SchemaVersion;
         use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::{FixtureStore, sample_record};
 
@@ -1581,17 +1562,9 @@ mod tests {
         let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
         let cfg = CairnConfig::default();
         let vault = tempfile::tempdir().expect("tempdir");
-        let result = lint_handler(
-            &store,
-            &registry,
-            None,
-            &cfg,
-            SchemaVersion { major: 0, minor: 1 },
-            false,
-            vault.path(),
-        )
-        .await
-        .expect("handler");
+        let result = lint_handler(&store, &registry, None, &cfg, false, vault.path())
+            .await
+            .expect("handler");
 
         assert!(result.has_error);
         let drifts: Vec<_> = result
@@ -1627,7 +1600,6 @@ mod tests {
         use cairn_core::domain::{
             ActorChainEntry, ChainRole, Identity, MemoryKind, Rfc3339Timestamp, ScopeTuple,
         };
-        use cairn_core::verbs::lint::SchemaVersion;
         use cairn_store_sqlite::SqliteIdentityRegistry;
         use cairn_test_fixtures::store::FixtureStore;
 
@@ -1657,17 +1629,9 @@ mod tests {
         let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
         let cfg = CairnConfig::default();
         let vault = tempfile::tempdir().expect("tempdir");
-        let result = lint_handler(
-            &store,
-            &registry,
-            None,
-            &cfg,
-            SchemaVersion { major: 0, minor: 1 },
-            false,
-            vault.path(),
-        )
-        .await
-        .expect("handler");
+        let result = lint_handler(&store, &registry, None, &cfg, false, vault.path())
+            .await
+            .expect("handler");
 
         let chain_findings: Vec<_> = result
             .data

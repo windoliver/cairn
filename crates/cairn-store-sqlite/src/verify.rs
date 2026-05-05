@@ -239,6 +239,9 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // filtered by the `sqlite_%` clause — do NOT add it here.
     ("table", "entity_episodes"),
     ("index", "entity_episodes_entity_idx"),
+    // 0046_records_schema_version — per-row schema-version stamp for the
+    // §6.4 stale_schema lint (#258).
+    ("index", "records_schema_version_idx"),
 ];
 
 fn hash_hex(content: &str) -> String {

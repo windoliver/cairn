@@ -49,6 +49,7 @@ struct RowEntry {
     tombstoned: bool,
     tombstone_reason: Option<TombstoneReason>,
     body_hash: BodyHash,
+    schema_version: cairn_core::contract::version::SchemaVersion,
 }
 
 impl FixtureStore {
@@ -180,6 +181,7 @@ impl MemoryStore for FixtureStore {
             tombstoned: false,
             tombstone_reason: None,
             body_hash: body_hash.clone(),
+            schema_version: cairn_core::contract::version::SchemaVersion::current(),
         };
         let outcome_id = entry.record.id.clone();
         let target_id = entry.record.target_id.clone();
@@ -253,6 +255,7 @@ impl MemoryStore for FixtureStore {
                 tombstoned: e.tombstoned,
                 tombstone_reason: e.tombstone_reason,
                 body_hash: e.body_hash.clone(),
+                schema_version: Some(e.schema_version),
             })
             .collect();
         out.sort_by_key(|v| v.version);
