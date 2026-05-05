@@ -45,7 +45,7 @@ pub mod timestamp;
 pub mod trace;
 
 pub use actor_chain::{ActorChainEntry, ChainRole, validate_chain};
-pub use admission::{AdmissionError, SignedAdmission, WalActionKind};
+pub use admission::{AdmissionError, SignedAdmission, WalActionKind, derive_target_hash};
 pub use body_hash::BodyHash;
 pub use canonical::CanonicalRecordHash;
 pub use capture::{
