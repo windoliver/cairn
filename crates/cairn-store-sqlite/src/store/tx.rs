@@ -21,7 +21,7 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, VerifiedSignedIntent};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, SignedAdmission};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
@@ -100,26 +100,32 @@ impl StoreTx<'_> {
     ///
     /// # Verification boundary
     ///
-    /// The argument type is [`VerifiedSignedIntent`], the sealed token
-    /// minted only by [`cairn_core::verifier::EnvelopeVerifier`] —
-    /// callers must run signature, expiry, lifecycle, and scope checks
-    /// before reaching this method. The sealed witness pattern enforces
-    /// the contract at the type system: any future verb-layer code
-    /// that tries to admit a raw [`cairn_core::generated::envelope::SignedIntent`]
-    /// fails to compile (issue #51 / #52 round-2 review #1).
+    /// The argument is a [`SignedAdmission`] — the sealed token whose
+    /// constructor recomputes `sha256(payload)` and asserts equality
+    /// with `intent.target_hash`. That binds the verb-layer's chosen
+    /// `kind` and `plan_ref` to the issuer's signature: a buggy
+    /// dispatcher cannot stage replay state for one `kind` under a
+    /// signature meant for another. See [`SignedAdmission::new`] for
+    /// the construction contract. Round-12 review #1.
     ///
     /// # Errors
     ///
     /// Returns [`ReplayError`] for replay-ledger violations (duplicate
     /// `operation_id` / nonce, out-of-order sequence, missing or
-    /// expired challenge, or an envelope missing both modes).
-    pub fn prepare_wal_with_replay(
-        &self,
-        intent: &VerifiedSignedIntent,
-        inputs: &WalPrepareInputs<'_>,
-    ) -> Result<(), ReplayError> {
+    /// expired challenge, an envelope missing both modes, or admission
+    /// past the signed `expires_at`).
+    pub fn prepare_wal_with_replay(&self, admission: &SignedAdmission) -> Result<(), ReplayError> {
         let now_ms = current_unix_ms();
-        crate::replay::prepare_wal_with_replay(&self.tx, intent.as_inner(), inputs, now_ms)
+        let inputs = WalPrepareInputs {
+            kind: admission.kind().as_db_str(),
+            plan_ref: admission.plan_ref(),
+        };
+        crate::replay::prepare_wal_with_replay(
+            &self.tx,
+            admission.intent().as_inner(),
+            &inputs,
+            now_ms,
+        )
     }
 
     /// In-crate test-only escape hatch: admit a raw, unverified
