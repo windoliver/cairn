@@ -5,5 +5,6 @@ pub mod consent;
 pub mod hot_memory;
 pub mod index_drift;
 pub mod malformed;
+pub mod projection;
 pub mod provenance;
 pub mod schema;
