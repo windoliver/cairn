@@ -136,6 +136,9 @@ The IDL-generated `HotRecipeStep` is structurally identical to the hand-written 
 
 ## 5. Pure helper in `cairn-core`
 
+**Trust model.** Producer-side step-order alignment is enforced by construction in `build_segments(recipe, bodies)`. Generic-envelope decode in `cairn-core` checks payload self-consistency (`validate_base` always; `validate_segments` whenever `segments.is_some()`) but does **not** enforce that the steps match a configured recipe — it cannot, because the wire layer has no access to `HotMemoryConfig`. Consumers that know which recipe their producer should be running call `validate_with_recipe` themselves. This is the same trust model as every other typed wire surface in the workspace: structural validity at the boundary, semantic alignment by either producer-side construction or caller-supplied expectation.
+
+
 New module `crates/cairn-core/src/verbs/assemble_hot/segments.rs` (no I/O, no adapter deps):
 
 ```rust
@@ -332,7 +335,7 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 
 | Criterion | Where verified |
 |---|---|
-| `segments` populated in declaration order | helper signature `build_segments(recipe, bodies)` aligns by construction (§5); unit `build_segments_aligns_steps_to_recipe`; `validate_with_recipe` rejects mismatches at the trust boundary |
+| `segments` populated in declaration order | **Producer side, by construction:** `build_segments(recipe, bodies)` accepts recipe + bodies as parallel slices and emits `segments[i].step == recipe[i]` for all i — the helper signature makes reorder/dup/omit unrepresentable. **Consumer side, opt-in:** `validate_with_recipe(data, expected)` enforces the same invariant when the consumer knows which recipe to expect. The generic envelope hook does **not** enforce step order, because `cairn-core` envelope decoding has no access to `HotMemoryConfig` (config is loaded by `cairn-cli`/SDK callers, not the wire layer). This is a deliberate trust-model choice: in P0, the only producer is `cairn-core::build_segments`, and the type system enforces alignment there. External producers that bypass the helper are out of the P0 trust model; consumers facing such producers MUST call `validate_with_recipe` themselves. Tests: unit `build_segments_aligns_steps_to_recipe`; `validate_with_recipe_rejects_step_mismatch`. |
 | `byte_range` covers `[0, bytes)` with no gaps / no overlaps | property `coverage_invariant`; `validate()` rejects malformed payloads at runtime (§5) |
 | `content_hash` byte-stable across runs when inputs unchanged | property `hash_stability`; insta snapshot |
 | `--json` output of `cairn assemble_hot` includes segments; insta snapshot covers shape | **Partial.** The wire shape is locked by an insta snapshot of `AssembleHotData` JSON serialized from a hand-built fixture. The CLI binary itself still returns `unimplemented_response` because the verb is not yet wired to a `HotMemoryAssembler`; the end-to-end CLI snapshot ships with that wiring PR (missing-half of #193). Called out in §2 and the PR description. |
@@ -343,7 +346,7 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 
 - **Codegen drift.** Editing `assemble_hot.json` requires re-running `cargo run -p cairn-idl --bin cairn-codegen` and committing regenerated `.rs` across `cairn-core`, `cairn-mcp`, `cairn-cli`, `cairn-sdk`. CI gates on no-diff. The codegen must emit `Option<Vec<HotSegment>>` with `#[serde(default)]` for `segments` (matching §4). It must **not** emit `skip_serializing_if` — the wire shape requires that an explicitly emitted empty array survives serialization (see §3 / §4 round-trip semantics). If the existing codegen does not handle the `optional + default + no-skip` combination correctly, that fix is a sub-task of this PR.
 - **Skill-pack codegen.** `crates/cairn-idl/tests/codegen_emit_skill.rs` and `skill_compat.rs` likely snapshot the verb's data shape — `cargo insta review` + commit.
-- **Envelope hook is new code.** `ResponseEnvelope::try_decode_data` for `AssembleHot` currently does plain serde. This PR adds a post-deserialize `validate()` call (when `segments` is non-empty). That is generated code today — we either (a) extend the codegen to emit per-verb post-decode hooks, or (b) wrap the generated decoder in a hand-written shim. Decision: option (b) for this PR (smallest blast radius); generalising the codegen is filed as a follow-up.
+- **Envelope hook is new code.** `ResponseEnvelope::try_decode_data` for `AssembleHot` currently does plain serde. This PR adds the post-deserialize hook described in §5: it calls `validate_base(&data)` **unconditionally** and `validate_segments(&data)` **whenever `data.segments.is_some()`** (i.e. for both `Some(vec![])` and `Some(vec![...])` — the canonical-empty invariant must be enforced too, otherwise the three-state contract is unsound). That is generated code today — we either (a) extend the codegen to emit per-verb post-decode hooks, or (b) wrap the generated decoder in a hand-written shim. Decision: option (b) for this PR (smallest blast radius); generalising the codegen is filed as a follow-up.
 - **`bytes` field semantics.** Now equals both `prefix.len() as u64` and `segments.last().byte_end` (when `segments` is non-empty). Property test asserts both.
 - **New direct dep.** `sha2` becomes a direct `cairn-core` dep. Justify in PR; verify with `cargo tree`.
 - **`#[non_exhaustive]` enums** force downstream `match` arms. Acceptable per CLAUDE.md §6.10.
