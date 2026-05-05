@@ -51,7 +51,7 @@ Sibling to `pipeline/extract/` and `pipeline/filter/`. Brief §5.2 places this
 stage between Extract and Store: `… Extract → Filter → Classify → Resolve → Store`.
 
 Module is registered in `pipeline/mod.rs`. No new workspace-crate deps. One
-external dep added: `xxhash-rust` (feature `xxh3`) for stable, fast,
+external dep added: `twox-hash` (feature `xxh3`) for stable, fast,
 non-cryptographic hashing — std `DefaultHasher` is documented as cross-version
 unstable, so determinism (required for reproducible vault state and snapshot
 tests) rules it out.
@@ -194,7 +194,7 @@ fn fuzzy_match<'a>(
 - 3-gram shingles over UTF-8 chars (use `char_indices()` to derive byte ranges
   — never split mid-char). Strings shorter than 3 chars produce one shingle of
   the whole string.
-- Hash function: `xxhash_rust::xxh3::xxh3_64_with_seed(bytes, seed)`. One seed
+- Hash function: `twox_hash::XxHash64::oneshot(seed, bytes)`. One seed
   per permutation slot (precomputed in `EntityResolver::new` from
   `config.hash_seed` via splitmix64).
 - For each permutation `i`: signature slot `i = min over shingles of hash`.
@@ -330,9 +330,9 @@ the same per-existing signatures — no extra hashing.
 - `./scripts/check-core-boundary.sh` — must pass; no new workspace-crate deps.
 
 ### Supply chain
-- `cargo deny check` — adds `xxhash-rust` license (MIT/Apache-2.0) to
-  allowlist if not present.
-- `cargo machete` — verify `xxhash-rust` is actually used.
+- `cargo deny check` — `twox-hash` is dual-licensed Apache-2.0 OR MIT,
+  already covered by `deny.toml` allowlist; no allowlist change needed.
+- `cargo machete` — verify `twox-hash` is actually used.
 
 ## 8. Acceptance criteria mapping (issue #187)
 
