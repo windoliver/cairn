@@ -786,7 +786,19 @@ impl SqliteMemoryStore {
     /// the trait must stay `dyn`-compatible — generic methods break
     /// object safety.
     ///
+    /// The transaction is opened with [`TransactionBehavior::Immediate`]
+    /// so the writer lock is acquired up front (issue #52 round-9
+    /// review #1). Without this, multi-connection write paths that
+    /// allocate per-row identifiers via `MAX(...) + 1` race: two
+    /// readers see the same `MAX` snapshot, one wins, the other surfaces
+    /// the table's `must_advance` trigger as `ReplayError::Sqlite`. With
+    /// IMMEDIATE the second writer waits on the file lock; its initial
+    /// snapshot is acquired AFTER the first commit, so its
+    /// `MAX(issued_seq)` reflects the new state. WAL-mode read traffic
+    /// remains unblocked.
+    ///
     /// [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
+    /// [`TransactionBehavior::Immediate`]: rusqlite::TransactionBehavior::Immediate
     ///
     /// # Errors
     ///
@@ -808,7 +820,7 @@ impl SqliteMemoryStore {
         let conn = self.require_conn("with_tx")?.clone();
         let result = conn
             .call(move |c| {
-                let tx = c.transaction()?;
+                let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let mut handle = StoreTx { tx };
                 match f(&mut handle) {
                     Ok(value) => {

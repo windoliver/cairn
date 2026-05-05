@@ -321,6 +321,69 @@ fn duplicate_operation_id_under_concurrency() {
 }
 
 #[test]
+fn multi_connection_admit_no_issued_seq_constraint_violation() {
+    // Round-8/9 review: independent SQLite connections in WAL mode must
+    // not race on `issued_seq` allocation. Each thread opens its OWN
+    // connection (no shared Mutex<Connection>) and uses IMMEDIATE
+    // transactions via `with_busy_retry_per_conn`, so the writer lock
+    // is grabbed eagerly. Every admission is a unique issuer +
+    // operation_id + nonce, so the only contention is `issued_seq`.
+    let dir = tempdir().expect("tempdir");
+    let db = dir.path().join("multi.db");
+    // Migrate once so concurrent opens skip the runner.
+    let _seed = open_at(&db);
+
+    let n_threads = 6;
+    let success = Arc::new(AtomicUsize::new(0));
+    let other = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for i in 0..n_threads {
+        let db = db.clone();
+        let success = Arc::clone(&success);
+        let other = Arc::clone(&other);
+        handles.push(thread::spawn(move || {
+            // Independent connection per thread — no shared mutex.
+            let mut conn = Connection::open(&db).expect("open per-thread connection");
+            conn.busy_timeout(Duration::from_secs(5))
+                .expect("busy timeout");
+            let issuer = format!("hmn:multi-{i}");
+            let intent = intent_seq(&issuer, i, 1, i + 1);
+            // BEGIN IMMEDIATE matches what `with_tx` issues in
+            // production after the round-9 fix.
+            let result: Result<(), ReplayError> = (|| {
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(ReplayError::Sqlite)?;
+                prepare_wal_with_replay(&tx, &intent, &inputs_at(), NOW_MS + i64::from(i))?;
+                tx.commit().map_err(ReplayError::Sqlite)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => success.fetch_add(1, Ordering::SeqCst),
+                Err(e) => {
+                    eprintln!("unexpected: {e:?}");
+                    other.fetch_add(1, Ordering::SeqCst)
+                }
+            };
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    assert_eq!(
+        success.load(Ordering::SeqCst),
+        n_threads as usize,
+        "every distinct-issuer admit must succeed under multi-connection contention"
+    );
+    assert_eq!(
+        other.load(Ordering::SeqCst),
+        0,
+        "no spurious replay errors under issued_seq contention"
+    );
+}
+
+#[test]
 fn handshake_ttl_expires_unused_challenge() {
     // Mint a challenge with a short TTL, advance the clock past expiry,
     // then attempt to consume — must return ChallengeExpired and leave

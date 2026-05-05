@@ -25,6 +25,41 @@
 PRAGMA defer_foreign_keys = ON;
 PRAGMA legacy_alter_table = ON;
 
+-- Drift guard: the rebuild below DROPs `used` after a rename, so any
+-- out-of-band trigger / index attached to it would be silently
+-- destroyed and the post-migration fingerprint would still validate.
+-- Mirrors 0041's pre-rebuild guard — fail the migration loudly if a
+-- replay-ledger object exists outside the explicit allowlist below
+-- (issue #52 round-9 review #2).
+CREATE TEMP TABLE _mig0046_drift_guard (
+  msg TEXT NOT NULL CHECK (msg = 'ok')
+);
+INSERT INTO _mig0046_drift_guard (msg)
+  SELECT 'migration 0046: unexpected schema object on used / issuer_seq / outstanding_challenges: '
+         || type || ':' || name
+    FROM sqlite_schema
+   WHERE (
+           tbl_name IN ('used', 'issuer_seq', 'outstanding_challenges')
+        OR name IN ('used', 'issuer_seq', 'outstanding_challenges')
+         )
+     AND name NOT LIKE 'sqlite_autoindex_%'
+     AND (type, name) NOT IN (
+       VALUES
+         ('table', 'used'),
+         ('table', 'issuer_seq'),
+         ('table', 'outstanding_challenges'),
+         ('index', 'outstanding_challenges_exp_idx'),
+         ('trigger', 'used_issuer_matches_wal'),
+         ('trigger', 'used_sequence_must_advance'),
+         ('trigger', 'used_advance_high_water'),
+         ('trigger', 'used_immutable'),
+         ('trigger', 'used_no_delete'),
+         ('trigger', 'issuer_seq_no_delete'),
+         ('trigger', 'issuer_seq_insert_must_match_ledger'),
+         ('trigger', 'issuer_seq_only_via_ledger')
+     );
+DROP TABLE _mig0046_drift_guard;
+
 -- Drop the 0003 triggers; they reference NEW.sequence as if it were
 -- NOT NULL and would fire incorrectly against a NULL-sequence row.
 DROP TRIGGER IF EXISTS used_issuer_matches_wal;
