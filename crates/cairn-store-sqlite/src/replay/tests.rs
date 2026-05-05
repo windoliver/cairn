@@ -89,10 +89,7 @@ fn inputs(now_ms: i64) -> WalPrepareInputs<'static> {
     WalPrepareInputs {
         kind: "upsert",
         plan_ref: None,
-        scope_json: r#"{"tenant":"acme","workspace":"ws","entity":"ent","tier":"project"}"#,
-        envelope_json: "{}",
         now_ms,
-        expires_at_ms: now_ms + 5 * 60 * 1000,
     }
 }
 
@@ -220,7 +217,16 @@ fn duplicate_operation_id_rejected_as_replay() {
     // must surface Duplicate, not Sqlite.
     let dup = intent_with(&op_id(1), &nonce_b64(2), Some(2), None);
     let err = prepare_wal_with_replay(&tx, &dup, &inputs(NOW_MS + 1)).expect_err("replay");
-    assert!(matches!(err, ReplayError::Duplicate { .. }));
+    // Either Duplicate (same envelope retry) or OperationMismatch
+    // (same op_id, different envelope content) — both are correct
+    // fail-closed responses (round-1 and round-5 review fixes).
+    assert!(
+        matches!(
+            err,
+            ReplayError::Duplicate { .. } | ReplayError::OperationMismatch { .. }
+        ),
+        "expected Duplicate or OperationMismatch, got {err:?}"
+    );
 }
 
 #[test]
@@ -463,6 +469,86 @@ fn wal_op_mismatch_rejected_on_conflict() {
         ),
         "expected OperationMismatch or Duplicate, got {err:?}"
     );
+}
+
+#[test]
+fn chain_parents_persisted_into_wal_op_deps() {
+    // Round-5 review #1: signed `chain_parents` must land in
+    // `wal_op_deps` so the WAL recovery / commit scheduler honours
+    // the partial ordering the issuer signed.
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    let parent_a = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    prepare_wal_with_replay(&tx, &parent_a, &inputs(NOW_MS)).expect("parent A");
+    let parent_b = intent_with(&op_id(2), &nonce_b64(2), Some(2), None);
+    prepare_wal_with_replay(&tx, &parent_b, &inputs(NOW_MS + 1)).expect("parent B");
+
+    // Child cites both parents in chain_parents.
+    let mut child = intent_with(&op_id(3), &nonce_b64(3), Some(3), None);
+    child.chain_parents = vec![
+        cairn_core::generated::common::Ulid(op_id(1)),
+        cairn_core::generated::common::Ulid(op_id(2)),
+    ];
+    prepare_wal_with_replay(&tx, &child, &inputs(NOW_MS + 2)).expect("child");
+
+    let dep_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM wal_op_deps WHERE operation_id = ?1",
+            rusqlite::params![&op_id(3)],
+            |r| r.get(0),
+        )
+        .expect("count deps");
+    assert_eq!(dep_count, 2, "two parent edges must persist");
+    tx.commit().expect("commit");
+}
+
+#[test]
+fn chain_parents_unknown_parent_rejected() {
+    // Unknown parent operation_id ⇒ FK violation on wal_op_deps; the
+    // whole admission rolls back so replay state stays consistent.
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    let mut intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    intent.chain_parents = vec![cairn_core::generated::common::Ulid(op_id(99))]; // not in wal_ops
+    let err = prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect_err("unknown parent");
+    // Surfaces as Sqlite (FK constraint failure); the trigger / FK
+    // chain may produce different SQLite error codes across versions,
+    // so just assert the failure mode is Sqlite-level (i.e., not
+    // Duplicate / OutOfOrder / OperationMismatch).
+    assert!(matches!(err, ReplayError::Sqlite(_)), "got {err:?}");
+}
+
+#[test]
+fn signed_payload_columns_derive_from_intent() {
+    // Round-5 review #2: scope_json + expires_at_ms come from the
+    // verified intent, not from caller-supplied WalPrepareInputs.
+    // Caller cannot widen scope or extend TTL beyond the signature.
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("admit");
+
+    let (scope_json, expires_at): (String, i64) = tx
+        .query_row(
+            "SELECT scope_json, expires_at FROM wal_ops WHERE operation_id = ?1",
+            rusqlite::params![&op_id(1)],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("read row");
+    // The fixture intent's `expires_at` is "2026-04-22T14:07:11Z".
+    // chrono's RFC-3339 parser converts this to 1_776_866_831_000 ms
+    // (epoch-ms). Compare exactly so future parse drift fails loudly.
+    assert_eq!(expires_at, 1_776_866_831_000);
+    assert!(
+        scope_json.contains("\"tenant\":\"acme\""),
+        "scope_json: {scope_json}"
+    );
+    assert!(scope_json.contains("\"workspace\":\"ws\""));
+    assert!(scope_json.contains("\"entity\":\"ent\""));
+    assert!(scope_json.contains("\"tier\":\"project\""));
 }
 
 #[test]

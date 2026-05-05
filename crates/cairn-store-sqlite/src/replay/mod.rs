@@ -124,6 +124,12 @@ pub enum ReplayError {
 /// `used_issuer_matches_wal` BEFORE-INSERT trigger reads
 /// `wal_ops.issuer` for the same `operation_id` at insert time and
 /// would abort if the row were absent.
+///
+/// Signed-payload columns (`scope_json`, `expires_at_ms`,
+/// `envelope_json`) are **derived from the verified intent**, not
+/// taken from the caller — round-4 review #2 closed the path where a
+/// verified envelope could be staged with mismatched authorization
+/// metadata.
 #[derive(Debug, Clone)]
 pub struct WalPrepareInputs<'a> {
     /// `wal_ops.kind` — must be one of the closed CHECK values from
@@ -132,17 +138,10 @@ pub struct WalPrepareInputs<'a> {
     pub kind: &'a str,
     /// Optional `plan_ref` ULID — set when the verb stages a plan blob.
     pub plan_ref: Option<&'a str>,
-    /// Serialized scope JSON — `wal_ops.scope_json` is `TEXT NOT NULL`.
-    pub scope_json: &'a str,
-    /// Full envelope JSON — `wal_ops.envelope` is `TEXT NOT NULL`.
-    pub envelope_json: &'a str,
     /// Wall-clock unix-ms `now`. Used for `wal_ops.issued_at`,
     /// `wal_ops.updated_at`, `used.committed_at`, and the challenge
     /// expiry check.
     pub now_ms: i64,
-    /// `wal_ops.expires_at` unix-ms. Caller derives from
-    /// `intent.expires_at` after envelope verification.
-    pub expires_at_ms: i64,
 }
 
 /// Atomically admit a verified envelope: insert the WAL `PREPARED` row,
@@ -179,6 +178,14 @@ pub(crate) fn prepare_wal_with_replay(
         return Err(ReplayError::ModeXorViolation);
     }
 
+    // Round-4 review #2: derive the signed-payload columns from the
+    // intent itself. Caller cannot widen the scope or extend the TTL
+    // beyond what the issuer signed.
+    let scope_json = canonical_scope_json(&intent.scope);
+    let envelope_json =
+        serde_json::to_string(intent).map_err(|e| ReplayError::Sqlite(rusqlite_codec_err(&e)))?;
+    let expires_at_ms = parse_rfc3339_to_ms(&intent.expires_at)?;
+
     let issued_seq: i64 = tx.query_row(
         "SELECT COALESCE(MAX(issued_seq), 0) + 1 FROM wal_ops",
         [],
@@ -205,12 +212,12 @@ pub(crate) fn prepare_wal_with_replay(
             intent.operation_id.0,
             issued_seq,
             inputs.kind,
-            inputs.envelope_json,
+            envelope_json,
             intent.issuer.0,
             intent.target_hash,
-            inputs.scope_json,
+            scope_json,
             inputs.plan_ref,
-            inputs.expires_at_ms,
+            expires_at_ms,
             intent.signature.0,
             inputs.now_ms,
         ],
@@ -223,7 +230,20 @@ pub(crate) fn prepare_wal_with_replay(
         // envelope under this `operation_id`; admitting under that row
         // would silently consume sequence/challenge state for an
         // unrelated WAL admission.
-        verify_existing_wal_op_matches(tx, intent, inputs)?;
+        verify_existing_wal_op_matches(tx, intent, inputs.kind, &envelope_json, &scope_json)?;
+    } else {
+        // Fresh row — persist the signed `chain_parents` DAG so the
+        // §5.6 WAL recovery / commit scheduler honours the partial
+        // ordering the issuer signed. The 0002 schema enforces strict
+        // `issued_seq` precedence and acyclicity via triggers; an
+        // unknown parent fails the FK fail-closed (round-5 review #1).
+        for parent in &intent.chain_parents {
+            tx.execute(
+                "INSERT INTO wal_op_deps (operation_id, depends_on_op_id) \
+                 VALUES (?1, ?2)",
+                params![intent.operation_id.0, parent.0],
+            )?;
+        }
     }
 
     consume_intent(tx, intent, inputs.now_ms)
@@ -239,7 +259,9 @@ pub(crate) fn prepare_wal_with_replay(
 fn verify_existing_wal_op_matches(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
-    inputs: &WalPrepareInputs<'_>,
+    expected_kind: &str,
+    expected_envelope_json: &str,
+    expected_scope_json: &str,
 ) -> Result<(), ReplayError> {
     let row: Option<(String, String, String, String, String, String)> = tx
         .query_row(
@@ -265,18 +287,74 @@ fn verify_existing_wal_op_matches(
         // rolls back rather than silently advancing replay state.
         return Err(ReplayError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
     };
-    if kind != inputs.kind
+    if kind != expected_kind
         || issuer != intent.issuer.0
         || target_hash != intent.target_hash
         || signature != intent.signature.0
-        || envelope != inputs.envelope_json
-        || scope_json != inputs.scope_json
+        || envelope != expected_envelope_json
+        || scope_json != expected_scope_json
     {
         return Err(ReplayError::OperationMismatch {
             operation_id: intent.operation_id.0.clone(),
         });
     }
     Ok(())
+}
+
+/// Canonical JSON for `intent.scope` — field-ordered, no whitespace.
+/// Pinning the field order keeps the `wal_ops.scope_json` column
+/// stable across re-serialisations so [`verify_existing_wal_op_matches`]
+/// can do a byte-equal comparison on retry.
+fn canonical_scope_json(scope: &cairn_core::generated::envelope::SignedIntentScope) -> String {
+    use cairn_core::generated::envelope::SignedIntentScopeTier;
+    let tier = match scope.tier {
+        SignedIntentScopeTier::Private => "private",
+        SignedIntentScopeTier::Session => "session",
+        SignedIntentScopeTier::Project => "project",
+        SignedIntentScopeTier::Team => "team",
+        SignedIntentScopeTier::Org => "org",
+        SignedIntentScopeTier::Public => "public",
+        // The IDL-generated enum is `#[non_exhaustive]`. Future tier
+        // additions land via codegen; treat them as unknown until the
+        // canonicaliser is updated explicitly.
+        _ => "unknown",
+    };
+    // Hand-rolled to keep field order deterministic — the IDL fixes
+    // `entity, tenant, tier, workspace` (alphabetical), and the wire
+    // schema is `serde(deny_unknown_fields)` so consumers parse this
+    // back without surprises. JSON-escape the strings via serde_json.
+    format!(
+        r#"{{"entity":{e},"tenant":{tn},"tier":"{ti}","workspace":{w}}}"#,
+        e = serde_json::Value::String(scope.entity.clone()),
+        tn = serde_json::Value::String(scope.tenant.clone()),
+        ti = tier,
+        w = serde_json::Value::String(scope.workspace.clone()),
+    )
+}
+
+/// Wrap a `serde_json::Error` as a [`rusqlite::Error`] so call sites
+/// can keep the single `ReplayError::Sqlite` arm.
+fn rusqlite_codec_err(err: &serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("serde_json: {err}"),
+    )))
+}
+
+/// Parse an RFC-3339 timestamp into unix-ms. The IDL guarantees the
+/// shape on the wire; in-process callers that bypass IDL validation
+/// surface as [`ReplayError::Sqlite`].
+fn parse_rfc3339_to_ms(s: &str) -> Result<i64, ReplayError> {
+    use chrono::DateTime;
+    let dt: DateTime<chrono::FixedOffset> = DateTime::parse_from_rfc3339(s).map_err(|e| {
+        ReplayError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("expires_at parse: {e}"),
+            ),
+        )))
+    })?;
+    Ok(dt.timestamp_millis())
 }
 
 /// Run the per-mode replay-ledger consume against an existing

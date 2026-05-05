@@ -45,10 +45,7 @@ fn inputs(now_ms: i64) -> WalPrepareInputs<'static> {
     WalPrepareInputs {
         kind: "upsert",
         plan_ref: None,
-        scope_json: r#"{"tenant":"acme","workspace":"ws","entity":"ent","tier":"project"}"#,
-        envelope_json: "{}",
         now_ms,
-        expires_at_ms: now_ms + 5 * 60 * 1000,
     }
 }
 

@@ -85,10 +85,7 @@ fn inputs_at(now_ms: i64) -> WalPrepareInputs<'static> {
     WalPrepareInputs {
         kind: "upsert",
         plan_ref: None,
-        scope_json: r#"{"tenant":"acme","workspace":"ws","entity":"ent","tier":"project"}"#,
-        envelope_json: "{}",
         now_ms,
-        expires_at_ms: now_ms + 5 * 60 * 1000,
     }
 }
 
@@ -304,9 +301,11 @@ fn duplicate_operation_id_under_concurrency() {
             });
             match result {
                 Ok(()) => success.fetch_add(1, Ordering::SeqCst),
-                Err(ReplayError::Duplicate { .. } | ReplayError::OutOfOrder { .. }) => {
-                    dup_or_oo.fetch_add(1, Ordering::SeqCst)
-                }
+                Err(
+                    ReplayError::Duplicate { .. }
+                    | ReplayError::OutOfOrder { .. }
+                    | ReplayError::OperationMismatch { .. },
+                ) => dup_or_oo.fetch_add(1, Ordering::SeqCst),
                 Err(e) => panic!("unexpected: {e:?}"),
             };
         }));
