@@ -42,9 +42,12 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
 fn ingest_with_url(url: String) -> IngestArgs {
     IngestArgs {
         body: None,
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: Some(url),
@@ -219,9 +222,12 @@ proptest! {
         prop_assume!(count != 1);
         let args = IngestArgs {
             body: has_body.then(|| "b".to_owned()),
+            dry_run: None,
             file: has_file.then(|| "/f".to_owned()),
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: has_url.then(|| "http://example.com/x".to_owned()),

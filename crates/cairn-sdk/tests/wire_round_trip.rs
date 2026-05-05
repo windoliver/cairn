@@ -32,6 +32,7 @@ fn ingest_response_round_trips() {
         data: IngestData {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
+            plan_ref: None,
         },
     };
     let parsed = round_trip(&resp);
@@ -87,6 +88,7 @@ fn target_on_non_retrieve_fails_round_trip() {
         data: IngestData {
             record_id: ulid(),
             session_id: "s".to_owned(),
+            plan_ref: None,
         },
     };
     assert!(serde_json::to_value(&resp).is_err());
@@ -107,6 +109,7 @@ fn malformed_operation_id_caught_by_canonical_deserializer() {
         data: IngestData {
             record_id: ulid(),
             session_id: "s".to_owned(),
+            plan_ref: None,
         },
     };
     let json = serde_json::to_value(&resp).expect("SDK serialize succeeds");
