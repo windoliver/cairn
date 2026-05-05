@@ -29,3 +29,59 @@ fn flush_list_outputs_pending_ids() {
     assert!(stdout.contains("01HQZK00000000000000000001"), "out: {stdout}");
     assert!(stdout.contains("01HQZK00000000000000000002"), "out: {stdout}");
 }
+
+#[test]
+fn flush_apply_moves_pending_to_applied() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK00000000000000000010";
+    write_pending(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+
+    let pending = plan_path(vault.path(), Bucket::Pending,
+        &cairn_core::generated::common::Ulid(id.into()));
+    let applied = plan_path(vault.path(), Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()));
+    assert!(!pending.exists(), "pending should have been removed");
+    assert!(applied.exists(), "applied should now exist");
+
+    let bytes = std::fs::read(&applied).unwrap();
+    let p: cairn_core::domain::flush_plan::PersistedPlan =
+        serde_json::from_slice(&bytes).unwrap();
+    assert!(matches!(p.status, cairn_core::domain::flush_plan::PlanStatus::Applied { .. }));
+}
+
+#[test]
+fn flush_apply_idempotent_on_applied() {
+    let vault = tempfile::tempdir().unwrap();
+    let id = "01HQZK00000000000000000011";
+    write_pending(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    for _ in 0..2 {
+        let out = std::process::Command::new(bin)
+            .args(["flush", "apply", id])
+            .env("CAIRN_VAULT", vault.path())
+            .output()
+            .expect("spawn cairn");
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn flush_apply_not_found_exits_66() {
+    let vault = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", "01HQZK0000000000000000NONE"])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(out.status.code(), Some(66), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}
