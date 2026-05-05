@@ -1349,12 +1349,14 @@ mod tests {
         // Post-rebase posture: §6.2 actor_chain is live. The empty
         // registry means the sample record's author resolves to
         // MissingFromRegistry → BrokenActorChain Error, tripping
-        // has_error. §6.5 consent runs against FixtureStore (cap=true,
-        // every record LegacyEvent) but FixtureStore does not
-        // implement ConsentLookup, so consent.rs returns no findings.
-        // Info findings: §6.3 + §6.4 + §6.6 deferred-info coverage
-        // gaps + the §6.2 signature-verification-deferred advisory =
-        // 4.
+        // has_error. §6.5 consent runs against FixtureStore
+        // (cap=true, every record LegacyEvent) but FixtureStore does
+        // not implement ConsentLookup, so consent.rs returns no
+        // findings. Info findings: §6.3 deferred-info + §6.2
+        // signature-verification-deferred advisory = 2. §6.4 (#258)
+        // is live; §6.6 (#259) is a real canary that emits a
+        // `Warning`-severity DeferredCheck — counted under warnings,
+        // not infos.
         let info_count = result
             .data
             .findings
@@ -1367,8 +1369,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 3,
-            "expect §6.3 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory (§6.4 schema check went live in #258)"
+            info_count, 2,
+            "expect §6.3 deferred-info finding + §6.2 signature-verification-deferred advisory"
         );
         assert!(
             result.has_error,
@@ -1757,6 +1759,194 @@ mod tests {
             );
         } else {
             panic!("by_kind must be an object");
+        }
+    }
+
+    /// E2E corner cases for the §6.6 hot-memory canary (#259) at the
+    /// CLI handler boundary. Each test seeds a `FixtureStore`, builds
+    /// a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
+    /// the full lint pipeline, and inspects only §6.6-specific
+    /// findings. Author-registry errors from the empty registry are
+    /// ignored — the §6.2 path is exercised elsewhere.
+    mod hot_memory_canary_e2e {
+        use super::*;
+        use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
+        use cairn_core::domain::taxonomy::MemoryKind;
+        use cairn_core::generated::verbs::lint::{Kind, Severity};
+        use cairn_store_sqlite::SqliteIdentityRegistry;
+        use cairn_test_fixtures::sample_record;
+        use cairn_test_fixtures::store::FixtureStore;
+
+        async fn run_handler(store: &FixtureStore, cfg: &CairnConfig) -> LintHandlerResult {
+            let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+            let vault = tempfile::tempdir().expect("tempdir");
+            lint_handler(store, &registry, None, cfg, false, vault.path())
+                .await
+                .expect("handler")
+        }
+
+        fn count_kind_severity(
+            result: &LintHandlerResult,
+            kind: Kind,
+            severity: Severity,
+        ) -> usize {
+            result
+                .data
+                .findings
+                .iter()
+                .filter(|f| f.kind == kind && f.severity == severity)
+                .count()
+        }
+
+        fn count_259_deferred(result: &LintHandlerResult) -> usize {
+            result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::DeferredCheck
+                        && f.tracking_issue == Some(259)
+                        && f.severity == Severity::Warning
+                })
+                .count()
+        }
+
+        async fn upsert_with(
+            store: &FixtureStore,
+            seed: u64,
+            kind: MemoryKind,
+            body: String,
+            salience: f32,
+        ) {
+            use cairn_core::contract::memory_store::MemoryStore;
+            let mut r = sample_record(seed);
+            r.kind = kind;
+            r.body = body;
+            r.salience = salience;
+            store.upsert(&r).await.expect("upsert");
+        }
+
+        #[tokio::test]
+        async fn default_recipe_empty_vault_emits_only_259_deferred_warning() {
+            let store = FixtureStore::default();
+            let cfg = CairnConfig::default();
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(count_259_deferred(&result), 1);
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+        }
+
+        #[tokio::test]
+        async fn records_only_recipe_over_budget_emits_warning_no_259_deferred() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 1, MemoryKind::Project, "x".repeat(2048), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 256;
+
+            let result = run_handler(&store, &cfg).await;
+            let warnings =
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning);
+            assert_eq!(warnings, 1);
+            assert_eq!(count_259_deferred(&result), 0);
+            let f = result
+                .data
+                .findings
+                .iter()
+                .find(|f| f.kind == Kind::HotMemoryOverBudget)
+                .expect("warning present");
+            assert_eq!(
+                f.target.as_ref().and_then(|t| t.path.as_deref()),
+                Some(".cairn/config.yaml")
+            );
+        }
+
+        #[tokio::test]
+        async fn mixed_recipe_under_budget_emits_only_259_deferred() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 2, MemoryKind::Project, "tiny".to_owned(), 0.5).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![
+                HotMemoryRecipeStep::Index,
+                HotMemoryRecipeStep::TopSalienceProject,
+            ];
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 1);
+        }
+
+        #[tokio::test]
+        async fn excluded_kinds_do_not_contribute_to_estimate() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 3, MemoryKind::UserSignal, "s".repeat(8192), 0.9).await;
+            upsert_with(&store, 4, MemoryKind::Playbook, "p".repeat(8192), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 16;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 0);
+        }
+
+        #[tokio::test]
+        async fn tied_salience_picks_largest_and_overflows() {
+            let store = FixtureStore::default();
+            for seed in 10..14 {
+                upsert_with(&store, seed, MemoryKind::Project, "x".to_owned(), 0.5).await;
+            }
+            for seed in 20..26 {
+                upsert_with(&store, seed, MemoryKind::Project, "L".repeat(800), 0.5).await;
+            }
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 2_000;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                1,
+                "tied-salience tie-break must pick larger records and overflow 2_000-byte budget",
+            );
+        }
+
+        #[tokio::test]
+        async fn degenerate_max_bytes_one_does_not_panic() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 30, MemoryKind::Project, "x".to_owned(), 0.5).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 1;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                1,
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_recipe_emits_no_259_findings() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 40, MemoryKind::Project, "x".repeat(4096), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![];
+            cfg.vault.hot_memory.max_bytes = 16;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 0);
         }
     }
 }
