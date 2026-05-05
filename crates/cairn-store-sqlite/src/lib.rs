@@ -16,6 +16,7 @@ pub mod error;
 mod identity;
 pub mod migrations;
 pub mod open;
+pub mod replay;
 pub mod store;
 pub mod vec_ext;
 mod verify;

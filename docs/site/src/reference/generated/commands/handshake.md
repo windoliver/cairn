@@ -12,6 +12,12 @@ cairn.mcp.v1 prelude: handshake
 Usage: handshake [OPTIONS]
 
 Options:
+      --issuer <IDENTITY>
+          Issuer identity to bind the minted challenge to (e.g. `hmn:alice` or
+          `agt:claude-code:opus-4-7:reviewer:v1`). When omitted the challenge is generated but not
+          persisted — a warning is emitted and the resulting nonce cannot be redeemed by a signed
+          envelope.
+
       --json
           Emit machine-readable JSON response envelope to stdout
 

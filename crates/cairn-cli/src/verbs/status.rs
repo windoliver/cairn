@@ -249,6 +249,15 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
     if cap_set.policy_trace {
         out.push(Capabilities::CairnMcpV1PolicyTrace);
     }
+    // Replay modes ship unconditionally at P0 (issue #52, brief §4.2).
+    // Both rely on the migration-0046 schema which the bound vault
+    // always carries.
+    if cap_set.replay_sequence {
+        out.push(Capabilities::CairnMcpV1ReplaySequence);
+    }
+    if cap_set.replay_challenge {
+        out.push(Capabilities::CairnMcpV1ReplayChallenge);
+    }
     out
 }
 

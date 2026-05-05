@@ -14,7 +14,9 @@ description = "SQLite + FTS5 + sqlite-vec record store adapter for Cairn."
 cairn-core = { workspace = true }
 cairn-embeddings-local = { path = "../cairn-embeddings-local" }
 async-trait = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
+rand = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 serde_json = { workspace = true }

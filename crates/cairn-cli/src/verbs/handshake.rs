@@ -1,50 +1,158 @@
-//! `cairn handshake` handler — fresh challenge mint (§8.0.a).
+//! `cairn handshake` handler — fresh challenge mint (§8.0.a, issue #52).
 //!
 //! Emits a typed `HandshakeResponse` conforming to the generated handshake
 //! schema. Every call produces a unique nonce (§8.0.a point d).
 //!
-//! **P0 caveat:** The issued nonce is ephemeral — it is NOT persisted into
-//! `outstanding_challenges` and cannot be consumed server-side. Challenge-mode
-//! signed intents will therefore be rejected until the store is wired in #9.
-//! Callers should not rely on challenge authentication in this build.
+//! # Behaviour
+//!
+//! - When `--issuer` is supplied **and** the active vault is bound, the
+//!   nonce is persisted into `outstanding_challenges` via a real `SQLite`
+//!   transaction so a later signed envelope from the same issuer can
+//!   redeem it. This is the production path that actually enables
+//!   challenge-mode replay (brief §4.2).
+//! - When `--issuer` is missing **or** the vault is unbound, the call
+//!   emits a warning to stderr and prints an ephemeral nonce that
+//!   cannot be redeemed server-side. This preserves the pre-#52 P0
+//!   surface for callers that are not ready to bind to an identity yet
+//!   (notably MCP `initialize` flows that have no caller identity).
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cairn_core::generated::common::Nonce16Base64;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
 
 use super::envelope::{emit_json, new_nonce};
 
-const CHALLENGE_TTL_MS: u64 = 60_000;
+const CHALLENGE_TTL_MS: i64 = 60_000;
 
-/// Run `cairn handshake`. Exits 0 with a typed `HandshakeResponse`.
+/// Run `cairn handshake` without store binding (ephemeral fallback).
+/// Kept for callers that still drive the verb without resolving a vault
+/// (e.g. `--help` flows). Production callers should use [`run_with_context`].
 #[must_use]
 pub fn run(json: bool) -> ExitCode {
-    let nonce = new_nonce();
-    #[allow(clippy::cast_possible_truncation)]
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("invariant: system clock is after Unix epoch")
-        .as_millis() as u64;
-    let expires_at = now_ms + CHALLENGE_TTL_MS;
+    run_with_context(json, None, None)
+}
 
-    let resp = HandshakeResponse {
-        contract: "cairn.mcp.v1".to_owned(),
-        challenge: HandshakeResponseChallenge {
-            nonce: nonce.clone(),
-            expires_at,
-        },
+/// Run `cairn handshake` with optional vault root + issuer.
+///
+/// When both are provided, opens the store at `<vault>/.cairn/cairn.db`
+/// and inserts a row into `outstanding_challenges` inside a single
+/// transaction. The returned nonce can be redeemed by a signed envelope
+/// from `issuer` until `expires_at_ms`.
+///
+/// When either is missing, the function falls back to the pre-#52
+/// ephemeral mint (random nonce, no persistence) and prints a one-line
+/// warning to stderr.
+#[must_use]
+pub fn run_with_context(json: bool, vault_root: Option<&Path>, issuer: Option<&str>) -> ExitCode {
+    let now_ms = unix_now_ms();
+
+    if let (Some(root), Some(issuer)) = (vault_root, issuer) {
+        return mint_persisted(json, root, issuer, now_ms);
+    }
+
+    // Ephemeral fallback. Mirrors the pre-#52 behaviour so help/CI
+    // smoke flows that drive `cairn handshake` without `--issuer` keep
+    // returning a well-formed response.
+    let nonce = new_nonce();
+    let expires_at_ms = now_ms.saturating_add(CHALLENGE_TTL_MS);
+    let resp = response(nonce, expires_at_ms);
+    if json {
+        emit_json(&resp);
+    } else {
+        eprintln!(
+            "warning: --issuer not provided (or vault unbound) — challenge will not be \
+             redeemable. Pass `--issuer ID` against a bound vault to persist."
+        );
+        print_human(&resp, /* persisted */ false);
+    }
+    ExitCode::SUCCESS
+}
+
+fn mint_persisted(json: bool, vault_root: &Path, issuer: &str, now_ms: i64) -> ExitCode {
+    let db_path = vault_root.join(".cairn").join("cairn.db");
+    if !db_path.exists() {
+        eprintln!(
+            "cairn handshake: vault at {} is not bound (no .cairn/cairn.db) — \
+             run `cairn bootstrap` first",
+            vault_root.display()
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("cairn handshake: could not build tokio runtime — {e}");
+            return ExitCode::from(1);
+        }
     };
+
+    let issuer_owned = issuer.to_owned();
+    let outcome = runtime.block_on(async move {
+        let store = cairn_store_sqlite::open(&db_path).await?;
+        store
+            .with_tx(move |tx| {
+                let chal = tx.mint_challenge(&issuer_owned, now_ms, CHALLENGE_TTL_MS)?;
+                Ok::<_, cairn_store_sqlite::StoreError>(chal)
+            })
+            .await
+    });
+
+    let chal = match outcome {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cairn handshake: store error — {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let resp = response(Nonce16Base64(chal.nonce_b64), chal.expires_at_ms);
 
     if json {
         emit_json(&resp);
     } else {
-        println!("contract:   {}", resp.contract);
-        println!("nonce:      {}", nonce.0);
+        print_human(&resp, /* persisted */ true);
+    }
+    ExitCode::SUCCESS
+}
+
+fn response(nonce: Nonce16Base64, expires_at_ms: i64) -> HandshakeResponse {
+    // The IDL exposes `expires_at` as `u64` (epoch-ms ≥ 0). The store
+    // computes it from a signed `i64` (matching SQLite's INTEGER); a
+    // negative value is impossible here unless the wall clock is
+    // before 1970. Coerce defensively.
+    let expires_at = u64::try_from(expires_at_ms).unwrap_or(0);
+    HandshakeResponse {
+        contract: "cairn.mcp.v1".to_owned(),
+        challenge: HandshakeResponseChallenge { nonce, expires_at },
+    }
+}
+
+fn print_human(resp: &HandshakeResponse, persisted: bool) {
+    println!("contract:   {}", resp.contract);
+    println!("nonce:      {}", resp.challenge.nonce.0);
+    if persisted {
         println!(
-            "expires_at: {} (epoch-ms, TTL 60 s, P0: challenge not persisted)",
+            "expires_at: {} (epoch-ms; persisted in outstanding_challenges, single-use)",
+            resp.challenge.expires_at
+        );
+    } else {
+        println!(
+            "expires_at: {} (epoch-ms, ephemeral — not persisted)",
             resp.challenge.expires_at
         );
     }
-    ExitCode::SUCCESS
+}
+
+fn unix_now_ms() -> i64 {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(dur.as_millis()).unwrap_or(i64::MAX)
 }

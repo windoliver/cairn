@@ -710,6 +710,19 @@ pub struct CapabilitySet {
     /// True iff `cairn.mcp.v1.policy_trace` capability is advertised.
     /// Gates `--explain` on search and other Tier-2 inspection paths.
     pub policy_trace: bool,
+    /// True iff `cairn.mcp.v1.replay.sequence` capability is advertised
+    /// — sequence-mode envelopes (`signed_intent.sequence`) admit
+    /// against the per-issuer CAS in `issuer_seq` (brief §4.2). Always
+    /// true at P0 once the vault is bound; the schema ships
+    /// unconditionally.
+    pub replay_sequence: bool,
+    /// True iff `cairn.mcp.v1.replay.challenge` capability is
+    /// advertised — challenge-mode envelopes
+    /// (`signed_intent.server_challenge`) admit by consuming an
+    /// outstanding row in `outstanding_challenges` minted via
+    /// `cairn handshake` (issue #52, brief §4.2). Always true at P0
+    /// once the vault is bound; the schema ships unconditionally.
+    pub replay_challenge: bool,
 }
 
 impl CairnConfig {
@@ -832,6 +845,12 @@ impl CairnConfig {
             // (`search.disable_explain: true`) can opt out for environments
             // that prohibit trace-level output.
             policy_trace: true,
+            // Both replay modes ship unconditionally at P0 (issue #52,
+            // brief §4.2). The 0046 schema admits both NULL-sequence
+            // (challenge-mode) and per-issuer-CAS (sequence-mode) rows
+            // in `used`, so a bound vault always honours them.
+            replay_sequence: true,
+            replay_challenge: true,
         }
     }
 

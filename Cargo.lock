@@ -607,6 +607,7 @@ name = "cairn-store-sqlite"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "cairn-cli",
  "cairn-core",
@@ -618,6 +619,7 @@ dependencies = [
  "insta",
  "parking_lot",
  "proptest",
+ "rand 0.8.6",
  "rand_core 0.6.4",
  "rusqlite",
  "rusqlite_migration",

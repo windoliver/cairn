@@ -35,7 +35,9 @@ pub fn build_command() -> clap::Command {
         )))
         .subcommand(verbs::with_json(generated::verbs::forget_subcommand()))
         // Protocol preludes.
-        .subcommand(verbs::with_json(generated::prelude::handshake_subcommand()))
+        .subcommand(verbs::with_json(with_issuer(
+            generated::prelude::handshake_subcommand(),
+        )))
         .subcommand(verbs::with_json(generated::prelude::status_subcommand()))
         // Management subcommand (plugins already has --json per sub-subcommand).
         .subcommand(plugins_subcommand())
@@ -46,6 +48,26 @@ pub fn build_command() -> clap::Command {
         .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
         .subcommand(identity::cli::identity_subcommand())
+}
+
+/// Attach `--issuer` to the generated handshake subcommand. The IDL
+/// schema describes only the response shape; the request body is
+/// CLI-shaped and the issuer is needed so the minted challenge binds
+/// to a row in `outstanding_challenges` (brief §4.2). Optional — when
+/// absent the CLI keeps its pre-#52 ephemeral behaviour and prints a
+/// warning explaining the challenge will not be redeemable.
+fn with_issuer(cmd: clap::Command) -> clap::Command {
+    cmd.arg(
+        clap::Arg::new("issuer")
+            .long("issuer")
+            .value_name("IDENTITY")
+            .help(
+                "Issuer identity to bind the minted challenge to (e.g. `hmn:alice` or \
+                 `agt:claude-code:opus-4-7:reviewer:v1`). When omitted the challenge is \
+                 generated but not persisted — a warning is emitted and the resulting nonce \
+                 cannot be redeemed by a signed envelope.",
+            ),
+    )
 }
 
 fn llm_subcommand() -> clap::Command {

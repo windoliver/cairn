@@ -202,7 +202,7 @@ fn main() -> ExitCode {
         Some(("lint", sub)) => verbs::lint::run(sub),
         Some(("forget", sub)) => verbs::forget::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
-        Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
+        Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
@@ -218,6 +218,34 @@ fn main() -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+/// `cairn handshake` dispatch (issue #52, brief §8.0.a).
+///
+/// Resolves the vault root the same way `status` does so the minted
+/// challenge persists into `<vault>/.cairn/cairn.db`'s
+/// `outstanding_challenges` table when the operator supplied
+/// `--issuer`. Without `--issuer` the verb falls back to the pre-#52
+/// ephemeral mint and prints a one-line warning explaining the
+/// returned nonce is not redeemable.
+fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let json = sub.get_flag("json");
+    let issuer = sub.get_one::<String>("issuer").map(String::as_str);
+
+    // `--issuer` absent ⇒ keep the ephemeral fallback path. Resolving a
+    // vault here would only emit a confusing extra error message.
+    if issuer.is_none() {
+        return verbs::handshake::run_with_context(json, None, None);
+    }
+
+    let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn handshake: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+    verbs::handshake::run_with_context(json, Some(&vault_root), issuer)
 }
 
 /// `cairn status` dispatch.
