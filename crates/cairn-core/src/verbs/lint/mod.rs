@@ -161,6 +161,8 @@ fn kind_key(k: Kind) -> String {
         Kind::HotMemoryOverBudget => "hot_memory_over_budget",
         Kind::IndexDrift => "index_drift",
         Kind::DeferredCheck => "deferred_check",
+        Kind::ProjectionDrift => "projection_drift",
+        Kind::ProjectionMissing => "projection_missing",
     }
     .to_owned()
 }
