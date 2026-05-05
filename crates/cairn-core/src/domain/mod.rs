@@ -28,6 +28,7 @@ pub mod consent_timeline;
 pub mod error;
 pub mod evidence;
 pub mod filter;
+pub mod flush_plan;
 pub mod folder;
 pub mod graph;
 pub mod identity;
@@ -58,6 +59,9 @@ pub use consent_timeline::{
 };
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
+pub use flush_plan::{
+    ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus, PlannedMutation,
+};
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
 pub use projection::{
