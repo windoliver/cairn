@@ -42,9 +42,12 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
 fn ingest_with_url(url: String) -> IngestArgs {
     IngestArgs {
         body: None,
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: Some(url),
@@ -219,9 +222,12 @@ proptest! {
         prop_assume!(count != 1);
         let args = IngestArgs {
             body: has_body.then(|| "b".to_owned()),
+            dry_run: None,
             file: has_file.then(|| "/f".to_owned()),
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: has_url.then(|| "http://example.com/x".to_owned()),
@@ -229,6 +235,48 @@ proptest! {
         let err = sdk().ingest(&args).expect_err("must reject");
         prop_assert!(is_invalid_args(&err));
     }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// FlushPlan modes — dry_run and human_review are mutually exclusive
+// at the wire layer (review-loop round 1, brief §5.5).
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ingest_dry_run_and_human_review_both_true_rejects() {
+    let args = IngestArgs {
+        body: Some("hello".to_owned()),
+        dry_run: Some(true),
+        file: None,
+        frontmatter: None,
+        human_review: Some(true),
+        kind: "note".to_owned(),
+        no_diff: None,
+        session_id: None,
+        tags: None,
+        url: None,
+    };
+    let err = sdk().ingest(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn forget_record_dry_run_and_human_review_both_true_rejects() {
+    use cairn_sdk::generated::verbs::forget::ForgetArgs;
+    let args = ForgetArgs::Record {
+        record_id: Ulid("01HQZX9F5N0000000000000000".to_owned()),
+        dry_run: Some(true),
+        human_review: Some(true),
+        no_diff: None,
+    };
+    let err = sdk().forget(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review on forget, got {err:?}"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────

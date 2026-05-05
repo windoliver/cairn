@@ -74,6 +74,7 @@ fn verb_response_serializes_as_canonical_envelope() {
         data: IngestData {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
+            plan_ref: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -119,6 +120,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
         data: IngestData {
             record_id: ulid(),
             session_id: "s".to_owned(),
+            plan_ref: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -210,9 +212,12 @@ fn ingest_invalid_args_returns_typed_error() {
     // Violate exactly-one-of: pass body AND file.
     let args = IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: Some("/tmp/x".to_owned()),
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -230,9 +235,12 @@ fn ingest_invalid_args_returns_typed_error() {
 fn ingest_valid_args_returns_internal_stub() {
     let args = IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -249,9 +257,12 @@ fn ingest_rejects_schema_minlength_violations() {
     // floor.
     let bases = || IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -409,9 +420,12 @@ fn ingest_accepts_well_formed_uri_schemes() {
     ] {
         let args = IngestArgs {
             body: None,
+            dry_run: None,
             file: None,
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
@@ -798,6 +812,9 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
 fn forget_record_rejects_malformed_ulid_with_invalid_args() {
     let args = ForgetArgs::Record {
         record_id: Ulid("not-a-ulid".to_owned()),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("ULID"), "reason: {reason}"),
@@ -864,6 +881,9 @@ fn capture_trace_rejects_empty_from_with_invalid_args() {
 fn forget_session_rejects_empty_session_id_with_invalid_args() {
     let args = ForgetArgs::Session {
         session_id: String::new(),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -935,9 +955,12 @@ fn sdk_error_code_helper_returns_typed_code() {
     let unimpl = sdk()
         .ingest(&IngestArgs {
             body: Some("note".to_owned()),
+            dry_run: None,
             file: None,
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: None,
@@ -949,9 +972,12 @@ fn sdk_error_code_helper_returns_typed_code() {
     let invalid = sdk()
         .ingest(&IngestArgs {
             body: Some("a".to_owned()),
+            dry_run: None,
             file: Some("b".to_owned()),
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: None,
@@ -964,7 +990,12 @@ fn sdk_error_code_helper_returns_typed_code() {
 #[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     let err = sdk()
-        .forget(&ForgetArgs::Record { record_id: ulid() })
+        .forget(&ForgetArgs::Record {
+            record_id: ulid(),
+            dry_run: None,
+            human_review: None,
+            no_diff: None,
+        })
         .expect_err("must fail closed in P0");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {

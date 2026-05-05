@@ -24,6 +24,11 @@
           "minLength": 1,
           "type": "string"
         },
+        "dry_run": {
+          "default": false,
+          "description": "If true, produce a FlushPlan and emit it without writing to MemoryStore (brief §5.5). Mutually exclusive with human_review.",
+          "type": "boolean"
+        },
         "file": {
           "description": "Path on the local filesystem.",
           "minLength": 1,
@@ -33,10 +38,20 @@
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "human_review": {
+          "default": false,
+          "description": "If true, persist a FlushPlan under .cairn/flush/pending/ for explicit `cairn flush apply` (brief §5.5). Mutually exclusive with dry_run.",
+          "type": "boolean"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
+        },
+        "no_diff": {
+          "default": false,
+          "description": "When human_review=true, skip emitting the markdown diff sidecar.",
+          "type": "boolean"
         },
         "session_id": {
           "minLength": 1,
@@ -63,6 +78,11 @@
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "plan_ref": {
+          "description": "Path under .cairn/flush/pending/ when human_review=true; absent otherwise.",
+          "minLength": 1,
+          "type": "string"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "ULID of the newly stored record."

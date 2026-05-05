@@ -31,6 +31,7 @@ Commands:
   admin          Administrative operations (model management, reindex)
   llm            LLM provider diagnostics (ADR 0001)
   identity       Manage vault identities (§3.5 / §4.1)
+  flush          Manage human-review FlushPlans (brief §5.5)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -64,3 +65,4 @@ Options:
 - [`cairn admin`](commands/admin.md) - Administrative operations (model management, reindex)
 - [`cairn llm`](commands/llm.md) - LLM provider diagnostics (ADR 0001)
 - [`cairn identity`](commands/identity.md) - Manage vault identities (§3.5 / §4.1)
+- [`cairn flush`](commands/flush.md) - Manage human-review FlushPlans (brief §5.5)

@@ -144,7 +144,7 @@ fn main() -> ExitCode {
     // from the top-level vault registry guard (which requires a named vault).
     let needs_vault_guard = !matches!(
         active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity"
+        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity" | "flush"
     );
 
     if needs_vault_guard {
@@ -210,6 +210,25 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
+            Err(e) => {
+                // Fall back to env-only resolution ONLY for `flush list`
+                // (read-only, useful for inspecting a vault outside the
+                // registry path). For `apply` and `reject` — the
+                // lifecycle-mutating commands — fail closed: an
+                // explicit `--vault` that didn't resolve must NOT
+                // silently re-route the mutation to whatever
+                // `CAIRN_VAULT` points at.
+                let mutating = matches!(sub.subcommand_name(), Some("apply" | "reject"));
+                if mutating {
+                    eprintln!("cairn flush: vault resolution failed — {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+                eprintln!("cairn flush: vault resolution warning — {e:#}");
+                verbs::flush::run(sub, None)
+            }
+        },
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {

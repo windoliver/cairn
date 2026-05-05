@@ -9,8 +9,10 @@
 //! [`KeystoreError`]: crate::contract::keystore::KeystoreError
 //! [`RegistryError`]: crate::contract::identity_registry::RegistryError
 
+pub mod flush_plan;
 pub mod identity;
 pub mod wire;
 
+pub use flush_plan::FlushPlanError;
 pub use identity::IdentityServiceError;
 pub use wire::{ErrorBody, envelope_error_for};

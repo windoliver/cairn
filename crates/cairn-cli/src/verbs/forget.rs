@@ -25,6 +25,21 @@ use super::envelope::{emit_json, human_error, unimplemented_response};
 pub fn run(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
 
+    let dry_run = sub.get_flag("dry-run");
+    let human_review = sub.get_flag("human-review");
+    let no_diff = sub.get_flag("no-diff");
+    if dry_run || human_review {
+        let mode = if dry_run {
+            cairn_core::domain::flush_plan::FlushMode::DryRun
+        } else {
+            cairn_core::domain::flush_plan::FlushMode::HumanReview
+        };
+        // Reuse the same stub planner — for the stub, the ingest/forget
+        // distinction collapses to "produce a placeholder plan." #9 will
+        // split them into real builders.
+        return crate::verbs::ingest_plan_stub(sub, mode, no_diff, json);
+    }
+
     // §3.5 trust-boundary guard: refuse if the vault is degraded.
     // In this P0 stub the report is always clean (no store is open); full async
     // wiring against the resolved vault path is deferred to issue #9.
