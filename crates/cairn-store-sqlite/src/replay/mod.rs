@@ -178,6 +178,37 @@ pub(crate) fn prepare_wal_with_replay(
         return Err(ReplayError::ModeXorViolation);
     }
 
+    // Round-6 review #1: wrap the admit body in a SAVEPOINT so partial
+    // writes (wal_ops PREPARED, wal_op_deps edges) cannot survive a
+    // later replay-ledger error if the caller swallows our `Err` and
+    // still commits the outer transaction. SQLite SAVEPOINTs are
+    // nested transactions: `ROLLBACK TO` undoes only the savepoint's
+    // changes; `RELEASE` makes them part of the parent on success.
+    tx.execute_batch("SAVEPOINT replay_admit")?;
+    match prepare_wal_with_replay_body(tx, intent, inputs) {
+        Ok(()) => {
+            tx.execute_batch("RELEASE replay_admit")?;
+            Ok(())
+        }
+        Err(e) => {
+            // Best-effort rollback of the savepoint — even if this
+            // fails (e.g., the connection is poisoned), surface the
+            // original replay error rather than masking it. The outer
+            // tx is left in a state where committing would still drop
+            // the savepoint's writes via the parent rollback the
+            // caller is expected to perform on Err.
+            let _ = tx.execute_batch("ROLLBACK TO replay_admit");
+            let _ = tx.execute_batch("RELEASE replay_admit");
+            Err(e)
+        }
+    }
+}
+
+fn prepare_wal_with_replay_body(
+    tx: &Transaction<'_>,
+    intent: &SignedIntent,
+    inputs: &WalPrepareInputs<'_>,
+) -> Result<(), ReplayError> {
     // Round-4 review #2: derive the signed-payload columns from the
     // intent itself. Caller cannot widen the scope or extend the TTL
     // beyond what the issuer signed.

@@ -56,16 +56,22 @@ pub fn run_with_context(json: bool, vault_root: Option<&Path>, issuer: Option<&s
     // Ephemeral fallback. Mirrors the pre-#52 behaviour so help/CI
     // smoke flows that drive `cairn handshake` without `--issuer` keep
     // returning a well-formed response.
+    //
+    // Round-6 review #2: stdout shape stays identical to the persisted
+    // response (downstream wire-compat tests rely on it), so emit the
+    // warning to stderr in BOTH human and JSON modes. Machine callers
+    // that care whether a nonce is redeemable read stderr; humans see
+    // the warning above the human-readable block.
     let nonce = new_nonce();
     let expires_at_ms = now_ms.saturating_add(CHALLENGE_TTL_MS);
     let resp = response(nonce, expires_at_ms);
+    eprintln!(
+        "warning: --issuer not provided (or vault unbound) — challenge will not be \
+         redeemable. Pass `--issuer ID` against a bound vault to persist."
+    );
     if json {
         emit_json(&resp);
     } else {
-        eprintln!(
-            "warning: --issuer not provided (or vault unbound) — challenge will not be \
-             redeemable. Pass `--issuer ID` against a bound vault to persist."
-        );
         print_human(&resp, /* persisted */ false);
     }
     ExitCode::SUCCESS

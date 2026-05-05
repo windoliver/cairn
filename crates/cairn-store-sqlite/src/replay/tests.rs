@@ -552,6 +552,53 @@ fn signed_payload_columns_derive_from_intent() {
 }
 
 #[test]
+fn caller_swallowing_replay_error_cannot_commit_partial_wal_state() {
+    // Round-6 review #1: even if the caller catches a ReplayError and
+    // commits the outer transaction, the SAVEPOINT around the admit
+    // body must roll back the wal_ops row + chain_parents edges so
+    // the WAL/replay invariant survives. Construct a scenario that
+    // succeeds the wal_ops insert (fresh row) but fails consume_intent
+    // (out-of-order sequence after we explicitly seed a higher
+    // high_water).
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    // Land an initial row at sequence=10 → high_water=10.
+    let baseline = intent_with(&op_id(1), &nonce_b64(1), Some(10), None);
+    prepare_wal_with_replay(&tx, &baseline, &inputs(NOW_MS)).expect("baseline admit");
+
+    // Build a child whose op_id is fresh (so wal_ops insert succeeds)
+    // but whose sequence is too low (consume_intent → OutOfOrder).
+    let too_low = intent_with(&op_id(2), &nonce_b64(2), Some(5), None);
+    let err = prepare_wal_with_replay(&tx, &too_low, &inputs(NOW_MS + 1))
+        .expect_err("must reject out-of-order");
+    assert!(matches!(err, ReplayError::OutOfOrder { .. }));
+
+    // Caller swallows the error and commits.
+    tx.commit().expect("commit outer despite admit failure");
+
+    // The failed admit's op_id must NOT appear in wal_ops — the
+    // SAVEPOINT rolled back its partial writes.
+    let leaked_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM wal_ops WHERE operation_id = ?1",
+            rusqlite::params![&op_id(2)],
+            |r| r.get(0),
+        )
+        .expect("count");
+    assert_eq!(
+        leaked_count, 0,
+        "savepoint must roll back partial wal_ops row"
+    );
+
+    // And only the baseline row should remain.
+    let wal_total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(wal_total, 1);
+}
+
+#[test]
 fn rolled_back_transaction_leaves_no_state() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");
