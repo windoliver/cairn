@@ -309,7 +309,9 @@ mod tests {
     fn snapshot_status_transitions() {
         let plan = sample_plan();
         let mut p = PersistedPlan::pending(plan);
-        p.status = PlanStatus::Applied { at: "2026-05-04T12:01:00Z".into() };
+        p.status = PlanStatus::Applied {
+            at: "2026-05-04T12:01:00Z".into(),
+        };
         insta::assert_snapshot!(
             "status_applied_json",
             serde_json::to_string_pretty(&p).unwrap()

@@ -29,7 +29,10 @@ pub fn render(plan: &FlushPlan) -> String {
         writeln!(&mut out, "## Mutation {i}").ok();
         writeln!(&mut out).ok();
         match m {
-            PlannedMutation::Upsert { record, prior_version } => {
+            PlannedMutation::Upsert {
+                record,
+                prior_version,
+            } => {
                 writeln!(&mut out, "- **Kind:** upsert").ok();
                 // record is Box<MemoryRecord> — auto-deref for field access.
                 writeln!(&mut out, "- **Target:** `{}`", record.target_id.as_str()).ok();
@@ -55,12 +58,19 @@ pub fn render(plan: &FlushPlan) -> String {
                 }
                 writeln!(&mut out, "```").ok();
             }
-            PlannedMutation::Delete { target, prior_version } => {
+            PlannedMutation::Delete {
+                target,
+                prior_version,
+            } => {
                 writeln!(&mut out, "- **Kind:** delete").ok();
                 writeln!(&mut out, "- **Target:** `{}`", target.as_str()).ok();
                 writeln!(&mut out, "- **Prior version:** {prior_version}").ok();
             }
-            PlannedMutation::Promote { from, to_kind, evidence } => {
+            PlannedMutation::Promote {
+                from,
+                to_kind,
+                evidence,
+            } => {
                 writeln!(&mut out, "- **Kind:** promote").ok();
                 writeln!(&mut out, "- **From:** `{}`", from.as_str()).ok();
                 writeln!(&mut out, "- **To kind:** `{to_kind:?}`").ok();

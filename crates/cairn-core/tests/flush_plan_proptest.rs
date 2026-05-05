@@ -8,8 +8,7 @@
 use std::collections::BTreeMap;
 
 use cairn_core::domain::flush_plan::{
-    ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus,
-    PlannedMutation,
+    ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus, PlannedMutation,
 };
 use cairn_core::domain::{Identity, ScopeTuple, TargetId};
 use cairn_core::generated::common::Ulid;
@@ -27,7 +26,10 @@ fn arb_ulid() -> impl Strategy<Value = Ulid> {
 fn arb_mutation() -> impl Strategy<Value = PlannedMutation> {
     prop_oneof![
         (arb_target(), 0u32..u32::MAX).prop_map(|(target, prior_version)| {
-            PlannedMutation::Delete { target, prior_version }
+            PlannedMutation::Delete {
+                target,
+                prior_version,
+            }
         }),
         arb_target().prop_map(|target| PlannedMutation::ForgetRecord { target }),
         (
@@ -51,8 +53,12 @@ fn arb_mode() -> impl Strategy<Value = FlushMode> {
 }
 
 fn arb_plan() -> impl Strategy<Value = FlushPlan> {
-    (arb_ulid(), arb_mode(), prop::collection::vec(arb_mutation(), 1..6)).prop_map(
-        |(operation_id, mode, mutations)| FlushPlan {
+    (
+        arb_ulid(),
+        arb_mode(),
+        prop::collection::vec(arb_mutation(), 1..6),
+    )
+        .prop_map(|(operation_id, mode, mutations)| FlushPlan {
             operation_id,
             issued_at: "2026-05-04T12:00:00Z".into(),
             issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
@@ -65,8 +71,7 @@ fn arb_plan() -> impl Strategy<Value = FlushPlan> {
             target_hashes: BTreeMap::default(),
             dependencies: vec![],
             expires_at: "2026-05-04T12:05:00Z".into(),
-        },
-    )
+        })
 }
 
 proptest! {
