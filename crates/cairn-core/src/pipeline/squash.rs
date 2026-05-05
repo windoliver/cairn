@@ -1968,6 +1968,175 @@ mod wrapper_tests {
         );
     }
 
+    /// Issue #250 round-2 review finding: when a payload's invalid UTF-8
+    /// byte sits immediately after an unrecognized ESC, the bypass walker
+    /// previously inferred a UTF-8 codepoint length naively from the raw
+    /// byte and could swallow a following bare `\r`. Stage 1's lossy
+    /// decode would have replaced the bad byte with `U+FFFD` first, so
+    /// the staged path counts the surviving CR-bearing line — the bypass
+    /// must match by validating UTF-8 continuations (or consuming only
+    /// the bad byte when the lead is invalid).
+    #[test]
+    fn cr_bearing_lines_parity_invalid_utf8_lead_after_esc() {
+        // ESC + 0xFF (invalid lead) + bare \r + content + \n.
+        let payload: &[u8] = b"prefix\n\x1b\xff\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 1,
+            "staged path: stage 1 lossy → ESC+U+FFFD consumed by stage 2; \\r survives"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on invalid lead after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a continuation byte (`0x80..=0xBF`)
+    /// in lead position after ESC is invalid; the walker must consume only
+    /// the bad byte so a following `\r` survives.
+    #[test]
+    fn cr_bearing_lines_parity_continuation_byte_as_esc_lead() {
+        // ESC + 0xA0 (continuation byte in lead position) + \r + content.
+        let payload: &[u8] = b"prefix\n\x1b\xa0\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: surviving \\r counted");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on continuation-byte ESC lead: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a truncated multibyte after ESC
+    /// (e.g., ESC + 0xC2 followed by a non-continuation byte) must consume
+    /// only the lead so the following byte stays visible.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_multibyte_after_esc() {
+        // ESC + 0xC2 (claims a 2-byte scalar) + \r (NOT a valid continuation
+        // byte) + content. Stage 1 lossy replaces 0xC2 alone with U+FFFD;
+        // stage 2 consumes ESC + U+FFFD, leaving \r intact.
+        let payload: &[u8] = b"prefix\n\x1b\xc2\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: \\r survives the lossy-decoded scalar");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated multibyte: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a well-formed multibyte scalar
+    /// after ESC must still be fully consumed on both paths (no
+    /// over-conservative under-skip from the new validation logic).
+    #[test]
+    fn cr_bearing_lines_parity_valid_multibyte_after_esc_unchanged() {
+        // ESC + é (0xC3 0xA9) + \r + content. Stage 2 consumes the entire
+        // ESC + 2-byte scalar; the bypass walker must do the same so the
+        // surviving \r is still counted exactly once.
+        let payload: &[u8] = b"prefix\n\x1b\xc3\xa9\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "valid 2-byte scalar consumed; \\r survives");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on valid multibyte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a UTF-16 surrogate-range encoding
+    /// (`ED A0..=BF ...`) is RFC 3629-invalid. Stage 1 lossy decode rejects
+    /// it; the bypass walker's continuation-byte check would have accepted
+    /// it. Delegating to `std::str::from_utf8` catches it.
+    #[test]
+    fn cr_bearing_lines_parity_surrogate_after_esc() {
+        // ESC + ED A0 80 (encodes U+D800, a high surrogate — invalid). The
+        // surrounding `\r ... \n` shape lets the line be CR-bearing only
+        // when stage 2 / the bypass walker do NOT swallow the bad bytes
+        // wholesale. Pre-fix, the walker consumed all three and treated
+        // the LF as a CRLF; staged kept the lossy replacement bytes after
+        // the \r and counted the line.
+        let payload: &[u8] = b"prefix\r\x1b\xed\xa0\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(
+            staged >= 1,
+            "staged must register the prefix-with-\\r line as CR-bearing"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on surrogate after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: overlong 3-byte forms
+    /// (`E0 80..=9F ...`) are RFC 3629-invalid. Same parity hazard as
+    /// surrogates — `from_utf8` validation catches both.
+    #[test]
+    fn cr_bearing_lines_parity_overlong_three_byte_after_esc() {
+        // ESC + E0 80 80 (overlong encoding of U+0000 in 3 bytes).
+        let payload: &[u8] = b"prefix\r\x1b\xe0\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on overlong 3-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: scalars beyond `U+10FFFF`
+    /// (`F4 90..=BF ...`) are RFC 3629-invalid. Confirms the F4-bound
+    /// branch of validation catches out-of-range 4-byte forms.
+    #[test]
+    fn cr_bearing_lines_parity_out_of_range_four_byte_after_esc() {
+        // ESC + F4 90 80 80 (encodes U+110000, beyond U+10FFFF).
+        let payload: &[u8] = b"prefix\r\x1b\xf4\x90\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on out-of-range 4-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: when `from_utf8` rejects a
+    /// truncated *valid prefix* (e.g., `E2 82` followed by a non-
+    /// continuation), `from_utf8_lossy` collapses the whole prefix into
+    /// one `U+FFFD`. The bypass walker must advance by the same maximal
+    /// invalid subsequence length, not unconditionally one byte —
+    /// otherwise a stray `0x82` leaks past ESC, resets the trailing-CR
+    /// run, and a CRLF that the staged path collapses gets reported as
+    /// CR-bearing on the bypass.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_three_byte_prefix_after_esc() {
+        // Prefix `\r` then ESC + E2 82 + LF: maximal invalid subsequence
+        // is `E2 82` (2 bytes), replaced with one U+FFFD on the staged
+        // path. Stage 2 then drops ESC + U+FFFD, leaving CRLF — which
+        // the second pass collapses to LF, so the line is NOT CR-bearing.
+        let payload: &[u8] = b"prefix\r\x1b\xe2\x82\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses E2 82 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 3-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: same shape for a 4-byte prefix
+    /// (`F0 90 80` followed by LF). `from_utf8_lossy` replaces the 3-byte
+    /// incomplete-but-valid prefix with one `U+FFFD`.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_four_byte_prefix_after_esc() {
+        let payload: &[u8] = b"prefix\r\x1b\xf0\x90\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses F0 90 80 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 4-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
     /// Issue #250: full integration via the actual `MAX_INPUT_BYTES` gate.
     /// Builds an oversize payload (`>= MAX_INPUT_BYTES`) where both the
     /// head and the tail carry the same OSC-body-with-embedded-CR +
@@ -2504,25 +2673,71 @@ fn stage2_skip_escape(bytes: &[u8], start: usize) -> (usize, usize) {
         }
         // Two-byte ESC controls (ESC 7/8 save/restore, ESC = / >, ESC c
         // reset, ESC D index, ESC E NEL, ESC M reverse-index, ...): consume
-        // ESC + one whole UTF-8 codepoint. Splitting a multi-byte char would
-        // produce invalid UTF-8 when this helper is called from
-        // `stage2_ansi_strip`; the cp-length classifier mirrors UTF-8
-        // leading-byte ranges and degrades gracefully on raw (possibly
-        // invalid) bytes from the bypass scan.
+        // ESC + one whole UTF-8 codepoint. The classifier mirrors RFC 3629
+        // leading-byte ranges and validates continuation bytes so a broken
+        // multibyte (or an invalid lead like `0xFF`) consumes only the bad
+        // byte. That keeps the bypass walker — which sees pre-stage-1 raw
+        // bytes — byte-stable with the staged path: stage 1 replaces each
+        // invalid scalar with `U+FFFD`, then stage 2 consumes ESC + that
+        // 3-byte replacement, advancing exactly one source byte beyond ESC.
+        // For valid UTF-8 input (the contract on the staged-path call site)
+        // every well-formed scalar consumes its full encoded length.
         _ => {
             let lead = bytes[start + 1];
-            let cp_len = if lead < 0x80 {
+            // Codepoint length per RFC 3629 leading-byte ranges.
+            // 0x80..=0xC1 are never valid UTF-8 leads (continuation bytes
+            // or overlong-2 starts); 0xF5..=0xFF encode code points beyond
+            // U+10FFFF. Both fall into the 1-byte branch so we consume
+            // just the bad byte and a following `\r`/`\n` stays visible.
+            let cp_len: usize = if lead < 0xC2 {
                 1
             } else if lead < 0xE0 {
                 2
             } else if lead < 0xF0 {
                 3
-            } else {
+            } else if lead < 0xF5 {
                 4
+            } else {
+                1
             };
             let after = start + 1;
-            let advance = 1 + cp_len.min(bytes.len() - after);
-            (advance, 0)
+            let available = bytes.len() - after;
+            // For multi-byte scalars, delegate full RFC 3629 validation to
+            // `std::str::from_utf8` — that catches surrogates (D800..DFFF
+            // via ED A0..BF), overlong forms (E0 80..9F, F0 80..8F), and
+            // out-of-range scalars (F4 90..BF) that a naive continuation-
+            // byte check would let through. On validation failure, advance
+            // by the same maximal invalid subsequence length that
+            // `from_utf8_lossy` collapses into one `U+FFFD`, using
+            // `Utf8Error::{valid_up_to, error_len}`. Consuming a fixed 1
+            // byte would leave a trailing continuation byte (e.g., `0x82`
+            // in `ESC E2 82 LF`) visible to the walker as text, breaking
+            // parity with the staged path where stage 2 over the lossy
+            // decode has already absorbed the entire malformed prefix
+            // alongside the ESC.
+            let final_consume = if cp_len > 1 {
+                let end = after + cp_len.min(available);
+                let slice = &bytes[after..end];
+                match std::str::from_utf8(slice) {
+                    Ok(_) if slice.len() == cp_len => cp_len,
+                    Ok(_) => slice.len(),
+                    Err(e) => match e.error_len() {
+                        Some(n) => e.valid_up_to() + n,
+                        // `None` means the slice ends in a valid-but-
+                        // incomplete prefix; lossy decode replaces the
+                        // whole prefix with one `U+FFFD`, so advance by
+                        // the entire slice length here too.
+                        None => slice.len(),
+                    },
+                }
+            } else {
+                // 1-byte scalar (valid ASCII or invalid lead): consume the
+                // single lead byte. `available` is always >= 1 here — the
+                // `start + 1 >= bytes.len()` early-return at the top of
+                // `stage2_skip_escape` rules out the EOF case.
+                1
+            };
+            (1 + final_consume, 0)
         }
     }
 }
