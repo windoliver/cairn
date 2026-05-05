@@ -1,0 +1,33 @@
+---
+source: crates/cairn-core/src/domain/flush_plan/mod.rs
+expression: "serde_json::to_string_pretty(&p).unwrap()"
+---
+{
+  "schema_version": 1,
+  "plan": {
+    "operation_id": "01HQZK000000000000000000VP",
+    "issued_at": "2026-05-04T12:00:00Z",
+    "issuer": "agt:claude-code:opus-4-7:reviewer:v1",
+    "principal": "hmn:tafeng:v1",
+    "scope": {},
+    "mode": "autonomous",
+    "mutations": [
+      {
+        "kind": "delete",
+        "target": "01HQZX9F5N0000000000000000",
+        "prior_version": 1
+      }
+    ],
+    "reason": {
+      "code": "user_ingest"
+    },
+    "source_events": [],
+    "target_hashes": {},
+    "dependencies": [],
+    "expires_at": "2026-05-04T12:05:00Z"
+  },
+  "status": {
+    "state": "applied",
+    "at": "2026-05-04T12:01:00Z"
+  }
+}

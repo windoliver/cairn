@@ -275,4 +275,52 @@ mod tests {
             serde_json::to_value(&back).unwrap()
         );
     }
+
+    fn plan_with(mutations: Vec<PlannedMutation>) -> FlushPlan {
+        let mut p = sample_plan();
+        p.mutations = mutations;
+        p
+    }
+
+    #[test]
+    fn snapshot_delete_plan_json() {
+        let plan = sample_plan();
+        let json = serde_json::to_string_pretty(&PersistedPlan::pending(plan)).unwrap();
+        insta::assert_snapshot!("plan_delete_json", json);
+    }
+
+    #[test]
+    fn snapshot_expire_plan_json() {
+        let plan = plan_with(vec![PlannedMutation::Expire {
+            target: TargetId::parse("01HQZX9F5N0000000000000000").unwrap(),
+            reason: ExpirationReason::TtlExpired,
+        }]);
+        let json = serde_json::to_string_pretty(&PersistedPlan::pending(plan)).unwrap();
+        insta::assert_snapshot!("plan_expire_json", json);
+    }
+
+    #[test]
+    fn snapshot_diff_markdown_for_delete() {
+        let md = diff::render(&sample_plan());
+        insta::assert_snapshot!("diff_delete_md", md);
+    }
+
+    #[test]
+    fn snapshot_status_transitions() {
+        let plan = sample_plan();
+        let mut p = PersistedPlan::pending(plan);
+        p.status = PlanStatus::Applied { at: "2026-05-04T12:01:00Z".into() };
+        insta::assert_snapshot!(
+            "status_applied_json",
+            serde_json::to_string_pretty(&p).unwrap()
+        );
+        p.status = PlanStatus::Rejected {
+            at: "2026-05-04T12:02:00Z".into(),
+            reason: "operator rejected".into(),
+        };
+        insta::assert_snapshot!(
+            "status_rejected_json",
+            serde_json::to_string_pretty(&p).unwrap()
+        );
+    }
 }
