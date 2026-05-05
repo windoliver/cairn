@@ -159,5 +159,14 @@ BEGIN
   SELECT RAISE(ABORT, 'issuer_seq.high_water must equal MAX(used.sequence) for the issuer');
 END;
 
+-- Restore PRAGMA legacy_alter_table to its default before the
+-- migration runner returns. This pragma is connection-scoped (NOT
+-- transaction-scoped), so any later migration in the same `to_latest`
+-- run, or any later schema operation on this connection, would
+-- otherwise inherit the relaxed rename semantics — the exact drift
+-- this localised pragma was meant to bound. Mirrors 0041's restore.
+-- (Issue #52 round-8 review #2.)
+PRAGMA legacy_alter_table = OFF;
+
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
   VALUES (46, '0046_replay_challenge_mode', '', strftime('%s','now') * 1000);

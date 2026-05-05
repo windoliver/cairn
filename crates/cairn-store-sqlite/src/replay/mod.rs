@@ -220,12 +220,6 @@ fn prepare_wal_with_replay_body(
         serde_json::to_string(intent).map_err(|e| ReplayError::Sqlite(rusqlite_codec_err(&e)))?;
     let expires_at_ms = parse_rfc3339_to_ms(&intent.expires_at)?;
 
-    let issued_seq: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(issued_seq), 0) + 1 FROM wal_ops",
-        [],
-        |r| r.get(0),
-    )?;
-
     // Idempotent on operation_id — a retry after a crash that already
     // committed the wal_ops row finds the conflict and continues. The
     // replay-ledger consume below is the source of truth for "this
@@ -234,27 +228,27 @@ fn prepare_wal_with_replay_body(
     // signed intent. Otherwise the replay-ledger consume would happily
     // bind sequence/challenge state to an unrelated wal_ops row whose
     // kind/envelope/target_hash/signature differ from this intent.
-    let inserted = tx.execute(
-        "INSERT INTO wal_ops (
-             operation_id, issued_seq, kind, state, envelope, issuer,
-             principal, target_hash, scope_json, plan_ref,
-             expires_at, signature, issued_at, updated_at, reason
-         ) VALUES (?1, ?2, ?3, 'PREPARED', ?4, ?5,
-                   NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?11, NULL)
-         ON CONFLICT (operation_id) DO NOTHING",
-        params![
-            intent.operation_id.0,
-            issued_seq,
-            inputs.kind,
-            envelope_json,
-            intent.issuer.0,
-            intent.target_hash,
-            scope_json,
-            inputs.plan_ref,
-            expires_at_ms,
-            intent.signature.0,
-            now_ms,
-        ],
+    //
+    // Round-8 review #1: `issued_seq` is allocated by reading
+    // `MAX(issued_seq) + 1` and inserting under a deferred SQLite
+    // transaction. Two concurrent admissions on independent
+    // connections can read the same MAX before either has acquired
+    // the WAL writer lock; the loser's INSERT then trips the
+    // `wal_ops_issued_seq_must_advance` trigger as a constraint
+    // violation. Retry the read+insert pair a bounded number of
+    // times so legitimate mixed-issuer traffic does not surface
+    // `ReplayError::Sqlite` to the verb layer for what is really a
+    // temporary writer-lock race. Bounded to 16 attempts — enough
+    // headroom for high-fan-in workloads, far below any deadlock
+    // budget.
+    let inserted = insert_wal_ops_with_issued_seq_retry(
+        tx,
+        intent,
+        inputs,
+        &envelope_json,
+        &scope_json,
+        expires_at_ms,
+        now_ms,
     )?;
 
     if inserted == 0 {
@@ -301,6 +295,64 @@ fn prepare_wal_with_replay_body(
 /// `envelope`, and `scope_json`. Anything else is suspicious — even
 /// a same-issuer same-`operation_id` row with a different signature
 /// is a different signed message.
+/// Read `MAX(issued_seq) + 1` and insert the `wal_ops` row, retrying
+/// the pair on the `wal_ops_issued_seq_must_advance` /
+/// UNIQUE-issued_seq race that loses to a concurrent writer on a
+/// different `SQLite` connection. See `is_issued_seq_race` for the
+/// detection logic.
+#[allow(clippy::too_many_arguments)]
+fn insert_wal_ops_with_issued_seq_retry(
+    tx: &Transaction<'_>,
+    intent: &SignedIntent,
+    inputs: &WalPrepareInputs<'_>,
+    envelope_json: &str,
+    scope_json: &str,
+    expires_at_ms: i64,
+    now_ms: i64,
+) -> Result<usize, ReplayError> {
+    const MAX_ISSUED_SEQ_RETRIES: u32 = 16;
+    for attempt in 0..=MAX_ISSUED_SEQ_RETRIES {
+        let issued_seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(issued_seq), 0) + 1 FROM wal_ops",
+            [],
+            |r| r.get(0),
+        )?;
+
+        let result = tx.execute(
+            "INSERT INTO wal_ops (
+                 operation_id, issued_seq, kind, state, envelope, issuer,
+                 principal, target_hash, scope_json, plan_ref,
+                 expires_at, signature, issued_at, updated_at, reason
+             ) VALUES (?1, ?2, ?3, 'PREPARED', ?4, ?5,
+                       NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?11, NULL)
+             ON CONFLICT (operation_id) DO NOTHING",
+            params![
+                intent.operation_id.0,
+                issued_seq,
+                inputs.kind,
+                envelope_json,
+                intent.issuer.0,
+                intent.target_hash,
+                scope_json,
+                inputs.plan_ref,
+                expires_at_ms,
+                intent.signature.0,
+                now_ms,
+            ],
+        );
+
+        match result {
+            Ok(n) => return Ok(n),
+            Err(e) if is_issued_seq_race(&e) && attempt < MAX_ISSUED_SEQ_RETRIES => {
+                // Re-read MAX(issued_seq) on next iteration.
+            }
+            Err(e) => return Err(ReplayError::Sqlite(e)),
+        }
+    }
+    // Loop body always either returns or continues, so this is unreachable.
+    unreachable!("issued_seq retry loop returned without resolving");
+}
+
 #[allow(clippy::too_many_arguments)]
 fn verify_existing_wal_op_matches(
     tx: &Transaction<'_>,
@@ -646,6 +698,20 @@ fn is_constraint_message(err: &rusqlite::Error, needle: &str) -> bool {
         err.sqlite_error_code(),
         Some(rusqlite::ErrorCode::ConstraintViolation)
     ) && err.to_string().contains(needle)
+}
+
+/// Is this the per-trigger / per-UNIQUE error that signals a
+/// concurrent `issued_seq` allocation lost the race against another
+/// connection? Both surfaces converge on the same root cause and the
+/// caller's retry loop handles them identically.
+fn is_issued_seq_race(err: &rusqlite::Error) -> bool {
+    let msg = err.to_string();
+    is_constraint_message(err, "wal_ops.issued_seq must strictly advance")
+        || (matches!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
+        ) && msg.to_lowercase().contains("issued_seq")
+            && msg.to_lowercase().contains("unique"))
 }
 
 /// Decode a 16-byte base64 nonce into raw bytes. The IDL
