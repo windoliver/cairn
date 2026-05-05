@@ -610,6 +610,57 @@ fn caller_swallowing_replay_error_cannot_commit_partial_wal_state() {
 }
 
 #[test]
+fn admit_at_or_after_expires_at_is_rejected() {
+    // Round-10 review #1: even with a `VerifiedSignedIntent`, the
+    // store boundary must re-check the signed `expires_at` against
+    // the trusted admission clock. `now_ms == expires_at_ms` rejects
+    // (exclusive upper bound, matching the verifier).
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    // Fixture intent's expires_at parses to 1_776_866_831_000 ms.
+    let expires = 1_776_866_831_000_i64;
+
+    let err_eq =
+        prepare_wal_with_replay(&tx, &intent, &inputs(), expires).expect_err("equal must reject");
+    assert!(
+        matches!(
+            err_eq,
+            ReplayError::IntentExpired { expires_at_ms, now_ms, .. }
+                if expires_at_ms == expires && now_ms == expires
+        ),
+        "got {err_eq:?}"
+    );
+
+    let err_after = prepare_wal_with_replay(&tx, &intent, &inputs(), expires + 1)
+        .expect_err("after must reject");
+    assert!(
+        matches!(err_after, ReplayError::IntentExpired { .. }),
+        "got {err_after:?}"
+    );
+
+    // Replay state must be untouched after a rejected admit.
+    let used: i64 = tx
+        .query_row("SELECT COUNT(*) FROM used", [], |r| r.get(0))
+        .expect("count");
+    let wal: i64 = tx
+        .query_row("SELECT COUNT(*) FROM wal_ops", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!((used, wal), (0, 0));
+}
+
+#[test]
+fn admit_one_ms_before_expiry_succeeds() {
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+    let intent = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    let expires = 1_776_866_831_000_i64;
+    prepare_wal_with_replay(&tx, &intent, &inputs(), expires - 1).expect("just-in-time admit");
+    tx.commit().expect("commit");
+}
+
+#[test]
 fn rolled_back_transaction_leaves_no_state() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");

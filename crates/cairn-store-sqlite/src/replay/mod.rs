@@ -111,6 +111,25 @@ pub enum ReplayError {
         operation_id: String,
     },
 
+    /// Signed intent's `expires_at` lies at or before the admission
+    /// clock. The verifier already enforced expiry at verification
+    /// time, but a `VerifiedSignedIntent` token can outlive its
+    /// signed window — queueing delay, writer-lock contention, or a
+    /// caller that holds the proof. Re-check at the store boundary
+    /// so the §4.2 leaked-key blast-radius bound holds end-to-end.
+    /// Maps to the IDL wire code `ExpiredIntent` (round-10 review #1).
+    #[error(
+        "signed intent expired at admit: operation_id {operation_id} expires_at_ms={expires_at_ms} now_ms={now_ms}"
+    )]
+    IntentExpired {
+        /// Envelope `operation_id` ULID.
+        operation_id: String,
+        /// Parsed `expires_at` unix-ms.
+        expires_at_ms: i64,
+        /// Trusted admission clock unix-ms.
+        now_ms: i64,
+    },
+
     /// Underlying `SQLite` failure (driver/IO error, schema mismatch,
     /// or unexpected trigger abort whose message did not match a known
     /// invariant string).
@@ -219,6 +238,21 @@ fn prepare_wal_with_replay_body(
     let envelope_json =
         serde_json::to_string(intent).map_err(|e| ReplayError::Sqlite(rusqlite_codec_err(&e)))?;
     let expires_at_ms = parse_rfc3339_to_ms(&intent.expires_at)?;
+
+    // Round-10 review #1: verifier-time expiry is not enough. A
+    // `VerifiedSignedIntent` token can outlive its signed window
+    // (queueing, writer-lock contention, caller holding the proof).
+    // Re-check the trusted admission clock against the signed
+    // `expires_at` so the §4.2 leaked-key blast-radius bound holds
+    // end-to-end. Use exclusive upper-bound semantics matching the
+    // verifier's `now >= expires_chrono`.
+    if now_ms >= expires_at_ms {
+        return Err(ReplayError::IntentExpired {
+            operation_id: intent.operation_id.0.clone(),
+            expires_at_ms,
+            now_ms,
+        });
+    }
 
     // Idempotent on operation_id — a retry after a crash that already
     // committed the wal_ops row finds the conflict and continues. The
