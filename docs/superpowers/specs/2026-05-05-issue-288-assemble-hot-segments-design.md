@@ -38,12 +38,11 @@ This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a r
 }
 ```
 
-`segments` is **required** (never absent). Its length equals the number of chunks the assembler passed to `build_segments`:
+`segments` is **required** (never absent) and **canonical** — exactly one wire shape per `(prefix, recipe)` state:
 
-- `build_segments(&[])` → `("", vec![])`. The "no hot-memory available" case.
-- `build_segments(&[(step, ""), (step, ""), ...])` → `("", vec![<N zero-length segments>])`. All recipe slots ran but produced no content; the segments are kept so wrappers can still see slot identity.
-
-Both are legal wire shapes. Wrappers that only care about non-empty content filter on `byte_end > byte_start`.
+- Producers (in P0, the future `HotMemoryAssembler` calling `build_segments`) MUST pass one chunk per configured recipe step, in declaration order. `segments.len() == HotMemoryConfig.recipe.len()` always.
+- The "no hot-memory available" case is encoded by passing all-empty bodies: `prefix == ""`, `segments` is N zero-length entries (one per recipe slot). There is **no second legal encoding** for empty content. The earlier-draft `build_segments(&[]) → vec![]` shortcut is rejected: it lets two producers emit different bytes for the same visible state, which breaks wrapper cache idempotency.
+- Wrappers that only care about non-empty content filter on `byte_end > byte_start`. Wrappers keying cache plans on `(step, content_hash)` get deterministic plans across producers and retries.
 
 `HotSegment` definition (added under `$defs`):
 
@@ -65,6 +64,7 @@ Both are legal wire shapes. Wrappers that only care about non-empty content filt
 **Wire-shape rationale:**
 
 - Flat `byte_start` / `byte_end` (half-open) over a nested `Range` object: lighter JSON, no extra `$defs`. The half-open invariant is asserted by tests (`segments[i].byte_end == segments[i+1].byte_start`).
+- **Cross-segment invariants are not expressible in JSON Schema 2020-12 portably** (no cross-property comparison). Per-field bounds (`byte_start`/`byte_end` ∈ `[0, 4194304]`) are in the schema; everything else (monotonicity, contiguity, `bytes == last.byte_end`, hash correctness) is enforced at runtime by `cairn_core::verbs::assemble_hot::validate()` (§5). The MCP envelope deserializer calls `validate()` on the way in. Wrappers consuming untrusted producers SHOULD call it before slicing `prefix`. This is documented in the schema's `description` and on the helper.
 - **Offsets are UTF-8 byte positions into `prefix`, not code-unit positions.** Wrappers in languages with non-UTF-8 string types (JavaScript / Java use UTF-16, Python `str` is opaque) MUST encode `prefix` to UTF-8 bytes before slicing. JS: `new TextEncoder().encode(prefix).slice(s, e)`. Python: `prefix.encode("utf-8")[s:e]`. Naïve `String.prototype.slice(s, e)` in JS uses UTF-16 code units and will corrupt any non-ASCII segment, including miscomputing `content_hash` against the wrong bytes. Documented on the schema and pinned by a non-ASCII unit test (§6.1).
 - Step wire values match existing `cairn-core::config::HotMemoryRecipeStep` snake_case (note: `top_salience_project`, not the issue's informal `top_salience`).
 - `content_hash` is lowercase hex sha256 (64 chars) over the segment's UTF-8 bytes. Hex over base64url because every other content-hash in the brief / Rust ecosystem is hex; 64 chars in JSON is fine.
@@ -130,19 +130,59 @@ pub const fn default_stability(step: HotRecipeStep) -> SegmentStability {
 
 /// Build (`prefix`, `segments`) from an ordered list of `(step, body)` chunks.
 ///
+/// **Producer contract.** Callers (in P0, `HotMemoryAssembler`) MUST pass
+/// exactly one chunk per configured `HotMemoryConfig.recipe` step, in
+/// declaration order. The "no hot-memory available" case is encoded by
+/// passing all-empty bodies, not by passing `&[]`. This guarantees a
+/// canonical wire shape for every `(prefix, recipe)` state.
+///
 /// - `prefix` = concatenation of bodies in input order.
-/// - `segments.len() == chunks.len()`. Empty input → empty output. All-empty
-///   bodies → N zero-length segments (kept, not dropped — preserves slot
-///   identity so wrappers can still inspect what the assembler attempted).
+/// - `segments.len() == chunks.len()`. Zero-length segments are kept.
 /// - Each segment's `byte_start..byte_end` is a half-open UTF-8 byte range
 ///   into `prefix`. Ranges cover `[0, prefix.len())` with no gaps, no
 ///   overlaps. First start is 0; last end is `prefix.len()`.
 /// - `content_hash` = lowercase hex `sha256` over the segment's bytes
 ///   (`prefix[byte_start..byte_end].as_bytes()`), no domain separation.
+///
+/// Passing `&[]` is permitted but discouraged — it represents "no recipe
+/// configured at all", which is not the same as "recipe ran with no
+/// content" and is not a state the runtime should produce in P0. Tests
+/// pin both behaviours so the distinction stays explicit.
 pub fn build_segments(chunks: &[(HotRecipeStep, &str)]) -> (String, Vec<HotSegment>);
+
+/// Validate that an `AssembleHotData` payload satisfies the wire-shape
+/// invariants: each `byte_start <= byte_end`, segments are contiguous in
+/// declaration order (`segments[i].byte_end == segments[i+1].byte_start`),
+/// `bytes == prefix.len() as u64`, last segment ends at `bytes` (when
+/// `segments` is non-empty), and every `content_hash` matches its slice.
+///
+/// `cairn-core` callers (e.g., the envelope deserializer for `assemble_hot`
+/// responses) call this after deserialization. SDK / MCP wrappers consuming
+/// untrusted producers SHOULD call it before slicing `prefix`.
+pub fn validate(data: &AssembleHotData) -> Result<(), AssembleHotValidationError>;
+
+/// Errors `validate` can return. `#[non_exhaustive]`.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AssembleHotValidationError {
+    #[error("segment {index}: byte_start {start} > byte_end {end}")]
+    DescendingRange { index: usize, start: u64, end: u64 },
+    #[error("segment {index}: byte_start {start} != previous byte_end {prev_end}")]
+    NonContiguous { index: usize, start: u64, prev_end: u64 },
+    #[error("segments[0].byte_start {start} != 0")]
+    DoesNotStartAtZero { start: u64 },
+    #[error("segments.last().byte_end {end} != prefix.len() {prefix_len}")]
+    DoesNotCoverPrefix { end: u64, prefix_len: u64 },
+    #[error("data.bytes {bytes} != prefix.len() {prefix_len}")]
+    BytesMismatch { bytes: u64, prefix_len: u64 },
+    #[error("segment {index}: content_hash mismatch")]
+    HashMismatch { index: usize },
+    #[error("segment {index}: byte_end {end} > prefix.len() {prefix_len}")]
+    OutOfBounds { index: usize, end: u64, prefix_len: u64 },
+}
 ```
 
-**Why keep zero-length segments instead of dropping them.** The recipe-order invariant is "segments[i].step matches the i-th chunk the assembler passed". Dropping empty segments breaks that alignment and forces wrappers to re-derive which slots ran. A wrapper that wants only non-empty segments filters on `byte_end > byte_start` — trivial. The "no hot-memory at all" case is distinct: the assembler passes `&[]` (no chunks) and gets `(String::new(), vec![])`.
+**Why keep zero-length segments instead of dropping them.** The recipe-order invariant is "segments[i].step matches the i-th configured recipe step". Dropping empty segments breaks alignment, forces wrappers to re-derive which slots ran, and creates two encodings for an empty `prefix` (an idempotency hazard for cache planners). Keeping zero-length segments gives a single canonical wire shape: `segments.len() == recipe.len()` always; "no content" = N zero-length segments. A wrapper that wants only non-empty segments filters on `byte_end > byte_start`.
 
 **Why no domain separation in the hash.** The issue's stated goal is "byte-stable across runs when inputs unchanged" — that's `sha256(bytes)`. Wrappers that key on hash already know which segment slot they're caching, so cross-slot collisions aren't a real risk.
 
@@ -155,12 +195,24 @@ pub fn build_segments(chunks: &[(HotRecipeStep, &str)]) -> (String, Vec<HotSegme
 ### 6.1 Unit tests (`segments.rs` `mod tests`)
 
 - `default_stability_matches_brief` — table-asserts the six step → stability mappings.
-- `build_segments_empty_input_returns_empty` — `build_segments(&[])` → `(String::new(), vec![])`.
-- `build_segments_all_empty_chunks_keeps_zero_length_segments` — six empty chunks → `prefix == ""`, `segments.len() == 6`, every `byte_start == byte_end == 0`. Pins the empty-prefix vs zero-length-segments contract from §3.
+- `build_segments_empty_input_returns_empty` — `build_segments(&[])` → `(String::new(), vec![])`. Documents the discouraged-but-defined edge case.
+- `build_segments_all_empty_chunks_keeps_zero_length_segments` — six empty chunks → `prefix == ""`, `segments.len() == 6`, every `byte_start == byte_end == 0`. Pins the **canonical** empty-content shape (§3).
 - `build_segments_single_chunk` — one step, prefix = body, one segment with full range.
 - `build_segments_preserves_recipe_order` — chunks in declaration order produce segments in that order.
 - `content_hash_matches_segment_bytes` — for each segment, `hex(sha256(prefix[s..e].as_bytes())) == s.content_hash`.
-- `build_segments_handles_non_ascii` — chunk body `"héllo·世界"` (multi-byte UTF-8). Asserts `byte_end - byte_start == body.len()` (bytes, not chars), `prefix[s..e] == body`, and `s.content_hash == hex(sha256(body.as_bytes()))`. Pins the UTF-8-byte-offset wire contract; documents that wrappers MUST use byte slicing, not code-unit slicing.
+- `build_segments_handles_non_ascii` — chunk body `"héllo·世界"` (multi-byte UTF-8). Asserts `byte_end - byte_start == body.len()` (bytes, not chars), `prefix[s..e] == body`, and `s.content_hash == hex(sha256(body.as_bytes()))`. Pins the UTF-8-byte-offset wire contract.
+
+**Validator unit tests** (one per error variant in `AssembleHotValidationError`):
+
+- `validate_accepts_well_formed` — happy path on a 6-slot fixture.
+- `validate_rejects_descending_range` — hand-crafted `{byte_start: 10, byte_end: 5}`.
+- `validate_rejects_non_contiguous` — gap between two segments.
+- `validate_rejects_does_not_start_at_zero`.
+- `validate_rejects_does_not_cover_prefix` — last segment ends before `prefix.len()`.
+- `validate_rejects_bytes_mismatch` — `data.bytes != prefix.len()`.
+- `validate_rejects_hash_mismatch` — flip a content_hash byte.
+- `validate_rejects_out_of_bounds` — last segment ends past `prefix.len()`.
+- `build_segments_output_validates` — round-trip: `validate(&build(...)) == Ok(())` for any chunks list.
 
 ### 6.2 Property tests (`proptest`)
 
@@ -203,7 +255,7 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 | Criterion | Where verified |
 |---|---|
 | `segments` populated in declaration order | unit `build_segments_preserves_recipe_order`; property `coverage_invariant` |
-| `byte_range` covers `[0, bytes)` with no gaps / no overlaps | property `coverage_invariant` |
+| `byte_range` covers `[0, bytes)` with no gaps / no overlaps | property `coverage_invariant`; `validate()` rejects malformed payloads at runtime (§5) |
 | `content_hash` byte-stable across runs when inputs unchanged | property `hash_stability`; insta snapshot |
 | `--json` output of `cairn assemble_hot` includes segments; insta snapshot covers shape | **Partial.** The wire shape is locked by an insta snapshot of `AssembleHotData` JSON serialized from a hand-built fixture. The CLI binary itself still returns `unimplemented_response` because the verb is not yet wired to a `HotMemoryAssembler`; the end-to-end CLI snapshot ships with that wiring PR (missing-half of #193). Called out in §2 and the PR description. |
 | No provider-specific terms in Cairn types — only stability hints | review |
