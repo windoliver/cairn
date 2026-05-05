@@ -92,15 +92,18 @@ pub fn command() -> Command {
         )
 }
 
-/// Dispatch the `flush` group.
+/// Dispatch the `flush` group. `resolved_vault` is the vault path the
+/// shared resolver produced for this invocation (honors `--vault` and
+/// `CAIRN_VAULT` together with the vault registry / CWD walk-up). When
+/// it's `None` we fall back to the bare `CAIRN_VAULT` env so operators
+/// can still inspect a vault outside the normal precedence chain.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
-    let vault = match resolve_vault() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("cairn flush: {e}");
-            return ExitCode::from(78); // EX_CONFIG
-        }
+pub fn run(sub: &ArgMatches, resolved_vault: Option<PathBuf>) -> ExitCode {
+    let Some(vault) =
+        resolved_vault.or_else(|| std::env::var_os("CAIRN_VAULT").map(PathBuf::from))
+    else {
+        eprintln!("cairn flush: vault root not set: pass --vault NAME_OR_PATH or CAIRN_VAULT");
+        return ExitCode::from(78); // EX_CONFIG
     };
     match sub.subcommand() {
         Some(("list", m)) => list(&vault, m),
@@ -503,76 +506,42 @@ fn claim_pending(
             Err(e) => return ClaimOutcome::Err(e),
         }
     }
-    // Crashed-owner recovery: a previous process renamed the canonical
-    // in-flight file to `.in-flight.<pid>` and crashed before publish.
-    // Pending and the canonical claim are both gone. Scan the bucket dir
-    // for any orphan `.in-flight.<pid>` matching this id and re-claim
-    // it — but ONLY when the orphan is provably stale (mtime older than
-    // `ORPHAN_STALE_THRESHOLD_SECS`). Younger orphans are assumed to
-    // belong to a still-running peer process and we fail closed with a
-    // recovery-in-progress conflict so we don't steal a live owner's
-    // claim. Operators can wait the threshold or manually rename a
-    // verified-dead orphan back to the canonical path.
+    // Crashed-owner recovery is INTENTIONALLY operator-driven, not
+    // automatic. If a previous process renamed the canonical in-flight
+    // file to `<id>.plan.json.in-flight.<pid>` and crashed before
+    // publish, the orphan is visible in `flush list` (with a
+    // `stranded` status) but `apply`/`reject` will not auto-claim it.
+    // Reasons:
+    //   - file mtime is mutable (`touch -m`) and PID can be reused, so
+    //     no filesystem-only signal can reliably prove the owner is
+    //     dead;
+    //   - auto-recovery from a fresh orphan can steal a live owner's
+    //     claim, leading to duplicate or partial publish;
+    //   - the safe path is for the operator to verify the owner is
+    //     dead (`ps -p <pid>`, etc.) and manually rename
+    //     `<id>.plan.json.in-flight.<pid>` back to
+    //     `<id>.plan.json.in-flight`, after which the next
+    //     `flush apply` / `flush reject` resumes via the existing
+    //     `claim.exists()` branch above.
     if !pending.exists()
         && let Some(orphan) = find_orphan_owned_claim(&claim, ulid)
     {
-        let owned = process_owned_claim(&claim);
-        if orphan == owned {
-            return ClaimOutcome::Claimed(owned);
-        }
-        if !is_orphan_stale(&orphan) {
-            return ClaimOutcome::Err(std::io::Error::other(format!(
-                "recovery for {0} held by recent owner ({1}); waited <{2}s — \
-                 retry once that process exits or rename {1} back to {0}.plan.json.in-flight \
-                 manually if you have verified the owner is dead",
-                ulid.0,
-                orphan
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("<unknown>"),
-                ORPHAN_STALE_THRESHOLD_SECS,
-            )));
-        }
-        match std::fs::rename(&orphan, &owned) {
-            Ok(()) => return ClaimOutcome::Claimed(owned),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Another concurrent recoverer beat us — fall through to
-                // the pending-rename attempt, which will return `NotFound`
-                // and the apply/reject caller will retry on the terminal
-                // (which the winner is in the process of publishing).
-            }
-            Err(e) => return ClaimOutcome::Err(e),
-        }
+        return ClaimOutcome::Err(std::io::Error::other(format!(
+            "stranded in-flight claim for {0} at {1}; auto-recovery is disabled. \
+             Verify the owning process is dead, then manually rename it back to \
+             the canonical claim path (`{0}.plan.json.in-flight`) and retry.",
+            ulid.0,
+            orphan
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("<unknown>"),
+        )));
     }
     match std::fs::rename(&pending, &claim) {
         Ok(()) => ClaimOutcome::Claimed(claim),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClaimOutcome::NotFound,
         Err(e) => ClaimOutcome::Err(e),
     }
-}
-
-/// Mtime threshold above which an orphan `.in-flight.<pid>` is treated
-/// as stale and recoverable. Matches brief §5.6 `expires_at` 5-minute
-/// receipt TTL — a process that has held a claim longer than this is
-/// almost certainly dead. Operators can rename a verified-dead orphan
-/// back to the canonical path manually if they need to recover sooner.
-const ORPHAN_STALE_THRESHOLD_SECS: u64 = 300;
-
-/// Returns `true` when `path` exists and its mtime is older than
-/// [`ORPHAN_STALE_THRESHOLD_SECS`]. Treats unreadable metadata as
-/// non-stale (fail closed) so a transient stat error never causes us
-/// to steal a live owner's claim.
-fn is_orphan_stale(path: &Path) -> bool {
-    let Ok(md) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(mtime) = md.modified() else {
-        return false;
-    };
-    let Ok(age) = std::time::SystemTime::now().duration_since(mtime) else {
-        return false;
-    };
-    age.as_secs() > ORPHAN_STALE_THRESHOLD_SECS
 }
 
 /// Look for any `<id>.plan.json.in-flight.<pid>` orphan in the same
@@ -714,13 +683,26 @@ fn emit_apply_ok(json: bool, id: &str, status: &str) {
 /// pulling `chrono` for one string. When `chrono` arrives as a workspace
 /// dep elsewhere, swap this for a real formatter.
 /// Compare an `expires_at` RFC-3339 timestamp to wall-clock now via
-/// lexicographic string compare. Works because both ends use the same
-/// fixed-width `YYYY-MM-DDTHH:MM:SSZ` form. Returns `false` (i.e. NOT
-/// expired) on any parse / clock error so we never block on a faulty
-/// clock — the caller's gate is conservative either way.
+/// chronological parse. Lexical compare is wrong because fractional
+/// seconds (`...00.999Z` vs `...00Z`) and offset forms (`+02:00`)
+/// don't sort the way ASCII does. Uses
+/// [`cairn_core::domain::Rfc3339Timestamp::cmp_chronological`] so a
+/// malformed `expires_at` returns `true` (treat as expired → fail
+/// closed) rather than silently passing.
 fn expires_at_in_past(expires_at: &str) -> bool {
-    let now = now_rfc3339();
-    expires_at < now.as_str()
+    use cairn_core::domain::Rfc3339Timestamp;
+    let Ok(expires) = Rfc3339Timestamp::parse(expires_at) else {
+        // Malformed plan timestamp — fail closed by treating it as
+        // expired. The caller's gate logs the value so an operator
+        // can see what went wrong.
+        return true;
+    };
+    let Ok(now) = Rfc3339Timestamp::parse(now_rfc3339()) else {
+        // Our own `now_rfc3339` is always well-formed by construction;
+        // if it isn't, fail closed.
+        return true;
+    };
+    expires.cmp_chronological(&now) == std::cmp::Ordering::Less
 }
 
 fn now_rfc3339() -> String {
@@ -776,13 +758,6 @@ fn epoch_days_to_ymd(mut days: u64) -> (u32, u32, u32) {
         m += 1;
     }
     (year, (m + 1) as u32, (days + 1) as u32)
-}
-
-fn resolve_vault() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("CAIRN_VAULT") {
-        return Ok(PathBuf::from(p));
-    }
-    Err("vault root not set: pass CAIRN_VAULT".into())
 }
 
 /// Summary row emitted by `flush list`.
@@ -960,14 +935,54 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
             });
         }
     }
+    // Apply the same defenses to the normal pending/applied/rejected
+    // scan: stream-truncate at MAX_INFLIGHT_SCAN, refuse oversize files,
+    // and emit an `omitted` notice when caps trip. A flooded bucket
+    // cannot turn `flush list` into an unbounded read.
     for b in buckets {
         let dir = bucket_dir(vault, b);
         let Ok(read) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in read.flatten() {
+        let mut entries: Vec<_> = read.flatten().take(MAX_INFLIGHT_SCAN + 1).collect();
+        let read_full = entries.len() > MAX_INFLIGHT_SCAN;
+        if read_full {
+            entries.truncate(MAX_INFLIGHT_SCAN);
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut bucket_rows = 0_usize;
+        let mut hit_row_cap = false;
+        for entry in entries {
+            if bucket_rows >= MAX_INFLIGHT_ROWS {
+                hit_row_cap = true;
+                break;
+            }
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            // Skip files larger than the defensive size cap. A
+            // corrupted/attacker-staged huge `.plan.json` cannot make
+            // the recovery list hang on read.
+            let oversize = entry
+                .metadata()
+                .ok()
+                .is_some_and(|md| md.len() > MAX_PLAN_BYTES);
+            if oversize {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                rows.push(PlanSummary {
+                    id: stem,
+                    bucket: b.dir_name(),
+                    mode: "?".into(),
+                    mutations: 0,
+                    issued_at: "?".into(),
+                    status: "stranded (oversize)".into(),
+                });
+                bucket_rows += 1;
                 continue;
             }
             let Ok(bytes) = std::fs::read(&path) else {
@@ -988,6 +1003,18 @@ fn list(vault: &Path, m: &ArgMatches) -> ExitCode {
                     PlanStatus::Rejected { .. } => "rejected".into(),
                     _ => "unknown".into(),
                 },
+            });
+            bucket_rows += 1;
+        }
+        if read_full || hit_row_cap {
+            let why = if read_full {
+                format!("omitted (scan cap {MAX_INFLIGHT_SCAN})")
+            } else {
+                format!("omitted (row cap {MAX_INFLIGHT_ROWS})")
+            };
+            omitted.push(OmittedNotice {
+                bucket: b.dir_name(),
+                reason: why,
             });
         }
     }

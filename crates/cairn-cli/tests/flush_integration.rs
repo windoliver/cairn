@@ -339,13 +339,13 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
-/// Round 7 (#54): a process that crashed AFTER taking exclusive
-/// ownership (renamed `<id>.in-flight` → `<id>.in-flight.<pid>`) and
-/// BEFORE publishing must still be recoverable by a later `flush
-/// apply <id>`. Without orphan-claim recovery the canonical claim
-/// path is gone, pending is gone, and apply would report `NotFound`.
+/// Round 9 (#54): auto-recovery from a `.in-flight.<pid>` orphan was
+/// removed because mtime + PID provide no reliable proof that the
+/// owner is dead. `apply` must now refuse to act on an orphan and
+/// instead surface a clear "stranded" message so the operator can
+/// verify-and-rename manually.
 #[test]
-fn flush_apply_recovers_orphan_owned_in_flight() {
+fn flush_apply_refuses_orphan_owned_in_flight() {
     let vault = tempfile::tempdir().unwrap();
     let id = "01HQZK000000000000000RPHN1";
     // Stage an orphan owned-claim file as if a prior process renamed
@@ -366,64 +366,6 @@ fn flush_apply_recovers_orphan_owned_in_flight() {
     std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
     let p = sample_pending(id);
     std::fs::write(&orphan, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
-    // Backdate mtime past the orphan staleness threshold (5 minutes)
-    // so the recovery path treats this orphan as recoverable rather
-    // than a still-running owner's claim.
-    let now_secs = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    )
-    .unwrap();
-    let old = filetime::FileTime::from_unix_time(now_secs - 600, 0);
-    filetime::set_file_mtime(&orphan, old).unwrap();
-
-    let bin = env!("CARGO_BIN_EXE_cairn");
-    let out = std::process::Command::new(bin)
-        .args(["flush", "apply", id])
-        .env("CAIRN_VAULT", vault.path())
-        .output()
-        .expect("spawn cairn");
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let applied = plan_path(
-        vault.path(),
-        Bucket::Applied,
-        &cairn_core::generated::common::Ulid(id.into()),
-    );
-    assert!(
-        applied.exists(),
-        "orphan owned-claim recovery must publish the terminal"
-    );
-}
-
-/// Round 8 (#54): a fresh orphan owned-claim (mtime within the
-/// staleness threshold) must NOT be auto-recovered — it might still
-/// belong to a running owner. Apply must fail closed with a recovery
-/// conflict instead of stealing the live owner's claim.
-#[test]
-fn flush_apply_refuses_to_steal_fresh_owned_claim() {
-    let vault = tempfile::tempdir().unwrap();
-    let id = "01HQZK000000000000000FRSH1";
-    let canonical = plan_path(
-        vault.path(),
-        Bucket::Applied,
-        &cairn_core::generated::common::Ulid(id.into()),
-    )
-    .with_extension("json.in-flight");
-    let orphan = {
-        let mut s = canonical.as_os_str().to_owned();
-        s.push(".999998");
-        std::path::PathBuf::from(s)
-    };
-    std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
-    let p = sample_pending(id);
-    std::fs::write(&orphan, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
-    // Don't backdate — fresh mtime simulates a still-running owner.
 
     let bin = env!("CARGO_BIN_EXE_cairn");
     let out = std::process::Command::new(bin)
@@ -433,19 +375,31 @@ fn flush_apply_refuses_to_steal_fresh_owned_claim() {
         .expect("spawn cairn");
     assert!(
         !out.status.success(),
-        "must refuse to recover fresh orphan; stderr: {}",
+        "must refuse orphan auto-recovery; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("recovery") && stderr.contains("recent owner"),
-        "expected recovery-conflict message; got: {stderr}"
+        stderr.contains("stranded in-flight claim"),
+        "expected stranded message; got: {stderr}"
     );
+    // Orphan and pending both untouched.
     assert!(
         orphan.exists(),
-        "fresh orphan must be preserved (not stolen by recovery)"
+        "orphan must be preserved for manual recovery"
     );
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    assert!(!applied.exists(), "must not have published a terminal");
 }
+
+// Round 9 (#54): the round-8 fresh-orphan steal-refusal test was
+// subsumed by `flush_apply_refuses_orphan_owned_in_flight` — auto
+// recovery is now disabled regardless of mtime, so a single test
+// covers both the fresh and stale orphan cases.
 
 /// Round 7 (#54): JSON output uses a typed envelope `{plans, omitted}`
 /// so consumers cannot mistake an omitted-scan marker for a real plan.

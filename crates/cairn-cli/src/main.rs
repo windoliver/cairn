@@ -210,7 +210,16 @@ fn main() -> ExitCode {
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
-        Some(("flush", sub)) => verbs::flush::run(sub),
+        Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
+            Err(e) => {
+                // Fall back to env-only resolution for `flush list` so an
+                // operator can still inspect a vault that wasn't found via
+                // the registry path. Mutating subcommands re-validate.
+                eprintln!("cairn flush: vault resolution warning — {e:#}");
+                verbs::flush::run(sub, None)
+            }
+        },
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {
