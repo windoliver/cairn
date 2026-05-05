@@ -24,6 +24,7 @@
 //!   per-sensor opt-in, append-only audit)
 
 pub mod capture_trace;
+pub mod entity_resolve;
 pub mod explain;
 pub mod extract;
 pub mod filter;
