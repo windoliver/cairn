@@ -168,6 +168,31 @@ pub struct WalPrepareInputs<'a> {
 /// then consume the replay ledger entry. Both writes happen inside the
 /// caller's transaction; rolling back drops both.
 ///
+/// # Caller contract: bind `inputs.kind` / `inputs.plan_ref` to the signed payload
+///
+/// The IDL `SignedIntent` schema covers `target_hash` (a sha256 of the
+/// record/plan/receipt) but **does not** include a verb-action /
+/// `kind` field in the signed bytes (brief §4.2). This function copies
+/// `inputs.kind` and `inputs.plan_ref` into `wal_ops` verbatim; it
+/// cannot prove the issuer authorized the specific WAL action.
+///
+/// **The verb-layer caller is responsible for binding `inputs.kind`
+/// and `inputs.plan_ref` to the `target_hash` it computed before
+/// admitting.** Concretely: the caller derives `target_hash` over the
+/// canonical bytes of the record / plan / receipt that this `kind`
+/// produces, asserts the verifier's `intent.target_hash ==
+/// computed_target_hash`, and only then calls this function. A future
+/// IDL extension may move `kind` into the signed payload (§13.5
+/// codegen) and let the store enforce the binding directly; round-11
+/// review #1 documented as a known mitigation-by-contract.
+///
+/// # Caller contract: do not enable `feature = "test-helpers"` in production
+///
+/// `cairn_store_sqlite::open_sync` is feature-gated for tests. The
+/// production `open` path stays unchanged. Round-11 review #2 closed
+/// the previous public-via-feature replay-admit bypass; the only
+/// raw-intent entry point is now `pub(crate)` `#[cfg(test)]`.
+///
 /// # Errors
 ///
 /// - [`ReplayError::Duplicate`] — `operation_id` or `(issuer, nonce)`
@@ -789,53 +814,8 @@ fn decode_nonce(b64: &str) -> Result<Vec<u8>, rusqlite::Error> {
 #[cfg(test)]
 mod tests;
 
-/// Test-only escape hatch — wraps the raw replay-admit free functions
-/// so in-crate / external integration tests can bypass the
-/// [`crate::store::tx::StoreTx::prepare_wal_with_replay`]
-/// `VerifiedSignedIntent` gate when constructing one is impractical
-/// (e.g., concurrency tests that drive a shared rusqlite `Connection`
-/// without an `EnvelopeVerifier`).
-///
-/// **Production callers MUST NOT use this module.** It is gated behind
-/// the `test-helpers` feature so production builds of
-/// `cairn-store-sqlite` cannot link these symbols. Issue #52 round-3
-/// review #1.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod test_helpers {
-    use rusqlite::Transaction;
+#[cfg(test)]
+mod concurrency_tests;
 
-    use cairn_core::generated::envelope::SignedIntent;
-
-    use super::{ReplayError, WalPrepareInputs};
-
-    /// Test-only: drive [`super::prepare_wal_with_replay`] without the
-    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate or
-    /// the trusted store clock. `now_ms` is supplied so deterministic
-    /// tests can drive the challenge-TTL boundary.
-    ///
-    /// # Errors
-    ///
-    /// See [`ReplayError`].
-    pub fn prepare_wal_with_replay(
-        tx: &Transaction<'_>,
-        intent: &SignedIntent,
-        inputs: &WalPrepareInputs<'_>,
-        now_ms: i64,
-    ) -> Result<(), ReplayError> {
-        super::prepare_wal_with_replay(tx, intent, inputs, now_ms)
-    }
-
-    /// Test-only: drive [`super::consume_intent`] without the
-    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate.
-    ///
-    /// # Errors
-    ///
-    /// See [`ReplayError`].
-    pub fn consume_intent(
-        tx: &Transaction<'_>,
-        intent: &SignedIntent,
-        now_ms: i64,
-    ) -> Result<(), ReplayError> {
-        super::consume_intent(tx, intent, now_ms)
-    }
-}
+#[cfg(test)]
+mod handshake_roundtrip_tests;

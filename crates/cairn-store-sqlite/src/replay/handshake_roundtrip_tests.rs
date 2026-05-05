@@ -3,10 +3,10 @@
 //! `SQLite` vault. Mirrors the production flow that the CLI handshake
 //! verb drives (issue #52).
 
+use crate::open;
+use crate::replay::{ReplayError, WalPrepareInputs};
 use cairn_core::generated::common::{Identity, Nonce16Base64, Ulid};
 use cairn_core::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
-use cairn_store_sqlite::open;
-use cairn_store_sqlite::replay::{ReplayError, WalPrepareInputs};
 use tempfile::tempdir;
 
 const ISSUER: &str = "hmn:tafeng";
@@ -50,8 +50,8 @@ fn inputs() -> WalPrepareInputs<'static> {
 
 /// Wrap `ReplayError` in `StoreError::Invariant` so the closure return
 /// type matches `with_tx`'s required `StoreError`.
-fn replay_to_store(e: &ReplayError) -> cairn_store_sqlite::StoreError {
-    cairn_store_sqlite::StoreError::Invariant {
+fn replay_to_store(e: &ReplayError) -> crate::StoreError {
+    crate::StoreError::Invariant {
         what: format!("replay: {e}"),
     }
 }

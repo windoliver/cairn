@@ -122,18 +122,19 @@ impl StoreTx<'_> {
         crate::replay::prepare_wal_with_replay(&self.tx, intent.as_inner(), inputs, now_ms)
     }
 
-    /// Test-only escape hatch: admit a raw, unverified `SignedIntent`
-    /// through the replay ledger. **Do not call from production code**
-    /// — the production [`Self::prepare_wal_with_replay`] takes a
-    /// sealed [`VerifiedSignedIntent`] specifically to forbid this. The
-    /// helper is gated behind `test-helpers` so production builds
-    /// cannot accidentally route through it.
+    /// In-crate test-only escape hatch: admit a raw, unverified
+    /// `SignedIntent` through the replay ledger. **Not part of any
+    /// production surface** — `pub(crate)` so even an external crate
+    /// that flips a build feature cannot reach it. The production
+    /// [`Self::prepare_wal_with_replay`] takes a sealed
+    /// [`VerifiedSignedIntent`]; round-11 review #2 closed the
+    /// previous `test-helpers`-feature-gated public hole.
     ///
     /// # Errors
     ///
     /// Same as [`Self::prepare_wal_with_replay`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn prepare_wal_with_replay_unverified(
+    #[cfg(test)]
+    pub(crate) fn prepare_wal_with_replay_unverified(
         &self,
         intent: &cairn_core::generated::envelope::SignedIntent,
         inputs: &WalPrepareInputs<'_>,

@@ -20,11 +20,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use crate::replay::challenge::{MintedChallenge, mint_challenge};
+use crate::replay::{ReplayError, WalPrepareInputs, prepare_wal_with_replay};
 use cairn_core::generated::common::{Identity, Nonce16Base64, Ulid};
 use cairn_core::generated::envelope::{SignedIntent, SignedIntentScope, SignedIntentScopeTier};
-use cairn_store_sqlite::replay::challenge::{MintedChallenge, mint_challenge};
-use cairn_store_sqlite::replay::test_helpers::prepare_wal_with_replay;
-use cairn_store_sqlite::replay::{ReplayError, WalPrepareInputs};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use tempfile::tempdir;
@@ -33,12 +32,12 @@ const TTL_MS: i64 = 60_000;
 const NOW_MS: i64 = 1_700_000_000_000;
 
 fn open_at(path: &std::path::Path) -> Connection {
-    cairn_store_sqlite::vec_ext::register_vec0();
+    crate::vec_ext::register_vec0();
     let mut conn = Connection::open(path).expect("open");
     conn.pragma_update(None, "journal_mode", "WAL")
         .expect("wal mode");
     conn.pragma_update(None, "foreign_keys", "ON").expect("fk");
-    cairn_store_sqlite::migrations::migrations()
+    crate::migrations::migrations()
         .to_latest(&mut conn)
         .expect("migrate");
     conn
