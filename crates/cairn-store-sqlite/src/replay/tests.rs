@@ -396,6 +396,76 @@ fn sequence_overflow_rejected() {
 }
 
 #[test]
+fn unpadded_nonce_admits_via_idl_shape() {
+    // The IDL `Nonce16Base64` accepts BOTH 22-char unpadded and 24-char
+    // padded forms. Issue #52 round-1 review #1: replay decoder must
+    // round-trip both, not just the padded form.
+    use base64::Engine as _;
+    let bytes: [u8; 16] = [
+        0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+        0xEF,
+    ];
+    let unpadded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes);
+    assert_eq!(unpadded.len(), 22);
+
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+    let intent = intent_with(&op_id(1), &unpadded, Some(1), None);
+    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS)).expect("unpadded nonce admits");
+    tx.commit().expect("commit");
+}
+
+#[test]
+fn unpadded_challenge_redeems_via_idl_shape() {
+    use base64::Engine as _;
+    let raw: [u8; 16] = [
+        0x55, 0xAA, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD,
+        0xEE,
+    ];
+    let unpadded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(raw);
+
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+    // Insert the challenge directly so we bypass mint_challenge's padded
+    // emit and exercise the decoder's unpadded path.
+    tx.execute(
+        "INSERT INTO outstanding_challenges (issuer, challenge, expires_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params!["hmn:tafeng", &raw[..], NOW_MS + TTL_MS],
+    )
+    .expect("insert challenge");
+    let intent = intent_with(&op_id(1), &nonce_b64(1), None, Some(&unpadded));
+    prepare_wal_with_replay(&tx, &intent, &inputs(NOW_MS + 1))
+        .expect("unpadded server_challenge redeems");
+}
+
+#[test]
+fn wal_op_mismatch_rejected_on_conflict() {
+    // Round-1 review #3: a same-issuer wal_ops row staged under the
+    // same operation_id but different signature/envelope must NOT let
+    // the replay-ledger consume succeed.
+    let mut conn = fresh_store();
+    let tx = conn.transaction().expect("tx");
+
+    let original = intent_with(&op_id(1), &nonce_b64(1), Some(1), None);
+    prepare_wal_with_replay(&tx, &original, &inputs(NOW_MS)).expect("first admit");
+
+    // Build a second intent that shares operation_id but mutates a
+    // signed-payload field (target_hash) — different envelope under
+    // the same op_id.
+    let mut tampered = intent_with(&op_id(1), &nonce_b64(2), Some(2), None);
+    tampered.target_hash = format!("sha256:{}", "b".repeat(64));
+    let err = prepare_wal_with_replay(&tx, &tampered, &inputs(NOW_MS + 1)).expect_err("mismatch");
+    assert!(
+        matches!(
+            err,
+            ReplayError::OperationMismatch { .. } | ReplayError::Duplicate { .. }
+        ),
+        "expected OperationMismatch or Duplicate, got {err:?}"
+    );
+}
+
+#[test]
 fn rolled_back_transaction_leaves_no_state() {
     let mut conn = fresh_store();
     let tx = conn.transaction().expect("tx");

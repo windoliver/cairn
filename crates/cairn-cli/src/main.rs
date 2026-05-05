@@ -228,6 +228,12 @@ fn main() -> ExitCode {
 /// `--issuer`. Without `--issuer` the verb falls back to the pre-#52
 /// ephemeral mint and prints a one-line warning explaining the
 /// returned nonce is not redeemable.
+///
+/// Mirrors `run_status`'s vault-binding gate: a real-resolution-source
+/// vault that is `Unbound` or `Invalid` must fail closed with
+/// `EX_CONFIG`. Persisting a challenge into a half-bootstrapped or
+/// damaged vault would mutate trust-boundary state under conditions
+/// the rest of the CLI (status / search / admin) treats as fatal.
 fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let json = sub.get_flag("json");
     let issuer = sub.get_one::<String>("issuer").map(String::as_str);
@@ -238,13 +244,48 @@ fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
         return verbs::handshake::run_with_context(json, None, None);
     }
 
-    let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("cairn handshake: vault resolution error — {e:#}");
             return ExitCode::from(78); // EX_CONFIG
         }
     };
+
+    // Real resolution sources must be bound. CwdFallback is a soft
+    // path (no explicit / env / registry hit) — fall back to the
+    // ephemeral path with a warning rather than minting against an
+    // unbound CWD.
+    if source == VaultResolutionSource::CwdFallback {
+        eprintln!(
+            "cairn handshake: no vault resolved (cwd is not a Cairn vault) — \
+             cannot persist; emitting an ephemeral nonce instead. \
+             Pass `--vault PATH` to a bound vault to persist."
+        );
+        return verbs::handshake::run_with_context(json, None, None);
+    }
+    match verbs::status::probe_vault_binding(&vault_root) {
+        verbs::status::VaultBinding::Bound => {}
+        verbs::status::VaultBinding::Unbound => {
+            let origin = match source {
+                VaultResolutionSource::Explicit => "--vault target",
+                VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                VaultResolutionSource::RegistryDefault => "registry default vault",
+                VaultResolutionSource::CwdFallback => unreachable!(),
+            };
+            eprintln!(
+                "cairn handshake: {origin} {} is not a Cairn vault \
+                 (no .cairn/vault.id) — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            return ExitCode::from(78); // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            eprintln!("cairn handshake: vault binding error — {reason}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    }
+
     verbs::handshake::run_with_context(json, Some(&vault_root), issuer)
 }
 

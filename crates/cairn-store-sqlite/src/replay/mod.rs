@@ -99,6 +99,18 @@ pub enum ReplayError {
         value: u64,
     },
 
+    /// `INSERT INTO wal_ops` hit `ON CONFLICT DO NOTHING` but the
+    /// pre-existing row was staged for a *different* envelope (mismatched
+    /// `kind` / `signature` / `target_hash` / `envelope` / `scope_json`).
+    /// Admitting under that row would consume sequence-or-challenge
+    /// state against an unrelated WAL admission. Surface as a typed
+    /// reject so the caller cannot silently advance replay state.
+    #[error("wal_ops row for operation_id {operation_id} was prepared for a different envelope")]
+    OperationMismatch {
+        /// The conflicting `operation_id` ULID.
+        operation_id: String,
+    },
+
     /// Underlying `SQLite` failure (driver/IO error, schema mismatch,
     /// or unexpected trigger abort whose message did not match a known
     /// invariant string).
@@ -177,7 +189,10 @@ pub fn prepare_wal_with_replay(
     // committed the wal_ops row finds the conflict and continues. The
     // replay-ledger consume below is the source of truth for "this
     // envelope has been admitted", so it is fine for wal_ops to be a
-    // no-op here.
+    // no-op here AS LONG AS the existing row was prepared for the same
+    // signed intent. Otherwise the replay-ledger consume would happily
+    // bind sequence/challenge state to an unrelated wal_ops row whose
+    // kind/envelope/target_hash/signature differ from this intent.
     let inserted = tx.execute(
         "INSERT INTO wal_ops (
              operation_id, issued_seq, kind, state, envelope, issuer,
@@ -201,13 +216,67 @@ pub fn prepare_wal_with_replay(
         ],
     )?;
 
-    // If the INSERT was a no-op, the replay ledger row already exists
-    // (committed via the same transaction in a prior crash-recovered
-    // run). The `used` INSERT below is also keyed on operation_id and
-    // will surface as Duplicate if the prior consume committed.
-    let _ = inserted;
+    if inserted == 0 {
+        // Conflict — confirm the existing row is for the *same* intent
+        // before letting the consume proceed. A mismatch means another
+        // writer (or a prior aborted attempt) staged a different
+        // envelope under this `operation_id`; admitting under that row
+        // would silently consume sequence/challenge state for an
+        // unrelated WAL admission.
+        verify_existing_wal_op_matches(tx, intent, inputs)?;
+    }
 
     consume_intent(tx, intent, inputs.now_ms)
+}
+
+/// On `INSERT … ON CONFLICT DO NOTHING` no-op, ensure the row that
+/// blocked us was prepared for *this* envelope. Compares the
+/// envelope-immutable columns the IDL/§4.2 defines as part of the
+/// signed intent: `kind`, `issuer`, `target_hash`, `signature`,
+/// `envelope`, and `scope_json`. Anything else is suspicious — even
+/// a same-issuer same-`operation_id` row with a different signature
+/// is a different signed message.
+fn verify_existing_wal_op_matches(
+    tx: &Transaction<'_>,
+    intent: &SignedIntent,
+    inputs: &WalPrepareInputs<'_>,
+) -> Result<(), ReplayError> {
+    let row: Option<(String, String, String, String, String, String)> = tx
+        .query_row(
+            "SELECT kind, issuer, target_hash, signature, envelope, scope_json
+               FROM wal_ops
+              WHERE operation_id = ?1",
+            params![intent.operation_id.0],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((kind, issuer, target_hash, signature, envelope, scope_json)) = row else {
+        // Should not happen — INSERT returned 0 yet the row is gone.
+        // Treat as opaque SQL anomaly so the caller's transaction
+        // rolls back rather than silently advancing replay state.
+        return Err(ReplayError::Sqlite(rusqlite::Error::QueryReturnedNoRows));
+    };
+    if kind != inputs.kind
+        || issuer != intent.issuer.0
+        || target_hash != intent.target_hash
+        || signature != intent.signature.0
+        || envelope != inputs.envelope_json
+        || scope_json != inputs.scope_json
+    {
+        return Err(ReplayError::OperationMismatch {
+            operation_id: intent.operation_id.0.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// Run the per-mode replay-ledger consume against an existing
@@ -399,20 +468,42 @@ fn is_constraint_message(err: &rusqlite::Error, needle: &str) -> bool {
     ) && err.to_string().contains(needle)
 }
 
-/// Decode a 16-byte base64 nonce (standard alphabet, optional `==`
-/// padding) into raw bytes. The IDL guarantees the shape on the wire;
-/// for in-process callers that bypass IDL validation we surface a
-/// fail-closed `rusqlite::Error::InvalidParameterName` rather than
-/// silently accepting malformed input.
+/// Decode a 16-byte base64 nonce into raw bytes. The IDL
+/// `Nonce16Base64` admits **both** the 22-char unpadded form and the
+/// 24-char padded form — pick the right base64 engine so both wire
+/// shapes round-trip to the same 16 bytes. After decoding we assert
+/// the length is exactly 16 to defend against in-process callers that
+/// bypass IDL validation. A length / decode failure surfaces as a
+/// `rusqlite::Error::ToSqlConversionFailure` so the caller's
+/// `ReplayError::Sqlite` arm preserves the diagnostic.
 fn decode_nonce(b64: &str) -> Result<Vec<u8>, rusqlite::Error> {
-    base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| {
-            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+    let raw = match b64.len() {
+        22 => base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64),
+        24 => base64::engine::general_purpose::STANDARD.decode(b64),
+        n => {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("nonce base64 decode: unexpected length {n} (want 22 or 24)"),
+                ),
+            )));
+        }
+    }
+    .map_err(|e| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("nonce base64 decode: {e}"),
+        )))
+    })?;
+    if raw.len() != 16 {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("nonce base64 decode: {e}"),
-            )))
-        })
+                format!("nonce base64 decode: decoded {} bytes (want 16)", raw.len()),
+            ),
+        )));
+    }
+    Ok(raw)
 }
 
 #[cfg(test)]
