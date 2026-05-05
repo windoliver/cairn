@@ -45,13 +45,17 @@ pub fn render(plan: &FlushPlan) -> String {
                 writeln!(&mut out, "```").ok();
                 let body = &record.body;
                 if body.len() > MAX_BODY_EXCERPT {
-                    out.push_str(&body[..MAX_BODY_EXCERPT]);
-                    writeln!(
-                        &mut out,
-                        "\n…[truncated; {} more bytes]",
-                        body.len() - MAX_BODY_EXCERPT
-                    )
-                    .ok();
+                    // Floor to nearest UTF-8 char boundary at or below
+                    // MAX_BODY_EXCERPT — a multibyte codepoint that
+                    // straddles the byte threshold would panic on a raw
+                    // slice. Walk down at most 3 bytes (UTF-8 codepoint
+                    // length cap) to land on a boundary.
+                    let mut cut = MAX_BODY_EXCERPT;
+                    while cut > 0 && !body.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    out.push_str(&body[..cut]);
+                    writeln!(&mut out, "\n…[truncated; {} more bytes]", body.len() - cut).ok();
                 } else {
                     out.push_str(body);
                     writeln!(&mut out).ok();
@@ -109,6 +113,46 @@ mod tests {
         FlushMode, FlushPlan, Identity, PlanReason, PlannedMutation, ScopeTuple, TargetId,
     };
     use crate::generated::common::Ulid;
+
+    /// Round 2 (#54): `MAX_BODY_EXCERPT` truncation must walk back to a
+    /// UTF-8 char boundary rather than panic when a multibyte codepoint
+    /// straddles the byte threshold.
+    #[test]
+    fn upsert_truncation_handles_multibyte_at_boundary() {
+        // 4-byte UTF-8 (😀, U+1F600). Build a body so that the codepoint
+        // straddles MAX_BODY_EXCERPT (4096): pad to len 4094 with ASCII,
+        // then append the emoji whose 4 bytes occupy positions 4094..4098
+        // — byte 4096 lands in the middle of it.
+        let mut body = "x".repeat(MAX_BODY_EXCERPT - 2);
+        body.push('😀');
+        // Pad with more ASCII so we exceed the threshold and trigger
+        // the truncation branch.
+        body.push_str(&"y".repeat(64));
+
+        let mut record = crate::domain::record::tests_export::sample_record();
+        record.body = body;
+        let plan = FlushPlan {
+            operation_id: Ulid("01HQZK000000000000000000VP".into()),
+            issued_at: "2026-05-04T12:00:00Z".into(),
+            issuer: Identity::parse("agt:claude-code:opus-4-7:reviewer:v1").unwrap(),
+            principal: None,
+            scope: ScopeTuple::default(),
+            mode: FlushMode::HumanReview,
+            mutations: vec![PlannedMutation::Upsert {
+                record: Box::new(record),
+                prior_version: None,
+            }],
+            reason: PlanReason::UserIngest,
+            source_events: vec![],
+            target_hashes: BTreeMap::default(),
+            dependencies: vec![],
+            expires_at: "2026-05-04T12:05:00Z".into(),
+            placeholder: false,
+        };
+        // Must not panic when slicing the body at the byte boundary.
+        let md = render(&plan);
+        assert!(md.contains("[truncated;"), "expected truncation marker");
+    }
 
     #[test]
     fn renders_delete_mutation() {

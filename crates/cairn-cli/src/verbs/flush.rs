@@ -82,18 +82,21 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear pre-check → claim → validate-and-rollback-on-failure → publish; \
+              splitting hides the lifecycle that needs to be read top-to-bottom"
+)]
 fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
     let json = m.get_flag("json");
     #[allow(clippy::expect_used, reason = "clap declared this required")]
     let id = m.get_one::<String>("id").expect("clap-required");
     let ulid = cairn_core::generated::common::Ulid(id.clone());
 
-    let pending = plan_path(vault, Bucket::Pending, &ulid);
     let applied = plan_path(vault, Bucket::Applied, &ulid);
     let rejected = plan_path(vault, Bucket::Rejected, &ulid);
 
-    // Idempotent re-apply on Applied → success no-op. We re-emit the same
-    // human / JSON shape the original apply produced.
+    // Idempotent re-apply on Applied → success no-op.
     if applied.exists() {
         emit_apply_ok(json, id, "applied (no-op)");
         return ExitCode::SUCCESS;
@@ -103,10 +106,40 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         eprintln!("cairn flush apply: {id} is already terminal: rejected");
         return ExitCode::from(65); // EX_DATAERR
     }
-    // Read pending.
-    let Ok(bytes) = std::fs::read(&pending) else {
-        eprintln!("cairn flush apply: plan {id} not found in pending/");
-        return ExitCode::from(66); // EX_NOINPUT
+
+    // Atomically claim the pending file. POSIX `rename` returns ENOENT if
+    // the source vanished — that's how concurrent apply/reject callers
+    // race-free settle to a single winner. The loser sees ENOENT and
+    // returns NotFound (or AlreadyTerminal if the winner committed).
+    let claim = match claim_pending(vault, &ulid, "applied") {
+        ClaimOutcome::Claimed(p) => p,
+        ClaimOutcome::NotFound => {
+            // Re-check terminal in case a peer committed between our
+            // pre-check and our rename attempt. If a terminal now exists,
+            // surface it as AlreadyTerminal; otherwise NotFound.
+            if applied.exists() {
+                emit_apply_ok(json, id, "applied (no-op)");
+                return ExitCode::SUCCESS;
+            }
+            if rejected.exists() {
+                eprintln!("cairn flush apply: {id} is already terminal: rejected");
+                return ExitCode::from(65);
+            }
+            eprintln!("cairn flush apply: plan {id} not found in pending/");
+            return ExitCode::from(66);
+        }
+        ClaimOutcome::Err(e) => {
+            eprintln!("cairn flush apply: claim failed: {e}");
+            return ExitCode::from(70);
+        }
+    };
+
+    let bytes = match std::fs::read(&claim) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cairn flush apply: read claimed file failed: {e}");
+            return ExitCode::from(70);
+        }
     };
     #[allow(
         clippy::single_match_else,
@@ -120,15 +153,38 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         }
     };
 
-    // Schema-version compatibility gate. Future plan formats must round-trip
-    // through their own CLI; refuse to act on a version this binary does
-    // not understand rather than silently overwriting status fields.
+    // Schema-version compatibility gate. Future plan formats must
+    // round-trip through their own CLI; refuse to act on a version this
+    // binary does not understand rather than silently overwriting status
+    // fields. Rollback the claim — restore the pending file so a later
+    // CLI / operator can still see and recover it.
     if persisted.schema_version != PersistedPlan::SCHEMA_VERSION {
         eprintln!(
             "cairn flush apply: plan {id} schema_version {} unsupported (this CLI handles {})",
             persisted.schema_version,
             PersistedPlan::SCHEMA_VERSION,
         );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
+    // Identity gate: refuse a pending file whose embedded `operation_id`
+    // does not match the path / requested id (tampering or stale-content
+    // protection).
+    if persisted.plan.operation_id.0 != *id {
+        eprintln!(
+            "cairn flush apply: plan {id} content operation_id `{}` mismatches filename id",
+            persisted.plan.operation_id.0,
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
+    // State gate: only `Pending` plans may be advanced.
+    if !matches!(persisted.status, PlanStatus::Pending) {
+        eprintln!(
+            "cairn flush apply: plan {id} is not in Pending state ({:?})",
+            persisted.status,
+        );
+        rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
     }
 
@@ -158,14 +214,19 @@ fn apply(vault: &Path, m: &ArgMatches) -> ExitCode {
         at: now_rfc3339(),
         apply_kind: ApplyKind::MetadataOnly,
     };
-    if let Err(e) = persist_and_move(vault, &pending, &applied, &persisted, &ulid) {
-        eprintln!("cairn flush apply: write failed: {e}");
+    if let Err(e) = publish_terminal(vault, &claim, &applied, &persisted, &ulid) {
+        eprintln!("cairn flush apply: publish failed: {e}");
         return ExitCode::from(70); // EX_SOFTWARE
     }
     emit_apply_ok(json, id, "applied");
     ExitCode::SUCCESS
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear pre-check → claim → validate-and-rollback-on-failure → publish; \
+              splitting hides the lifecycle that needs to be read top-to-bottom"
+)]
 fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
     let json = m.get_flag("json");
     #[allow(clippy::expect_used, reason = "clap declared this required")]
@@ -177,7 +238,6 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         .clone();
     let ulid = cairn_core::generated::common::Ulid(id.clone());
 
-    let pending = plan_path(vault, Bucket::Pending, &ulid);
     let applied = plan_path(vault, Bucket::Applied, &ulid);
     let rejected = plan_path(vault, Bucket::Rejected, &ulid);
 
@@ -189,9 +249,33 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
         eprintln!("cairn flush reject: {id} is already terminal: rejected");
         return ExitCode::from(65);
     }
-    let Ok(bytes) = std::fs::read(&pending) else {
-        eprintln!("cairn flush reject: plan {id} not found in pending/");
-        return ExitCode::from(66);
+
+    let claim = match claim_pending(vault, &ulid, "rejected") {
+        ClaimOutcome::Claimed(p) => p,
+        ClaimOutcome::NotFound => {
+            if applied.exists() {
+                eprintln!("cairn flush reject: {id} is already terminal: applied");
+                return ExitCode::from(65);
+            }
+            if rejected.exists() {
+                eprintln!("cairn flush reject: {id} is already terminal: rejected");
+                return ExitCode::from(65);
+            }
+            eprintln!("cairn flush reject: plan {id} not found in pending/");
+            return ExitCode::from(66);
+        }
+        ClaimOutcome::Err(e) => {
+            eprintln!("cairn flush reject: claim failed: {e}");
+            return ExitCode::from(70);
+        }
+    };
+
+    let bytes = match std::fs::read(&claim) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("cairn flush reject: read claimed file failed: {e}");
+            return ExitCode::from(70);
+        }
     };
     #[allow(
         clippy::single_match_else,
@@ -210,14 +294,31 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
             persisted.schema_version,
             PersistedPlan::SCHEMA_VERSION,
         );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
+    if persisted.plan.operation_id.0 != *id {
+        eprintln!(
+            "cairn flush reject: plan {id} content operation_id `{}` mismatches filename id",
+            persisted.plan.operation_id.0,
+        );
+        rollback_claim(vault, &claim, &ulid);
+        return ExitCode::from(65);
+    }
+    if !matches!(persisted.status, PlanStatus::Pending) {
+        eprintln!(
+            "cairn flush reject: plan {id} is not in Pending state ({:?})",
+            persisted.status,
+        );
+        rollback_claim(vault, &claim, &ulid);
         return ExitCode::from(65);
     }
     persisted.status = PlanStatus::Rejected {
         at: now_rfc3339(),
         reason: reason.clone(),
     };
-    if let Err(e) = persist_and_move(vault, &pending, &rejected, &persisted, &ulid) {
-        eprintln!("cairn flush reject: write failed: {e}");
+    if let Err(e) = publish_terminal(vault, &claim, &rejected, &persisted, &ulid) {
+        eprintln!("cairn flush reject: publish failed: {e}");
         return ExitCode::from(70);
     }
     if json {
@@ -236,43 +337,121 @@ fn reject(vault: &Path, m: &ArgMatches) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Persist `p` to `to` and remove `from` using a write-tmp → atomic-rename
-/// pattern so the terminal file appears in one filesystem step rather than
-/// being written in place. Sequence:
-///
-/// 1. Serialize `p` and write to `<to>.tmp` (replace any prior tmp).
-/// 2. `rename(<to>.tmp, <to>)` — atomic on POSIX same-filesystem.
-/// 3. `remove_file(<from>)` — pending file gone.
-/// 4. Best-effort `remove_file(<diff sidecar>)`.
-///
-/// A crash between steps 2 and 3 leaves both `pending/` and the terminal
-/// file present for the same `operation_id`. The terminal file is
-/// authoritative — apply/reject pre-checks treat any existing
-/// `applied/<id>.plan.json` or `rejected/<id>.plan.json` as the
-/// canonical state and short-circuit accordingly.
-fn persist_and_move(
+/// Restore a claimed pending file to `pending/<id>.plan.json`. Best-effort:
+/// callers invoke this after a validation gate trips so a future apply or
+/// operator can still see the original plan. If the rename fails (e.g. the
+/// pending dir has been removed mid-flight), surface the in-flight path
+/// in the log and leave it for manual cleanup.
+fn rollback_claim(vault: &Path, claim: &Path, ulid: &cairn_core::generated::common::Ulid) {
+    let pending = plan_path(vault, Bucket::Pending, ulid);
+    if let Some(parent) = pending.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "cairn flush: rollback could not recreate pending dir {}: {e}",
+            parent.display(),
+        );
+        return;
+    }
+    if let Err(e) = std::fs::rename(claim, &pending) {
+        eprintln!(
+            "cairn flush: rollback could not restore pending file (claim left at {}): {e}",
+            claim.display(),
+        );
+    }
+}
+
+/// Outcome of an atomic claim attempt on `pending/<id>.plan.json`.
+enum ClaimOutcome {
+    /// Successfully renamed pending → claim path; returned path is the
+    /// claim file, ready for read + status mutation.
+    Claimed(std::path::PathBuf),
+    /// `pending/<id>.plan.json` did not exist (or was claimed by a
+    /// concurrent peer in the same instant). Caller decides whether to
+    /// surface `NotFound` or `AlreadyTerminal` based on what's now in
+    /// `applied/` / `rejected/`.
+    NotFound,
+    /// Other I/O error.
+    Err(std::io::Error),
+}
+
+/// Atomically claim `pending/<id>.plan.json` for one operator (apply or
+/// reject) by renaming it under a `<bucket>/<id>.plan.json.in-flight`
+/// path. POSIX `rename(2)` is atomic and returns `ENOENT` if the source
+/// vanished, so two concurrent callers race race-free for the same
+/// pending file: the loser sees `NotFound` and exits without writing
+/// anything. Different `role` strings ("applied" / "rejected") give each
+/// caller a distinct destination so they never overwrite each other's
+/// in-flight state.
+fn claim_pending(
     vault: &Path,
-    from: &Path,
-    to: &Path,
+    ulid: &cairn_core::generated::common::Ulid,
+    role: &str,
+) -> ClaimOutcome {
+    let pending = plan_path(vault, Bucket::Pending, ulid);
+    let bucket = match role {
+        "applied" => Bucket::Applied,
+        "rejected" => Bucket::Rejected,
+        _ => return ClaimOutcome::Err(std::io::Error::other(format!("unknown role {role}"))),
+    };
+    let claim = plan_path(vault, bucket, ulid).with_extension("json.in-flight");
+    if let Some(parent) = claim.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return ClaimOutcome::Err(e);
+    }
+    match std::fs::rename(&pending, &claim) {
+        Ok(()) => ClaimOutcome::Claimed(claim),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ClaimOutcome::NotFound,
+        Err(e) => ClaimOutcome::Err(e),
+    }
+}
+
+/// Publish a terminal `applied/<id>.plan.json` or `rejected/<id>.plan.json`
+/// from a previously-claimed in-flight file. Sequence:
+///
+/// 1. Serialize `p` and write to `<terminal>.tmp` via a `File` that we
+///    `sync_all` before close — guarantees bytes are durable.
+/// 2. `rename(<terminal>.tmp, <terminal>)` — atomic on POSIX
+///    same-filesystem.
+/// 3. `fsync` the terminal directory so the rename is durable across
+///    a power-loss event (best-effort on platforms that allow it).
+/// 4. Remove the claim file (`<terminal>.in-flight`).
+/// 5. Best-effort: remove the markdown diff sidecar.
+fn publish_terminal(
+    vault: &Path,
+    claim: &Path,
+    terminal: &Path,
     p: &PersistedPlan,
     ulid: &cairn_core::generated::common::Ulid,
 ) -> std::io::Result<()> {
-    if let Some(parent) = to.parent() {
+    use std::io::Write as _;
+    if let Some(parent) = terminal.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(p).map_err(std::io::Error::other)?;
-    let mut tmp = to.as_os_str().to_owned();
+    let mut tmp = terminal.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
-    // Write to tmp first; atomic rename publishes the terminal file in one
-    // step. If `to` already exists, `rename` overwrites it on POSIX —
-    // callers must guard with the pre-check on `applied`/`rejected`
-    // existence to avoid clobbering a peer process's terminal file.
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, to)?;
-    // Pending now redundant; remove. A crash here leaves pending+terminal
-    // for the same id; terminal wins per the pre-check semantics above.
-    std::fs::remove_file(from)?;
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        // Ensure bytes hit storage before we expose the terminal name.
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, terminal)?;
+    // Best-effort directory fsync so the rename survives power loss. This
+    // is a no-op on platforms where opening a directory for sync is not
+    // supported; we ignore failures here because the rename is already
+    // committed at the inode level on the common-case Linux/macOS
+    // filesystems Cairn targets.
+    if let Some(parent) = terminal.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    // Claim file is no longer needed (terminal is the canonical record).
+    let _ = std::fs::remove_file(claim);
     let _ = std::fs::remove_file(cairn_core::domain::flush_plan::store::diff_path(
         vault, ulid,
     ));

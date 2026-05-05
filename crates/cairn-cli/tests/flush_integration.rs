@@ -336,6 +336,112 @@ fn flush_apply_rejects_unsupported_schema_version() {
     assert!(!applied.exists(), "must NOT have moved to applied/");
 }
 
+/// Round 2 (#54): `flush apply` must reject a pending file whose embedded
+/// `operation_id` does not match the path / requested id (tampering or
+/// stale-content protection).
+#[test]
+fn flush_apply_rejects_id_mismatch() {
+    let vault = tempfile::tempdir().unwrap();
+    let request_id = "01HQZK000000000000000RQST1";
+    let embedded_id = "01HQZK000000000000000EMBD2";
+    // Write a pending file under the request_id name but with a different
+    // embedded operation_id inside the JSON body.
+    let mut p = sample_pending(embedded_id);
+    p.plan.operation_id = cairn_core::generated::common::Ulid(embedded_id.into());
+    let path = plan_path(
+        vault.path(),
+        Bucket::Pending,
+        &cairn_core::generated::common::Ulid(request_id.into()),
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&p).unwrap()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let out = std::process::Command::new(bin)
+        .args(["flush", "apply", request_id])
+        .env("CAIRN_VAULT", vault.path())
+        .output()
+        .expect("spawn cairn");
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("mismatches filename id"),
+        "expected id-mismatch message; got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round 2 (#54): concurrent `apply` and `reject` against the same pending
+/// id must produce exactly one terminal file (race-free atomic claim).
+#[test]
+fn flush_apply_and_reject_race_yields_single_terminal() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    let vault = Arc::new(tempfile::tempdir().unwrap());
+    let id = "01HQZK000000000000000RACE1";
+    write_pending(vault.path(), id);
+
+    let bin = env!("CARGO_BIN_EXE_cairn");
+    let success_count = Arc::new(AtomicUsize::new(0));
+
+    let v1 = Arc::clone(&vault);
+    let s1 = Arc::clone(&success_count);
+    let t1 = thread::spawn(move || {
+        let out = std::process::Command::new(bin)
+            .args(["flush", "apply", id])
+            .env("CAIRN_VAULT", v1.path())
+            .output()
+            .expect("spawn cairn");
+        if out.status.success() {
+            s1.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let v2 = Arc::clone(&vault);
+    let s2 = Arc::clone(&success_count);
+    let t2 = thread::spawn(move || {
+        let out = std::process::Command::new(bin)
+            .args(["flush", "reject", id, "--reason", "race"])
+            .env("CAIRN_VAULT", v2.path())
+            .output()
+            .expect("spawn cairn");
+        if out.status.success() {
+            s2.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+    let applied = plan_path(
+        vault.path(),
+        Bucket::Applied,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let rejected = plan_path(
+        vault.path(),
+        Bucket::Rejected,
+        &cairn_core::generated::common::Ulid(id.into()),
+    );
+    let terminals = u32::from(applied.exists()) + u32::from(rejected.exists());
+    assert_eq!(
+        terminals,
+        1,
+        "expected exactly one terminal file, found applied={} rejected={}",
+        applied.exists(),
+        rejected.exists(),
+    );
+    assert_eq!(
+        success_count.load(Ordering::Relaxed),
+        1,
+        "exactly one of apply / reject must have reported success",
+    );
+}
+
 /// Round 1 (#54): `flush apply` against a stub-planner placeholder must
 /// emit a prominent stderr warning and record `apply_kind=metadata_only`
 /// so operators understand `MemoryStore` mutations did NOT execute.

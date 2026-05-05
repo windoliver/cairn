@@ -214,18 +214,57 @@ pub fn ingest_plan_stub(
                 eprintln!("cairn: mkdir {}: {e}", pending_dir.display());
                 return std::process::ExitCode::from(73);
             }
-            let path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
-            let persisted = PersistedPlan::pending(plan.clone());
-            let bytes = match serde_json::to_vec_pretty(&persisted) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("cairn: serialize plan: {e}");
-                    return std::process::ExitCode::from(70);
+            // Use `create_new(true)` so two concurrent stub-planner
+            // invocations (or two within the same `synth_ulid` clock tick)
+            // never silently overwrite each other's pending plan.
+            // On EEXIST, mint a fresh id and retry up to a small bound
+            // before failing closed.
+            let mut plan = plan;
+            let mut path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
+            let mut retries = 0_u8;
+            loop {
+                let persisted = PersistedPlan::pending(plan.clone());
+                let bytes = match serde_json::to_vec_pretty(&persisted) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("cairn: serialize plan: {e}");
+                        return std::process::ExitCode::from(70);
+                    }
+                };
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(mut f) => {
+                        use std::io::Write as _;
+                        if let Err(e) = f.write_all(&bytes) {
+                            eprintln!("cairn: write {}: {e}", path.display());
+                            return std::process::ExitCode::from(73);
+                        }
+                        if let Err(e) = f.sync_all() {
+                            eprintln!("cairn: fsync {}: {e}", path.display());
+                            return std::process::ExitCode::from(73);
+                        }
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        retries += 1;
+                        if retries > 8 {
+                            eprintln!(
+                                "cairn: gave up minting unique plan id after 8 retries (last id {})",
+                                plan.operation_id.0,
+                            );
+                            return std::process::ExitCode::from(70);
+                        }
+                        plan.operation_id = Ulid(synth_ulid());
+                        path = plan_path(&vault, Bucket::Pending, &plan.operation_id);
+                    }
+                    Err(e) => {
+                        eprintln!("cairn: write {}: {e}", path.display());
+                        return std::process::ExitCode::from(73);
+                    }
                 }
-            };
-            if let Err(e) = std::fs::write(&path, &bytes) {
-                eprintln!("cairn: write {}: {e}", path.display());
-                return std::process::ExitCode::from(73);
             }
             if !no_diff {
                 let dpath = diff_path(&vault, &plan.operation_id);
@@ -260,21 +299,31 @@ pub fn ingest_plan_stub(
     }
 }
 
-/// Synthesize a 26-char Crockford-base32 ULID-shaped string from the
-/// current wall clock. Not a real ULID generator — #9 swaps in the
-/// proper one. Output: 26 chars, leading char `0`, rest `[0-9A-HJKMNP-TV-Z]`.
+/// Synthesize a 26-char Crockford-base32 ULID-shaped string. Not a real
+/// ULID generator (#9 swaps in the proper one). Mixes the current
+/// nanosecond clock with a per-process counter so two calls within the
+/// same clock tick still produce distinct ids; the call site additionally
+/// guards against collision via `create_new(true)` + retry.
 fn synth_ulid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
     const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let bump = u128::from(COUNTER.fetch_add(1, Ordering::Relaxed));
+    let mut n = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(bump);
     let mut buf = [b'0'; 26];
-    let mut n = nanos;
     // Fill from right; leftmost char stays '0' to satisfy first-char rule.
     for slot in buf.iter_mut().skip(1).rev() {
-        *slot = ALPHABET[(n & 0x1F) as usize];
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "explicit 5-bit mask, value always < ALPHABET.len()"
+        )]
+        let idx = (n & 0x1F) as usize;
+        *slot = ALPHABET[idx];
         n >>= 5;
     }
     // Safety: every byte is ASCII from `ALPHABET`.
