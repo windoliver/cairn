@@ -97,8 +97,11 @@ transaction:
 5. Delete the selected `consent_journal` row by `rowid`.
 6. Recreate both append-only triggers with the same bodies used by the migrated
    schema.
-7. Insert or replace a `consent_mirror_resets` marker with a fresh nonce so live
-   materializers rebuild `.cairn/consent.log` from rowid 0.
+7. If migration 0021 has already created `consent_mirror_resets`, insert or
+   replace a marker with a fresh nonce so live materializers rebuild
+   `.cairn/consent.log` from rowid 0. On a DB still blocked before 0021, do not
+   pre-create the table or marker; migration 0021 inserts its own reset marker
+   once the repair has unblocked it.
 8. Commit.
 
 If any step fails, SQLite rolls back the transaction. The triggers therefore
@@ -159,8 +162,10 @@ Store integration tests:
 - delete refuses a row not returned by the classifier;
 - delete removes an eligible row despite append-only triggers;
 - delete writes an immutable audit row;
-- delete inserts a fresh `consent_mirror_resets` marker;
-- after delete, migration 0021 can run successfully on the repaired DB.
+- delete inserts a fresh `consent_mirror_resets` marker when the DB is already
+  at or beyond migration 0021;
+- after pre-0021 delete, migration 0021 can run successfully on the repaired DB
+  and inserts its normal reset marker.
 
 CLI tests:
 

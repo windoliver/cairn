@@ -4,7 +4,7 @@
 
 **Goal:** Add a deletion-only `cairn repair consent-journal` recovery path for legacy rows that block migration 0021.
 
-**Architecture:** The CLI is the ground-truth maintenance surface and calls a focused `cairn_store_sqlite::repair::consent_journal` sync API over `rusqlite::Connection`. The store API classifies blockers, performs one controlled trigger bypass inside `BEGIN IMMEDIATE`, writes an append-only audit row, deletes only eligible rows, and inserts a `consent_mirror_resets` marker. The reusable store API is the SDK-consumable path for this maintenance command; a generated MCP repair tool is deferred until the IDL grows a repair namespace.
+**Architecture:** The CLI is the ground-truth maintenance surface and calls a focused `cairn_store_sqlite::repair::consent_journal` sync API over `rusqlite::Connection`. The store API classifies blockers, performs one controlled trigger bypass inside `BEGIN IMMEDIATE`, writes an append-only audit row, deletes only eligible rows, and inserts a `consent_mirror_resets` marker when migration 0021 has already established that table. Pre-0021 vaults rely on migration 0021 to insert its reset marker after repair unblocks the migration. The reusable store API is the SDK-consumable path for this maintenance command; a generated MCP repair tool is deferred until the IDL grows a repair namespace.
 
 **Tech Stack:** Rust 2024, clap 4, rusqlite, rusqlite_migration, serde/serde_json, ULID, cargo nextest.
 
@@ -399,7 +399,7 @@ Append tests to `consent_journal_repair.rs`:
 use cairn_store_sqlite::repair::consent_journal::delete_blocker;
 
 #[test]
-fn delete_blocker_removes_row_audits_and_resets_mirror() {
+fn delete_blocker_removes_row_audits_and_allows_migration() {
     let mut conn = open_at_version(20);
     conn.execute(
         "INSERT INTO consent_journal \
@@ -427,14 +427,14 @@ fn delete_blocker_removes_row_audits_and_resets_mirror() {
         .expect("count audit");
     assert_eq!(audit_count, 1);
 
+    migrations()
+        .to_version(&mut conn, 21)
+        .expect("repaired DB migrates through 0021");
+
     let reset_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM consent_mirror_resets WHERE migration_id = 21", [], |r| r.get(0))
         .expect("count reset");
     assert_eq!(reset_count, 1);
-
-    migrations()
-        .to_version(&mut conn, 46)
-        .expect("repaired DB migrates through 0046");
 }
 
 #[test]
@@ -500,7 +500,6 @@ pub fn delete_blocker(
     apply_repair_pragmas(conn)?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     ensure_audit_schema(&tx)?;
-    ensure_mirror_resets_schema(&tx)?;
     let blocker = find_blocker_by_rowid(&tx, rowid)?.ok_or(StoreError::RepairNotEligible { rowid })?;
     let repair_id = ulid::Ulid::new().to_string();
     let repaired_at = now_millis();
@@ -535,11 +534,7 @@ pub fn delete_blocker(
     )?;
     tx.execute("DELETE FROM consent_journal WHERE rowid = ?1", params![rowid])?;
     tx.execute_batch(CONSENT_JOURNAL_APPEND_ONLY_TRIGGERS)?;
-    tx.execute(
-        "INSERT OR REPLACE INTO consent_mirror_resets (migration_id, applied_at, consumed, db_nonce) \
-         VALUES (21, ?1, 0, lower(hex(randomblob(16))))",
-        params![repaired_at],
-    )?;
+    mark_consent_mirror_reset_if_ready(&tx, repaired_at)?;
     tx.commit()?;
     Ok(ConsentJournalRepairReceipt {
         repair_id,
@@ -552,7 +547,7 @@ pub fn delete_blocker(
 }
 ```
 
-Use `CREATE TABLE IF NOT EXISTS consent_mirror_resets (...)` in `ensure_mirror_resets_schema`, because v20 databases do not have the table yet.
+`mark_consent_mirror_reset_if_ready` should only write when `consent_mirror_resets` exists and migration 0021 is already recorded in `schema_migrations`. Do not create the reset table before 0021; otherwise migration 0021's normal marker insert can conflict with the repair marker.
 
 - [ ] **Step 4: Run tests to verify they pass**
 

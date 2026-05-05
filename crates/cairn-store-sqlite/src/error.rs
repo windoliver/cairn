@@ -27,6 +27,14 @@ pub enum StoreError {
     #[error("invalid consent event: {0}")]
     InvalidConsentEvent(#[from] cairn_core::domain::ConsentEventError),
 
+    /// Requested repair target is not one of the legacy rows the repair
+    /// classifier knows how to remediate.
+    #[error("consent_journal rowid {rowid} is not repair-eligible")]
+    RepairNotEligible {
+        /// The consent_journal rowid that was requested for repair.
+        rowid: i64,
+    },
+
     /// `MemoryRecord` failed structural validation at the write boundary
     /// (out-of-range scalars, missing scope.user, empty body, malformed
     /// actor chain, …) before insert. Rejecting here keeps malformed
