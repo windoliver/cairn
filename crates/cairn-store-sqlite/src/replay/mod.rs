@@ -169,7 +169,7 @@ pub struct WalPrepareInputs<'a> {
     issuer = %intent.issuer.0,
     mode = mode_label(intent),
 ))]
-pub fn prepare_wal_with_replay(
+pub(crate) fn prepare_wal_with_replay(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
     inputs: &WalPrepareInputs<'_>,
@@ -293,7 +293,7 @@ fn verify_existing_wal_op_matches(
     issuer = %intent.issuer.0,
     mode = mode_label(intent),
 ))]
-pub fn consume_intent(
+pub(crate) fn consume_intent(
     tx: &Transaction<'_>,
     intent: &SignedIntent,
     now_ms: i64,
@@ -508,3 +508,51 @@ fn decode_nonce(b64: &str) -> Result<Vec<u8>, rusqlite::Error> {
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only escape hatch — wraps the raw replay-admit free functions
+/// so in-crate / external integration tests can bypass the
+/// [`crate::store::tx::StoreTx::prepare_wal_with_replay`]
+/// `VerifiedSignedIntent` gate when constructing one is impractical
+/// (e.g., concurrency tests that drive a shared rusqlite `Connection`
+/// without an `EnvelopeVerifier`).
+///
+/// **Production callers MUST NOT use this module.** It is gated behind
+/// the `test-helpers` feature so production builds of
+/// `cairn-store-sqlite` cannot link these symbols. Issue #52 round-3
+/// review #1.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers {
+    use rusqlite::Transaction;
+
+    use cairn_core::generated::envelope::SignedIntent;
+
+    use super::{ReplayError, WalPrepareInputs};
+
+    /// Test-only: drive [`super::prepare_wal_with_replay`] without the
+    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate.
+    ///
+    /// # Errors
+    ///
+    /// See [`ReplayError`].
+    pub fn prepare_wal_with_replay(
+        tx: &Transaction<'_>,
+        intent: &SignedIntent,
+        inputs: &WalPrepareInputs<'_>,
+    ) -> Result<(), ReplayError> {
+        super::prepare_wal_with_replay(tx, intent, inputs)
+    }
+
+    /// Test-only: drive [`super::consume_intent`] without the
+    /// production [`cairn_core::domain::VerifiedSignedIntent`] gate.
+    ///
+    /// # Errors
+    ///
+    /// See [`ReplayError`].
+    pub fn consume_intent(
+        tx: &Transaction<'_>,
+        intent: &SignedIntent,
+        now_ms: i64,
+    ) -> Result<(), ReplayError> {
+        super::consume_intent(tx, intent, now_ms)
+    }
+}
