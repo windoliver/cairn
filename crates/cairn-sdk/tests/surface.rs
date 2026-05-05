@@ -812,6 +812,9 @@ async fn search_rejects_empty_scope_filter_with_invalid_args() {
 fn forget_record_rejects_malformed_ulid_with_invalid_args() {
     let args = ForgetArgs::Record {
         record_id: Ulid("not-a-ulid".to_owned()),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("ULID"), "reason: {reason}"),
@@ -878,6 +881,9 @@ fn capture_trace_rejects_empty_from_with_invalid_args() {
 fn forget_session_rejects_empty_session_id_with_invalid_args() {
     let args = ForgetArgs::Session {
         session_id: String::new(),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -984,7 +990,12 @@ fn sdk_error_code_helper_returns_typed_code() {
 #[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     let err = sdk()
-        .forget(&ForgetArgs::Record { record_id: ulid() })
+        .forget(&ForgetArgs::Record {
+            record_id: ulid(),
+            dry_run: None,
+            human_review: None,
+            no_diff: None,
+        })
         .expect_err("must fail closed in P0");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {

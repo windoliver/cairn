@@ -1040,14 +1040,14 @@ fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
 fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::forget::ForgetArgs as F;
     match args {
-        F::Record { record_id } => validate_ulid(record_id),
-        F::Session { session_id } => {
+        F::Record { record_id, .. } => validate_ulid(record_id),
+        F::Session { session_id, .. } => {
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
             Ok(())
         }
-        F::Scope { scope } => validate_scope_filter(scope),
+        F::Scope { scope, .. } => validate_scope_filter(scope),
         // Forward-compat for #[non_exhaustive].
         _ => Err(invalid("unsupported forget target variant")),
     }
