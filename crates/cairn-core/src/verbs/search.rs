@@ -13,6 +13,7 @@ use crate::config::{CairnConfig, CapabilitySet};
 use crate::contract::memory_store::{
     HybridSearchArgs, KeywordSearchArgs, MemoryStore, SearchCandidate, SemanticSearchArgs,
 };
+use crate::domain::ScopeTuple;
 use crate::domain::taxonomy::MemoryVisibility;
 use crate::search::{ScoreExplain, token_budget_trim};
 
@@ -153,6 +154,7 @@ pub async fn run(
             let args = KeywordSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: ScopeTuple::default(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 cursor: None,
@@ -165,6 +167,7 @@ pub async fn run(
             let args = SemanticSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: ScopeTuple::default(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
@@ -177,6 +180,7 @@ pub async fn run(
             let args = HybridSearchArgs {
                 query: request.query.clone(),
                 filter: None,
+                auth_scope: ScopeTuple::default(),
                 visibility_allowlist: visibility,
                 limit: request.limit,
                 model_label: request.model_label.clone(),
@@ -184,6 +188,7 @@ pub async fn run(
                 rrf_k: config.search.rrf_k,
                 rerank_topk: config.search.rerank_topk,
                 with_explain: request.explain,
+                confidence_floor: 1e-3,
             };
             let page = store.search_hybrid(&args).await?;
             (page.candidates, page.explain)
@@ -344,6 +349,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -394,6 +400,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -436,6 +443,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -468,6 +476,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: true,
+                graph_search: false,
             },
             last_hybrid: Mutex::new(None),
         };
@@ -533,6 +542,7 @@ mod tests {
                     graph_edges: false,
                     transactions: true,
                     per_record_consent_model: true,
+                    graph_search: false,
                 };
                 &CAPS
             }

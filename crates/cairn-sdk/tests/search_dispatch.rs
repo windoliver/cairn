@@ -42,6 +42,8 @@ impl MemoryStore for EmptyStore {
             graph_edges: false,
             transactions: true,
             per_record_consent_model: true,
+
+            graph_search: false,
         };
         &CAPS
     }

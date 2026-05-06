@@ -37,6 +37,8 @@ fn base_caps(vector: bool) -> MemoryStoreCapabilities {
         graph_edges: true,
         transactions: true,
         per_record_consent_model: true,
+
+        graph_search: false,
     }
 }
 

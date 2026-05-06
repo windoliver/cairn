@@ -13,6 +13,7 @@ async fn no_embedder_returns_capability_unavailable() {
         .search_semantic(&SemanticSearchArgs {
             query: "test".into(),
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![],
             limit: 5,
             model_label: "bge-small-en-v1.5".into(),

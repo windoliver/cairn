@@ -1039,6 +1039,7 @@ mod tests {
         let args = KeywordSearchArgs {
             query: "feedback".into(),
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 5,
             cursor: None,
