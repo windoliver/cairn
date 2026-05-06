@@ -11,6 +11,13 @@ use clap::ArgMatches;
 
 use super::envelope::{emit_json, human_error, unimplemented_response};
 
+mod cache;
+mod extract;
+mod folder;
+mod patterns;
+mod report;
+mod scanner;
+
 /// Run `cairn ingest`.
 #[must_use]
 pub fn run(sub: &ArgMatches) -> ExitCode {
