@@ -82,6 +82,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
 parking_lot = "0.12"
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
 fs2 = "0.4"
 whoami = "1.5"
 
