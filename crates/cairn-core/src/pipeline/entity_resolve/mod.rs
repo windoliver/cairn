@@ -95,6 +95,7 @@ use crate::domain::graph::EntityId;
 // Task 6 wires Merge/New into EntityResolver; suppress dead_code until then.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Resolution {
     /// Merge the candidate into the existing node with this id.
     Merge(EntityId),
