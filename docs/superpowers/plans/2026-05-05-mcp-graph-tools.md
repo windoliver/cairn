@@ -60,10 +60,22 @@ Spec: §2.1, §3.0a, §3.0a-bis, §3.0b. Create the struct, the per-`ScopeTuple`
 
 **Prereq helpers landed in this task** (used across Tasks 3, 4, 5, 6, 9, 10):
 
-- `SqliteMemoryStore::read_conn(&self) -> Result<&Arc<AsyncConn>, StoreError>` — thin error-mapping wrapper over the existing `raw_conn() -> Option<&Arc<AsyncConn>>` so the read path can use `?` instead of unwrapping. Mirrors the existing `require_conn(method)` shape but with a fixed read-path label.
-- `ScopeTuple::dimension_iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)>` — yields the six bind dimensions (`tenant`, `workspace`, `session_id`, `entity`, `user`, `agent`) in the same order `scope_match_clause` emits them. Same constant list, exposed as an iterator so call sites bind without duplicating the dimension order.
+- `SqliteMemoryStore::read_conn(&self) -> Result<Arc<AsyncConn>, StoreError>` — thin wrapper over the existing `raw_conn() -> Option<&Arc<AsyncConn>>` that **clones the `Arc`** and maps the absent-store case to `StoreError`. Returning a cloned `Arc` (not a reference) is what later tasks need so they can move the handle into the `move |c| { ... }` closure passed to `tokio_rusqlite::Connection::call`.
+- `ScopeTuple::dimension_iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)>` — yields the six bind dimensions (`tenant`, `workspace`, `session_id`, `entity`, `user`, `agent`) in the same order `scope_match_clause` emits them.
 
 Both helpers are intentionally tiny and stay in this task — they are not separate prereq tasks.
+
+**Async execution model — read this before writing any query task.**
+
+`SqliteMemoryStore` wraps `tokio_rusqlite::Connection` (re-exported as `AsyncConn`). All SQL execution in this crate runs on the dedicated DB thread via `conn.call(|c| { ... }).await`. There is **no synchronous `prepare`/`query` API** on the public surface and no place a `&rusqlite::Connection` is borrowable on the calling thread. Every `GraphQueries` method that runs SQL is therefore:
+
+1. `async fn` returning `Result<…, StoreError>` (not `rusqlite::Result<…>`).
+2. Acquires the handle with `let conn = self.store.read_conn()?;` (cloned `Arc`).
+3. Moves the SQL string and *owned* bind values into `conn.call(move |c| { … }).await?`.
+4. Inside the closure: `c.prepare(&sql)?`, `stmt.query(rusqlite::params_from_iter(binds))?`, collect into an owned `Vec<RowDto>`, return it. The closure must be `Send + 'static` and may not borrow non-`'static` data — capture by value.
+5. Map `tokio_rusqlite::Error` (the closure's error type) to `StoreError` with `?`. The store crate already implements `From<tokio_rusqlite::Error> for StoreError` (see `crates/cairn-store-sqlite/src/error.rs`); reuse that conversion.
+
+Task 3 is the canonical example. Tasks 4, 5, 6, 9, 10 follow Task 3's pattern verbatim — clone the handle, move binds and SQL into the closure, collect rows into owned DTOs, return through `?`. **No task in this plan calls `.prepare()` outside a `conn.call(...)` closure.**
 
 - [ ] **Write failing test.**
   ```rust
@@ -181,11 +193,14 @@ Both helpers are intentionally tiny and stay in this task — they are not separ
   ```rust
   // crates/cairn-store-sqlite/src/store/mod.rs — append.
   impl SqliteMemoryStore {
-      /// Read-path connection accessor. Returns the same `Arc<AsyncConn>`
-      /// as `raw_conn()` but maps the absent-store case to `StoreError`
-      /// so read methods can use `?` directly. Used by `GraphQueries`.
-      pub fn read_conn(&self) -> Result<&Arc<AsyncConn>, StoreError> {
-          self.require_conn("read_conn")
+      /// Read-path connection accessor. Clones the underlying
+      /// `Arc<AsyncConn>` and maps the absent-store case to
+      /// `StoreError`. Returning the cloned `Arc` (not a reference)
+      /// lets `GraphQueries` move the handle into the
+      /// `tokio_rusqlite::Connection::call(move |c| { … })` closure
+      /// without borrowing `&self`.
+      pub fn read_conn(&self) -> Result<Arc<AsyncConn>, StoreError> {
+          self.require_conn("read_conn").map(Arc::clone)
       }
   }
   ```
@@ -398,7 +413,7 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
   async fn get_entity_by_id_returns_id_and_live_edge_count() {
       let f = tiny_graph().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      let hit = q.get_entity_by_id(&f.node_a).unwrap();
+      let hit = q.get_entity_by_id(f.node_a.clone()).await.unwrap().unwrap();
       assert_eq!(hit.id, f.node_a);
       assert_eq!(hit.edge_count, 2); // A↔B and A↔C in scope_a
   }
@@ -407,13 +422,14 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
   async fn get_entity_by_id_out_of_scope_returns_none() {
       let f = tiny_graph().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_b.clone()], f.now);
-      assert!(q.get_entity_by_id(&f.node_a).unwrap().is_none());
+      assert!(q.get_entity_by_id(f.node_a.clone()).await.unwrap().is_none());
   }
   ```
 - [ ] **Run-fail.** `cargo nextest run -p cairn-store-sqlite --test graph_queries -- get_entity_by_id`
-- [ ] **Implement.**
+- [ ] **Implement.** Canonical async pattern (see Task 1 "Async execution model"). All later query tasks follow this exact shape — `read_conn()?` → owned-bind `Vec<SqlValue>` → `conn.call(move |c| { … }).await?` → owned DTOs → `StoreError` via `?`.
   ```rust
   use rusqlite::{params_from_iter, types::Value as SqlValue};
+  use crate::error::StoreError;
 
   pub struct EntityHit {
       pub id: String,
@@ -422,10 +438,10 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
   }
 
   impl GraphQueries {
-      pub fn get_entity_by_id(
+      pub async fn get_entity_by_id(
           &self,
-          id: &str,
-      ) -> rusqlite::Result<Option<EntityHit>> {
+          id: String,
+      ) -> Result<Option<EntityHit>, StoreError> {
           let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
           let sql = format!(
               "{prefix}
@@ -438,23 +454,33 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
                WHERE v.id = ?
                LIMIT 1"
           );
-          let conn = self.store.read_conn()?;
-          let mut stmt = conn.prepare(&sql)?;
           let mut binds: Vec<SqlValue> = Vec::new();
           self.push_prefix_binds(&mut binds);
-          binds.push(SqlValue::Text(id.to_string()));
-          binds.push(SqlValue::Text(id.to_string()));
-          binds.push(SqlValue::Text(id.to_string()));
-          let mut rows = stmt.query(params_from_iter(binds))?;
-          if let Some(row) = rows.next()? {
-              Ok(Some(EntityHit {
-                  id: row.get(0)?,
-                  echoed_name: None,
-                  edge_count: row.get(1)?,
-              }))
-          } else {
-              Ok(None)
-          }
+          binds.push(SqlValue::Text(id.clone()));
+          binds.push(SqlValue::Text(id.clone()));
+          binds.push(SqlValue::Text(id));
+
+          let conn = self.store.read_conn()?;
+          // SQL string and binds are moved into the DB-thread closure.
+          // Closure returns owned DTOs; tokio_rusqlite::Error converts
+          // to StoreError via the existing impl in store/error.rs.
+          let hit = conn
+              .call(move |c| {
+                  let mut stmt = c.prepare(&sql)?;
+                  let mut rows = stmt.query(params_from_iter(binds))?;
+                  let result = if let Some(row) = rows.next()? {
+                      Some(EntityHit {
+                          id: row.get(0)?,
+                          echoed_name: None,
+                          edge_count: row.get(1)?,
+                      })
+                  } else {
+                      None
+                  };
+                  Ok::<_, tokio_rusqlite::Error>(result)
+              })
+              .await?;
+          Ok(hit)
       }
 
       /// Push :now (×4) and ScopeTuple dimensions (tuple-major) onto
@@ -494,6 +520,15 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
   ```
 
 ---
+
+> **Async pattern reminder for Tasks 4–10.** The remaining query sketches
+> show only the SQL string, the bind-vector construction, and the row
+> decoding. Each method is `async fn …(&self, …) -> Result<…, StoreError>`,
+> acquires `let conn = self.store.read_conn()?;`, then wraps the
+> `prepare/query/collect` block inside `conn.call(move |c| { … }).await?`
+> exactly like Task 3. Reviewers should mentally re-add the wrapper
+> when reading subsequent sketches; **none of the subsequent tasks
+> calls `prepare()` outside a `conn.call(...)` closure**.
 
 ## Task 4: `get_entity` — `ByName` arm (uses `normalize_entity_name`)
 
@@ -1572,6 +1607,22 @@ Spec: §4.2.
 
 Spec: §4.2. Single-pass resolution: `materialize_graph_request` resolves store, scope, and `allowed_scopes` exactly once and returns the materialized request bundle. `call_tool` and `list_tools` (Task 14) both go through this helper — there is no separate boolean predicate that re-resolves later. Eliminates the TOCTOU window where a transient `allowed_scopes` failure between predicate and dispatch would otherwise panic.
 
+**Cross-plan extension — handler gains a concrete-store field.** `GraphQueries` is sqlite-specific (it relies on JSON1 / window-function CTEs and goes through `tokio_rusqlite::Connection::call`), so dispatch needs `Arc<SqliteMemoryStore>`, not `Arc<dyn MemoryStore>`. Plan A's handler holds `Option<Arc<dyn MemoryStore>>` for the verb path; **Plan C adds a sibling field**:
+
+```rust
+// crates/cairn-mcp/src/handler.rs — Plan C extends Plan A's struct.
+pub struct CairnMcpHandler {
+    store: Option<Arc<dyn MemoryStore>>,        // Plan A — verb path
+    sqlite_store: Option<Arc<SqliteMemoryStore>>, // Plan C — graph path
+    scope: Option<Arc<dyn McpSessionScope>>,
+    config: CairnConfig,
+    principal: ScopeTuple,
+    transport: McpTransport,
+}
+```
+
+Add a new constructor `with_store_scope_and_sqlite(store: Arc<dyn MemoryStore>, sqlite_store: Arc<SqliteMemoryStore>, scope, config, principal)` — both pointers are clones of the same underlying store; we keep two typed handles rather than re-introducing a downcast. The trait-object handle stays for the verb path; the concrete handle is what `materialize_graph_request` reads. Add `cairn-store-sqlite = { workspace = true }` to `crates/cairn-mcp/Cargo.toml` as part of this task — it is the only new dep cairn-mcp gains for graph dispatch.
+
 - [ ] **Write failing test.**
   ```rust
   #[tokio::test(flavor = "current_thread")]
@@ -1605,9 +1656,11 @@ Spec: §4.2. Single-pass resolution: `materialize_graph_request` resolves store,
 - [ ] **Implement.** Add a single-pass helper on `Handler` that returns the materialized request bundle or an unavailability reason — no second resolution anywhere:
   ```rust
   /// Materialized graph-request bundle. Resolved once; carried into dispatch.
+  /// Holds the **concrete** sqlite store handle — `GraphQueries` is sqlite-
+  /// specific and there is no graph-capable trait on `dyn MemoryStore` yet.
   struct GraphRequest {
-      store: std::sync::Arc<dyn cairn_core::contract::MemoryStore>,
-      allowed: Vec<cairn_core::scope::ScopeTuple>,
+      store: std::sync::Arc<cairn_store_sqlite::SqliteMemoryStore>,
+      allowed: Vec<cairn_core::domain::ScopeTuple>,
       now_ms: i64,
   }
 
@@ -1626,8 +1679,11 @@ Spec: §4.2. Single-pass resolution: `materialize_graph_request` resolves store,
           &self,
           ctx: &McpAuthContext,
       ) -> Result<GraphRequest, GraphUnavailable> {
-          let (Some(store), Some(scope)) = (self.store.as_ref(), self.scope.as_ref())
-          else {
+          let (Some(store), Some(sqlite_store), Some(scope)) = (
+              self.store.as_ref(),
+              self.sqlite_store.as_ref(),
+              self.scope.as_ref(),
+          ) else {
               return Err(GraphUnavailable::Gate(
                   McpGraphAvailability::UnavailableNoStoreCapability,
               ));
@@ -1647,7 +1703,7 @@ Spec: §4.2. Single-pass resolution: `materialize_graph_request` resolves store,
               _ => return Err(GraphUnavailable::Resolver),
           };
           Ok(GraphRequest {
-              store: store.clone(),
+              store: sqlite_store.clone(),
               allowed,
               now_ms: chrono::Utc::now().timestamp_millis(),
           })
