@@ -950,26 +950,24 @@ fn assemble_hot_rejects_any_session_id_until_loader_lands() {
 }
 
 #[test]
-fn assemble_hot_dispatches_to_core_verb() {
-    // assemble_hot is now wired to cairn_core::verbs::assemble_hot::assemble_hot
-    // and should succeed without a store. The default config has 6 recipe steps,
-    // all of which produce empty stub bodies, yielding 6 zero-length segments.
+fn assemble_hot_without_store_returns_unimplemented() {
+    // SDK fails closed on `Sdk::new()`: no store wired = no verified vault
+    // context. Mirrors the CLI's vault-binding gate.
     let args = AssembleHotArgs {
         budget: None,
         session_id: None,
     };
-    let resp = sdk().assemble_hot(&args).expect("assemble_hot ok");
-    let segments = resp.data.segments.expect("segments emitted");
-    assert_eq!(segments.len(), 6);
-    for s in &segments {
-        assert_eq!(s.byte_start, 0);
-        assert_eq!(s.byte_end, 0);
-    }
+    assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
 }
 
 #[test]
 fn sdk_assemble_hot_returns_typed_segments() {
-    let sdk = Sdk::new();
+    // Success path requires a wired store. The store is only used as a
+    // bound-vault signal here — assemble_hot never calls into it.
+    let sdk = Sdk::with_store(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+    );
     let resp = sdk
         .assemble_hot(&AssembleHotArgs {
             budget: None,
@@ -1079,5 +1077,92 @@ fn assert_unimplemented<T: std::fmt::Debug>(verb: &'static str, result: Result<T
             assert_eq!(operation_id.0.len(), 26, "operation_id is a ULID");
         }
         other => panic!("expected Unimplemented, got {other:?}"),
+    }
+}
+
+mod noop_store {
+    //! Stub `MemoryStore` used to gate `assemble_hot` behind a wired store
+    //! without exercising any store method (`assemble_hot` never calls into
+    //! the store; it just checks `is_some()`). Every method panics.
+
+    use cairn_core::contract::memory_store::CONTRACT_VERSION;
+    use cairn_core::contract::memory_store::{
+        Edge, EdgeDir, EdgeKey, HybridSearchArgs, HybridSearchPage, KeywordSearchArgs,
+        KeywordSearchPage, ListArgs, ListPage, MemoryStore, MemoryStoreCapabilities, RecordVersion,
+        SemanticSearchArgs, SemanticSearchPage, StoreError, TombstoneReason, UpsertOutcome,
+    };
+    use cairn_core::contract::version::{ContractVersion, VersionRange};
+    use cairn_core::domain::record::MemoryRecord;
+    use cairn_core::domain::{RecordId, TargetId};
+
+    pub struct NoopStore;
+
+    #[async_trait::async_trait]
+    impl MemoryStore for NoopStore {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn capabilities(&self) -> &MemoryStoreCapabilities {
+            static CAPS: MemoryStoreCapabilities = MemoryStoreCapabilities {
+                fts: false,
+                vector: false,
+                graph_edges: false,
+                transactions: false,
+                per_record_consent_model: false,
+            };
+            &CAPS
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            VersionRange::new(
+                CONTRACT_VERSION,
+                ContractVersion::new(CONTRACT_VERSION.major, CONTRACT_VERSION.minor + 1, 0),
+            )
+        }
+        async fn upsert(&self, _r: &MemoryRecord) -> Result<UpsertOutcome, StoreError> {
+            unimplemented!("NoopStore: upsert")
+        }
+        async fn get(&self, _id: &RecordId) -> Result<Option<MemoryRecord>, StoreError> {
+            unimplemented!("NoopStore: get")
+        }
+        async fn list(&self, _args: &ListArgs) -> Result<ListPage, StoreError> {
+            unimplemented!("NoopStore: list")
+        }
+        async fn tombstone(
+            &self,
+            _id: &RecordId,
+            _reason: TombstoneReason,
+        ) -> Result<(), StoreError> {
+            unimplemented!("NoopStore: tombstone")
+        }
+        async fn versions(&self, _target: &TargetId) -> Result<Vec<RecordVersion>, StoreError> {
+            unimplemented!("NoopStore: versions")
+        }
+        async fn put_edge(&self, _edge: &Edge) -> Result<(), StoreError> {
+            unimplemented!("NoopStore: put_edge")
+        }
+        async fn remove_edge(&self, _key: &EdgeKey) -> Result<bool, StoreError> {
+            unimplemented!("NoopStore: remove_edge")
+        }
+        async fn neighbours(&self, _id: &RecordId, _dir: EdgeDir) -> Result<Vec<Edge>, StoreError> {
+            unimplemented!("NoopStore: neighbours")
+        }
+        async fn search_keyword(
+            &self,
+            _args: &KeywordSearchArgs<'_>,
+        ) -> Result<KeywordSearchPage, StoreError> {
+            unimplemented!("NoopStore: search_keyword")
+        }
+        async fn search_semantic(
+            &self,
+            _args: &SemanticSearchArgs<'_>,
+        ) -> Result<SemanticSearchPage, StoreError> {
+            unimplemented!("NoopStore: search_semantic")
+        }
+        async fn search_hybrid(
+            &self,
+            _args: &HybridSearchArgs<'_>,
+        ) -> Result<HybridSearchPage, StoreError> {
+            unimplemented!("NoopStore: search_hybrid")
+        }
     }
 }

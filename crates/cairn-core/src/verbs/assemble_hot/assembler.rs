@@ -4,7 +4,7 @@
 //! the missing-half of issue #193 — that PR replaces `load_step_body`
 //! and changes nothing else.
 
-use super::segments::{AssembleHotValidationError, build_segments};
+use super::segments::{AssembleHotValidationError, build_segments, validate};
 use crate::config::HotMemoryConfig;
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
 
@@ -55,11 +55,16 @@ where
     if bytes > max {
         return Err(AssembleHotError::BudgetExceeded { got: bytes, max });
     }
-    Ok(AssembleHotData {
+    let data = AssembleHotData {
         bytes,
         prefix,
         segments: Some(segments),
-    })
+    };
+    // Run the same trust-boundary validator a deserializer would apply.
+    // Catches contract-violating outputs (e.g. recipe.len() > MAX_SEGMENTS)
+    // before they reach the wire.
+    validate(&data)?;
+    Ok(data)
 }
 
 /// Load the body for one recipe step. Stub: always `""`. The
@@ -95,6 +100,28 @@ mod tests {
         let data = assemble_hot(&cfg).unwrap();
         assert_eq!(data.prefix, "");
         assert_eq!(data.segments, Some(vec![]));
+    }
+
+    #[test]
+    fn assemble_hot_rejects_over_max_segments_recipe() {
+        // A recipe with 65 steps would emit a `segments` array the wire
+        // contract rejects (MAX_SEGMENTS = 64). The assembler must catch
+        // this before serialization.
+        use crate::config::HotMemoryRecipeStep;
+        let cfg = HotMemoryConfig {
+            max_bytes: 4_194_304,
+            recipe: vec![HotMemoryRecipeStep::Purpose; 65],
+        };
+        let err = assemble_hot(&cfg).unwrap_err();
+        match err {
+            AssembleHotError::Segments(
+                super::super::segments::AssembleHotValidationError::TooManySegments { got, max },
+            ) => {
+                assert_eq!(got, 65);
+                assert_eq!(max, 64);
+            }
+            other => panic!("expected TooManySegments, got {other:?}"),
+        }
     }
 
     #[test]

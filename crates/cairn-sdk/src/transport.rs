@@ -351,6 +351,13 @@ impl<T: Transport> Sdk<T> {
     /// silently accept and drop them, the SDK rejects requests that supply
     /// either with [`SdkError::InvalidArgs`]. Both will become real once #193
     /// lands the loader.
+    ///
+    /// Mirrors the CLI's vault-binding gate: the SDK rejects `assemble_hot`
+    /// with [`SdkError::Unimplemented`] when no store has been wired, since
+    /// [`Sdk::new`] uses [`CairnConfig::default`] and therefore has no
+    /// verified vault context. Returning a committed assembly from a default
+    /// config would silently mask misconfiguration and become a wrong-vault
+    /// injection vector once real loading lands.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
@@ -370,6 +377,10 @@ impl<T: Transport> Sdk<T> {
                 "assemble_hot: `session_id` is not yet honored by the stub-body \
                  assembler (tracked under #193); omit until real loading lands",
             ));
+        }
+
+        if self.store.is_none() {
+            return Err(unimplemented("assemble_hot"));
         }
 
         match cairn_core::verbs::assemble_hot::assemble_hot(&self.config.vault.hot_memory) {
