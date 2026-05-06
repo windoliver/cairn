@@ -25,8 +25,8 @@ pub enum StoreError {
     /// WAL boot recovery failed (issue #55, brief §5.6). Surfaced from
     /// every public async open path so a corrupt or unrecoverable WAL
     /// fails the open rather than serving requests against partial state.
-    #[error("wal recovery: {0}")]
-    Recovery(String),
+    #[error("wal recovery")]
+    Recovery(#[from] crate::wal::RecoveryError),
 
     /// `ConsentEvent` failed structural validation (kind/payload mismatch,
     /// malformed hash, etc.) before insert.

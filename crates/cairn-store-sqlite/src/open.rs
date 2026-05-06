@@ -101,7 +101,7 @@ async fn run_boot_recovery(conn: &Arc<AsyncConn>) -> Result<(), StoreError> {
         }
         Err(e) => {
             tracing::error!(error = %e, "WAL boot recovery failed");
-            Err(StoreError::Recovery(format!("{e}")))
+            Err(StoreError::Recovery(e))
         }
     }
 }
