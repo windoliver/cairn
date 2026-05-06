@@ -736,7 +736,7 @@ Spec: §3.3 algorithm + per-wave SQL with `ROW_NUMBER()` partitioning. `IN (?,?,
   async fn bfs_two_hops_returns_depth_stratified_set() {
       let f = tiny_graph().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      let res = q.query_bfs(&f.node_a, 2, 64).unwrap();
+      let res = q.query_bfs(f.node_a.clone(), 2, 64).await.unwrap();
       assert_eq!(res.nodes[0].id, f.node_a); // seed first
       assert!(res.nodes.iter().any(|n| n.id == f.node_b));
       // depth_of cap respected
@@ -928,8 +928,8 @@ Spec: §3.3 property 5. Reuse the BFS edge set; reorder via DFS over `parent_of`
   async fn query_dfs_reorders_bfs_via_parent_of() {
       let f = tiny_graph().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      let bfs = q.query_bfs(&f.node_a, 3, 64).unwrap();
-      let dfs = q.query_dfs(&f.node_a, 3, 64).unwrap();
+      let bfs = q.query_bfs(f.node_a.clone(), 3, 64).await.unwrap();
+      let dfs = q.query_dfs(f.node_a.clone(), 3, 64).await.unwrap();
       // Same edge set, possibly different order
       assert_eq!(
           bfs.edges.iter().map(|e| &e.id).collect::<std::collections::HashSet<_>>(),
@@ -1085,7 +1085,7 @@ Spec: §3.4. Defaults match active-at-now. Scope filter unconditional. Endpoint 
   async fn timeline_default_excludes_future_and_expired() {
       let f = timeline_fixture().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      let entries = q.timeline(&f.node_a, false, false).unwrap();
+      let entries = q.timeline(f.node_a.clone(), false, false).await.unwrap();
       assert!(entries.iter().all(|e| e.expired_at.is_none()));
       assert!(entries.iter().all(|e| e.valid_at <= f.now));
   }
@@ -1094,7 +1094,7 @@ Spec: §3.4. Defaults match active-at-now. Scope filter unconditional. Endpoint 
   async fn timeline_include_history_surfaces_future_dated() {
       let f = timeline_fixture().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      let entries = q.timeline(&f.node_a, true, false).unwrap();
+      let entries = q.timeline(f.node_a.clone(), true, false).await.unwrap();
       assert!(entries.iter().any(|e| e.valid_at > f.now));
   }
   ```
@@ -1236,9 +1236,9 @@ Spec: §3.5. Bonus keyed on actual scope id, not `source_record_id`.
           vec![f.scope_a.clone(), f.scope_b.clone()],
           f.now,
       );
-      let hits = q.surprising_connections(&[
+      let hits = q.surprising_connections(vec![
           f.node_a.clone(), f.node_b.clone(), f.node_c.clone(),
-      ], 10).unwrap();
+      ], 10).await.unwrap();
       // Highest score must be the S_b edge (modal is S_a).
       // `source_record_id` lives on `SurpriseHit`, not on the inner
       // `GraphEdge` — the public edge type is id-only by design (§3.1).
@@ -2289,37 +2289,37 @@ Spec covers: tombstoned-endpoint (§3.0a-bis test 6), lineage re-scope (§3.0a-b
   async fn tombstoned_endpoint_hidden_from_all_five_tools() {
       let f = endpoint_tombstone_fixture().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      assert!(q.get_neighbors(&f.node_a, None, None).unwrap().is_empty());
-      assert!(q.timeline(&f.node_a, true, true).unwrap().is_empty());
-      let bfs = q.query_bfs(&f.node_a, 5, 64).unwrap();
+      assert!(q.get_neighbors(f.node_a.clone(), None, None).await.unwrap().is_empty());
+      assert!(q.timeline(f.node_a.clone(), true, true).await.unwrap().is_empty());
+      let bfs = q.query_bfs(f.node_a.clone(), 5, 64).await.unwrap();
       assert!(bfs.nodes.iter().all(|n| n.id != f.tombstoned_b));
-      assert!(q.surprising_connections(&[f.node_a.clone(), f.tombstoned_b.clone()], 16).unwrap().is_empty());
-      assert!(q.get_entity_by_id(&f.tombstoned_b).unwrap().is_none());
+      assert!(q.surprising_connections(vec![f.node_a.clone(), f.tombstoned_b.clone()], 16).await.unwrap().is_empty());
+      assert!(q.get_entity_by_id(f.tombstoned_b.clone()).await.unwrap().is_none());
   }
 
   #[tokio::test(flavor = "current_thread")]
   async fn lineage_rescope_keys_off_immutable_provenance() {
       let f = lineage_rescope_fixture().await; // S_a original, S_b active head
       let q_a = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      assert!(!q_a.get_neighbors(&f.node_a, None, None).unwrap().is_empty()); // S_a sees the edge
+      assert!(!q_a.get_neighbors(f.node_a.clone(), None, None).await.unwrap().is_empty()); // S_a sees the edge
       let q_b = GraphQueries::new(f.store.clone(), vec![f.scope_b.clone()], f.now);
-      assert!(q_b.get_neighbors(&f.node_a, None, None).unwrap().is_empty());  // S_b does not
+      assert!(q_b.get_neighbors(f.node_a.clone(), None, None).await.unwrap().is_empty());  // S_b does not
   }
 
   #[tokio::test(flavor = "current_thread")]
   async fn future_only_provenance_is_not_found_until_clock_advances() {
       let f = future_provenance_fixture().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      assert!(q.get_entity_by_id(&f.node_future).unwrap().is_none());
+      assert!(q.get_entity_by_id(f.node_future.clone()).await.unwrap().is_none());
       let q2 = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.future_valid_at + 1);
-      assert!(q2.get_entity_by_id(&f.node_future).unwrap().is_some());
+      assert!(q2.get_entity_by_id(f.node_future.clone()).await.unwrap().is_some());
   }
 
   #[tokio::test(flavor = "current_thread")]
   async fn episode_via_tombstoned_record_hides_entity() {
       let f = episode_tombstone_fixture().await;
       let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
-      assert!(q.get_entity_by_id(&f.node_via_episode).unwrap().is_none());
+      assert!(q.get_entity_by_id(f.node_via_episode.clone()).await.unwrap().is_none());
   }
 
   #[tokio::test(flavor = "current_thread")]
@@ -2329,7 +2329,7 @@ Spec covers: tombstoned-endpoint (§3.0a-bis test 6), lineage re-scope (§3.0a-b
       let scope = ScopeTuple { tenant: Some("a".into()), user: None, ..Default::default() };
       let q = GraphQueries::new(f.store.clone(), vec![scope], f.now);
       // Edge sourced from a record with user="bob" must NOT be visible.
-      let edges = q.get_neighbors(&f.node_a, None, None).unwrap();
+      let edges = q.get_neighbors(f.node_a.clone(), None, None).await.unwrap();
       assert!(edges.iter().all(|e| e.id != f.edge_with_user_bob));
   }
   ```

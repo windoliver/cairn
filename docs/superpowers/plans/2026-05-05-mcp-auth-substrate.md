@@ -1449,35 +1449,20 @@ Expected: compile errors — `render_mcp_graph_line` does not exist.
 
 - [ ] **Step 3: Add the formatter and call it from `run_with_context`**
 
-Append to `crates/cairn-cli/src/verbs/status.rs`:
+The final `render_mcp_graph_line` signature takes `&ResolvedAvailability`
+(see the dedicated definition further below in this task; lines ~1865+).
+That single signature is consistent with the failing tests in Step 2,
+which pass `&ResolvedAvailability::Predicate(avail)`. Earlier review
+rounds proposed a `&McpGraphAvailability`-only formatter and a separate
+`{"mcp.graph_tools":"<label>"} addendum` JSON document; both have been
+superseded. The authoritative shape is:
 
-```rust
-/// Format one line for the MCP graph-tools availability state.
-///
-/// Used by the human-readable status output. JSON output emits the same
-/// state via `McpGraphAvailability::label()` under `mcp.graph_tools`.
-#[must_use]
-pub fn render_mcp_graph_line(
-    avail: &cairn_core::mcp_auth::McpGraphAvailability,
-) -> String {
-    use cairn_core::mcp_auth::McpGraphAvailability;
-    match avail {
-        McpGraphAvailability::Available { tool_count } => {
-            format!("mcp.graph_tools: available ({tool_count} tools)")
-        }
-        McpGraphAvailability::UnavailableSingleTenantOff => {
-            "mcp.graph_tools: unavailable (single-tenant mode off)".to_owned()
-        }
-        McpGraphAvailability::UnavailableNoStoreCapability => {
-            "mcp.graph_tools: unavailable (store does not advertise graph_edges)"
-                .to_owned()
-        }
-        McpGraphAvailability::UnavailableNoScopeResolver => {
-            "mcp.graph_tools: unavailable (no scope resolver wired)".to_owned()
-        }
-    }
-}
-```
+- One formatter: `pub fn render_mcp_graph_line(avail: &ResolvedAvailability) -> String` (defined later in this task).
+- One JSON path: extend the IDL-generated `StatusResponse` with an `mcp_graph_tools` field (see Step 6a–c below); no second JSON document is emitted.
+
+Skip ahead to "Insert the MCP-graph reporting" — the formatter
+definition, the resolver-probe block, and the IDL/codegen wiring all
+follow in order.
 
 In `run_with_context` (around line 109 of the same file), after the existing capability-printing block (after `for cap in &resp.capabilities { ... }`), insert the MCP-graph reporting:
 
@@ -1997,12 +1982,13 @@ git add crates/cairn-cli/src/verbs/status.rs \
 git commit -m "$(cat <<'EOF'
 feat(cli): cairn status reports mcp_graph_tools_available
 
-render_mcp_graph_line maps McpGraphAvailability to one of four stable
-human-readable lines. status.run_with_context calls it after the
-existing capabilities block. JSON output gets a single-line
-{"mcp.graph_tools":"<label>"} addendum so machine consumers can grep.
-Snapshot pins all four states; Plan C's flip will fail this test
-loudly so the formatter gets updated together with the predicate.
+render_mcp_graph_line maps ResolvedAvailability to one of six stable
+human-readable lines (4 predicate states + ProbeFailed + NoVault +
+ResolverEmpty). status.run_with_context calls it after the existing
+capabilities block. JSON output extends the IDL-generated StatusResponse
+with an mcp_graph_tools field (single document; no addendum) — see the
+schema/prelude/status.json edit in Step 6a. Snapshot pins all states;
+Plan C's flip changes only the predicate fall-through.
 
 Issue #190 prerequisite (Plan A).
 
