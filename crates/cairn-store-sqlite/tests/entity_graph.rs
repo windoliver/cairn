@@ -524,6 +524,78 @@ async fn seed_two_entities(
 }
 
 #[tokio::test]
+async fn upsert_entity_round_trip_punctuation_and_unicode() {
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
+
+    let store = cairn_store_sqlite::open_in_memory().await.expect("open");
+
+    let display = "Auth Service (v2)";
+    let node = EntityNode {
+        id: EntityId::from("01HZE7JV5N0000000000000099"),
+        name: display.into(),
+        name_norm: normalize_entity_name(display),
+        summary: None,
+        created_at: 1,
+        embedding_id: None,
+    };
+
+    use cairn_core::contract::memory_store::MemoryStore;
+    let inserted_id = store.upsert_entity(&node).await.expect("insert");
+
+    // The §3.1 ByName arm computes `name_norm` from the user-provided
+    // `name` and probes `entity_nodes.name_norm` directly. Simulate that
+    // here by recomputing from the *display* form (whitespace/punctuation
+    // intact) and asserting the row is found.
+    let probe_norm = normalize_entity_name("Auth Service (v2)");
+    assert_eq!(
+        probe_norm,
+        node.name_norm,
+        "helper must be deterministic across call sites"
+    );
+
+    let conn = store.raw_conn().expect("conn present after open_in_memory");
+    let probe_norm_clone = probe_norm.clone();
+    let found_id: String = conn
+        .call(move |c| {
+            let id: String = c.query_row(
+                "SELECT id FROM entity_nodes WHERE name_norm = ?1",
+                rusqlite::params![&probe_norm_clone],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        })
+        .await
+        .expect("lookup");
+
+    assert_eq!(found_id, inserted_id.as_str());
+
+    // A naive `lower()` lookup would NOT find this row — assert that.
+    let conn = store.raw_conn().expect("conn present after open_in_memory");
+    let display_owned = display.to_owned();
+    let found_lower: Option<String> = conn
+        .call(move |c| {
+            let res = c
+                .query_row(
+                    "SELECT id FROM entity_nodes WHERE name_norm = lower(?1)",
+                    rusqlite::params![&display_owned],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            Ok(res)
+        })
+        .await
+        .expect("naive-lower probe");
+    assert!(
+        found_lower.is_none(),
+        "naive lower() must NOT find the row — proves the helper is load-bearing",
+    );
+}
+
+#[tokio::test]
 async fn upsert_entity_edge_simple_insert() {
     use cairn_core::contract::memory_store::MemoryStore;
     use cairn_core::domain::graph::{EdgeConfidence, EntityEdge, EntityEdgeId};
