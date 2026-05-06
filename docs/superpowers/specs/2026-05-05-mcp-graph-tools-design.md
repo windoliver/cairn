@@ -65,11 +65,24 @@ No new migration required.
 
 ## 3. Query semantics
 
-All queries default to:
+All queries default to a single shared **active-at-now** predicate
+applied uniformly:
 
-- `expired_at IS NULL` (exclude tombstoned rows).
-- For point-in-time views: `valid_at <= now AND (invalid_at IS NULL OR
-  invalid_at > now)`.
+```sql
+e.expired_at IS NULL
+  AND e.valid_at  <= :now
+  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+```
+
+Defined once as `fn active_edge_predicate(alias: &str) -> &str` (or a
+SQL view `entity_edges_active`) and reused by `get_entity` edge count,
+`get_neighbors`, `graph.query` traversal, and `surprising_connections`.
+The only query that intentionally bypasses temporal slicing is
+`graph.timeline`, which is the audit view by definition.
+
+Future-dated edges (`valid_at > now`) are therefore invisible to all
+present-time reads — closing the leak that an earlier draft of this
+spec allowed.
 
 ### 3.1 `graph.get_entity`
 
@@ -81,12 +94,15 @@ WHERE (id = ?1 OR name_norm = lower(?1))
 LIMIT 1;
 ```
 
-Live edge count via secondary query:
+Live edge count via secondary query (uses the shared active-at-now
+predicate from §3):
 
 ```sql
-SELECT COUNT(*) FROM entity_edges
-WHERE (source_id = ?1 OR target_id = ?1)
-  AND expired_at IS NULL AND invalid_at IS NULL;
+SELECT COUNT(*) FROM entity_edges e
+WHERE (e.source_id = ?1 OR e.target_id = ?1)
+  AND e.expired_at IS NULL
+  AND e.valid_at <= :now
+  AND (e.invalid_at IS NULL OR e.invalid_at > :now);
 ```
 
 ### 3.2 `graph.get_neighbors`
@@ -97,6 +113,8 @@ SELECT e.id, e.source_id, e.target_id, e.relation,
 FROM entity_edges e
 WHERE (e.source_id = ?1 OR e.target_id = ?1)
   AND e.expired_at IS NULL
+  AND e.valid_at <= :now
+  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
   AND (?2 IS NULL OR e.relation = ?2)
   AND (?3 IS NULL OR e.confidence_score >= ?3);
 ```
@@ -105,34 +123,64 @@ Returned edges include the *other* node's id + name (joined).
 
 ### 3.3 `graph.query` (BFS/DFS)
 
+Cycle prevention is enforced **inside the recursive CTE**, not after
+materialization. Each frontier row carries a `path` string of
+slash-joined visited node ids; we refuse to enqueue a neighbor whose id
+already appears in `path`. We also cap the materialized row count at a
+hard SQL-side `node_budget` (passed in alongside the input args, default
+1024) so a wide branching graph can never explode the intermediate set
+even with cycles excluded.
+
 ```sql
-WITH RECURSIVE frontier(node_id, depth, parent_edge) AS (
-  SELECT id, 0, NULL FROM entity_nodes
-  WHERE (id = ?1 OR name_norm = lower(?1)) AND expired_at IS NULL
+WITH RECURSIVE frontier(node_id, depth, parent_edge, path, n) AS (
+  SELECT id, 0, NULL, '/' || id || '/', 1 FROM entity_nodes
+  WHERE (id = ?seed OR name_norm = lower(?seed))
+    AND expired_at IS NULL
   UNION ALL
   SELECT
-    CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END,
+    CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END
+      AS next_id,
     f.depth + 1,
-    e.id
+    e.id,
+    f.path
+      || (CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END)
+      || '/',
+    f.n + 1
   FROM frontier f
   JOIN entity_edges e
     ON (e.source_id = f.node_id OR e.target_id = f.node_id)
-   AND e.expired_at IS NULL AND e.invalid_at IS NULL
-  WHERE f.depth < ?2
+   AND e.expired_at IS NULL
+   AND e.valid_at <= :now
+   AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+  WHERE f.depth < ?max_hops
+    AND f.n     < ?node_budget
+    AND instr(
+          f.path,
+          '/' ||
+          (CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END)
+          || '/'
+        ) = 0
 )
-SELECT DISTINCT node_id, depth, parent_edge FROM frontier
+SELECT node_id, MIN(depth) AS depth, parent_edge
+FROM frontier
+GROUP BY node_id
 ORDER BY depth ASC, node_id;
 ```
 
-- BFS uses level-order (depth ASC) — implicit from recursion.
-- DFS reorders the result set client-side (depth-first stack walk over
-  the same materialized rows). SQLite's `WITH RECURSIVE` does not
-  guarantee DFS ordering directly.
-- `max_hops` capped at 5 in the input schema.
-- Token budget enforced in Rust: serialize each emitted node/edge with
+- **Cycle guard:** `instr(path, ...)` rejects any neighbor already on
+  the current branch's visited path before it enters the union — no
+  re-enqueue, no exponential expansion on cycles.
+- **Hard SQL budget:** `f.n < ?node_budget` halts intermediate growth
+  even on dense acyclic graphs, before any Rust-side serialization runs.
+- **BFS / DFS:** ordering is BFS by construction (`depth ASC`). DFS is
+  produced by reordering the materialized BFS rowset client-side via
+  the recorded `parent_edge` chain — SQLite's `WITH RECURSIVE` does not
+  guarantee DFS order on its own.
+- **`max_hops`:** capped at 5 in the input schema (clap / schemars).
+- **Token budget (secondary):** serialize each row with
   `serde_json::to_string`, accumulate `s.len()`, stop when accumulator
-  exceeds `token_budget` (rough byte-budget proxy; documented as
-  approximate). Default 4000 from issue.
+  exceeds `token_budget` (default 4000). This is an emission cap
+  layered on top of the SQL `node_budget`, not the only defense.
 
 ### 3.4 `graph.timeline`
 
@@ -236,21 +284,53 @@ future IDL additions. JSON schemas live alongside in
 
 ## 5. Stdio blank-line relay
 
-Today `serve_stdio` calls `rmcp::transport::io::stdio()` directly, which
-forwards every byte to the rmcp framer. Some harnesses (Claude Desktop
-historically) emit blank lines between JSON-RPC frames; the framer
-chokes on them.
+### 5.1 Framing — MCP stdio is NOT LSP
 
-Add a small relay shim:
+**Pin this up front to avoid confusion with LSP-style transports:**
+MCP over stdio is **newline-delimited JSON-RPC** — one complete JSON
+object per line, terminated by `\n`. It does **not** use LSP's
+`Content-Length: N\r\n\r\n<body>` framing. There is no header block,
+no required blank-line delimiter inside a frame, and no byte-counted
+body. See the MCP spec §"stdio transport" and the rmcp
+`transport::io::stdio()` reader, which is line-based.
 
-- Spawn a blocking task that reads `tokio::io::stdin()` line-by-line
-  (`tokio::io::AsyncBufReadExt::lines`).
-- Drop lines where `line.trim().is_empty()`.
-- Forward retained lines to a `tokio::io::duplex` writer that the rmcp
-  transport consumes.
-- Stdout passthrough is identity (rmcp writes well-formed frames).
+Because frames are exactly one line each, any blank line on stdin is
+**inter-frame whitespace by definition** — never part of a body.
+Filtering blank lines before the rmcp framer therefore cannot corrupt
+a valid frame.
 
-This is symmetric with Graphify's pattern referenced in the issue.
+### 5.2 Why a relay is needed
+
+Some harnesses (Claude Desktop and a few wrapper shells) interleave
+blank lines or stray `\r` between JSON-RPC frames during startup or
+when the host writes log noise to the same pipe. The rmcp framer is
+strict and will surface a parse error on the empty token rather than
+skip it, breaking the session.
+
+### 5.3 Shim
+
+- Spawn one task reading `tokio::io::stdin()` line-by-line via
+  `AsyncBufReadExt::lines()`.
+- For each line: skip if `line.trim().is_empty()`. Otherwise write
+  `line` + `'\n'` into the write half of a `tokio::io::duplex(64 *
+  1024)` channel.
+- Hand the read half of that duplex to rmcp as its stdin. Stdout is
+  passed through directly (rmcp's outgoing frames are already
+  well-formed single-line JSON).
+- Cancellation: when stdin reaches EOF the relay drops the duplex
+  writer, which the rmcp side observes as EOF and exits cleanly.
+
+**Invariants the shim preserves:**
+
+1. Every non-empty input line is forwarded byte-for-byte (no trim, no
+   re-encoding) — rmcp sees the exact JSON the harness sent.
+2. The relay never holds more than one line at a time; no buffering
+   semantics that could reorder concurrent writes (stdin has only one
+   writer anyway).
+3. Stdout is untouched — server-to-host frames are not normalized.
+
+This is the same pattern Graphify ships and the one called out in the
+issue.
 
 ## 6. Status / capability advertisement
 
