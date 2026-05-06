@@ -11,7 +11,10 @@ mod orchestrator;
 mod rrf;
 mod trim;
 
-pub use cosine::{RerankedCandidate, cosine_rerank, cosine_similarity};
+pub use cosine::{
+    CandidateOrigin, OriginTaggedCandidate, RerankedCandidate, cosine_rerank,
+    cosine_rerank_tagged, cosine_similarity,
+};
 pub use degraded::{DegradationReason, DegradedLeg, GraphSource};
 pub use explain::ScoreExplain;
 pub use graph::GraphCandidate;
