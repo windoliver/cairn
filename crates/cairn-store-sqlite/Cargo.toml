@@ -37,6 +37,7 @@ chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 parking_lot = { workspace = true }
 indexmap = { workspace = true }
+serde = { workspace = true }
 # sqlite-vec ANN extension — statically compiled; the crate's own build.rs
 # handles compilation. We load it per-connection via register_auto_extension.
 sqlite-vec = { workspace = true }

@@ -2,6 +2,7 @@ use cairn_core::domain::graph::normalize::normalize_entity_name;
 use cairn_core::domain::scope::ScopeTuple;
 use indexmap::IndexMap;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use crate::store::SqliteMemoryStore;
 
 /// A single directed edge between two entities, returned by graph traversal
 /// queries. All fields are id-only per §2.1.0 — no cross-scope name columns.
+#[derive(Serialize)]
 pub struct GraphEdge {
     /// The edge's canonical id.
     pub id: String,
@@ -26,6 +28,7 @@ pub struct GraphEdge {
 }
 
 /// A node returned by a graph traversal query (§3.3).
+#[derive(Serialize)]
 pub struct GraphNode {
     /// The entity's canonical id.
     pub id: String,
@@ -672,5 +675,30 @@ impl GraphQueries {
             })
             .await?;
         Ok(hit)
+    }
+
+    /// Truncate a slice of serializable rows to fit within `byte_budget`
+    /// bytes when JSON-serialized (§3.3 property 6).
+    ///
+    /// Each row is serialized individually to estimate its byte cost. The
+    /// accumulator stops adding rows once the running total would exceed
+    /// `byte_budget`, with a single-element overshoot tolerance (the last
+    /// item that pushes the total over the budget is still included).
+    /// Returns an empty `Vec` when `rows` is empty.
+    pub fn truncate_to_token_budget<T: Serialize>(rows: &[T], byte_budget: usize) -> Vec<&T> {
+        let mut out: Vec<&T> = Vec::new();
+        let mut used = 2usize; // "[]"
+        for r in rows {
+            let Ok(s) = serde_json::to_string(r) else {
+                continue;
+            };
+            let cost = s.len() + 1; // comma
+            if used + cost > byte_budget && !out.is_empty() {
+                break;
+            }
+            out.push(r);
+            used += cost;
+        }
+        out
     }
 }

@@ -1,7 +1,7 @@
 //! Integration tests for [`cairn_store_sqlite::entity_graph::queries::GraphQueries`].
 
 use cairn_core::domain::scope::ScopeTuple;
-use cairn_store_sqlite::entity_graph::queries::GraphQueries;
+use cairn_store_sqlite::entity_graph::queries::{GraphEdge, GraphQueries};
 
 #[test]
 fn scope_clause_emits_six_coalesce_pairs_per_tuple() {
@@ -102,4 +102,22 @@ async fn get_neighbors_filters_by_relation_and_confidence() {
         .unwrap();
     assert!(edges.iter().all(|e| e.relation == "calls"));
     assert!(edges.iter().all(|e| e.confidence_score >= 0.7));
+}
+
+#[test]
+fn token_budget_truncates_at_byte_threshold() {
+    let edges: Vec<GraphEdge> = (0..100)
+        .map(|i| GraphEdge {
+            id: format!("e{i}"),
+            source_id: "s".into(),
+            target_id: "t".into(),
+            relation: "r".into(),
+            confidence_score: 1.0,
+            valid_at: 0,
+        })
+        .collect();
+    let truncated = GraphQueries::truncate_to_token_budget(&edges, 200);
+    let s = serde_json::to_string(&truncated).unwrap();
+    assert!(s.len() <= 200 + 64); // soft cap with single-element overshoot
+    assert!(truncated.len() < edges.len());
 }
