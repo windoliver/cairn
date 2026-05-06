@@ -36,16 +36,21 @@ Five tools:
   `TOOLS`. A dispatch function maps tool name → `GraphQueries` method →
   serialized `CallToolResult`.
 - **`crates/cairn-mcp/src/handler.rs`** (edit). Extend `list_tools` to
-  concat `TOOLS` + `GRAPH_TOOLS` **only when a store is wired**
-  (`self.store.is_some()`); when the handler is unwired the manifest
-  must not advertise these tools at all. Extend `call_tool` to route
-  graph names before the existing search/stub paths. Reuses the
-  existing `Option<Arc<dyn MemoryStore>>` field.
+  concat `TOOLS` + `GRAPH_TOOLS` **only when the wired store advertises
+  graph capability** — `store.is_some()` is not sufficient because
+  `MemoryStore`'s graph methods are allowed to return
+  `CapabilityUnavailable` by default. Add a `MemoryStore::capabilities()
+  -> StoreCapabilities` accessor (or extend the existing capability
+  set) with a `graph_traversal: bool` bit, set `true` only by
+  `cairn-store-sqlite` once migrations 0042/0043 are applied. The MCP
+  handler reads that bit at `list_tools` time and at `call_tool` time
+  (defense in depth — same predicate, both sites).
 
-  This gates discovery on capability — clients that cache `tools/list`
-  responses never see a graph tool they cannot invoke. The manifest
-  snapshot test must cover both wired and unwired cases (two snapshot
-  files) so this gating is byte-verifiable.
+  This gates discovery on the *actual* graph capability, not on
+  whether a store handle is present. Clients that cache `tools/list`
+  responses never see a graph tool they cannot invoke. Manifest
+  snapshot tests cover both states (graph-capable and graph-incapable)
+  so the gating is byte-verifiable.
 - **`crates/cairn-cli/src/...mcp dispatch`** (edit). Pass the open store
   into `CairnMcpServer` so graph tools have a backend. Today
   `serve_stdio` always builds an unwired handler; introduce
@@ -55,6 +60,53 @@ Why A (chosen over alternatives B/C from brainstorm): graph queries are
 SQLite-shaped (recursive CTEs), have no business logic to share across
 surfaces, and are MCP-only per issue scope. Adding an 8th contract is
 brief-level work and overkill for read-only queries.
+
+### 2.1.1 Authorization & scope (CRITICAL)
+
+The graph tables (`entity_nodes`, `entity_edges`) carry no
+tenant/workspace/session columns of their own. Record-level reads
+elsewhere in Cairn enforce visibility by having the caller pass a
+`visibility_allowlist` of scope ids; the graph schema cannot do the
+same directly. **Skipping this control would let any caller who knows
+one entity id traverse edges sourced from any record in the database,
+including other tenants/workspaces sharing the same vault file.** The
+issue's "without going through the 8-verb layer" framing is about
+*shape* (graph queries vs. record retrieval), not about *bypassing
+authorization*.
+
+The spec therefore mandates **scope-by-provenance**: every graph
+read derives its allowed scope set from the active session, then
+filters edges by joining `entity_edges.source_record_id` →
+`records.scope` and keeping only edges whose source record is in the
+allowed set. A node is reachable iff at least one in-scope edge
+touches it. Edges with `source_record_id IS NULL` (orphan provenance)
+are **excluded by default** — they can be opted into via an explicit
+`include_unattributed: bool` argument that the caller must set
+deliberately.
+
+The shared active-at-now predicate composes with this scope filter:
+
+```sql
+EXISTS (
+  SELECT 1 FROM records r
+  WHERE r.record_id = e.source_record_id
+    AND r.scope IN rarray(:allowed_scopes)
+)
+AND e.expired_at IS NULL
+AND e.valid_at  <= :now
+AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+```
+
+This is the **only** safe form of any graph read. `GraphQueries`
+takes the resolved `allowed_scopes` slice as a constructor argument
+and bakes it into every query — there is no public method that omits
+the scope predicate. The MCP dispatch layer fills `allowed_scopes`
+from the active session's scope resolution (same source the search
+verb uses) before invoking `GraphQueries`.
+
+A test must assert: an edge whose `source_record_id` belongs to a
+record outside `allowed_scopes` is invisible to all five tools (no
+neighbor, no traversal step, no timeline entry, no surprise hit).
 
 ### 2.2 Schema dependencies
 
@@ -93,9 +145,27 @@ spec allowed.
 
 ### 3.1 `graph.get_entity`
 
-`name_norm` is the dedup key chosen at upsert time (see
-`cairn-store-sqlite::entity_graph::node::upsert_entity`), and the
-graph's normalization is **not** plain `lower()` — it strips
+**Disambiguated input.** The MCP tool exposes two mutually exclusive
+arguments: `id: Option<String>` and `name: Option<String>`. Exactly
+one must be set; the schemars schema enforces this with an `oneOf`
+constraint. The earlier `id_or_name` overload is dropped — passing a
+single string into a single column is correct only when ids and
+names cannot collide, and we cannot guarantee that for arbitrary
+content.
+
+```rust
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum GetEntityArgs {
+    ById  { id: String },
+    ByName { name: String },
+}
+```
+
+**Normalization.** `name_norm` is the dedup key chosen at upsert
+time (see `cairn-store-sqlite::entity_graph::node::upsert_entity`),
+and the graph's normalization is **not** plain `lower()` — it strips
 punctuation, normalizes whitespace, and may apply Unicode folding.
 A naive `lower(?1)` lookup would silently miss any entity whose
 canonical form requires more than ASCII case folding.
@@ -116,19 +186,28 @@ Existing upsert sites that build `name_norm` inline are migrated to
 this helper as part of the same PR (small change, currently scattered
 across resolver and ingest paths).
 
-The SQL then becomes:
+**Two SQL queries** — one per arm — instead of one overloaded
+`OR`-predicate. This gives unambiguous semantics and lets each form
+use its own index path:
 
 ```sql
-SELECT id, name, summary, created_at
-FROM entity_nodes
-WHERE (id = ?1 OR name_norm = ?2)   -- ?2 = normalize_entity_name(input)
-  AND expired_at IS NULL
-LIMIT 1;
+-- ById
+SELECT id, name, summary, created_at FROM entity_nodes
+WHERE id = ?1 AND expired_at IS NULL;
+
+-- ByName
+SELECT id, name, summary, created_at FROM entity_nodes
+WHERE name_norm = ?1   -- ?1 = normalize_entity_name(input)
+  AND expired_at IS NULL;
 ```
 
 A regression test asserts that an entity inserted with a name like
-`"Auth Service (v2)"` is round-trippable: `get_entity("Auth Service
-(v2)")` returns the row, while a naive `lower()` lookup would not.
+`"Auth Service (v2)"` is round-trippable: `ByName { name: "Auth
+Service (v2)" }` returns the row, while a naive `lower()` lookup
+would not. A second test populates one row with `id = "X"` and a
+*different* row with `name = "X"` and confirms `ById { id: "X" }`
+returns the first while `ByName { name: "X" }` returns the second
+— never the wrong one.
 
 Live edge count via secondary query (uses the shared active-at-now
 predicate from §3):
@@ -197,27 +276,51 @@ fn bfs(seed, max_hops, node_budget, token_budget):
            truncated by token_budget during serialization
 ```
 
-**Per-wave neighbor SQL.** The frontier id list is bounded by
-`node_budget` (so finite), and the query itself carries a hard
-`LIMIT :wave_cap` so a single hub node cannot return millions of
-edges before Rust gets to truncate. `wave_cap` is computed as
-`node_budget - visited.len()` — i.e. the maximum number of *new*
-nodes this wave can possibly add. Pulling more rows than that is
-guaranteed waste, and keeping the limit at the SQL boundary stops
-SQLite from materializing them in the first place.
+**Per-wave neighbor SQL.** A naive `LIMIT :wave_cap` on the raw edge
+result is wrong: duplicate edges, multi-edges to the same neighbor,
+and edges back to already-visited nodes all consume the budget
+before the Rust dedup runs, which can drop reachable nodes that
+appear later in the ordered set. The query must instead bound by
+**distinct unseen neighbor**, picking exactly one canonical edge
+per neighbor up front via a window function.
 
 ```sql
-SELECT e.id, e.source_id, e.target_id, e.relation,
-       e.confidence_score
-FROM entity_edges e
-WHERE (e.source_id IN rarray(:frontier)
-    OR e.target_id IN rarray(:frontier))
-  AND e.expired_at IS NULL
-  AND e.valid_at <= :now
-  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-ORDER BY e.confidence_score DESC, e.id ASC   -- deterministic
+WITH candidate AS (
+  SELECT
+    CASE WHEN e.source_id IN rarray(:frontier)
+         THEN e.target_id ELSE e.source_id END  AS other_id,
+    e.id, e.source_id, e.target_id, e.relation, e.confidence_score,
+    ROW_NUMBER() OVER (
+      PARTITION BY
+        CASE WHEN e.source_id IN rarray(:frontier)
+             THEN e.target_id ELSE e.source_id END
+      ORDER BY e.confidence_score DESC, e.id ASC   -- deterministic
+    ) AS rn
+  FROM entity_edges e
+  WHERE (e.source_id IN rarray(:frontier)
+      OR e.target_id IN rarray(:frontier))
+    AND e.expired_at IS NULL
+    AND e.valid_at <= :now
+    AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+    AND EXISTS (
+      SELECT 1 FROM records r
+      WHERE r.record_id = e.source_record_id
+        AND r.scope IN rarray(:allowed_scopes)
+    )
+    AND other_id NOT IN rarray(:visited)
+)
+SELECT id, source_id, target_id, relation, confidence_score, other_id
+FROM candidate
+WHERE rn = 1
+ORDER BY confidence_score DESC, id ASC
 LIMIT :wave_cap;
 ```
+
+`wave_cap = node_budget - visited.len()` now bounds *distinct unseen
+neighbors* directly, because the inner CTE collapses each candidate
+to a single canonical edge before `LIMIT` applies. Reachable nodes
+later in the ordered set can no longer be displaced by duplicate
+edges to earlier-seen ones.
 
 The implementation must additionally **stream** rows
 (`Rows::next()` loop, not `query_map().collect()`) and break out of
