@@ -93,9 +93,17 @@ read derives its allowed scope set from the active session, then
 filters edges by joining `entity_edges.source_record_id` →
 `records.scope` and keeping only edges whose source record is in the
 allowed set. Edges with `source_record_id IS NULL` (orphan
-provenance) are **excluded by default** — they can be opted into via
-an explicit `include_unattributed: bool` argument that the caller
-must set deliberately.
+provenance) carry no scope-bearing provenance at all and are
+therefore **permanently hidden from MCP graph tools**. There is no
+caller-facing flag to opt into them — exposing one would let any
+caller surface unattributed edges from outside its scope, which
+defeats the only authorization boundary available to the design.
+
+Backfilling existing orphan edges with scope-bearing provenance is
+tracked separately; until that lands, the MCP graph surface treats
+them as if they did not exist. An operator-only ingestion or repair
+path may surface them out-of-band, but that is not reachable from
+this issue's tool set.
 
 #### Scope resolution on the MCP path (prerequisite)
 
@@ -107,24 +115,51 @@ tools are stricter: an empty resolved scope set means **deny all**,
 not "allow all."
 
 This work depends on a concrete scope-resolution API on the MCP
-path. The contract:
+path. The resolver must take **per-request context** — a zero-arg
+resolver could only return one static scope set per server, which
+breaks isolation in any deployment that multiplexes callers or
+rotates sessions. The contract therefore takes a request context
+and is invoked at every `tools/list` and `tools/call` boundary, not
+once at construction:
 
 ```rust
-// In cairn-core or cairn-mcp — exact location to be decided in the
-// implementation plan.
-pub trait McpSessionScope {
-    /// Resolve the active session's allowed record scope ids.
-    /// An empty Vec means "no scopes authorized" → tools fail closed.
-    /// `None` means scope resolution is unconfigured for this
-    /// deployment → tools advertise as unavailable.
-    fn allowed_scopes(&self) -> Option<Vec<ScopeId>>;
+/// Per-request authorization context handed to the resolver.
+/// Carried through rmcp's RequestContext or an equivalent
+/// session-id field. Exact shape decided in the implementation
+/// plan; the requirement is that it identifies the caller, not
+/// the server.
+pub struct McpAuthContext<'a> {
+    pub session_id: &'a SessionId,
+    pub request_id: &'a RequestId,
+    // additional caller-identity fields as needed
+}
+
+pub trait McpSessionScope: Send + Sync {
+    /// Resolve the *requesting* session's allowed record scope ids.
+    /// Empty Vec → fail closed (tool returns NotFound / empty).
+    /// Err → resolver was unable to identify the caller; tool
+    ///       returns CapabilityUnavailable rather than executing
+    ///       on partial data.
+    fn allowed_scopes(
+        &self,
+        ctx: &McpAuthContext<'_>,
+    ) -> Result<Vec<ScopeId>, ScopeResolutionError>;
 }
 ```
 
-The MCP handler accepts an `Arc<dyn McpSessionScope>` at
-construction time. `serve_stdio_with_store` takes one explicitly;
-deployments without a scope source must supply a deny-all impl
-(or accept that graph tools advertise `unavailable`).
+The MCP handler stores `Option<Arc<dyn McpSessionScope>>`, but
+**reads it per-request** with the active `McpAuthContext`. Caching
+the previous caller's scopes is forbidden — every tool invocation
+re-resolves through the trait. `tools/list` either resolves with the
+current request's context (single-tenant deployments still work,
+multi-tenant deployments stay isolated) or, if pre-flight discovery
+must happen before any caller is bound, returns an empty graph
+manifest until the first authenticated request.
+
+If a deployment is intentionally single-tenant, that is
+expressible: a resolver that ignores `ctx` and returns a fixed
+`Vec<ScopeId>` is a valid impl. The contract just makes per-request
+isolation possible for the cases that need it.
 
 **This trait does not exist yet in the repo.** Landing it is
 in-scope for this issue and gates the rest of the work. Two
@@ -200,23 +235,21 @@ open (or, equivalently, a CTE prefix injected by `GraphQueries`):
 -- visible_edges — the only edge source ANY graph tool reads from.
 -- (a) temporal: only edges currently active
 -- (b) provenance: only edges whose source record is in the
---     caller's allowed scope set; orphan edges (NULL
---     source_record_id) are excluded unless the tool sets
---     :include_unattributed = 1.
+--     caller's allowed scope set. Orphan edges
+--     (source_record_id IS NULL) are unconditionally excluded —
+--     no flag opts into them, because they carry no scope-bearing
+--     provenance and exposing them would bypass authorization.
 WITH visible_edges AS (
   SELECT e.*
   FROM entity_edges e
   WHERE e.expired_at IS NULL
     AND e.valid_at  <= :now
     AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-    AND (
-      EXISTS (
-        SELECT 1 FROM records r
-        WHERE r.record_id = e.source_record_id
-          AND r.scope IN rarray(:allowed_scopes)
-      )
-      OR (:include_unattributed = 1
-          AND e.source_record_id IS NULL)
+    AND e.source_record_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1 FROM records r
+      WHERE r.record_id = e.source_record_id
+        AND r.scope IN rarray(:allowed_scopes)
     )
 )
 ```
@@ -553,14 +586,12 @@ relaxes it.
 ```sql
 WITH scope_filtered AS (
   SELECT e.* FROM entity_edges e
-  WHERE (
-    EXISTS (
+  WHERE e.source_record_id IS NOT NULL
+    AND EXISTS (
       SELECT 1 FROM records r
       WHERE r.record_id = e.source_record_id
         AND r.scope IN rarray(:allowed_scopes)
     )
-    OR (:include_unattributed = 1 AND e.source_record_id IS NULL)
-  )
 )
 SELECT id, source_id, target_id, relation, confidence_score,
        valid_at, invalid_at, created_at, expired_at,
@@ -792,10 +823,19 @@ empty/`NotFound` correctly. A *missing* scope resolver
 (`None`) means the deployment is unconfigured — tools stay hidden
 from `tools/list` rather than appearing-then-failing.
 
-`CairnMcpServer::capabilities()` derives its `graph_edges` flag
-from the same conjunction. Wiring into `cairn status` is deferred
-only if it requires an IDL bump — the in-PR signal is the manifest
-snapshot test, which must cover the **four** states of the matrix:
+**Out of scope for this PR:** changing `MCPServerCapabilities` or
+`CairnMcpServer::capabilities()` to surface a derived
+`graph_edges` flag. The current `MCPServerCapabilities` advertises
+only transport and extension support; adding a graph-related field
+is a contract/IDL change with conformance-suite implications that
+do not belong in this issue. Discovery gating happens entirely
+inside the MCP handler via `tools/list` filtering — clients
+observe the gate by *not seeing* the tool, not by reading a
+capability flag. If we later want explicit advertisement, that
+lands as its own contract bump issue.
+
+The in-PR signal is the manifest snapshot test, which must cover
+the **four** states of the matrix:
 
 | store.graph_edges | scope present | `graph.*` tools listed? |
 |---|---|---|
