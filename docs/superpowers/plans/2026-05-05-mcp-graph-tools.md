@@ -97,7 +97,7 @@ Spec: §2.1, §3.0a, §3.0a-bis, §3.0b. Create the struct, the per-`ScopeTuple`
   ///
   /// `allowed_scopes` is the resolver's `Vec<ScopeTuple>` and MUST be
   /// non-empty — empty means deny-all and is the caller's
-  /// responsibility to short-circuit upstream (`graph_tools_available`).
+  /// responsibility to short-circuit upstream (`materialize_graph_request`).
   pub struct GraphQueries {
       pub(crate) store: Arc<SqliteMemoryStore>,
       pub(crate) allowed_scopes: Vec<ScopeTuple>,
@@ -113,7 +113,7 @@ Spec: §2.1, §3.0a, §3.0a-bis, §3.0b. Create the struct, the per-`ScopeTuple`
           debug_assert!(
               !allowed_scopes.is_empty(),
               "invariant: GraphQueries requires non-empty allowed_scopes; \
-               graph_tools_available must short-circuit upstream"
+               materialize_graph_request must short-circuit upstream"
           );
           Self { store, allowed_scopes, now }
       }
@@ -1525,7 +1525,7 @@ Spec: §4.2.
 - `crates/cairn-mcp/src/handler.rs` (Modify)
 - `crates/cairn-mcp/tests/graph_tools_manifest.rs` (Modify)
 
-Spec: §4.2. Defense-in-depth: re-evaluate `graph_tools_available` (Plan A) inside `call_tool` before constructing `GraphQueries`.
+Spec: §4.2. Single-pass resolution: `materialize_graph_request` resolves store, scope, and `allowed_scopes` exactly once and returns the materialized request bundle. `call_tool` and `list_tools` (Task 14) both go through this helper — there is no separate boolean predicate that re-resolves later. Eliminates the TOCTOU window where a transient `allowed_scopes` failure between predicate and dispatch would otherwise panic.
 
 - [ ] **Write failing test.**
   ```rust
@@ -1544,24 +1544,84 @@ Spec: §4.2. Defense-in-depth: re-evaluate `graph_tools_available` (Plan A) insi
       let res = h.call_tool(req, ctx_with_principal()).await.unwrap();
       assert_eq!(res.is_error, Some(true));
   }
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn call_tool_returns_capability_unavailable_when_resolver_errors() {
+      // Resolver that succeeds in any preflight check would still be re-called;
+      // this test asserts a transient resolver Err becomes a denied response,
+      // never a panic.
+      let h = build_handler_resolver_errors();
+      let req = call_tool_request("graph.get_entity", serde_json::json!({"id":"a"}));
+      let res = h.call_tool(req, ctx_with_principal()).await.unwrap();
+      assert_eq!(res.is_error, Some(true));
+  }
   ```
 - [ ] **Run-fail.** `cargo nextest run -p cairn-mcp --test graph_tools_manifest -- call_tool`
-- [ ] **Implement.** In `handler.rs::call_tool`, after the IDL `TOOLS` lookup but before falling through to "unknown tool":
+- [ ] **Implement.** Add a single-pass helper on `Handler` that returns the materialized request bundle or an unavailability reason — no second resolution anywhere:
+  ```rust
+  /// Materialized graph-request bundle. Resolved once; carried into dispatch.
+  struct GraphRequest {
+      store: std::sync::Arc<dyn cairn_core::contract::MemoryStore>,
+      allowed: Vec<cairn_core::scope::ScopeTuple>,
+      now_ms: i64,
+  }
+
+  enum GraphUnavailable {
+      /// Transport/config/capability gate from Plan A returned non-Available.
+      Gate(McpGraphAvailability),
+      /// Resolver returned Err or empty Vec at request time.
+      Resolver,
+  }
+
+  impl Handler {
+      /// Single source of truth for "is the graph surface usable for this
+      /// request, and if so with what scope set?" Called by both `list_tools`
+      /// and `call_tool`. Never called twice per request.
+      fn materialize_graph_request(
+          &self,
+          ctx: &McpAuthContext,
+      ) -> Result<GraphRequest, GraphUnavailable> {
+          let (Some(store), Some(scope)) = (self.store.as_ref(), self.scope.as_ref())
+          else {
+              return Err(GraphUnavailable::Gate(
+                  McpGraphAvailability::UnavailableNoStoreCapability,
+              ));
+          };
+          let caps = store.capabilities();
+          let avail = self.config.mcp_graph_tools_available(
+              Some(scope.as_ref()),
+              self.transport,
+              &caps,
+          );
+          if avail != McpGraphAvailability::Available {
+              return Err(GraphUnavailable::Gate(avail));
+          }
+          // Single resolver call — Err or empty -> Resolver-unavailable, never panic.
+          let allowed = match scope.allowed_scopes(ctx) {
+              Ok(v) if !v.is_empty() => v,
+              _ => return Err(GraphUnavailable::Resolver),
+          };
+          Ok(GraphRequest {
+              store: store.clone(),
+              allowed,
+              now_ms: chrono::Utc::now().timestamp_millis(),
+          })
+      }
+  }
+  ```
+  Then in `handler.rs::call_tool`, after the IDL `TOOLS` lookup but before falling through to "unknown tool":
   ```rust
   if cairn_mcp::graph_tools::GRAPH_TOOLS.iter().any(|d| d.name == name.as_ref()) {
       let ctx = self.auth_context_from(&request_context)?;
-      if !self.graph_tools_available(&ctx) {
-          return Ok(capability_unavailable_result(&name));
-      }
-      let store = self.store.as_ref().expect("checked by graph_tools_available");
-      let scope = self.scope.as_ref().expect("checked by graph_tools_available");
-      let allowed = scope.allowed_scopes(&ctx).expect("checked above");
-      let now = chrono::Utc::now().timestamp_millis();
-      let queries = GraphQueries::new(store.clone(), allowed, now);
+      let req = match self.materialize_graph_request(&ctx) {
+          Ok(r) => r,
+          Err(_) => return Ok(capability_unavailable_result(&name)),
+      };
+      let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
       return Ok(cairn_mcp::graph_tools::dispatch(&queries, &name, arguments).await);
   }
   ```
-  Add `fn graph_tools_available(&self, ctx: &McpAuthContext) -> bool` that delegates to Plan A's free function with the handler's owned fields.
+  No `.expect()` calls. The match arm is the only place a denied response is constructed for a graph tool, so future refactors cannot accidentally reintroduce double-resolution.
 - [ ] **Run-pass.** `cargo nextest run -p cairn-mcp --test graph_tools_manifest -- call_tool`
 - [ ] **Commit.**
   ```bash
@@ -1593,10 +1653,10 @@ Spec: §2.1. Same predicate as `call_tool`. `tools/list` resolves the current re
   }
   ```
 - [ ] **Run-fail.** `cargo nextest run -p cairn-mcp --test graph_tools_manifest -- list_tools_lists_graph`
-- [ ] **Implement.** In `handler.rs::list_tools`, after assembling the IDL-generated `TOOLS` list:
+- [ ] **Implement.** In `handler.rs::list_tools`, after assembling the IDL-generated `TOOLS` list, use the same `materialize_graph_request` single-pass helper from Task 13. We discard the materialized `GraphRequest` here — `list_tools` only needs to know whether the surface is usable. A transient resolver `Err` collapses to "do not advertise," same as a hard gate failure:
   ```rust
   let ctx = self.auth_context_from(&request_context)?;
-  if self.graph_tools_available(&ctx) {
+  if self.materialize_graph_request(&ctx).is_ok() {
       for decl in cairn_mcp::graph_tools::GRAPH_TOOLS {
           tools.push(rmcp::model::Tool {
               name: decl.name.into(),
@@ -1610,6 +1670,7 @@ Spec: §2.1. Same predicate as `call_tool`. `tools/list` resolves the current re
       }
   }
   ```
+  Calling `materialize_graph_request` here resolves `allowed_scopes` once for `list_tools`; `call_tool` resolves again for its own request. Each request is a single resolution — no within-request TOCTOU.
 - [ ] **Run-pass.** `cargo nextest run -p cairn-mcp --test graph_tools_manifest -- list_tools_lists_graph`
 - [ ] **Commit.**
   ```bash
@@ -2150,6 +2211,6 @@ Run the CLAUDE.md §8 checklist before opening the PR:
 
 - **§4 Seven contracts.** No new contract — `GraphQueries` is a struct in the existing `cairn-store-sqlite` crate; `McpSessionScope` is from Plan A.
 - **§5 WAL + two-phase apply.** Untouched (read-only path).
-- **§6 Fail closed on capability.** Plan A's `graph_tools_available` predicate is now exercised by both `list_tools` and `call_tool`. `mcp_graph_tools_available` returns `Available { tool_count: 5 }` only when every condition holds.
+- **§6 Fail closed on capability.** A single `Handler::materialize_graph_request` helper resolves store + scope + `allowed_scopes` exactly once per request and is shared by both `list_tools` and `call_tool` — there is no separate boolean predicate that re-resolves later, so transient resolver failures cannot become panics. `CairnConfig::mcp_graph_tools_available` returns `Available { tool_count: 5 }` only when every condition holds.
 - **§9 Privacy by construction.** Discovered nodes are id-only; `entity_nodes.name` and `summary` never leave the store. `tracing::warn!` calls in the relay carry byte counts only, never frame contents.
 - **§10 Vault layers.** No vault writes — graph queries are pure reads.
