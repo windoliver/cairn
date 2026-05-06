@@ -95,7 +95,7 @@ impl StoreTx<'_> {
 
     /// Atomically admit a verified envelope: insert the WAL `PREPARED`
     /// row, then consume the replay-ledger entry. See
-    /// [`crate::replay::prepare_wal_with_replay`] for full semantics
+    /// `crate::replay::prepare_wal_with_replay` for full semantics
     /// (issue #52, brief §4.2).
     ///
     /// # Verification boundary

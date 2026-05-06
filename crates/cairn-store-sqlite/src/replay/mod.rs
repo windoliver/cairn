@@ -1,8 +1,8 @@
 //! Atomic replay ledger + WAL `PREPARE` coupling (issue #52, brief §4.2).
 //!
-//! [`consume_intent`] runs the per-mode replay check (`used` insert + per-issuer
+//! `consume_intent` runs the per-mode replay check (`used` insert + per-issuer
 //! sequence CAS, or `outstanding_challenges` consume) against an open
-//! transaction. [`prepare_wal_with_replay`] couples that with a `wal_ops`
+//! transaction. `prepare_wal_with_replay` couples that with a `wal_ops`
 //! `PREPARED` row insert so the three writes — replay consume, sequence /
 //! challenge bookkeeping, and WAL admission — land or roll back as a unit.
 //!
@@ -137,7 +137,7 @@ pub enum ReplayError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-/// Transaction order for [`prepare_wal_with_replay`] writes.
+/// Transaction order for `prepare_wal_with_replay` writes.
 ///
 /// `wal_ops_first → used` matches the 0046 trigger semantics: the
 /// `used_issuer_matches_wal` BEFORE-INSERT trigger reads
@@ -152,7 +152,7 @@ pub enum ReplayError {
 /// in this struct: production callers go through
 /// [`crate::store::tx::StoreTx::prepare_wal_with_replay`] which
 /// derives the trusted store clock internally; tests inject a clock
-/// via [`test_helpers::prepare_wal_with_replay`].
+/// via `test_helpers::prepare_wal_with_replay`.
 /// (Round-7 review #1.)
 #[derive(Debug, Clone)]
 pub struct WalPrepareInputs<'a> {
