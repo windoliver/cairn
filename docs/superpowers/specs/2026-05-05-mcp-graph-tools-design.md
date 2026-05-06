@@ -89,35 +89,48 @@ Five tools:
   *no* `graph.*` tools — capability discovery is per-request, not
   a server-global property.
 
-  Concretely:
+  Concretely, the helper is the **same** function `call_tool`
+  uses (§4.2) — there is no second predicate that could drift:
 
   ```rust
   fn graph_tools_listed_for(
       &self,
       ctx: &McpAuthContext<'_>,
   ) -> bool {
-      let store_ok = self.store
-          .as_ref()
-          .map(|s| s.capabilities().graph_edges)
-          .unwrap_or(false);
-      if !store_ok { return false; }
-      match self.scope.as_ref() {
-          None => false,
-          Some(s) => matches!(
-              s.allowed_scopes(ctx),
-              Ok(v) if !v.is_empty()
-          ),
-      }
+      // Single shared predicate — see §6 graph_tools_available.
+      // Covers transport+single_tenant precondition, store
+      // capability, scope resolver presence, AND a successful
+      // non-empty resolution.
+      graph_tools_available(
+          self.store.as_deref(),
+          self.scope.as_deref(),
+          &self.config,
+          self.transport,
+          ctx,
+      )
   }
   ```
 
   Cached `tools/list` manifests therefore cannot expose graph
   tools to a caller who could not invoke them — each `tools/list`
-  response is bound to a specific `McpAuthContext`.
+  response is bound to a specific `McpAuthContext` and to the
+  process's transport + `single_tenant` configuration.
 
-  The manifest snapshot test covers six states (graph-capable ×
-  resolver-state matrix: none / err / empty-vec / non-empty-vec).
-  Only the (graph-capable, non-empty-vec) cell lists graph tools.
+  The manifest snapshot test covers the **transport × store ×
+  resolver** matrix:
+
+  | transport | single_tenant | graph_edges | resolver outcome | listed? |
+  |---|---|---|---|---|
+  | stdio   | false | (any)  | (any)            | no  |
+  | stdio   | true  | false  | (any)            | no  |
+  | stdio   | true  | true   | None             | no  |
+  | stdio   | true  | true   | Err(_)           | no  |
+  | stdio   | true  | true   | Ok(vec![])       | no  |
+  | stdio   | true  | true   | Ok(non-empty)    | yes |
+
+  Only the bottom row lists graph tools. Future network
+  transports add their own rows; the same predicate evaluates
+  them.
 
   This gates discovery on the *actual* graph capability, not on
   whether a store handle is present. Clients that cache `tools/list`
@@ -1279,29 +1292,44 @@ In `handler.rs::call_tool`:
 
 ```rust
 if let Some(_decl) = GRAPH_TOOLS.iter().find(|d| d.name == name.as_ref()) {
-    // Resolve the per-request scope set FIRST. If this fails, we
-    // return CapabilityUnavailable without touching the store.
     let ctx = self.auth_context_from(&request_context)?;
-    let allowed = match self
+
+    // SINGLE shared predicate — same one list_tools uses (§2.1).
+    // Covers store presence, store.capabilities().graph_edges,
+    // transport+single_tenant precondition, AND a successful
+    // non-empty scope resolution. Fail-closed for any miss.
+    if !graph_tools_available(
+        self.store.as_deref(),
+        self.scope.as_deref(),
+        &self.config,
+        self.transport,
+        &ctx,
+    ) {
+        return Ok(capability_unavailable_result(&name));
+    }
+
+    // Now safe to materialize: every condition above held.
+    // Re-resolve scopes for the actual query (the predicate
+    // confirmed Ok(non-empty) but did not capture the value).
+    let store   = self.store.as_ref().expect("checked above");
+    let allowed = self
         .scope
         .as_ref()
-        .ok_or(CapabilityUnavailable)
-        .and_then(|s| s.allowed_scopes(&ctx).map_err(|_| CapabilityUnavailable))
-    {
-        Ok(v) if !v.is_empty() => v,
-        _ => return Ok(capability_unavailable_result(&name)),
-    };
+        .expect("checked above")
+        .allowed_scopes(&ctx)
+        .expect("checked above");
 
     let queries = GraphQueries::new(store.clone(), allowed, now);
     return Ok(graph_tools::dispatch(&queries, &name, arguments).await);
 }
 ```
 
-The `dispatch` helper signature carries the resolved scopes
-explicitly via the `GraphQueries` value, never the raw store —
-there is no method on `GraphQueries` that omits the scope predicate
-(it is baked into every CTE). Compile-time impossibility, not just
-a coding-convention rule.
+Both `list_tools` and `call_tool` go through `graph_tools_available`
+— there is no second predicate that could drift. The dispatch
+helper's signature still carries the resolved scopes via
+`GraphQueries`, so even an internal bug that bypassed the gate
+could not produce an unscoped read (no method on `GraphQueries`
+omits the scope predicate — it is baked into every CTE).
 
 ```rust
 pub struct GraphQueries<'a> {
@@ -1390,14 +1418,23 @@ received (including a trailing `\r` if present).
 - Forwarded bytes go to the write half of a
   `tokio::io::duplex(64 * 1024)` channel; the read half is
   handed to rmcp as its stdin.
-- Cancellation: when stdin reaches EOF the relay drops the
-  duplex writer so rmcp observes EOF cleanly. Any unterminated
-  partial frame in the ring buffer (no trailing `\n` ever
-  arrived) is **discarded with a `tracing::warn!`**, never
-  forwarded — sending half a JSON object to rmcp would surface
-  shutdown noise as a malformed-frame parse error rather than
-  the clean EOF the caller expects. Only complete
-  newline-terminated frames cross into the rmcp framer.
+- Cancellation: when stdin reaches EOF the relay mirrors
+  rmcp's `JsonRpcMessageCodec::decode_eof()` semantics on the
+  final buffered fragment. The fragment is parsed once as
+  JSON; if it parses **and** is non-empty after trimming, the
+  bytes are forwarded with a synthetic trailing `\n` so rmcp's
+  framer accepts them as a final frame. If the fragment is
+  empty or fails to parse, it is dropped with a
+  `tracing::warn!`. Then the duplex writer is closed and rmcp
+  observes EOF cleanly.
+
+  This preserves the legitimate "client writes one last
+  request and closes stdin" pattern (the request would
+  otherwise be silently lost on shutdown) while still
+  protecting rmcp from genuinely truncated/malformed trailing
+  bytes. Discarding a *valid* trailing frame would be a
+  user-visible correctness failure because the server would
+  just see clean EOF.
 
 **Invariants the shim preserves:**
 
@@ -1425,9 +1462,18 @@ Tests:
    `TransportError::FrameTooLarge` and the session terminates
    cleanly. Asserts oversized input never reaches rmcp as a
    partial frame.
-4. EOF mid-frame (no terminator ever arrives): the partial
-   accumulator is discarded with a `tracing::warn!`, rmcp
-   observes clean EOF.
+4. **EOF with a valid non-newline-terminated final frame**:
+   `{"jsonrpc":"2.0","id":1,"method":"ping"}` followed
+   immediately by EOF (no `\n`). The relay parses the
+   trailing bytes, finds valid JSON, and forwards them with a
+   synthetic `\n` so rmcp processes the final request. The
+   request must NOT be silently dropped — that would lose a
+   legitimate shutdown-time tool call.
+5. **EOF with truncated/malformed trailing bytes**:
+   `{"jsonrpc":"2.0",` followed immediately by EOF. JSON
+   parse fails; the bytes are discarded with a
+   `tracing::warn!`, rmcp observes clean EOF, no malformed
+   frame reaches the framer.
 
 This is the same pattern Graphify ships and the one called out in the
 issue.
@@ -1490,29 +1536,22 @@ observe the gate by *not seeing* the tool, not by reading a
 capability flag. If we later want explicit advertisement, that
 lands as its own contract bump issue.
 
-The in-PR signal is the manifest snapshot test, which must cover
-the **eight** states of the resolver-outcome × store-capability
-matrix. Only the `(graph_edges = true, resolver outcome = Ok(non-
-empty))` cell may list any `graph.*` tools; every other cell
-returns the standard 8-verb manifest with no graph entries. This
-is the same matrix described in §2 and §6's earlier predicate; it
-is restated here so a snapshot test cannot accidentally validate a
-fail-open manifest.
-
-| store.graph_edges | resolver outcome    | `graph.*` tools listed? |
-|---|---|---|
-| false             | (any)               | no                      |
-| true              | None (unconfigured) | no                      |
-| true              | Err(_)              | no                      |
-| true              | Ok(vec![])          | no                      |
-| true              | Ok(non-empty)       | yes (5 tools)           |
+The in-PR signal is the manifest snapshot test, which covers the
+full **transport × single_tenant × store × resolver** matrix
+defined in §2.1. Only the
+`(stdio, single_tenant=true, graph_edges=true, Ok(non-empty))`
+cell may list any `graph.*` tools; every other cell returns the
+standard 8-verb manifest with no graph entries. The matrix is
+defined once in §2.1 and reused here — a snapshot test cannot
+accidentally validate a fail-open manifest because both sites
+consume the same `graph_tools_available` predicate.
 
 Negative tests cover each "no" row: invoking `graph.get_entity` in
 any of those states returns `CapabilityUnavailable` rather than
 executing — defense in depth at dispatch mirrors the discovery
-gate. A successful non-empty scope resolution is the **only**
-condition that may list or execute `graph.*` — `Err`, `Ok(empty)`,
-and a missing resolver are all fail-closed.
+gate. A successful non-empty scope resolution **plus a graph-
+capable store on a `single_tenant`-enabled stdio transport** is
+the only configuration that may list or execute `graph.*`.
 
 ## 7. Tests
 
