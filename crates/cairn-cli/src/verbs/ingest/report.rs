@@ -34,12 +34,15 @@ pub struct FolderIngestSummary {
 }
 
 /// Render a stable human-readable folder ingest summary.
+#[must_use]
 pub fn render_human(folder: &str, summary: &FolderIngestSummary) -> String {
     let dry_run_suffix = if summary.dry_run { " (dry-run)" } else { "" };
-    let elapsed_seconds = summary.elapsed_ms as f64 / 1000.0;
+    let elapsed_tenths = summary.elapsed_ms.saturating_add(50) / 100;
+    let elapsed_seconds = elapsed_tenths / 10;
+    let elapsed_tenth = elapsed_tenths % 10;
 
     format!(
-        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\nElapsed: {:.1}s\n",
+        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\nElapsed: {elapsed_seconds}.{elapsed_tenth}s\n",
         summary.scanned,
         summary.cached,
         summary.processed,
@@ -49,7 +52,6 @@ pub fn render_human(folder: &str, summary: &FolderIngestSummary) -> String {
         summary.contradictions_resolved,
         summary.records_written,
         dry_run_suffix,
-        elapsed_seconds,
     )
 }
 

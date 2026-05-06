@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::patterns::{matches_any, GlobPattern};
+use super::patterns::{GlobPattern, matches_any};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {

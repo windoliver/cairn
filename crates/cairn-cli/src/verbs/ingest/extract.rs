@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn rust_extracts_structural_declarations() {
-        let body = r#"
+        let body = r"
 pub struct Folder;
 pub enum Entry {
     File,
@@ -108,7 +108,7 @@ pub fn ingest_folder() {}
 impl Folder {
     fn path(&self) {}
 }
-"#;
+";
 
         let counts = extract_keyword_counts(Path::new("src/folder.rs"), body);
 
@@ -118,13 +118,13 @@ impl Folder {
 
     #[test]
     fn rust_extracts_indented_structural_declarations() {
-        let body = r#"
+        let body = r"
 mod outer {
     pub struct Nested;
     pub fn build_nested() {}
     impl Nested {}
 }
-"#;
+";
 
         let counts = extract_keyword_counts(Path::new("src/nested.rs"), body);
 
@@ -134,11 +134,11 @@ mod outer {
 
     #[test]
     fn python_extracts_functions_and_classes() {
-        let body = r#"
+        let body = r"
 class Ingestor:
     def ingest(self):
         pass
-"#;
+";
 
         let counts = extract_keyword_counts(Path::new("ingest.py"), body);
 
@@ -148,17 +148,17 @@ class Ingestor:
 
     #[test]
     fn typescript_and_javascript_extract_declarations() {
-        let ts_body = r#"
+        let ts_body = r"
 export function route() {}
 interface RouteConfig {}
 type RouteId = string;
 const activeRoute = route();
-"#;
-        let js_body = r#"
+";
+        let js_body = r"
 function route() {}
 class Router {}
 const activeRoute = route();
-"#;
+";
 
         assert_eq!(
             extract_keyword_counts(Path::new("route.ts"), ts_body).entities_new,
@@ -172,13 +172,13 @@ const activeRoute = route();
 
     #[test]
     fn go_extracts_package_types_and_functions() {
-        let body = r#"
+        let body = r"
 package ingest
 
 type Scanner struct {}
 
 func NewScanner() {}
-"#;
+";
 
         let counts = extract_keyword_counts(Path::new("scanner.go"), body);
 
