@@ -209,6 +209,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "temp-env",
  "tempfile",
  "ulid",
