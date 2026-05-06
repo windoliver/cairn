@@ -48,31 +48,66 @@ Five tools:
      change.** That flag promises end-to-end runtime support
      surfaced via `cairn status`, but graph tools depend on
      per-transport (`single_tenant`) and per-request (resolver
-     outcome) conditions that a global capability set cannot
-     represent. Flipping it would over-advertise: deployments
-     where `tools/list` must hide every `graph.*` tool would
-     still claim graph support to status and config-driven
-     negotiation. Discovery gating therefore stays inside the
-     MCP handler at `tools/list` and `tools/call`. A separate
-     MCP tool-level capability surface that can encode
-     transport + auth prerequisites is a follow-up issue if it
-     ever becomes necessary; this PR does not need it.
+     outcome) conditions a global capability set cannot
+     represent. Flipping it would over-advertise to deployments
+     where `tools/list` must hide every `graph.*` tool.
+
+     **A new `mcp_graph_tools` capability surface lands in this
+     PR** so `status` and `tools/list` both read from a single
+     authoritative predicate — no split-brain. Add a method
+     `CairnConfig::mcp_graph_tools_available(scope, transport)
+     -> McpGraphAvailability` that returns one of
+     `Available { tool_count: 5 }`,
+     `UnavailableSingleTenantOff`,
+     `UnavailableNoStoreCapability`, or
+     `UnavailableNoScopeResolver`. `cairn status` reports the
+     enum's discriminant in its capability section; the MCP
+     handler reuses the same function (composed with
+     per-request scope resolution) to gate `tools/list` and
+     `tools/call`. The two surfaces cannot drift because they
+     share the same code path.
 
      **Rollout prerequisites (in-scope for this PR, must land
      atomically):**
-     - `crates/cairn-cli/src/mcp.rs:22` and
-       `crates/cairn-mcp/src/lib.rs::serve_stdio` — currently
-       launch an unwired handler. Replace `serve_stdio()` with
-       a new `serve_stdio_with_store(store, scope, config)`
-       that the CLI calls after opening the SQLite store. The
-       unwired entry point either disappears or is gated to
-       returning the 8-verb manifest only.
 
-     The `MemoryStore::capabilities().graph_edges` flag (the
-     one surfaced by `cairn-store-sqlite` after migrations
-     0042/0043) is already correct — no flag flip needed there
-     either. Only the CLI wiring and the MCP handler's
-     gating logic move in this PR.
+     1. **MCP config schema.** Add an `[mcp.stdio]` section to
+        `cairn.toml`:
+        ```toml
+        [mcp.stdio]
+        single_tenant = false               # default: deny
+        principal     = "<scope-tuple ref>" # required when
+                                            # single_tenant = true
+        ```
+        Defaults are fail-closed: `single_tenant = false` means
+        graph tools are unavailable, no principal needed; flipping
+        to `true` requires a `principal` value or config
+        validation rejects the file. Schema lands in
+        `crates/cairn-core/src/config/mod.rs` next to the existing
+        config sections, with a serde-derived loader and a
+        validation error for the missing-principal case.
+     2. **CLI wiring.** `crates/cairn-cli/src/mcp.rs:22` and
+        `crates/cairn-mcp/src/lib.rs::serve_stdio` currently
+        launch an unwired handler. Replace `serve_stdio()` with
+        `serve_stdio_with_store(store, scope, config,
+        principal)` that the CLI calls after opening the SQLite
+        store. The unwired entry point either disappears or is
+        gated to returning the 8-verb manifest only. The CLI
+        derives `principal` from `config.mcp.stdio.principal`;
+        if absent (because `single_tenant = false`), it passes
+        `None` and graph tools stay disabled — no implicit
+        process-global default. A CLI integration test asserts
+        that `cairn mcp` started against a config without
+        `single_tenant = true` returns the 8-verb manifest only.
+     3. **Status integration.** `cairn status` consumes
+        `mcp_graph_tools_available` and prints one of the four
+        states verbatim. A snapshot test covers each.
+
+     The `MemoryStore::capabilities().graph_edges` flag from
+     `cairn-store-sqlite` is already correct and stays
+     unchanged. The CLI wiring, config schema, status
+     integration, and MCP handler gating logic all move
+     together in this PR; partial rollout is the failure mode
+     called out earlier.
   2. A non-deny-all `McpSessionScope` resolver is wired into the
      handler (see §2.1.1). A deployment that has graph storage but
      no scope resolver does **not** advertise the tools.
