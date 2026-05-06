@@ -317,4 +317,179 @@ mod tests {
         h.update(body.as_bytes());
         assert_eq!(s.content_hash, format!("{:x}", h.finalize()));
     }
+
+    fn well_formed_data() -> AssembleHotData {
+        let recipe = [Purpose, Index];
+        let bodies = ["alpha", "beta"];
+        let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+        AssembleHotData {
+            bytes: prefix.len() as u64,
+            prefix,
+            segments: Some(segments),
+        }
+    }
+
+    #[test]
+    fn validate_base_accepts_well_formed() {
+        assert!(validate_base(&well_formed_data()).is_ok());
+    }
+
+    #[test]
+    fn validate_base_rejects_bytes_mismatch() {
+        let mut d = well_formed_data();
+        d.bytes = 999;
+        assert!(matches!(
+            validate_base(&d),
+            Err(AssembleHotValidationError::BytesMismatch { bytes: 999, .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_accepts_canonical_empty() {
+        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: Some(vec![]) };
+        assert!(validate_segments(&d).is_ok());
+    }
+
+    #[test]
+    fn validate_segments_rejects_empty_with_non_empty_prefix() {
+        let d = AssembleHotData { bytes: 3, prefix: "abc".into(), segments: Some(vec![]) };
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::EmptySegmentsRequiresEmptyPrefix { bytes: 3, prefix_len: 3 })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_accepts_none() {
+        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: None };
+        assert!(validate_segments(&d).is_ok());
+    }
+
+    #[test]
+    fn validate_segments_rejects_descending_range() {
+        let mut d = well_formed_data();
+        let segs = d.segments.as_mut().unwrap();
+        segs[0].byte_start = 10;
+        segs[0].byte_end = 5;
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::DescendingRange { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_non_contiguous() {
+        let mut d = well_formed_data();
+        let segs = d.segments.as_mut().unwrap();
+        segs[1].byte_start += 1;
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::NonContiguous { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_does_not_start_at_zero() {
+        let mut d = well_formed_data();
+        d.segments.as_mut().unwrap()[0].byte_start = 1;
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::DoesNotStartAtZero { start: 1 })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_does_not_cover_prefix() {
+        let mut d = well_formed_data();
+        let segs = d.segments.as_mut().unwrap();
+        let last = segs.last_mut().unwrap();
+        last.byte_end -= 1;
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::DoesNotCoverPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_hash_mismatch() {
+        let mut d = well_formed_data();
+        let segs = d.segments.as_mut().unwrap();
+        segs[0].content_hash = "0".repeat(64);
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::HashMismatch { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_out_of_bounds() {
+        let mut d = well_formed_data();
+        let segs = d.segments.as_mut().unwrap();
+        let last = segs.last_mut().unwrap();
+        last.byte_end = (d.prefix.len() as u64) + 100;
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::OutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_stability_mismatch() {
+        let mut d = well_formed_data();
+        d.segments.as_mut().unwrap()[0].stability = Volatile; // Purpose should be Stable1h
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::StabilityMismatch { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn validate_segments_rejects_too_many() {
+        let recipe: Vec<HotRecipeStep> = std::iter::repeat(Purpose).take(65).collect();
+        let bodies: Vec<&str> = std::iter::repeat("").take(65).collect();
+        let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+        let d = AssembleHotData { bytes: prefix.len() as u64, prefix, segments: Some(segments) };
+        assert!(matches!(
+            validate_segments(&d),
+            Err(AssembleHotValidationError::TooManySegments { got: 65, max: 64 })
+        ));
+    }
+
+    #[test]
+    fn validate_with_recipe_rejects_step_mismatch() {
+        let d = well_formed_data();
+        let expected = [Purpose, RecentUserSignal];
+        assert!(matches!(
+            validate_with_recipe(&d, &expected),
+            Err(AssembleHotValidationError::StepMismatch { index: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn validate_with_recipe_rejects_recipe_len_mismatch() {
+        let d = well_formed_data();
+        assert!(matches!(
+            validate_with_recipe(&d, &[Purpose]),
+            Err(AssembleHotValidationError::RecipeLenMismatch { expected: 1, got: 2 })
+        ));
+    }
+
+    #[test]
+    fn validate_with_recipe_rejects_legacy_absent() {
+        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: None };
+        assert!(matches!(
+            validate_with_recipe(&d, &[]),
+            Err(AssembleHotValidationError::LegacyProducerSegmentsAbsent)
+        ));
+    }
+
+    #[test]
+    fn build_segments_output_validates() {
+        let recipe = [Purpose, Index, RecentUserSignal];
+        let bodies = ["a", "bb", "ccc"];
+        let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+        let d = AssembleHotData { bytes: prefix.len() as u64, prefix, segments: Some(segments) };
+        validate(&d).unwrap();
+        validate_with_recipe(&d, &recipe).unwrap();
+    }
 }
