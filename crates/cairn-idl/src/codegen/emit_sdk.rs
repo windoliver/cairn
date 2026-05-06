@@ -1633,10 +1633,12 @@ fn write_struct(
     // wires the main struct to it via `#[serde(try_from / into)]`.
     if s.validate {
         let raw_name = format!("{}Raw", s.name.0);
+        // `Deserialize` must be in the derive list so serde generates the impl
+        // that routes through `TryFrom<{raw_name}>` (triggered by `try_from`).
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
         w.line(&format!(
             "#[serde(try_from = \"{raw_name}\", into = \"{raw_name}\")]"
         ));
-        w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
         if s.deny_unknown_fields {
             w.line("#[serde(deny_unknown_fields)]");
         }

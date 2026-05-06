@@ -49,8 +49,8 @@ pub struct AssembleHotArgs {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "AssembleHotDataRaw", into = "AssembleHotDataRaw")]
-#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssembleHotData {
     pub bytes: u64,
