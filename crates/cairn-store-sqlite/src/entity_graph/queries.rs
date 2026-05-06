@@ -1,6 +1,8 @@
 use cairn_core::domain::graph::normalize::normalize_entity_name;
 use cairn_core::domain::scope::ScopeTuple;
+use indexmap::IndexMap;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::StoreError;
@@ -21,6 +23,25 @@ pub struct GraphEdge {
     pub confidence_score: f64,
     /// Epoch-millisecond timestamp when the edge became valid.
     pub valid_at: i64,
+}
+
+/// A node returned by a graph traversal query (§3.3).
+pub struct GraphNode {
+    /// The entity's canonical id.
+    pub id: String,
+}
+
+/// A traversal result set containing ordered nodes and edges (§3.3).
+pub struct GraphSubgraph {
+    /// Nodes in traversal order (seed first).
+    pub nodes: Vec<GraphNode>,
+    /// Edges discovered during traversal.
+    pub edges: Vec<GraphEdge>,
+    /// Maps each discovered node id to the edge id that first reached it.
+    /// The seed is absent (it has no parent edge).
+    pub parent_of: HashMap<String, String>,
+    /// Maps each discovered node id to its BFS depth (seed = 0).
+    pub depth_of: HashMap<String, u32>,
 }
 
 /// An entity returned by one of the `get_entity_*` query arms.
@@ -327,6 +348,160 @@ impl GraphQueries {
                         confidence_score: row.get(4)?,
                         valid_at: row.get(5)?,
                     });
+                }
+                Ok::<_, tokio_rusqlite::Error>(out)
+            })
+            .await?;
+        Ok(out)
+    }
+
+    /// BFS traversal from `seed` up to `max_hops` hops, capped at
+    /// `node_budget` nodes (§3.3).
+    ///
+    /// Returns a [`GraphSubgraph`] with nodes in BFS insertion order (seed
+    /// first), edges for each newly-reached node, and `depth_of` /
+    /// `parent_of` maps for downstream reordering.
+    pub async fn query_bfs(
+        &self,
+        seed: String,
+        max_hops: u32,
+        node_budget: usize,
+    ) -> Result<GraphSubgraph, StoreError> {
+        let mut visited: IndexMap<String, GraphNode> = IndexMap::new();
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut parent_of: HashMap<String, String> = HashMap::new();
+        let mut depth_of: HashMap<String, u32> = HashMap::new();
+
+        // Seed visibility check — falls through visible_nodes.
+        let Some(seed_hit) = self.get_entity_by_id(seed.clone()).await? else {
+            return Ok(GraphSubgraph {
+                nodes: vec![],
+                edges: vec![],
+                parent_of,
+                depth_of,
+            });
+        };
+        visited.insert(seed_hit.id.clone(), GraphNode { id: seed_hit.id.clone() });
+        depth_of.insert(seed_hit.id.clone(), 0);
+
+        let mut frontier: Vec<String> = vec![seed];
+        for depth in 1..=max_hops {
+            if frontier.is_empty() {
+                break;
+            }
+            if visited.len() >= node_budget {
+                break;
+            }
+            let wave_cap = node_budget - visited.len();
+            let visited_ids: Vec<String> = visited.keys().cloned().collect();
+            let wave = self
+                .bfs_wave_sql(frontier.clone(), visited_ids, wave_cap)
+                .await?;
+            let mut next_frontier = Vec::new();
+            for e in wave {
+                if visited.len() >= node_budget {
+                    break;
+                }
+                let other = if frontier.iter().any(|f| f == &e.source_id) {
+                    e.target_id.clone()
+                } else {
+                    e.source_id.clone()
+                };
+                if visited.contains_key(&other) {
+                    continue;
+                }
+                visited.insert(other.clone(), GraphNode { id: other.clone() });
+                parent_of.insert(other.clone(), e.id.clone());
+                depth_of.insert(other.clone(), depth);
+                edges.push(e);
+                next_frontier.push(other);
+            }
+            frontier = next_frontier;
+        }
+        Ok(GraphSubgraph {
+            nodes: visited.into_values().collect(),
+            edges,
+            parent_of,
+            depth_of,
+        })
+    }
+
+    /// Execute one BFS wave: find all edges incident to `frontier` that lead
+    /// to nodes not yet in `visited`, applying a `ROW_NUMBER()` window to
+    /// pick the highest-confidence edge per new neighbor. Results are capped
+    /// at `wave_cap`.
+    async fn bfs_wave_sql(
+        &self,
+        frontier: Vec<String>,
+        visited: Vec<String>,
+        wave_cap: usize,
+    ) -> Result<Vec<GraphEdge>, StoreError> {
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        let frontier_in = Self::placeholders(frontier.len());
+        let visited_filter = if visited.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE other_id NOT IN {}", Self::placeholders(visited.len()))
+        };
+        let sql = format!(
+            "{prefix}
+             edge_with_other AS (
+               SELECT e.id, e.source_id, e.target_id, e.relation,
+                      e.confidence_score, e.valid_at,
+                      CASE WHEN e.source_id IN {frontier_in}
+                           THEN e.target_id ELSE e.source_id END AS other_id
+               FROM visible_edges e
+               WHERE e.source_id IN {frontier_in}
+                  OR e.target_id IN {frontier_in}
+             ),
+             candidate AS (
+               SELECT id, source_id, target_id, relation,
+                      confidence_score, valid_at, other_id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY other_id
+                        ORDER BY confidence_score DESC, id ASC
+                      ) AS rn
+               FROM edge_with_other
+               {visited_filter}
+             )
+             SELECT id, source_id, target_id, relation,
+                    confidence_score, valid_at
+             FROM candidate
+             WHERE rn = 1
+             ORDER BY confidence_score DESC, id ASC
+             LIMIT ?"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        // frontier appears 3× in SQL above
+        for _ in 0..3 {
+            for f in &frontier {
+                binds.push(SqlValue::Text(f.clone()));
+            }
+        }
+        for v in &visited {
+            binds.push(SqlValue::Text(v.clone()));
+        }
+        binds.push(SqlValue::Integer(i64::try_from(wave_cap).unwrap_or(i64::MAX)));
+
+        let conn = self.store.read_conn()?;
+        let out = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(GraphEdge {
+                        id: row.get(0)?,
+                        source_id: row.get(1)?,
+                        target_id: row.get(2)?,
+                        relation: row.get(3)?,
+                        confidence_score: row.get(4)?,
+                        valid_at: row.get(5)?,
+                    });
+                    if out.len() >= wave_cap {
+                        break;
+                    }
                 }
                 Ok::<_, tokio_rusqlite::Error>(out)
             })

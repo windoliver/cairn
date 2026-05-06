@@ -67,6 +67,17 @@ async fn get_entity_by_name_normalizes_and_echoes_input() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn bfs_two_hops_returns_depth_stratified_set() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let res = q.query_bfs(f.node_a.clone(), 2, 64).await.unwrap();
+    assert_eq!(res.nodes[0].id, f.node_a); // seed first
+    assert!(res.nodes.iter().any(|n| n.id == f.node_b));
+    // depth_of cap respected
+    assert!(res.depth_of.values().all(|&d| d <= 2));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn get_neighbors_filters_by_relation_and_confidence() {
     let f = cairn_test_fixtures::graph::tiny_graph().await;
     let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
