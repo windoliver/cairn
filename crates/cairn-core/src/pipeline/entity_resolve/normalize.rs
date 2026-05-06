@@ -107,9 +107,9 @@ mod tests {
             node("01HZE7JV5N0000000000000001", "AuthService", "authservice"),
             node("01HZE7JV5N0000000000000002", "Auth Service", "auth service"),
         ];
-        let hit = exact_match("authservice", &nodes);
-        assert!(hit.is_some());
-        assert_eq!(hit.unwrap().as_str(), "01HZE7JV5N0000000000000001");
+        let id = exact_match("authservice", &nodes)
+            .expect("invariant: existing nodes contain a name_norm match for `authservice`");
+        assert_eq!(id.as_str(), "01HZE7JV5N0000000000000001");
     }
 
     #[test]
