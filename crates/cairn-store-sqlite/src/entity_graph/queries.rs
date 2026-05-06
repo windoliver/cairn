@@ -685,7 +685,12 @@ impl GraphQueries {
     /// literal input string — never the canonical DB `name` column, which
     /// is a cross-scope field per §2.1.0.
     pub async fn get_entity_by_name(&self, name: String) -> Result<Option<EntityHit>, StoreError> {
-        let norm = normalize_entity_name(&name);
+        // Empty/punctuation-only inputs canonicalize to `None` — fail closed
+        // before binding to `name_norm`, so `"!!!"` cannot resolve to an
+        // arbitrary row keyed on the empty string.
+        let Some(norm) = normalize_entity_name(&name) else {
+            return Ok(None);
+        };
         let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
         // The cte_prefix ends with a trailing comma, so we must append at
         // least one more CTE before the final SELECT. Use a named scalar CTE

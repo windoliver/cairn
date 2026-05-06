@@ -80,7 +80,7 @@ pub async fn timeline_fixture() -> TimelineGraphFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,
@@ -223,7 +223,7 @@ pub async fn tiny_graph() -> TinyGraphFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: FIXTURE_NOW,
             embedding_id: None,
@@ -372,7 +372,7 @@ pub async fn surprise_fixture() -> SurpriseFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,
@@ -484,7 +484,7 @@ pub async fn endpoint_tombstone_fixture() -> EndpointTombstoneFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,
@@ -598,7 +598,7 @@ pub async fn lineage_rescope_fixture() -> LineageRescopeFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,
@@ -701,7 +701,7 @@ pub async fn future_provenance_fixture() -> FutureProvenanceFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,
@@ -793,7 +793,7 @@ pub async fn episode_tombstone_fixture() -> EpisodeTombstoneFixture {
     let node = EntityNode {
         id: EntityId::from(id_node_episode),
         name: "ep-episode-node".to_owned(),
-        name_norm: normalize_entity_name("ep-episode-node"),
+        name_norm: normalize_entity_name("ep-episode-node").expect("non-empty literal"),
         summary: None,
         created_at: now,
         embedding_id: None,
@@ -885,7 +885,7 @@ pub async fn scope_user_fixture() -> ScopeUserFixture {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),
-            name_norm: normalize_entity_name(name),
+            name_norm: normalize_entity_name(name).expect("fixture name non-empty"),
             summary: None,
             created_at: now,
             embedding_id: None,

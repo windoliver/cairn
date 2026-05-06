@@ -372,8 +372,7 @@
     "contract",
     "server_info",
     "capabilities",
-    "extensions",
-    "mcp_graph_tools"
+    "extensions"
   ],
   "title": "Cairn status response",
   "type": "object",

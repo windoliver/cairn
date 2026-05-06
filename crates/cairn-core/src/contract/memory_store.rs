@@ -964,7 +964,7 @@ mod tests {
         let node = EntityNode {
             id: EntityId::from("01HZE7JV5N0000000000000001"),
             name: "alice".into(),
-            name_norm: normalize_entity_name("alice"),
+            name_norm: normalize_entity_name("alice").expect("non-empty literal"),
             summary: None,
             created_at: 1,
             embedding_id: None,

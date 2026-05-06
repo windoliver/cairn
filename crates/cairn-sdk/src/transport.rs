@@ -184,13 +184,13 @@ impl<T: Transport> Sdk<T> {
             // `crates/cairn-cli/src/verbs/status.rs` for the
             // long-form note.
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
-            mcp_graph_tools: StatusResponseMcpGraphTools {
+            mcp_graph_tools: Some(StatusResponseMcpGraphTools {
                 state: StatusResponseMcpGraphToolsState::Unavailable,
                 reason: Some(StatusResponseMcpGraphToolsReason::SingleTenantOff),
                 tool_count: None,
                 probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
                 error: None,
-            },
+            }),
         }
     }
 

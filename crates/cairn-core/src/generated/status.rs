@@ -64,7 +64,8 @@ pub struct StatusResponse {
     pub capabilities: Vec<crate::generated::common::Capabilities>,
     pub contract: String,
     pub extensions: Vec<crate::generated::common::Namespace>,
-    pub mcp_graph_tools: StatusResponseMcpGraphTools,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_graph_tools: Option<StatusResponseMcpGraphTools>,
     pub server_info: StatusResponseServerInfo,
 }
 

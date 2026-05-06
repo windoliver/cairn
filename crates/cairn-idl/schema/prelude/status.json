@@ -5,8 +5,7 @@
   "x-cairn-contract": "cairn.mcp.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contract", "server_info", "capabilities", "extensions",
-               "mcp_graph_tools"],
+  "required": ["contract", "server_info", "capabilities", "extensions"],
   "properties": {
     "contract": { "const": "cairn.mcp.v1" },
     "mcp_graph_tools": {

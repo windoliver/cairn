@@ -164,16 +164,12 @@ pub fn run_with_context(
         |cfg| probe_mcp_graph_tools(cfg, vault_root),
     );
 
-    let mcp_graph_tools_field = mcp_graph_avail.as_ref().map_or_else(
-        || StatusResponseMcpGraphTools {
-            state: StatusResponseMcpGraphToolsState::Unavailable,
-            reason: Some(StatusResponseMcpGraphToolsReason::SingleTenantOff),
-            tool_count: None,
-            probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
-            error: None,
-        },
-        |(_, wire)| wire.clone(),
-    );
+    // `mcp_graph_tools` is now optional in the IDL (additive change to keep
+    // the `cairn.mcp.v1` wire contract backward-compatible). When the CLI
+    // could not run a probe at all (no config), omit the field; otherwise
+    // emit the resolved availability.
+    let mcp_graph_tools_field: Option<StatusResponseMcpGraphTools> =
+        mcp_graph_avail.as_ref().map(|(_, wire)| wire.clone());
 
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),
