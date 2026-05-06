@@ -55,7 +55,7 @@ Five tools:
   *this* request." `list_tools` invokes
   `scope.allowed_scopes(&ctx)` against the current
   `McpAuthContext`; the tools are advertised only if the call
-  succeeds and returns a non-empty `Vec<ScopeId>`. A request with
+  succeeds and returns a non-empty `Vec<ScopeTuple>`. A request with
   no bound caller, an `Err` resolution, or an empty scope set sees
   *no* `graph.*` tools — capability discovery is per-request, not
   a server-global property.
@@ -104,6 +104,49 @@ Why A (chosen over alternatives B/C from brainstorm): graph queries are
 SQLite-shaped (recursive CTEs), have no business logic to share across
 surfaces, and are MCP-only per issue scope. Adding an 8th contract is
 brief-level work and overkill for read-only queries.
+
+### 2.1.0 Node-payload exposure boundary (CRITICAL)
+
+`entity_nodes.name_norm` is **globally UNIQUE** across the whole
+vault — `upsert_entity` deduplicates by it (see
+`crates/cairn-store-sqlite/src/entity_graph/node.rs::upsert_entity`).
+That makes node *rows* shared infrastructure across every scope
+that ever encountered the same canonical name. The `name` and
+`summary` columns therefore have no per-scope provenance: the
+first writer wins, and a later in-scope edge that makes the node
+visible cannot tell whose summary it is reading.
+
+Returning `summary` (or any node-level free-text payload) from an
+MCP tool would be a cross-scope metadata leak — the same
+mechanism the edge-level scope filter is designed to prevent
+would be defeated at the node level. Until `entity_nodes`
+acquires per-scope versioning or scope-bearing summaries, **the
+MCP graph tools never expose `summary`** and treat node identity
+as the only safely-shareable node attribute. Concretely:
+
+- **`graph.get_entity` returns** `{ id, edge_count }` — id is a
+  ULID, edge_count is computed against `visible_edges` so it
+  reflects only in-scope structure. The caller already knows the
+  name they queried by (it is in their input); we do not echo
+  `entity_nodes.name` back, and we never return `summary`.
+- **`graph.get_neighbors`** returns edges with `(source_id,
+  target_id, relation, confidence_score, valid_at)` — id-only;
+  no joined node payload.
+- **`graph.query`** returns the BFS subgraph as ids and edges
+  only; no node names or summaries.
+- **`graph.timeline`** returns edge fields exactly as defined in
+  §3.4; no node-level columns.
+- **`graph.surprising_connections`** returns edges plus `score`
+  and the modal-vs-non-modal `scope_id` from `records.scope`
+  (already in-scope); no node payload.
+
+This is a meaningful narrowing of the original issue's
+`graph.get_entity` contract ("Returns node attributes"), but it
+is the only model-safe shape until node provenance lands. The
+implementation plan documents this in the user-facing tool
+description so callers know what they get. Restoring `name` /
+`summary` exposure is a follow-up issue, gated on per-scope node
+provenance.
 
 ### 2.1.1 Authorization & scope (CRITICAL)
 
@@ -204,7 +247,7 @@ pub trait McpSessionScope: Send + Sync {
     fn allowed_scopes(
         &self,
         ctx: &McpAuthContext<'_>,
-    ) -> Result<Vec<ScopeId>, ScopeResolutionError>;
+    ) -> Result<Vec<ScopeTuple>, ScopeResolutionError>;
 }
 ```
 
@@ -219,7 +262,7 @@ manifest until the first authenticated request.
 
 If a deployment is intentionally single-tenant, that is
 expressible: a resolver that ignores `ctx` and returns a fixed
-`Vec<ScopeId>` is a valid impl. The contract just makes per-request
+`Vec<ScopeTuple>` is a valid impl. The contract just makes per-request
 isolation possible for the cases that need it.
 
 **This trait does not exist yet in the repo.** Landing it is
@@ -240,14 +283,13 @@ The implementation plan picks one of these paths explicitly.
 Shipping the graph tools without a scope source is **not**
 permitted by this spec.
 
-The shared active-at-now predicate composes with this scope filter:
+The shared active-at-now predicate composes with this scope
+filter — the latter is the §3.0a stable-lineage,
+ScopeTuple-aware EXISTS, not a scalar `IN`. See §3.0a for the
+canonical form; the SQL below sketches only the temporal part:
 
 ```sql
-EXISTS (
-  SELECT 1 FROM records r
-  WHERE r.record_id = e.source_record_id
-    AND r.scope IN rarray(:allowed_scopes)
-)
+<§3.0a AuthorizedSource expansion>
 AND e.expired_at IS NULL
 AND e.valid_at  <= :now
 AND (e.invalid_at IS NULL OR e.invalid_at > :now)
@@ -301,17 +343,25 @@ Existing scope-aware queries in `cairn-store-sqlite` use
 `json_extract(scope, '$.<dim>')` with the
 `coalesce(json_extract(...), '') = coalesce(?N, '')` idiom (see
 `crates/cairn-store-sqlite/src/store/tx.rs::payload_hash_count_in_scope`
-and `crates/cairn-core/src/domain/filter.rs:697-704`). The graph
-auth predicate uses the same shape — a synthetic `Vec<ScopeId>`
-with `r.scope IN (...)` would not even compile against the real
-storage and would either fail-closed on every query or force
-brittle string equality on serialized JSON.
+and `crates/cairn-core/src/domain/filter.rs:697-704`). In that
+existing semantics, **`None` on a dimension means "record's
+dimension is NULL"** — exact null-equality, **not** a wildcard.
+
+The graph auth predicate must use the same exact-equality
+semantics. Reusing `ScopeTuple` *as a wildcard selector* would
+silently widen authorization (a resolver returning
+`tenant=Some("a"), user=None` would authorize every user in
+tenant `a`, instead of only records whose user is unset). That
+is unacceptable.
 
 The contract:
 
 ```rust
-// McpSessionScope returns the SAME representation the rest of
-// the store uses, not synthetic scalar ids.
+// McpSessionScope returns concrete scope tuples — fully
+// specified to the same exactness the store enforces. The
+// `Vec` is the union of authorized scopes; each entry is matched
+// with the existing exact null-equality predicate, never with
+// wildcard semantics.
 pub trait McpSessionScope: Send + Sync {
     fn allowed_scopes(
         &self,
@@ -320,11 +370,18 @@ pub trait McpSessionScope: Send + Sync {
 }
 ```
 
-Each `ScopeTuple` in the returned `Vec` is a pattern: a record's
-scope matches the pattern iff every `Some(_)` dimension in the
-pattern equals that dimension on the record (using the
-`coalesce(..., '') = coalesce(?, '')` idiom for null-handling).
-A `Vec` of multiple patterns is OR'd together.
+A record's scope matches an entry iff **every dimension equals
+the entry's value** under the same `coalesce(..., '') =
+coalesce(?, '')` idiom the rest of the store uses. There is no
+"any" wildcard. If a deployment needs to authorize across a
+sub-tree (e.g. all users in tenant `a`), the resolver enumerates
+the concrete tuples and returns them as separate `Vec` entries
+— it does not introduce a pattern language. A `Vec` of multiple
+entries is OR'd together.
+
+If wildcard semantics ever become necessary, they land as a
+separate pattern type with its own predicate in a follow-up
+issue, not by overloading `ScopeTuple`.
 
 #### The canonical authorization predicate
 
@@ -367,11 +424,12 @@ A test must cover:
    `ScopeTuple`.
 2. Tombstoning the entire `target_id` chain (no `active = 1`
    row remaining) removes the edge.
-3. A `ScopeTuple` pattern with `tenant = Some("a"), user = None`
-   matches records carrying any user inside tenant `a`, never
-   records in a different tenant.
-4. A pattern `Vec` with two `ScopeTuple` entries authorizes the
-   union of records matching either.
+3. A `ScopeTuple` entry with `tenant = Some("a"), user = None`
+   matches **only** records whose `tenant = "a"` AND `user IS
+   NULL` — not records carrying any user inside tenant `a`.
+   Asserts there is no wildcard semantics.
+4. A `Vec` with two `ScopeTuple` entries authorizes the union of
+   records matching either entry exactly.
 
 ### 3.0b Set-valued parameter binding
 
@@ -596,19 +654,29 @@ across resolver and ingest paths).
 
 **Two SQL queries** — one per arm — instead of one overloaded
 `OR`-predicate. Each query reads from `visible_nodes` (the §3.0
-primitive), never from `entity_nodes` directly, so an out-of-scope
-id or name returns `NotFound` instead of leaking the payload:
+primitive), never from `entity_nodes` directly. Per §2.1.0 the
+projection is **id-only** plus an in-scope edge count; `name`
+and `summary` are never returned because they have no per-scope
+provenance.
 
 ```sql
--- ById  (allowed_scopes, include_unattributed bound by caller)
+-- ById
 WITH visible_edges AS (...), visible_nodes AS (...)   -- §3.0
-SELECT id, name, summary, created_at FROM visible_nodes
-WHERE id = ?1;
+SELECT
+  v.id,
+  (SELECT COUNT(*) FROM visible_edges e
+     WHERE e.source_id = v.id OR e.target_id = v.id) AS edge_count
+FROM visible_nodes v
+WHERE v.id = ?1;
 
 -- ByName
 WITH visible_edges AS (...), visible_nodes AS (...)
-SELECT id, name, summary, created_at FROM visible_nodes
-WHERE name_norm = ?1;   -- ?1 = normalize_entity_name(input)
+SELECT
+  v.id,
+  (SELECT COUNT(*) FROM visible_edges e
+     WHERE e.source_id = v.id OR e.target_id = v.id) AS edge_count
+FROM visible_nodes v
+WHERE v.name_norm = ?1;   -- ?1 = normalize_entity_name(input)
 ```
 
 Tests:
@@ -808,10 +876,9 @@ the Rust side to allocate the full wave before truncating.
   At `max_hops=5` and `node_budget=1024` this is ≤5 queries, each
   parameter-bound on the previous wave's ids. SQLite handles this in
   microseconds; the simplicity and budget correctness are worth it.
-- `rarray` (carray module) needs to be enabled in the SQLite
-  connection. If unavailable, fall back to `IN (?,?,?,...)` with a
-  re-prepared statement per wave — same semantics, slightly more
-  prepare overhead.
+- Per §3.0b, `IN (?,?,...)` with re-prepared statements per
+  wave is the binding strategy — `rarray`/`carray` is not loaded
+  in the open path and is not relied on anywhere in this spec.
 
 ### 3.4 `graph.timeline`
 
@@ -1044,7 +1111,9 @@ a coding-convention rule.
 ```rust
 pub struct GraphQueries<'a> {
     store: &'a dyn MemoryStore,
-    allowed_scopes: Vec<ScopeId>,   // never Vec::new() at this point
+    allowed_scopes: Vec<ScopeTuple>,    // §3.0a; never Vec::new()
+                                        // here — empty fail-closes
+                                        // upstream
     now: UnixMillis,
 }
 
