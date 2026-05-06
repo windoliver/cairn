@@ -700,10 +700,11 @@ fn write_error_envelope_validator(w: &mut RustWriter, doc: &Document) {
         &[("reason", FieldShape::NonEmptyString)],
         &[("path", FieldShape::NonEmptyString)],
     );
-    write_error_data_arm(
+    write_error_data_arm_with_optional(
         w,
         "CapabilityUnavailable",
         &[("capability", FieldShape::Capability)],
+        &[("remediation", FieldShape::NonEmptyString)],
     );
     write_error_data_arm(w, "UnknownVerb", &[("verb", FieldShape::NonEmptyString)]);
     write_error_data_arm(

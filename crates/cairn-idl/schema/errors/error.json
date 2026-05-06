@@ -46,7 +46,12 @@
       "additionalProperties": false,
       "required": ["capability"],
       "properties": {
-        "capability": { "$ref": "../capabilities/capabilities.json" }
+        "capability": { "$ref": "../capabilities/capabilities.json" },
+        "remediation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Free-form operator-facing hint for resolving the capability gap. Optional and additive — pre-#53 servers omit the field, newer servers populate it from the cairn-core::status::REMEDIATION map. Callers MUST NOT parse this for dispatch; the closed `capability` enum is the machine-readable signal."
+        }
       }
     },
     "UnknownVerbData": {
