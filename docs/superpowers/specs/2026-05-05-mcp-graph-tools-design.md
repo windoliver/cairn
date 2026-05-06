@@ -42,8 +42,27 @@ Five tools:
   1. The wired store advertises graph capability via the existing
      `MemoryStoreCapabilities::graph_edges: bool` field
      (`crates/cairn-core/src/contract/memory_store.rs:48`). No new
-     capability struct fields are added — `cairn-store-sqlite`
-     already sets `graph_edges = true` post-migration.
+     capability struct fields are added.
+
+     **Rollout prerequisites (in-scope for this PR, must land
+     atomically):**
+     - `crates/cairn-core/src/config/mod.rs:830` —
+       `CairnConfig::capabilities()` currently hard-codes
+       `graph_edges: false` for the SQLite path. Flip it to
+       `true`. Without this, status/config-driven gates report
+       graph unavailable even though the store can serve it.
+     - `crates/cairn-cli/src/mcp.rs:22` and
+       `crates/cairn-mcp/src/lib.rs::serve_stdio` — currently
+       launch an unwired handler. Replace `serve_stdio()` with
+       a new `serve_stdio_with_store(store, scope, config)`
+       that the CLI calls after opening the SQLite store. The
+       unwired entry point either disappears or is gated to
+       returning the 8-verb manifest only.
+
+     All three capability sources (store flag, config flag, CLI
+     wiring) must move in the same PR — leaving any of them in
+     the old state is the split-brain failure mode where one
+     surface advertises graph and another denies it.
   2. A non-deny-all `McpSessionScope` resolver is wired into the
      handler (see §2.1.1). A deployment that has graph storage but
      no scope resolver does **not** advertise the tools.
@@ -1017,10 +1036,15 @@ Negative tests:
    `target_id` is `active = 1` and in scope)** → still
    **present** in the timeline. Asserts that normal record
    supersession does not transiently hide the edge.
-7. **Same target chain superseded *out of scope*** (active row
-   has scope outside `allowed_scopes`) → **absent**. Asserts
-   that the predicate uses the active version's scope, not the
-   superseded version's.
+7. **Lineage re-scope (active head out of scope, source version
+   in scope)**: a target chain whose original `source_record_id`
+   row is in scope `S_a` and whose newest active version is in
+   `S_b`. A caller authorized for `S_a` (only) → edge **present**
+   in the timeline, because §3.0a-bis keys authorization off the
+   immutable `r_src.scope`, not the active head. A caller
+   authorized for `S_b` (only) → **absent** for the same reason.
+   Asserts the timeline does not silently re-scope historical
+   edges when a different-scope head appears.
 
 ### 3.5 `graph.surprising_connections`
 
