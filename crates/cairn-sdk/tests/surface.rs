@@ -918,6 +918,38 @@ fn summarize_returns_internal_stub() {
 }
 
 #[test]
+fn assemble_hot_rejects_any_budget_until_loader_lands() {
+    // Stub-body assembler cannot honor budget yet; SDK must fail explicitly
+    // rather than silently drop a knob the caller asked to enforce.
+    let args = AssembleHotArgs {
+        budget: Some(1024),
+        session_id: None,
+    };
+    match sdk().assemble_hot(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("budget"), "reason: {reason}");
+            assert!(reason.contains("not yet honored"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn assemble_hot_rejects_any_session_id_until_loader_lands() {
+    let args = AssembleHotArgs {
+        budget: None,
+        session_id: Some("01J0000000000000000000000A".to_owned()),
+    };
+    match sdk().assemble_hot(&args).expect_err("must reject") {
+        SdkError::InvalidArgs { reason } => {
+            assert!(reason.contains("session_id"), "reason: {reason}");
+            assert!(reason.contains("not yet honored"), "reason: {reason}");
+        }
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
 fn assemble_hot_dispatches_to_core_verb() {
     // assemble_hot is now wired to cairn_core::verbs::assemble_hot::assemble_hot
     // and should succeed without a store. The default config has 6 recipe steps,

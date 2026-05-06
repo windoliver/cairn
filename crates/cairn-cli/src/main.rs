@@ -329,13 +329,40 @@ fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 /// in the walk-up path and no registry default), so an unconfigured CWD
 /// still returns a valid stub response instead of failing closed.
 fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
-    let vault_root = match resolve_vault_or_cwd(explicit_vault) {
-        Ok((path, _source)) => path,
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("cairn assemble_hot: vault resolution error — {e:#}");
             return ExitCode::from(78); // EX_CONFIG
         }
     };
+    // Mirror `run_status`: any non-`CwdFallback` resolution source must
+    // pass the vault-binding gate. An assembly returned for a path that
+    // is not a Cairn vault would, once #193 lands real loading, be a
+    // wrong-vault hot-memory injection vector.
+    if source != VaultResolutionSource::CwdFallback {
+        match verbs::status::probe_vault_binding(&vault_root) {
+            verbs::status::VaultBinding::Bound => {}
+            verbs::status::VaultBinding::Unbound => {
+                let origin = match source {
+                    VaultResolutionSource::Explicit => "--vault target",
+                    VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                    VaultResolutionSource::RegistryDefault => "registry default vault",
+                    VaultResolutionSource::CwdFallback => unreachable!(),
+                };
+                eprintln!(
+                    "cairn assemble_hot: {origin} {} is not a Cairn vault \
+                     (no .cairn/vault.id) — run `cairn bootstrap` first",
+                    vault_root.display()
+                );
+                return ExitCode::from(78); // EX_CONFIG
+            }
+            verbs::status::VaultBinding::Invalid(reason) => {
+                eprintln!("cairn assemble_hot: vault binding error — {reason}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        }
+    }
     let config =
         match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
             Ok(c) => c,

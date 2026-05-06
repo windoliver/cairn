@@ -10,6 +10,12 @@ use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentSt
 /// amplification.
 pub const MAX_SEGMENTS: usize = 64;
 
+/// Hard upper bound on `data.bytes` (and therefore on every segment
+/// `byte_start`/`byte_end`) at the wire boundary. Mirrors the schema's
+/// `bytes.maximum: 4194304` (4 MiB). Defends the trust boundary against
+/// oversized-allocation / oversized-hash `DoS` payloads.
+pub const MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Default stability hint per recipe step. Constants, not config.
 #[must_use]
 pub const fn default_stability(step: HotRecipeStep) -> SegmentStability {
@@ -148,6 +154,14 @@ pub enum AssembleHotValidationError {
         /// Hard upper bound ([`MAX_SEGMENTS`]).
         max: usize,
     },
+    /// `data.bytes` (or a segment offset) exceeds [`MAX_BYTES`] (4 MiB).
+    #[error("byte length {got} exceeds maximum {max}")]
+    BytesExceedsMax {
+        /// The offending byte length / offset.
+        got: u64,
+        /// Hard upper bound ([`MAX_BYTES`]).
+        max: u64,
+    },
     /// A segment offset falls inside a multi-byte UTF-8 code point in `prefix`.
     /// Slicing on this offset would panic, so the validator rejects up front.
     #[error("segment {index}: offset {offset} is not a UTF-8 char boundary in prefix")]
@@ -187,6 +201,14 @@ pub fn build_segments(
         });
     }
 
+    let total: u64 = bodies.iter().map(|b| b.len() as u64).sum();
+    if total > MAX_BYTES {
+        return Err(AssembleHotValidationError::BytesExceedsMax {
+            got: total,
+            max: MAX_BYTES,
+        });
+    }
+
     let prefix: String = bodies.iter().copied().collect();
     let mut segments = Vec::with_capacity(recipe.len());
     let mut cursor: u64 = 0;
@@ -210,6 +232,12 @@ pub fn build_segments(
 
 /// Wire invariants of `AssembleHotData` independent of `segments`.
 pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidationError> {
+    if data.bytes > MAX_BYTES {
+        return Err(AssembleHotValidationError::BytesExceedsMax {
+            got: data.bytes,
+            max: MAX_BYTES,
+        });
+    }
     let prefix_len = data.prefix.len() as u64;
     if data.bytes != prefix_len {
         return Err(AssembleHotValidationError::BytesMismatch {
@@ -237,6 +265,13 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
             );
         }
         return Ok(());
+    }
+
+    if prefix_len > MAX_BYTES {
+        return Err(AssembleHotValidationError::BytesExceedsMax {
+            got: prefix_len,
+            max: MAX_BYTES,
+        });
     }
 
     if segments.len() > MAX_SEGMENTS {
@@ -610,6 +645,22 @@ mod tests {
         assert!(matches!(
             validate_segments(&d),
             Err(AssembleHotValidationError::StabilityMismatch { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn validate_base_rejects_bytes_exceeds_max() {
+        let d = AssembleHotData {
+            bytes: MAX_BYTES + 1,
+            prefix: String::new(),
+            segments: None,
+        };
+        assert!(matches!(
+            validate_base(&d),
+            Err(AssembleHotValidationError::BytesExceedsMax {
+                got,
+                max: MAX_BYTES,
+            }) if got == MAX_BYTES + 1
         ));
     }
 

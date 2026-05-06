@@ -346,11 +346,11 @@ impl<T: Transport> Sdk<T> {
     /// reads recipe steps from config and emits stub bodies (real source loading
     /// is tracked under #193). Validates `args` before dispatch.
     ///
-    /// `args.budget` and `args.session_id` are validated for shape but **not yet
-    /// honored** — bodies are stubbed to `""` so the budget cannot be exceeded
-    /// and the assembler is session-agnostic. Both will be threaded through once
-    /// real loading lands (#193). The SDK emits a `tracing::debug!` event when
-    /// either field is supplied so callers can audit the drop in logs.
+    /// `args.budget` and `args.session_id` cannot yet be honored — bodies are
+    /// stubbed to `""` and the assembler is session-agnostic. Rather than
+    /// silently accept and drop them, the SDK rejects requests that supply
+    /// either with [`SdkError::InvalidArgs`]. Both will become real once #193
+    /// lands the loader.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
@@ -359,13 +359,17 @@ impl<T: Transport> Sdk<T> {
 
         validate_assemble_hot(args)?;
 
-        if args.budget.is_some() || args.session_id.is_some() {
-            tracing::debug!(
-                budget = ?args.budget,
-                session_id = ?args.session_id,
-                "assemble_hot: budget/session_id accepted but not yet honored \
-                 (stub-body assembler; tracked under #193)"
-            );
+        if args.budget.is_some() {
+            return Err(invalid(
+                "assemble_hot: `budget` is not yet honored by the stub-body \
+                 assembler (tracked under #193); omit until real loading lands",
+            ));
+        }
+        if args.session_id.is_some() {
+            return Err(invalid(
+                "assemble_hot: `session_id` is not yet honored by the stub-body \
+                 assembler (tracked under #193); omit until real loading lands",
+            ));
         }
 
         match cairn_core::verbs::assemble_hot::assemble_hot(&self.config.vault.hot_memory) {
