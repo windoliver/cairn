@@ -8,9 +8,17 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
+mod error;
+mod lint;
+mod migrations;
+
 use cairn_core::contract::memory_store::{CONTRACT_VERSION, MemoryStore, MemoryStoreCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
+
+pub use error::StoreError;
+pub use lint::{EdgeLintReport, lint_edges, resolve_edge_contradictions};
+pub use migrations::migrate;
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
