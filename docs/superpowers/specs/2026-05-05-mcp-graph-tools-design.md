@@ -292,33 +292,86 @@ normal upsert flow. Authorizing strictly on
 graph reads go dark whenever the source record is replaced —
 even though the underlying fact is still authoritative.
 
-The spec therefore authorizes through **stable lineage**: an edge
-is in scope iff *some* currently-active, non-tombstoned record
-sharing the same `target_id` as `e.source_record_id` is in
-`allowed_scopes`. This is the **single shared provenance
-predicate** every CTE in this spec applies — visible_edges, the
-timeline scope_filtered CTE, surprising_connections' edge_scope,
-and every node-visibility branch.
+#### `records.scope` is JSON, not a scalar
+
+In this repo `records.scope` stores the canonical JSON
+serialization of `ScopeTuple` (dimensions: `tenant`, `workspace`,
+`session_id`, `entity`, `user`, `agent`; `None` fields omitted).
+Existing scope-aware queries in `cairn-store-sqlite` use
+`json_extract(scope, '$.<dim>')` with the
+`coalesce(json_extract(...), '') = coalesce(?N, '')` idiom (see
+`crates/cairn-store-sqlite/src/store/tx.rs::payload_hash_count_in_scope`
+and `crates/cairn-core/src/domain/filter.rs:697-704`). The graph
+auth predicate uses the same shape — a synthetic `Vec<ScopeId>`
+with `r.scope IN (...)` would not even compile against the real
+storage and would either fail-closed on every query or force
+brittle string equality on serialized JSON.
+
+The contract:
+
+```rust
+// McpSessionScope returns the SAME representation the rest of
+// the store uses, not synthetic scalar ids.
+pub trait McpSessionScope: Send + Sync {
+    fn allowed_scopes(
+        &self,
+        ctx: &McpAuthContext<'_>,
+    ) -> Result<Vec<ScopeTuple>, ScopeResolutionError>;
+}
+```
+
+Each `ScopeTuple` in the returned `Vec` is a pattern: a record's
+scope matches the pattern iff every `Some(_)` dimension in the
+pattern equals that dimension on the record (using the
+`coalesce(..., '') = coalesce(?, '')` idiom for null-handling).
+A `Vec` of multiple patterns is OR'd together.
+
+#### The canonical authorization predicate
 
 ```sql
 -- AuthorizedSource(:src_record_id) — the canonical predicate.
+-- One UNION-ALL clause per ScopeTuple pattern; each clause
+-- compiles per-dimension equalities for the Some(_) fields of
+-- the pattern. The bind list below shows ONE pattern with
+-- (tenant=?, user=?, agent=?) Some — extend as needed; absent
+-- dimensions drop their per-dim WHERE clause entirely.
 EXISTS (
   SELECT 1
   FROM records r_src
   JOIN records r_active
     ON r_active.target_id = r_src.target_id
   WHERE r_src.record_id   = :src_record_id
-    AND r_active.scope    IN (?, ?, ...)   -- :allowed_scopes
     AND r_active.active     = 1
     AND r_active.tombstoned = 0
+    AND coalesce(json_extract(r_active.scope, '$.tenant'), '')
+        = coalesce(?, '')
+    AND coalesce(json_extract(r_active.scope, '$.user'),   '')
+        = coalesce(?, '')
+    AND coalesce(json_extract(r_active.scope, '$.agent'),  '')
+        = coalesce(?, '')
+  -- additional patterns OR'd via repeated EXISTS / UNION ALL
 )
 ```
 
-A test must cover: an edge whose `source_record_id` points at a
-*superseded* (`active = 0`) record stays visible, because a newer
-version of the same `target_id` is `active = 1` and in scope.
-Tombstoning the entire `target_id` chain (no `active = 1` row
-remaining) removes the edge.
+A `Vec<ScopeTuple>` with N patterns produces N parallel `EXISTS`
+clauses joined by `OR` (or one CTE materializing per-pattern
+membership and a single `EXISTS`). The exact rendering is an
+implementation detail; the spec requirement is that authorization
+SQL never reads `scope` as a scalar.
+
+A test must cover:
+
+1. An edge whose `source_record_id` points at a *superseded*
+   (`active = 0`) record stays visible, because a newer version
+   of the same `target_id` is `active = 1` with a matching
+   `ScopeTuple`.
+2. Tombstoning the entire `target_id` chain (no `active = 1`
+   row remaining) removes the edge.
+3. A `ScopeTuple` pattern with `tenant = Some("a"), user = None`
+   matches records carrying any user inside tenant `a`, never
+   records in a different tenant.
+4. A pattern `Vec` with two `ScopeTuple` entries authorizes the
+   union of records matching either.
 
 ### 3.0b Set-valued parameter binding
 
@@ -368,7 +421,7 @@ WITH visible_edges AS (
       JOIN records r_active
         ON r_active.target_id = r_src.target_id
       WHERE r_src.record_id   = e.source_record_id
-        AND r_active.scope    IN (?, ?, ...)      -- :allowed_scopes
+        AND <ScopeTuple-match-clause>             -- §3.0a expansion
         AND r_active.active     = 1
         AND r_active.tombstoned = 0
     )
@@ -442,9 +495,9 @@ visible_nodes AS (
         JOIN records r_active
           ON r_active.target_id = r_src.target_id
         WHERE ep.entity_node_id = n.id
-          AND r_active.scope    IN (?, ?, ...)
           AND r_active.active     = 1
           AND r_active.tombstoned = 0
+          AND <ScopeTuple-match-clause>           -- §3.0a expansion
       )
       OR EXISTS (
         -- Past-invalidated, non-tombstoned, NOT future-dated.
@@ -668,6 +721,13 @@ level out. The query is written so it is executable verbatim — a
 test runs the exact text against an in-memory SQLite to guarantee
 the spec stays in sync with the implementation.
 
+Per §3.0b the SQL uses generated `IN (?, ?, ...)` placeholder
+lists, not `rarray(...)`. The implementation re-prepares the
+statement per wave because the frontier and visited sizes change.
+The placeholder spans below are written as `IN (?,?,...)` for
+brevity; at runtime they expand to exactly `frontier.len()` and
+`visited.len()` `?` markers respectively.
+
 ```sql
 WITH visible_edges AS (...),     -- §3.0 — temporal + scope baked in
 edge_with_other AS (
@@ -676,11 +736,11 @@ edge_with_other AS (
   -- issues.
   SELECT
     e.id, e.source_id, e.target_id, e.relation, e.confidence_score,
-    CASE WHEN e.source_id IN rarray(:frontier)
+    CASE WHEN e.source_id IN (?,?,...)            -- :frontier
          THEN e.target_id ELSE e.source_id END AS other_id
   FROM visible_edges e
-  WHERE e.source_id IN rarray(:frontier)
-     OR e.target_id IN rarray(:frontier)
+  WHERE e.source_id IN (?,?,...)                  -- :frontier
+     OR e.target_id IN (?,?,...)                  -- :frontier
 ),
 candidate AS (
   SELECT
@@ -690,14 +750,19 @@ candidate AS (
       ORDER BY confidence_score DESC, id ASC      -- deterministic
     ) AS rn
   FROM edge_with_other
-  WHERE other_id NOT IN rarray(:visited)
+  WHERE other_id NOT IN (?,?,...)                 -- :visited
 )
 SELECT id, source_id, target_id, relation, confidence_score, other_id
 FROM candidate
 WHERE rn = 1
 ORDER BY confidence_score DESC, id ASC
-LIMIT :wave_cap;
+LIMIT ?;                                          -- :wave_cap
 ```
+
+When `:visited` is empty (first wave) the implementation omits
+the `WHERE other_id NOT IN (...)` clause entirely rather than
+emitting a degenerate `IN ()`. Same trick for the frontier on
+unreachable seeds — handled in the Rust loop, not in SQL.
 
 Seed loading also goes through the §3.0 primitives: BFS calls
 `get_entity` (which reads from `visible_nodes`) for the seed, so a
@@ -1033,25 +1098,47 @@ skip it, breaking the session.
 
 ### 5.3 Shim
 
-- Spawn one task reading `tokio::io::stdin()` line-by-line via
-  `AsyncBufReadExt::lines()`.
-- For each line: skip if `line.trim().is_empty()`. Otherwise write
-  `line` + `'\n'` into the write half of a `tokio::io::duplex(64 *
-  1024)` channel.
-- Hand the read half of that duplex to rmcp as its stdin. Stdout is
-  passed through directly (rmcp's outgoing frames are already
-  well-formed single-line JSON).
-- Cancellation: when stdin reaches EOF the relay drops the duplex
-  writer, which the rmcp side observes as EOF and exits cleanly.
+The shim is a **byte-oriented relay**, not a line-oriented one,
+because line-based forwarding via `AsyncBufReadExt::lines()`
+silently strips trailing `\r` from CRLF input and re-emits `\n`
+— breaking any harness that relies on its exact framing bytes.
+The implementation reads bytes directly with `AsyncReadExt`,
+maintains a small ring buffer, and emits frames at every `\n`
+boundary while preserving the bytes between framers exactly as
+received (including a trailing `\r` if present).
+
+- Spawn one task reading `tokio::io::stdin()` with `read_buf`
+  into a small ring buffer (~64 KiB).
+- Scan the buffered bytes for `\n` boundaries. Each frame is the
+  byte slice from the previous boundary up to and including the
+  `\n`.
+- A frame is **dropped** iff its body (the bytes before any
+  trailing `\r\n` / `\n`) is empty or all whitespace. Drop
+  decision is made on a copy; the *retained* frame is forwarded
+  byte-for-byte from the original buffer slice — `\r\n` stays
+  `\r\n`, `\n` stays `\n`.
+- Forwarded bytes go to the write half of a
+  `tokio::io::duplex(64 * 1024)` channel; the read half is
+  handed to rmcp as its stdin.
+- Cancellation: when stdin reaches EOF the relay flushes any
+  partial buffered frame as-is, drops the duplex writer, and
+  rmcp observes EOF cleanly.
 
 **Invariants the shim preserves:**
 
-1. Every non-empty input line is forwarded byte-for-byte (no trim, no
-   re-encoding) — rmcp sees the exact JSON the harness sent.
-2. The relay never holds more than one line at a time; no buffering
-   semantics that could reorder concurrent writes (stdin has only one
-   writer anyway).
-3. Stdout is untouched — server-to-host frames are not normalized.
+1. Every retained frame is forwarded **byte-for-byte** from the
+   original input buffer — no re-encoding, no line-ending
+   normalization, no trimming. CRLF input stays CRLF; LF stays
+   LF.
+2. The relay holds at most one ring-buffer's worth of bytes at a
+   time; no reordering, since stdin has a single writer.
+3. Stdout is untouched — server-to-host frames are not
+   normalized.
+
+A test feeds a mix of `\n`- and `\r\n`-terminated frames
+interleaved with blank lines and asserts that the rmcp side
+receives the non-empty frames with their original line endings
+intact.
 
 This is the same pattern Graphify ships and the one called out in the
 issue.
