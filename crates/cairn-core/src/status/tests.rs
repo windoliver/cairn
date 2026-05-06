@@ -160,6 +160,52 @@ mod remediation_tests {
             assert!(!hint.is_empty(), "empty remediation for {cap}");
         }
     }
+
+    #[test]
+    fn every_advertised_capability_has_remediation() {
+        // Pin: any capability we *can* advertise at v0.1 (with all wiring flags
+        // imagined on) must have a remediation string registered. Future
+        // advertisers won't accidentally ship a fail-closed verb without an
+        // operator hint.
+        use crate::config::CapabilitySet;
+
+        let always_on = CapabilitySet {
+            keyword_search: true,
+            semantic_search: true,
+            hybrid_search: true,
+            llm_extract: false,
+            agent_extract: false,
+            graph_edges: false,
+            policy_trace: true,
+            replay_sequence: true,
+            replay_challenge: true,
+        };
+        let gates = CapabilityGates {
+            config: always_on,
+            store: Some(StoreCaps { fts: true, vector: true }),
+            vault_bound: true,
+            model_present: true,
+            llm_configured: false,
+            contract_phase: Phase::V0_1,
+        };
+
+        for cap in advertise(&gates) {
+            let cap_str = serde_json::to_value(cap).ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .expect("cap serializes to string");
+            // search.keyword and policy_trace are universally available; their
+            // remediation is "should not happen" — None is acceptable.
+            if cap_str == "cairn.mcp.v1.search.keyword"
+                || cap_str == "cairn.mcp.v1.policy_trace"
+            {
+                continue;
+            }
+            assert!(
+                remediation_for(&cap_str).is_some(),
+                "no remediation registered for {cap_str}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
