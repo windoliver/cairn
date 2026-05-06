@@ -152,16 +152,47 @@ rotates sessions. The contract therefore takes a request context
 and is invoked at every `tools/list` and `tools/call` boundary, not
 once at construction:
 
+**MCP transport reality check.** The pinned `rmcp` crate
+threads a `RequestContext<RoleServer>` through `list_tools` and
+`call_tool`, but it carries only `request_id`, `meta`,
+`extensions`, and a peer handle — there is no built-in
+authenticated session/principal field. Stdio MCP has no caller
+identity whatsoever (the process on the other end of the pipe
+is the only "caller"). HTTP-streamable / SSE transports could
+plumb headers through `extensions`, but neither is in scope for
+this PR.
+
+Concrete consequences for this issue:
+
+1. **Stdio transport (the only one this PR ships):** there is
+   no per-call caller identity. `McpAuthContext` carries only
+   `request_id` and a single deployment-resolved `principal:
+   PrincipalId` injected at server-construction time from
+   config. This is honest single-tenant behaviour — the
+   resolver returns the same scope set for every request — but
+   it is **not** "global static scopes": the resolver still
+   runs per-request, the predicate is evaluated per-request,
+   and a future multi-tenant transport can replace
+   `principal` with a per-request value without changing any
+   downstream code.
+
+2. **Future SSE / HTTP transports:** the implementation plan
+   for those (separate issues) extends `McpAuthContext` with
+   real per-request principal extraction from
+   `RequestContext::extensions`. This spec reserves that
+   field's role explicitly so we don't cement a single-tenant
+   shape into the trait surface.
+
 ```rust
 /// Per-request authorization context handed to the resolver.
-/// Carried through rmcp's RequestContext or an equivalent
-/// session-id field. Exact shape decided in the implementation
-/// plan; the requirement is that it identifies the caller, not
-/// the server.
+///
+/// On stdio transport (this PR), `principal` is fixed at
+/// server construction and `request_id` varies per call. On
+/// future network transports, both vary and `principal` is
+/// extracted from `RequestContext::extensions` per request.
 pub struct McpAuthContext<'a> {
-    pub session_id: &'a SessionId,
+    pub principal: &'a PrincipalId,
     pub request_id: &'a RequestId,
-    // additional caller-identity fields as needed
 }
 
 pub trait McpSessionScope: Send + Sync {
@@ -280,9 +311,18 @@ WITH visible_edges AS (
       SELECT 1 FROM records r
       WHERE r.record_id = e.source_record_id
         AND r.scope IN rarray(:allowed_scopes)
+        AND r.active     = 1                    -- live row
+        AND r.tombstoned = 0                    -- not deleted
     )
 )
 ```
+
+The record-lifecycle predicate (`active = 1 AND tombstoned = 0`)
+is part of the scope check by definition — a tombstoned source
+record cannot continue to authorize edges sourced from it. Every
+scope EXISTS clause in this spec applies the same predicate; the
+`scope_filtered` CTE in `graph.timeline` and the modal-scope CTE
+in `graph.surprising_connections` are no exception.
 
 Likewise a derived **`visible_nodes`** primitive — a node is
 "visible" iff its provenance can be established through any
@@ -302,15 +342,20 @@ historical entities):
    record in `allowed_scopes`. Covers entities created or
    referenced via ingest sources whose edges have all been
    tombstoned or expired-out.
-3. **Historical edges** — at least one *non-active but
-   non-tombstoned* `entity_edges` row (out-of-window:
-   `valid_at > now` or `invalid_at <= now`) touches the node
-   *and* its `source_record_id` is in `allowed_scopes`. Covers
-   the "all my edges aged out but I still exist" case.
+3. **Past-invalidated edges** — at least one
+   `entity_edges` row that is **past-invalidated**
+   (`invalid_at <= :now`), non-tombstoned, and whose
+   `source_record_id` is in `allowed_scopes`. Covers the
+   "all my edges aged out but I still exist" case.
+
    **Tombstoned edges (`expired_at IS NOT NULL`) do not count**
-   — using them as provenance would resurrect entities that
-   operators have explicitly deleted, defeating
-   rollback/deletion expectations.
+   — they would resurrect entities operators have deleted.
+
+   **Future-dated edges (`valid_at > :now`) do not count
+   either** — they are invisible to every other tool path, so
+   they must not be the sole provenance that makes a node
+   discoverable. A node reachable only via a future-scheduled
+   edge stays `NotFound` until that edge becomes active.
 
 Direct reads of `entity_nodes` without composing one of the three
 provenance branches are forbidden in tool SQL.
@@ -329,19 +374,32 @@ visible_nodes AS (
         -- entity_episodes columns per migration 0044:
         --   episode_id     TEXT REFERENCES records(record_id)
         --   entity_node_id TEXT REFERENCES entity_nodes(id)
+        -- Episode provenance must require the backing record to
+        -- be active and non-tombstoned, otherwise deleted source
+        -- content keeps the entity visible forever (records are
+        -- tombstoned in place, so the episode row alone is not
+        -- sufficient).
         SELECT 1 FROM entity_episodes ep
         JOIN records r ON r.record_id = ep.episode_id
         WHERE ep.entity_node_id = n.id
           AND r.scope IN rarray(:allowed_scopes)
+          AND r.active     = 1                  -- live row
+          AND r.tombstoned = 0                  -- not deleted
       )
       OR EXISTS (
-        -- Historical (out-of-window) but NOT tombstoned. We
-        -- explicitly require expired_at IS NULL so deleted
-        -- provenance cannot keep an entity visible.
+        -- Past-invalidated, non-tombstoned, NOT future-dated.
+        -- Future-dated edges (valid_at > now) cannot be the sole
+        -- provenance that makes a node discoverable — they are
+        -- invisible to every other tool path. Tombstoned edges
+        -- (expired_at IS NOT NULL) cannot resurrect deleted
+        -- entities.
         SELECT 1 FROM entity_edges he
         JOIN records r ON r.record_id = he.source_record_id
         WHERE (he.source_id = n.id OR he.target_id = n.id)
           AND he.expired_at IS NULL
+          AND he.valid_at  <= :now                  -- not future
+          AND he.invalid_at IS NOT NULL
+          AND he.invalid_at <= :now                 -- past-invalid
           AND r.scope IN rarray(:allowed_scopes)
       )
     )
@@ -441,6 +499,22 @@ Tests:
    provenance is a record outside `allowed_scopes` is *not*
    returned by either arm — the response is `NotFound`. Even a
    caller who knows the exact id sees nothing.
+4. **Future-only provenance (negative test):** an entity whose
+   only edge has `valid_at = now + 1h` is `NotFound` for every
+   tool. Once the clock advances past `valid_at`, it becomes
+   visible. Asserts visible_nodes does not surface entities
+   from edges that have not yet become active.
+5. **Tombstoned-record episode provenance (negative test):**
+   an entity whose only provenance is an `entity_episodes` row
+   pointing to a now-tombstoned (`tombstoned = 1`) record is
+   `NotFound`. Asserts deletion of the source record removes
+   the entity from MCP visibility, not just from the records
+   surface.
+6. **Unauthenticated discovery (negative test):** a
+   `tools/list` request whose `McpAuthContext` resolves to
+   `Ok(vec![])` or `Err(_)` returns *no* `graph.*` tools.
+   Same for `tools/call` — invocation in those states returns
+   `CapabilityUnavailable`, not partial data.
 
 Live edge count reads from the §3.0 `visible_edges` primitive (which
 already bakes in temporal AND scope filtering — never from
