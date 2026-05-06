@@ -24,7 +24,7 @@ fn assemble_hot_body() -> String {
 
 /// The `Data` struct in `assemble_hot.json` carries `x-cairn-validate: true`.
 /// Codegen must emit `#[serde(try_from = "AssembleHotDataRaw", into = "AssembleHotDataRaw")]`
-/// on the main struct and NOT include `Deserialize` in its derive.
+/// on the main struct; serde uses this to route deserialization through `TryFrom`.
 #[test]
 fn validate_struct_has_try_from_serde_attr() {
     let body = assemble_hot_body();
@@ -34,17 +34,20 @@ fn validate_struct_has_try_from_serde_attr() {
     );
 }
 
-/// The `Data` struct itself must NOT derive `Deserialize` — deserialization
-/// goes through the Raw mirror via `try_from`.
+/// The `Data` struct must have `Deserialize` in its derive AND carry the
+/// `#[serde(try_from = "...")]` attribute. Together these cause serde to
+/// generate a `Deserialize` impl that routes through `TryFrom<AssembleHotDataRaw>`,
+/// so every deserialization path (JSON, MCP, SDK) runs the invariant checks.
+///
+/// Without `Deserialize` in the derive there would be no deserialization at
+/// all; without `try_from` the raw bytes would be accepted unchecked.
 #[test]
-fn validate_struct_does_not_derive_deserialize_directly() {
+fn validate_struct_derives_deserialize_via_try_from() {
     let body = assemble_hot_body();
-    // Find the derive line immediately before `pub struct AssembleHotData {`
-    // It must NOT contain `Deserialize`.
+    // Find the derive line immediately before `pub struct AssembleHotData {`.
     let struct_pos = body
         .find("pub struct AssembleHotData {")
         .expect("pub struct AssembleHotData must exist in generated output");
-    // Look at the two lines before the struct declaration.
     let before = &body[..struct_pos];
     let derive_line_start = before
         .rfind("#[derive(")
@@ -53,9 +56,16 @@ fn validate_struct_does_not_derive_deserialize_directly() {
         .find('\n')
         .map_or(before.len(), |n| derive_line_start + n);
     let derive_line = &before[derive_line_start..derive_line_end];
+    // Deserialize MUST be present so serde generates the routed impl.
     assert!(
-        !derive_line.contains("Deserialize"),
-        "AssembleHotData derive line must NOT contain Deserialize, got: {derive_line}"
+        derive_line.contains("Deserialize"),
+        "AssembleHotData derive line must contain Deserialize (for serde try_from routing), got: {derive_line}"
+    );
+    // The try_from attribute is separately tested in validate_struct_has_try_from_serde_attr,
+    // but assert it here too so this test is self-contained.
+    assert!(
+        body.contains(r#"#[serde(try_from = "AssembleHotDataRaw", into = "AssembleHotDataRaw")]"#),
+        "AssembleHotData must also carry #[serde(try_from = ...)] to route through TryFrom"
     );
 }
 
