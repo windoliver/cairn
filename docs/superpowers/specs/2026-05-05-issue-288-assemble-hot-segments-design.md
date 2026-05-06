@@ -25,6 +25,7 @@ This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a r
 "Data": {
   "type": "object",
   "additionalProperties": false,
+  "x-cairn-validate": true,
   "required": ["prefix", "bytes"],
   "properties": {
     "prefix":   { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available." },
@@ -74,7 +75,7 @@ Producers in this PR always emit `Some(...)`. Legacy-absent is only produced by 
 - **Cross-segment invariants are not expressible in JSON Schema 2020-12 portably** (no cross-property comparison). Per-field bounds (`byte_start`/`byte_end` ∈ `[0, 4194304]`) are in the schema; everything else is enforced at runtime in two layers (§5):
     - `validate_base(&data)` — `bytes == prefix.len()`. Wire invariants of `AssembleHotData` that hold regardless of whether `segments` was emitted.
     - `validate_segments(&data)` — per-segment monotonicity, contiguity, bounds, hash correctness. Only meaningful when `segments` is non-empty.
-- **This PR adds the envelope-level enforcement hook.** `ResponseEnvelope::try_decode_data` for `ResponseVerb::AssembleHot` calls `validate_base(&data)` **unconditionally** and `validate_segments(&data)` **iff `data.segments.is_some()`** (i.e. the producer emitted the field at all, including the canonical-empty `Some(vec![])` case). Both convert errors into a typed envelope decode error. Mandatory at the trust boundary, not advisory. Legacy payloads (`None`) still get base-invariant enforcement; malformed `bytes`/`prefix` pairs cannot sneak past the boundary by hiding behind absent segments.
+- **Validation runs inside `Deserialize` itself, not in an optional shim.** Existing call sites use `serde_json::from_str::<Response>` and `from_slice::<Response>` directly (see `cairn-cli/tests/envelope_tests.rs`); a hand-written `try_decode_data` wrapper would not intercept those paths and the trust boundary would leak. Instead, this PR makes `AssembleHotData` use `#[serde(try_from = "AssembleHotDataRaw")]`, where `AssembleHotDataRaw` is a private mirror struct with the same fields and the inverse `From<AssembleHotData>` impl for `Serialize`. The `TryFrom<AssembleHotDataRaw> for AssembleHotData` impl runs `validate_base` unconditionally and `validate_segments` whenever `segments.is_some()`. Errors surface as `serde::de::Error` (turning into `serde_json::Error`/`envelope::DecodeError`). **Every code path that deserializes the type — generated `Response`, direct serde calls, MCP, SDK, tests — runs validation; bypass is impossible.** Codegen change: the optional emitter learns to emit `#[serde(try_from = ..., into = ...)]` for verbs that opt in via an `x-cairn-validate: true` schema annotation; this is added to `assemble_hot.json` in this PR and is a one-time codegen feature.
 - **Offsets are UTF-8 byte positions into `prefix`, not code-unit positions.** Wrappers in languages with non-UTF-8 string types (JavaScript / Java use UTF-16, Python `str` is opaque) MUST encode `prefix` to UTF-8 bytes before slicing. JS: `new TextEncoder().encode(prefix).slice(s, e)`. Python: `prefix.encode("utf-8")[s:e]`. Naïve `String.prototype.slice(s, e)` in JS uses UTF-16 code units and will corrupt any non-ASCII segment, including miscomputing `content_hash` against the wrong bytes. Documented on the schema and pinned by a non-ASCII unit test (§6.1).
 - Step wire values match existing `cairn-core::config::HotMemoryRecipeStep` snake_case (note: `top_salience_project`, not the issue's informal `top_salience`).
 - `content_hash` is lowercase hex sha256 (64 chars) over the segment's UTF-8 bytes. Hex over base64url because every other content-hash in the brief / Rust ecosystem is hex; 64 chars in JSON is fine.
@@ -98,11 +99,14 @@ pub struct AssembleHotData {
     /// - `Some(vec![...])`: new producer with a configured recipe.
     ///   `len()` mirrors `HotMemoryConfig.recipe.len()` 1:1.
     ///
-    /// `#[serde(default)]` deserializes absent → `None`. **No
-    /// `skip_serializing_if`**: when the field is `Some(vec![])`, it
-    /// serializes as `"segments": []`, not omitted. Required to keep
-    /// canonical-empty distinguishable from legacy-absent on the wire.
-    #[serde(default)]
+    /// `#[serde(default)]` deserializes absent → `None`.
+    /// `skip_serializing_if = "Option::is_none"` is permitted (and is
+    /// what the existing codegen emits for optional fields): it skips
+    /// only the `None` case, while `Some(vec![])` and `Some(vec![...])`
+    /// both still serialize, preserving the three-state distinction.
+    /// `skip_serializing_if = "Vec::is_empty"` is **forbidden** —
+    /// it would collapse `Some(vec![])` into legacy-absent on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub segments: Option<Vec<HotSegment>>,
 }
 
@@ -136,7 +140,9 @@ The IDL-generated `HotRecipeStep` is structurally identical to the hand-written 
 
 ## 5. Pure helper in `cairn-core`
 
-**Trust model.** Producer-side step-order alignment is enforced by construction in `build_segments(recipe, bodies)`. Generic-envelope decode in `cairn-core` checks payload self-consistency (`validate_base` always; `validate_segments` whenever `segments.is_some()`) but does **not** enforce that the steps match a configured recipe — it cannot, because the wire layer has no access to `HotMemoryConfig`. Consumers that know which recipe their producer should be running call `validate_with_recipe` themselves. This is the same trust model as every other typed wire surface in the workspace: structural validity at the boundary, semantic alignment by either producer-side construction or caller-supplied expectation.
+**Trust model.** Producer-side step-order alignment is enforced by construction in `build_segments(recipe, bodies)`. Generic-envelope decode in `cairn-core` checks payload self-consistency (`validate_base` always; `validate_segments` whenever `segments.is_some()`) but does **not** enforce that the steps match a configured recipe — it cannot, because the wire layer has no access to `HotMemoryConfig`. Consumers that know which recipe their producer should be running call `validate_with_recipe` themselves.
+
+Step labels are inherently producer-controlled — there is no out-of-band signal cairn-core can compare them against, so making `validate_with_recipe` mandatory at the wire boundary is technically impossible without inflating every payload with a recipe-identity checksum (rejected as overkill: the workspace's only producer is `build_segments`, which is alignment-by-construction). This is the same trust posture as every other typed wire surface in the workspace: structural validity at the boundary, semantic alignment by either producer-side construction or caller-supplied expectation. **Wrapper guidance**: an external wrapper that does NOT have access to the producer's `HotMemoryConfig` should treat segment step labels as advisory metadata only; cache placement should rely on `stability` transitions and `content_hash` (which `validate_segments` does enforce), not on `step` semantics.
 
 
 New module `crates/cairn-core/src/verbs/assemble_hot/segments.rs` (no I/O, no adapter deps):
@@ -288,7 +294,10 @@ pub enum AssembleHotValidationError {
 - `validate_with_recipe_rejects_recipe_len_mismatch` — `segments.len() != expected.len()`.
 - `build_segments_output_validates` — round-trip: `validate(&build(...).unwrap()) == Ok(())` for any `(recipe, bodies)`.
 
-**Envelope-hook integration tests** (in `cairn-core/tests/`):
+**Trust-boundary integration tests** (in `cairn-core/tests/`):
+
+These specifically exercise `serde_json::from_str::<Response>` (the call shape used by the existing test suite and SDK) to prove validation cannot be bypassed. Tests that deserialize `AssembleHotData` directly are equally covered because the `try_from` annotation makes the path identical.
+
 
 - `envelope_decode_rejects_malformed_assemble_hot` — craft an envelope JSON with a bad `byte_end`; assert `ResponseEnvelope::try_decode_data` returns the validation error, not `Ok`.
 - `envelope_decode_rejects_legacy_with_bytes_mismatch` — legacy payload (no `segments`) where `bytes != prefix.len()`; assert decode rejects via `validate_base`. Pins that absent segments do **not** bypass base invariants.
@@ -344,9 +353,9 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 
 ## 8. Risks
 
-- **Codegen drift.** Editing `assemble_hot.json` requires re-running `cargo run -p cairn-idl --bin cairn-codegen` and committing regenerated `.rs` across `cairn-core`, `cairn-mcp`, `cairn-cli`, `cairn-sdk`. CI gates on no-diff. The codegen must emit `Option<Vec<HotSegment>>` with `#[serde(default)]` for `segments` (matching §4). It must **not** emit `skip_serializing_if` — the wire shape requires that an explicitly emitted empty array survives serialization (see §3 / §4 round-trip semantics). If the existing codegen does not handle the `optional + default + no-skip` combination correctly, that fix is a sub-task of this PR.
+- **Codegen drift.** Editing `assemble_hot.json` requires re-running `cargo run -p cairn-idl --bin cairn-codegen` and committing regenerated `.rs` across `cairn-core`, `cairn-mcp`, `cairn-cli`, `cairn-sdk`. CI gates on no-diff. The existing codegen pattern for optional fields (`emit_sdk.rs:~1796`) emits `#[serde(default, skip_serializing_if = "Option::is_none")]` — that is **the right pattern** for `segments`: it skips only the `None` case (legacy-absent on the wire), while `Some(vec![])` and `Some(vec![...])` both still serialize. The forbidden pattern is `Vec::is_empty`, which would collapse the canonical-empty case. Verify the generated output for `assemble_hot.rs` matches §4 character-for-character before merging.
 - **Skill-pack codegen.** `crates/cairn-idl/tests/codegen_emit_skill.rs` and `skill_compat.rs` likely snapshot the verb's data shape — `cargo insta review` + commit.
-- **Envelope hook is new code.** `ResponseEnvelope::try_decode_data` for `AssembleHot` currently does plain serde. This PR adds the post-deserialize hook described in §5: it calls `validate_base(&data)` **unconditionally** and `validate_segments(&data)` **whenever `data.segments.is_some()`** (i.e. for both `Some(vec![])` and `Some(vec![...])` — the canonical-empty invariant must be enforced too, otherwise the three-state contract is unsound). That is generated code today — we either (a) extend the codegen to emit per-verb post-decode hooks, or (b) wrap the generated decoder in a hand-written shim. Decision: option (b) for this PR (smallest blast radius); generalising the codegen is filed as a follow-up.
+- **Validation must live in `Deserialize`, not an external shim.** Existing call sites deserialize `Response` directly via `serde_json::from_str`/`from_slice`; a hand-written `try_decode_data` shim would not intercept those paths. This PR adds an `x-cairn-validate: true` schema annotation that the codegen interprets as `#[serde(try_from = "<Type>Raw", into = "<Type>Raw")]`, with `TryFrom<Raw>` calling `validate_base` + `validate_segments` (when `segments.is_some()`). Both `Some(vec![])` and `Some(vec![...])` go through validation; only `None` skips the segment layer. `assemble_hot` is the first verb to use this annotation; future verbs that need post-deserialize invariants opt in the same way.
 - **`bytes` field semantics.** Now equals both `prefix.len() as u64` and `segments.last().byte_end` (when `segments` is non-empty). Property test asserts both.
 - **New direct dep.** `sha2` becomes a direct `cairn-core` dep. Justify in PR; verify with `cargo tree`.
 - **`#[non_exhaustive]` enums** force downstream `match` arms. Acceptable per CLAUDE.md §6.10.
