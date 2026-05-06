@@ -171,12 +171,27 @@ pub fn run_with_context(
         |cfg| probe_mcp_graph_tools(cfg, probe_vault_root),
     );
 
-    // `mcp_graph_tools` is now optional in the IDL (additive change to keep
-    // the `cairn.mcp.v1` wire contract backward-compatible). When the CLI
-    // could not run a probe at all (no config), omit the field; otherwise
-    // emit the resolved availability.
-    let mcp_graph_tools_field: Option<StatusResponseMcpGraphTools> =
-        mcp_graph_avail.as_ref().map(|(_, wire)| wire.clone());
+    // `mcp_graph_tools` is optional in the IDL (additive change to
+    // keep the `cairn.mcp.v1` wire contract backward-compatible),
+    // but in practice both adapter surfaces always emit it: omitting
+    // it on one side while the other emits a `NoVault` payload would
+    // break cross-surface parity for clients that consume CLI and
+    // SDK status interchangeably (round-10 review). When the CLI has
+    // no config to drive the probe, synthesize the same `NoVault`
+    // wire response the SDK emits — there is no MCP server to
+    // negotiate against either way.
+    let mcp_graph_tools_field: Option<StatusResponseMcpGraphTools> = Some(
+        mcp_graph_avail.as_ref().map_or_else(
+            || {
+                McpGraphToolsStatus::from_resolved(
+                    &ResolvedAvailability::NoVault,
+                    ProbeBasis::ConfigOnly,
+                )
+                .to_wire()
+            },
+            |(_, wire)| wire.clone(),
+        ),
+    );
 
     let resp = StatusResponse {
         contract: "cairn.mcp.v1".to_owned(),
