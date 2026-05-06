@@ -238,18 +238,27 @@ fn process_folder_file(
     stats.cache_misses += 1;
     let relative_path =
         relative_path_for_cache(file, vault_root).map_err(FolderIngestError::Key)?;
-    let entry = ExtractionCacheEntry::new(
-        key,
-        relative_path,
-        current_time_millis()?,
-        ExtractionResult {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-        },
-    );
+    let result = extraction_result_for_source_file(&key, &relative_path, body.len());
+    let entry = ExtractionCacheEntry::new(key, relative_path, current_time_millis()?, result);
     save_cache_entry(&cache_path, &entry)?;
     stats.cache_writes += 1;
     Ok(())
+}
+
+fn extraction_result_for_source_file(
+    key: &str,
+    relative_path: &str,
+    content_length_bytes: usize,
+) -> ExtractionResult {
+    ExtractionResult {
+        nodes: vec![serde_json::json!({
+            "id": format!("source:{key}"),
+            "kind": "source_document",
+            "source_path": relative_path,
+            "content_length_bytes": content_length_bytes,
+        })],
+        edges: Vec::new(),
+    }
 }
 
 fn lookup_cache_entry(

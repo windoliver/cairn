@@ -53,6 +53,13 @@ fn folder_ingest_writes_and_reuses_extraction_cache_entry() {
         .collect::<Result<Vec<_>, _>>()
         .expect("read cache dir");
     assert_eq!(cache_files.len(), 1);
+    let cache_entry: serde_json::Value =
+        serde_json::from_slice(&fs::read(cache_files[0].path()).expect("read cache entry"))
+            .expect("cache entry is JSON");
+    assert_eq!(cache_entry["entity_count"], 1);
+    assert_eq!(cache_entry["edge_count"], 0);
+    assert_eq!(cache_entry["nodes"][0]["kind"], "source_document");
+    assert_eq!(cache_entry["nodes"][0]["source_path"], "docs/note.md");
 
     let second = run_folder_ingest(vault.path(), false);
     assert_eq!(second["status"], "committed");
