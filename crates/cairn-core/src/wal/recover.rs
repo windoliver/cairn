@@ -77,9 +77,13 @@ pub enum RecoveryDecision {
 /// | `Prepared`  | every graph step has a `Done` row            | `FinalizeCommitted`            |
 /// | `Prepared`  | otherwise                                    | `Resume{next_ord}`             |
 ///
-/// `next_ord` = `1 + max(ord where state == Done)`, or `0` if no `Done`
-/// rows exist. `Failed` rows below `MAX` and `Pending` rows do not advance
-/// `next_ord` — they will be retried in place.
+/// `next_ord` = the first ord in `0..total` without a `Done` row, or `0`
+/// if no `Done` rows exist. This contiguous-coverage interpretation of
+/// brief §5.6 step 4 (`resume at step:(last_done + 1)`) is robust to
+/// degenerate inputs (duplicate ords, gaps): a gap means an earlier step
+/// must be re-run before later DONE rows are honored. `Failed` rows below
+/// `MAX` and `Pending` rows do not advance `next_ord` — they will be
+/// retried in place.
 ///
 /// `expires_at` is intentionally NOT consulted: brief §5.6 specifies that
 /// TTL applies to new external requests, not to WAL recovery.
@@ -95,7 +99,8 @@ pub fn decide_recovery(snapshot: &OpSnapshot) -> RecoveryDecision {
 }
 
 fn decide_prepared(snapshot: &OpSnapshot) -> RecoveryDecision {
-    // First: any step exhausted retries?
+    // Abort takes priority over all forward progress: any step that
+    // exhausted retries finalizes the op.
     if let Some(failed_ord) = snapshot
         .steps
         .iter()
@@ -106,32 +111,26 @@ fn decide_prepared(snapshot: &OpSnapshot) -> RecoveryDecision {
     }
 
     let graph: &StepGraph = graph_for(snapshot.kind);
-    // Step graphs are static and tiny (≤7 entries); cast is genuinely safe.
-    #[allow(clippy::cast_possible_truncation)]
+    // graph.len() <= 7 for every graph in this scaffold; cast is safe.
+    #[allow(clippy::cast_possible_truncation)] // see graph_for invariant
     let total = graph.len() as u32;
 
-    // All steps DONE?
-    // Step rows mirror the static graph (≤7 entries); cast is genuinely safe.
-    #[allow(clippy::cast_possible_truncation)]
-    let done_count = snapshot
-        .steps
-        .iter()
-        .filter(|s| s.state == StepState::Done)
-        .count() as u32;
-    if done_count == total {
-        return RecoveryDecision::FinalizeCommitted;
-    }
-
-    // Otherwise resume from 1 + max(done_ord), or 0 if no DONE rows.
-    let next_ord = snapshot
+    // Collect DONE ords into a BTreeSet — naturally dedupes duplicate rows
+    // and lets us scan the contiguous 0..total range for the first ord
+    // that does not have a DONE row.
+    let done: std::collections::BTreeSet<u32> = snapshot
         .steps
         .iter()
         .filter(|s| s.state == StepState::Done)
         .map(|s| s.ord)
-        .max()
-        .map_or(0, |max_done| max_done + 1);
+        .collect();
 
-    RecoveryDecision::Resume { next_ord }
+    // First ord in [0, total) without a DONE row, or None if every ord is
+    // covered. `find` short-circuits on the first miss.
+    match (0..total).find(|ord| !done.contains(ord)) {
+        None => RecoveryDecision::FinalizeCommitted,
+        Some(next_ord) => RecoveryDecision::Resume { next_ord },
+    }
 }
 
 #[cfg(test)]
@@ -250,14 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn prepared_with_gap_in_done_steps_resumes_from_after_max_done() {
-        // Steps 0, 1, 3 DONE; step 2 is absent (must mean it never ran).
-        // We resume from 1 + max(done_ord) = 4. Step 2 will be re-run by
-        // the runner (idempotent re-entry on the absent row inserts PENDING).
-        // NOTE: this is the brief's intent — recovery never replays already-DONE
-        // steps. The runner ensures step 2 is also marked DONE before
-        // continuing because it iterates from start_ord onward; this test
-        // documents what `decide_recovery` itself returns.
+    fn prepared_with_gap_in_done_steps_resumes_at_first_missing_ord() {
+        // Steps 0, 1, 3 DONE; step 2 is absent. Brief §5.6 says recovery
+        // resumes at "step:(last_done + 1)" — interpreted as the first ord
+        // without a DONE row, NOT max(done) + 1. The runner then runs step 2
+        // (and 3 again is skipped as already DONE) before continuing.
         let s = snap(
             OpState::Prepared,
             vec![
@@ -268,7 +264,23 @@ mod tests {
         );
         assert_eq!(
             decide_recovery(&s),
-            RecoveryDecision::Resume { next_ord: 4 }
+            RecoveryDecision::Resume { next_ord: 2 }
+        );
+    }
+
+    #[test]
+    fn prepared_with_duplicate_done_rows_does_not_finalize_falsely() {
+        // 6 DONE rows that all reference ord 0 — a buggy upstream projection
+        // could in principle produce this. Naive count-based logic would say
+        // "6 == graph.len() so FinalizeCommitted"; the BTreeSet dedup catches
+        // it and reports first-missing = 1.
+        let s = snap(
+            OpState::Prepared,
+            (0..6).map(|_| step(0, StepState::Done, 1)).collect(),
+        );
+        assert_eq!(
+            decide_recovery(&s),
+            RecoveryDecision::Resume { next_ord: 1 }
         );
     }
 
