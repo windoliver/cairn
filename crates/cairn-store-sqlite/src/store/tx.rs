@@ -21,11 +21,13 @@
 //! [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
 
 use cairn_core::contract::memory_store::{Edge, EdgeKey, TombstoneReason, UpsertOutcome};
-use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId};
+use cairn_core::domain::{BodyHash, MemoryRecord, RecordId, SessionId, SignedAdmission};
 use rusqlite::{OptionalExtension as _, Transaction, params};
 use tracing::instrument;
 
 use crate::error::StoreError;
+use crate::replay::challenge::MintedChallenge;
+use crate::replay::{ReplayError, WalPrepareInputs};
 use crate::store::projection::{ProjectedRow, record_from_json};
 use crate::store::upsert::upsert_in_tx;
 use crate::store::{SqliteMemoryStore, current_unix_ms};
@@ -72,6 +74,89 @@ impl StoreTx<'_> {
             params![reason.as_db_str(), now_ms, id.as_str()],
         )?;
         Ok(())
+    }
+
+    /// Mint and persist a fresh single-use server challenge for
+    /// `issuer`. Returns the base64 nonce + absolute expiry.
+    /// See [`crate::replay::challenge::mint_challenge`] for full
+    /// semantics. Used by the `handshake` prelude (issue #52).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the underlying insert fails.
+    pub fn mint_challenge(
+        &self,
+        issuer: &str,
+        now_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<MintedChallenge, StoreError> {
+        crate::replay::challenge::mint_challenge(&self.tx, issuer, now_ms, ttl_ms)
+    }
+
+    /// Atomically admit a verified envelope: insert the WAL `PREPARED`
+    /// row, then consume the replay-ledger entry. See
+    /// `crate::replay::prepare_wal_with_replay` for full semantics
+    /// (issue #52, brief §4.2).
+    ///
+    /// # Verification boundary
+    ///
+    /// The argument is a [`SignedAdmission`] — the sealed token whose
+    /// constructor recomputes `sha256(payload)` and asserts equality
+    /// with `intent.target_hash`. That binds the verb-layer's chosen
+    /// `kind` and `plan_ref` to the issuer's signature: a buggy
+    /// dispatcher cannot stage replay state for one `kind` under a
+    /// signature meant for another. See [`SignedAdmission::new`] for
+    /// the construction contract. Round-12 review #1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError`] for replay-ledger violations (duplicate
+    /// `operation_id` / nonce, out-of-order sequence, missing or
+    /// expired challenge, an envelope missing both modes, or admission
+    /// past the signed `expires_at`).
+    pub fn prepare_wal_with_replay(&self, admission: &SignedAdmission) -> Result<(), ReplayError> {
+        let now_ms = current_unix_ms();
+        let inputs = WalPrepareInputs {
+            kind: admission.kind().as_db_str(),
+            plan_ref: admission.plan_ref(),
+        };
+        crate::replay::prepare_wal_with_replay(
+            &self.tx,
+            admission.intent().as_inner(),
+            &inputs,
+            now_ms,
+        )
+    }
+
+    /// In-crate test-only escape hatch: admit a raw, unverified
+    /// `SignedIntent` through the replay ledger. **Not part of any
+    /// production surface** — `pub(crate)` so even an external crate
+    /// that flips a build feature cannot reach it. The production
+    /// [`Self::prepare_wal_with_replay`] takes a sealed
+    /// [`VerifiedSignedIntent`]; round-11 review #2 closed the
+    /// previous `test-helpers`-feature-gated public hole.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::prepare_wal_with_replay`].
+    #[cfg(test)]
+    pub(crate) fn prepare_wal_with_replay_unverified(
+        &self,
+        intent: &cairn_core::generated::envelope::SignedIntent,
+        inputs: &WalPrepareInputs<'_>,
+        now_ms: i64,
+    ) -> Result<(), ReplayError> {
+        crate::replay::prepare_wal_with_replay(&self.tx, intent, inputs, now_ms)
+    }
+
+    /// Drop expired rows from `outstanding_challenges`. Returns the
+    /// number deleted. See [`crate::replay::challenge::purge_expired_challenges`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Sqlite`] if the underlying delete fails.
+    pub fn purge_expired_challenges(&self, now_ms: i64) -> Result<usize, StoreError> {
+        crate::replay::challenge::purge_expired_challenges(&self.tx, now_ms)
     }
 
     /// Synchronous edge upsert. `INSERT OR REPLACE` keyed on
@@ -717,7 +802,19 @@ impl SqliteMemoryStore {
     /// the trait must stay `dyn`-compatible — generic methods break
     /// object safety.
     ///
+    /// The transaction is opened with [`TransactionBehavior::Immediate`]
+    /// so the writer lock is acquired up front (issue #52 round-9
+    /// review #1). Without this, multi-connection write paths that
+    /// allocate per-row identifiers via `MAX(...) + 1` race: two
+    /// readers see the same `MAX` snapshot, one wins, the other surfaces
+    /// the table's `must_advance` trigger as `ReplayError::Sqlite`. With
+    /// IMMEDIATE the second writer waits on the file lock; its initial
+    /// snapshot is acquired AFTER the first commit, so its
+    /// `MAX(issued_seq)` reflects the new state. WAL-mode read traffic
+    /// remains unblocked.
+    ///
     /// [`MemoryStore`]: cairn_core::contract::memory_store::MemoryStore
+    /// [`TransactionBehavior::Immediate`]: rusqlite::TransactionBehavior::Immediate
     ///
     /// # Errors
     ///
@@ -739,7 +836,7 @@ impl SqliteMemoryStore {
         let conn = self.require_conn("with_tx")?.clone();
         let result = conn
             .call(move |c| {
-                let tx = c.transaction()?;
+                let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let mut handle = StoreTx { tx };
                 match f(&mut handle) {
                     Ok(value) => {

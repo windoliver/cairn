@@ -81,6 +81,9 @@ const M0047_WAL_LINT_REPAIR: &str = include_str!("sql/0047_wal_lint_repair.sql")
 // had already taken 0046..0047.
 const M0048_CONSENT_JOURNAL_REPAIR_AUDIT: &str =
     include_str!("sql/0048_consent_journal_repair_audit.sql");
+// Issue #52 — renumbered from 0046 → 0047 → 0048 → 0049 across three
+// main merges as #258 / #254 / #267 each took the next slot.
+const M0049_REPLAY_CHALLENGE_MODE: &str = include_str!("sql/0049_replay_challenge_mode.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -215,6 +218,11 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0048_consent_journal_repair_audit",
         M0048_CONSENT_JOURNAL_REPAIR_AUDIT,
     ),
+    (
+        49,
+        "0049_replay_challenge_mode",
+        M0049_REPLAY_CHALLENGE_MODE,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -264,5 +272,6 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0046_RECORDS_SCHEMA_VERSION),
         M::up(M0047_WAL_LINT_REPAIR),
         M::up(M0048_CONSENT_JOURNAL_REPAIR_AUDIT),
+        M::up(M0049_REPLAY_CHALLENGE_MODE),
     ])
 }

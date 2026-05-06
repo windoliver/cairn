@@ -218,7 +218,7 @@ fn main() -> ExitCode {
         },
         Some(("forget", sub)) => verbs::forget::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
-        Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
+        Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
@@ -254,6 +254,79 @@ fn main() -> ExitCode {
             ExitCode::from(64)
         }
     }
+}
+
+/// `cairn handshake` dispatch (issue #52, brief §8.0.a).
+///
+/// Resolves the vault root the same way `status` does so the minted
+/// challenge persists into `<vault>/.cairn/cairn.db`'s
+/// `outstanding_challenges` table when the operator supplied
+/// `--issuer`. Without `--issuer` the verb falls back to the pre-#52
+/// ephemeral mint and prints a one-line warning explaining the
+/// returned nonce is not redeemable.
+///
+/// Mirrors `run_status`'s vault-binding gate: a real-resolution-source
+/// vault that is `Unbound` or `Invalid` must fail closed with
+/// `EX_CONFIG`. Persisting a challenge into a half-bootstrapped or
+/// damaged vault would mutate trust-boundary state under conditions
+/// the rest of the CLI (status / search / admin) treats as fatal.
+fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let json = sub.get_flag("json");
+    let issuer = sub.get_one::<String>("issuer").map(String::as_str);
+
+    // `--issuer` absent ⇒ keep the ephemeral fallback path. Resolving a
+    // vault here would only emit a confusing extra error message.
+    if issuer.is_none() {
+        return verbs::handshake::run_with_context(json, None, None);
+    }
+
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn handshake: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    // Real resolution sources must be bound. CwdFallback (no explicit
+    // / env / registry hit) means there is no vault to persist into.
+    // The operator passed `--issuer`, so they expect persistence — a
+    // silent downgrade to an ephemeral mint would print an
+    // indistinguishable JSON envelope on stdout that automation could
+    // sign against, only to fail at admission time. Fail closed
+    // instead (issue #52 round-4 review #2).
+    if source == VaultResolutionSource::CwdFallback {
+        eprintln!(
+            "cairn handshake: --issuer supplied but no vault could be resolved \
+             (cwd is not a Cairn vault, no --vault flag, no CAIRN_VAULT, \
+             no registry default). Pass `--vault PATH` to a bound vault, or \
+             omit `--issuer` for an ephemeral nonce."
+        );
+        return ExitCode::from(78); // EX_CONFIG
+    }
+    match verbs::status::probe_vault_binding(&vault_root) {
+        verbs::status::VaultBinding::Bound => {}
+        verbs::status::VaultBinding::Unbound => {
+            let origin = match source {
+                VaultResolutionSource::Explicit => "--vault target",
+                VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                VaultResolutionSource::RegistryDefault => "registry default vault",
+                VaultResolutionSource::CwdFallback => unreachable!(),
+            };
+            eprintln!(
+                "cairn handshake: {origin} {} is not a Cairn vault \
+                 (no .cairn/vault.id) — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            return ExitCode::from(78); // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            eprintln!("cairn handshake: vault binding error — {reason}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    }
+
+    verbs::handshake::run_with_context(json, Some(&vault_root), issuer)
 }
 
 /// `cairn status` dispatch.

@@ -318,6 +318,8 @@ mod tests {
             agent_extract: false,
             graph_edges: false,
             policy_trace: true,
+            replay_sequence: true,
+            replay_challenge: true,
         }
     }
 

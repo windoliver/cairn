@@ -260,6 +260,22 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
     if cap_set.policy_trace {
         out.push(Capabilities::CairnMcpV1PolicyTrace);
     }
+    // NOTE — `cairn.mcp.v1.replay.{sequence,challenge}` are deliberately
+    // NOT advertised yet, even though the substrate (migration 0046,
+    // `replay::prepare_wal_with_replay`, `mint_challenge`) ships in this
+    // PR.  Brief §15 / §8.0.a require advertised capabilities to be
+    // honored end-to-end; the signed-verb dispatch path
+    // (ingest / forget / capture_trace) does not yet route through
+    // `prepare_wal_with_replay`, so a client negotiating from the cap
+    // would believe the runtime enforces replay rejection while the
+    // production hot path does not.  The follow-up issue that wires
+    // the dispatch flips `cap_set.replay_{sequence,challenge}` to
+    // `true` and adds the two `out.push(...)` lines.
+    //
+    // Issue #52 round-2 review #2: advertising before enforcement is
+    // over-advertising.
+    let _ = cap_set.replay_sequence;
+    let _ = cap_set.replay_challenge;
     out
 }
 

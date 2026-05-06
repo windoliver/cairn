@@ -710,6 +710,19 @@ pub struct CapabilitySet {
     /// True iff `cairn.mcp.v1.policy_trace` capability is advertised.
     /// Gates `--explain` on search and other Tier-2 inspection paths.
     pub policy_trace: bool,
+    /// True iff `cairn.mcp.v1.replay.sequence` capability is advertised
+    /// — sequence-mode envelopes (`signed_intent.sequence`) admit
+    /// against the per-issuer CAS in `issuer_seq` (brief §4.2). Always
+    /// true at P0 once the vault is bound; the schema ships
+    /// unconditionally.
+    pub replay_sequence: bool,
+    /// True iff `cairn.mcp.v1.replay.challenge` capability is
+    /// advertised — challenge-mode envelopes
+    /// (`signed_intent.server_challenge`) admit by consuming an
+    /// outstanding row in `outstanding_challenges` minted via
+    /// `cairn handshake` (issue #52, brief §4.2). Always true at P0
+    /// once the vault is bound; the schema ships unconditionally.
+    pub replay_challenge: bool,
 }
 
 impl CairnConfig {
@@ -832,6 +845,15 @@ impl CairnConfig {
             // (`search.disable_explain: true`) can opt out for environments
             // that prohibit trace-level output.
             policy_trace: true,
+            // Both replay modes have substrate support (migration 0046,
+            // `replay::prepare_wal_with_replay`, `mint_challenge`) shipped
+            // by issue #52, but the signed-verb dispatch path does not
+            // yet route through them. Advertising the capability before
+            // the dispatch is honest end-to-end would over-advertise per
+            // brief §15. These flags flip to `true` in the follow-up that
+            // wires verb dispatch — see `cairn-cli/src/verbs/status.rs`.
+            replay_sequence: false,
+            replay_challenge: false,
         }
     }
 
