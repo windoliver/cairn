@@ -72,6 +72,15 @@ const M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER: &str =
 // Issue #258 — renumbered from 0041 to 0046 during rebase, since
 // #186 (KG substrate) had already taken 0041..0045 on main.
 const M0046_RECORDS_SCHEMA_VERSION: &str = include_str!("sql/0046_records_schema_version.sql");
+// Issue #254 (lint --fix-markdown) — renumbered from 0031 to 0047
+// during rebase, since #253 (consent timeline) had already taken
+// 0031..0040 and #186 (KG substrate) + #258 (schema_version) had
+// taken 0041..0046 on main.
+const M0047_WAL_LINT_REPAIR: &str = include_str!("sql/0047_wal_lint_repair.sql");
+// Issue #267 — renumbered from 0046 to 0048 during rebase, since main
+// had already taken 0046..0047.
+const M0048_CONSENT_JOURNAL_REPAIR_AUDIT: &str =
+    include_str!("sql/0048_consent_journal_repair_audit.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -200,6 +209,12 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
         "0046_records_schema_version",
         M0046_RECORDS_SCHEMA_VERSION,
     ),
+    (47, "0047_wal_lint_repair", M0047_WAL_LINT_REPAIR),
+    (
+        48,
+        "0048_consent_journal_repair_audit",
+        M0048_CONSENT_JOURNAL_REPAIR_AUDIT,
+    ),
 ];
 
 /// All migrations, in order. Returns a fresh `Migrations` set on every call
@@ -247,5 +262,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0044_ENTITY_EPISODES),
         M::up(M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
         M::up(M0046_RECORDS_SCHEMA_VERSION),
+        M::up(M0047_WAL_LINT_REPAIR),
+        M::up(M0048_CONSENT_JOURNAL_REPAIR_AUDIT),
     ])
 }

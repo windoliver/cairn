@@ -62,8 +62,22 @@ use tempfile::TempDir;
 #[allow(clippy::expect_used)]
 pub fn sample_record(seed: u64) -> MemoryRecord {
     let mut r = cairn_core::domain::record::tests_export::sample_record();
-    let suffix = format!("{seed:020X}");
-    let id_str = format!("01HQZX9F5N0{}", &suffix[..15]);
+    // ULID layout in this fixture: 11-char prefix `01HQZX9F5N0` + a
+    // 15-char seed-derived suffix = 26 chars. 15 hex digits hold 60
+    // bits, so distinct seeds in the low-60-bit space always produce
+    // distinct ids; seeds whose top 4 bits differ but low 60 match
+    // collapse onto the same id. Document and accept — every test
+    // suite using this helper passes seeds in the small-integer range.
+    //
+    // Earlier form (`{seed:020X}`, take `[..15]`) was wrong: 20-pad
+    // is left-padded with zeros, so the first 15 chars were always
+    // `"000000000000000"` for any seed < 16^15, collapsing every
+    // small seed onto the same id and silently breaking
+    // FixtureStore's target-id-keyed dedupe.
+    let masked = seed & ((1u64 << 60) - 1);
+    let suffix = format!("{masked:015X}");
+    debug_assert_eq!(suffix.len(), 15);
+    let id_str = format!("01HQZX9F5N0{suffix}");
     r.id = RecordId::parse(id_str.clone()).expect("seed-derived id");
     r.target_id = TargetId::parse(id_str).expect("seed-derived target");
     r.body = format!("seeded body {seed}");
@@ -92,4 +106,27 @@ pub async fn memstore() -> SqliteMemoryStore {
     cairn_store_sqlite::open_in_memory()
         .await
         .expect("memstore")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinct_seeds_yield_distinct_ids() {
+        // Regression: previous implementation truncated the suffix
+        // to the first 15 chars of a 20-pad zero-prefixed hex form,
+        // collapsing every seed in `0..16^15` onto the same id.
+        // FixtureStore dedupes by `target_id`, so collisions caused
+        // multi-record fixtures to silently lose all but one row.
+        let ids: Vec<_> = (0..16u64).map(|s| sample_record(s).id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            ids.len(),
+            "distinct seeds must yield distinct ids"
+        );
+    }
 }

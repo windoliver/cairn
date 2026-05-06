@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use cairn_cli::{command, identity, plugins, verbs};
+use cairn_cli::{command, identity, plugins, repair, verbs};
 use cairn_core::contract::registry::PluginError;
 use clap::ArgMatches;
 fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
@@ -114,6 +114,22 @@ fn resolve_vault_or_cwd(
         }
     }
 }
+
+fn subcommand_needs_vault_guard(active_subcommand: &str) -> bool {
+    !matches!(
+        active_subcommand,
+        "vault"
+            | "bootstrap"
+            | "plugins"
+            | "mcp"
+            | "admin"
+            | "llm"
+            | "identity"
+            | "flush"
+            | "repair"
+    )
+}
+
 fn main() -> ExitCode {
     let matches = match command::build_command().try_get_matches() {
         Ok(m) => m,
@@ -142,10 +158,7 @@ fn main() -> ExitCode {
     // registry guard here would reject them when no vault is registered.
     // `identity` manages vault-path internally for each subcommand; exclude
     // from the top-level vault registry guard (which requires a named vault).
-    let needs_vault_guard = !matches!(
-        active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity" | "flush"
-    );
+    let needs_vault_guard = subcommand_needs_vault_guard(active_subcommand);
 
     if needs_vault_guard {
         let store = match registry_store() {
@@ -199,7 +212,10 @@ fn main() -> ExitCode {
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
-        Some(("lint", sub)) => verbs::lint::run(sub),
+        Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
+            Err(_) => verbs::lint::run(sub, None),
+        },
         Some(("forget", sub)) => verbs::forget::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
@@ -229,6 +245,7 @@ fn main() -> ExitCode {
                 verbs::flush::run(sub, None)
             }
         },
+        Some(("repair", sub)) => repair::run(sub, explicit_vault.clone()),
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
         Some((verb, _)) => {

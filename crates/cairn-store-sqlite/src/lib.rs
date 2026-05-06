@@ -14,11 +14,14 @@ pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
 mod identity;
+pub mod locks;
 pub mod migrations;
 pub mod open;
+pub mod repair;
 pub mod store;
 pub mod vec_ext;
 mod verify;
+pub mod wal;
 
 pub use error::StoreError;
 pub use identity::SqliteIdentityRegistry;

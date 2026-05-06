@@ -97,6 +97,68 @@ pub const PROJECTED_STANDARD_FIELDS: &[&str] = &[
     "updated",
 ];
 
+/// Outcome of comparing a DB-derived projection against an on-disk file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionStatus {
+    /// On-disk content matches the canonical projection (after line-ending normalization).
+    Match,
+    /// File exists but disagrees with the projection.
+    Drift {
+        /// blake3 hex of the canonical projection body.
+        expected_body_hash: String,
+        /// blake3 hex of the on-disk body.
+        actual_body_hash: String,
+    },
+    /// File is absent or unreadable.
+    Missing {
+        /// blake3 hex of the canonical projection body.
+        expected_body_hash: String,
+    },
+}
+
+/// Hash a projection body deterministically.
+///
+/// Normalizes CRLF → LF and ensures a single trailing newline before hashing,
+/// so that line-ending differences between platforms or editors do not register
+/// as drift. Returns lowercase hex of the blake3 digest.
+#[must_use]
+pub fn body_hash(s: &str) -> String {
+    let normalized = normalize_for_hash(s);
+    blake3::hash(normalized.as_bytes()).to_hex().to_string()
+}
+
+fn normalize_for_hash(s: &str) -> String {
+    let lf = s.replace("\r\n", "\n");
+    if lf.ends_with('\n') {
+        lf
+    } else {
+        format!("{lf}\n")
+    }
+}
+
+/// Compare a canonical projection (`expected`) against an optional on-disk
+/// reading (`actual`). Pure — no I/O.
+#[must_use]
+pub fn compare_projection(expected: &str, actual: Option<&str>) -> ProjectionStatus {
+    let expected_hash = body_hash(expected);
+    match actual {
+        None => ProjectionStatus::Missing {
+            expected_body_hash: expected_hash,
+        },
+        Some(disk) => {
+            let actual_hash = body_hash(disk);
+            if expected_hash == actual_hash {
+                ProjectionStatus::Match
+            } else {
+                ProjectionStatus::Drift {
+                    expected_body_hash: expected_hash,
+                    actual_body_hash: actual_hash,
+                }
+            }
+        }
+    }
+}
+
 /// Pure projection functions — render, parse, and conflict-check.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MarkdownProjector;
@@ -360,7 +422,7 @@ mod tests {
         StoredRecord {
             record: sample_record(),
             version,
-            schema_version: Some(crate::contract::version::SchemaVersion::current()),
+            schema_version: None,
         }
     }
 
@@ -644,5 +706,68 @@ mod tests {
         let parsed = proj.parse(&tampered).unwrap();
         let outcome = proj.check_conflict(&parsed, Some(&stored));
         assert!(matches!(outcome, ConflictOutcome::Conflict { .. }));
+    }
+
+    #[test]
+    fn body_hash_is_blake3_lowercase_hex_64() {
+        let h = body_hash("hello\n");
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
+
+    #[test]
+    fn body_hash_normalizes_trailing_newline_lf() {
+        assert_eq!(body_hash("a\r\nb"), body_hash("a\nb\n"));
+        assert_eq!(body_hash("a\nb"), body_hash("a\nb\n"));
+    }
+
+    #[test]
+    fn compare_projection_match_when_bytes_identical() {
+        let s = compare_projection("---\nid: x\n---\nbody\n", Some("---\nid: x\n---\nbody\n"));
+        assert!(matches!(s, ProjectionStatus::Match));
+    }
+
+    #[test]
+    fn compare_projection_drift_when_body_differs() {
+        let s = compare_projection("---\nid: x\n---\nA\n", Some("---\nid: x\n---\nB\n"));
+        let ProjectionStatus::Drift {
+            expected_body_hash,
+            actual_body_hash,
+        } = s
+        else {
+            panic!("expected Drift, got {s:?}");
+        };
+        assert_ne!(expected_body_hash, actual_body_hash);
+    }
+
+    #[test]
+    fn compare_projection_missing_when_actual_none() {
+        let s = compare_projection("anything\n", None);
+        assert!(matches!(s, ProjectionStatus::Missing { .. }));
+    }
+
+    #[test]
+    fn compare_projection_match_tolerates_line_endings() {
+        let s = compare_projection("a\nb\n", Some("a\r\nb\r\n"));
+        assert!(matches!(s, ProjectionStatus::Match));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn body_hash_is_idempotent(s in ".*") {
+            let h1 = body_hash(&s);
+            let h2 = body_hash(&s);
+            proptest::prop_assert_eq!(h1, h2);
+        }
+
+        #[test]
+        fn compare_projection_match_iff_normalized_equal(a in "[a-z\n]{0,40}", b in "[a-z\n]{0,40}") {
+            let s = compare_projection(&a, Some(&b));
+            let normalized_eq = normalize_for_hash(&a) == normalize_for_hash(&b);
+            proptest::prop_assert_eq!(matches!(s, ProjectionStatus::Match), normalized_eq);
+        }
     }
 }

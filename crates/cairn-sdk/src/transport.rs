@@ -26,6 +26,7 @@ use cairn_core::generated::verbs::{
     search::{SearchArgs, SearchArgsMode, SearchData},
     summarize::{SummarizeArgs, SummarizeData},
 };
+use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 
 use crate::stub::{new_nonce, now_ms, now_rfc3339_seconds, store_not_wired};
 use crate::{CONTRACT, SdkError, VerbResponse};
@@ -166,6 +167,14 @@ impl<T: Transport> Sdk<T> {
             },
             capabilities: self.advertised_capabilities(),
             extensions: vec![],
+            // Advertise the live routing policy. Mirrors the CLI
+            // status producer: both surfaces emit the same
+            // family-granular `pipeline_dispatch` derived from
+            // `DefaultRegistry`, which is the registry the
+            // `capture_trace` verb actually dispatches through. See
+            // `crates/cairn-cli/src/verbs/status.rs` for the
+            // long-form note.
+            pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
         }
     }
 

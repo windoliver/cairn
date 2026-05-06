@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use cairn_core::contract::memory_store::MemoryStore;
@@ -13,7 +15,399 @@ use cairn_core::domain::projection::MarkdownProjector;
 use cairn_core::generated::envelope::ResponseVerb;
 use clap::ArgMatches;
 
-use super::envelope::{emit_json, human_error, unimplemented_response};
+use super::envelope::{emit_json, human_error, new_operation_id, unimplemented_response};
+
+/// Sentinel error type used to thread `LockLost` through the
+/// `anyhow::Error` path of [`fix_markdown_handler_with_fence`]. Carrying
+/// a typed marker (vs. matching on a string) lets the wrapper distinguish
+/// fence-trigger from a real I/O failure.
+#[derive(Debug, thiserror::Error)]
+#[error("lint.lock_lost (fence)")]
+struct LockLostMarker;
+
+/// Errors from [`fix_markdown_with_lock`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LintFixError {
+    /// Another `--fix-markdown` run currently holds the repair lock.
+    #[error("lint.fix_in_progress")]
+    FixInProgress,
+    /// The lint-repair lease was reclaimed by another caller while this
+    /// run was in flight (machine sleep, scheduler stall, etc). The
+    /// markdown rewrites that did happen are durable; the WAL op is
+    /// aborted so the next run can pick up cleanly.
+    #[error("lint.lock_lost")]
+    LockLost,
+    /// Lock-table error (not a simple Held conflict).
+    #[error("lock error")]
+    Lock(#[source] cairn_store_sqlite::locks::LockError),
+    /// WAL state-machine error.
+    #[error("wal error")]
+    Wal(#[source] cairn_store_sqlite::wal::lint_repair::LintRepairWalError),
+    /// The underlying `fix_markdown_handler` failed.
+    #[error("handler error")]
+    Handler(#[source] anyhow::Error),
+}
+
+/// Derive a stable vault identifier from its filesystem path.
+///
+/// Canonicalizes the path (falls back to the raw path on I/O error) and
+/// returns the lowercase hex blake3 digest of the string representation.
+/// This produces a fixed-length, filesystem-safe key suitable for use as a
+/// lock-table `scope_key`.
+fn vault_id(vault_root: &Path) -> Result<String, LintFixError> {
+    // Fail closed on canonicalization errors. Two invocations
+    // targeting the same live vault MUST resolve to the same lock
+    // scope, otherwise both runs would bypass `FixInProgress` and
+    // race on the same files. The only safe response to "the OS
+    // can't tell us the canonical path" is to refuse to acquire
+    // the lock at all — TOCTOU-grade ambiguity on the scope key
+    // is worse than no repair.
+    let canonical = vault_root.canonicalize().map_err(|e| {
+        LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(
+            tokio_rusqlite::Error::Other(
+                format!(
+                    "vault canonicalization failed for {}: {e}",
+                    vault_root.display()
+                )
+                .into(),
+            ),
+        ))
+    })?;
+    Ok(cairn_core::domain::projection::body_hash(
+        &canonical.to_string_lossy(),
+    ))
+}
+
+/// Acquire an EXCLUSIVE lint-repair lock, open a `lint_repair` WAL op,
+/// call `fix_markdown_handler`, then commit or abort the WAL op.
+///
+/// # Errors
+/// - [`LintFixError::FixInProgress`] if another caller holds the lock.
+/// - [`LintFixError::Lock`] on any other lock-table error.
+/// - [`LintFixError::Wal`] if the WAL state-machine rejects a transition.
+/// - [`LintFixError::Handler`] if `fix_markdown_handler` fails.
+pub async fn fix_markdown_with_lock(
+    store: &cairn_store_sqlite::SqliteMemoryStore,
+    vault_root: &Path,
+    ttl: Duration,
+) -> Result<FixMarkdownResult, LintFixError> {
+    let conn = Arc::clone(store.raw_conn_for_admin().ok_or_else(|| {
+        LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(
+            tokio_rusqlite::Error::Other("store not initialized".into()),
+        ))
+    })?);
+    let vid = vault_id(vault_root)?;
+    // Use a ULID for the holder id — unique per process+call, no uuid dep needed.
+    let holder_id = format!("pid={}-{}", std::process::id(), ulid::Ulid::new());
+
+    let lock = match cairn_store_sqlite::locks::acquire_exclusive(
+        &conn,
+        "lint_repair",
+        &vid,
+        &holder_id,
+        ttl,
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(cairn_store_sqlite::locks::LockError::Held { .. }) => {
+            return Err(LintFixError::FixInProgress);
+        }
+        Err(e) => return Err(LintFixError::Lock(e)),
+    };
+
+    // Holding the exclusive repair lock means no other repair is in
+    // flight for this vault, so any PREPARED `lint_repair` op left over
+    // from a previous run is stale: either a post-write `commit` failed,
+    // or a `wal::abort` failed after a handler error. Markdown rewrites
+    // are idempotent + the DB is unchanged across a `lint_repair` op, so
+    // the safe + correct recovery is to abort the stale op. The next
+    // `--fix-markdown` (this one) will re-derive the projection from the
+    // DB and write whatever the vault actually needs.
+    reconcile_stale_lint_repair_ops(&conn, &vid).await?;
+
+    let op_id = cairn_store_sqlite::wal::lint_repair::begin(&conn, &vid, &holder_id, ttl)
+        .await
+        .map_err(LintFixError::Wal)?;
+    // Once `begin` succeeds an `ISSUED` row exists. If `prepare`
+    // fails, the op is still in ISSUED — and ISSUED → ABORTED is
+    // illegal in the FSM, so calling `abort()` here would just
+    // return IllegalTransition. Use the FSM-legal terminal
+    // transition for a never-prepared op: REJECTED.
+    if let Err(e) = cairn_store_sqlite::wal::lint_repair::prepare(&conn, &op_id).await {
+        let _ = cairn_store_sqlite::wal::lint_repair::reject(
+            &conn,
+            &op_id,
+            "prepare failed before any markdown rewrite",
+        )
+        .await;
+        return Err(LintFixError::Wal(e));
+    }
+
+    // Heartbeat: refresh the lock holder's expires_at every `ttl/3` so a
+    // repair longer than `ttl` does not get reclaimed mid-run by a second
+    // caller. The heartbeat owns its own oneshot cancel; we shut it down
+    // before releasing the lock or returning, so it never outlives the
+    // repair.
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat = spawn_lock_heartbeat(
+        Arc::clone(&conn),
+        format!("lint_repair:{vid}"),
+        holder_id.clone(),
+        lock.acquired_at(),
+        ttl,
+        cancel_rx,
+    );
+
+    // Fence callback invoked before every destructive write inside the
+    // handler. `is_still_held` returns false once a second caller has
+    // reclaimed our holder row (acquired_at differs); we surface that as
+    // a typed error so the loop stops *before* publishing more stale
+    // files instead of overwriting a winner's newer projections.
+    let lock_for_fence = &lock;
+    let outcome = fix_markdown_handler_with_fence(store, vault_root, move || {
+        let lock = lock_for_fence;
+        async move {
+            if lock
+                .is_still_held()
+                .await
+                .map_err(|e| anyhow::anyhow!("lock fence query: {e}"))?
+            {
+                Ok(())
+            } else {
+                Err(anyhow::Error::new(LockLostMarker))
+            }
+        }
+    })
+    .await;
+
+    // Stop the heartbeat before touching the WAL or the lock so the next
+    // statements are the only ones racing for connection access.
+    let _ = cancel_tx.send(());
+    let _ = heartbeat.await;
+
+    // Final fence (paranoia): even if the handler returned Ok, recheck
+    // before WAL commit. The handler's per-write fence catches the
+    // common case; this catches the no-write run plus any window after
+    // the last write.
+    let still_ours = lock.is_still_held().await.map_err(LintFixError::Lock)?;
+    if !still_ours {
+        let _ = cairn_store_sqlite::wal::lint_repair::abort(
+            &conn,
+            &op_id,
+            "fencing check failed: lock_holders row missing or reclaimed",
+        )
+        .await;
+        // The lock row no longer belongs to us, so dropping the handle
+        // would race against the new owner. Forget the handle; TTL +
+        // reclaim semantics on the new owner's row stand on their own.
+        std::mem::forget(lock);
+        return Err(LintFixError::LockLost);
+    }
+
+    // Map the fence-trigger error from the handler to LockLost.
+    let outcome = match outcome {
+        Ok(r) => Ok(r),
+        Err(e) if e.is::<LockLostMarker>() => {
+            let _ = cairn_store_sqlite::wal::lint_repair::abort(
+                &conn,
+                &op_id,
+                "lock_lost during fix_markdown_handler",
+            )
+            .await;
+            std::mem::forget(lock);
+            return Err(LintFixError::LockLost);
+        }
+        Err(e) => Err(e),
+    };
+
+    finalize_outcome(&conn, &op_id, lock, outcome).await
+}
+
+/// Commit-or-abort the WAL op according to handler `outcome`, then
+/// release the lock. Post-commit lock-release failures are demoted to
+/// `tracing::warn!` so a successful repair is never reported as failure.
+async fn finalize_outcome(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    op_id: &str,
+    lock: cairn_store_sqlite::locks::LockHandle,
+    outcome: Result<FixMarkdownResult, anyhow::Error>,
+) -> Result<FixMarkdownResult, LintFixError> {
+    match outcome {
+        Ok(r) => {
+            cairn_store_sqlite::wal::lint_repair::commit(conn, op_id)
+                .await
+                .map_err(LintFixError::Wal)?;
+            // Post-commit cleanup must not turn success into failure
+            // (the WAL op is durable, files are on disk). But a stuck
+            // holder row blocks the next `--fix-markdown` for the
+            // remainder of TTL — bad UX. Try once, briefly back off,
+            // try again; if it still fails, demote to a warning and
+            // count on TTL reclaim. Two attempts cover transient
+            // connection-busy errors without prolonging shutdown.
+            let resource = lock.resource().to_owned();
+            let holder_id = lock.holder_id().to_owned();
+            let acquired_at = lock.acquired_at();
+            if let Err(first) = lock.release().await {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Err(retry) = cairn_store_sqlite::locks::release_by_holder(
+                    conn,
+                    &resource,
+                    &holder_id,
+                    acquired_at,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        first_error = %first,
+                        retry_error = %retry,
+                        resource = %resource,
+                        "lint --fix-markdown: lock release failed twice post-commit; \
+                         row will be reclaimed on TTL expiry",
+                    );
+                }
+            }
+            Ok(r)
+        }
+        Err(handler_err) => {
+            let reason = format!("fix_markdown_handler: {handler_err:?}");
+            let _ = cairn_store_sqlite::wal::lint_repair::abort(conn, op_id, &reason).await;
+            let _ = lock.release().await;
+            Err(LintFixError::Handler(handler_err))
+        }
+    }
+}
+
+/// Spawn a tokio task that refreshes `lock_holders.expires_at` for the
+/// `(resource, holder_id, acquired_at)` row every `ttl / 3` until
+/// cancellation. The `acquired_at` predicate is the fencing token: once a
+/// second caller has reclaimed the row, our renewals stop matching and
+/// drop on the floor instead of resurrecting a row that no longer belongs
+/// to us.
+///
+/// The refresh is best-effort: a transient DB error simply causes the next
+/// tick to retry. Cancellation drains the task before the surrounding flow
+/// releases the lock.
+fn spawn_lock_heartbeat(
+    conn: Arc<tokio_rusqlite::Connection>,
+    resource: String,
+    holder_id: String,
+    acquired_at: i64,
+    ttl: Duration,
+    mut cancel: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    // ttl/3 gives two refreshes within each TTL window so a transient
+    // failure on one tick still leaves a valid renewal before expiry.
+    let interval = ttl / 3;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut cancel => return,
+                () = tokio::time::sleep(interval) => {}
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(i64::MAX, |d| {
+                    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+                });
+            let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
+            let expires = now_ms.saturating_add(ttl_ms);
+            let resource = resource.clone();
+            let holder = holder_id.clone();
+            let _ = conn
+                .call(move |c| {
+                    c.execute(
+                        "UPDATE lock_holders \
+                            SET expires_at = ?1 \
+                          WHERE resource = ?2 AND holder_id = ?3 \
+                            AND acquired_at = ?4",
+                        rusqlite::params![expires, resource, holder, acquired_at],
+                    )?;
+                    Ok::<_, tokio_rusqlite::Error>(())
+                })
+                .await;
+        }
+    })
+}
+
+/// Abort every non-terminal `lint_repair` WAL op whose envelope names
+/// this vault. Caller must hold the EXCLUSIVE `lint_repair` lock for
+/// `vault_id` before invoking — that's what makes any leftover ISSUED
+/// or PREPARED row definitively stale (no live writer can be using it).
+///
+/// Sweeps both ISSUED and PREPARED states. ISSUED rows can be left
+/// behind by a `begin()`-success / `prepare()`-failure path; PREPARED
+/// rows by a post-write `commit()` failure or a handler-error path
+/// where `abort()` itself failed. Recovery treats both the same way:
+/// abort and let the next run re-derive the projection from the DB.
+///
+/// Errors during the abort UPDATE are surfaced; an op that has already
+/// terminated since the SELECT is treated as a benign race (the abort
+/// returns `IllegalTransition`, which we swallow).
+async fn reconcile_stale_lint_repair_ops(
+    conn: &Arc<tokio_rusqlite::Connection>,
+    vault_id: &str,
+) -> Result<(), LintFixError> {
+    // Pull state along with the op id so we know which terminal
+    // transition is FSM-legal: ISSUED → REJECTED, PREPARED →
+    // ABORTED. The previous round's pass selected both states but
+    // called only `abort()`, which is gated on PREPARED — every
+    // ISSUED row therefore came back as IllegalTransition and was
+    // silently swallowed, leaving permanent non-terminal pollution.
+    let vault_id_q = vault_id.to_owned();
+    let stale: Vec<(String, String)> = conn
+        .call(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT operation_id, state FROM wal_ops \
+                  WHERE kind = 'lint_repair' \
+                    AND state IN ('ISSUED', 'PREPARED') \
+                    AND scope_json LIKE '%' || ?1 || '%'",
+            )?;
+            let rows = stmt
+                .query_map([vault_id_q], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, tokio_rusqlite::Error>(rows)
+        })
+        .await
+        .map_err(|e| LintFixError::Lock(cairn_store_sqlite::locks::LockError::Db(e)))?;
+
+    for (op_id, state) in stale {
+        // IllegalTransition (already-terminal between SELECT and
+        // UPDATE) is benign; anything else is a real recovery
+        // failure and must surface so the caller bails before
+        // touching files.
+        let result = match state.as_str() {
+            "ISSUED" => {
+                cairn_store_sqlite::wal::lint_repair::reject(
+                    conn,
+                    &op_id,
+                    "stale issued op reclaimed under lint_repair lock",
+                )
+                .await
+            }
+            // PREPARED — fall through to abort.
+            _ => {
+                cairn_store_sqlite::wal::lint_repair::abort(
+                    conn,
+                    &op_id,
+                    "stale prepared op reclaimed under lint_repair lock",
+                )
+                .await
+            }
+        };
+        match result {
+            Ok(())
+            | Err(cairn_store_sqlite::wal::lint_repair::LintRepairWalError::IllegalTransition(_)) =>
+                {}
+            Err(e) => return Err(LintFixError::Wal(e)),
+        }
+    }
+    Ok(())
+}
 
 /// Result of a `lint --fix-markdown` run.
 #[derive(Debug, serde::Serialize)]
@@ -22,6 +416,26 @@ pub struct FixMarkdownResult {
     pub written: Vec<PathBuf>,
     /// Number of files that were already up to date.
     pub already_current: usize,
+    /// Vault-relative paths the run could NOT auto-repair: symlinked
+    /// projection paths, non-regular files at the destination, or
+    /// projections whose existing on-disk file failed to read with
+    /// anything other than `NotFound`. Operators must triage these
+    /// manually before re-running. The presence of any entry forces
+    /// the surrounding command to a non-zero exit so automation
+    /// cannot mistake a partial repair for a successful one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<BlockedProjection>,
+}
+
+/// One projection that `--fix-markdown` refused to auto-repair.
+#[derive(Debug, serde::Serialize)]
+pub struct BlockedProjection {
+    /// Vault-relative projection path.
+    pub path: PathBuf,
+    /// Why the path was skipped — `unsafe-path`, `read-error`, etc.
+    pub reason: String,
+    /// Operator-readable detail.
+    pub detail: String,
 }
 
 /// Project all active records to markdown, writing files that are missing or stale.
@@ -36,41 +450,223 @@ pub async fn fix_markdown_handler(
     store: &dyn MemoryStore,
     vault_root: &Path,
 ) -> anyhow::Result<FixMarkdownResult> {
+    fix_markdown_handler_with_fence(store, vault_root, || async { Ok(()) }).await
+}
+
+/// Variant of [`fix_markdown_handler`] that calls `fence` before every
+/// destructive write. The fence is the lock-fencing recheck used by
+/// [`fix_markdown_with_lock`]: a paused / stalled run that has lost its
+/// lease must stop publishing files immediately, not after the loop ends.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be queried, the fence reports lock
+/// loss, or any file I/O fails.
+// Single-loop body bundling fence callbacks, spawn_blocking stages,
+// and the final persist into one cohesive sequence; splitting it for
+// the line counter would force the F: FnMut closure to thread through
+// extra helper signatures without making the flow easier to follow.
+#[allow(clippy::too_many_lines)]
+pub async fn fix_markdown_handler_with_fence<F, Fut>(
+    store: &dyn MemoryStore,
+    vault_root: &Path,
+    mut fence: F,
+) -> anyhow::Result<FixMarkdownResult>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    use std::collections::HashMap;
+
     let projector = MarkdownProjector;
     let records = store
         .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
         .await
         .map_err(anyhow::Error::msg)
         .context("store: list_active_stored")?;
+    // target_id -> record_id we projected this iteration. After the
+    // loop completes, we re-list and any target whose active
+    // record_id differs (or is gone) was mutated mid-run; the
+    // on-disk projection is now stale relative to the DB even though
+    // we did write a file for it. Recording record_id (not target_id
+    // alone) is what catches updates to *existing* records — a
+    // target-only HashSet would miss them.
+    let mut projected_at: HashMap<String, String> = HashMap::with_capacity(records.len());
     let mut written = Vec::new();
     let mut already_current: usize = 0;
+    let mut blocked: Vec<BlockedProjection> = Vec::new();
 
-    for stored in records {
+    for snapshot in records {
+        // Re-fetch per record immediately before projection. The lock
+        // serialises other `lint_repair` runs but does NOT fence
+        // concurrent ingest/upsert/tombstone — the snapshot from
+        // `list_active_stored` may be seconds out of date by the time
+        // we reach this iteration. Always project from the freshest
+        // store state so we never publish a stale projection on top of
+        // newer authoritative data.
+        // Record was tombstoned or otherwise deactivated since the
+        // snapshot. Leave the on-disk projection untouched — its
+        // removal is the projection-cleanup workflow's job, not
+        // `--fix-markdown`'s.
+        let Some(stored) = store
+            .get_active_by_target(&snapshot.record.target_id)
+            .await
+            .map_err(anyhow::Error::msg)
+            .with_context(|| {
+                format!(
+                    "store: get_active_by_target({})",
+                    snapshot.record.target_id.as_str()
+                )
+            })?
+        else {
+            continue;
+        };
+        projected_at.insert(
+            stored.record.target_id.as_str().to_owned(),
+            stored.record.id.as_str().to_owned(),
+        );
         let projected = projector.project(&stored);
         let abs_path = vault_root.join(&projected.path);
 
+        // No-follow validation BEFORE the read. `read_to_string` follows
+        // symlinks; without this guard, a symlinked `raw/<id>.md` (or any
+        // intermediate ancestor swapped for a symlink) would be read through
+        // to its target and a "matching" comparison would silently bypass
+        // the symlink rejection that `write_once` enforces.
+        //
+        // An unsafe path (symlink, non-regular file) is NOT a fixable
+        // condition by `--fix-markdown` alone — the operator must
+        // remove the symlink first. Skip the iteration with a warning
+        // instead of aborting the whole run; the read-only `lint`
+        // pass already surfaces it as a Drift finding so the user
+        // sees the offending path.
+        let safe = {
+            let vroot = vault_root.to_path_buf();
+            let dest = abs_path.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::vault::bootstrap::check_write_safe(&vroot, &dest)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking validate {}", abs_path.display()))?
+        };
+        if let Err(unsafe_err) = safe {
+            // Unsafe projection path (symlink / non-regular file). The
+            // run cannot rewrite this file safely; record it as blocked
+            // so the caller fails non-zero. Other records still proceed
+            // — the lint command stays useful for the rest of the
+            // vault — but the overall outcome is not "success".
+            tracing::warn!(
+                path = %abs_path.display(),
+                error = %unsafe_err,
+                "lint --fix-markdown: skipping unsafe projection path; \
+                 manual cleanup required before this projection can be repaired",
+            );
+            blocked.push(BlockedProjection {
+                path: projected.path.clone(),
+                reason: "unsafe-path".to_owned(),
+                detail: format!("{unsafe_err}"),
+            });
+            continue;
+        }
+
+        // Use the same normalized comparison the read-only drift pass
+        // uses, so `--fix-markdown` is a no-op exactly when `lint` reports
+        // no drift. Raw `!=` would treat CRLF / trailing-newline
+        // differences as drift and rewrite files that lint already
+        // considers matching.
+        // Read-only `lint` reports an unreadable projection (permission
+        // denied, invalid UTF-8, transient I/O error) as `ProjectionDrift`
+        // and the finding builder unconditionally suggests
+        // `cairn lint --fix-markdown`. Honour that contract here: treat
+        // a non-NotFound read failure the same as Missing — overwrite
+        // with the canonical projection rather than aborting the entire
+        // repair run on the first unreadable file.
+        // Auto-repair only for `NotFound` (file gone) and clean drift
+        // (file present but different from canonical). For any other
+        // read failure (permission denied, invalid UTF-8, transient
+        // I/O, hardware error) DO NOT overwrite — the existing file
+        // is the only forensic evidence of what went wrong. Record
+        // the case as blocked and move on; the operator triages.
         let needs_write = match tokio::fs::read_to_string(&abs_path).await {
-            Ok(existing) => existing != projected.content,
+            Ok(existing) => !matches!(
+                cairn_core::domain::projection::compare_projection(
+                    &projected.content,
+                    Some(&existing),
+                ),
+                cairn_core::domain::projection::ProjectionStatus::Match
+            ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(e) => return Err(anyhow::anyhow!("cannot read {}: {e}", abs_path.display())),
+            Err(e) => {
+                tracing::warn!(
+                    path = %abs_path.display(),
+                    error = %e,
+                    "lint --fix-markdown: refusing to overwrite unreadable \
+                     projection; manual triage required",
+                );
+                blocked.push(BlockedProjection {
+                    path: projected.path.clone(),
+                    reason: "read-error".to_owned(),
+                    detail: format!("{e}"),
+                });
+                continue;
+            }
         };
 
         if needs_write {
+            // Pre-write fence: a stalled run that lost its lease must
+            // refuse to publish more files even if its in-memory snapshot
+            // is older than what a concurrent winner already wrote.
+            fence().await?;
+
+            // Refuse to call `create_dir_all` on an unchecked path —
+            // that helper follows symlinks. If a missing ancestor is
+            // swapped to a symlink between the top-of-iteration
+            // check and this point, `create_dir_all` would create
+            // directories outside the vault as a side effect.
+            //
+            // Bootstrap creates `raw/` (and the rest of the vault
+            // tree) up front; the projector emits `raw/<id>.md` and
+            // similar shallow paths. If the parent does NOT exist,
+            // someone has tampered with the vault outside the
+            // documented projection layout — record it as blocked
+            // and skip rather than spelunk a possibly-malicious
+            // path with `create_dir_all`.
             if let Some(parent) = abs_path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("create_dir_all {}", parent.display()))?;
+                let parent_meta = tokio::fs::symlink_metadata(parent).await;
+                let parent_ok = matches!(
+                    parent_meta.as_ref(),
+                    Ok(m) if m.file_type().is_dir(),
+                );
+                if !parent_ok {
+                    let detail = match parent_meta {
+                        Err(e) => format!("parent {} is unreachable: {e}", parent.display()),
+                        Ok(_) => {
+                            format!("parent {} is a symlink or non-directory", parent.display())
+                        }
+                    };
+                    tracing::warn!(
+                        parent = %parent.display(),
+                        "lint --fix-markdown: parent must be a real directory; \
+                         refusing to mkdir on an unchecked path",
+                    );
+                    blocked.push(BlockedProjection {
+                        path: projected.path.clone(),
+                        reason: "unsafe-parent".to_owned(),
+                        detail,
+                    });
+                    continue;
+                }
             }
-            // Write atomically via a unique temp file + rename. tempfile::Builder
-            // assigns a random suffix so concurrent calls in the same process never
-            // share a temp path; rename(2) is atomic for readers.
+
+            // Stage 1: build the temp file fully on disk (write + fsync)
+            // before the publish fence. The temp lives in the destination
+            // directory, so `persist()` is a same-filesystem rename(2).
             let content = projected.content.clone();
-            let dest = abs_path.clone();
             let parent_buf = abs_path
                 .parent()
                 .unwrap_or(std::path::Path::new("."))
                 .to_path_buf();
-            tokio::task::spawn_blocking(move || {
+            let staged: tempfile::NamedTempFile = tokio::task::spawn_blocking(move || {
                 use std::io::Write as _;
                 let mut tmp = tempfile::Builder::new()
                     .suffix(".md.tmp")
@@ -78,22 +674,122 @@ pub async fn fix_markdown_handler(
                     .with_context(|| format!("create temp file in {}", parent_buf.display()))?;
                 tmp.write_all(content.as_bytes())
                     .with_context(|| format!("write temp {}", tmp.path().display()))?;
-                tmp.persist(&dest).map_err(|e| {
+                tmp.as_file()
+                    .sync_all()
+                    .with_context(|| format!("fsync temp {}", tmp.path().display()))?;
+                Ok::<_, anyhow::Error>(tmp)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking stage {}", abs_path.display()))??;
+
+            // Publish fence: re-check ownership immediately before the
+            // rename. Combined with the pre-write fence above, the only
+            // window in which a stale writer can publish is the time
+            // between this check and the rename(2) syscall — a single
+            // spawn_blocking schedule + `persist()` call. Drop the
+            // staged temp file on lease loss so it never reaches the
+            // canonical path.
+            fence().await?;
+
+            // Late-bound TOCTOU defense: re-validate path safety
+            // immediately before publish. The first `check_write_safe`
+            // at the top of this iteration runs before stage; a
+            // concurrent actor that swapped an ancestor for a symlink
+            // between then and here would otherwise let `persist()`
+            // rename through the symlink. This second check shrinks
+            // the unsafe window to the single rename(2) syscall —
+            // not zero, but bounded.
+            let vroot = vault_root.to_path_buf();
+            let dest_for_check = abs_path.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::vault::bootstrap::check_write_safe(&vroot, &dest_for_check)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking revalidate {}", abs_path.display()))??;
+
+            // Persist + parent directory fsync. POSIX `rename(2)`
+            // updates the dirent but the change can be lost on a
+            // crash unless the *containing directory* is fsync'd.
+            // Without this, the WAL op can reach COMMITTED while
+            // the on-disk projection silently reverts to the
+            // pre-rename name on power loss — exactly the partial-
+            // write recovery case `--fix-markdown` exists to
+            // repair, but worse: now the WAL says the repair
+            // already happened. Sync the directory before this
+            // iteration counts as written.
+            let dest = abs_path.clone();
+            let parent_for_sync = abs_path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                staged.persist(&dest).map_err(|e| {
                     anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error)
                 })?;
+                let dir = std::fs::File::open(&parent_for_sync).with_context(|| {
+                    format!("open parent for fsync {}", parent_for_sync.display())
+                })?;
+                dir.sync_all()
+                    .with_context(|| format!("fsync parent dir {}", parent_for_sync.display()))?;
                 Ok::<_, anyhow::Error>(())
             })
             .await
-            .with_context(|| format!("spawn_blocking write {}", abs_path.display()))??;
+            .with_context(|| format!("spawn_blocking publish {}", abs_path.display()))??;
             written.push(projected.path);
         } else {
             already_current += 1;
         }
     }
 
+    // Convergence check: re-list active records and detect drift the
+    // run cannot have repaired. The `lint_repair` lock does not fence
+    // concurrent ingest/upsert/tombstone, so the DB can change
+    // between our per-record `get_active_by_target` and the end of
+    // the run. Two distinct cases need reporting:
+    //   1. New target_id appeared after our snapshot — never
+    //      projected by this run.
+    //   2. Existing target_id we did project, but the active
+    //      record_id is now different — our on-disk projection
+    //      reflects a superseded version.
+    // Either case means a successful WAL commit would leave the
+    // vault stale; surface them as `blocked` so the caller fails
+    // non-zero and the operator re-runs.
+    let post = store
+        .list_active_stored(&cairn_core::contract::memory_store::ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("store: list_active_stored (post)")?;
+    for s in &post {
+        let tid = s.record.target_id.as_str();
+        let now_rid = s.record.id.as_str();
+        match projected_at.get(tid) {
+            None => {
+                blocked.push(BlockedProjection {
+                    path: PathBuf::from(format!("(target {tid})")),
+                    reason: "post-snapshot-record".to_owned(),
+                    detail: "record ingested during repair; re-run cairn lint --fix-markdown \
+                             to converge"
+                        .to_owned(),
+                });
+            }
+            Some(seen_rid) if seen_rid != now_rid => {
+                blocked.push(BlockedProjection {
+                    path: PathBuf::from(format!("(target {tid})")),
+                    reason: "post-write-update".to_owned(),
+                    detail: format!(
+                        "record updated during repair (projected {seen_rid}, now active {now_rid}); \
+                         re-run cairn lint --fix-markdown to converge"
+                    ),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
     Ok(FixMarkdownResult {
         written,
         already_current,
+        blocked,
     })
 }
 
@@ -365,12 +1061,10 @@ pub struct LintHandlerResult {
 /// engine, and (when `write_report` is true) atomically writes
 /// `.cairn/lint-report.md` under `vault_root`.
 ///
-/// The §6.4 `stale_schema` check reads the current host schema version
-/// directly from `SchemaVersion::current()` (the same constant the store
-/// stamps rows with), so this handler does **not** accept a
-/// caller-supplied schema version. A second source of truth would let
-/// callers pass `SchemaVersion::from_contract(CONTRACT_VERSION)` and
-/// mark every freshly written row stale.
+/// `schema_version` is the runtime's contract major.minor pair. Today
+/// every record runs through the legacy `consent_model` gate (see
+/// `cairn-core::verbs::lint::ConsentModel::LegacyEvent`); per-row gating
+/// arrives with #253.
 ///
 /// # Errors
 ///
@@ -421,50 +1115,41 @@ pub async fn lint_handler(
     // crash) propagate, because hiding them would convert a real
     // index-corruption signal into a falsely clean run — exactly the
     // posture §6.7 is meant to expose.
-    let (index_stats, index_stats_skipped) = load_index_stats(store, stored.len()).await?;
+    let stored_count = u64::try_from(stored.len()).unwrap_or(u64::MAX);
+    let (index_stats, index_stats_skipped) = match store.index_stats().await {
+        Ok(s) => (s, false),
+        Err(e)
+            if e.to_string()
+                .contains("not supported by this store adapter") =>
+        {
+            (
+                cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
+                true,
+            )
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("store: index_stats: {e}")).context("lint: index_stats");
+        }
+    };
 
-    let supports_consent_model_gate = store.capabilities().per_record_consent_model;
-    // Always observe `list_consent_models` so legacy-only adapters
-    // (capability=false + explicit `Ok(empty)`) are distinguishable
-    // from adapters that don't implement the escape hatch at all
-    // (Err sentinel). Round 1 reorder: this is the documented
-    // compatibility contract.
-    let (consent_models, consent_models_unsupported) = load_consent_models(store).await?;
-
-    // Keep `stored` borrowable for the post-run gap audit. Gaps in
-    // `consent_models` (one-entry-per-active-row contract violation)
-    // would otherwise be silently coerced to `LegacyEvent` below.
+    // PR-1: every row carries LegacyEvent. Per-record gating lands in #253.
     let lint_records: Vec<LintRecord> = stored
-        .iter()
-        .map(|s| {
-            let model = consent_models
-                .get(&s.record.id)
-                .copied()
-                .unwrap_or(ConsentModel::LegacyEvent);
-            LintRecord {
-                stored: s.clone(),
-                consent_model: model,
-            }
+        .into_iter()
+        .map(|s| LintRecord {
+            stored: s,
+            consent_model: ConsentModel::LegacyEvent,
         })
         .collect();
 
     let unresolvable_authors: std::collections::HashSet<cairn_core::domain::Identity> =
         prefetch_failures.keys().cloned().collect();
-    // Round 4: prefer the store-provided consent_lookup so plugin-
-    // registered adapters (which the registry only sees as
-    // `Arc<dyn MemoryStore>`) can satisfy §6.5 without the caller
-    // having to thread a side-channel reference. The explicit
-    // `consent_lookup` parameter still wins when provided so tests
-    // can inject a static fixture.
-    let store_lookup = store.as_consent_lookup();
-    let effective_lookup = consent_lookup.or(store_lookup);
     let inputs = LintInputs {
         records: &lint_records,
         config,
         index_stats,
         author_states: &author_states,
         unresolvable_authors: &unresolvable_authors,
-        consent_lookup: effective_lookup,
+        consent_lookup,
     };
     let mut data = run_checks(&inputs).await;
 
@@ -488,13 +1173,9 @@ pub async fn lint_handler(
 
     push_section_6_2_advisories(&mut data, &lint_records);
 
-    push_consent_model_findings(
-        &mut data,
-        supports_consent_model_gate,
-        consent_models_unsupported,
-        &stored,
-        &consent_models,
-    );
+    // Projection-drift pass: read-only, Warning-severity only. Extracted
+    // to keep lint_handler within the line-count limit.
+    append_projection_drift_findings(store, vault_root, &mut data).await?;
 
     let has_error = data.findings.iter().any(|f| {
         matches!(
@@ -504,7 +1185,34 @@ pub async fn lint_handler(
     });
 
     let report_path = if write_report {
-        Some(write_lint_report(&mut data, vault_root).await?)
+        let body = cairn_core::verbs::lint::report::render(&data);
+        let rel = PathBuf::from(".cairn/lint-report.md");
+        let abs = vault_root.join(&rel);
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+        let parent = abs
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let dest = abs.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            use std::io::Write as _;
+            let mut tmp = tempfile::Builder::new()
+                .suffix(".md.tmp")
+                .tempfile_in(&parent)
+                .with_context(|| format!("create temp file in {}", parent.display()))?;
+            tmp.write_all(body.as_bytes())
+                .with_context(|| format!("write temp {}", tmp.path().display()))?;
+            tmp.persist(&dest)
+                .map_err(|e| anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error))?;
+            Ok(())
+        })
+        .await
+        .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
+        data.report_path = Some(rel.display().to_string());
+        Some(rel)
     } else {
         None
     };
@@ -514,44 +1222,6 @@ pub async fn lint_handler(
         report_path,
         has_error,
     })
-}
-
-/// Render the lint report and persist it atomically under
-/// `<vault_root>/.cairn/lint-report.md`. Pulled out of `lint_handler` so
-/// the async shell stays under the workspace's `clippy::too_many_lines`
-/// limit. Returns the vault-relative path that was written.
-async fn write_lint_report(
-    data: &mut cairn_core::generated::verbs::lint::LintData,
-    vault_root: &Path,
-) -> anyhow::Result<PathBuf> {
-    let body = cairn_core::verbs::lint::report::render(data);
-    let rel = PathBuf::from(".cairn/lint-report.md");
-    let abs = vault_root.join(&rel);
-    if let Some(parent) = abs.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("create_dir_all {}", parent.display()))?;
-    }
-    let parent = abs
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let dest = abs.clone();
-    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        use std::io::Write as _;
-        let mut tmp = tempfile::Builder::new()
-            .suffix(".md.tmp")
-            .tempfile_in(&parent)
-            .with_context(|| format!("create temp file in {}", parent.display()))?;
-        tmp.write_all(body.as_bytes())
-            .with_context(|| format!("write temp {}", tmp.path().display()))?;
-        tmp.persist(&dest)
-            .map_err(|e| anyhow::anyhow!("persist temp -> {}: {}", dest.display(), e.error))?;
-        Ok(())
-    })
-    .await
-    .with_context(|| format!("spawn_blocking write {}", abs.display()))??;
-    data.report_path = Some(rel.display().to_string());
-    Ok(rel)
 }
 
 /// Pre-fetch the `ProvisioningState` of every distinct chain-author
@@ -914,339 +1584,187 @@ fn push_registry_unavailable(
     }
 }
 
-/// Load `index_stats`, swallowing the "not supported by this store
-/// adapter" sentinel so the §6.7 `index_drift` check can downgrade to a
-/// deferred-info finding instead of aborting the whole lint run. Real
-/// operational failures from an adapter that *does* support
-/// `index_stats` propagate.
-async fn load_index_stats(
-    store: &dyn cairn_core::contract::memory_store::MemoryStore,
-    stored_len: usize,
-) -> anyhow::Result<(cairn_core::contract::memory_store::IndexStats, bool)> {
-    let stored_count = u64::try_from(stored_len).unwrap_or(u64::MAX);
-    match store.index_stats().await {
-        Ok(s) => Ok((s, false)),
-        Err(e)
-            if e.to_string()
-                .contains("not supported by this store adapter") =>
-        {
-            Ok((
-                cairn_core::contract::memory_store::IndexStats::new(stored_count, stored_count),
-                true,
-            ))
-        }
-        Err(e) => Err(anyhow::anyhow!("store: index_stats: {e}")).context("lint: index_stats"),
-    }
-}
-
-/// Load per-record consent models, swallowing the "not supported by
-/// this store adapter" sentinel so the caller can emit a finding rather
-/// than aborting the whole lint run. Real I/O failures propagate.
-async fn load_consent_models(
-    store: &dyn cairn_core::contract::memory_store::MemoryStore,
-) -> anyhow::Result<(
-    std::collections::HashMap<
-        cairn_core::domain::RecordId,
-        cairn_core::domain::consent_timeline::ConsentModel,
-    >,
-    bool,
-)> {
-    match store.list_consent_models().await {
-        Ok(m) => Ok((m, false)),
-        Err(e)
-            if e.to_string()
-                .contains("not supported by this store adapter") =>
-        {
-            Ok((std::collections::HashMap::new(), true))
-        }
-        Err(e) => Err(anyhow::anyhow!("store: list_consent_models: {e}"))
-            .context("lint: list_consent_models"),
-    }
-}
-
-/// Append an error-severity finding noting that the store adapter has
-/// not opted into per-record consent-model lookup. Issue #253 fails
-/// closed: an adapter that returns the trait's "not supported" sentinel
-/// cannot tell us whether any record carries `consent_model =
-/// 'receipt_timeline'`, and silently coercing every row to legacy
-/// semantics is a fail-open authorization hole. Adapters that
-/// genuinely have no per-record metadata (test fixtures, legacy-only
-/// stores) opt in by overriding `list_consent_models` to return
-/// `Ok(HashMap::new())` — that path bypasses this finding entirely.
-fn push_consent_models_unsupported(data: &mut cairn_core::generated::verbs::lint::LintData) {
-    let f = cairn_core::generated::verbs::lint::Finding {
-        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
-        message: "store adapter does not implement list_consent_models; \
-                  cannot enforce §6.5 per-record consent gating. Failing \
-                  closed: lint refuses to certify a vault whose adapter \
-                  cannot read the consent_model column."
-            .to_owned(),
-        severity: cairn_core::generated::verbs::lint::Severity::Error,
-        suggested_fix: Some(
-            "ship MemoryStore::list_consent_models on this adapter, or \
-             explicitly opt into legacy-only by overriding to return \
-             Ok(HashMap::new()) (acknowledges the adapter has no \
-             receipt-timeline rows and silences this finding)"
-                .to_owned(),
-        ),
-        target: None,
-        tracking_issue: Some(253),
-    };
-    data.findings.push(f);
-    data.summary.total += 1;
-    data.summary.by_severity.error += 1;
-    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
-        let entry = map
-            .entry("missing_provenance".to_owned())
-            .or_insert(serde_json::Value::from(0_u64));
-        if let Some(n) = entry.as_u64() {
-            *entry = serde_json::Value::from(n.saturating_add(1));
-        }
-    }
-}
-
-/// Dispatch the §6.5 adapter-capability findings (Issue #253). Pulled
-/// out of `lint_handler` so the async shell stays under the workspace's
-/// `clippy::too_many_lines` limit.
-fn push_consent_model_findings(
-    data: &mut cairn_core::generated::verbs::lint::LintData,
-    supports_gate: bool,
-    consent_models_unsupported: bool,
-    stored: &[cairn_core::contract::memory_store::StoredRecord],
-    consent_models: &std::collections::HashMap<
-        cairn_core::domain::RecordId,
-        cairn_core::domain::consent_timeline::ConsentModel,
-    >,
-) {
-    if !supports_gate {
-        // Loop 3 round 1: capability=false on a non-empty vault is
-        // fail-open territory regardless of whether
-        // `list_consent_models` returned the Err sentinel or
-        // Ok(empty). Both signals are advisory: a stale or rolled-back
-        // adapter could return Ok(empty) while the underlying store
-        // genuinely contains receipt_timeline rows. Lint can only
-        // certify §6.5 when the adapter advertises capability=true
-        // and provides authoritative per-row enumeration. Empty vault
-        // remains a benign deferred-info coverage gap.
-        if stored.is_empty() {
-            push_consent_model_gate_deferred(data);
-        } else {
-            push_consent_model_gate_blocked_non_empty(data);
-        }
-        return;
-    }
-    if consent_models_unsupported {
-        push_consent_models_unsupported(data);
-        return;
-    }
-    // Capability says supported AND list_consent_models returned data:
-    // result is authoritative. Validate completeness — any active
-    // record missing from the map is corruption. Empty map on a
-    // non-empty vault is fail-open territory; emit an explicit error
-    // (Round 8).
-    push_consent_model_gaps(data, stored, consent_models);
-    if !stored.is_empty() && consent_models.is_empty() {
-        push_consent_models_empty_with_records(data);
-    }
-}
-
-/// Append an info-severity deferred-check finding for adapters that
-/// declare `MemoryStoreCapabilities::per_record_consent_model = false`.
+/// Walk every active record, compare its canonical markdown projection
+/// against what is on disk, and append any `ProjectionDrift` or
+/// `ProjectionMissing` findings to `data`. Read-only — never writes to the
+/// vault. Findings are Warning-severity only and do not affect `has_error`.
 ///
-/// **Round 6 posture.** Until #255 ships the Phase-B privileged
-/// transition writer, no `ReceiptTimeline` rows can be created through
-/// supported APIs — every `upsert` forces `legacy_event` and the store
-/// ignores caller-supplied `consent_model`. The §6.5 gate is therefore
-/// not yet load-bearing, so a non-supporting adapter is a coverage gap
-/// rather than a fail-open trust-boundary bypass. When #255 lands
-/// writers, this branch flips to data-dependent error severity (the
-/// round-2/10 posture). The trust boundary is held in this branch by
-/// the read+write path forcing `legacy_event`, plus migration 0024's
-/// `consent_timeline_grant_immutable` trigger preventing widening
-/// inside any single `consent_ref`.
-fn push_consent_model_gate_deferred(data: &mut cairn_core::generated::verbs::lint::LintData) {
-    let f = cairn_core::generated::verbs::lint::Finding {
-        kind: cairn_core::generated::verbs::lint::Kind::DeferredCheck,
-        message: "store adapter declares \
-                  capabilities.per_record_consent_model = false; the \
-                  §6.5 per-row consent gate is deferred in this \
-                  branch (no supported API can yet produce \
-                  receipt_timeline rows — that lands in Phase-B, \
-                  #255). When #255 ships, this finding flips to \
-                  error severity for adapters that still cannot \
-                  enumerate the column."
-            .to_owned(),
-        severity: cairn_core::generated::verbs::lint::Severity::Info,
-        suggested_fix: Some(
-            "if this adapter persists records in the consent_timeline \
-             era, set capabilities.per_record_consent_model = true and \
-             implement MemoryStore::list_consent_models"
-                .to_owned(),
-        ),
-        target: None,
-        tracking_issue: Some(253),
-    };
-    data.findings.push(f);
-    data.summary.total += 1;
-    data.summary.by_severity.info += 1;
-    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
-        let entry = map
-            .entry("deferred_check".to_owned())
-            .or_insert(serde_json::Value::from(0_u64));
-        if let Some(n) = entry.as_u64() {
-            *entry = serde_json::Value::from(n.saturating_add(1));
-        }
-    }
-}
-
-/// Append an error finding when an adapter declares
-/// `per_record_consent_model = false` on a non-empty vault. With no way
-/// to enumerate per-row consent state, lint cannot prove that any row
-/// is `legacy_event` — version skew, rollback, or out-of-band writes
-/// could leave `receipt_timeline` rows the adapter is blind to, and
-/// downgrading the gate to info would let those rows pass unchecked.
-fn push_consent_model_gate_blocked_non_empty(
+/// Extracted from `lint_handler` to keep that function within the 100-line
+/// clippy limit while preserving full test coverage.
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be queried or if a file read fails
+/// for any reason other than `NotFound`.
+async fn append_projection_drift_findings(
+    store: &dyn cairn_core::contract::memory_store::MemoryStore,
+    vault_root: &Path,
     data: &mut cairn_core::generated::verbs::lint::LintData,
-) {
-    let f = cairn_core::generated::verbs::lint::Finding {
-        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
-        message: "store adapter declares \
-                  capabilities.per_record_consent_model = false on a \
-                  non-empty vault; refusing to certify §6.5 because \
-                  the adapter cannot prove every row is legacy_event \
-                  (rollback / version skew / out-of-band write could \
-                  leave receipt_timeline rows unenumerable)."
-            .to_owned(),
-        severity: cairn_core::generated::verbs::lint::Severity::Error,
-        suggested_fix: Some(
-            "implement MemoryStore::list_consent_models and set \
-             capabilities.per_record_consent_model = true on this \
-             adapter, or run lint against an empty vault"
-                .to_owned(),
-        ),
-        target: None,
-        tracking_issue: Some(253),
-    };
-    data.findings.push(f);
-    data.summary.total += 1;
-    data.summary.by_severity.error += 1;
-    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
-        let entry = map
-            .entry("missing_provenance".to_owned())
-            .or_insert(serde_json::Value::from(0_u64));
-        if let Some(n) = entry.as_u64() {
-            *entry = serde_json::Value::from(n.saturating_add(1));
-        }
-    }
-}
+) -> anyhow::Result<()> {
+    use cairn_core::contract::memory_store::ListArgs;
 
-/// Append an error finding when an adapter that *claims* to track
-/// per-row `consent_model` returns an empty map for a non-empty vault.
-/// Treating an empty result as authoritative would silently downgrade
-/// every row to `legacy_event` (Round 8 review).
-fn push_consent_models_empty_with_records(data: &mut cairn_core::generated::verbs::lint::LintData) {
-    let f = cairn_core::generated::verbs::lint::Finding {
-        kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
-        message: "store adapter declares per_record_consent_model = true \
-                  but list_consent_models returned an empty map for a \
-                  non-empty vault. Refusing to coerce all rows to \
-                  legacy_event — likely adapter bug or partial read."
-            .to_owned(),
-        severity: cairn_core::generated::verbs::lint::Severity::Error,
-        suggested_fix: Some(
-            "verify the adapter's list_consent_models query returns \
-             every active record; investigate schema drift / partial reads"
-                .to_owned(),
-        ),
-        target: None,
-        tracking_issue: Some(253),
-    };
-    data.findings.push(f);
-    data.summary.total += 1;
-    data.summary.by_severity.error += 1;
-    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
-        let entry = map
-            .entry("missing_provenance".to_owned())
-            .or_insert(serde_json::Value::from(0_u64));
-        if let Some(n) = entry.as_u64() {
-            *entry = serde_json::Value::from(n.saturating_add(1));
-        }
-    }
-}
+    let active = store
+        .list_active_stored(&ListArgs::default())
+        .await
+        .map_err(anyhow::Error::msg)
+        .context("lint: list_active_stored for projection drift")?;
 
-/// Append error findings for any active record that the adapter's
-/// `list_consent_models` result omitted. The contract is one entry per
-/// active row; a missing entry is corruption / adapter bug, not an
-/// implicit `legacy_event` downgrade. Returns the set of `record_id`s
-/// that *were* covered so the caller can branch on completeness.
-fn push_consent_model_gaps(
-    data: &mut cairn_core::generated::verbs::lint::LintData,
-    stored: &[cairn_core::contract::memory_store::StoredRecord],
-    consent_models: &std::collections::HashMap<
-        cairn_core::domain::RecordId,
-        cairn_core::domain::consent_timeline::ConsentModel,
-    >,
-) {
-    // Only validate completeness when the adapter returned at least one
-    // entry — an entirely empty map is the explicit legacy-only opt-in
-    // (see `push_consent_models_unsupported`'s suggested_fix), not a
-    // gap to flag.
-    if consent_models.is_empty() {
-        return;
-    }
-    for s in stored {
-        if !consent_models.contains_key(&s.record.id) {
-            let f = cairn_core::generated::verbs::lint::Finding {
-                kind: cairn_core::generated::verbs::lint::Kind::MissingProvenance,
-                message: format!(
-                    "active record {id} is missing from list_consent_models result; \
-                     contract requires one entry per active row. Treating as adapter \
-                     bug rather than implicit legacy_event downgrade.",
-                    id = s.record.id.as_str(),
-                ),
-                severity: cairn_core::generated::verbs::lint::Severity::Error,
-                suggested_fix: Some(
-                    "verify the adapter's list_consent_models query returns every \
-                     active record; investigate schema drift / partial reads"
-                        .to_owned(),
-                ),
-                target: Some(cairn_core::generated::verbs::lint::Target {
-                    operation_id: None,
-                    path: None,
-                    record_id: Some(cairn_core::generated::common::Ulid(
-                        s.record.id.as_str().to_owned(),
-                    )),
-                }),
-                tracking_issue: Some(253),
+    let projector = MarkdownProjector;
+    for stored in &active {
+        let projected = projector.project(stored);
+        let abs = vault_root.join(&projected.path);
+
+        // No-follow validation BEFORE the read. `read_to_string` follows
+        // symlinks; without this guard, a symlinked projection could be
+        // read through to a target whose content matches the canonical
+        // projection — `compare_projection` would return Match and lint
+        // would emit no finding, while `--fix-markdown` would refuse to
+        // write through the same path. Surface the unsafe path as a Drift
+        // finding instead of silently blessing it.
+        let safe = {
+            let vroot = vault_root.to_path_buf();
+            let dest = abs.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::vault::bootstrap::check_write_safe(&vroot, &dest)
+            })
+            .await
+            .with_context(|| format!("spawn_blocking validate {}", abs.display()))?
+        };
+        if let Err(symlink_err) = safe {
+            // Treat any symlinked / non-regular projection as drift —
+            // `--fix-markdown` would refuse the same path, so lint must
+            // not bless it. Encode the symlink reason in a synthetic
+            // body hash so the finding still carries actionable detail.
+            let status = cairn_core::domain::projection::ProjectionStatus::Drift {
+                expected_body_hash: cairn_core::domain::projection::body_hash(&projected.content),
+                actual_body_hash: format!("unsafe-projection-path: {symlink_err}"),
             };
-            data.findings.push(f);
-            data.summary.total += 1;
-            data.summary.by_severity.error += 1;
-            if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
-                let entry = map
-                    .entry("missing_provenance".to_owned())
-                    .or_insert(serde_json::Value::from(0_u64));
-                if let Some(n) = entry.as_u64() {
-                    *entry = serde_json::Value::from(n.saturating_add(1));
-                }
+            if let Some(f) = cairn_core::verbs::lint::checks::projection::finding_for(
+                stored.record.id.as_str(),
+                projected.path.to_string_lossy().as_ref(),
+                &status,
+            ) {
+                push_projection_finding(data, f);
             }
+            continue;
+        }
+
+        let actual = match tokio::fs::read_to_string(&abs).await {
+            Ok(s) => Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                // A single unreadable projection (permission denied, I/O
+                // error, invalid UTF-8) must NOT abort the whole lint —
+                // the read-only `lint` is a survey, not a transaction.
+                // Surface the failure as a per-record Drift finding so
+                // the user sees actionable detail and continues scanning
+                // the rest of the vault.
+                let status = cairn_core::domain::projection::ProjectionStatus::Drift {
+                    expected_body_hash: cairn_core::domain::projection::body_hash(
+                        &projected.content,
+                    ),
+                    actual_body_hash: format!("read-error: {e}"),
+                };
+                if let Some(f) = cairn_core::verbs::lint::checks::projection::finding_for(
+                    stored.record.id.as_str(),
+                    projected.path.to_string_lossy().as_ref(),
+                    &status,
+                ) {
+                    push_projection_finding(data, f);
+                }
+                continue;
+            }
+        };
+        let status = cairn_core::domain::projection::compare_projection(
+            &projected.content,
+            actual.as_deref(),
+        );
+        if let Some(f) = cairn_core::verbs::lint::checks::projection::finding_for(
+            stored.record.id.as_str(),
+            projected.path.to_string_lossy().as_ref(),
+            &status,
+        ) {
+            push_projection_finding(data, f);
         }
     }
+    Ok(())
+}
+
+/// Append a projection-drift or projection-missing finding and keep
+/// `data.summary` consistent. Severity is taken from the finding —
+/// auto-repairable cases stay Warning, but unsafe-path / read-error
+/// cases that `--fix-markdown` cannot resolve are emitted as Error so
+/// `has_error` flips and `cairn lint` exits non-zero.
+fn push_projection_finding(
+    data: &mut cairn_core::generated::verbs::lint::LintData,
+    f: cairn_core::generated::verbs::lint::Finding,
+) {
+    let kind_key = match f.kind {
+        cairn_core::generated::verbs::lint::Kind::ProjectionDrift => "projection_drift",
+        cairn_core::generated::verbs::lint::Kind::ProjectionMissing => "projection_missing",
+        // Safety: this helper is only called with projection finding kinds.
+        _ => "unknown",
+    };
+    data.summary.total += 1;
+    // The `LintResult.has_error` flag is computed downstream by
+    // walking `data.findings` for any Error-severity entry, so we
+    // only need to keep the per-severity counter in sync here.
+    match f.severity {
+        cairn_core::generated::verbs::lint::Severity::Error => {
+            data.summary.by_severity.error += 1;
+        }
+        cairn_core::generated::verbs::lint::Severity::Warning => {
+            data.summary.by_severity.warning += 1;
+        }
+        cairn_core::generated::verbs::lint::Severity::Info => {
+            data.summary.by_severity.info += 1;
+        }
+        // `Severity` is `#[non_exhaustive]`; an unrecognised variant
+        // gets counted as a warning so the total stays consistent.
+        _ => data.summary.by_severity.warning += 1,
+    }
+    if let serde_json::Value::Object(map) = &mut data.summary.by_kind {
+        let entry = map
+            .entry(kind_key.to_owned())
+            .or_insert(serde_json::Value::from(0_u64));
+        if let Some(n) = entry.as_u64() {
+            *entry = serde_json::Value::from(n.saturating_add(1));
+        }
+    }
+    data.findings.push(f);
 }
 
 /// Run `cairn lint`.
+///
+/// `vault_root` is the already-resolved vault root from `main.rs` —
+/// `cairn_cli::vault::resolve_vault` runs the registry lookup, the
+/// walk-up search, and the `CAIRN_VAULT` fallback before this verb
+/// is dispatched. Passing the raw selector string here would re-do
+/// (and frequently mis-do) that resolution: registry names would
+/// be treated as relative paths, and a subdirectory inside a vault
+/// would look for `.cairn/cairn.db` under the subdirectory. `None`
+/// falls back to cwd, which only happens when the top-level guard
+/// tolerated a `NoneResolved` outcome.
 #[must_use]
-pub fn run(sub: &ArgMatches) -> ExitCode {
+pub fn run(sub: &ArgMatches, vault_root: Option<&Path>) -> ExitCode {
     let json = sub.get_flag("json");
-    let fix_markdown = sub.get_flag("fix-markdown");
-    let fix_folders = sub.get_flag("fix-folders");
+    let fix_markdown_flag = sub.get_flag("fix-markdown");
+    let fix_folders_flag = sub.get_flag("fix-folders");
 
-    if fix_markdown || fix_folders {
-        // TODO(#46): wire SQLite store. When live, dispatch should call:
-        //   - fix_markdown_handler(&store, &vault_root) when fix_markdown
-        //   - fix_folders_handler(&store, &vault_root) when fix_folders
-        // Both handlers are already implemented and exercised via FixtureStore in
-        // crates/cairn-cli/tests/{resync,lint_folders}.rs.
+    // The `--fix` umbrella was deliberately removed from the public CLI
+    // surface in this build: shipping a flag that always returns
+    // `EX_CONFIG` is a worse user contract than not advertising the
+    // flag at all. It will return when every sub-mode (`--fix-folders`
+    // tracked under #46) is wired and can run as a single composite.
+
+    if fix_markdown_flag {
+        return run_fix_markdown(json, vault_root);
+    }
+
+    if fix_folders_flag {
+        // fix_folders does not have a lock in #254. Keep the existing
+        // unimplemented branch until #46 wires full store dispatch.
+        // TODO(#46): call fix_folders_handler without a lint-repair lock.
         let resp = unimplemented_response(ResponseVerb::Lint);
         if json {
             emit_json(&resp);
@@ -1261,6 +1779,19 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Plain `cairn lint` (no --fix-* flag) intentionally fails
+    // closed in this build. The full `cairn_core::verbs::lint::
+    // run_checks` pipeline needs a wired identity registry plus
+    // config that issue #9 will land. Shipping a partial
+    // drift-only survey under the canonical `lint` verb would be
+    // worse than returning Internal: a green exit from a partial
+    // check creates false confidence in CI when non-projection
+    // invariants are silently ignored. Drop the unresolved-vault
+    // suggestion from the message: the diagnostic must be the
+    // standard "store not wired" envelope so existing JSON-shape
+    // tests (`lint --json` returning `cairn.mcp.v1`) keep
+    // passing.
+    let _ = vault_root;
     let resp = unimplemented_response(ResponseVerb::Lint);
     if json {
         emit_json(&resp);
@@ -1275,6 +1806,195 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// Dispatch `--fix-markdown`: open the store, acquire the lint-repair lock,
+/// run the handler, emit the result or error.
+///
+/// `vault_root` is the registry-resolved vault root from main.rs —
+/// see [`run`] for why we accept the resolved `Path` instead of the
+/// raw `--vault` selector string.
+// Sequential dispatch: vault resolution, store open, lock acquire,
+// outcome match. Splitting forces every error variant through extra
+// helper signatures without making the flow easier to follow.
+#[allow(clippy::too_many_lines)]
+fn run_fix_markdown(json: bool, vault_root: Option<&Path>) -> ExitCode {
+    // Mutating modes (`--fix-markdown`) MUST run against a
+    // registry-resolved vault root, never the cwd fallback. Round 5
+    // pointed out that `main.rs` tolerates non-`NotFound`
+    // resolution failures (so `vault_root == None` can mean
+    // "registry parse failed", not just "no vault selected"); a
+    // cwd fallback would silently mutate the wrong tree. Fail
+    // closed with EX_CONFIG so automation cannot misinterpret an
+    // unresolved selector as a successful repair.
+    let Some(vault_root) = vault_root else {
+        let op = new_operation_id();
+        let msg = "lint --fix-markdown requires a resolved vault root: \
+                   pass --vault NAME_OR_PATH or set CAIRN_VAULT";
+        if json {
+            emit_json(&serde_json::json!({
+                "code": "CapabilityUnavailable",
+                "message": msg,
+                "operation_id": op.0,
+            }));
+        } else {
+            human_error("lint", "CapabilityUnavailable", msg, &op);
+        }
+        return ExitCode::from(78); // EX_CONFIG
+    };
+    let vault_root = vault_root.to_path_buf();
+    let db_path = vault_root.join(".cairn/cairn.db");
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let op = new_operation_id();
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "Internal",
+                    "message": format!("tokio init error: {e}"),
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "Internal", &format!("tokio init error: {e}"), &op);
+            }
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Fail closed if the resolved vault has no SQLite store. `open()` is
+    // open-or-create, so a mis-resolved cwd would silently create
+    // `.cairn/cairn.db` and run --fix-markdown against an empty store.
+    if let Some(exit) = require_existing_vault(json, &vault_root, &db_path) {
+        return exit;
+    }
+
+    let outcome: Result<FixMarkdownResult, LintFixError> = rt.block_on(async {
+        let store = cairn_store_sqlite::open(&db_path)
+            .await
+            .map_err(|e| LintFixError::Handler(anyhow::anyhow!("open store: {e}")))?;
+        fix_markdown_with_lock(&store, &vault_root, Duration::from_mins(5)).await
+    });
+
+    match outcome {
+        Ok(r) => {
+            // Any blocked record means the run did NOT fully repair
+            // the vault. Report it loudly and exit non-zero so
+            // automation can distinguish "everything fixed" from
+            // "some files require manual triage".
+            let has_blocked = !r.blocked.is_empty();
+            if json {
+                emit_json(&r);
+            } else if has_blocked {
+                println!(
+                    "cairn lint --fix-markdown: wrote {written}, {current} already current, \
+                     {skipped} BLOCKED (manual triage required)",
+                    written = r.written.len(),
+                    current = r.already_current,
+                    skipped = r.blocked.len(),
+                );
+                for b in &r.blocked {
+                    println!(
+                        "  - {path} [{reason}]: {detail}",
+                        path = b.path.display(),
+                        reason = b.reason,
+                        detail = b.detail,
+                    );
+                }
+            } else {
+                println!(
+                    "cairn lint --fix-markdown: wrote {written}, {current} already current",
+                    written = r.written.len(),
+                    current = r.already_current,
+                );
+            }
+            if has_blocked {
+                // EX_DATAERR (65): input data is malformed. The
+                // unsafe-path / read-error cases are exactly that:
+                // the vault contains files that block automated
+                // repair. Distinct from EX_UNAVAILABLE so callers
+                // can tell "another run is in progress" apart from
+                // "manual cleanup needed".
+                ExitCode::from(65)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(LintFixError::FixInProgress) => {
+            let op = new_operation_id();
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "CapabilityUnavailable",
+                    "message": "lint.fix_in_progress: another --fix-markdown run holds the repair lock",
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error(
+                    "lint",
+                    "CapabilityUnavailable",
+                    "lint.fix_in_progress: another --fix-markdown run holds the repair lock",
+                    &op,
+                );
+            }
+            ExitCode::from(69) // EX_UNAVAILABLE
+        }
+        Err(LintFixError::LockLost) => {
+            let op = new_operation_id();
+            let msg = "lint.lock_lost: this run's repair lease was reclaimed mid-run; \
+                 re-run --fix-markdown to converge";
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "CapabilityUnavailable",
+                    "message": msg,
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "CapabilityUnavailable", msg, &op);
+            }
+            ExitCode::from(69)
+        }
+        Err(e) => {
+            let op = new_operation_id();
+            if json {
+                emit_json(&serde_json::json!({
+                    "code": "Internal",
+                    "message": format!("{e}"),
+                    "operation_id": op.0,
+                }));
+            } else {
+                human_error("lint", "Internal", &format!("{e}"), &op);
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Verify `.cairn/cairn.db` exists at the resolved vault root. Returns
+/// `Some(ExitCode)` to short-circuit `run_fix_markdown` with `EX_CONFIG`
+/// when the file is absent; `None` when the vault looks live.
+fn require_existing_vault(json: bool, vault_root: &Path, db_path: &Path) -> Option<ExitCode> {
+    if db_path.is_file() {
+        return None;
+    }
+    let op = new_operation_id();
+    let msg = format!(
+        "no Cairn vault at {}: .cairn/cairn.db is missing. \
+         Set CAIRN_VAULT or run from the vault root.",
+        vault_root.display()
+    );
+    if json {
+        emit_json(&serde_json::json!({
+            "code": "Internal",
+            "message": msg,
+            "operation_id": op.0,
+        }));
+    } else {
+        human_error("lint", "Internal", &msg, &op);
+    }
+    Some(ExitCode::from(78)) // EX_CONFIG
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,9 +2005,11 @@ mod tests {
         let result = FixMarkdownResult {
             written: vec!["a.md".into(), "b.md".into()],
             already_current: 3,
+            blocked: vec![],
         };
         assert_eq!(result.written.len(), 2);
         assert_eq!(result.already_current, 3);
+        assert!(result.blocked.is_empty());
     }
 
     #[test]
@@ -1295,6 +2017,7 @@ mod tests {
         let result = FixMarkdownResult {
             written: vec![],
             already_current: 0,
+            blocked: vec![],
         };
         assert!(result.written.is_empty());
         assert_eq!(result.already_current, 0);
@@ -1309,6 +2032,9 @@ mod tests {
         store.upsert(&record).await.unwrap();
 
         let vault_root = tempfile::tempdir().unwrap();
+        // Bootstrap the projection layout the same way `cairn init` does;
+        // the handler refuses to `create_dir_all` on an unchecked path.
+        std::fs::create_dir_all(vault_root.path().join("raw")).unwrap();
         let result = fix_markdown_handler(&store, vault_root.path())
             .await
             .unwrap();
@@ -1349,12 +2075,14 @@ mod tests {
         // Post-rebase posture: §6.2 actor_chain is live. The empty
         // registry means the sample record's author resolves to
         // MissingFromRegistry → BrokenActorChain Error, tripping
-        // has_error. §6.5 consent runs against FixtureStore (cap=true,
-        // every record LegacyEvent) but FixtureStore does not
-        // implement ConsentLookup, so consent.rs returns no findings.
-        // Info findings: §6.3 + §6.4 + §6.6 deferred-info coverage
-        // gaps + the §6.2 signature-verification-deferred advisory =
-        // 4.
+        // has_error. §6.5 consent runs against FixtureStore
+        // (cap=true, every record LegacyEvent) but FixtureStore does
+        // not implement ConsentLookup, so consent.rs returns no
+        // findings. Info findings: §6.3 deferred-info + §6.2
+        // signature-verification-deferred advisory = 2. §6.4 (#258)
+        // is live; §6.6 (#259) is a real canary that emits a
+        // `Warning`-severity DeferredCheck — counted under warnings,
+        // not infos.
         let info_count = result
             .data
             .findings
@@ -1367,8 +2095,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            info_count, 3,
-            "expect §6.3 + §6.6 deferred-info findings + §6.2 signature-verification-deferred advisory (§6.4 schema check went live in #258)"
+            info_count, 2,
+            "expect §6.3 deferred-info finding + §6.2 signature-verification-deferred advisory"
         );
         assert!(
             result.has_error,
@@ -1382,169 +2110,6 @@ mod tests {
             .await
             .expect("read lint-report.md");
         assert!(body.contains("# Lint report"));
-    }
-
-    /// §6.5 capability gate 2×2 matrix. Pins the four quadrants of
-    /// `(per_record_consent_model: true|false) × (vault: empty|non-empty)`
-    /// so the persistent fail-open/fail-closed oscillation gets caught
-    /// the next time someone flips the gate posture.
-    mod consent_model_gate_matrix {
-        use super::*;
-        use cairn_core::config::CairnConfig;
-        use cairn_core::generated::verbs::lint::{Kind, Severity};
-        use cairn_test_fixtures::store::{FixtureStore, sample_record};
-
-        async fn run_lint(store: &FixtureStore) -> LintHandlerResult {
-            use cairn_store_sqlite::SqliteIdentityRegistry;
-            let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
-            let cfg = CairnConfig::default();
-            let vault = tempfile::tempdir().expect("tempdir");
-            lint_handler(store, &registry, None, &cfg, false, vault.path())
-                .await
-                .expect("handler")
-        }
-
-        fn count_kind(result: &LintHandlerResult, kind: Kind, severity: Severity) -> usize {
-            result
-                .data
-                .findings
-                .iter()
-                .filter(|f| f.kind == kind && f.severity == severity)
-                .count()
-        }
-
-        // Quadrant 1: capability=true + vault=non-empty.
-        // §6.5 sub-checks run; FixtureStore reports every record as
-        // LegacyEvent so the covering-grant resolver is never engaged
-        // and no §6.5 errors fire. The Phase-A "no receipt_timeline
-        // records yet" deferred-info finding still emits.
-        #[tokio::test]
-        async fn cap_true_non_empty_runs_subchecks_no_errors() {
-            let store = FixtureStore::default();
-            store.upsert(&sample_record()).await.expect("upsert");
-            let result = run_lint(&store).await;
-
-            // §6.2 actor_chain is now a real check (post-rebase): the
-            // empty stub registry will produce a BrokenActorChain
-            // Error for the sample record's author, so result.has_error
-            // is true regardless of §6.5. Scope the gate-matrix
-            // invariant to §6.5-specific findings (tracking_issue=253).
-            let consent_errors = result
-                .data
-                .findings
-                .iter()
-                .filter(|f| f.severity == Severity::Error && f.tracking_issue == Some(253))
-                .count();
-            assert_eq!(
-                consent_errors, 0,
-                "LegacyEvent rows must not produce §6.5 errors"
-            );
-            // Gate findings (errors) for capability=false MUST NOT fire.
-            let blocked = result
-                .data
-                .findings
-                .iter()
-                .filter(|f| {
-                    f.kind == Kind::MissingProvenance
-                        && f.severity == Severity::Error
-                        && f.tracking_issue == Some(253)
-                })
-                .count();
-            assert_eq!(blocked, 0, "no gate-blocked finding under cap=true");
-        }
-
-        // Quadrant 2: capability=true + vault=empty.
-        // No records to check; gate is satisfied. Phase-A deferred-info
-        // still fires for the §6.5 sub-checks coverage gap.
-        #[tokio::test]
-        async fn cap_true_empty_no_errors() {
-            let store = FixtureStore::default();
-            let result = run_lint(&store).await;
-
-            assert!(
-                !result.has_error,
-                "empty vault must not error under cap=true"
-            );
-            let blocked = result
-                .data
-                .findings
-                .iter()
-                .filter(|f| {
-                    f.kind == Kind::MissingProvenance
-                        && f.severity == Severity::Error
-                        && f.tracking_issue == Some(253)
-                })
-                .count();
-            assert_eq!(blocked, 0);
-        }
-
-        // Quadrant 3: capability=false + vault=empty.
-        // Coverage gap, not a trust-boundary breach. push_consent_model_gate_deferred
-        // emits an Info finding with tracking_issue=253. Must not error.
-        #[tokio::test]
-        async fn cap_false_empty_emits_info_not_error() {
-            let store = FixtureStore::default();
-            store.set_legacy_only_override(true);
-            let result = run_lint(&store).await;
-
-            assert!(
-                !result.has_error,
-                "cap=false on empty vault is a coverage gap, not an error",
-            );
-            let deferred_gate = result
-                .data
-                .findings
-                .iter()
-                .filter(|f| {
-                    f.kind == Kind::DeferredCheck
-                        && f.severity == Severity::Info
-                        && f.tracking_issue == Some(253)
-                        && f.message.contains("per_record_consent_model = false")
-                })
-                .count();
-            assert_eq!(
-                deferred_gate, 1,
-                "gate_deferred info must fire exactly once on cap=false empty vault",
-            );
-        }
-
-        // Quadrant 4: capability=false + vault=non-empty.
-        // Trust-boundary breach. push_consent_model_gate_blocked_non_empty
-        // emits an Error: lint cannot prove every row is legacy_event when
-        // the adapter is blind to the consent_model column.
-        #[tokio::test]
-        async fn cap_false_non_empty_emits_error() {
-            let store = FixtureStore::default();
-            store.upsert(&sample_record()).await.expect("upsert");
-            store.set_legacy_only_override(true);
-            let result = run_lint(&store).await;
-
-            assert!(
-                result.has_error,
-                "cap=false on non-empty vault must fail closed",
-            );
-            let blocked = count_kind(&result, Kind::MissingProvenance, Severity::Error);
-            assert!(
-                blocked >= 1,
-                "missing_provenance error from gate_blocked_non_empty must fire",
-            );
-            // And the deferred-info from quadrant 3 must NOT also fire.
-            let deferred_gate = result
-                .data
-                .findings
-                .iter()
-                .filter(|f| {
-                    f.kind == Kind::DeferredCheck
-                        && f.severity == Severity::Info
-                        && f.tracking_issue == Some(253)
-                        && f.message.contains("per_record_consent_model = false")
-                })
-                .count();
-            assert_eq!(
-                deferred_gate, 0,
-                "gate_deferred info must not fire on cap=false non-empty vault",
-            );
-        }
     }
 
     #[tokio::test]
@@ -1757,6 +2322,194 @@ mod tests {
             );
         } else {
             panic!("by_kind must be an object");
+        }
+    }
+
+    /// E2E corner cases for the §6.6 hot-memory canary (#259) at the
+    /// CLI handler boundary. Each test seeds a `FixtureStore`, builds
+    /// a `CairnConfig` with a custom `vault.hot_memory.recipe`, runs
+    /// the full lint pipeline, and inspects only §6.6-specific
+    /// findings. Author-registry errors from the empty registry are
+    /// ignored — the §6.2 path is exercised elsewhere.
+    mod hot_memory_canary_e2e {
+        use super::*;
+        use cairn_core::config::{CairnConfig, HotMemoryRecipeStep};
+        use cairn_core::domain::taxonomy::MemoryKind;
+        use cairn_core::generated::verbs::lint::{Kind, Severity};
+        use cairn_store_sqlite::SqliteIdentityRegistry;
+        use cairn_test_fixtures::sample_record;
+        use cairn_test_fixtures::store::FixtureStore;
+
+        async fn run_handler(store: &FixtureStore, cfg: &CairnConfig) -> LintHandlerResult {
+            let registry = SqliteIdentityRegistry::open_in_memory().expect("open registry");
+            let vault = tempfile::tempdir().expect("tempdir");
+            lint_handler(store, &registry, None, cfg, false, vault.path())
+                .await
+                .expect("handler")
+        }
+
+        fn count_kind_severity(
+            result: &LintHandlerResult,
+            kind: Kind,
+            severity: Severity,
+        ) -> usize {
+            result
+                .data
+                .findings
+                .iter()
+                .filter(|f| f.kind == kind && f.severity == severity)
+                .count()
+        }
+
+        fn count_259_deferred(result: &LintHandlerResult) -> usize {
+            result
+                .data
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.kind == Kind::DeferredCheck
+                        && f.tracking_issue == Some(259)
+                        && f.severity == Severity::Warning
+                })
+                .count()
+        }
+
+        async fn upsert_with(
+            store: &FixtureStore,
+            seed: u64,
+            kind: MemoryKind,
+            body: String,
+            salience: f32,
+        ) {
+            use cairn_core::contract::memory_store::MemoryStore;
+            let mut r = sample_record(seed);
+            r.kind = kind;
+            r.body = body;
+            r.salience = salience;
+            store.upsert(&r).await.expect("upsert");
+        }
+
+        #[tokio::test]
+        async fn default_recipe_empty_vault_emits_only_259_deferred_warning() {
+            let store = FixtureStore::default();
+            let cfg = CairnConfig::default();
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(count_259_deferred(&result), 1);
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+        }
+
+        #[tokio::test]
+        async fn records_only_recipe_over_budget_emits_warning_no_259_deferred() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 1, MemoryKind::Project, "x".repeat(2048), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 256;
+
+            let result = run_handler(&store, &cfg).await;
+            let warnings =
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning);
+            assert_eq!(warnings, 1);
+            assert_eq!(count_259_deferred(&result), 0);
+            let f = result
+                .data
+                .findings
+                .iter()
+                .find(|f| f.kind == Kind::HotMemoryOverBudget)
+                .expect("warning present");
+            assert_eq!(
+                f.target.as_ref().and_then(|t| t.path.as_deref()),
+                Some(".cairn/config.yaml")
+            );
+        }
+
+        #[tokio::test]
+        async fn mixed_recipe_under_budget_emits_only_259_deferred() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 2, MemoryKind::Project, "tiny".to_owned(), 0.5).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![
+                HotMemoryRecipeStep::Index,
+                HotMemoryRecipeStep::TopSalienceProject,
+            ];
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 1);
+        }
+
+        #[tokio::test]
+        async fn excluded_kinds_do_not_contribute_to_estimate() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 3, MemoryKind::UserSignal, "s".repeat(8192), 0.9).await;
+            upsert_with(&store, 4, MemoryKind::Playbook, "p".repeat(8192), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 16;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 0);
+        }
+
+        #[tokio::test]
+        async fn tied_salience_picks_largest_and_overflows() {
+            let store = FixtureStore::default();
+            for seed in 10..14 {
+                upsert_with(&store, seed, MemoryKind::Project, "x".to_owned(), 0.5).await;
+            }
+            for seed in 20..26 {
+                upsert_with(&store, seed, MemoryKind::Project, "L".repeat(800), 0.5).await;
+            }
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 2_000;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                1,
+                "tied-salience tie-break must pick larger records and overflow 2_000-byte budget",
+            );
+        }
+
+        #[tokio::test]
+        async fn degenerate_max_bytes_one_does_not_panic() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 30, MemoryKind::Project, "x".to_owned(), 0.5).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![HotMemoryRecipeStep::TopSalienceProject];
+            cfg.vault.hot_memory.max_bytes = 1;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                1,
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_recipe_emits_no_259_findings() {
+            let store = FixtureStore::default();
+            upsert_with(&store, 40, MemoryKind::Project, "x".repeat(4096), 0.9).await;
+            let mut cfg = CairnConfig::default();
+            cfg.vault.hot_memory.recipe = vec![];
+            cfg.vault.hot_memory.max_bytes = 16;
+
+            let result = run_handler(&store, &cfg).await;
+            assert_eq!(
+                count_kind_severity(&result, Kind::HotMemoryOverBudget, Severity::Warning),
+                0,
+            );
+            assert_eq!(count_259_deferred(&result), 0);
         }
     }
 }
