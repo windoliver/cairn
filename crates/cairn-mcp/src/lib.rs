@@ -91,8 +91,37 @@ register_plugin!(MCPServer, CairnMcpServer, "cairn-mcp", MANIFEST_TOML);
 /// errors: those surface inside the MCP protocol as
 /// `CallToolResult { is_error: true }` and do not reach this function's return
 /// value.
+#[deprecated(
+    since = "0.1.0",
+    note = "use serve_stdio_with_store; serve_stdio returns the 8-verb manifest \
+            with no store wiring and is retained only for unwired-fallback callers"
+)]
 pub async fn serve_stdio() -> Result<(), TransportError> {
     let handler = CairnMcpHandler::new();
+    let transport = rmcp::transport::io::stdio();
+    let service = handler
+        .serve(transport)
+        .await
+        .map_err(|e| TransportError::Service(e.to_string()))?;
+    service
+        .waiting()
+        .await
+        .map_err(|e| TransportError::Service(e.to_string()))?;
+    Ok(())
+}
+
+/// Plan A entry point: serve MCP over stdio with a wired store, scope
+/// resolver, and principal.
+///
+/// # Errors
+/// Same shape as [`serve_stdio`].
+pub async fn serve_stdio_with_store(
+    store: std::sync::Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    scope: std::sync::Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+) -> Result<(), TransportError> {
+    let handler = CairnMcpHandler::with_store_and_scope(store, scope, config, principal);
     let transport = rmcp::transport::io::stdio();
     let service = handler
         .serve(transport)

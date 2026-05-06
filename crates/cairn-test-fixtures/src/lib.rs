@@ -15,6 +15,7 @@ pub mod store;
 pub use fake_consent_lookup::FakeConsentLookup;
 pub use hybrid_vault::{HybridTestVault, RecordSpec, build_hybrid_test_vault};
 pub use keystore::MemoryKeystore;
+pub use store::FixtureStore;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

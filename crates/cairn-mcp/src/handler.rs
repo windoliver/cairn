@@ -18,6 +18,7 @@ use rmcp::{
 
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::MemoryStore;
+use cairn_core::domain::ScopeTuple;
 
 use crate::generated::TOOLS;
 
@@ -29,7 +30,9 @@ use crate::generated::TOOLS;
 /// [`dispatch_stub`] until their real dispatch lands in a follow-up PR.
 pub struct CairnMcpHandler {
     store: Option<Arc<dyn MemoryStore>>,
+    scope: Option<Arc<dyn cairn_core::mcp_auth::McpSessionScope>>,
     config: CairnConfig,
+    principal: ScopeTuple,
 }
 
 impl Default for CairnMcpHandler {
@@ -42,6 +45,7 @@ impl std::fmt::Debug for CairnMcpHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CairnMcpHandler")
             .field("store_wired", &self.store.is_some())
+            .field("scope_wired", &self.scope.is_some())
             // config omitted: may contain sensitive keys (embedding model paths,
             // provider credentials). Use finish_non_exhaustive to signal the
             // omission to derive-based tooling.
@@ -55,7 +59,9 @@ impl CairnMcpHandler {
     pub fn new() -> Self {
         Self {
             store: None,
+            scope: None,
             config: CairnConfig::default(),
+            principal: ScopeTuple::default(),
         }
     }
 
@@ -67,8 +73,54 @@ impl CairnMcpHandler {
     pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
         Self {
             store: Some(store),
+            scope: None,
             config,
+            principal: ScopeTuple::default(),
         }
+    }
+
+    /// Create a handler wired to a real store, a scope resolver, and a
+    /// principal. Plan A entry point — `tools/list` still returns the
+    /// 8-verb manifest; graph tools land in Plan C.
+    #[must_use]
+    pub fn with_store_and_scope(
+        store: Arc<dyn MemoryStore>,
+        scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+        config: CairnConfig,
+        principal: ScopeTuple,
+    ) -> Self {
+        Self {
+            store: Some(store),
+            scope: Some(scope),
+            config,
+            principal,
+        }
+    }
+
+    /// Returns `true` if a store is wired into this handler.
+    #[must_use]
+    pub fn has_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Returns `true` if a scope resolver is wired into this handler.
+    #[must_use]
+    pub fn has_scope(&self) -> bool {
+        self.scope.is_some()
+    }
+
+    /// Returns the principal this handler was constructed with.
+    #[must_use]
+    pub fn principal(&self) -> &ScopeTuple {
+        &self.principal
+    }
+
+    /// Returns the names of all tools in the current manifest.
+    ///
+    /// Plan A: always the 8-verb [`TOOLS`] slice — no `graph.*` tools.
+    #[must_use]
+    pub fn listed_tool_names(&self) -> Vec<String> {
+        TOOLS.iter().map(|t| t.name.to_string()).collect()
     }
 }
 
@@ -280,4 +332,56 @@ pub fn dispatch_stub(verb: &str) -> CallToolResult {
         "cairn {verb}: not yet implemented in this P0 scaffold. \
          Verb dispatch lands in a follow-up PR; no memory operation was performed."
     ))])
+}
+
+#[cfg(test)]
+mod tests_plan_a {
+    use super::*;
+    use std::sync::Arc;
+    use cairn_core::config::CairnConfig;
+    use cairn_core::domain::ScopeTuple;
+    use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
+    use cairn_test_fixtures::FixtureStore;
+
+    fn principal() -> ScopeTuple {
+        ScopeTuple {
+            tenant: Some("acme".into()),
+            ..ScopeTuple::default()
+        }
+    }
+
+    #[test]
+    fn handler_with_store_carries_scope_and_principal() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let cfg = CairnConfig::default();
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        assert!(handler.has_store());
+        assert!(handler.has_scope());
+        assert_eq!(handler.principal().tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn manifest_without_graph_tools_in_plan_a() {
+        let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+            Arc::new(FixtureStore::default());
+        let scope: Arc<dyn McpSessionScope> = Arc::new(ConfigBackedScope::new(principal()));
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal());
+        let handler = CairnMcpHandler::with_store_and_scope(store, scope, cfg, principal());
+        let listed = handler.listed_tool_names();
+        assert_eq!(
+            listed.len(),
+            crate::generated::TOOLS.len(),
+            "Plan A: no graph tools added to manifest"
+        );
+        for tool in listed {
+            assert!(
+                !tool.starts_with("graph."),
+                "Plan A must not list graph.* tools, got `{tool}`"
+            );
+        }
+    }
 }
