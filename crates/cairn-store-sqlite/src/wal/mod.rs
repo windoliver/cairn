@@ -5,3 +5,6 @@
 //! against the `wal_ops` table.
 
 pub mod lint_repair;
+pub mod runner;
+
+pub use runner::{RunnerError, StepBody, StepBodyError, run_from};
