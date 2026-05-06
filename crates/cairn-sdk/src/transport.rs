@@ -69,12 +69,6 @@ pub struct Sdk<T: Transport = InProcess> {
     store: Option<Arc<dyn MemoryStore>>,
     /// Active config, used for capability derivation and dispatch knobs.
     config: CairnConfig,
-    /// Optional vault-binding token. `Some(_)` proves the SDK was
-    /// constructed against a verified Cairn vault (mirrors the CLI's
-    /// `probe_vault_binding` gate). Vault-sensitive verbs such as
-    /// `assemble_hot` require this to be `Some`; an unbound SDK gets
-    /// [`SdkError::Unimplemented`] from those paths.
-    vault_id: Option<cairn_core::domain::identity::keys::VaultId>,
 }
 
 impl std::fmt::Debug for Sdk {
@@ -99,7 +93,6 @@ impl Clone for Sdk {
             _transport: InProcess,
             store: self.store.clone(),
             config: self.config.clone(),
-            vault_id: self.vault_id.clone(),
         }
     }
 }
@@ -115,7 +108,6 @@ impl Sdk<InProcess> {
             _transport: InProcess,
             store: None,
             config: CairnConfig::default(),
-            vault_id: None,
         }
     }
 
@@ -125,54 +117,18 @@ impl Sdk<InProcess> {
     /// dispatch against the supplied store. The store is shared via [`Arc`]
     /// so callers can keep their own handle.
     ///
-    /// **Note**: this constructor does NOT set a vault-binding token, so
-    /// vault-sensitive verbs (e.g. `assemble_hot`) still return
-    /// [`SdkError::Unimplemented`]. Use [`Sdk::with_vault`] to construct
-    /// an SDK against a verified vault binding.
+    /// **Note**: vault-sensitive verbs (e.g. `assemble_hot`) still return
+    /// [`SdkError::Unimplemented`] regardless of `with_store` — the SDK
+    /// has no safe way to couple a vault root to the supplied config from
+    /// this layer; that wiring lands with #193. Use the CLI for committed
+    /// `assemble_hot` until then.
     #[must_use]
     pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
         Self {
             _transport: InProcess,
             store: Some(store),
             config,
-            vault_id: None,
         }
-    }
-
-    /// Construct an in-process SDK client bound to a verified vault root.
-    ///
-    /// Reads `<vault_root>/.cairn/vault.id`, parses it as a [`VaultId`],
-    /// and stores the result. Mirrors the CLI's vault-probe gate; the
-    /// resulting `vault_id` is non-forgeable in the sense that the caller
-    /// cannot inject an arbitrary string — they must operate against a
-    /// real bootstrapped vault. Vault-sensitive verbs (`assemble_hot`)
-    /// only succeed on an SDK constructed via this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdkError::InvalidArgs`] when `vault_root/.cairn/vault.id`
-    /// is missing, unreadable, or not a valid ULID.
-    pub fn with_vault(
-        store: Arc<dyn MemoryStore>,
-        config: CairnConfig,
-        vault_root: &std::path::Path,
-    ) -> Result<Self, SdkError> {
-        let sentinel = vault_root.join(".cairn").join("vault.id");
-        let raw = std::fs::read_to_string(&sentinel).map_err(|e| SdkError::InvalidArgs {
-            reason: format!("vault binding: cannot read {} ({e})", sentinel.display()),
-        })?;
-        let vault_id =
-            cairn_core::domain::identity::keys::VaultId::parse(raw.trim()).map_err(|e| {
-                SdkError::InvalidArgs {
-                    reason: format!("vault binding: invalid vault.id ({e})"),
-                }
-            })?;
-        Ok(Self {
-            _transport: InProcess,
-            store: Some(store),
-            config,
-            vault_id: Some(vault_id),
-        })
     }
 }
 
@@ -402,19 +358,18 @@ impl<T: Transport> Sdk<T> {
     /// either with [`SdkError::InvalidArgs`]. Both will become real once #193
     /// lands the loader.
     ///
-    /// Mirrors the CLI's vault-binding gate: the SDK rejects `assemble_hot`
-    /// with [`SdkError::Unimplemented`] unless it was constructed via
-    /// [`Sdk::with_vault`] with a verified [`VaultId`]. Returning a
-    /// committed assembly from an unbound or default config would silently
-    /// mask misconfiguration and become a wrong-vault injection vector
-    /// once real loading lands. A wired store alone is **not** sufficient;
-    /// callers must prove vault-binding via `with_vault`.
+    /// **The SDK currently always returns [`SdkError::Unimplemented`] for
+    /// `assemble_hot`.** Tying vault-binding to the [`HotMemoryConfig`]
+    /// safely requires a core-side config loader (so SDK callers cannot
+    /// accidentally pair vault A's `vault.id` with vault B's recipe), and
+    /// that loader lands with the real source-loading change in #193.
+    /// Until then the CLI is the only surface that returns committed
+    /// assemblies — it loads config from the same `vault_root` it probes,
+    /// so the binding cannot diverge.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
-        use cairn_core::generated::envelope::ResponseVerb;
-
         validate_assemble_hot(args)?;
 
         if args.budget.is_some() {
@@ -430,25 +385,9 @@ impl<T: Transport> Sdk<T> {
             ));
         }
 
-        if self.vault_id.is_none() {
-            return Err(unimplemented("assemble_hot"));
-        }
-
-        match cairn_core::verbs::assemble_hot::assemble_hot(&self.config.vault.hot_memory) {
-            Ok(data) => Ok(VerbResponse {
-                operation_id: crate::stub::new_operation_id(),
-                policy_trace: vec![],
-                verb: ResponseVerb::AssembleHot,
-                target: None,
-                data,
-            }),
-            Err(e) => Err(SdkError::Protocol {
-                code: crate::error::ErrorCode::Internal,
-                message: format!("assemble_hot dispatcher error: {e}"),
-                data: None,
-                operation_id: crate::stub::new_operation_id(),
-            }),
-        }
+        // Always Unimplemented until #193 lands a vault-coupled config
+        // loader. The CLI verb is the canonical surface for now.
+        Err(unimplemented("assemble_hot"))
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).

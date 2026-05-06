@@ -950,61 +950,25 @@ fn assemble_hot_rejects_any_session_id_until_loader_lands() {
 }
 
 #[test]
-fn assemble_hot_without_vault_returns_unimplemented() {
-    // SDK fails closed on `Sdk::new()`: no vault binding = no verified
-    // context. Mirrors the CLI's vault-binding gate.
+fn assemble_hot_returns_unimplemented_in_sdk() {
+    // The SDK cannot safely couple a vault root to the supplied config
+    // from this layer — that wiring lands with #193. Until then, every
+    // SDK construction returns Unimplemented for assemble_hot; the CLI
+    // is the canonical surface (it loads config from the same root it
+    // probes, so vault-binding cannot diverge).
     let args = AssembleHotArgs {
         budget: None,
         session_id: None,
     };
     assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
-}
 
-#[test]
-fn assemble_hot_with_store_but_no_vault_returns_unimplemented() {
-    // A wired store alone is not sufficient — `with_store` does not prove
-    // vault binding. Use `with_vault` for vault-sensitive verbs.
-    let sdk = Sdk::with_store(
+    // Wiring a store does not change the answer — config and vault.id
+    // would still be decoupled.
+    let sdk_wired = Sdk::with_store(
         std::sync::Arc::new(noop_store::NoopStore),
         cairn_core::config::CairnConfig::default(),
     );
-    let args = AssembleHotArgs {
-        budget: None,
-        session_id: None,
-    };
-    assert_unimplemented("assemble_hot", sdk.assemble_hot(&args));
-}
-
-#[test]
-fn sdk_assemble_hot_returns_typed_segments() {
-    // Success path requires `with_vault`, which reads the vault.id sentinel
-    // off disk — minting a VaultId in process is not sufficient. Write a
-    // real sentinel into a tempdir.
-    let dir = tempfile::tempdir().expect("tempdir");
-    let cairn = dir.path().join(".cairn");
-    std::fs::create_dir_all(&cairn).unwrap();
-    let vault_id = cairn_core::domain::identity::keys::VaultId::mint();
-    std::fs::write(cairn.join("vault.id"), vault_id.as_str()).unwrap();
-    let sdk = Sdk::with_vault(
-        std::sync::Arc::new(noop_store::NoopStore),
-        cairn_core::config::CairnConfig::default(),
-        dir.path(),
-    )
-    .expect("vault binding ok");
-    let resp = sdk
-        .assemble_hot(&AssembleHotArgs {
-            budget: None,
-            session_id: None,
-        })
-        .expect("assemble_hot ok");
-
-    let data = resp.data;
-    let segments = data.segments.expect("segments emitted");
-    assert_eq!(segments.len(), 6);
-    for s in &segments {
-        assert_eq!(s.byte_start, 0);
-        assert_eq!(s.byte_end, 0);
-    }
+    assert_unimplemented("assemble_hot", sdk_wired.assemble_hot(&args));
 }
 
 #[test]
