@@ -194,6 +194,25 @@ async fn read_op_state(conn: &Arc<Connection>, op_id: &str) -> String {
     .expect("read op state")
 }
 
+async fn read_step_row(
+    conn: &Arc<Connection>,
+    op_id: &str,
+    ord: u32,
+) -> (String, u32) {
+    let op = op_id.to_owned();
+    conn.call(move |c| {
+        let row: (String, u32) = c.query_row(
+            "SELECT state, attempts FROM wal_steps \
+             WHERE operation_id = ?1 AND step_ord = ?2",
+            params![op, ord],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)),
+        )?;
+        Ok::<_, tokio_rusqlite::Error>(row)
+    })
+    .await
+    .expect("read step row")
+}
+
 fn upsert_step_names() -> Vec<&'static str> {
     cairn_core::wal::UPSERT_STEPS.iter().map(|s| s.name).collect()
 }
@@ -299,6 +318,17 @@ async fn prepared_partial_resumes_from_next_step_only() {
     for ord in 2..6 {
         assert_eq!(body.calls(ord), 1, "step {ord} should run exactly once");
     }
+    // Steps 0,1 were pre-seeded as DONE with attempts=1 and stay that way.
+    assert_eq!(read_step_row(&conn, "op-partial", 0).await, ("DONE".into(), 1));
+    assert_eq!(read_step_row(&conn, "op-partial", 1).await, ("DONE".into(), 1));
+    // Steps 2..=5 ran exactly once via the runner's fresh-row path: attempts=1.
+    for ord in 2..6 {
+        assert_eq!(
+            read_step_row(&conn, "op-partial", ord).await,
+            ("DONE".into(), 1),
+            "step {ord} should be DONE with attempts=1"
+        );
+    }
 }
 
 #[tokio::test]
@@ -320,6 +350,10 @@ async fn retry_exhaustion_aborts_op() {
     assert_eq!(read_op_state(&conn, "op-fail").await, "ABORTED");
     // Step 1 body called 3 times (MAX_STEP_ATTEMPTS).
     assert_eq!(body.calls(1), cairn_core::wal::MAX_STEP_ATTEMPTS);
+    // wal_steps row for step 1 must be durably FAILED with attempts == MAX.
+    let (state, attempts) = read_step_row(&conn, "op-fail", 1).await;
+    assert_eq!(state, "FAILED");
+    assert_eq!(attempts, cairn_core::wal::MAX_STEP_ATTEMPTS);
 }
 
 #[tokio::test]
@@ -376,6 +410,15 @@ async fn repeated_recovery_after_partial_is_idempotent() {
     }
     // Step 0 was pre-seeded DONE — body never invoked.
     assert_eq!(body.calls(0), 0, "step 0 was pre-DONE; body must not run");
+    // After 3 recovery passes, every wal_steps row is durably DONE with
+    // attempts=1 — recovery never re-stamped already-DONE rows.
+    for ord in 0..6 {
+        assert_eq!(
+            read_step_row(&conn, "op-rep", ord).await,
+            ("DONE".into(), 1),
+            "step {ord} must be DONE with attempts=1 after repeated recovery"
+        );
+    }
 }
 
 #[tokio::test]
