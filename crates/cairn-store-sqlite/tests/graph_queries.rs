@@ -51,3 +51,17 @@ async fn get_entity_by_id_out_of_scope_returns_none() {
     let q = GraphQueries::new(f.store.clone(), vec![f.scope_b.clone()], f.now);
     assert!(q.get_entity_by_id(f.node_a.clone()).await.unwrap().is_none());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_entity_by_name_normalizes_and_echoes_input() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let hit = q
+        .get_entity_by_name("Auth Service (v2)".to_owned())
+        .await
+        .unwrap()
+        .expect("found");
+    assert_eq!(hit.id, f.node_auth_service);
+    // echoed_name is the literal input, NOT a read of entity_nodes.name
+    assert_eq!(hit.echoed_name.as_deref(), Some("Auth Service (v2)"));
+}

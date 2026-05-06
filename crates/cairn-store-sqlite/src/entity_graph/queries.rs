@@ -1,3 +1,4 @@
+use cairn_core::domain::graph::normalize::normalize_entity_name;
 use cairn_core::domain::scope::ScopeTuple;
 use rusqlite::{params_from_iter, types::Value as SqlValue};
 use std::sync::Arc;
@@ -291,6 +292,67 @@ impl GraphQueries {
                     Some(EntityHit {
                         id: row.get(0)?,
                         echoed_name: None,
+                        edge_count: row.get(1)?,
+                    })
+                } else {
+                    None
+                };
+                Ok::<_, tokio_rusqlite::Error>(result)
+            })
+            .await?;
+        Ok(hit)
+    }
+
+    /// Name-based entity lookup with an in-scope edge count (§2.1.0, §3.1).
+    ///
+    /// Normalizes `name` via [`normalize_entity_name`] and probes
+    /// `entity_nodes.name_norm` directly. Returns `None` when no entity
+    /// with that normalized name is visible under `allowed_scopes`.
+    ///
+    /// `echoed_name` in the returned [`EntityHit`] carries the caller's
+    /// literal input string — never the canonical DB `name` column, which
+    /// is a cross-scope field per §2.1.0.
+    pub async fn get_entity_by_name(
+        &self,
+        name: String,
+    ) -> Result<Option<EntityHit>, StoreError> {
+        let norm = normalize_entity_name(&name);
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        // The cte_prefix ends with a trailing comma, so we must append at
+        // least one more CTE before the final SELECT. Use a named scalar CTE
+        // for the name_norm lookup so the prefix's comma is consumed cleanly.
+        let sql = format!(
+            "{prefix}
+             seed AS (
+               SELECT v.id AS eid
+               FROM visible_nodes v
+               WHERE v.name_norm = ?
+               LIMIT 1
+             )
+             SELECT s.eid,
+               (SELECT COUNT(*) FROM visible_edges e
+                  WHERE e.source_id = s.eid OR e.target_id = s.eid)
+             FROM seed s"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        binds.push(SqlValue::Text(norm));
+
+        let conn = self.store.read_conn()?;
+        // Async wrap (canonical pattern from Task 3): owned binds and SQL
+        // are moved into the DB-thread closure; closure returns owned
+        // DTOs. `name` is moved in too so we can echo the caller's
+        // literal input on the way out.
+        let hit = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let result = if let Some(row) = rows.next()? {
+                    Some(EntityHit {
+                        id: row.get(0)?,
+                        // §2.1.0: echo the caller's literal input,
+                        // never the canonical row name.
+                        echoed_name: Some(name),
                         edge_count: row.get(1)?,
                     })
                 } else {

@@ -148,6 +148,12 @@ pub async fn tiny_graph() -> TinyGraphFixture {
              ('edge-ac', '{id_alpha}', '{id_gamma}', 'calls', 'EXTRACTED', 0.6, \
               {FIXTURE_NOW}, {FIXTURE_NOW}, X'02', 'rec-scope-a');"
         );
+        // Auth Service (v2) has no edges; link it via entity_episodes so it
+        // appears in visible_nodes under scope_a (episode arm of the CTE).
+        let episodes_sql = format!(
+            "INSERT INTO entity_episodes (episode_id, entity_node_id, linked_at) \
+             VALUES ('rec-scope-a', '{id_auth}', {FIXTURE_NOW});"
+        );
 
         conn.call(move |c| {
             // Two records — one per scope. The records table requires:
@@ -158,6 +164,7 @@ pub async fn tiny_graph() -> TinyGraphFixture {
             // the CTE EXISTS predicate fires.
             c.execute_batch(&records_sql)?;
             c.execute_batch(&edges_sql)?;
+            c.execute_batch(&episodes_sql)?;
             Ok(())
         })
         .await
