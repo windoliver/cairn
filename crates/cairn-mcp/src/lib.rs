@@ -197,11 +197,30 @@ where
     // FrameTooLarge or I/O failure on the input side must surface as an error
     // — otherwise rmcp sees clean EOF on its reader after the relay drops the
     // writer and `waiting_result` is `Ok(())`, masking the protocol violation.
-    let relay_result: Result<(), TransportError> = match relay_task.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(join_err) if join_err.is_cancelled() => Ok(()),
-        Err(join_err) => Err(TransportError::Service(join_err.to_string())),
+    //
+    // We use `try_join_handle_now` semantics: poll the relay once. If it has
+    // already finished (frame-cap trip, I/O error, stdin EOF) take its
+    // outcome. Otherwise — the rmcp service has shut down cleanly while the
+    // client is still holding stdin open — abort the relay so we do not
+    // hang the process waiting for stdin EOF that may never arrive. An
+    // aborted relay is treated as a clean shutdown (`Ok`) for our purposes.
+    let relay_result: Result<(), TransportError> = if relay_task.is_finished() {
+        match relay_task.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(join_err) if join_err.is_cancelled() => Ok(()),
+            Err(join_err) => Err(TransportError::Service(join_err.to_string())),
+        }
+    } else {
+        relay_task.abort();
+        // Drain the JoinHandle so the spawned future is fully torn down
+        // before we return; cancellation is the expected outcome here.
+        match relay_task.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(join_err) if join_err.is_cancelled() => Ok(()),
+            Err(join_err) => Err(TransportError::Service(join_err.to_string())),
+        }
     };
 
     waiting_result.and(relay_result)

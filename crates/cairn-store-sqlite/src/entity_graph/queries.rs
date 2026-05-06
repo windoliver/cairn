@@ -907,26 +907,33 @@ impl GraphQueries {
                FROM visible_edges e
                JOIN records r ON r.record_id = e.source_record_id
              ),
+             candidate_edges AS (
+               -- The same edge set that will be scored and returned. Modal
+               -- scope MUST be derived from this set, not from every edge
+               -- incident to *any* input node — otherwise high-degree
+               -- external edges flip the bonus applied to the returned
+               -- subgraph and rankings start depending on unrelated
+               -- neighborhood structure.
+               SELECT es.* FROM edge_scope es
+               WHERE es.source_id IN {input_in}
+                 AND es.target_id IN {input_in}
+             ),
              modal_scope AS (
                SELECT scope_id
-               FROM edge_scope es
-               JOIN input i
-                 ON (es.source_id = i.id OR es.target_id = i.id)
+               FROM candidate_edges
                GROUP BY scope_id
                ORDER BY COUNT(*) DESC, scope_id ASC
                LIMIT 1
              ),
              scored AS (
-               SELECT es.*,
-                      es.confidence_score *
+               SELECT ce.*,
+                      ce.confidence_score *
                       (1.0 + CASE
-                               WHEN es.scope_id <>
+                               WHEN ce.scope_id <>
                                     (SELECT scope_id FROM modal_scope)
                                THEN 1.0 ELSE 0.0
                              END) AS score
-               FROM edge_scope es
-               WHERE es.source_id IN {input_in}
-                 AND es.target_id IN {input_in}
+               FROM candidate_edges ce
              )
              SELECT id, source_id, target_id, relation, confidence_score,
                     valid_at, source_record_id, scope_id, score

@@ -101,6 +101,10 @@ pub const MAX_HOPS_CAP: u32 = 5;
 pub const NODE_BUDGET_CAP: usize = 256;
 /// Maximum serialized response budget enforced across the full payload.
 pub const TOKEN_BUDGET_CAP: usize = 64 * 1024;
+/// Maximum number of `SurpriseHit` rows the store may return.
+pub const SURPRISE_LIMIT_CAP: usize = 64;
+/// Maximum number of input ids `graph.surprising_connections` will consider.
+pub const SURPRISE_INPUT_CAP: usize = 256;
 
 /// Traversal strategy for `graph.query`.
 #[derive(Default, Deserialize, Serialize, JsonSchema)]
@@ -303,9 +307,20 @@ pub async fn dispatch(
         "graph.surprising_connections" => {
             match serde_json::from_value::<SurprisingArgs>(Value::Object(args)) {
                 Ok(a) => {
-                    let limit = usize::try_from(a.limit).unwrap_or(usize::MAX);
+                    // Server-side caps: a hostile or accidental large `limit`
+                    // would otherwise force the store to materialize an
+                    // unbounded result Vec; an oversized `ids` list bloats the
+                    // SQL placeholder expansion and the JSON inputs to
+                    // `json_each(?)`. Clamp both before they reach the store.
+                    let limit = usize::try_from(a.limit)
+                        .unwrap_or(usize::MAX)
+                        .min(SURPRISE_LIMIT_CAP);
+                    let mut ids = a.ids;
+                    if ids.len() > SURPRISE_INPUT_CAP {
+                        ids.truncate(SURPRISE_INPUT_CAP);
+                    }
                     queries
-                        .surprising_connections(a.ids, limit)
+                        .surprising_connections(ids, limit)
                         .await
                         .map_err(|e| e.to_string())
                         .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
