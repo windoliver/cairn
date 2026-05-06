@@ -165,6 +165,16 @@ impl EntityResolver {
     ) -> Result<Resolution, EntityResolutionError> {
         let norm = normalize(candidate_name);
 
+        // Empty normalized key — the candidate has no alphanumeric
+        // content (punctuation/whitespace/symbols only). Short-circuit
+        // to New rather than allow an empty key to collide with another
+        // empty `name_norm` and force a false merge. Without this,
+        // every empty 3-gram signature would also compare as equal in
+        // Tier 2, yielding Jaccard 1.0 against any other empty-key node.
+        if norm.is_empty() {
+            return Ok(Resolution::New);
+        }
+
         // Tier 1.
         if let Some(id) = exact_match(&norm, existing) {
             return Ok(Resolution::Merge(id.clone()));
@@ -610,5 +620,24 @@ mod resolver_tests {
             r,
             Err(ResolverConfigError::FuzzyThresholdOutOfRange { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_normalized_candidate_returns_new_no_match() {
+        // Codex-review R2.3: punctuation-only candidate normalizes to
+        // empty. Even if an existing entity also has empty `name_norm`
+        // (e.g. a previously-stored corrupt row), the resolver must
+        // refuse to match empty-against-empty rather than force a merge.
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let existing = vec![node("01HZE7JV5N0000000000000001", "")];
+        let res = r
+            .resolve("???", &existing)
+            .await
+            .expect("invariant: empty-key candidate resolves without error");
+        assert!(
+            matches!(res, Resolution::New),
+            "expected New for empty-key candidate, got {res:?}"
+        );
     }
 }
