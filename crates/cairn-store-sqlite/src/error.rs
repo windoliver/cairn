@@ -183,6 +183,13 @@ pub enum StoreError {
         reason: String,
     },
 
+    /// The `schema_migrations` table is absent from the database — the
+    /// vault has never been opened by `cairn mcp` / `cairn ingest` and
+    /// no migrations have been applied. Callers should surface this as
+    /// a "not yet initialized" state rather than a capability negation.
+    #[error("schema not initialized: schema_migrations table absent")]
+    SchemaNotInitialized,
+
     /// Two distinct record ids share the same `trace.capture_event_id`.
     /// This should not happen under the documented projector contract
     /// (Task 6 derives `record_id` deterministically from

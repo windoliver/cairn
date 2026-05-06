@@ -15,7 +15,10 @@ use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
-use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+use cairn_core::generated::status::{
+    StatusResponse, StatusResponseMcpGraphTools, StatusResponseMcpGraphToolsProbeBasis,
+    StatusResponseMcpGraphToolsReason, StatusResponseMcpGraphToolsState, StatusResponseServerInfo,
+};
 use cairn_core::generated::verbs::{
     assemble_hot::{AssembleHotArgs, AssembleHotData},
     capture_trace::{CaptureTraceArgs, CaptureTraceData},
@@ -181,6 +184,13 @@ impl<T: Transport> Sdk<T> {
             // `crates/cairn-cli/src/verbs/status.rs` for the
             // long-form note.
             pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
+            mcp_graph_tools: StatusResponseMcpGraphTools {
+                state: StatusResponseMcpGraphToolsState::Unavailable,
+                reason: Some(StatusResponseMcpGraphToolsReason::SingleTenantOff),
+                tool_count: None,
+                probe_basis: StatusResponseMcpGraphToolsProbeBasis::ConfigOnly,
+                error: None,
+            },
         }
     }
 

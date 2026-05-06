@@ -362,6 +362,52 @@ fn read_record_vectors_dim(conn: &rusqlite::Connection) -> Result<usize, StoreEr
     })
 }
 
+/// Open the `SQLite` file at `path` read-only, with no migrations run, and
+/// read just enough of the schema to derive the public
+/// [`MemoryStoreCapabilities`]. Returns a typed
+/// [`StoreError::SchemaNotInitialized`] when the expected
+/// `schema_migrations` table is absent — meaning the vault has never been
+/// opened by `cairn mcp` / `cairn ingest`.
+///
+/// Used only by `cairn status` for the graph-tools probe; do not reuse
+/// for runtime read paths (no connection pool, no FTS5, no extension load).
+///
+/// # Errors
+/// Returns [`StoreError::SchemaNotInitialized`] when `schema_migrations`
+/// is absent, or [`StoreError::Sqlite`] on any underlying `rusqlite` error.
+pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreError> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+
+    // Check whether `schema_migrations` exists — absence means the vault
+    // has never been initialized and we must not manufacture a synthetic
+    // "capabilities absent" answer.
+    let has_migrations: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+    if !has_migrations {
+        return Err(StoreError::SchemaNotInitialized);
+    }
+
+    // Derive the `vector` flag from whether `record_vectors` exists.
+    // All other fields mirror `base_caps(false)` — see the comment there:
+    // `graph_edges` and `fts` are always true once migration 0001 runs,
+    // and `transactions`/`per_record_consent_model` are always true.
+    let has_record_vectors: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'record_vectors'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? > 0;
+
+    Ok(base_caps(has_record_vectors))
+}
+
 /// Sync open at `path`, returning a raw `rusqlite::Connection`. For tests
 /// that drive SQL directly (drift detection, migration validation). Not
 /// part of the production API — gated behind `test-helpers` feature.

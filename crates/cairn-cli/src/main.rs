@@ -226,7 +226,7 @@ fn main() -> ExitCode {
                 Ok(v) => v,
                 Err(code) => return code,
             };
-            return cairn_cli::mcp::run(&vault_root, config);
+            cairn_cli::mcp::run(&vault_root, config)
         }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),

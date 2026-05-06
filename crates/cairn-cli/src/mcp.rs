@@ -15,10 +15,15 @@ use cairn_core::mcp_auth::{ConfigBackedScope, McpSessionScope};
 
 /// Outcome of resolving the `[mcp.stdio]` block into runtime components.
 pub struct ResolvedMcpScope {
+    /// The scope resolver derived from the configured principal.
     pub resolver: Arc<dyn McpSessionScope>,
+    /// The principal `ScopeTuple` extracted from config.
     pub principal: ScopeTuple,
 }
 
+/// Resolve the `[mcp.stdio]` config block into runtime scope components.
+///
+/// Returns `None` when `single_tenant` is off or no principal is configured.
 #[must_use]
 pub fn resolve_scope_components(config: &CairnConfig) -> Option<ResolvedMcpScope> {
     if !config.mcp.stdio.single_tenant {
@@ -30,7 +35,7 @@ pub fn resolve_scope_components(config: &CairnConfig) -> Option<ResolvedMcpScope
     Some(ResolvedMcpScope { resolver, principal })
 }
 
-/// Path to the on-disk SQLite store, derived from the vault root.
+/// Path to the on-disk `SQLite` store, derived from the vault root.
 /// Single source of truth — Task 6 (status probe) reuses this to avoid
 /// status/`cairn mcp` split-brain.
 #[must_use]
@@ -40,7 +45,7 @@ pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf 
 
 /// Run the MCP stdio server.
 ///
-/// Exit codes: 0 success, 69 EX_UNAVAILABLE (transport/IO/store), 78 EX_CONFIG.
+/// Exit codes: 0 success, 69 `EX_UNAVAILABLE` (transport/IO/store), 78 `EX_CONFIG`.
 #[must_use]
 pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
     if let Err(e) = config.validate_mcp() {
