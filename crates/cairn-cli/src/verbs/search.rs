@@ -64,6 +64,9 @@ pub fn run(sub: &ArgMatches, vault_root: std::path::PathBuf) -> ExitCode {
                 &format!("--explain requires {EXPLAIN_CAPABILITY}, which is not advertised"),
                 &resp.operation_id,
             );
+            if let Some(hint) = cairn_core::status::remediation_for(EXPLAIN_CAPABILITY) {
+                eprintln!("  hint: {hint}");
+            }
         }
         return ExitCode::from(69); // EX_UNAVAILABLE
     }
@@ -265,6 +268,9 @@ async fn run_async(
                 &format!("capability unavailable: {capability}"),
                 &resp.operation_id,
             );
+            if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                eprintln!("  hint: {hint}");
+            }
         }
         return ExitCode::from(69); // EX_UNAVAILABLE
     }
@@ -333,6 +339,9 @@ async fn run_async(
                     &format!("capability unavailable: {capability}"),
                     &resp.operation_id,
                 );
+                if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                    eprintln!("  hint: {hint}");
+                }
             }
             ExitCode::from(69) // EX_UNAVAILABLE
         }
@@ -597,8 +606,8 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
         // capability identifier is the same as the dispatcher's gate
         // for `openai` so generated clients can route the failure off
         // a single capability id.
-        let resp =
-            capability_unavailable_response(ResponseVerb::Search, "cairn.mcp.v1.search.semantic");
+        const OPENAI_CAP: &str = "cairn.mcp.v1.search.semantic";
+        let resp = capability_unavailable_response(ResponseVerb::Search, OPENAI_CAP);
         if json {
             emit_json(&resp);
         } else {
@@ -609,6 +618,9 @@ fn openai_feature_gate(provider: EmbeddingProvider, json: bool) -> Option<ExitCo
                  rebuild cairn-cli with `--features openai`",
                 &resp.operation_id,
             );
+            if let Some(hint) = cairn_core::status::remediation_for(OPENAI_CAP) {
+                eprintln!("  hint: {hint}");
+            }
         }
         Some(ExitCode::from(69)) // EX_UNAVAILABLE
     }
@@ -644,6 +656,9 @@ impl EmbedderInitError {
                     emit_json(&resp);
                 } else {
                     human_error("search", "CapabilityUnavailable", &msg, &resp.operation_id);
+                    if let Some(hint) = cairn_core::status::remediation_for(capability) {
+                        eprintln!("  hint: {hint}");
+                    }
                 }
                 ExitCode::from(69)
             }

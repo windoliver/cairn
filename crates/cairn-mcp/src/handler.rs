@@ -414,10 +414,7 @@ async fn handle_search(
     config: CairnConfig,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> CallToolResult {
-    use cairn_core::generated::common::Ulid;
-    use cairn_core::generated::verbs::search::{
-        Hit, HitTrust, ScoreExplain, SearchArgs, SearchArgsMode, SearchData,
-    };
+    use cairn_core::generated::verbs::search::{SearchArgs, SearchArgsMode};
 
     // Parse args from the MCP tool argument map.
     let args_json = serde_json::Value::Object(arguments.unwrap_or_default());
@@ -458,9 +455,14 @@ async fn handle_search(
         match cairn_core::verbs::search::run(store.as_ref(), &config, &caps, request).await {
             Ok(o) => o,
             Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "cairn search: capability unavailable: {capability}"
-                ))]);
+                let remediation = cairn_core::status::remediation_for(capability);
+                let msg = match remediation {
+                    Some(hint) => format!(
+                        "cairn search: capability unavailable: {capability}\n  hint: {hint}"
+                    ),
+                    None => format!("cairn search: capability unavailable: {capability}"),
+                };
+                return CallToolResult::error(vec![Content::text(msg)]);
             }
             Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
                 return CallToolResult::error(vec![Content::text(format!(
@@ -479,6 +481,17 @@ async fn handle_search(
                 ))]);
             }
         };
+
+    search_outcome_to_result(outcome)
+}
+
+/// Convert a successful [`cairn_core::verbs::search::SearchOutcome`] into the
+/// MCP [`CallToolResult`] shape.
+fn search_outcome_to_result(
+    outcome: cairn_core::verbs::search::SearchOutcome,
+) -> CallToolResult {
+    use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
 
     let hits: Vec<Hit> = outcome
         .candidates
@@ -514,16 +527,12 @@ async fn handle_search(
         score_explain,
     };
 
-    let json = match serde_json::to_string(&data) {
-        Ok(s) => s,
-        Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!(
-                "cairn search: serialize error: {e}"
-            ))]);
-        }
-    };
-
-    CallToolResult::success(vec![Content::text(json)])
+    match serde_json::to_string(&data) {
+        Ok(s) => CallToolResult::success(vec![Content::text(s)]),
+        Err(e) => CallToolResult::error(vec![Content::text(format!(
+            "cairn search: serialize error: {e}"
+        ))]),
+    }
 }
 
 // ── date / identity helpers ─────────────────────────────────────────────────

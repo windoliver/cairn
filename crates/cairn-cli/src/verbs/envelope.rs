@@ -131,8 +131,22 @@ pub fn internal_error_response(verb: ResponseVerb, message: &str) -> Response {
 /// `CapabilityUnavailable` in the rejected family — generated clients
 /// deserialize the envelope through that constraint and reject
 /// `Aborted + CapabilityUnavailable` at parse time (round-9 review #1).
+///
+/// The `data.remediation` field is populated automatically from
+/// [`cairn_core::status::remediation_for`] when a hint is registered for
+/// `capability`. When no hint is registered the field is omitted (the IDL
+/// declares it optional with `minLength: 1` so an empty string is invalid).
 #[must_use]
 pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> Response {
+    let mut data = serde_json::json!({ "capability": capability });
+    if let Some(hint) = cairn_core::status::remediation_for(capability)
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.insert(
+            "remediation".to_owned(),
+            serde_json::Value::String(hint.to_owned()),
+        );
+    }
     Response {
         contract: "cairn.mcp.v1".to_owned(),
         data: None,
@@ -141,7 +155,7 @@ pub fn capability_unavailable_response(verb: ResponseVerb, capability: &str) -> 
             "message": format!(
                 "this server does not advertise {capability}; the requested feature requires it"
             ),
-            "data": { "capability": capability },
+            "data": data,
         })),
         operation_id: new_operation_id(),
         policy_trace: Vec::<ResponsePolicyTrace>::new(),

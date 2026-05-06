@@ -325,6 +325,8 @@ impl<T: Transport> Sdk<T> {
                 Err(SdkError::CapabilityUnavailable {
                     capability: capability.to_owned(),
                     reason: "rejected by dispatcher".to_owned(),
+                    remediation: cairn_core::status::remediation_for(capability)
+                        .map(str::to_owned),
                     operation_id: crate::stub::new_operation_id(),
                 })
             }
@@ -466,6 +468,7 @@ impl<T: Transport> Sdk<T> {
             Err(SdkError::CapabilityUnavailable {
                 capability: cap.to_owned(),
                 reason: "not advertised by `status` in this incarnation".to_owned(),
+                remediation: cairn_core::status::remediation_for(cap).map(str::to_owned),
                 operation_id: crate::stub::new_operation_id(),
             })
         }
