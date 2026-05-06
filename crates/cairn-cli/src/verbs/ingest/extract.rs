@@ -197,6 +197,16 @@ func NewScanner() {}
     }
 
     #[test]
+    fn rst_extracts_text_signals() {
+        let body = "Cairn Guide\nSee [[Memory Store]] for New York context.\nTODO: wire this.\n";
+
+        let counts = extract_keyword_counts(Path::new("guide.rst"), body);
+
+        assert!(counts.entities_new >= 3);
+        assert_eq!(counts.edges_new, 1);
+    }
+
+    #[test]
     fn unknown_extensions_return_zero_counts() {
         let body = "TODO: [[Memory Store]]\npub struct Folder;\n";
 
