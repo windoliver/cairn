@@ -24,6 +24,90 @@ pub struct RrfCandidate {
     pub rrf_score: f64,
 }
 
+/// One element of an explicit-rank input list to [`rrf_fusion_weighted`].
+///
+/// Unlike [`ScoredCandidate`] (rank inferred from list position), this
+/// carries `rank` and `weight` per candidate. Used by the graph leg where
+/// the SQL output order is the rank and the connecting-edge confidence
+/// is the weight, surviving hydration which may re-order results by id.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedCandidate {
+    /// Record id.
+    pub record_id: RecordId,
+    /// 1-based rank in the source list.
+    pub rank: usize,
+    /// Confidence weight in `[0.0, 1.0]`. Used to compute
+    /// `effective_rank = rank / max(weight, floor)`.
+    pub weight: f32,
+}
+
+/// One leg of [`rrf_fusion_weighted`].
+///
+/// `ListPosition` is the legacy shape (rank inferred from index, no
+/// weighting). `Explicit` carries per-candidate rank and weight, and the
+/// per-leg `floor` clamps weight from below to keep `effective_rank`
+/// finite at zero confidence.
+#[derive(Debug, Clone)]
+pub enum Leg {
+    /// Rank inferred from slice index. Equivalent to a single input of
+    /// [`rrf_fusion`].
+    ListPosition(Vec<ScoredCandidate>),
+    /// Rank carried per-candidate; confidence penalty applied with `floor`.
+    Explicit(Vec<RankedCandidate>, f32),
+}
+
+/// Confidence-weighted Reciprocal Rank Fusion.
+///
+/// Behaves identically to [`rrf_fusion`] for [`Leg::ListPosition`] legs
+/// (proven by the `list_position_matches_legacy_fusion` test). For
+/// [`Leg::Explicit`] legs each contribution is `1.0 / (k +
+/// rank/max(weight, floor))`, so a low-confidence neighbor at rank 1
+/// contributes less than a high-confidence one at the same rank, but
+/// always contributes more than a list of equal length and rank with no
+/// confidence penalty would.
+#[must_use]
+pub fn rrf_fusion_weighted(legs: &[Leg], k: usize) -> Vec<RrfCandidate> {
+    use std::collections::HashMap;
+    let mut acc: HashMap<RecordId, f64> = HashMap::new();
+    #[allow(clippy::cast_precision_loss)]
+    let kf = k as f64;
+    for leg in legs {
+        match leg {
+            Leg::ListPosition(list) => {
+                for (i, c) in list.iter().enumerate() {
+                    #[allow(clippy::cast_precision_loss)]
+                    let r = (i + 1) as f64;
+                    *acc.entry(c.record_id.clone()).or_insert(0.0) += 1.0 / (kf + r);
+                }
+            }
+            Leg::Explicit(list, floor) => {
+                let f = f64::from((*floor).max(1e-6));
+                for c in list {
+                    #[allow(clippy::cast_precision_loss)]
+                    let raw_rank = c.rank as f64;
+                    let weight = f64::from(c.weight).max(f);
+                    let effective = raw_rank / weight;
+                    *acc.entry(c.record_id.clone()).or_insert(0.0) += 1.0 / (kf + effective);
+                }
+            }
+        }
+    }
+    let mut out: Vec<RrfCandidate> = acc
+        .into_iter()
+        .map(|(record_id, rrf_score)| RrfCandidate {
+            record_id,
+            rrf_score,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.record_id.as_str().cmp(b.record_id.as_str()))
+    });
+    out
+}
+
 /// Reciprocal Rank Fusion over `inputs`.
 ///
 /// Each input list must be pre-sorted descending by its own score.
@@ -129,6 +213,56 @@ mod tests {
                 .map(|c| c.record_id.as_str().to_owned())
                 .collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn weighted_extracted_outranks_inferred_at_same_rank() {
+        let extracted = vec![RankedCandidate {
+            record_id: rid("0A"),
+            rank: 1,
+            weight: 1.0,
+        }];
+        let inferred = vec![RankedCandidate {
+            record_id: rid("0B"),
+            rank: 1,
+            weight: 0.6,
+        }];
+        let out = rrf_fusion_weighted(
+            &[
+                Leg::Explicit(extracted, 1e-3),
+                Leg::Explicit(inferred, 1e-3),
+            ],
+            60,
+        );
+        assert_eq!(out[0].record_id, rid("0A"));
+    }
+
+    #[test]
+    fn list_position_matches_legacy_fusion() {
+        let list = vec![
+            ScoredCandidate {
+                record_id: rid("0A"),
+                score: 1.0,
+            },
+            ScoredCandidate {
+                record_id: rid("0B"),
+                score: 0.5,
+            },
+        ];
+        let legacy = rrf_fusion(std::slice::from_ref(&list), 60);
+        let weighted = rrf_fusion_weighted(&[Leg::ListPosition(list)], 60);
+        assert_eq!(legacy, weighted);
+    }
+
+    #[test]
+    fn confidence_floor_prevents_div_by_zero() {
+        let zero_conf = vec![RankedCandidate {
+            record_id: rid("0A"),
+            rank: 1,
+            weight: 0.0,
+        }];
+        let out = rrf_fusion_weighted(&[Leg::Explicit(zero_conf, 1e-3)], 60);
+        assert!(out[0].rrf_score.is_finite());
     }
 
     #[test]
