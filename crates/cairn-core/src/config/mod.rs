@@ -901,22 +901,20 @@ impl CairnConfig {
         validate_mcp_config(&self.mcp)
     }
 
-    /// Single shared predicate that gates `cairn status` MCP-graph
-    /// reporting today and (in Plan C) the MCP `tools/list` /
-    /// `tools/call` graph-tool advertisement. Both surfaces read the same
-    /// function so they cannot drift.
+    /// Single shared predicate that gates `cairn status` MCP-graph reporting
+    /// and the MCP `tools/list` / `tools/call` graph-tool advertisement.
+    /// Both surfaces read the same function so they cannot drift.
     ///
-    /// **Plan A behaviour:** zero graph tools exist, so the predicate
-    /// never returns [`McpGraphAvailability::Available`]. The deliberate
-    /// fall-through order (most-specific reason wins) is:
+    /// The deliberate fall-through order (most-specific reason wins) is:
     ///
     /// 1. `single_tenant == false` → `UnavailableSingleTenantOff`
     /// 2. else if `scope.is_none()` → `UnavailableNoScopeResolver`
     /// 3. else if `!store_caps.graph_edges` → `UnavailableNoStoreCapability`
-    /// 4. else (Plan C will return `Available { tool_count: 5 }`) →
-    ///    Plan A returns `UnavailableNoStoreCapability` as the
-    ///    fall-through, because Plan A's store wiring does not advertise
-    ///    graph tools to MCP yet — see the design spec §6.
+    /// 4. else → `Available { tool_count: 5 }` (Plan C: graph tools landed)
+    ///
+    /// Note: the predicate does **not** call `scope.allowed_scopes`. That
+    /// single resolver call lives in `Handler::materialize_graph_request`,
+    /// which calls this predicate first and then resolves scopes exactly once.
     ///
     /// The `transport` argument is currently always `Stdio` and the body
     /// branches only on `Stdio`. Future SSE / HTTP transports add their
@@ -941,11 +939,8 @@ impl CairnConfig {
                 if !store_caps.graph_edges {
                     return McpGraphAvailability::UnavailableNoStoreCapability;
                 }
-                // Plan A: no graph tools land in this PR. The substrate
-                // is wired but the manifest stays at 8 verbs. Plan C
-                // flips this fall-through to
-                // `Available { tool_count: 5 }` in a one-line change.
-                McpGraphAvailability::UnavailableNoStoreCapability
+                // Plan C: graph tools have landed; advertise them.
+                McpGraphAvailability::Available { tool_count: 5 }
             }
         }
     }
@@ -1522,12 +1517,58 @@ rerank_topk: 20
         assert_eq!(avail, McpGraphAvailability::UnavailableNoStoreCapability);
     }
 
+    /// Minimal static scope for tests — returns a fixed allowed-scope set.
+    struct StaticScope {
+        allowed: Vec<crate::domain::ScopeTuple>,
+    }
+
+    impl StaticScope {
+        fn new(allowed: Vec<crate::domain::ScopeTuple>) -> Self {
+            Self { allowed }
+        }
+    }
+
+    impl McpSessionScope for StaticScope {
+        fn allowed_scopes(
+            &self,
+            _ctx: &crate::mcp_auth::McpAuthContext<'_>,
+        ) -> Result<Vec<crate::domain::ScopeTuple>, crate::mcp_auth::ScopeResolutionError> {
+            Ok(self.allowed.clone())
+        }
+    }
+
+    fn config_with_single_tenant_stdio() -> CairnConfig {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(principal_acme());
+        cfg
+    }
+
+    /// Plan C: with all conditions met, the predicate must return
+    /// `Available { tool_count: 5 }`.
     #[test]
-    fn graph_tools_substrate_ready_state_does_not_emit_available_in_plan_a() {
-        // Plan A ships zero graph tools. Even with every precondition met,
-        // the predicate must NOT return Available — Plan C will flip the
-        // body once it lands the actual tools. This test pins the
-        // contract-version invariant: do not over-advertise.
+    fn mcp_graph_tools_available_returns_five_when_all_conditions_hold() {
+        let cfg = config_with_single_tenant_stdio();
+        let store_caps = MemoryStoreCapabilities {
+            graph_edges: true,
+            ..Default::default()
+        };
+        let scope = StaticScope::new(vec![crate::domain::ScopeTuple::default()]);
+        let av = cfg.mcp_graph_tools_available(
+            Some(&scope),
+            McpTransport::Stdio,
+            &store_caps,
+        );
+        assert!(
+            matches!(av, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C: all conditions met must return Available{{5}}; got {av:?}",
+        );
+    }
+
+    /// Previously the Plan A test. Now that Plan C has landed, the same
+    /// all-conditions-hold scenario must return `Available { tool_count: 5 }`.
+    #[test]
+    fn graph_tools_available_when_all_conditions_hold() {
         let mut cfg = CairnConfig::default();
         cfg.mcp.stdio.single_tenant = true;
         cfg.mcp.stdio.principal = Some(principal_acme());
@@ -1536,8 +1577,8 @@ rerank_topk: 20
         let s: &dyn McpSessionScope = &scope;
         let avail = cfg.mcp_graph_tools_available(Some(s), McpTransport::Stdio, &caps);
         assert!(
-            !matches!(avail, McpGraphAvailability::Available { .. }),
-            "Plan A must not emit Available; got {avail:?}",
+            matches!(avail, McpGraphAvailability::Available { tool_count: 5 }),
+            "Plan C must emit Available{{5}} when all conditions hold; got {avail:?}",
         );
     }
 }
