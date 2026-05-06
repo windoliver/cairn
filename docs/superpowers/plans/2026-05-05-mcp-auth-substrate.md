@@ -1501,11 +1501,13 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
         // tell "graph capability genuinely absent" apart from "we
         // could not look".
         let (probe_outcome, probe_basis) = match vault_root {
-            // `try_open_store_capabilities` is async (the underlying
-            // `cairn_store_sqlite::open` is async). The `status` verb
-            // path enters a tokio runtime here for the probe and exits
-            // it before returning — see the helper definition below.
-            Some(root) => match probe_with_runtime(root) {
+            // `try_peek_store_capabilities` is sync and uses the
+            // non-mutating `cairn_store_sqlite::peek_capabilities`
+            // helper added in this task — `status` never opens the
+            // store the way `cairn mcp` does, never runs migrations,
+            // and never creates the file. See the helper definition
+            // below.
+            Some(root) => match try_peek_store_capabilities(root) {
                 Ok(caps) => (ProbeOutcome::Capabilities(caps), ProbeBasis::FullProbe),
                 Err(err) => {
                     tracing::debug!(
@@ -1804,48 +1806,60 @@ enum ResolvedAvailability {
 /// }
 /// ```
 ///
-/// Both `mcp::run` and `status::try_open_store_capabilities`
+/// Both `mcp::run` (writable open) and `status::try_peek_store_capabilities` (read-only peek)
 /// call it; there is no second hard-coded path.
 /// Sync wrapper used by the (sync) `status` verb. Builds a short-
-/// lived current-thread runtime, runs the async probe, drops the
-/// runtime. Errors propagate untouched.
-fn probe_with_runtime(
-    vault_root: &std::path::Path,
-) -> Result<
-    cairn_core::contract::memory_store::MemoryStoreCapabilities,
-    Box<dyn std::error::Error>,
-> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(try_open_store_capabilities(vault_root))
-}
-
-async fn try_open_store_capabilities(
+/// Synchronous, **non-mutating** capability probe. Reads the on-disk
+/// SQLite file with `SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`
+/// and never touches the migration runner. Returns `Err` (which the
+/// caller maps to `ResolvedAvailability::ProbeFailed`) when the file
+/// does not exist, when migrations have not been applied yet, or
+/// when the schema is unreadable. **Critical: status MUST NOT
+/// invoke `cairn_store_sqlite::open()`** — that path creates the
+/// database file and runs migrations, which is unacceptable as a
+/// side effect of `cairn status`. We add a small new helper to the
+/// store crate as part of this task:
+///
+/// ```rust
+/// // crates/cairn-store-sqlite/src/open.rs — new public fn.
+/// /// Open the SQLite file at `path` read-only, with no migrations
+/// /// run, and read just enough of the schema to derive the public
+/// /// `MemoryStoreCapabilities`. Errors out with a typed
+/// /// `StoreError::SchemaNotInitialized` (new variant) when the
+/// /// expected `schema_migrations` table is absent — meaning the
+/// /// vault has never been opened by `cairn mcp` / `cairn ingest`.
+/// ///
+/// /// Used only by `cairn status` for the graph-tools probe; do not
+/// /// reuse for runtime read paths (no connection pool, no FTS5,
+/// /// no extension load).
+/// pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreError> { … }
+/// ```
+///
+/// The implementation is ~30 lines: open the file with
+/// `rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY |
+/// SQLITE_OPEN_NO_MUTEX`, run a single
+/// `SELECT * FROM schema_migrations` query, derive
+/// `MemoryStoreCapabilities` from the same source-of-truth the
+/// existing `SqliteMemoryStore::capabilities()` uses, drop the
+/// connection. No migrations, no extensions, no async runtime.
+fn try_peek_store_capabilities(
     vault_root: &std::path::Path,
 ) -> Result<
     cairn_core::contract::memory_store::MemoryStoreCapabilities,
     Box<dyn std::error::Error>,
 > {
     let db_path = crate::mcp::store_db_path(vault_root);
-    // Use the existing free async open fn re-exported from the store
-    // crate (`crates/cairn-store-sqlite/src/lib.rs`). There is no
-    // `SqliteMemoryStore::open` inherent and no `open_read_only`
-    // helper today; we open with the standard write-capable handle
-    // and only read `capabilities()`. The handle is dropped at the
-    // end of this fn, so we do not contend with a concurrently-
-    // running `cairn mcp` server beyond a brief open/close window.
-    let store = cairn_store_sqlite::open(&db_path).await?;
-    Ok(*store.capabilities())
+    // peek_capabilities is sync — `status` stays sync; no tokio
+    // runtime is built here. If the file is missing or has no
+    // schema_migrations table, the caller renders ProbeFailed.
+    Ok(cairn_store_sqlite::peek_capabilities(&db_path)?)
 }
 ```
 
-The `status` verb is sync today — wrap the call in
-`tokio::runtime::Builder::new_current_thread().enable_all().build()?`
-or hoist the existing tokio runtime if `status` already builds one.
-The status path consequently picks up tokio as a transitive dep
-the first time `mcp_graph_tools` is reported; this is intentional
-and matches `cairn mcp`'s own runtime model.
+The probe is sync; `status` stays sync. There is no tokio runtime
+constructed inside `status`. The first call site that introduces a
+runtime in `status` would be a separate change; this task does not
+do that.
 
 `render_mcp_graph_line` consumes the `ResolvedAvailability` enum
 directly so probe-failure / no-vault are first-class outputs and

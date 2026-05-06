@@ -14,9 +14,9 @@ Implement the read-only graph-traversal MCP surface that Plan A and Plan B leave
 
 - **`cairn-store-sqlite::entity_graph::queries`** owns all SQL. `GraphQueries` is constructed with a borrowed store handle, the resolved `Vec<ScopeTuple>`, and a `now: i64`. Every method composes the §3.0 `visible_edges_raw` / `visible_edges` / `visible_nodes` CTE prefix — there is no public method that omits scope.
 - **`cairn-mcp::graph_tools`** owns schemars-derived input types, the `GRAPH_TOOLS` static registry, and a `dispatch(queries, name, args)` entry point. No SQL.
-- **`cairn-mcp::handler`** routes `tools/list` and `tools/call` through Plan A's `graph_tools_available` predicate before exposing or invoking any graph tool. Both sites consume the same predicate so the cached manifest cannot drift from per-request authorization.
+- **`cairn-mcp::handler`** routes `tools/list` and `tools/call` through one shared `Handler::materialize_graph_request` helper that resolves store + scope + `allowed_scopes` exactly once per request (Plan C Task 13). Resolver-emptiness lives in this helper — *not* in `mcp_graph_tools_available` — so there is exactly one resolver evaluation per request and no within-request TOCTOU between predicate and dispatch.
 - **`cairn-mcp::relay`** is a byte-oriented stdin shim that drops blank-line frames between JSON-RPC messages and preserves CRLF/LF byte-for-byte. Caps frame size at 16 MiB.
-- **`cairn-core::config`** flips Plan A's stub: when transport is stdio, `single_tenant=true`, store advertises `graph_edges`, and a non-empty resolver result is observed, return `McpGraphAvailability::Available { tool_count: 5 }`.
+- **`cairn-core::config`** flips Plan A's stub: `mcp_graph_tools_available` stays a **pure precondition** over `(scope, transport, store_caps)` — it does **not** call the resolver. When transport is stdio, `single_tenant=true`, a scope resolver is *wired*, and the store advertises `graph_edges`, it returns `McpGraphAvailability::Available { tool_count: 5 }`. Whether the wired resolver returns a non-empty allowed set is checked exactly once per request inside `materialize_graph_request`; `cairn status` mirrors that check via a probe (best-effort for context-insensitive resolvers).
 
 Read paths only. No new migration. No new contract.
 
@@ -493,7 +493,10 @@ Spec: §2.1.0 (id-only return), §3.1. Returns `{ id, edge_count }` — no `name
           // emits one full tuple-major expansion.
           for _ in 0..3 {
               for tup in &self.allowed_scopes {
-                  for v in tup.dimension_iter() {
+                  // dimension_iter yields (&'static str, Option<&str>);
+                  // we ignore the dimension name here because the bind
+                  // order is positional and matches scope_match_clause.
+                  for (_, v) in tup.dimension_iter() {
                       binds.push(match v {
                           Some(s) => SqlValue::Text(s.to_string()),
                           None    => SqlValue::Null,
