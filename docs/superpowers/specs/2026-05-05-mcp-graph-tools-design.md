@@ -698,12 +698,18 @@ relaxes it.
 
 ```sql
 WITH scope_filtered AS (
+  -- Same record-lifecycle predicate as visible_edges (§3.0).
+  -- Tombstoning or deactivating the source record removes its
+  -- edges from the timeline, exactly as it does from every other
+  -- tool — there is no audit-view exception.
   SELECT e.* FROM entity_edges e
   WHERE e.source_record_id IS NOT NULL
     AND EXISTS (
       SELECT 1 FROM records r
       WHERE r.record_id = e.source_record_id
         AND r.scope IN rarray(:allowed_scopes)
+        AND r.active     = 1
+        AND r.tombstoned = 0
     )
 )
 SELECT id, source_id, target_id, relation, confidence_score,
@@ -738,6 +744,11 @@ Negative tests:
    present.
 4. `expired_at IS NOT NULL` with `include_expired = false` →
    absent regardless of `include_history`.
+5. **Tombstoned source record (`r.tombstoned = 1`)** → absent
+   from the timeline regardless of any flag combination. Asserts
+   the record-lifecycle predicate is applied to the audit view.
+6. **Inactive source record (`r.active = 0`)** → absent from the
+   timeline regardless of any flag combination.
 
 ### 3.5 `graph.surprising_connections`
 
@@ -860,17 +871,54 @@ demands it.)
 In `handler.rs::call_tool`:
 
 ```rust
-if let Some(decl) = GRAPH_TOOLS.iter().find(|d| d.name == name.as_ref()) {
-    return Ok(graph_tools::dispatch(store, &name, arguments).await);
+if let Some(_decl) = GRAPH_TOOLS.iter().find(|d| d.name == name.as_ref()) {
+    // Resolve the per-request scope set FIRST. If this fails, we
+    // return CapabilityUnavailable without touching the store.
+    let ctx = self.auth_context_from(&request_context)?;
+    let allowed = match self
+        .scope
+        .as_ref()
+        .ok_or(CapabilityUnavailable)
+        .and_then(|s| s.allowed_scopes(&ctx).map_err(|_| CapabilityUnavailable))
+    {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(capability_unavailable_result(&name)),
+    };
+
+    let queries = GraphQueries::new(store.clone(), allowed, now);
+    return Ok(graph_tools::dispatch(&queries, &name, arguments).await);
 }
+```
+
+The `dispatch` helper signature carries the resolved scopes
+explicitly via the `GraphQueries` value, never the raw store —
+there is no method on `GraphQueries` that omits the scope predicate
+(it is baked into every CTE). Compile-time impossibility, not just
+a coding-convention rule.
+
+```rust
+pub struct GraphQueries<'a> {
+    store: &'a dyn MemoryStore,
+    allowed_scopes: Vec<ScopeId>,   // never Vec::new() at this point
+    now: UnixMillis,
+}
+
+pub async fn dispatch(
+    queries: &GraphQueries<'_>,
+    name: &str,
+    arguments: Option<serde_json::Map<String, Value>>,
+) -> CallToolResult { /* … */ }
 ```
 
 `graph_tools::dispatch` parses args with `serde_json::from_value`,
 invokes the matching `GraphQueries` method, serializes the result.
 Errors map to `CallToolResult::error` mirroring `handle_search`.
 
-If `store` is `None`, return a `CapabilityUnavailable`-shaped error
-(graph tools fail closed when no store is wired, per invariant 6).
+The scope-resolution check fires **before** any store work; a
+missing resolver, an `Err(_)`, or an `Ok(vec![])` short-circuits
+to `CapabilityUnavailable`. There is no path that constructs
+`GraphQueries` without a non-empty `allowed_scopes` slice — making
+unscoped graph execution structurally impossible.
 
 ### 4.3 Namespace
 
@@ -975,19 +1023,28 @@ capability flag. If we later want explicit advertisement, that
 lands as its own contract bump issue.
 
 The in-PR signal is the manifest snapshot test, which must cover
-the **four** states of the matrix:
+the **eight** states of the resolver-outcome × store-capability
+matrix. Only the `(graph_edges = true, resolver outcome = Ok(non-
+empty))` cell may list any `graph.*` tools; every other cell
+returns the standard 8-verb manifest with no graph entries. This
+is the same matrix described in §2 and §6's earlier predicate; it
+is restated here so a snapshot test cannot accidentally validate a
+fail-open manifest.
 
-| store.graph_edges | scope present | `graph.*` tools listed? |
+| store.graph_edges | resolver outcome    | `graph.*` tools listed? |
 |---|---|---|
-| false             | false         | no                      |
-| false             | true          | no                      |
-| true              | false         | no                      |
-| true              | true          | yes (5 tools)           |
+| false             | (any)               | no                      |
+| true              | None (unconfigured) | no                      |
+| true              | Err(_)              | no                      |
+| true              | Ok(vec![])          | no                      |
+| true              | Ok(non-empty)       | yes (5 tools)           |
 
-Negative tests cover each "no" cell: invoking `graph.get_entity`
-in any of those states returns `CapabilityUnavailable` rather than
+Negative tests cover each "no" row: invoking `graph.get_entity` in
+any of those states returns `CapabilityUnavailable` rather than
 executing — defense in depth at dispatch mirrors the discovery
-gate.
+gate. A successful non-empty scope resolution is the **only**
+condition that may list or execute `graph.*` — `Err`, `Ok(empty)`,
+and a missing resolver are all fail-closed.
 
 ## 7. Tests
 
