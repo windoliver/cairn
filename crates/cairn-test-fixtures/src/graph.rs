@@ -4,6 +4,14 @@
 //! of issue #190. It inserts four entity nodes, two scopes, two records, and
 //! two edges so that every graph-query test can share a single fixture instead
 //! of re-inserting the same rows.
+//!
+//! Task 21 adds five adversarial fixtures:
+//! - [`endpoint_tombstone_fixture`] — node B is tombstoned; edges to B hidden.
+//! - [`lineage_rescope_fixture`]    — immutable provenance: scope_a sees edge,
+//!   scope_b (active head) does not.
+//! - [`future_provenance_fixture`]  — edge only valid in the future.
+//! - [`episode_tombstone_fixture`]  — entity reachable only via tombstoned record.
+//! - [`scope_user_fixture`]         — user-scoped record; `user=None` must not match.
 
 use std::sync::Arc;
 
@@ -426,5 +434,507 @@ pub async fn surprise_fixture() -> SurpriseFixture {
         node_b: id_node_b.to_owned(),
         node_c: id_node_c.to_owned(),
         rec_b: rec_b_id.to_owned(),
+    }
+}
+
+// ── Task 21: adversarial cross-tool fixtures ──────────────────────────────────
+
+/// Result of [`endpoint_tombstone_fixture`].
+pub struct EndpointTombstoneFixture {
+    /// In-memory store with all rows inserted.
+    pub store: Arc<SqliteMemoryStore>,
+    /// `now` timestamp.
+    pub now: i64,
+    /// Scope that owns the edge.
+    pub scope_a: ScopeTuple,
+    /// Live node A — source of the edge.
+    pub node_a: String,
+    /// Tombstoned node B — target of the edge; must be hidden from all tools.
+    pub tombstoned_b: String,
+}
+
+/// Fixture: node B has `expired_at` set (entity-level tombstone).
+///
+/// One edge connects A→B under scope_a, but B's `expired_at` is NOT NULL.
+/// `visible_nodes` filters out expired nodes, so no edge involving B must
+/// appear in any tool's output.
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn endpoint_tombstone_fixture() -> EndpointTombstoneFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("endpoint_tombstone_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("et-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_json = serde_json::to_string(&scope_a).expect("scope json");
+
+    let id_node_a = "01HZET0000000000000000A001";
+    let id_node_b = "01HZET0000000000000000B001";
+
+    let now = FIXTURE_NOW;
+
+    // Insert node A (live) via MemoryStore trait.
+    for (id, name) in &[(id_node_a, "et-alpha"), (id_node_b, "et-beta")] {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        // Tombstone node B: set expired_at + tombstone_reason (CHECK constraint
+        // requires both or neither).
+        let tombstone_sql = format!(
+            "UPDATE entity_nodes \
+             SET expired_at = {now}, tombstone_reason = 'test-tombstone' \
+             WHERE id = '{id_node_b}';"
+        );
+
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-et-a', 'tgt-et-a', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        // Edge A→B in scope_a; node B is tombstoned so the edge must be hidden.
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id) \
+             VALUES \
+             ('edge-et-ab', '{id_node_a}', '{id_node_b}', 'calls', 'EXTRACTED', 0.9, \
+              {now}, {now}, X'E1', 'rec-et-a');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            c.execute_batch(&tombstone_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("endpoint_tombstone_fixture: seed SQL");
+    }
+
+    EndpointTombstoneFixture {
+        store,
+        now,
+        scope_a,
+        node_a: id_node_a.to_owned(),
+        tombstoned_b: id_node_b.to_owned(),
+    }
+}
+
+/// Result of [`lineage_rescope_fixture`].
+pub struct LineageRescopeFixture {
+    /// In-memory store.
+    pub store: Arc<SqliteMemoryStore>,
+    /// `now` timestamp.
+    pub now: i64,
+    /// Original record scope; source_record_id of the edge.
+    pub scope_a: ScopeTuple,
+    /// Active-head scope (promoted record); NOT the edge provenance.
+    pub scope_b: ScopeTuple,
+    /// Node A — edge source.
+    pub node_a: String,
+    /// Node B — edge target.
+    pub node_b: String,
+}
+
+/// Fixture: immutable provenance — scope_a sees the edge, scope_b does not.
+///
+/// `r_orig` has `scope=scope_a, active=0`; the edge's `source_record_id`
+/// points to `r_orig`.  `r_new` has `scope=scope_b, active=1, tombstoned=0`
+/// and shares `target_id` with `r_orig`.
+///
+/// scope_a query: r_src = r_orig (scope_a ✓) → r_active = r_new (active=1) → edge visible.
+/// scope_b query: r_src = r_orig (scope != scope_b) → no match → edge hidden.
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn lineage_rescope_fixture() -> LineageRescopeFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("lineage_rescope_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("lr-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_b = ScopeTuple {
+        tenant: Some("lr-other".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_a_json = serde_json::to_string(&scope_a).expect("scope_a json");
+    let scope_b_json = serde_json::to_string(&scope_b).expect("scope_b json");
+
+    let id_node_a = "01HZLR0000000000000000A001";
+    let id_node_b = "01HZLR0000000000000000B001";
+    let now = FIXTURE_NOW;
+
+    for (id, name) in &[(id_node_a, "lr-alpha"), (id_node_b, "lr-beta")] {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        // r_orig: scope_a, active=0 — the immutable provenance record.
+        // r_new:  scope_b, active=1 — the promoted active head, same target_id.
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-lr-orig', 'tgt-lr-shared', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_a_json}', '[]', '', 'h', {now}, {now}, 0, 0), \
+             ('rec-lr-new',  'tgt-lr-shared', 2, 'p', 'fact', 'episodic', 'private', \
+              '{scope_b_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        // Edge sourced from r_orig (scope_a, active=0).
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id) \
+             VALUES \
+             ('edge-lr-ab', '{id_node_a}', '{id_node_b}', 'relates', 'EXTRACTED', 0.8, \
+              {now}, {now}, X'F1', 'rec-lr-orig');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("lineage_rescope_fixture: seed SQL");
+    }
+
+    LineageRescopeFixture {
+        store,
+        now,
+        scope_a,
+        scope_b,
+        node_a: id_node_a.to_owned(),
+        node_b: id_node_b.to_owned(),
+    }
+}
+
+/// Result of [`future_provenance_fixture`].
+pub struct FutureProvenanceFixture {
+    /// In-memory store.
+    pub store: Arc<SqliteMemoryStore>,
+    /// `now` timestamp; the edge is NOT visible at this instant.
+    pub now: i64,
+    /// Scope that owns the future edge.
+    pub scope_a: ScopeTuple,
+    /// Node whose only edge has `valid_at > now`.
+    pub node_future: String,
+    /// Another node connected via the future edge.
+    pub node_anchor: String,
+    /// `valid_at` of the future edge; visible only at `now >= future_valid_at`.
+    pub future_valid_at: i64,
+}
+
+/// Fixture: an edge whose `valid_at` is in the future relative to `now`.
+///
+/// At `now` the edge is not in `visible_edges_raw` (the CTE requires
+/// `valid_at <= now`).  Advancing `now` to `future_valid_at + 1` makes it
+/// visible.
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn future_provenance_fixture() -> FutureProvenanceFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("future_provenance_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("fp-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_json = serde_json::to_string(&scope_a).expect("scope json");
+
+    let id_node_anchor = "01HZFP0000000000000000A001";
+    let id_node_future = "01HZFP0000000000000000F001";
+    let now = FIXTURE_NOW;
+    let future_valid_at = now + 86_400_000; // +1 day
+
+    for (id, name) in &[
+        (id_node_anchor, "fp-anchor"),
+        (id_node_future, "fp-future"),
+    ] {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-fp-a', 'tgt-fp-a', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        // Edge with valid_at = future_valid_at (not visible at `now`).
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id) \
+             VALUES \
+             ('edge-fp-af', '{id_node_anchor}', '{id_node_future}', 'relates', \
+              'EXTRACTED', 0.9, {future_valid_at}, {now}, X'C1', 'rec-fp-a');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("future_provenance_fixture: seed SQL");
+    }
+
+    FutureProvenanceFixture {
+        store,
+        now,
+        scope_a,
+        node_future: id_node_future.to_owned(),
+        node_anchor: id_node_anchor.to_owned(),
+        future_valid_at,
+    }
+}
+
+/// Result of [`episode_tombstone_fixture`].
+pub struct EpisodeTombstoneFixture {
+    /// In-memory store.
+    pub store: Arc<SqliteMemoryStore>,
+    /// `now` timestamp.
+    pub now: i64,
+    /// Scope in which we query.
+    pub scope_a: ScopeTuple,
+    /// Node reachable only via a tombstoned episode record; must be hidden.
+    pub node_via_episode: String,
+}
+
+/// Fixture: a node linked only via an `entity_episodes` row whose
+/// `episode_id` points to a tombstoned record.
+///
+/// The `visible_nodes` episode arm requires `r_active.tombstoned = 0`.
+/// With the record tombstoned the node must not appear.
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn episode_tombstone_fixture() -> EpisodeTombstoneFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("episode_tombstone_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("ep-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_json = serde_json::to_string(&scope_a).expect("scope json");
+
+    let id_node_episode = "01HZEP0000000000000000E001";
+    let now = FIXTURE_NOW;
+
+    let node = EntityNode {
+        id: EntityId::from(id_node_episode),
+        name: "ep-episode-node".to_owned(),
+        name_norm: normalize_entity_name("ep-episode-node"),
+        summary: None,
+        created_at: now,
+        embedding_id: None,
+    };
+    store.upsert_entity(&node).await.expect("upsert_entity");
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        // Tombstoned record — active=1 but tombstoned=1.
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-ep-tomb', 'tgt-ep-tomb', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_json}', '[]', '', 'h', {now}, {now}, 1, 1);"
+        );
+
+        // Episode linking the node to the tombstoned record.
+        let episodes_sql = format!(
+            "INSERT INTO entity_episodes (episode_id, entity_node_id, linked_at) \
+             VALUES ('rec-ep-tomb', '{id_node_episode}', {now});"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&episodes_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("episode_tombstone_fixture: seed SQL");
+    }
+
+    EpisodeTombstoneFixture {
+        store,
+        now,
+        scope_a,
+        node_via_episode: id_node_episode.to_owned(),
+    }
+}
+
+/// Result of [`scope_user_fixture`].
+pub struct ScopeUserFixture {
+    /// In-memory store.
+    pub store: Arc<SqliteMemoryStore>,
+    /// `now` timestamp.
+    pub now: i64,
+    /// Edge whose source record has `scope.user = "bob"`.
+    pub edge_with_user_bob: String,
+    /// Node A — source of the edge.
+    pub node_a: String,
+    /// Node B — target of the edge.
+    pub node_b: String,
+}
+
+/// Fixture: a record with `scope.user = "bob"` owns the edge between A and B.
+///
+/// A query with `ScopeTuple { tenant: Some("a"), user: None, .. }` must NOT
+/// match that record (no wildcard on user — `user=None` binds `''`, which
+/// does not equal `'bob'`).
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn scope_user_fixture() -> ScopeUserFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("scope_user_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    // The record's scope has user="bob".
+    let scope_with_user = ScopeTuple {
+        tenant: Some("a".to_owned()),
+        user: Some("bob".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_json = serde_json::to_string(&scope_with_user).expect("scope json");
+
+    let id_node_a = "01HZSU0000000000000000A001";
+    let id_node_b = "01HZSU0000000000000000B001";
+    let now = FIXTURE_NOW;
+
+    for (id, name) in &[(id_node_a, "su-alpha"), (id_node_b, "su-beta")] {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-su-bob', 'tgt-su-bob', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id) \
+             VALUES \
+             ('edge-su-ab', '{id_node_a}', '{id_node_b}', 'relates', 'EXTRACTED', 0.9, \
+              {now}, {now}, X'D1', 'rec-su-bob');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("scope_user_fixture: seed SQL");
+    }
+
+    ScopeUserFixture {
+        store,
+        now,
+        edge_with_user_bob: "edge-su-ab".to_owned(),
+        node_a: id_node_a.to_owned(),
+        node_b: id_node_b.to_owned(),
     }
 }
