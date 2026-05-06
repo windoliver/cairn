@@ -13,8 +13,6 @@ use crate::domain::graph::{EntityId, EntityNode};
 /// `normalize` is idempotent: `normalize(normalize(s)) == normalize(s)`
 /// (proptest in `proptests.rs`).
 #[must_use]
-// Task 6 wires this into EntityResolver; suppress dead_code until then.
-#[allow(dead_code)]
 pub fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_was_space = true; // suppresses leading whitespace
@@ -42,8 +40,6 @@ pub fn normalize(s: &str) -> String {
 /// Returns the first hit (caller is responsible for ensuring `name_norm`
 /// is unique within scope; uniqueness is enforced upstream by the store).
 #[must_use]
-// Task 6 wires this into EntityResolver; suppress dead_code until then.
-#[allow(dead_code)]
 pub fn exact_match<'a>(norm: &str, existing: &'a [EntityNode]) -> Option<&'a EntityId> {
     existing.iter().find(|n| n.name_norm == norm).map(|n| &n.id)
 }

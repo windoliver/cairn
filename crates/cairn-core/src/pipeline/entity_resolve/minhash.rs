@@ -12,7 +12,6 @@ use crate::pipeline::entity_resolve::MAX_NUM_PERMUTATIONS;
 /// must be ignored by [`jaccard`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub struct MinHashSignature(pub [u64; MAX_NUM_PERMUTATIONS]);
 
 impl MinHashSignature {
@@ -26,7 +25,6 @@ impl MinHashSignature {
 /// `char_indices`). Strings shorter than 3 chars produce a single
 /// shingle covering the whole string. Empty input produces an empty vec.
 #[must_use]
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn shingles(norm: &str) -> Vec<(usize, usize)> {
     let chars: Vec<(usize, char)> = norm.char_indices().collect();
     if chars.len() < 3 {
@@ -48,7 +46,6 @@ pub fn shingles(norm: &str) -> Vec<(usize, usize)> {
 /// Compute a [`MinHashSignature`] for `norm` using the supplied
 /// `seeds`. `seeds.len()` should equal the configured `num_permutations`;
 /// slots beyond `seeds.len()` are left at `u64::MAX`.
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn signature(norm: &str, shingle_ranges: &[(usize, usize)], seeds: &[u64]) -> MinHashSignature {
     let mut sig = MinHashSignature::empty();
     if shingle_ranges.is_empty() {
@@ -75,7 +72,6 @@ pub fn signature(norm: &str, shingle_ranges: &[(usize, usize)], seeds: &[u64]) -
 /// `1..=MAX_NUM_PERMUTATIONS`. Caller's invariant is that `n` equals
 /// `num_permutations` from `ResolverConfig` (validated upstream).
 #[must_use]
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature, n: usize) -> f32 {
     debug_assert!(
         n > 0 && n <= MAX_NUM_PERMUTATIONS,
@@ -99,7 +95,6 @@ pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature, n: usize) -> f32 {
 /// Sorted descending by `jaccard`; ties broken by `EntityId` lex order.
 #[derive(Debug)]
 #[must_use]
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub struct Scored<'a> {
     /// Existing entity that was scored.
     pub node: &'a EntityNode,
@@ -110,7 +105,6 @@ pub struct Scored<'a> {
 /// Outcome of the Tier-2 pass over the supplied existing entities.
 #[derive(Debug)]
 #[must_use]
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub enum FuzzyOutcome {
     /// No existing entity scored at or above `threshold`.
     None,
@@ -125,7 +119,6 @@ pub enum FuzzyOutcome {
 /// sorted descending by Jaccard with ties broken by `EntityId` lex
 /// order. The `Scored` slice is the source of truth Tier 3 uses to
 /// pick its top-1 in-band candidate.
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn fuzzy_match<'a>(
     cand_sig: &MinHashSignature,
     existing: &'a [EntityNode],

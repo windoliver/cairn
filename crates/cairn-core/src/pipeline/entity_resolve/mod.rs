@@ -492,32 +492,55 @@ mod resolver_tests {
     }
 
     #[tokio::test]
-    async fn tier3_with_llm_returns_valid_resolution() {
-        let existing = vec![node("01HZE7JV5N0000000000000001", "auth service backend")];
+    async fn tier3_merges_when_llm_says_same_above_threshold() {
+        // Tune config so Tier 2 cannot match (threshold near 1.0) and
+        // Tier 3 always fires (low_band = 0.0). The candidate need only
+        // be similar enough to produce some non-zero Jaccard, which 3-gram
+        // shingles over related strings reliably do.
+        let cfg = ResolverConfig {
+            fuzzy_threshold: 0.999,
+            llm_low_band: 0.0,
+            llm_min_confidence: 0.7,
+            ..ResolverConfig::default()
+        };
+        let existing = vec![node("01HZE7JV5N0000000000000001", "auth service")];
         let llm = Arc::new(CannedJsonLlm(json!({
             "same": true,
             "confidence": 0.95,
-            "reasoning": "same concept, different deployment"
+            "reasoning": "stub"
         })));
-        let r = EntityResolver::new(ResolverConfig::default(), Some(llm))
-            .expect("invariant: default config validates");
+        let r = EntityResolver::new(cfg, Some(llm)).expect("invariant: tuned config validates");
         let res = r
-            .resolve("auth service frontend", &existing)
+            .resolve("authentication service", &existing)
             .await
-            .expect("invariant: canned LLM returning Json never errors");
-        // Outcome depends on whether Tier 2 already crossed 0.85 (Merge)
-        // or fell into the LLM band where the canned response triggers
-        // Merge. Either way, the resolver returns a defined Resolution.
-        match res {
-            Resolution::Merge(id) => {
-                assert_eq!(id.as_str(), "01HZE7JV5N0000000000000001");
-            }
-            Resolution::New | Resolution::Ambiguous(_) => {
-                // Acceptable if Jaccard fell below llm_low_band (returning New
-                // before the LLM call) or Tier 2 produced Many. Both are valid
-                // resolver outputs given the input shape.
-            }
-        }
+            .expect("invariant: canned LLM never errors");
+        assert!(
+            matches!(res, Resolution::Merge(ref id) if id.as_str() == "01HZE7JV5N0000000000000001"),
+            "expected Merge, got {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tier3_returns_new_when_llm_says_different() {
+        // Same tuning as above; canned response now declines.
+        let cfg = ResolverConfig {
+            fuzzy_threshold: 0.999,
+            llm_low_band: 0.0,
+            llm_min_confidence: 0.7,
+            ..ResolverConfig::default()
+        };
+        let existing = vec![node("01HZE7JV5N0000000000000001", "auth service")];
+        let llm = Arc::new(CannedJsonLlm(json!({
+            "same": false,
+            "confidence": 0.99,
+            "reasoning": "stub"
+        })));
+        let r = EntityResolver::new(cfg, Some(llm)).expect("invariant: tuned config validates");
+        let res = r
+            .resolve("authentication service", &existing)
+            .await
+            .expect("invariant: canned LLM never errors");
+        assert!(matches!(res, Resolution::New), "expected New, got {res:?}");
     }
 
     #[tokio::test]

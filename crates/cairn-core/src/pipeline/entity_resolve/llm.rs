@@ -7,7 +7,6 @@ use crate::domain::graph::EntityNode;
 use crate::pipeline::entity_resolve::{EntityResolutionError, Resolution};
 
 /// JSON Schema sent to `LLMProvider::complete` for Tier-3 enforcement.
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub(super) fn dedup_schema() -> Value {
     json!({
         "type": "object",
@@ -22,7 +21,6 @@ pub(super) fn dedup_schema() -> Value {
 }
 
 /// Build the Tier-3 prompt verbatim per issue #187.
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub(super) fn dedup_prompt(candidate_name: &str, top_match_name: &str) -> String {
     format!(
         "Are these two entities the same real-world concept?\n  A: {candidate_name}\n  B: {top_match_name}\nRespond as JSON: {{ \"same\": <bool>, \"confidence\": <float 0..1>, \"reasoning\": <string> }}"
@@ -41,7 +39,6 @@ pub(super) fn dedup_prompt(candidate_name: &str, top_match_name: &str) -> String
 ///   parsed as `Json` but missing/wrong-typed required fields
 ///   (defence-in-depth — should be unreachable when the provider
 ///   honours the schema arg).
-#[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub(super) async fn llm_dedup(
     provider: &dyn LLMProvider,
     candidate_name: &str,
