@@ -23,18 +23,20 @@ pub struct Finding {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Kind {
-    Contradiction,
-    Orphan,
-    Stale,
-    MissingConcept,
-    DataGap,
-    MalformedRecord,
     BrokenActorChain,
-    MissingProvenance,
-    StaleSchema,
+    Contradiction,
+    DataGap,
+    DeferredCheck,
     HotMemoryOverBudget,
     IndexDrift,
-    DeferredCheck,
+    MalformedRecord,
+    MissingConcept,
+    MissingProvenance,
+    Orphan,
+    ProjectionDrift,
+    ProjectionMissing,
+    Stale,
+    StaleSchema,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

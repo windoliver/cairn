@@ -19,6 +19,7 @@ use cairn_core::config::{CairnConfig, EmbeddingModelKind};
 use cairn_core::domain::identity::keys::VaultId;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 
 use super::envelope::{emit_json, new_operation_id};
 
@@ -164,6 +165,16 @@ pub fn run_with_context(
         },
         capabilities: caps,
         extensions: vec![],
+        // Advertise the live routing policy (issue #217). The
+        // `capture_trace` verb dispatches through the same
+        // `DefaultRegistry` (see `crates/cairn-cli/src/verbs/capture_trace.rs`
+        // — `dispatch(event, &DefaultRegistry)`), so this advertisement
+        // is exact for the runtime, not a placeholder. When a
+        // deployment-supplied `ToolSchemaLookup` lands, the call here
+        // and the matching call in `capture_trace` move in lockstep to
+        // the live registry; the wire schema's family-granular shape
+        // makes the two sides un-divergeable.
+        pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
     };
 
     if json {

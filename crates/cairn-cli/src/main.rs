@@ -199,7 +199,10 @@ fn main() -> ExitCode {
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
-        Some(("lint", sub)) => verbs::lint::run(sub),
+        Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
+            Err(_) => verbs::lint::run(sub, None),
+        },
         Some(("forget", sub)) => verbs::forget::run(sub),
         Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),

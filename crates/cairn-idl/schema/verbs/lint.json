@@ -41,18 +41,20 @@
     "Kind": {
       "type": "string",
       "enum": [
-        "contradiction",
-        "orphan",
-        "stale",
-        "missing_concept",
-        "data_gap",
-        "malformed_record",
         "broken_actor_chain",
-        "missing_provenance",
-        "stale_schema",
+        "contradiction",
+        "data_gap",
+        "deferred_check",
         "hot_memory_over_budget",
         "index_drift",
-        "deferred_check"
+        "malformed_record",
+        "missing_concept",
+        "missing_provenance",
+        "orphan",
+        "projection_drift",
+        "projection_missing",
+        "stale",
+        "stale_schema"
       ]
     },
     "Target": {
