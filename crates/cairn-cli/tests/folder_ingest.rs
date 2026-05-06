@@ -126,6 +126,9 @@ fn second_non_dry_run_uses_cache() {
         .output()
         .expect("first cairn ingest --folder");
     assert_eq!(first.status.code(), Some(0), "exit: {:?}", first.status);
+    assert!(dir.path().join(".cairn/cache").exists());
+    let first_json = json_stdout(&first);
+    assert_eq!(first_json["records_written"], 0);
 
     let second = cli()
         .current_dir(dir.path())

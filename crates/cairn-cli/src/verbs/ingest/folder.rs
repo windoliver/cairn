@@ -210,7 +210,6 @@ fn run_with_options(
                     entry.relative_path.display()
                 ))
             })?;
-            summary.records_written = summary.records_written.saturating_add(1);
         }
     }
 
