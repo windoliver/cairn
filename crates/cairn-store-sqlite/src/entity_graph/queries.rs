@@ -3,6 +3,17 @@ use std::sync::Arc;
 
 use crate::store::SqliteMemoryStore;
 
+/// Bind-slot accounting for the CTE prefix. Callers bind in this
+/// order: `now` (×`now_count`), then scope tuple dimensions
+/// (×`scope_count`, in tuple-major / dimension-minor order matching
+/// `scope_match_clause`).
+pub struct CtePrefixBinds {
+    /// Number of `?` slots bound to the `now` timestamp.
+    pub now_count: usize,
+    /// Number of `?` slots bound to scope-tuple dimensions.
+    pub scope_count: usize,
+}
+
 /// Read-only graph-traversal driver. Constructed per-request after
 /// the MCP handler has resolved the caller's scope set; every
 /// method bakes both the §3.0 active-at-now temporal predicate
@@ -67,6 +78,99 @@ impl GraphQueries {
             arms.push(format!("({})", conds.join(" AND ")));
         }
         (arms.join(" OR "), tuples.len() * DIMS.len())
+    }
+
+    /// Build the canonical §3.0 CTE prefix used by every public
+    /// query. The returned SQL ends with a trailing comma so the
+    /// caller appends their own SELECT-feeding CTEs or trailing
+    /// statement directly.
+    ///
+    /// Bind order: `now` (×[`CtePrefixBinds::now_count`]), then scope
+    /// tuple dimensions (×[`CtePrefixBinds::scope_count`]) in
+    /// tuple-major / dimension-minor order matching `scope_match_clause`.
+    #[must_use]
+    pub fn cte_prefix(tuples: &[ScopeTuple]) -> (String, CtePrefixBinds) {
+        let (scope_clause, scope_per_block) = Self::scope_match_clause(tuples);
+        // visible_edges_raw — temporal + scope + orphan exclusion
+        let raw = format!(
+            "visible_edges_raw AS (
+               SELECT e.*
+               FROM entity_edges e
+               WHERE e.expired_at IS NULL
+                 AND e.valid_at  <= ?
+                 AND (e.invalid_at IS NULL OR e.invalid_at > ?)
+                 AND e.source_record_id IS NOT NULL
+                 AND EXISTS (
+                   SELECT 1 FROM records r_src
+                   JOIN records r_active
+                     ON r_active.target_id = r_src.target_id
+                   WHERE r_src.record_id = e.source_record_id
+                     AND ({scope_clause})
+                     AND r_active.active     = 1
+                     AND r_active.tombstoned = 0
+                 )
+             )"
+        );
+        // visible_nodes — three OR'd provenance branches
+        let nodes = format!(
+            "visible_nodes AS (
+               SELECT n.*
+               FROM entity_nodes n
+               WHERE n.expired_at IS NULL
+                 AND (
+                   EXISTS (
+                     SELECT 1 FROM visible_edges_raw e
+                     WHERE e.source_id = n.id OR e.target_id = n.id
+                   )
+                   OR EXISTS (
+                     SELECT 1 FROM entity_episodes ep
+                     JOIN records r_src ON r_src.record_id = ep.episode_id
+                     JOIN records r_active
+                       ON r_active.target_id = r_src.target_id
+                     WHERE ep.entity_node_id = n.id
+                       AND r_active.active     = 1
+                       AND r_active.tombstoned = 0
+                       AND ({scope_clause})
+                   )
+                   OR EXISTS (
+                     SELECT 1 FROM entity_edges he
+                     WHERE (he.source_id = n.id OR he.target_id = n.id)
+                       AND he.expired_at IS NULL
+                       AND he.valid_at   <= ?
+                       AND he.invalid_at IS NOT NULL
+                       AND he.invalid_at <= ?
+                       AND EXISTS (
+                         SELECT 1 FROM records r_src
+                         JOIN records r_active
+                           ON r_active.target_id = r_src.target_id
+                         WHERE r_src.record_id = he.source_record_id
+                           AND ({scope_clause})
+                           AND r_active.active     = 1
+                           AND r_active.tombstoned = 0
+                       )
+                   )
+                 )
+             )"
+        );
+        // visible_edges — endpoint liveness join
+        let edges = "visible_edges AS (
+               SELECT e.* FROM visible_edges_raw e
+               WHERE e.source_id IN (SELECT id FROM visible_nodes)
+                 AND e.target_id IN (SELECT id FROM visible_nodes)
+             )"
+        .to_string();
+        let sql = format!("WITH {raw}, {nodes}, {edges},");
+        (
+            sql,
+            CtePrefixBinds {
+                // visible_edges_raw: valid_at <= ? AND invalid_at > ?  → 2 :now
+                // past-invalidated branch: valid_at <= ? AND invalid_at <= ? → 2 :now
+                // Total :now = 4.
+                now_count: 4,
+                // Three scope blocks (raw, episode, past-invalid) × scope_per_block each.
+                scope_count: scope_per_block * 3,
+            },
+        )
     }
 
     /// Expand a `len`-wide `IN (?,?,...)` placeholder list. `len = 0`

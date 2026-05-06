@@ -21,3 +21,17 @@ fn scope_clause_two_tuples_or_joins_arms() {
     assert_eq!(n, 12);
     assert_eq!(sql.matches(" OR ").count(), 1);
 }
+
+#[test]
+fn cte_prefix_emits_three_named_ctes_and_counts_binds() {
+    let tuples = vec![ScopeTuple::default()];
+    let (sql, prefix_binds) = GraphQueries::cte_prefix(&tuples);
+    assert!(sql.contains("visible_edges_raw AS"));
+    assert!(sql.contains("visible_nodes AS"));
+    assert!(sql.contains("visible_edges AS"));
+    // visible_edges_raw: valid_at <= ? AND invalid_at > ?  → 2 :now
+    // past-invalidated branch: valid_at <= ? AND invalid_at <= ? → 2 :now
+    // Total :now = 4. Three scope blocks × 6 params each = 18.
+    assert_eq!(prefix_binds.now_count, 4);
+    assert_eq!(prefix_binds.scope_count, 18);
+}
