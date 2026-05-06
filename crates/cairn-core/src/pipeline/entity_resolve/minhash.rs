@@ -17,7 +17,6 @@ pub struct MinHashSignature(pub [u64; MAX_NUM_PERMUTATIONS]);
 
 impl MinHashSignature {
     /// All-`u64::MAX` signature, used as the starting point for [`signature`].
-    #[must_use]
     pub const fn empty() -> Self {
         Self([u64::MAX; MAX_NUM_PERMUTATIONS])
     }
@@ -49,7 +48,6 @@ pub fn shingles(norm: &str) -> Vec<(usize, usize)> {
 /// Compute a [`MinHashSignature`] for `norm` using the supplied
 /// `seeds`. `seeds.len()` should equal the configured `num_permutations`;
 /// slots beyond `seeds.len()` are left at `u64::MAX`.
-#[must_use]
 #[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn signature(norm: &str, shingle_ranges: &[(usize, usize)], seeds: &[u64]) -> MinHashSignature {
     let mut sig = MinHashSignature::empty();
@@ -127,7 +125,6 @@ pub enum FuzzyOutcome {
 /// sorted descending by Jaccard with ties broken by `EntityId` lex
 /// order. The `Scored` slice is the source of truth Tier 3 uses to
 /// pick its top-1 in-band candidate.
-#[must_use]
 #[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub fn fuzzy_match<'a>(
     cand_sig: &MinHashSignature,
