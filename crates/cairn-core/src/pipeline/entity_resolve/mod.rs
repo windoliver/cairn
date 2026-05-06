@@ -85,6 +85,22 @@ impl ResolverConfig {
 }
 
 use crate::contract::llm_provider::LlmError;
+use crate::domain::graph::EntityId;
+
+/// Outcome of a Tier-1/2/3 resolution for a candidate entity name.
+///
+/// Task 6 adds [`EntityResolver`] which calls all three tiers and
+/// returns this enum. Defined here so Tier-3 (`llm.rs`) can import
+/// and return it without a forward-reference.
+// Task 6 wires Merge/New into EntityResolver; suppress dead_code until then.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// Merge the candidate into the existing node with this id.
+    Merge(EntityId),
+    /// No match found; create a new entity node.
+    New,
+}
 
 /// Errors raised when [`ResolverConfig::validate`] rejects a configuration.
 #[derive(Debug, thiserror::Error)]

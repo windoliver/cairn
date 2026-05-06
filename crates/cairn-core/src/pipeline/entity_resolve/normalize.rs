@@ -45,10 +45,7 @@ pub fn normalize(s: &str) -> String {
 // Task 6 wires this into EntityResolver; suppress dead_code until then.
 #[allow(dead_code)]
 pub fn exact_match<'a>(norm: &str, existing: &'a [EntityNode]) -> Option<&'a EntityId> {
-    existing
-        .iter()
-        .find(|n| n.name_norm == norm)
-        .map(|n| &n.id)
+    existing.iter().find(|n| n.name_norm == norm).map(|n| &n.id)
 }
 
 #[cfg(test)]
