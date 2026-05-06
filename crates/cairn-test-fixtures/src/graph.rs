@@ -67,18 +67,15 @@ pub async fn timeline_fixture() -> TimelineGraphFixture {
     let scope_json = serde_json::to_string(&scope_a).expect("scope_a json");
 
     // Distinct stable IDs for nodes and edges.
-    let id_node_a  = "01HZE7TL0000000000000000A1";
-    let id_node_b  = "01HZE7TL0000000000000000B1";
+    let id_node_a = "01HZE7TL0000000000000000A1";
+    let id_node_b = "01HZE7TL0000000000000000B1";
 
     let now = FIXTURE_NOW;
     let past = now - 10_000;
     let future = now + 10_000;
 
     // Insert entity nodes.
-    let nodes: &[(&str, &str)] = &[
-        (id_node_a, "tl-alpha"),
-        (id_node_b, "tl-beta"),
-    ];
+    let nodes: &[(&str, &str)] = &[(id_node_a, "tl-alpha"), (id_node_b, "tl-beta")];
     for (id, name) in nodes {
         let node = EntityNode {
             id: EntityId::from(*id),
@@ -700,10 +697,7 @@ pub async fn future_provenance_fixture() -> FutureProvenanceFixture {
     let now = FIXTURE_NOW;
     let future_valid_at = now + 86_400_000; // +1 day
 
-    for (id, name) in &[
-        (id_node_anchor, "fp-anchor"),
-        (id_node_future, "fp-future"),
-    ] {
+    for (id, name) in &[(id_node_anchor, "fp-anchor"), (id_node_future, "fp-future")] {
         let node = EntityNode {
             id: EntityId::from(*id),
             name: (*name).to_owned(),

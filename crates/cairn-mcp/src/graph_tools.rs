@@ -208,21 +208,19 @@ pub async fn dispatch(
 ) -> CallToolResult {
     let args = arguments.unwrap_or_default();
     let result: Result<Value, String> = match name {
-        "graph.get_entity" => {
-            match serde_json::from_value::<GetEntityArgs>(Value::Object(args)) {
-                Ok(GetEntityArgs::ById { id }) => queries
-                    .get_entity_by_id(id)
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
-                Ok(GetEntityArgs::ByName { name }) => queries
-                    .get_entity_by_name(name)
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
-                Err(e) => Err(format!("invalid args: {e}")),
-            }
-        }
+        "graph.get_entity" => match serde_json::from_value::<GetEntityArgs>(Value::Object(args)) {
+            Ok(GetEntityArgs::ById { id }) => queries
+                .get_entity_by_id(id)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            Ok(GetEntityArgs::ByName { name }) => queries
+                .get_entity_by_name(name)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            Err(e) => Err(format!("invalid args: {e}")),
+        },
         "graph.get_neighbors" => {
             match serde_json::from_value::<GetNeighborsArgs>(Value::Object(args)) {
                 Ok(a) => queries
@@ -233,45 +231,34 @@ pub async fn dispatch(
                 Err(e) => Err(format!("invalid args: {e}")),
             }
         }
-        "graph.query" => {
-            match serde_json::from_value::<QueryGraphArgs>(Value::Object(args)) {
-                Ok(a) => {
-                    let max_hops = a.max_hops.min(5);
-                    let node_budget =
-                        usize::try_from(a.node_budget).unwrap_or(usize::MAX);
-                    let token_budget =
-                        usize::try_from(a.token_budget).unwrap_or(usize::MAX);
-                    let res = match a.mode {
-                        TraversalMode::Bfs => {
-                            queries.query_bfs(a.seed, max_hops, node_budget).await
-                        }
-                        TraversalMode::Dfs => {
-                            queries.query_dfs(a.seed, max_hops, node_budget).await
-                        }
-                    };
-                    res.map_err(|e| e.to_string()).and_then(|sg| {
-                        let trimmed =
-                            GraphQueries::truncate_to_token_budget(&sg.edges, token_budget);
-                        serde_json::to_value(serde_json::json!({
-                            "nodes": sg.nodes,
-                            "edges": trimmed,
-                        }))
-                        .map_err(|e| e.to_string())
-                    })
-                }
-                Err(e) => Err(format!("invalid args: {e}")),
-            }
-        }
-        "graph.timeline" => {
-            match serde_json::from_value::<TimelineArgs>(Value::Object(args)) {
-                Ok(a) => queries
-                    .timeline(a.id, a.include_history, a.include_expired)
-                    .await
+        "graph.query" => match serde_json::from_value::<QueryGraphArgs>(Value::Object(args)) {
+            Ok(a) => {
+                let max_hops = a.max_hops.min(5);
+                let node_budget = usize::try_from(a.node_budget).unwrap_or(usize::MAX);
+                let token_budget = usize::try_from(a.token_budget).unwrap_or(usize::MAX);
+                let res = match a.mode {
+                    TraversalMode::Bfs => queries.query_bfs(a.seed, max_hops, node_budget).await,
+                    TraversalMode::Dfs => queries.query_dfs(a.seed, max_hops, node_budget).await,
+                };
+                res.map_err(|e| e.to_string()).and_then(|sg| {
+                    let trimmed = GraphQueries::truncate_to_token_budget(&sg.edges, token_budget);
+                    serde_json::to_value(serde_json::json!({
+                        "nodes": sg.nodes,
+                        "edges": trimmed,
+                    }))
                     .map_err(|e| e.to_string())
-                    .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
-                Err(e) => Err(format!("invalid args: {e}")),
+                })
             }
-        }
+            Err(e) => Err(format!("invalid args: {e}")),
+        },
+        "graph.timeline" => match serde_json::from_value::<TimelineArgs>(Value::Object(args)) {
+            Ok(a) => queries
+                .timeline(a.id, a.include_history, a.include_expired)
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+            Err(e) => Err(format!("invalid args: {e}")),
+        },
         "graph.surprising_connections" => {
             match serde_json::from_value::<SurprisingArgs>(Value::Object(args)) {
                 Ok(a) => {

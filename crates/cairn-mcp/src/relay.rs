@@ -68,9 +68,7 @@ fn frame_is_blank(bytes: &[u8]) -> bool {
     if end > 0 && bytes[end - 1] == b'\r' {
         end -= 1;
     }
-    bytes[..end]
-        .iter()
-        .all(|b| matches!(*b, b' ' | b'\t'))
+    bytes[..end].iter().all(|b| matches!(*b, b' ' | b'\t'))
 }
 
 /// Handle bytes remaining in the buffer after EOF with no trailing newline.
@@ -78,10 +76,7 @@ fn frame_is_blank(bytes: &[u8]) -> bool {
 /// Mirrors `rmcp::JsonRpcMessageCodec::decode_eof`: if the bytes parse as
 /// valid JSON they are forwarded followed by a synthetic `\n`; otherwise
 /// they are silently dropped after a `tracing::warn!`.
-async fn handle_eof_tail<W: AsyncWrite + Unpin>(
-    tail: &[u8],
-    out: &mut W,
-) -> std::io::Result<()> {
+async fn handle_eof_tail<W: AsyncWrite + Unpin>(tail: &[u8], out: &mut W) -> std::io::Result<()> {
     if tail.is_empty() {
         return Ok(());
     }

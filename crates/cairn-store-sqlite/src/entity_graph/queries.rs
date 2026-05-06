@@ -149,17 +149,17 @@ impl GraphQueries {
     /// Production callers must short-circuit upstream via
     /// `materialize_graph_request` before reaching this constructor.
     #[must_use]
-    pub fn new(
-        store: Arc<SqliteMemoryStore>,
-        allowed_scopes: Vec<ScopeTuple>,
-        now: i64,
-    ) -> Self {
+    pub fn new(store: Arc<SqliteMemoryStore>, allowed_scopes: Vec<ScopeTuple>, now: i64) -> Self {
         debug_assert!(
             !allowed_scopes.is_empty(),
             "invariant: GraphQueries requires non-empty allowed_scopes; \
              materialize_graph_request must short-circuit upstream"
         );
-        Self { store, allowed_scopes, now }
+        Self {
+            store,
+            allowed_scopes,
+            now,
+        }
     }
 
     /// Render the §3.0a six-dimension scope match clause.
@@ -172,7 +172,12 @@ impl GraphQueries {
     #[must_use]
     pub fn scope_match_clause(tuples: &[ScopeTuple]) -> (String, usize) {
         const DIMS: [&str; 6] = [
-            "tenant", "workspace", "session_id", "entity", "user", "agent",
+            "tenant",
+            "workspace",
+            "session_id",
+            "entity",
+            "user",
+            "agent",
         ];
         let mut arms: Vec<String> = Vec::with_capacity(tuples.len());
         for _ in tuples {
@@ -431,7 +436,12 @@ impl GraphQueries {
                 depth_of,
             });
         };
-        visited.insert(seed_hit.id.clone(), GraphNode { id: seed_hit.id.clone() });
+        visited.insert(
+            seed_hit.id.clone(),
+            GraphNode {
+                id: seed_hit.id.clone(),
+            },
+        );
         depth_of.insert(seed_hit.id.clone(), 0);
 
         let mut frontier: Vec<String> = vec![seed];
@@ -491,7 +501,10 @@ impl GraphQueries {
         let visited_filter = if visited.is_empty() {
             String::new()
         } else {
-            format!("WHERE other_id NOT IN {}", Self::placeholders(visited.len()))
+            format!(
+                "WHERE other_id NOT IN {}",
+                Self::placeholders(visited.len())
+            )
         };
         let sql = format!(
             "{prefix}
@@ -532,7 +545,9 @@ impl GraphQueries {
         for v in &visited {
             binds.push(SqlValue::Text(v.clone()));
         }
-        binds.push(SqlValue::Integer(i64::try_from(wave_cap).unwrap_or(i64::MAX)));
+        binds.push(SqlValue::Integer(
+            i64::try_from(wave_cap).unwrap_or(i64::MAX),
+        ));
 
         let conn = self.store.read_conn()?;
         let out = conn
@@ -621,10 +636,7 @@ impl GraphQueries {
     ///
     /// Returns `None` when the entity is unknown or not visible under
     /// `allowed_scopes` — the §2.1.0 anti-leak contract.
-    pub async fn get_entity_by_id(
-        &self,
-        id: String,
-    ) -> Result<Option<EntityHit>, StoreError> {
+    pub async fn get_entity_by_id(&self, id: String) -> Result<Option<EntityHit>, StoreError> {
         let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
         let sql = format!(
             "{prefix}
@@ -672,10 +684,7 @@ impl GraphQueries {
     /// `echoed_name` in the returned [`EntityHit`] carries the caller's
     /// literal input string — never the canonical DB `name` column, which
     /// is a cross-scope field per §2.1.0.
-    pub async fn get_entity_by_name(
-        &self,
-        name: String,
-    ) -> Result<Option<EntityHit>, StoreError> {
+    pub async fn get_entity_by_name(&self, name: String) -> Result<Option<EntityHit>, StoreError> {
         let norm = normalize_entity_name(&name);
         let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
         // The cte_prefix ends with a trailing comma, so we must append at
@@ -782,7 +791,7 @@ impl GraphQueries {
             for (_, v) in tup.dimension_iter() {
                 binds.push(match v {
                     Some(s) => SqlValue::Text(s.to_string()),
-                    None    => SqlValue::Null,
+                    None => SqlValue::Null,
                 });
             }
         }
@@ -832,7 +841,9 @@ impl GraphQueries {
         input: Vec<String>,
         limit: usize,
     ) -> Result<Vec<SurpriseHit>, StoreError> {
-        if input.is_empty() { return Ok(vec![]); }
+        if input.is_empty() {
+            return Ok(vec![]);
+        }
         let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
         let input_in = Self::placeholders(input.len());
         let sql = format!(
@@ -872,8 +883,7 @@ impl GraphQueries {
         );
         let mut binds: Vec<SqlValue> = Vec::new();
         self.push_prefix_binds(&mut binds);
-        let json_array = serde_json::to_string(&input)
-            .unwrap_or_else(|_| "[]".to_string());
+        let json_array = serde_json::to_string(&input).unwrap_or_else(|_| "[]".to_string());
         binds.push(SqlValue::Text(json_array));
         for v in &input {
             binds.push(SqlValue::Text(v.clone()));

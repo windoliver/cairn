@@ -7,7 +7,7 @@
 //! Task 20: manifest snapshot matrix (6-cell §2.1 table).
 #![allow(missing_docs)]
 
-use cairn_mcp::graph_tools::{GetEntityArgs, GRAPH_TOOLS};
+use cairn_mcp::graph_tools::{GRAPH_TOOLS, GetEntityArgs};
 use cairn_store_sqlite::entity_graph::queries::GraphQueries;
 use cairn_test_fixtures::graph::tiny_graph as tiny_graph_async;
 
@@ -122,19 +122,12 @@ async fn build_handler_single_tenant_graph_capable() -> CairnMcpHandler {
     cfg.mcp.stdio.single_tenant = true;
     cfg.mcp.stdio.principal = Some(f.scope_a.clone());
 
-    let scope: Arc<dyn McpSessionScope> =
-        Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
 
     // The trait-object store (verb path) wraps the same sqlite store.
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    )
+    CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a)
 }
 
 /// Build a handler where the scope resolver returns an empty Vec.
@@ -148,13 +141,7 @@ async fn build_handler_resolver_returns_empty() -> CairnMcpHandler {
     let scope: Arc<dyn McpSessionScope> = Arc::new(EmptyScope);
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    )
+    CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a)
 }
 
 /// Build a handler where the scope resolver always errors.
@@ -168,13 +155,7 @@ async fn build_handler_resolver_errors() -> CairnMcpHandler {
     let scope: Arc<dyn McpSessionScope> = Arc::new(ErrorScope);
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    )
+    CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a)
 }
 
 /// Write one newline-terminated JSON-RPC frame.
@@ -432,13 +413,8 @@ async fn manifest_matrix_single_tenant_off() {
     let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    );
+    let handler =
+        CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a);
 
     let names = tools_list_via_wire(handler).await;
     insta::assert_json_snapshot!("manifest_single_tenant_off", names);
@@ -501,13 +477,8 @@ async fn manifest_matrix_resolver_err() {
     let scope: Arc<dyn McpSessionScope> = Arc::new(ErrorScope);
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    );
+    let handler =
+        CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a);
 
     let names = tools_list_via_wire(handler).await;
     insta::assert_json_snapshot!("manifest_resolver_err", names);
@@ -525,13 +496,8 @@ async fn manifest_matrix_resolver_ok_empty() {
     let scope: Arc<dyn McpSessionScope> = Arc::new(EmptyScope);
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
 
-    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
-        store_dyn,
-        f.store,
-        scope,
-        cfg,
-        f.scope_a,
-    );
+    let handler =
+        CairnMcpHandler::with_store_scope_and_sqlite(store_dyn, f.store, scope, cfg, f.scope_a);
 
     let names = tools_list_via_wire(handler).await;
     insta::assert_json_snapshot!("manifest_resolver_ok_empty", names);

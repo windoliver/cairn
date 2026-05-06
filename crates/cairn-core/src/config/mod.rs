@@ -1554,11 +1554,7 @@ rerank_topk: 20
             ..Default::default()
         };
         let scope = StaticScope::new(vec![crate::domain::ScopeTuple::default()]);
-        let av = cfg.mcp_graph_tools_available(
-            Some(&scope),
-            McpTransport::Stdio,
-            &store_caps,
-        );
+        let av = cfg.mcp_graph_tools_available(Some(&scope), McpTransport::Stdio, &store_caps);
         assert!(
             matches!(av, McpGraphAvailability::Available { tool_count: 5 }),
             "Plan C: all conditions met must return Available{{5}}; got {av:?}",

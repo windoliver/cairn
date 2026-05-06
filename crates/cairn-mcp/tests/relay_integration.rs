@@ -41,7 +41,10 @@ impl McpSessionScope for StaticScope {
 
 /// Write one newline-terminated JSON-RPC frame.
 async fn send_frame(writer: &mut (impl AsyncWriteExt + Unpin), json: &str) {
-    writer.write_all(json.as_bytes()).await.expect("write frame");
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .expect("write frame");
     writer.write_all(b"\n").await.expect("write newline");
     writer.flush().await.expect("flush");
 }
@@ -96,8 +99,7 @@ async fn serve_with_relay_completes_initialize_handshake() {
     cfg.mcp.stdio.single_tenant = true;
     cfg.mcp.stdio.principal = Some(f.scope_a.clone());
 
-    let scope: Arc<dyn McpSessionScope> =
-        Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
     let principal = f.scope_a.clone();
 
@@ -150,8 +152,7 @@ async fn serve_with_relay_tools_list_includes_graph_tools() {
     cfg.mcp.stdio.single_tenant = true;
     cfg.mcp.stdio.principal = Some(f.scope_a.clone());
 
-    let scope: Arc<dyn McpSessionScope> =
-        Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
     let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
     let principal = f.scope_a.clone();
 

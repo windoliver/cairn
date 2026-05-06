@@ -269,11 +269,10 @@ impl ServerHandler for CairnMcpHandler {
         let ctx = self.auth_context();
         if self.materialize_graph_request(&ctx).is_ok() {
             for decl in crate::graph_tools::GRAPH_TOOLS {
-                let schema_value: serde_json::Value =
-                    serde_json::from_slice(crate::graph_tools::schema_of(decl))
-                        .unwrap_or_else(|_| {
-                            serde_json::json!({"type": "object", "properties": {}})
-                        });
+                let schema_value: serde_json::Value = serde_json::from_slice(
+                    crate::graph_tools::schema_of(decl),
+                )
+                .unwrap_or_else(|_| serde_json::json!({"type": "object", "properties": {}}));
                 let schema_obj = match schema_value {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),
@@ -314,9 +313,7 @@ impl ServerHandler for CairnMcpHandler {
                     return Ok(capability_unavailable_result(&name));
                 };
                 let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
-                return Ok(
-                    crate::graph_tools::dispatch(&queries, &name, arguments).await
-                );
+                return Ok(crate::graph_tools::dispatch(&queries, &name, arguments).await);
             }
 
             let known = TOOLS.iter().any(|d| d.name == name.as_ref());

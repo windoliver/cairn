@@ -247,7 +247,14 @@ mod tests {
         let names: Vec<&str> = dims.iter().map(|(k, _)| *k).collect();
         assert_eq!(
             names,
-            ["tenant", "workspace", "session_id", "entity", "user", "agent"],
+            [
+                "tenant",
+                "workspace",
+                "session_id",
+                "entity",
+                "user",
+                "agent"
+            ],
             "canonical order must match scope_match_clause"
         );
         assert_eq!(dims[0].1, Some("acme"));

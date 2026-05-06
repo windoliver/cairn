@@ -53,7 +53,12 @@ async fn get_entity_by_id_returns_id_and_live_edge_count() {
 async fn get_entity_by_id_out_of_scope_returns_none() {
     let f = cairn_test_fixtures::graph::tiny_graph().await;
     let q = GraphQueries::new(f.store.clone(), vec![f.scope_b.clone()], f.now);
-    assert!(q.get_entity_by_id(f.node_a.clone()).await.unwrap().is_none());
+    assert!(
+        q.get_entity_by_id(f.node_a.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -89,8 +94,14 @@ async fn query_dfs_reorders_bfs_via_parent_of() {
     let dfs = q.query_dfs(f.node_a.clone(), 3, 64).await.unwrap();
     // Same edge set, possibly different order
     assert_eq!(
-        bfs.edges.iter().map(|e| &e.id).collect::<std::collections::HashSet<_>>(),
-        dfs.edges.iter().map(|e| &e.id).collect::<std::collections::HashSet<_>>(),
+        bfs.edges
+            .iter()
+            .map(|e| &e.id)
+            .collect::<std::collections::HashSet<_>>(),
+        dfs.edges
+            .iter()
+            .map(|e| &e.id)
+            .collect::<std::collections::HashSet<_>>(),
     );
     // DFS visits a child before any sibling's subtree
     assert_eq!(dfs.nodes[0].id, f.node_a);
@@ -135,9 +146,13 @@ async fn surprising_connections_scores_cross_scope_above_same_scope() {
         vec![f.scope_a.clone(), f.scope_b.clone()],
         f.now,
     );
-    let hits = q.surprising_connections(vec![
-        f.node_a.clone(), f.node_b.clone(), f.node_c.clone(),
-    ], 10).await.unwrap();
+    let hits = q
+        .surprising_connections(
+            vec![f.node_a.clone(), f.node_b.clone(), f.node_c.clone()],
+            10,
+        )
+        .await
+        .unwrap();
     // Highest score must be the S_b edge (modal is S_a).
     // `source_record_id` lives on `SurpriseHit`, not on the inner
     // `GraphEdge` — the public edge type is id-only by design (§3.1).
@@ -175,10 +190,7 @@ async fn tombstoned_endpoint_hidden_from_all_five_tools() {
     let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
 
     // get_neighbors from node_a must return nothing (only edge goes to tombstoned B).
-    let neighbors = q
-        .get_neighbors(f.node_a.clone(), None, None)
-        .await
-        .unwrap();
+    let neighbors = q.get_neighbors(f.node_a.clone(), None, None).await.unwrap();
     assert!(
         neighbors.is_empty(),
         "get_neighbors must hide edge to tombstoned B; got {} edge(s)",
@@ -186,10 +198,7 @@ async fn tombstoned_endpoint_hidden_from_all_five_tools() {
     );
 
     // timeline for node_a has no live edges → empty.
-    let timeline = q
-        .timeline(f.node_a.clone(), true, true)
-        .await
-        .unwrap();
+    let timeline = q.timeline(f.node_a.clone(), true, true).await.unwrap();
     assert!(
         timeline.is_empty(),
         "timeline must hide edge to tombstoned B; got {} entry(s)",
@@ -326,10 +335,7 @@ async fn scope_tuple_has_no_wildcard_user_dimension() {
         ..ScopeTuple::default()
     };
     let q = GraphQueries::new(f.store.clone(), vec![scope_no_user], f.now);
-    let edges = q
-        .get_neighbors(f.node_a.clone(), None, None)
-        .await
-        .unwrap();
+    let edges = q.get_neighbors(f.node_a.clone(), None, None).await.unwrap();
     assert!(
         edges.iter().all(|e| e.id != f.edge_with_user_bob),
         "edge sourced from user=bob record must not be visible to user=None query; \
