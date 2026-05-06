@@ -4,6 +4,7 @@
 //! return scored output. The store adapters orchestrate the data fetching.
 
 mod cosine;
+mod degraded;
 mod explain;
 mod graph;
 mod orchestrator;
@@ -11,6 +12,7 @@ mod rrf;
 mod trim;
 
 pub use cosine::{RerankedCandidate, cosine_rerank, cosine_similarity};
+pub use degraded::{DegradationReason, DegradedLeg, GraphSource};
 pub use explain::ScoreExplain;
 pub use graph::GraphCandidate;
 pub use orchestrator::{HybridSearchInputs, HybridSearchParams, hybrid_search};
