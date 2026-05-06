@@ -14,12 +14,8 @@
     ]
   },
   "x-cairn-skill-triggers": {
-    "positive": [
-      "use at the start of every turn to load the hot-memory prefix for this agent/session"
-    ],
-    "negative": [
-      "do NOT call in a tight inner loop — one call per turn"
-    ],
+    "positive": ["use at the start of every turn to load the hot-memory prefix for this agent/session"],
+    "negative": ["do NOT call in a tight inner loop — one call per turn"],
     "exclusivity": "this is the canonical hot-prefix surface"
   },
   "type": "object",
@@ -35,11 +31,40 @@
     "Data": {
       "type": "object",
       "additionalProperties": false,
+      "x-cairn-validate": true,
       "required": ["prefix", "bytes"],
       "properties": {
         "prefix": { "type": "string", "description": "Assembled hot-memory text ready to inject into the agent prompt. May be empty when no hot-memory is available." },
-        "bytes":  { "type": "integer", "minimum": 0, "maximum": 4194304 }
+        "bytes":  { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/HotSegment" },
+          "maxItems": 64,
+          "description": "Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy cairn.mcp.v1 producer that predates this feature; consumers MUST treat prefix as opaque. (2) \"segments\": [] — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: prefix == \"\" AND bytes == 0. (3) \"segments\": [...] — new producer with a configured recipe; len() mirrors HotMemoryConfig.recipe.len() 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via Option<Vec<HotSegment>> (None vs Some(vec![])); JSON-only consumers distinguish them by field presence. NOTE: there is intentionally NO default: [] here — schema-aware tooling that materialized defaults would rewrite legacy-absent into canonical-empty and trip the EmptySegmentsRequiresEmptyPrefix invariant. Forward-compat depends on absence staying absence."
+        }
       }
+    },
+    "HotSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "byte_start", "byte_end", "stability", "content_hash"],
+      "properties": {
+        "step":         { "$ref": "#/$defs/HotRecipeStep" },
+        "byte_start":   { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "byte_end":     { "type": "integer", "minimum": 0, "maximum": 4194304 },
+        "stability":    { "$ref": "#/$defs/SegmentStability" },
+        "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Lowercase hex SHA-256 of prefix[byte_start..byte_end].as_bytes(). Wrappers in non-UTF-8 string-typed languages (JS/Java UTF-16) MUST encode prefix to UTF-8 bytes before slicing — naïve String.slice() uses code units and will corrupt non-ASCII segments." }
+      }
+    },
+    "HotRecipeStep": {
+      "type": "string",
+      "enum": ["purpose", "index", "pinned_feedback", "top_salience_project", "active_playbook", "recent_user_signal"],
+      "description": "Frozen for the lifetime of cairn.mcp.v1. Adding a recipe step requires bumping to cairn.mcp.v2."
+    },
+    "SegmentStability": {
+      "type": "string",
+      "enum": ["stable_1h", "stable_5m", "volatile"],
+      "description": "Cache-lifetime hint per segment. Frozen for the lifetime of cairn.mcp.v1."
     }
   }
 }
