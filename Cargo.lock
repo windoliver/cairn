@@ -573,6 +573,7 @@ dependencies = [
  "cairn-core",
  "cairn-store-sqlite",
  "cairn-test-fixtures",
+ "chrono",
  "insta",
  "rmcp",
  "schemars",
