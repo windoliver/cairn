@@ -1100,8 +1100,7 @@ async fn sdk_search_semantic_rejects_when_no_store_with_remediation() {
             ..
         } => {
             assert_eq!(
-                capability,
-                "cairn.mcp.v1.search.semantic",
+                capability, "cairn.mcp.v1.search.semantic",
                 "wrong capability id"
             );
             let hint = remediation

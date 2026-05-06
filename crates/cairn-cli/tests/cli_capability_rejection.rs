@@ -89,10 +89,9 @@ fn search_semantic_rejects_with_remediation_when_local_embeddings_off() {
 
     // The JSON envelope is on stdout (emit_json writes to stdout).
     let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
-    let envelope: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-            panic!("expected valid JSON on stdout; parse error: {e}\nstdout: {stdout:?}")
-        });
+    let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("expected valid JSON on stdout; parse error: {e}\nstdout: {stdout:?}")
+    });
 
     assert_eq!(
         envelope["status"], "rejected",
@@ -103,16 +102,13 @@ fn search_semantic_rejects_with_remediation_when_local_embeddings_off() {
         "error.code must be CapabilityUnavailable; envelope: {envelope}"
     );
     assert_eq!(
-        envelope["error"]["data"]["capability"],
-        "cairn.mcp.v1.search.semantic",
+        envelope["error"]["data"]["capability"], "cairn.mcp.v1.search.semantic",
         "error.data.capability must be the semantic capability id; envelope: {envelope}"
     );
     let remediation = envelope["error"]["data"]["remediation"]
         .as_str()
         .unwrap_or_else(|| {
-            panic!(
-                "error.data.remediation must be a non-empty string; envelope: {envelope}"
-            )
+            panic!("error.data.remediation must be a non-empty string; envelope: {envelope}")
         });
     assert!(
         remediation.contains("local_embeddings"),

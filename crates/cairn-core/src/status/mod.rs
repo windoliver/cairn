@@ -33,7 +33,7 @@
 pub mod remediation;
 pub mod wiring;
 
-pub use remediation::{remediation_for, REMEDIATION};
+pub use remediation::{REMEDIATION, remediation_for};
 
 use crate::config::CapabilitySet;
 use crate::generated::common::Capabilities;

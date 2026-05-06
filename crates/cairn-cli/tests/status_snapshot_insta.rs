@@ -103,8 +103,7 @@ fn snapshot_unbound_dir() {
 
 #[test]
 fn snapshot_sdk_new_no_store() {
-    let mut v =
-        serde_json::to_value(cairn_sdk::Sdk::new().status()).expect("serialize");
+    let mut v = serde_json::to_value(cairn_sdk::Sdk::new().status()).expect("serialize");
     if let Some(si) = v["server_info"].as_object_mut() {
         si.insert("incarnation".into(), "<masked>".into());
         si.insert("started_at".into(), "<masked>".into());

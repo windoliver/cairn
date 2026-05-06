@@ -58,18 +58,26 @@ fn bound_no_store_with_model_advertises_all_search_modes() {
 
 #[test]
 fn bound_store_without_fts_does_not_advertise_keyword() {
-    let store = Some(StoreCaps { fts: false, vector: true });
+    let store = Some(StoreCaps {
+        fts: false,
+        vector: true,
+    });
     let g = gates(true, true, store);
     let caps = advertise(&g);
     assert!(!caps.contains(&Capabilities::CairnMcpV1SearchKeyword));
     assert!(caps.contains(&Capabilities::CairnMcpV1SearchSemantic));
-    assert!(!caps.contains(&Capabilities::CairnMcpV1SearchHybrid),
-        "hybrid requires FTS; got {caps:?}");
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1SearchHybrid),
+        "hybrid requires FTS; got {caps:?}"
+    );
 }
 
 #[test]
 fn bound_store_without_vector_drops_semantic_and_hybrid() {
-    let store = Some(StoreCaps { fts: true, vector: false });
+    let store = Some(StoreCaps {
+        fts: true,
+        vector: false,
+    });
     let g = gates(true, true, store);
     let caps = advertise(&g);
     assert!(caps.contains(&Capabilities::CairnMcpV1SearchKeyword));
@@ -92,8 +100,10 @@ fn forget_record_held_back_until_wiring_flips() {
     // wiring::FORGET_RECORD_WIRED = false today.
     let g = gates(true, true, None);
     let caps = advertise(&g);
-    assert!(!caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
-        "forget.record advertised before runtime wired (brief §15)");
+    assert!(
+        !caps.contains(&Capabilities::CairnMcpV1ForgetRecord),
+        "forget.record advertised before runtime wired (brief §15)"
+    );
 }
 
 #[test]
@@ -122,11 +132,17 @@ fn output_order_is_stable() {
     let g = gates(true, true, None);
     let caps = advertise(&g);
     // search.* before policy_trace, per the table.
-    let kw_idx = caps.iter().position(|c| matches!(c, Capabilities::CairnMcpV1SearchKeyword));
-    let pt_idx = caps.iter().position(|c| matches!(c, Capabilities::CairnMcpV1PolicyTrace));
+    let kw_idx = caps
+        .iter()
+        .position(|c| matches!(c, Capabilities::CairnMcpV1SearchKeyword));
+    let pt_idx = caps
+        .iter()
+        .position(|c| matches!(c, Capabilities::CairnMcpV1PolicyTrace));
     assert!(kw_idx.is_some() && pt_idx.is_some());
-    assert!(kw_idx.expect("keyword must be present") < pt_idx.expect("policy_trace must be present"),
-        "wire-stable order requires search.keyword before policy_trace; got {caps:?}");
+    assert!(
+        kw_idx.expect("keyword must be present") < pt_idx.expect("policy_trace must be present"),
+        "wire-stable order requires search.keyword before policy_trace; got {caps:?}"
+    );
 }
 
 #[cfg(test)]
@@ -137,8 +153,10 @@ mod remediation_tests {
     fn remediation_for_search_semantic_is_set() {
         let hint = remediation_for("cairn.mcp.v1.search.semantic")
             .expect("semantic must have a remediation hint");
-        assert!(hint.contains("local_embeddings"),
-            "remediation should mention the toggle: got {hint:?}");
+        assert!(
+            hint.contains("local_embeddings"),
+            "remediation should mention the toggle: got {hint:?}"
+        );
     }
 
     #[test]
@@ -182,7 +200,10 @@ mod remediation_tests {
         };
         let gates = CapabilityGates {
             config: always_on,
-            store: Some(StoreCaps { fts: true, vector: true }),
+            store: Some(StoreCaps {
+                fts: true,
+                vector: true,
+            }),
             vault_bound: true,
             model_present: true,
             llm_configured: false,
@@ -190,14 +211,13 @@ mod remediation_tests {
         };
 
         for cap in advertise(&gates) {
-            let cap_str = serde_json::to_value(cap).ok()
+            let cap_str = serde_json::to_value(cap)
+                .ok()
                 .and_then(|v| v.as_str().map(str::to_owned))
                 .expect("cap serializes to string");
             // search.keyword and policy_trace are universally available; their
             // remediation is "should not happen" — None is acceptable.
-            if cap_str == "cairn.mcp.v1.search.keyword"
-                || cap_str == "cairn.mcp.v1.policy_trace"
-            {
+            if cap_str == "cairn.mcp.v1.search.keyword" || cap_str == "cairn.mcp.v1.policy_trace" {
                 continue;
             }
             assert!(
@@ -226,8 +246,8 @@ mod prop_tests {
     }
 
     fn arb_cap_set() -> impl Strategy<Value = crate::config::CapabilitySet> {
-        (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>())
-            .prop_map(|(kw, sem, hyb, pt)| crate::config::CapabilitySet {
+        (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+            |(kw, sem, hyb, pt)| crate::config::CapabilitySet {
                 keyword_search: kw,
                 semantic_search: sem,
                 hybrid_search: hyb,
@@ -237,7 +257,8 @@ mod prop_tests {
                 policy_trace: pt,
                 replay_sequence: true,
                 replay_challenge: true,
-            })
+            },
+        )
     }
 
     fn arb_gates() -> impl Strategy<Value = CapabilityGates> {
@@ -249,14 +270,16 @@ mod prop_tests {
             any::<bool>(),
             arb_phase(),
         )
-            .prop_map(|(config, store, bound, model, llm, phase)| CapabilityGates {
-                config,
-                store,
-                vault_bound: bound,
-                model_present: model,
-                llm_configured: llm,
-                contract_phase: phase,
-            })
+            .prop_map(
+                |(config, store, bound, model, llm, phase)| CapabilityGates {
+                    config,
+                    store,
+                    vault_bound: bound,
+                    model_present: model,
+                    llm_configured: llm,
+                    contract_phase: phase,
+                },
+            )
     }
 
     // Turning a capability gate ON never removes capabilities. Catches
@@ -373,8 +396,7 @@ mod exhaustiveness {
             Capabilities::CairnMcpV1ExtensionSessiontree,
         ];
         for c in known {
-            assert_ne!(classify(c), "unknown",
-                "missing classify arm for {c:?}");
+            assert_ne!(classify(c), "unknown", "missing classify arm for {c:?}");
         }
     }
 }

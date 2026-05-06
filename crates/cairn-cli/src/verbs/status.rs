@@ -387,8 +387,8 @@ fn capabilities_for_config(config: &CairnConfig, model_present: bool) -> Vec<Cap
     cairn_core::status::advertise(&cairn_core::status::CapabilityGates {
         config: config.capabilities(model_present),
         store: None,
-        vault_bound: true,        // capability surface — used by --explain gate;
-                                  // the gate runs only when caller is in a vault.
+        vault_bound: true, // capability surface — used by --explain gate;
+        // the gate runs only when caller is in a vault.
         model_present,
         llm_configured: false,
         contract_phase: cairn_core::status::Phase::V0_1,

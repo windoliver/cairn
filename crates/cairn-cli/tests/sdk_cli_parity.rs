@@ -174,9 +174,8 @@ fn status_parity_cli_vs_sdk_vs_mcp() {
 
     let mut cli = run_json(&["status", "--json"]);
     let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
-    let mut mcp =
-        serde_json::to_value(CairnMcpHandler::new().status_response())
-            .expect("mcp status serializes");
+    let mut mcp = serde_json::to_value(CairnMcpHandler::new().status_response())
+        .expect("mcp status serializes");
 
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],

@@ -487,9 +487,7 @@ async fn handle_search(
 
 /// Convert a successful [`cairn_core::verbs::search::SearchOutcome`] into the
 /// MCP [`CallToolResult`] shape.
-fn search_outcome_to_result(
-    outcome: cairn_core::verbs::search::SearchOutcome,
-) -> CallToolResult {
+fn search_outcome_to_result(outcome: cairn_core::verbs::search::SearchOutcome) -> CallToolResult {
     use cairn_core::generated::common::Ulid;
     use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
 

@@ -5,7 +5,7 @@
 
 use cairn_core::config::CapabilitySet;
 use cairn_core::generated::common::Capabilities;
-use cairn_core::status::{advertise, CapabilityGates, Phase, StoreCaps};
+use cairn_core::status::{CapabilityGates, Phase, StoreCaps, advertise};
 
 fn full_caps_set() -> CapabilitySet {
     CapabilitySet {
@@ -24,7 +24,10 @@ fn full_caps_set() -> CapabilitySet {
 fn full_gates(phase: Phase) -> CapabilityGates {
     CapabilityGates {
         config: full_caps_set(),
-        store: Some(StoreCaps { fts: true, vector: true }),
+        store: Some(StoreCaps {
+            fts: true,
+            vector: true,
+        }),
         vault_bound: true,
         model_present: true,
         llm_configured: false,
@@ -35,8 +38,10 @@ fn full_gates(phase: Phase) -> CapabilityGates {
 #[test]
 fn forget_session_pinned_to_v0_2_phase() {
     let caps_v0_1 = advertise(&full_gates(Phase::V0_1));
-    assert!(!caps_v0_1.contains(&Capabilities::CairnMcpV1ForgetSession),
-        "forget.session must NOT appear at v0.1 even with every gate on; got {caps_v0_1:?}");
+    assert!(
+        !caps_v0_1.contains(&Capabilities::CairnMcpV1ForgetSession),
+        "forget.session must NOT appear at v0.1 even with every gate on; got {caps_v0_1:?}"
+    );
 }
 
 #[test]
@@ -51,10 +56,14 @@ fn forget_scope_pinned_to_v0_3_phase() {
 fn replay_capabilities_held_back_at_every_phase() {
     for phase in [Phase::V0_1, Phase::V0_2, Phase::V0_3] {
         let caps = advertise(&full_gates(phase));
-        assert!(!caps.contains(&Capabilities::CairnMcpV1ReplaySequence),
-            "replay.sequence must stay un-advertised; got {caps:?}");
-        assert!(!caps.contains(&Capabilities::CairnMcpV1ReplayChallenge),
-            "replay.challenge must stay un-advertised; got {caps:?}");
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1ReplaySequence),
+            "replay.sequence must stay un-advertised; got {caps:?}"
+        );
+        assert!(
+            !caps.contains(&Capabilities::CairnMcpV1ReplayChallenge),
+            "replay.challenge must stay un-advertised; got {caps:?}"
+        );
     }
 }
 
@@ -70,8 +79,10 @@ fn retrieve_capabilities_held_back_at_every_phase() {
             Capabilities::CairnMcpV1RetrieveScope,
             Capabilities::CairnMcpV1RetrieveProfile,
         ] {
-            assert!(!caps.contains(&needle),
-                "retrieve.* held behind wiring flags; {needle:?} appeared in {caps:?}");
+            assert!(
+                !caps.contains(&needle),
+                "retrieve.* held behind wiring flags; {needle:?} appeared in {caps:?}"
+            );
         }
     }
 }
