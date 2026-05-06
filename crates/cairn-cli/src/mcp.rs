@@ -82,15 +82,16 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
                         return ExitCode::from(69);
                     }
                 };
+            // Upcast to dyn MemoryStore for the verb layer; keep the concrete
+            // Arc<SqliteMemoryStore> for the graph-tool layer (Plan C Task 19).
             let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
                 sqlite_store.clone();
-            // Plan A signature (4 params). Plan C Task 19 will add
-            // `sqlite_store` as a separate parameter; the unused
-            // binding is kept here to make the Plan C diff additive.
-            #[allow(unused_variables)]
-            let _sqlite_store = sqlite_store;
             rt.block_on(cairn_mcp::serve_stdio_with_store(
-                store, resolver, config, principal,
+                store,
+                sqlite_store,
+                resolver,
+                config,
+                principal,
             ))
         }
         None => {

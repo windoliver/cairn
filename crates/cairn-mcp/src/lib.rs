@@ -19,10 +19,13 @@ pub mod relay;
 pub use error::TransportError;
 pub use handler::CairnMcpHandler;
 
+use std::sync::Arc;
+
 use cairn_core::contract::mcp_server::{CONTRACT_VERSION, MCPServer, MCPServerCapabilities};
 use cairn_core::contract::version::{ContractVersion, VersionRange};
 use cairn_core::register_plugin;
 use rmcp::ServiceExt as _;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Stable plugin name. Matches `name = ...` in `plugin.toml`.
 pub const PLUGIN_NAME: &str = "cairn-mcp";
@@ -112,26 +115,88 @@ pub async fn serve_stdio() -> Result<(), TransportError> {
     Ok(())
 }
 
-/// Plan A entry point: serve MCP over stdio with a wired store, scope
-/// resolver, and principal.
+/// Plan C entry point: serve MCP over stdio with a wired store, concrete
+/// sqlite store (for graph tools), scope resolver, and principal.
+///
+/// Internally wraps stdin in a relay (blank-line filter + 16 MiB frame cap)
+/// before handing bytes to the rmcp handler.  stdout is passed through
+/// unmodified.
 ///
 /// # Errors
-/// Same shape as [`serve_stdio`].
+/// Returns [`TransportError::Service`] if the rmcp service fails or
+/// terminates abnormally.  Transport-layer I/O errors surface as
+/// `CallToolResult { is_error: true }` inside the protocol and do not reach
+/// this function's return value.
 pub async fn serve_stdio_with_store(
-    store: std::sync::Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
-    scope: std::sync::Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
     config: cairn_core::config::CairnConfig,
     principal: cairn_core::domain::ScopeTuple,
 ) -> Result<(), TransportError> {
-    let handler = CairnMcpHandler::with_store_and_scope(store, scope, config, principal);
-    let transport = rmcp::transport::io::stdio();
-    let service = handler
-        .serve(transport)
+    serve_stdio_with_store_io(
+        store,
+        sqlite_store,
+        scope,
+        config,
+        principal,
+        tokio::io::stdin(),
+        tokio::io::stdout(),
+    )
+    .await
+}
+
+/// Internal helper — same as [`serve_stdio_with_store`] but accepts arbitrary
+/// `AsyncRead` / `AsyncWrite` so integration tests can drive it in-process.
+///
+/// `input` is wrapped in a relay that drops blank lines and enforces the
+/// 16 MiB per-frame cap before bytes reach the rmcp codec.
+///
+/// # Errors
+/// Same as [`serve_stdio_with_store`].
+pub async fn serve_stdio_with_store_io<I, O>(
+    store: Arc<dyn cairn_core::contract::memory_store::MemoryStore>,
+    sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore>,
+    scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+    config: cairn_core::config::CairnConfig,
+    principal: cairn_core::domain::ScopeTuple,
+    input: I,
+    output: O,
+) -> Result<(), TransportError>
+where
+    I: AsyncRead + Unpin + Send + 'static,
+    O: AsyncWrite + Unpin + Send + 'static,
+{
+    // Relay: filter blank lines from `input`, write surviving frames to the
+    // framer-reader half that rmcp reads from.
+    let (framer_reader, relay_writer) = tokio::io::duplex(64 * 1024);
+    let relay_task = tokio::spawn(async move {
+        relay::run_relay(input, relay_writer).await.ok();
+    });
+
+    let handler =
+        CairnMcpHandler::with_store_scope_and_sqlite(store, sqlite_store, scope, config, principal);
+
+    // rmcp's `IntoTransport` is implemented for `(R, W)` tuples where R:
+    // `AsyncRead + Unpin + Send + 'static` and W: `AsyncWrite + Unpin + Send +
+    // 'static` — pass the relay-filtered reader and the original output writer.
+    let serve_result = handler
+        .serve((framer_reader, output))
         .await
-        .map_err(|e| TransportError::Service(e.to_string()))?;
-    service
-        .waiting()
-        .await
-        .map_err(|e| TransportError::Service(e.to_string()))?;
-    Ok(())
+        .map_err(|e| TransportError::Service(e.to_string()));
+
+    let waiting_result: Result<(), TransportError> = match serve_result {
+        Ok(service) => service
+            .waiting()
+            .await
+            .map(|_| ())
+            .map_err(|e| TransportError::Service(e.to_string())),
+        Err(e) => Err(e),
+    };
+
+    // Best-effort relay cleanup after the service has finished (or errored).
+    relay_task.abort();
+    let _ = relay_task.await;
+
+    waiting_result
 }
