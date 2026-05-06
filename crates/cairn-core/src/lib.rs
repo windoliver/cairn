@@ -17,6 +17,7 @@ pub mod mcp_auth;
 pub mod pipeline;
 pub mod policy_trace;
 pub mod search;
+pub mod status;
 pub mod verbs;
 pub mod verifier;
 pub mod wal;
