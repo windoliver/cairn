@@ -140,10 +140,10 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
         });
     }
 
-    if segments[0].byte_start != 0 {
-        return Err(AssembleHotValidationError::DoesNotStartAtZero { start: segments[0].byte_start });
-    }
-
+    // First pass: structural checks (range, contiguity, bounds, starts-at-zero,
+    // stability). Hash verification is deferred to the second pass so that
+    // structural errors (e.g. DescendingRange) take precedence over hash errors,
+    // and coverage (DoesNotCoverPrefix) is checked before attempting hash slices.
     let mut prev_end: u64 = 0;
     for (i, s) in segments.iter().enumerate() {
         if s.byte_start > s.byte_end {
@@ -152,6 +152,9 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
                 start: s.byte_start,
                 end: s.byte_end,
             });
+        }
+        if i == 0 && s.byte_start != 0 {
+            return Err(AssembleHotValidationError::DoesNotStartAtZero { start: s.byte_start });
         }
         if i > 0 && s.byte_start != prev_end {
             return Err(AssembleHotValidationError::NonContiguous {
@@ -176,14 +179,6 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
                 expected: expected_stability,
             });
         }
-        let slice = &data.prefix[s.byte_start as usize..s.byte_end as usize];
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(slice.as_bytes());
-        let actual_hash = format!("{:x}", h.finalize());
-        if s.content_hash != actual_hash {
-            return Err(AssembleHotValidationError::HashMismatch { index: i });
-        }
         prev_end = s.byte_end;
     }
 
@@ -193,6 +188,19 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
             prefix_len,
         });
     }
+
+    // Second pass: hash verification (only after structural checks pass).
+    use sha2::{Digest, Sha256};
+    for (i, s) in segments.iter().enumerate() {
+        let slice = &data.prefix[s.byte_start as usize..s.byte_end as usize];
+        let mut h = Sha256::new();
+        h.update(slice.as_bytes());
+        let actual_hash = format!("{:x}", h.finalize());
+        if s.content_hash != actual_hash {
+            return Err(AssembleHotValidationError::HashMismatch { index: i });
+        }
+    }
+
     Ok(())
 }
 
