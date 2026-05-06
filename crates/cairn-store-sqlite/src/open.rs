@@ -411,7 +411,17 @@ pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreEr
 
     let has_record_vectors = table_exists("record_vectors")?;
     let has_records_fts = table_exists("records_fts")?;
-    let has_entity_graph = table_exists("entity_nodes")? && table_exists("entity_edges")?;
+    // Graph queries (`entity_graph::queries`) unconditionally join
+    // `entity_episodes` through their shared `visible_nodes` CTE — an
+    // older vault with the original `entity_nodes` + `entity_edges`
+    // tables but missing migration 0044 would otherwise be advertised
+    // as graph-capable here and then fail at query time with
+    // `no such table: entity_episodes`. Probe the full schema
+    // dependency set so `cairn status` matches the query layer's real
+    // requirements.
+    let has_entity_graph = table_exists("entity_nodes")?
+        && table_exists("entity_edges")?
+        && table_exists("entity_episodes")?;
     let has_consent_timeline = table_exists("consent_timeline")?;
 
     Ok(MemoryStoreCapabilities {

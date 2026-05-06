@@ -77,17 +77,16 @@ fn status_parity_cli_vs_sdk() {
     let mut cli = run_json(&["status", "--json"]);
     let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
 
+    // Both surfaces run from a vault-less, config-less context here
+    // (CLI is forced into the OS tempdir; `Sdk::new()` has no store).
+    // Under those conditions both surfaces must emit
+    // `mcp_graph_tools = None` — the CLI has no config to validate
+    // and the SDK has no MCP server to probe. Enforcing equality on
+    // the field catches regressions where one adapter starts
+    // synthesizing a value the other cannot.
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],
         &["server_info", "started_at"],
-        // mcp_graph_tools is a live-probe surface on the CLI side
-        // (Plan A Task 6, issue #190): CLI runs `peek_capabilities`
-        // against the on-disk store, while the SDK has no MCP server
-        // and emits a static `unavailable / single_tenant_off`. The
-        // two surfaces are intentionally not byte-equal here; the
-        // shape is pinned by the IDL schema and exercised by the
-        // dedicated `verbs::status::mcp_graph_tests` unit suite.
-        &["mcp_graph_tools"],
     ];
     mask(&mut cli, volatile);
     mask(&mut sdk, volatile);

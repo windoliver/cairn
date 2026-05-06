@@ -159,9 +159,16 @@ pub fn run_with_context(
     let caps = compute_capabilities(vault_root, config, bound);
 
     // ── MCP graph-tools availability (issue #190 Plan A) ─────────────
+    // The probe only runs against a *bound* vault: an unbound CWD has
+    // no `.cairn/vault.id` and no migrated database to peek, so
+    // `try_peek_store_capabilities` would surface a generic
+    // `store_open_error` even though there is nothing wrong with the
+    // deployment. Gate the store-touching probe on `bound`; the
+    // resolver/predicate side still runs whenever config is present.
+    let probe_vault_root = if bound { vault_root } else { None };
     let (mcp_graph_avail, probe_basis_for_json) = config.map_or_else(
         || (None, ProbeBasis::ConfigOnly),
-        |cfg| probe_mcp_graph_tools(cfg, vault_root),
+        |cfg| probe_mcp_graph_tools(cfg, probe_vault_root),
     );
 
     // `mcp_graph_tools` is now optional in the IDL (additive change to keep
