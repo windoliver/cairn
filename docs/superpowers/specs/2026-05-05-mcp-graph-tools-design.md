@@ -254,13 +254,28 @@ Concrete consequences for this issue:
    no per-call caller identity. `McpAuthContext` carries only
    `request_id` and a single deployment-resolved `principal:
    PrincipalId` injected at server-construction time from
-   config. This is honest single-tenant behaviour — the
-   resolver returns the same scope set for every request — but
-   it is **not** "global static scopes": the resolver still
-   runs per-request, the predicate is evaluated per-request,
-   and a future multi-tenant transport can replace
-   `principal` with a per-request value without changing any
-   downstream code.
+   config. **Graph tools therefore advertise on stdio only when
+   the operator explicitly opts into single-tenant mode** via
+   `cairn.toml::[mcp.stdio] single_tenant = true`. Without that
+   flag set, graph tools return `CapabilityUnavailable` even on
+   a graph-capable store with a configured scope resolver — the
+   conjunction in `graph_tools_available` includes a
+   `single_tenant_stdio` precondition that reads this flag.
+
+   This makes the trust boundary explicit: a shared MCP process
+   without `single_tenant = true` cannot list or invoke
+   `graph.*`. An operator who flips the flag is asserting that
+   the process serves exactly one principal for its entire
+   lifetime, which is the only configuration where the
+   construction-time `principal` is a faithful authorization
+   key. Multi-principal stdio servers must wait for the
+   per-request identity work below.
+
+   This is **not** "global static scopes": the resolver still
+   runs per-request and the predicate is evaluated per-request.
+   It is honest single-tenant behaviour with no implication of
+   per-caller isolation — the spec stops promising what stdio
+   cannot deliver.
 
 2. **Future SSE / HTTP transports:** the implementation plan
    for those (separate issues) extends `McpAuthContext` with
@@ -1054,12 +1069,18 @@ WITH scope_filtered AS (
         AND r_active.active     = 1
         AND r_active.tombstoned = 0
     )
-)
+),
+visible_nodes AS (...)                         -- §3.0
 SELECT id, source_id, target_id, relation, confidence_score,
        valid_at, invalid_at, created_at, expired_at,
        tombstone_reason, source_record_id
 FROM scope_filtered
 WHERE (source_id = ?seed OR target_id = ?seed)
+  -- Endpoint liveness (parity with visible_edges in §3.0):
+  -- both endpoints must be in visible_nodes so a tombstoned
+  -- node id cannot leak through the audit view.
+  AND source_id IN (SELECT id FROM visible_nodes)
+  AND target_id IN (SELECT id FROM visible_nodes)
   -- Tombstone gate
   AND (:include_expired = 1 OR expired_at IS NULL)
   -- Temporal gate: drop unless include_history opts in.
@@ -1104,6 +1125,13 @@ Negative tests:
    authorized for `S_b` (only) → **absent** for the same reason.
    Asserts the timeline does not silently re-scope historical
    edges when a different-scope head appears.
+8. **Tombstoned endpoint** (parity with the cross-tool test in
+   §3.0): an active in-scope edge from live node `A` to
+   tombstoned node `B` (`entity_nodes.expired_at IS NOT NULL`).
+   `timeline(A)` does **not** return the edge regardless of
+   `include_history` / `include_expired`. Asserts timeline
+   composes the same endpoint-liveness predicate as the other
+   tools.
 
 ### 3.5 `graph.surprising_connections`
 
@@ -1393,8 +1421,20 @@ scope resolution returns a usable set for the *current* caller.
 fn graph_tools_available(
     store: Option<&dyn MemoryStore>,
     scope: Option<&dyn McpSessionScope>,
+    config: &CairnConfig,
+    transport: McpTransport,
     ctx: &McpAuthContext<'_>,
 ) -> bool {
+    // Stdio precondition: graph tools advertise only when the
+    // operator has opted into single-tenant mode. A shared
+    // stdio process serves exactly one principal for its
+    // lifetime, which is the only configuration where the
+    // construction-time `principal` is a faithful auth key.
+    if transport == McpTransport::Stdio
+        && !config.mcp.stdio.single_tenant
+    {
+        return false;
+    }
     let store_ok = store
         .map(|s| s.capabilities().graph_edges)
         .unwrap_or(false);
