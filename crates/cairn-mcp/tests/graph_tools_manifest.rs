@@ -4,6 +4,7 @@
 //! Task 12: `dispatch` routes `graph.get_entity` to a real store.
 //! Task 13: `call_tool` routes graph tools through `materialize_graph_request`.
 //! Task 14: `list_tools` advertises graph tools when available.
+//! Task 20: manifest snapshot matrix (6-cell §2.1 table).
 #![allow(missing_docs)]
 
 use cairn_mcp::graph_tools::{GetEntityArgs, GRAPH_TOOLS};
@@ -368,4 +369,192 @@ async fn list_tools_lists_graph_when_resolver_returns_non_empty() {
         names.contains(&"graph.query"),
         "expected graph.query in tool list, got: {names:?}"
     );
+}
+
+// ----- Task 20: manifest snapshot matrix (§2.1 table) ----------------------
+//
+// Six cells; only the bottom row (Stdio + single_tenant=true + graph_edges=true
+// + resolver=OkNonEmpty) must advertise graph.* tools.  All others must list
+// only the eight core verbs.
+//
+// Each helper drives the handler through the wire-protocol duplex approach so
+// we exercise exactly the same code-path as a real client: initialize
+// handshake → tools/list → snapshot the sorted tool-name list.
+
+/// Drive `handler` through initialize + tools/list and return the sorted list
+/// of tool names.
+async fn tools_list_via_wire(handler: CairnMcpHandler) -> Vec<String> {
+    let (server_half, client_half) = tokio::io::duplex(65_536);
+    let _server_task = tokio::spawn(async move {
+        handler
+            .serve(server_half)
+            .await
+            .expect("server init")
+            .waiting()
+            .await
+            .ok();
+    });
+
+    let (client_read, mut client_write) = tokio::io::split(client_half);
+    let mut client_reader = BufReader::new(client_read);
+    do_initialize(&mut client_write, &mut client_reader).await;
+
+    send_frame(
+        &mut client_write,
+        r#"{"jsonrpc":"2.0","id":99,"method":"tools/list"}"#,
+    )
+    .await;
+
+    let resp = recv_frame(&mut client_reader).await;
+    let tools = resp
+        .pointer("/result/tools")
+        .and_then(serde_json::Value::as_array)
+        .expect("tools/list must return tools array");
+    let mut names: Vec<String> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(serde_json::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect();
+    names.sort();
+    names
+}
+
+/// Cell 1 — single_tenant=false (graph tools must be absent regardless of
+/// other conditions).
+#[tokio::test]
+async fn manifest_matrix_single_tenant_off() {
+    let f = tiny_graph_async().await;
+
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = false; // gate fails here
+    // No principal required when single_tenant=false.
+
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
+    let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
+
+    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+        store_dyn,
+        f.store,
+        scope,
+        cfg,
+        f.scope_a,
+    );
+
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_single_tenant_off", names);
+}
+
+/// Cell 2 — single_tenant=true but store does NOT advertise graph_edges
+/// (FixtureStore has graph_edges=false).
+#[tokio::test]
+async fn manifest_matrix_graph_edges_false() {
+    let f = tiny_graph_async().await;
+
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = true;
+    cfg.mcp.stdio.principal = Some(f.scope_a.clone());
+
+    let scope: Arc<dyn McpSessionScope> = Arc::new(StaticScope::new(vec![f.scope_a.clone()]));
+    // Use FixtureStore (graph_edges=false) as the capability-bearing store.
+    let store_no_graph: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+        Arc::new(cairn_test_fixtures::FixtureStore::default());
+
+    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+        store_no_graph,
+        f.store,
+        scope,
+        cfg,
+        f.scope_a,
+    );
+
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_graph_edges_false", names);
+}
+
+/// Cell 3 — single_tenant=true, graph_edges=true, but no scope resolver wired
+/// (Absent). `materialize_graph_request` short-circuits on `scope.is_none()`.
+#[tokio::test]
+async fn manifest_matrix_resolver_absent() {
+    let f = tiny_graph_async().await;
+
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = true;
+    cfg.mcp.stdio.principal = Some(f.scope_a.clone());
+
+    // Build the handler WITHOUT a scope resolver by using `with_store` (no scope).
+    let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
+    let handler = CairnMcpHandler::with_store(store_dyn, cfg);
+
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_resolver_absent", names);
+}
+
+/// Cell 4 — single_tenant=true, graph_edges=true, resolver always errors.
+#[tokio::test]
+async fn manifest_matrix_resolver_err() {
+    let f = tiny_graph_async().await;
+
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = true;
+    cfg.mcp.stdio.principal = Some(f.scope_a.clone());
+
+    let scope: Arc<dyn McpSessionScope> = Arc::new(ErrorScope);
+    let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
+
+    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+        store_dyn,
+        f.store,
+        scope,
+        cfg,
+        f.scope_a,
+    );
+
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_resolver_err", names);
+}
+
+/// Cell 5 — single_tenant=true, graph_edges=true, resolver returns empty Vec.
+#[tokio::test]
+async fn manifest_matrix_resolver_ok_empty() {
+    let f = tiny_graph_async().await;
+
+    let mut cfg = CairnConfig::default();
+    cfg.mcp.stdio.single_tenant = true;
+    cfg.mcp.stdio.principal = Some(f.scope_a.clone());
+
+    let scope: Arc<dyn McpSessionScope> = Arc::new(EmptyScope);
+    let store_dyn: Arc<dyn cairn_core::contract::memory_store::MemoryStore> = f.store.clone();
+
+    let handler = CairnMcpHandler::with_store_scope_and_sqlite(
+        store_dyn,
+        f.store,
+        scope,
+        cfg,
+        f.scope_a,
+    );
+
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_resolver_ok_empty", names);
+}
+
+/// Cell 6 — all conditions met: Stdio + single_tenant=true + graph_edges=true
+/// + resolver=OkNonEmpty.  Must advertise all five graph.* tools.
+#[tokio::test]
+async fn manifest_matrix_all_conditions_met() {
+    let handler = build_handler_single_tenant_graph_capable().await;
+    let names = tools_list_via_wire(handler).await;
+    insta::assert_json_snapshot!("manifest_all_conditions_met", names);
+    // Invariant: all five graph.* tools must be present.
+    for tool in &[
+        "graph.get_entity",
+        "graph.get_neighbors",
+        "graph.query",
+        "graph.surprising_connections",
+        "graph.timeline",
+    ] {
+        assert!(
+            names.contains(&tool.to_string()),
+            "cell 6 must advertise {tool}; got: {names:?}"
+        );
+    }
 }
