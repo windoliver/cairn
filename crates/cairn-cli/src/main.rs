@@ -221,7 +221,13 @@ fn main() -> ExitCode {
         Some(("handshake", sub)) => run_handshake(sub, explicit_vault.as_deref()),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
-        Some(("mcp", _sub)) => cairn_cli::mcp::run(),
+        Some(("mcp", _sub)) => {
+            let (vault_root, config) = match resolve_vault_and_config(explicit_vault.as_deref()) {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            return cairn_cli::mcp::run(&vault_root, config);
+        }
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
         Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
@@ -349,6 +355,32 @@ fn run_handshake(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
 /// validation. Fail closed with `EX_CONFIG` so clients do not
 /// negotiate capabilities derived from a config the runtime would
 /// also reject.
+/// Resolve vault path and load config, returning both on success.
+///
+/// Used by subcommands that need a `(PathBuf, CairnConfig)` pair (e.g. `mcp`,
+/// `status`). Returns `Err(exit_code)` on any resolution or config error so
+/// callers can return early with a typed exit code.
+fn resolve_vault_and_config(
+    explicit: Option<&str>,
+) -> Result<(std::path::PathBuf, cairn_core::config::CairnConfig), ExitCode> {
+    let (vault_root, _source) = match resolve_vault_or_cwd(explicit) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn mcp: vault resolution error — {e:#}");
+            return Err(ExitCode::from(78)); // EX_CONFIG
+        }
+    };
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn mcp: config error — {e:#}");
+                return Err(ExitCode::from(78)); // EX_CONFIG
+            }
+        };
+    Ok((vault_root, config))
+}
+
 fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     let json = sub.get_flag("json");
     let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
