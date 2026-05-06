@@ -385,13 +385,26 @@ issue, not by overloading `ScopeTuple`.
 
 #### The canonical authorization predicate
 
+Two non-negotiable rules apply to every rendering:
+
+1. **Every supported scope dimension is bound on every entry**,
+   not just `Some(_)` ones. `None` binds the SQL parameter as
+   `NULL` and the `coalesce(..., '') = coalesce(?, '')`
+   comparison enforces exact null-equality. Omitting a
+   dimension's WHERE clause would silently widen the predicate
+   into a wildcard, exactly the failure mode §3.0a forbids.
+2. **Authorization is anchored to immutable edge provenance**,
+   not to the current active head's scope. See §3.0a-bis
+   below.
+
 ```sql
 -- AuthorizedSource(:src_record_id) — the canonical predicate.
--- One UNION-ALL clause per ScopeTuple pattern; each clause
--- compiles per-dimension equalities for the Some(_) fields of
--- the pattern. The bind list below shows ONE pattern with
--- (tenant=?, user=?, agent=?) Some — extend as needed; absent
--- dimensions drop their per-dim WHERE clause entirely.
+-- One EXISTS per ScopeTuple entry, OR'd together. EVERY
+-- supported dimension (tenant, workspace, session_id, entity,
+-- user, agent — six dimensions per ScopeTuple) is compared on
+-- every entry. None entries bind a NULL parameter; the
+-- coalesce idiom makes that an exact "dimension IS NULL" check
+-- rather than a wildcard.
 EXISTS (
   SELECT 1
   FROM records r_src
@@ -400,36 +413,81 @@ EXISTS (
   WHERE r_src.record_id   = :src_record_id
     AND r_active.active     = 1
     AND r_active.tombstoned = 0
-    AND coalesce(json_extract(r_active.scope, '$.tenant'), '')
+    -- Authorization is keyed off the SOURCE VERSION's stored
+    -- scope (immutable provenance), AND requires a matching
+    -- active head on the lineage to prove the chain is not
+    -- fully tombstoned. Two separate predicates joined to one
+    -- ScopeTuple entry — both must hold.
+    AND coalesce(json_extract(r_src.scope,    '$.tenant'),    '')
         = coalesce(?, '')
-    AND coalesce(json_extract(r_active.scope, '$.user'),   '')
+    AND coalesce(json_extract(r_src.scope,    '$.workspace'), '')
         = coalesce(?, '')
-    AND coalesce(json_extract(r_active.scope, '$.agent'),  '')
+    AND coalesce(json_extract(r_src.scope,    '$.session_id'),'')
         = coalesce(?, '')
-  -- additional patterns OR'd via repeated EXISTS / UNION ALL
+    AND coalesce(json_extract(r_src.scope,    '$.entity'),    '')
+        = coalesce(?, '')
+    AND coalesce(json_extract(r_src.scope,    '$.user'),      '')
+        = coalesce(?, '')
+    AND coalesce(json_extract(r_src.scope,    '$.agent'),     '')
+        = coalesce(?, '')
 )
 ```
 
-A `Vec<ScopeTuple>` with N patterns produces N parallel `EXISTS`
-clauses joined by `OR` (or one CTE materializing per-pattern
-membership and a single `EXISTS`). The exact rendering is an
-implementation detail; the spec requirement is that authorization
-SQL never reads `scope` as a scalar.
+A `Vec<ScopeTuple>` with N entries produces N parallel `EXISTS`
+clauses joined by `OR`. The exact rendering is an implementation
+detail; the spec requirements are (a) every dimension bound on
+every entry, (b) `r_src` carries the scope predicate (not
+`r_active`), and (c) authorization SQL never reads `scope` as a
+scalar.
 
-A test must cover:
+#### §3.0a-bis: immutable provenance, not lineage re-scope
 
-1. An edge whose `source_record_id` points at a *superseded*
-   (`active = 0`) record stays visible, because a newer version
-   of the same `target_id` is `active = 1` with a matching
-   `ScopeTuple`.
+A target chain can be re-scoped (a new active version with a
+different `ScopeTuple` than its predecessors). If we keyed
+authorization off the active head's scope, **historical edges
+would silently re-scope themselves** — an edge sourced from a
+record originally in scope `S_a` would become visible to scope
+`S_b` callers the moment a same-target record is upserted into
+`S_b`. That is a real cross-scope leak, not a versioning
+nicety.
+
+Authorization therefore reads scope from `r_src` (the version
+that *produced* the edge), which is immutable: `records` rows
+are never re-scoped in place; a new scope is a new
+`record_id`/`target_id` row, and the historical row's scope
+column never changes. The `r_active` join still gates against
+full-chain tombstoning (no active row remaining anywhere on
+the lineage hides the edge), but it does not contribute scope
+matching.
+
+A test must cover: a target_id chain whose original version is
+in `S_a` and whose newest active version is in `S_b`. A caller
+authorized for `S_b` does **not** see the edge produced by the
+older `S_a` version. A caller authorized for `S_a` does see it
+(provided some active row still exists on the lineage).
+
+Tests:
+
+1. An edge whose `source_record_id` is a *superseded*
+   (`active = 0`) record **stays visible to callers
+   authorized for the source version's scope**, provided some
+   active row still exists on the same `target_id` chain. The
+   active head's scope is irrelevant to authorization (§3.0a-bis).
 2. Tombstoning the entire `target_id` chain (no `active = 1`
    row remaining) removes the edge.
 3. A `ScopeTuple` entry with `tenant = Some("a"), user = None`
    matches **only** records whose `tenant = "a"` AND `user IS
    NULL` — not records carrying any user inside tenant `a`.
-   Asserts there is no wildcard semantics.
+   Asserts there is no wildcard semantics — every dimension is
+   bound on every entry.
 4. A `Vec` with two `ScopeTuple` entries authorizes the union of
    records matching either entry exactly.
+5. **Lineage re-scope adversarial test:** a target chain with
+   the original version in scope `S_a` and the newest active
+   version in `S_b`. A caller authorized for `S_b` (only) does
+   **not** see edges sourced from the older `S_a` version. A
+   caller authorized for `S_a` (only) does see them as long as
+   any active row still exists on the lineage.
 
 ### 3.0b Set-valued parameter binding
 
@@ -1179,7 +1237,13 @@ boundary while preserving the bytes between framers exactly as
 received (including a trailing `\r` if present).
 
 - Spawn one task reading `tokio::io::stdin()` with `read_buf`
-  into a small ring buffer (~64 KiB).
+  into a `Vec<u8>` accumulator. The accumulator starts at
+  64 KiB and **grows up to a 16 MiB hard cap** to handle
+  legitimately large MCP frames (e.g. tool-call results carrying
+  embedded blobs). On overflow past 16 MiB without seeing a `\n`
+  the relay returns a `TransportError::FrameTooLarge`,
+  `tracing::error!`s the size, and shuts the session down
+  cleanly — never silently drops or truncates bytes.
 - Scan the buffered bytes for `\n` boundaries. Each frame is the
   byte slice from the previous boundary up to and including the
   `\n`.
@@ -1206,15 +1270,29 @@ received (including a trailing `\r` if present).
    original input buffer — no re-encoding, no line-ending
    normalization, no trimming. CRLF input stays CRLF; LF stays
    LF.
-2. The relay holds at most one ring-buffer's worth of bytes at a
-   time; no reordering, since stdin has a single writer.
+2. The accumulator holds at most one un-emitted frame at a
+   time, capped at 16 MiB; oversized frames terminate the
+   session with `FrameTooLarge` rather than violate the
+   byte-preservation guarantee. No reordering, since stdin has
+   a single writer.
 3. Stdout is untouched — server-to-host frames are not
    normalized.
 
-A test feeds a mix of `\n`- and `\r\n`-terminated frames
-interleaved with blank lines and asserts that the rmcp side
-receives the non-empty frames with their original line endings
-intact.
+Tests:
+
+1. A mix of `\n`- and `\r\n`-terminated frames interleaved with
+   blank lines: the rmcp side receives the non-empty frames
+   with their original line endings intact.
+2. A single 8 MiB frame with embedded JSON: forwarded
+   end-to-end without truncation. Asserts the accumulator grows
+   correctly up to (but not past) the 16 MiB cap.
+3. A 16+ MiB frame with no `\n`: the relay returns
+   `TransportError::FrameTooLarge` and the session terminates
+   cleanly. Asserts oversized input never reaches rmcp as a
+   partial frame.
+4. EOF mid-frame (no terminator ever arrives): the partial
+   accumulator is discarded with a `tracing::warn!`, rmcp
+   observes clean EOF.
 
 This is the same pattern Graphify ships and the one called out in the
 issue.
