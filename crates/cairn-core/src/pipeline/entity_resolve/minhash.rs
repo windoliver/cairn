@@ -9,13 +9,13 @@ use crate::pipeline::entity_resolve::MAX_NUM_PERMUTATIONS;
 
 /// 128-permutation `MinHash` signature. Only the first `num_permutations`
 /// slots are populated; the remainder are filled with `u64::MAX` and
-/// must be ignored by [`jaccard`].
+/// must be ignored by `jaccard`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub struct MinHashSignature(pub [u64; MAX_NUM_PERMUTATIONS]);
 
 impl MinHashSignature {
-    /// All-`u64::MAX` signature, used as the starting point for [`signature`].
+    /// All-`u64::MAX` signature, used as the starting point for `signature`.
     pub const fn empty() -> Self {
         Self([u64::MAX; MAX_NUM_PERMUTATIONS])
     }
