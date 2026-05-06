@@ -109,6 +109,8 @@ use std::sync::Arc;
 use crate::contract::llm_provider::LLMProvider;
 use crate::domain::graph::EntityNode;
 
+pub use self::minhash::MinHashSignature;
+
 use self::llm::llm_dedup;
 use self::minhash::{FuzzyOutcome, fuzzy_match, shingles, signature};
 use self::normalize::{exact_match, normalize};
