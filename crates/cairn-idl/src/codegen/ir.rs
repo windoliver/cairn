@@ -265,6 +265,11 @@ pub struct StructField {
     pub ty: RustType,
     pub required: bool,
     pub doc: Option<String>,
+    /// `x-cairn-reject-null: true` on the field schema — the deserializer
+    /// must distinguish field-absent from explicit JSON `null` and reject
+    /// the latter. Used to preserve tri-state semantics for optional
+    /// fields whose absence carries a different contract from `null`.
+    pub reject_null: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -502,6 +507,10 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             .and_then(Value::as_str)
             .map(String::from);
         let is_required = required.contains(key);
+        let reject_null = prop
+            .get("x-cairn-reject-null")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         fields.push(StructField {
             name: key.clone(),
             ty: if is_required {
@@ -511,6 +520,7 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             },
             required: is_required,
             doc,
+            reject_null,
         });
     }
     // Detect a sibling top-level `anyOf` whose every branch is a single-

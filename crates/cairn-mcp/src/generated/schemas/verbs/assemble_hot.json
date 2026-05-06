@@ -34,7 +34,8 @@
             "$ref": "#/$defs/HotSegment"
           },
           "maxItems": 64,
-          "type": "array"
+          "type": "array",
+          "x-cairn-reject-null": true
         }
       },
       "required": [

@@ -69,6 +69,12 @@ pub struct Sdk<T: Transport = InProcess> {
     store: Option<Arc<dyn MemoryStore>>,
     /// Active config, used for capability derivation and dispatch knobs.
     config: CairnConfig,
+    /// Optional vault-binding token. `Some(_)` proves the SDK was
+    /// constructed against a verified Cairn vault (mirrors the CLI's
+    /// `probe_vault_binding` gate). Vault-sensitive verbs such as
+    /// `assemble_hot` require this to be `Some`; an unbound SDK gets
+    /// [`SdkError::Unimplemented`] from those paths.
+    vault_id: Option<cairn_core::domain::identity::keys::VaultId>,
 }
 
 impl std::fmt::Debug for Sdk {
@@ -93,6 +99,7 @@ impl Clone for Sdk {
             _transport: InProcess,
             store: self.store.clone(),
             config: self.config.clone(),
+            vault_id: self.vault_id.clone(),
         }
     }
 }
@@ -108,6 +115,7 @@ impl Sdk<InProcess> {
             _transport: InProcess,
             store: None,
             config: CairnConfig::default(),
+            vault_id: None,
         }
     }
 
@@ -116,12 +124,39 @@ impl Sdk<InProcess> {
     /// Verbs that previously returned [`SdkError::Unimplemented`] now
     /// dispatch against the supplied store. The store is shared via [`Arc`]
     /// so callers can keep their own handle.
+    ///
+    /// **Note**: this constructor does NOT set a vault-binding token, so
+    /// vault-sensitive verbs (e.g. `assemble_hot`) still return
+    /// [`SdkError::Unimplemented`]. Use [`Sdk::with_vault`] to construct
+    /// an SDK against a verified vault binding.
     #[must_use]
     pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
         Self {
             _transport: InProcess,
             store: Some(store),
             config,
+            vault_id: None,
+        }
+    }
+
+    /// Construct an in-process SDK client wired to a real store **and** a
+    /// verified vault binding. Mirrors the CLI's vault-probe gate: the
+    /// caller must already have validated `<vault>/.cairn/vault.id` and
+    /// pass the resulting [`VaultId`].
+    ///
+    /// Vault-sensitive verbs such as `assemble_hot` only succeed on an
+    /// SDK constructed via this method.
+    #[must_use]
+    pub fn with_vault(
+        store: Arc<dyn MemoryStore>,
+        config: CairnConfig,
+        vault_id: cairn_core::domain::identity::keys::VaultId,
+    ) -> Self {
+        Self {
+            _transport: InProcess,
+            store: Some(store),
+            config,
+            vault_id: Some(vault_id),
         }
     }
 }
@@ -353,11 +388,12 @@ impl<T: Transport> Sdk<T> {
     /// lands the loader.
     ///
     /// Mirrors the CLI's vault-binding gate: the SDK rejects `assemble_hot`
-    /// with [`SdkError::Unimplemented`] when no store has been wired, since
-    /// [`Sdk::new`] uses [`CairnConfig::default`] and therefore has no
-    /// verified vault context. Returning a committed assembly from a default
-    /// config would silently mask misconfiguration and become a wrong-vault
-    /// injection vector once real loading lands.
+    /// with [`SdkError::Unimplemented`] unless it was constructed via
+    /// [`Sdk::with_vault`] with a verified [`VaultId`]. Returning a
+    /// committed assembly from an unbound or default config would silently
+    /// mask misconfiguration and become a wrong-vault injection vector
+    /// once real loading lands. A wired store alone is **not** sufficient;
+    /// callers must prove vault-binding via `with_vault`.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
@@ -379,7 +415,7 @@ impl<T: Transport> Sdk<T> {
             ));
         }
 
-        if self.store.is_none() {
+        if self.vault_id.is_none() {
             return Err(unimplemented("assemble_hot"));
         }
 

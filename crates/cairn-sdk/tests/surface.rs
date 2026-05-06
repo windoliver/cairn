@@ -950,8 +950,8 @@ fn assemble_hot_rejects_any_session_id_until_loader_lands() {
 }
 
 #[test]
-fn assemble_hot_without_store_returns_unimplemented() {
-    // SDK fails closed on `Sdk::new()`: no store wired = no verified vault
+fn assemble_hot_without_vault_returns_unimplemented() {
+    // SDK fails closed on `Sdk::new()`: no vault binding = no verified
     // context. Mirrors the CLI's vault-binding gate.
     let args = AssembleHotArgs {
         budget: None,
@@ -961,12 +961,28 @@ fn assemble_hot_without_store_returns_unimplemented() {
 }
 
 #[test]
-fn sdk_assemble_hot_returns_typed_segments() {
-    // Success path requires a wired store. The store is only used as a
-    // bound-vault signal here — assemble_hot never calls into it.
+fn assemble_hot_with_store_but_no_vault_returns_unimplemented() {
+    // A wired store alone is not sufficient — `with_store` does not prove
+    // vault binding. Use `with_vault` for vault-sensitive verbs.
     let sdk = Sdk::with_store(
         std::sync::Arc::new(noop_store::NoopStore),
         cairn_core::config::CairnConfig::default(),
+    );
+    let args = AssembleHotArgs {
+        budget: None,
+        session_id: None,
+    };
+    assert_unimplemented("assemble_hot", sdk.assemble_hot(&args));
+}
+
+#[test]
+fn sdk_assemble_hot_returns_typed_segments() {
+    // Success path requires an explicit vault binding via `with_vault`.
+    let vault_id = cairn_core::domain::identity::keys::VaultId::mint();
+    let sdk = Sdk::with_vault(
+        std::sync::Arc::new(noop_store::NoopStore),
+        cairn_core::config::CairnConfig::default(),
+        vault_id,
     );
     let resp = sdk
         .assemble_hot(&AssembleHotArgs {

@@ -82,3 +82,18 @@ fn envelope_decode_rejects_stability_mismatch() {
     let msg = err.to_string().to_lowercase();
     assert!(msg.contains("stability"), "got: {err}");
 }
+
+#[test]
+fn envelope_decode_rejects_explicit_null_segments() {
+    // Tri-state contract: field-absent (legacy) and `[]` (canonical empty)
+    // are valid, but explicit JSON `null` is NOT — it would otherwise
+    // collapse to None and bypass the EmptySegmentsRequiresEmptyPrefix
+    // invariant a malformed producer should hit.
+    let json = r#"{"bytes": 0, "prefix": "", "segments": null}"#;
+    let err = serde_json::from_str::<AssembleHotData>(json).unwrap_err();
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("null") || msg.contains("invalid type"),
+        "expected null-rejection error, got: {err}"
+    );
+}

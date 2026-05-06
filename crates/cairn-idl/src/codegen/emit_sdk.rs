@@ -234,6 +234,30 @@ fn emit_common(
     w.line("use serde::{Deserialize, Serialize};");
     w.blank();
 
+    // Strict tri-state helper for fields annotated `x-cairn-reject-null: true`.
+    // Distinguishes field-absent (default → `None`) from explicit JSON `null`
+    // (rejected) from a real value (deserialized to `Some(_)`). Used to
+    // preserve tri-state semantics for optional fields whose absence carries
+    // a different contract from `null`.
+    w.line("/// Strict deserializer for optional fields that must reject explicit JSON `null`.");
+    w.line("///");
+    w.line("/// Returns `Some(T)` for a present non-null value. Returns an error for an");
+    w.line("/// explicit `null`. The field-absent case bypasses this function entirely");
+    w.line("/// (handled by `#[serde(default)]`), preserving tri-state semantics.");
+    w.line("///");
+    w.line("/// # Errors");
+    w.line("///");
+    w.line("/// Returns the deserializer's error when input is `null` or otherwise invalid.");
+    w.line("pub fn reject_null_option<'de, T, D>(d: D) -> Result<Option<T>, D::Error>");
+    w.line("where T: ::serde::Deserialize<'de>, D: ::serde::Deserializer<'de> {");
+    w.indent();
+    w.line("// Deserialize the value via T directly. If the wire is `null`,");
+    w.line("// T's deserializer will see `null` and (for non-Option T) reject it.");
+    w.line("T::deserialize(d).map(Some)");
+    w.dedent();
+    w.line("}");
+    w.blank();
+
     // BTreeMap iterates in sorted key order — deterministic.
     for (name, ty) in &doc.common {
         emit_common_entry(&mut w, name, ty, common_names)?;
@@ -1846,7 +1870,21 @@ fn write_field_inner(
         None
     };
     if matches!(field.ty, RustType::Optional(_)) {
-        if serializing {
+        if field.reject_null {
+            // Tri-state: distinguish field-absent (default → None) from
+            // explicit JSON `null` (rejected) from `[...]`/`{...}`/etc.
+            // The helper is provided by the consuming crate at
+            // `crate::generated::common::reject_null_option`.
+            if serializing {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\", skip_serializing_if = \"Option::is_none\")]",
+                );
+            } else {
+                w.line(
+                    "#[serde(default, deserialize_with = \"crate::generated::common::reject_null_option\")]",
+                );
+            }
+        } else if serializing {
             w.line("#[serde(default, skip_serializing_if = \"Option::is_none\")]");
         } else {
             w.line("#[serde(default)]");
