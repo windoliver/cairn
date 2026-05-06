@@ -17,6 +17,7 @@ mod identity;
 pub mod locks;
 pub mod migrations;
 pub mod open;
+pub mod repair;
 pub mod replay;
 pub mod store;
 pub mod vec_ext;

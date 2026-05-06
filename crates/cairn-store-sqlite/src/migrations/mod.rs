@@ -77,10 +77,13 @@ const M0046_RECORDS_SCHEMA_VERSION: &str = include_str!("sql/0046_records_schema
 // 0031..0040 and #186 (KG substrate) + #258 (schema_version) had
 // taken 0041..0046 on main.
 const M0047_WAL_LINT_REPAIR: &str = include_str!("sql/0047_wal_lint_repair.sql");
-// Issue #52 — renumbered from 0046 → 0047 → 0048 across two main
-// merges; #258 (schema_version) took 0046 then #254 (lint repair)
-// took 0047.
-const M0048_REPLAY_CHALLENGE_MODE: &str = include_str!("sql/0048_replay_challenge_mode.sql");
+// Issue #267 — renumbered from 0046 to 0048 during rebase, since main
+// had already taken 0046..0047.
+const M0048_CONSENT_JOURNAL_REPAIR_AUDIT: &str =
+    include_str!("sql/0048_consent_journal_repair_audit.sql");
+// Issue #52 — renumbered from 0046 → 0047 → 0048 → 0049 across three
+// main merges as #258 / #254 / #267 each took the next slot.
+const M0049_REPLAY_CHALLENGE_MODE: &str = include_str!("sql/0049_replay_challenge_mode.sql");
 
 /// Canonical SQL for migration 0020 (`workflow_jobs`). Re-exported so
 /// downstream crates (notably `cairn-workflows`, which hashes the
@@ -212,8 +215,13 @@ pub(crate) const MIGRATION_SOURCES: &[(i64, &str, &str)] = &[
     (47, "0047_wal_lint_repair", M0047_WAL_LINT_REPAIR),
     (
         48,
-        "0048_replay_challenge_mode",
-        M0048_REPLAY_CHALLENGE_MODE,
+        "0048_consent_journal_repair_audit",
+        M0048_CONSENT_JOURNAL_REPAIR_AUDIT,
+    ),
+    (
+        49,
+        "0049_replay_challenge_mode",
+        M0049_REPLAY_CHALLENGE_MODE,
     ),
 ];
 
@@ -263,6 +271,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(M0045_ENTITY_EDGES_NO_OVERLAP_TRIGGER),
         M::up(M0046_RECORDS_SCHEMA_VERSION),
         M::up(M0047_WAL_LINT_REPAIR),
-        M::up(M0048_REPLAY_CHALLENGE_MODE),
+        M::up(M0048_CONSENT_JOURNAL_REPAIR_AUDIT),
+        M::up(M0049_REPLAY_CHALLENGE_MODE),
     ])
 }

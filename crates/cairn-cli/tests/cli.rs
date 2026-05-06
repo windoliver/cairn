@@ -20,6 +20,28 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cairn"))
 }
 
+fn seed_consent_journal_vault(seed_sql: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cairn_dir = dir.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn");
+    let db_path = cairn_dir.join("cairn.db");
+    let mut conn = rusqlite::Connection::open(db_path).expect("open sqlite");
+    cairn_store_sqlite::migrations::migrations()
+        .to_version(&mut conn, 20)
+        .expect("apply migrations to v20");
+    conn.execute(seed_sql, [])
+        .expect("seed consent_journal row");
+    dir
+}
+
+fn seed_consent_journal_repair_vault() -> tempfile::TempDir {
+    seed_consent_journal_vault(
+        "INSERT INTO consent_journal \
+          (rowid, consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES (0, 'repair-cli', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
+    )
+}
+
 #[test]
 fn prints_version_with_flag() {
     let out = cli().arg("--version").output().expect("cairn --version");
@@ -65,6 +87,153 @@ fn mcp_subcommand_help_exits_zero() {
     assert!(
         stdout.contains("stdio"),
         "mcp help should describe stdio transport: {stdout:?}",
+    );
+}
+
+#[test]
+fn repair_consent_journal_help_lists_delete_options() {
+    let out = cli()
+        .args(["repair", "consent-journal", "--help"])
+        .output()
+        .expect("cairn repair consent-journal --help");
+    assert!(out.status.success(), "exit: {:?}", out.status);
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    for needle in ["--delete-rowid", "--reason", "--yes", "--json"] {
+        assert!(
+            stdout.contains(needle),
+            "repair help missing {needle}: {stdout}",
+        );
+    }
+}
+
+#[test]
+fn repair_delete_requires_reason_and_yes() {
+    let missing_yes = cli()
+        .args([
+            "repair",
+            "consent-journal",
+            "--delete-rowid",
+            "0",
+            "--reason",
+            "operator approved",
+        ])
+        .output()
+        .expect("cairn repair delete without yes");
+    assert_eq!(missing_yes.status.code(), Some(64));
+
+    let missing_reason = cli()
+        .args(["repair", "consent-journal", "--delete-rowid", "0", "--yes"])
+        .output()
+        .expect("cairn repair delete without reason");
+    assert_eq!(missing_reason.status.code(), Some(64));
+}
+
+#[test]
+fn repair_consent_journal_json_lists_blockers() {
+    let dir = seed_consent_journal_repair_vault();
+    let out = cli()
+        .args([
+            "--vault",
+            dir.path().to_str().expect("utf-8 tempdir"),
+            "repair",
+            "consent-journal",
+            "--json",
+        ])
+        .output()
+        .expect("cairn repair consent-journal --json");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("repair list must emit JSON");
+    let blockers = parsed["blockers"]
+        .as_array()
+        .expect("blockers should be an array");
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0]["rowid"], 0);
+    assert_eq!(blockers[0]["blocker_codes"][0], "non_positive_rowid");
+}
+
+#[test]
+fn repair_consent_journal_delete_succeeds_and_reports_receipt() {
+    let dir = seed_consent_journal_repair_vault();
+    let out = cli()
+        .args([
+            "--vault",
+            dir.path().to_str().expect("utf-8 tempdir"),
+            "repair",
+            "consent-journal",
+            "--delete-rowid",
+            "0",
+            "--reason",
+            "operator approved",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .expect("cairn repair consent-journal delete");
+    assert!(
+        out.status.success(),
+        "exit: {:?}\nstderr: {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("utf-8 stdout");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("repair delete must emit JSON");
+    assert_eq!(parsed["deleted"]["target_rowid"], 0);
+    assert_eq!(parsed["deleted"]["reason"], "operator approved");
+
+    let conn =
+        rusqlite::Connection::open(dir.path().join(".cairn").join("cairn.db")).expect("open db");
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM consent_journal WHERE consent_id = 'repair-cli'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count remaining");
+    assert_eq!(remaining, 0);
+    let audit_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM consent_journal_repair_audit",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count audit rows");
+    assert_eq!(audit_count, 1);
+}
+
+#[test]
+fn repair_consent_journal_delete_non_blocker_exits_65() {
+    let dir = seed_consent_journal_vault(
+        "INSERT INTO consent_journal \
+          (consent_id, subject, scope, decision, granted_by, decided_at) \
+         VALUES ('not-a-blocker', 'sub', 'private', 'GRANT', 'hmn:t', 0)",
+    );
+    let out = cli()
+        .args([
+            "--vault",
+            dir.path().to_str().expect("utf-8 tempdir"),
+            "repair",
+            "consent-journal",
+            "--delete-rowid",
+            "1",
+            "--reason",
+            "operator approved",
+            "--yes",
+        ])
+        .output()
+        .expect("cairn repair consent-journal delete non-blocker");
+    assert_eq!(out.status.code(), Some(65));
+    let stderr = String::from_utf8(out.stderr).expect("utf-8 stderr");
+    assert!(
+        stderr.contains("not repair-eligible"),
+        "stderr missing repair eligibility error: {stderr:?}",
     );
 }
 
