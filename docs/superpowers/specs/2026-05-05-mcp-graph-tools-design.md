@@ -311,8 +311,12 @@ Concrete consequences for this issue:
 1. **Stdio transport (the only one this PR ships):** there is
    no per-call caller identity. `McpAuthContext` carries only
    `request_id` and a single deployment-resolved `principal:
-   PrincipalId` injected at server-construction time from
-   config. **Graph tools therefore advertise on stdio only when
+   ScopeTuple` injected at server-construction time from config.
+   (Plan A standardizes the auth substrate on `ScopeTuple` as
+   the principal type. This spec previously referred to a
+   `PrincipalId` newtype that was never introduced; the API
+   below uses `ScopeTuple` consistently with the implementation
+   plan.) **Graph tools therefore advertise on stdio only when
    the operator explicitly opts into single-tenant mode** via
    `cairn.toml::[mcp.stdio] single_tenant = true`. Without that
    flag set, graph tools return `CapabilityUnavailable` even on
@@ -350,7 +354,7 @@ Concrete consequences for this issue:
 /// future network transports, both vary and `principal` is
 /// extracted from `RequestContext::extensions` per request.
 pub struct McpAuthContext<'a> {
-    pub principal: &'a PrincipalId,
+    pub principal: &'a cairn_core::domain::ScopeTuple,
     pub request_id: &'a RequestId,
 }
 

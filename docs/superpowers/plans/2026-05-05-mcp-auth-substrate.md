@@ -1170,6 +1170,21 @@ pub fn resolve_scope_components(config: &CairnConfig) -> Option<ResolvedMcpScope
     })
 }
 
+/// Path to the on-disk SQLite store, derived from the vault root.
+///
+/// **Single source of truth.** Both the writable open path
+/// (`mcp::run`'s opted-in branch) and the read-only capability
+/// peek (`status::try_peek_store_capabilities`, Task 6) call this
+/// helper. Hard-coding `.cairn/cairn.db` (or `.cairn/memory.db`)
+/// at either site would re-introduce the split-brain Codex flagged
+/// in review-loop r2: `status` would inspect a different file
+/// than the live MCP server. Defined in this task because Task 5
+/// is the first call site; Task 6 reuses it.
+#[must_use]
+pub(crate) fn store_db_path(vault_root: &std::path::Path) -> std::path::PathBuf {
+    vault_root.join(".cairn/cairn.db")
+}
+
 /// Run the MCP stdio server.
 ///
 /// Blocks until the MCP client closes stdin or sends a shutdown
@@ -1674,6 +1689,47 @@ The regenerated `StatusResponse` automatically grows the new
 `StatusResponseMcpGraphTools` whose shape mirrors `McpGraphToolsStatus`
 below. CI's `cargo run -p cairn-idl --bin cairn-codegen --locked --
 --check` step gates on a committed regeneration.
+
+**Step 6b-bis — Update every other `StatusResponse { … }` constructor.**
+
+Adding a required field to a generated struct breaks every site that
+constructs it positionally. After codegen, sweep the workspace:
+
+```bash
+rg -nF 'StatusResponse {' crates/ -g '!target' -g '!**/generated/**'
+```
+
+Today (pre-Plan-A) the only non-generated constructor outside the CLI
+emit path is the SDK at `crates/cairn-sdk/src/transport.rs` (around
+line 158, in `Sdk::status`). Update it to include the new field with
+a default-unavailable value — the SDK does not run an MCP server, so
+the SDK-side status reports `mcp_graph_tools` as `unavailable` with
+reason `single_tenant_off`:
+
+```rust
+// crates/cairn-sdk/src/transport.rs — Sdk::status
+pub fn status(&self) -> StatusResponse {
+    StatusResponse {
+        contract: CONTRACT.to_owned(),
+        server_info: StatusResponseServerInfo { /* unchanged */ },
+        capabilities: self.advertised_capabilities(),
+        extensions: vec![],
+        mcp_graph_tools: StatusResponseMcpGraphTools {
+            state: "unavailable".to_owned(),
+            reason: Some("single_tenant_off".to_owned()),
+            tool_count: None,
+            probe_basis: "config_only".to_owned(),
+            error: None,
+        },
+    }
+}
+```
+
+The grep above is the verification step — Task 6 cannot ship until
+every `StatusResponse { … }` constructor in the workspace has been
+updated. CI's workspace-wide `cargo check --locked` step gates on
+this; if a future call site is added between Plan A and merge, it
+must update the constructor in the same PR.
 
 **Step 6c — Wire the value at the CLI emit site.** The CLI
 constructs the generated `StatusResponse` from the verb-layer
