@@ -58,6 +58,7 @@ fn scan_dir(
             Ok(metadata) => metadata,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 result.warnings.broken_symlinks += 1;
+                result.skipped += 1;
                 continue;
             }
             Err(err) => return Err(err),
@@ -73,6 +74,7 @@ fn scan_dir(
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     result.warnings.broken_symlinks += 1;
+                    result.skipped += 1;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -183,5 +185,26 @@ mod tests {
             rels(&result),
             vec!["actual.md", "alias.md", "linked_dir/child.md"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_counts_as_warning_and_skipped() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        symlink(
+            dir.path().join("does-not-exist.md"),
+            dir.path().join("missing.md"),
+        )
+        .unwrap();
+        let include = parse_pattern_list(None, &["*.md"]).unwrap();
+        let exclude = parse_pattern_list(None, &[]).unwrap();
+
+        let result = scan_folder(dir.path(), true, &include, &exclude).unwrap();
+
+        assert_eq!(rels(&result), Vec::<String>::new());
+        assert_eq!(result.warnings.broken_symlinks, 1);
+        assert_eq!(result.skipped, 1);
     }
 }

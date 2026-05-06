@@ -162,6 +162,11 @@ fn run_with_options(
     };
 
     for entry in scan.entries {
+        if !is_supported_keyword_file(&entry.relative_path) {
+            summary.warnings = summary.warnings.saturating_add(1);
+            summary.skipped = summary.skipped.saturating_add(1);
+            continue;
+        }
         let body = match std::fs::read_to_string(&entry.absolute_path) {
             Ok(body) => body,
             Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
@@ -215,6 +220,13 @@ fn run_with_options(
 
     summary.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(summary)
+}
+
+fn is_supported_keyword_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("md" | "txt" | "rst" | "rs" | "py" | "ts" | "js" | "go")
+    )
 }
 
 fn normalize_path(path: &Path) -> String {

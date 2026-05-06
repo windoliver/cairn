@@ -143,6 +143,26 @@ fn second_non_dry_run_uses_cache() {
 }
 
 #[test]
+fn explicitly_included_unsupported_files_are_warned_and_not_cached() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("docs/image.png"), "not keyword text");
+
+    let out = cli()
+        .current_dir(dir.path())
+        .args(["ingest", "--folder", "docs", "--include", "*.png", "--json"])
+        .output()
+        .expect("cairn ingest unsupported include");
+
+    assert_eq!(out.status.code(), Some(0), "exit: {:?}", out.status);
+    assert!(!dir.path().join(".cairn/cache").exists());
+    let v = json_stdout(&out);
+    assert_eq!(v["processed"], 0);
+    assert_eq!(v["skipped"], 1);
+    assert_eq!(v["warnings"], 1);
+    assert_eq!(v["entities_new"], 0);
+}
+
+#[test]
 fn docs_folder_keyword_dry_run_extracts_entities() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
