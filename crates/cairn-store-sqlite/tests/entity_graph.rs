@@ -391,13 +391,13 @@ fn wal_helper_writes_op_and_steps_in_one_tx() {
 #[tokio::test]
 async fn upsert_entity_inserts_new_returns_supplied_id() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let node = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000010"),
         name: "Alice".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("Alice"),
         summary: Some("eng".into()),
         created_at: 1,
         embedding_id: None,
@@ -409,13 +409,13 @@ async fn upsert_entity_inserts_new_returns_supplied_id() {
 #[tokio::test]
 async fn upsert_entity_dedup_returns_existing_id() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
     let first = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000020"),
         name: "Alice".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("Alice"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -425,7 +425,7 @@ async fn upsert_entity_dedup_returns_existing_id() {
     let dup = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000021"),
         name: "ALICE".into(),
-        name_norm: "alice".into(),
+        name_norm: normalize_entity_name("ALICE"),
         summary: Some("changed".into()),
         created_at: 2,
         embedding_id: None,
@@ -442,7 +442,7 @@ async fn upsert_entity_dedup_returns_existing_id() {
 #[tokio::test]
 async fn link_entity_episode_idempotent_returns_true_then_false() {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
     use cairn_core::domain::record::RecordId;
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
@@ -451,7 +451,7 @@ async fn link_entity_episode_idempotent_returns_true_then_false() {
     let node = EntityNode {
         id: EntityId::from("01HZE7JV5N0000000000000030"),
         name: "Alice".into(),
-        name_norm: "alice-link".into(),
+        name_norm: normalize_entity_name("alice link"),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -501,11 +501,11 @@ async fn seed_two_entities(
     cairn_core::domain::graph::EntityId,
 ) {
     use cairn_core::contract::memory_store::MemoryStore;
-    use cairn_core::domain::graph::{EntityId, EntityNode};
+    use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
     let n1 = EntityNode {
         id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}A").as_str()),
         name: "Alice".into(),
-        name_norm: format!("alice-{suffix}"),
+        name_norm: normalize_entity_name(&format!("alice {suffix}")),
         summary: None,
         created_at: 1,
         embedding_id: None,
@@ -513,7 +513,7 @@ async fn seed_two_entities(
     let n2 = EntityNode {
         id: EntityId::from(format!("01HZE7JV5N00000000000000{suffix}B").as_str()),
         name: "Acme".into(),
-        name_norm: format!("acme-{suffix}"),
+        name_norm: normalize_entity_name(&format!("acme {suffix}")),
         summary: None,
         created_at: 1,
         embedding_id: None,

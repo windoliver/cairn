@@ -955,6 +955,7 @@ mod tests {
     async fn issue_186_default_impls_report_capability_unavailable() {
         use crate::domain::graph::{
             EdgeConfidence, EntityEdge, EntityEdgeId, EntityId, EntityNode, GraphEdgesArgs,
+            normalize_entity_name,
         };
         use crate::domain::record::RecordId;
 
@@ -963,7 +964,7 @@ mod tests {
         let node = EntityNode {
             id: EntityId::from("01HZE7JV5N0000000000000001"),
             name: "alice".into(),
-            name_norm: "alice".into(),
+            name_norm: normalize_entity_name("alice"),
             summary: None,
             created_at: 1,
             embedding_id: None,
