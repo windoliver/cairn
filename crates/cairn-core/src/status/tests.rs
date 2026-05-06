@@ -161,3 +161,100 @@ mod remediation_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_phase() -> impl Strategy<Value = Phase> {
+        prop_oneof![Just(Phase::V0_1), Just(Phase::V0_2), Just(Phase::V0_3)]
+    }
+
+    fn arb_store() -> impl Strategy<Value = Option<StoreCaps>> {
+        prop_oneof![
+            Just(None),
+            (any::<bool>(), any::<bool>())
+                .prop_map(|(fts, vector)| Some(StoreCaps { fts, vector }))
+        ]
+    }
+
+    fn arb_cap_set() -> impl Strategy<Value = crate::config::CapabilitySet> {
+        (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>())
+            .prop_map(|(kw, sem, hyb, pt)| crate::config::CapabilitySet {
+                keyword_search: kw,
+                semantic_search: sem,
+                hybrid_search: hyb,
+                llm_extract: false,
+                agent_extract: false,
+                graph_edges: false,
+                policy_trace: pt,
+                replay_sequence: true,
+                replay_challenge: true,
+            })
+    }
+
+    fn arb_gates() -> impl Strategy<Value = CapabilityGates> {
+        (
+            arb_cap_set(),
+            arb_store(),
+            any::<bool>(),
+            any::<bool>(),
+            any::<bool>(),
+            arb_phase(),
+        )
+            .prop_map(|(config, store, bound, model, llm, phase)| CapabilityGates {
+                config,
+                store,
+                vault_bound: bound,
+                model_present: model,
+                llm_configured: llm,
+                contract_phase: phase,
+            })
+    }
+
+    // Turning a capability gate ON never removes capabilities. Catches
+    // accidental conjunction inversions in the decision table.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn monotone_in_keyword_search_flag(mut gates in arb_gates()) {
+            gates.vault_bound = true; // monotone holds within bound branch
+            let off = {
+                gates.config.keyword_search = false;
+                advertise(&gates)
+            };
+            let on = {
+                gates.config.keyword_search = true;
+                advertise(&gates)
+            };
+            for cap in &off {
+                prop_assert!(on.contains(cap),
+                    "keyword_search true must be a superset of false; lost {cap:?}");
+            }
+        }
+
+        #[test]
+        fn monotone_in_model_present(mut gates in arb_gates()) {
+            gates.vault_bound = true;
+            let off = {
+                gates.model_present = false;
+                advertise(&gates)
+            };
+            let on = {
+                gates.model_present = true;
+                advertise(&gates)
+            };
+            for cap in &off {
+                prop_assert!(on.contains(cap),
+                    "model_present true must be a superset of false; lost {cap:?}");
+            }
+        }
+
+        #[test]
+        fn unbound_always_empty(mut gates in arb_gates()) {
+            gates.vault_bound = false;
+            prop_assert!(advertise(&gates).is_empty());
+        }
+    }
+}
