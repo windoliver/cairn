@@ -15,6 +15,7 @@ use crate::vec_ext::register_vec0;
 use crate::verify::{
     preflight_migration_history, verify_migration_history, verify_schema_fingerprint,
 };
+use crate::wal::{RecoveryConfig, recover_pending};
 
 const PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
      PRAGMA foreign_keys=ON;\
@@ -55,11 +56,10 @@ const DEFAULT_VEC_DIM: usize = 384;
 /// optional embedder. Spawns the background drain loop when an embedder is
 /// provided.
 fn build_store(
-    conn: AsyncConn,
+    conn: Arc<AsyncConn>,
     embedder: Option<Arc<dyn EmbeddingModel>>,
     fts_column_weights: [f64; 4],
 ) -> SqliteMemoryStore {
-    let conn = Arc::new(conn);
     let vector = embedder.is_some();
     let caps = base_caps(vector);
     let cancel = embedder.as_ref().map(|_| CancellationToken::new());
@@ -77,6 +77,32 @@ fn build_store(
         caps,
         _cancel: cancel,
         fts_column_weights,
+    }
+}
+
+/// Runs WAL boot recovery (issue #55, brief §5.6). Called after migrations
+/// from every public async open path. Errors propagate so a corrupt WAL
+/// fails the open rather than serving requests against partial state.
+async fn run_boot_recovery(conn: &Arc<AsyncConn>) -> Result<(), StoreError> {
+    let cfg = RecoveryConfig::default();
+    match recover_pending(conn, &cfg).await {
+        Ok(report) => {
+            tracing::info!(
+                finalized_committed = report.finalized_committed.len(),
+                finalized_rejected = report.finalized_rejected.len(),
+                aborted = report.aborted.len(),
+                resumed_committed = report.resumed_committed.len(),
+                skipped_no_body = report.skipped_no_body.len(),
+                skipped_unhandled_kind = report.skipped_unhandled_kind.len(),
+                no_op = report.no_op.len(),
+                "WAL boot recovery complete"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "WAL boot recovery failed");
+            Err(StoreError::Recovery(format!("{e}")))
+        }
     }
 }
 
@@ -131,6 +157,8 @@ pub async fn open_with_embedder_and_config(
     let conn = AsyncConn::open(path).await?;
     let dim = embedder.as_ref().map(|e| e.dim());
     bootstrap(&conn, dim).await?;
+    let conn = Arc::new(conn);
+    run_boot_recovery(&conn).await?;
     Ok(build_store(conn, embedder, fts_column_weights))
 }
 
@@ -170,6 +198,8 @@ pub async fn open_in_memory_with_embedder_and_config(
     let conn = AsyncConn::open_in_memory().await?;
     let dim = embedder.as_ref().map(|e| e.dim());
     bootstrap(&conn, dim).await?;
+    let conn = Arc::new(conn);
+    run_boot_recovery(&conn).await?;
     Ok(build_store(conn, embedder, fts_column_weights))
 }
 

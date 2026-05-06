@@ -66,9 +66,7 @@ impl StepBody for SyntheticBody {
                 Err(StepBodyError::Failed("synthetic fail-once".into()))
             }
             BodyBehavior::FailOnceThenSucceed => Ok(()),
-            BodyBehavior::AlwaysFail => {
-                Err(StepBodyError::Failed("synthetic always-fail".into()))
-            }
+            BodyBehavior::AlwaysFail => Err(StepBodyError::Failed("synthetic always-fail".into())),
         }
     }
 }
@@ -102,13 +100,7 @@ async fn open_db() -> Arc<Connection> {
     )
 }
 
-async fn seed_op(
-    conn: &Arc<Connection>,
-    op_id: &str,
-    kind: WalKind,
-    state: &str,
-    issued_seq: i64,
-) {
+async fn seed_op(conn: &Arc<Connection>, op_id: &str, kind: WalKind, state: &str, issued_seq: i64) {
     let op = op_id.to_owned();
     let kind_str = kind.as_str().to_owned();
     let state_str = state.to_owned();
@@ -194,11 +186,7 @@ async fn read_op_state(conn: &Arc<Connection>, op_id: &str) -> String {
     .expect("read op state")
 }
 
-async fn read_step_row(
-    conn: &Arc<Connection>,
-    op_id: &str,
-    ord: u32,
-) -> (String, u32) {
+async fn read_step_row(conn: &Arc<Connection>, op_id: &str, ord: u32) -> (String, u32) {
     let op = op_id.to_owned();
     conn.call(move |c| {
         let row: (String, u32) = c.query_row(
@@ -214,13 +202,19 @@ async fn read_step_row(
 }
 
 fn upsert_step_names() -> Vec<&'static str> {
-    cairn_core::wal::UPSERT_STEPS.iter().map(|s| s.name).collect()
+    cairn_core::wal::UPSERT_STEPS
+        .iter()
+        .map(|s| s.name)
+        .collect()
 }
 
 fn upsert_with_body(body: Arc<dyn StepBody>) -> RecoveryConfig {
     RecoveryConfig {
         enabled: true,
-        bodies: Box::new(OneKindRegistry { kind: WalKind::Upsert, body }),
+        bodies: Box::new(OneKindRegistry {
+            kind: WalKind::Upsert,
+            body,
+        }),
     }
 }
 
@@ -319,8 +313,14 @@ async fn prepared_partial_resumes_from_next_step_only() {
         assert_eq!(body.calls(ord), 1, "step {ord} should run exactly once");
     }
     // Steps 0,1 were pre-seeded as DONE with attempts=1 and stay that way.
-    assert_eq!(read_step_row(&conn, "op-partial", 0).await, ("DONE".into(), 1));
-    assert_eq!(read_step_row(&conn, "op-partial", 1).await, ("DONE".into(), 1));
+    assert_eq!(
+        read_step_row(&conn, "op-partial", 0).await,
+        ("DONE".into(), 1)
+    );
+    assert_eq!(
+        read_step_row(&conn, "op-partial", 1).await,
+        ("DONE".into(), 1)
+    );
     // Steps 2..=5 ran exactly once via the runner's fresh-row path: attempts=1.
     for ord in 2..6 {
         assert_eq!(
@@ -436,4 +436,52 @@ async fn decision_only_mode_skips_resume_with_warn() {
     assert!(report.aborted.is_empty());
     // Op stays in PREPARED — recovery did not advance it.
     assert_eq!(read_op_state(&conn, "op-skip").await, "PREPARED");
+}
+
+/// Wiring smoke test for Task 10: opens a tempdir-backed DB through the
+/// production async `open` path, pre-seeds a PREPARED op + all 6 upsert
+/// step DONE rows, drops the store, then re-opens through the same async
+/// `open` path and asserts the second open ran `run_boot_recovery` and
+/// finalized the op to COMMITTED.
+#[tokio::test]
+async fn open_path_runs_boot_recovery_and_finalizes_committed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("cairn.sqlite");
+
+    // First open via the production file-path async open.
+    {
+        let store = cairn_store_sqlite::open(&path).await.expect("open #1");
+        let conn = Arc::clone(
+            store
+                .raw_conn_for_admin()
+                .expect("store has a live connection"),
+        );
+
+        // Seed a PREPARED op with all 6 upsert steps DONE — terminal-finalizable.
+        seed_op(&conn, "op-wire", WalKind::Upsert, "ISSUED", 1).await;
+        forward_to_prepared(&conn, "op-wire").await;
+        let names = upsert_step_names();
+        for (ord, name) in names.iter().enumerate() {
+            let ord_u32 = u32::try_from(ord).expect("invariant: upsert step ord fits in u32");
+            seed_step(&conn, "op-wire", ord_u32, name, "DONE", 1).await;
+        }
+        assert_eq!(read_op_state(&conn, "op-wire").await, "PREPARED");
+        // Drop the store/conn (closes connection); `tempdir` keeps the DB file.
+    }
+
+    // Second open via the SAME production async path. `run_boot_recovery`
+    // should fire from inside `open()` and finalize the op to COMMITTED
+    // before the store is returned.
+    let store = cairn_store_sqlite::open(&path).await.expect("open #2");
+    let conn = Arc::clone(
+        store
+            .raw_conn_for_admin()
+            .expect("store has a live connection"),
+    );
+
+    assert_eq!(
+        read_op_state(&conn, "op-wire").await,
+        "COMMITTED",
+        "boot recovery must finalize a PREPARED op with all DONE steps"
+    );
 }
