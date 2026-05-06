@@ -165,3 +165,28 @@ fn handshake_volatile_fields_have_expected_shape() {
         assert!(expires > 0, "{label}: expires_at must be positive epoch-ms");
     }
 }
+
+#[test]
+fn status_parity_cli_vs_sdk_vs_mcp() {
+    use cairn_mcp::CairnMcpHandler;
+
+    assert_tempdir_unbound();
+
+    let mut cli = run_json(&["status", "--json"]);
+    let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
+    let mut mcp =
+        serde_json::to_value(CairnMcpHandler::new().status_response())
+            .expect("mcp status serializes");
+
+    let volatile: &[&[&str]] = &[
+        &["server_info", "incarnation"],
+        &["server_info", "started_at"],
+    ];
+    mask(&mut cli, volatile);
+    mask(&mut sdk, volatile);
+    mask(&mut mcp, volatile);
+
+    assert_eq!(cli, sdk, "CLI and SDK status diverge");
+    assert_eq!(sdk, mcp, "SDK and MCP status diverge");
+    // Transitive: cli == mcp follows.
+}
