@@ -36,6 +36,7 @@ pub use store::reindex::{DrainStats, drain_once};
 pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
+pub use wal::{RecoveryConfig, RecoveryReport, recover_pending};
 
 use cairn_core::contract::memory_store::CONTRACT_VERSION;
 use cairn_core::contract::version::{ContractVersion, VersionRange};
