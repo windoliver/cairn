@@ -138,11 +138,20 @@ mod tests {
     use super::*;
 
     fn snap(state: OpState, steps: Vec<StepRow>) -> OpSnapshot {
-        OpSnapshot { kind: WalKind::Upsert, state, steps }
+        OpSnapshot {
+            kind: WalKind::Upsert,
+            state,
+            steps,
+        }
     }
 
     fn step(ord: u32, state: StepState, attempts: u32) -> StepRow {
-        StepRow { ord, state, attempts, last_error: None }
+        StepRow {
+            ord,
+            state,
+            attempts,
+            last_error: None,
+        }
     }
 
     #[test]
@@ -183,10 +192,7 @@ mod tests {
         // 0,1 DONE, 2 absent — resume from 2.
         let s = snap(
             OpState::Prepared,
-            vec![
-                step(0, StepState::Done, 1),
-                step(1, StepState::Done, 1),
-            ],
+            vec![step(0, StepState::Done, 1), step(1, StepState::Done, 1)],
         );
         assert_eq!(
             decide_recovery(&s),
@@ -210,10 +216,7 @@ mod tests {
         // Last DONE is 0, so next_ord = 1.
         let s = snap(
             OpState::Prepared,
-            vec![
-                step(0, StepState::Done, 1),
-                step(1, StepState::Failed, 1),
-            ],
+            vec![step(0, StepState::Done, 1), step(1, StepState::Failed, 1)],
         );
         assert_eq!(
             decide_recovery(&s),
@@ -288,10 +291,7 @@ mod tests {
     fn pending_under_max_resumes_in_place() {
         let s = snap(
             OpState::Prepared,
-            vec![
-                step(0, StepState::Done, 1),
-                step(1, StepState::Pending, 1),
-            ],
+            vec![step(0, StepState::Done, 1), step(1, StepState::Pending, 1)],
         );
         assert_eq!(
             decide_recovery(&s),

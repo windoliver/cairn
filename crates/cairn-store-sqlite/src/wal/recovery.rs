@@ -183,9 +183,8 @@ async fn list_open_ops(
 
     let mut out = Vec::with_capacity(rows.len());
     for (op, kind, state) in rows {
-        let op_id = OperationId::parse(op).map_err(|e| {
-            RecoveryError::Invariant(format!("wal_ops.operation_id parse: {e}"))
-        })?;
+        let op_id = OperationId::parse(op)
+            .map_err(|e| RecoveryError::Invariant(format!("wal_ops.operation_id parse: {e}")))?;
         // Defer kind parsing to the per-op loop so unhandled kinds can be
         // skipped with a warn instead of aborting recovery for everyone.
         let state = parse_op_state(&state)?;
@@ -370,7 +369,10 @@ async fn handle_resume(
             }
             Ok(())
         }
-        Err(RunnerError::Exhausted { op_id: e_op, step_ord }) => {
+        Err(RunnerError::Exhausted {
+            op_id: e_op,
+            step_ord,
+        }) => {
             let reason = format!("recovered: step {step_ord} exhausted");
             finalize(conn, &e_op, OpState::Aborted, &reason).await?;
             report.aborted.push((e_op, step_ord));

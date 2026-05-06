@@ -85,7 +85,10 @@ impl StepKey {
     /// Construct a new `StepKey`.
     #[must_use]
     pub fn new(operation_id: OperationId, step_ord: u32) -> Self {
-        Self { operation_id, step_ord }
+        Self {
+            operation_id,
+            step_ord,
+        }
     }
 }
 

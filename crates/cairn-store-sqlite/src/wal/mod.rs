@@ -9,7 +9,6 @@ pub mod recovery;
 pub mod runner;
 
 pub use recovery::{
-    EmptyRegistry, RecoveryConfig, RecoveryError, RecoveryReport, StepBodyRegistry,
-    recover_pending,
+    EmptyRegistry, RecoveryConfig, RecoveryError, RecoveryReport, StepBodyRegistry, recover_pending,
 };
 pub use runner::{RunnerError, StepBody, StepBodyError, run_from};

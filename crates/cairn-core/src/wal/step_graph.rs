@@ -82,12 +82,36 @@ impl StepGraph {
 /// Step 7 (`consent_log_materializer`) is async and not part of the WAL
 /// step graph per the brief; it lives in a separate background tail.
 pub const UPSERT_STEPS: &[StepDef] = &[
-    StepDef { ord: 0, name: "snapshot.stage",     idempotent: false },
-    StepDef { ord: 1, name: "primary.upsert_cow", idempotent: true  },
-    StepDef { ord: 2, name: "vector.upsert",      idempotent: true  },
-    StepDef { ord: 3, name: "fts.upsert",         idempotent: true  },
-    StepDef { ord: 4, name: "edges.upsert",       idempotent: true  },
-    StepDef { ord: 5, name: "primary.activate",   idempotent: true  },
+    StepDef {
+        ord: 0,
+        name: "snapshot.stage",
+        idempotent: false,
+    },
+    StepDef {
+        ord: 1,
+        name: "primary.upsert_cow",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 2,
+        name: "vector.upsert",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 3,
+        name: "fts.upsert",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 4,
+        name: "edges.upsert",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 5,
+        name: "primary.activate",
+        idempotent: true,
+    },
 ];
 
 const UPSERT_GRAPH: StepGraph = StepGraph {
@@ -97,13 +121,41 @@ const UPSERT_GRAPH: StepGraph = StepGraph {
 
 /// Step graph for `forget_record` — brief §5.6 fan-out table row 2.
 pub const FORGET_RECORD_STEPS: &[StepDef] = &[
-    StepDef { ord: 0, name: "primary.mark_tombstone", idempotent: true  },
-    StepDef { ord: 1, name: "vector.drain",           idempotent: true  },
-    StepDef { ord: 2, name: "fts.drain",              idempotent: true  },
-    StepDef { ord: 3, name: "edges.drain",            idempotent: true  },
-    StepDef { ord: 4, name: "primary.purge",          idempotent: false },
-    StepDef { ord: 5, name: "wal.purge_pre_images",   idempotent: true  },
-    StepDef { ord: 6, name: "snapshot.purge",         idempotent: true  },
+    StepDef {
+        ord: 0,
+        name: "primary.mark_tombstone",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 1,
+        name: "vector.drain",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 2,
+        name: "fts.drain",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 3,
+        name: "edges.drain",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 4,
+        name: "primary.purge",
+        idempotent: false,
+    },
+    StepDef {
+        ord: 5,
+        name: "wal.purge_pre_images",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 6,
+        name: "snapshot.purge",
+        idempotent: true,
+    },
 ];
 
 const FORGET_RECORD_GRAPH: StepGraph = StepGraph {
@@ -119,11 +171,31 @@ const FORGET_RECORD_GRAPH: StepGraph = StepGraph {
 /// It is therefore not a separate WAL step; the same fusion treatment is
 /// applied to `upsert`'s consent journal append (see `UPSERT_STEPS` doc).
 pub const EXPIRE_STEPS: &[StepDef] = &[
-    StepDef { ord: 0, name: "snapshot.stage",        idempotent: false },
-    StepDef { ord: 1, name: "primary.mark_expired",  idempotent: true  },
-    StepDef { ord: 2, name: "vector.drain",          idempotent: true  },
-    StepDef { ord: 3, name: "fts.drain",             idempotent: true  },
-    StepDef { ord: 4, name: "edges.drain",           idempotent: true  },
+    StepDef {
+        ord: 0,
+        name: "snapshot.stage",
+        idempotent: false,
+    },
+    StepDef {
+        ord: 1,
+        name: "primary.mark_expired",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 2,
+        name: "vector.drain",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 3,
+        name: "fts.drain",
+        idempotent: true,
+    },
+    StepDef {
+        ord: 4,
+        name: "edges.drain",
+        idempotent: true,
+    },
 ];
 
 const EXPIRE_GRAPH: StepGraph = StepGraph {
@@ -151,7 +223,8 @@ mod tests {
             for (idx, step) in graph.steps.iter().enumerate() {
                 assert_eq!(
                     step.ord as usize, idx,
-                    "{:?} step {idx} has ord {}", graph.kind, step.ord
+                    "{:?} step {idx} has ord {}",
+                    graph.kind, step.ord
                 );
             }
         }
@@ -164,7 +237,9 @@ mod tests {
             for step in graph.steps {
                 assert!(
                     !seen.contains(&step.name),
-                    "{:?} has duplicate step name {}", graph.kind, step.name
+                    "{:?} has duplicate step name {}",
+                    graph.kind,
+                    step.name
                 );
                 seen.push(step.name);
             }

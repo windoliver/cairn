@@ -97,9 +97,7 @@ pub fn legal_step_transition(from: StepState, to: StepState) -> bool {
     }
     matches!(
         (from, to),
-        (Pending, Done | Failed)
-            | (Failed, Pending | Compensated)
-            | (Done, Compensated)
+        (Pending, Done | Failed) | (Failed, Pending | Compensated) | (Done, Compensated)
     )
 }
 
@@ -107,7 +105,10 @@ pub fn legal_step_transition(from: StepState, to: StepState) -> bool {
 /// transitions are legal).
 #[must_use]
 pub fn is_terminal_op(state: OpState) -> bool {
-    matches!(state, OpState::Committed | OpState::Aborted | OpState::Rejected)
+    matches!(
+        state,
+        OpState::Committed | OpState::Aborted | OpState::Rejected
+    )
 }
 
 /// Returns true if `state` is a terminal `wal_steps.state`.
