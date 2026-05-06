@@ -55,6 +55,47 @@ fn ingest_args_accepts_exactly_one_xor_member() {
 }
 
 #[test]
+fn ingest_args_accepts_folder_xor_member() {
+    let json = serde_json::json!({
+        "kind": "reference",
+        "folder": "docs",
+        "recursive": true,
+        "include": ["*.md", "*.rs"],
+        "exclude": ["target"],
+        "mode": "keyword",
+        "dry_run": true
+    });
+
+    let args: IngestArgs = serde_json::from_value(json).unwrap();
+
+    assert_eq!(args.folder.as_deref(), Some("docs"));
+    assert_eq!(
+        args.include.as_ref().unwrap(),
+        &vec!["*.md".to_owned(), "*.rs".to_owned()]
+    );
+    assert_eq!(args.exclude.as_ref().unwrap(), &vec!["target".to_owned()]);
+    assert_eq!(serde_json::to_value(&args).unwrap()["mode"], "keyword");
+    assert_eq!(serde_json::to_value(&args).unwrap()["dry_run"], true);
+    assert!(args.validate().is_ok());
+}
+
+#[test]
+fn ingest_args_rejects_folder_combined_with_body_at_deserialize() {
+    let json = serde_json::json!({
+        "kind": "reference",
+        "folder": "docs",
+        "body": "hello"
+    });
+
+    let err = serde_json::from_value::<IngestArgs>(json).unwrap_err();
+
+    assert!(
+        err.to_string().contains("exactly one of"),
+        "expected folder/body XOR error, got: {err}"
+    );
+}
+
+#[test]
 fn signed_intent_rejects_missing_sequence_and_challenge_at_deserialize() {
     // Stripped-down intent missing both `sequence` and `server_challenge`.
     let mut m = signed_intent_minimum();

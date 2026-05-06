@@ -11,6 +11,12 @@
       { "name": "body",        "long": "body",        "value_source": "string" },
       { "name": "file",        "long": "file",        "value_source": "path" },
       { "name": "url",         "long": "url",         "value_source": "string" },
+      { "name": "folder",      "long": "folder",      "value_source": "path" },
+      { "name": "recursive",   "long": "recursive",   "value_source": "bool" },
+      { "name": "include",     "long": "include",     "value_source": "list<string>" },
+      { "name": "exclude",     "long": "exclude",     "value_source": "list<string>" },
+      { "name": "mode",        "long": "mode",        "value_source": "enum(keyword,semantic,full)" },
+      { "name": "dry_run",     "long": "dry-run",     "value_source": "bool" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
       { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
     ],
@@ -48,6 +54,37 @@
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
         "url":   { "type": "string", "format": "uri", "minLength": 1 },
+        "folder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Folder to scan for offline folder ingest."
+        },
+        "recursive": {
+          "type": "boolean",
+          "description": "Whether folder ingest recurses into child directories. CLI default: true."
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go."
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Folder ingest exclude patterns. CLI default: .git,node_modules,target."
+        },
+        "mode": {
+          "oneOf": [
+            { "const": "keyword" },
+            { "const": "semantic" },
+            { "const": "full" }
+          ],
+          "description": "Folder ingest extraction mode. keyword is the P0 offline default."
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "Plan folder ingest without writing cache entries or store/WAL state."
+        },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
@@ -61,7 +98,8 @@
       "oneOf": [
         { "required": ["body"] },
         { "required": ["file"] },
-        { "required": ["url"] }
+        { "required": ["url"] },
+        { "required": ["folder"] }
       ]
     },
     "Data": {
