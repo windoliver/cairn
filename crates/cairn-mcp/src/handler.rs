@@ -245,6 +245,53 @@ impl CairnMcpHandler {
             now_ms: chrono::Utc::now().timestamp_millis(),
         })
     }
+
+    /// Snapshot of the status response this handler advertises through MCP
+    /// `initialize`. Used by parity tests (issue #53) so the test does not
+    /// need to reach into rmcp's extension slot. Return shape is identical
+    /// to what `Sdk::status()` and `cairn status --json` produce for the
+    /// same inputs — volatile fields (`incarnation`, `started_at`) differ
+    /// per call.
+    #[must_use]
+    pub fn status_response(&self) -> cairn_core::generated::status::StatusResponse {
+        self.build_status_response()
+    }
+
+    fn build_status_response(&self) -> cairn_core::generated::status::StatusResponse {
+        use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
+        use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
+
+        let store_caps = self.store.as_ref().map(|s| {
+            let c = s.capabilities();
+            cairn_core::status::StoreCaps {
+                fts: c.fts,
+                vector: c.vector,
+            }
+        });
+        let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        let gates = cairn_core::status::CapabilityGates {
+            config: self.config.capabilities(model_present),
+            store: store_caps,
+            vault_bound: self.store.is_some(),
+            model_present,
+            llm_configured: false,
+            contract_phase: cairn_core::status::Phase::V0_1,
+        };
+
+        StatusResponse {
+            contract: "cairn.mcp.v1".to_owned(),
+            server_info: StatusResponseServerInfo {
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                build: build_profile(),
+                started_at: now_rfc3339_seconds(),
+                incarnation: new_operation_id(),
+            },
+            capabilities: cairn_core::status::advertise(&gates),
+            extensions: vec![],
+            pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
+            mcp_graph_tools: None,
+        }
+    }
 }
 
 impl ServerHandler for CairnMcpHandler {
@@ -477,6 +524,79 @@ async fn handle_search(
     };
 
     CallToolResult::success(vec![Content::text(json)])
+}
+
+// ── date / identity helpers ─────────────────────────────────────────────────
+// Mirrors `crates/cairn-sdk/src/stub.rs` and `crates/cairn-cli/src/verbs/envelope.rs`
+// so all three surfaces produce the same RFC-3339 + ULID format.
+
+fn new_operation_id() -> cairn_core::generated::common::Ulid {
+    cairn_core::generated::common::Ulid(ulid::Ulid::new().to_string())
+}
+
+fn build_profile() -> String {
+    if cfg!(debug_assertions) {
+        "debug".to_owned()
+    } else {
+        "release".to_owned()
+    }
+}
+
+fn now_rfc3339_seconds() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (y, mo, d, h, mi, s) = secs_to_ymdhms(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn secs_to_ymdhms(mut s: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let sec = s % 60;
+    s /= 60;
+    let min = s % 60;
+    s /= 60;
+    let hour = s % 24;
+    s /= 24;
+    let mut days = s;
+    let mut year = 1970u64;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let months = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 1u64;
+    for &m in &months {
+        if days < m {
+            break;
+        }
+        days -= m;
+        month += 1;
+    }
+    (year, month, days + 1, hour, min, sec)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Stub dispatcher returned while real verb wiring is pending.
