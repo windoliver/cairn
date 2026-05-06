@@ -1,7 +1,26 @@
 use cairn_core::domain::scope::ScopeTuple;
+use rusqlite::{params_from_iter, types::Value as SqlValue};
 use std::sync::Arc;
 
+use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
+
+/// An entity returned by one of the `get_entity_*` query arms.
+///
+/// Per §2.1.0: only `id` and an in-scope edge count are ever returned;
+/// `name` and `summary` are cross-scope columns and must not be echoed
+/// back from the DB. `echoed_name` carries the caller's literal input
+/// string when the `ByName` arm was used — it is never read from the DB.
+pub struct EntityHit {
+    /// The entity's canonical id.
+    pub id: String,
+    /// The literal name string the caller passed in (`ByName` arm only).
+    /// Always `None` from the `ById` arm.
+    pub echoed_name: Option<String>,
+    /// Count of live edges where this entity is source or target,
+    /// scoped to the caller's `allowed_scopes`.
+    pub edge_count: i64,
+}
 
 /// Bind-slot accounting for the CTE prefix. Callers bind in this
 /// order: `now` (×`now_count`), then scope tuple dimensions
@@ -195,5 +214,91 @@ impl GraphQueries {
         }
         s.push(')');
         s
+    }
+
+    /// Push bind parameters for the CTE prefix in the exact order the SQL
+    /// placeholder `?` slots appear in the output of [`Self::cte_prefix`].
+    ///
+    /// The SQL placeholder order is:
+    ///
+    /// 1. `now` (`valid_at` <=)          — `visible_edges_raw`
+    /// 2. `now` (`invalid_at` >)         — `visible_edges_raw`
+    /// 3. scope-block-1 × 6              — `visible_edges_raw` EXISTS scope clause
+    /// 4. scope-block-2 × 6              — `visible_nodes` episode arm scope clause
+    /// 5. `now` (`valid_at` <=)          — `visible_nodes` past-invalidated arm
+    /// 6. `now` (`invalid_at` <=)        — `visible_nodes` past-invalidated arm
+    /// 7. scope-block-3 × 6              — `visible_nodes` past-invalidated EXISTS scope clause
+    pub(crate) fn push_prefix_binds(&self, binds: &mut Vec<SqlValue>) {
+        // Block 1: visible_edges_raw temporal + scope
+        binds.push(SqlValue::Integer(self.now)); // valid_at <= ?
+        binds.push(SqlValue::Integer(self.now)); // invalid_at > ?
+        self.push_scope_block(binds);
+
+        // Block 2: visible_nodes episode arm scope (no now binds here)
+        self.push_scope_block(binds);
+
+        // Block 3: visible_nodes past-invalidated arm temporal + scope
+        binds.push(SqlValue::Integer(self.now)); // valid_at <= ?
+        binds.push(SqlValue::Integer(self.now)); // invalid_at <= ?
+        self.push_scope_block(binds);
+    }
+
+    /// Push one full tuple-major scope-block expansion. Each tuple emits
+    /// six dimension values in the canonical order matching `scope_match_clause`.
+    fn push_scope_block(&self, binds: &mut Vec<SqlValue>) {
+        for tup in &self.allowed_scopes {
+            for (_, v) in tup.dimension_iter() {
+                binds.push(match v {
+                    Some(s) => SqlValue::Text(s.to_string()),
+                    None => SqlValue::Null,
+                });
+            }
+        }
+    }
+
+    /// Id-only entity lookup with an in-scope edge count (§2.1.0, §3.1).
+    ///
+    /// Returns `None` when the entity is unknown or not visible under
+    /// `allowed_scopes` — the §2.1.0 anti-leak contract.
+    pub async fn get_entity_by_id(
+        &self,
+        id: String,
+    ) -> Result<Option<EntityHit>, StoreError> {
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        let sql = format!(
+            "{prefix}
+             edge_count_for_seed AS (
+               SELECT COUNT(*) AS c FROM visible_edges e
+               WHERE e.source_id = ? OR e.target_id = ?
+             )
+             SELECT v.id, (SELECT c FROM edge_count_for_seed)
+             FROM visible_nodes v
+             WHERE v.id = ?
+             LIMIT 1"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        binds.push(SqlValue::Text(id.clone()));
+        binds.push(SqlValue::Text(id.clone()));
+        binds.push(SqlValue::Text(id));
+
+        let conn = self.store.read_conn()?;
+        let hit = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let result = if let Some(row) = rows.next()? {
+                    Some(EntityHit {
+                        id: row.get(0)?,
+                        echoed_name: None,
+                        edge_count: row.get(1)?,
+                    })
+                } else {
+                    None
+                };
+                Ok::<_, tokio_rusqlite::Error>(result)
+            })
+            .await?;
+        Ok(hit)
     }
 }

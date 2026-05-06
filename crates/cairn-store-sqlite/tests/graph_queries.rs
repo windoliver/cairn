@@ -35,3 +35,19 @@ fn cte_prefix_emits_three_named_ctes_and_counts_binds() {
     assert_eq!(prefix_binds.now_count, 4);
     assert_eq!(prefix_binds.scope_count, 18);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_entity_by_id_returns_id_and_live_edge_count() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let hit = q.get_entity_by_id(f.node_a.clone()).await.unwrap().unwrap();
+    assert_eq!(hit.id, f.node_a);
+    assert_eq!(hit.edge_count, 2); // A→B and A→C in scope_a
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn get_entity_by_id_out_of_scope_returns_none() {
+    let f = cairn_test_fixtures::graph::tiny_graph().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_b.clone()], f.now);
+    assert!(q.get_entity_by_id(f.node_a.clone()).await.unwrap().is_none());
+}
