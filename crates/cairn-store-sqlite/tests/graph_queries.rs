@@ -121,6 +121,26 @@ async fn timeline_include_history_surfaces_future_dated() {
     assert!(entries.iter().any(|e| e.valid_at > f.now));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn surprising_connections_scores_cross_scope_above_same_scope() {
+    // 3 in-scope edges in S_a, 1 cross-scope edge in S_b — both
+    // resolver entries authorize the caller.
+    let f = cairn_test_fixtures::graph::surprise_fixture().await;
+    let q = GraphQueries::new(
+        f.store.clone(),
+        vec![f.scope_a.clone(), f.scope_b.clone()],
+        f.now,
+    );
+    let hits = q.surprising_connections(vec![
+        f.node_a.clone(), f.node_b.clone(), f.node_c.clone(),
+    ], 10).await.unwrap();
+    // Highest score must be the S_b edge (modal is S_a).
+    // `source_record_id` lives on `SurpriseHit`, not on the inner
+    // `GraphEdge` — the public edge type is id-only by design (§3.1).
+    assert_eq!(hits[0].source_record_id.as_str(), &f.rec_b[..]);
+    assert!((hits[0].score - 2.0 * hits[0].edge.confidence_score).abs() < 1e-9);
+}
+
 #[test]
 fn token_budget_truncates_at_byte_threshold() {
     let edges: Vec<GraphEdge> = (0..100)

@@ -294,3 +294,137 @@ pub async fn tiny_graph() -> TinyGraphFixture {
         node_auth_service: id_auth.to_owned(),
     }
 }
+
+/// Result of [`surprise_fixture`]. All fields are `pub` so tests can reference
+/// them directly without cloning.
+pub struct SurpriseFixture {
+    /// Connected in-memory store with all fixture rows inserted.
+    pub store: Arc<SqliteMemoryStore>,
+    /// The `now` timestamp.
+    pub now: i64,
+    /// Primary scope — owns 3 edges.
+    pub scope_a: ScopeTuple,
+    /// Secondary scope — owns 1 cross-scope edge (the outlier).
+    pub scope_b: ScopeTuple,
+    /// `EntityId` of node A.
+    pub node_a: String,
+    /// `EntityId` of node B.
+    pub node_b: String,
+    /// `EntityId` of node C.
+    pub node_c: String,
+    /// Record id whose `scope` JSON matches `scope_b` — the cross-scope edge
+    /// is authored against this record.
+    pub rec_b: String,
+}
+
+/// Build a surprise-connections in-memory entity graph.
+///
+/// Schema after return:
+///
+/// ```text
+/// 3 edges in scope_a: node_a→node_b, node_b→node_c, node_a→node_c
+/// 1 edge  in scope_b: node_b→node_c  (the cross-scope outlier)
+/// Both scopes are in the caller's allowed_scopes so all edges are visible.
+/// Modal scope is scope_a (3 edges vs 1); the scope_b edge scores higher.
+/// ```
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn surprise_fixture() -> SurpriseFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("surprise_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("sp-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+    let scope_b = ScopeTuple {
+        tenant: Some("sp-other".to_owned()),
+        ..ScopeTuple::default()
+    };
+
+    let primary_scope_json = serde_json::to_string(&scope_a).expect("scope_a json");
+    let secondary_scope_json = serde_json::to_string(&scope_b).expect("scope_b json");
+
+    let id_node_a = "01HZE7SP0000000000000000A1";
+    let id_node_b = "01HZE7SP0000000000000000B1";
+    let id_node_c = "01HZE7SP0000000000000000C1";
+
+    let now = FIXTURE_NOW;
+
+    let nodes: &[(&str, &str)] = &[
+        (id_node_a, "sp-alpha"),
+        (id_node_b, "sp-beta"),
+        (id_node_c, "sp-gamma"),
+    ];
+    for (id, name) in nodes {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    let rec_b_id = "rec-sp-scope-b";
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-sp-scope-a', 'tgt-sp-scope-a', 1, 'p', 'fact', 'episodic', 'private', \
+              '{primary_scope_json}', '[]', '', 'h', {now}, {now}, 1, 0), \
+             ('{rec_b_id}', 'tgt-sp-scope-b', 1, 'p', 'fact', 'episodic', 'private', \
+              '{secondary_scope_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        // 3 edges in scope_a, 1 cross-scope edge in scope_b (node_b→node_c).
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id) \
+             VALUES \
+             ('edge-sp-ab', '{id_node_a}', '{id_node_b}', 'relates', 'EXTRACTED', 0.5, \
+              {now}, {now}, X'B1', 'rec-sp-scope-a'), \
+             ('edge-sp-bc', '{id_node_b}', '{id_node_c}', 'relates', 'EXTRACTED', 0.5, \
+              {now}, {now}, X'B2', 'rec-sp-scope-a'), \
+             ('edge-sp-ac', '{id_node_a}', '{id_node_c}', 'relates', 'EXTRACTED', 0.5, \
+              {now}, {now}, X'B3', 'rec-sp-scope-a'), \
+             ('edge-sp-bc-outlier', '{id_node_b}', '{id_node_c}', 'calls', 'EXTRACTED', 0.5, \
+              {now}, {now}, X'B4', '{rec_b_id}');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("surprise_fixture: seed SQL");
+    }
+
+    SurpriseFixture {
+        store,
+        now,
+        scope_a,
+        scope_b,
+        node_a: id_node_a.to_owned(),
+        node_b: id_node_b.to_owned(),
+        node_c: id_node_c.to_owned(),
+        rec_b: rec_b_id.to_owned(),
+    }
+}

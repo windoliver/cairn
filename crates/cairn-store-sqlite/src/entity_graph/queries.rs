@@ -6,6 +6,8 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde_json;
+
 use crate::error::StoreError;
 use crate::store::SqliteMemoryStore;
 
@@ -32,6 +34,22 @@ pub struct GraphEdge {
 pub struct GraphNode {
     /// The entity's canonical id.
     pub id: String,
+}
+
+/// A surprising-connection hit: an edge scored by cross-scope bonus (§3.5).
+pub struct SurpriseHit {
+    /// The edge that was scored.
+    pub edge: GraphEdge,
+    /// Provenance record id (the immutable `r_src` lineage from
+    /// §3.0a-bis) that this edge was authored against. Surfaced on
+    /// `SurpriseHit` rather than `GraphEdge` because the public
+    /// edge type is id-only (§3.1) and reused by other tools that
+    /// must not leak provenance.
+    pub source_record_id: String,
+    /// The `records.scope` JSON string of the record that authored this edge.
+    pub scope_id: String,
+    /// Score: `confidence_score * (1 + cross_scope_bonus)`.
+    pub score: f64,
 }
 
 /// A traversal result set containing ordered nodes and edges (§3.3).
@@ -792,6 +810,96 @@ impl GraphQueries {
                         expired_at: row.get(8)?,
                         tombstone_reason: row.get(9)?,
                         source_record_id: row.get(10)?,
+                    });
+                }
+                Ok::<_, tokio_rusqlite::Error>(out)
+            })
+            .await?;
+        Ok(out)
+    }
+
+    /// Score and rank edges among `input` nodes by a cross-scope bonus (§3.5).
+    ///
+    /// The modal scope (most-frequent `records.scope` among edges in the
+    /// input subgraph) is determined by a CTE; edges whose author record has
+    /// a different scope receive a 1× confidence bonus. Returns the top
+    /// `limit` hits ordered by score descending.
+    pub async fn surprising_connections(
+        &self,
+        input: Vec<String>,
+        limit: usize,
+    ) -> Result<Vec<SurpriseHit>, StoreError> {
+        if input.is_empty() { return Ok(vec![]); }
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        let input_in = Self::placeholders(input.len());
+        let sql = format!(
+            "{prefix}
+             input(id) AS (SELECT value FROM json_each(?)),
+             edge_scope AS (
+               SELECT e.id AS edge_id, r.scope AS scope_id, e.*
+               FROM visible_edges e
+               JOIN records r ON r.record_id = e.source_record_id
+             ),
+             modal_scope AS (
+               SELECT scope_id
+               FROM edge_scope es
+               JOIN input i
+                 ON (es.source_id = i.id OR es.target_id = i.id)
+               GROUP BY scope_id
+               ORDER BY COUNT(*) DESC, scope_id ASC
+               LIMIT 1
+             ),
+             scored AS (
+               SELECT es.*,
+                      es.confidence_score *
+                      (1.0 + CASE
+                               WHEN es.scope_id <>
+                                    (SELECT scope_id FROM modal_scope)
+                               THEN 1.0 ELSE 0.0
+                             END) AS score
+               FROM edge_scope es
+               WHERE es.source_id IN {input_in}
+                 AND es.target_id IN {input_in}
+             )
+             SELECT id, source_id, target_id, relation, confidence_score,
+                    valid_at, source_record_id, scope_id, score
+             FROM scored
+             ORDER BY score DESC, edge_id ASC
+             LIMIT ?"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        let json_array = serde_json::to_string(&input)
+            .unwrap_or_else(|_| "[]".to_string());
+        binds.push(SqlValue::Text(json_array));
+        for v in &input {
+            binds.push(SqlValue::Text(v.clone()));
+        }
+        for v in &input {
+            binds.push(SqlValue::Text(v.clone()));
+        }
+        binds.push(SqlValue::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
+
+        let conn = self.store.read_conn()?;
+        // Async wrap (Task 3 canonical pattern).
+        let out = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(SurpriseHit {
+                        edge: GraphEdge {
+                            id: row.get(0)?,
+                            source_id: row.get(1)?,
+                            target_id: row.get(2)?,
+                            relation: row.get(3)?,
+                            confidence_score: row.get(4)?,
+                            valid_at: row.get(5)?,
+                        },
+                        source_record_id: row.get(6)?,
+                        scope_id: row.get(7)?,
+                        score: row.get(8)?,
                     });
                 }
                 Ok::<_, tokio_rusqlite::Error>(out)
