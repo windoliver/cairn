@@ -107,6 +107,10 @@ pub struct RecoveryReport {
     pub skipped_no_body: Vec<(OperationId, RecoveryDecision)>,
     /// Ops already terminal — no action.
     pub no_op: Vec<OperationId>,
+    /// Ops whose `wal_ops.kind` is not in scope for the #55 scaffold
+    /// (anything other than `upsert`, `forget_record`, `expire`).
+    /// Recorded with the raw kind string for observability.
+    pub skipped_unhandled_kind: Vec<(OperationId, String)>,
 }
 
 /// Runs recovery on every non-terminal `wal_ops` row.
@@ -134,7 +138,17 @@ pub async fn recover_pending(
 
     let pending = list_open_ops(conn).await?;
 
-    for (op_id, kind, op_state) in pending {
+    for (op_id, kind_str, op_state) in pending {
+        let Ok(kind) = parse_kind(&kind_str) else {
+            warn!(
+                op_id = %op_id,
+                kind = %kind_str,
+                state = ?op_state,
+                "WAL op kind not handled by issue #55 scaffold; skipping"
+            );
+            report.skipped_unhandled_kind.push((op_id, kind_str));
+            continue;
+        };
         let snapshot = load_snapshot(conn, &op_id, kind, op_state).await?;
         let decision = decide_recovery(&snapshot);
         apply_decision(conn, &snapshot, decision, &op_id, config, &mut report).await?;
@@ -145,7 +159,7 @@ pub async fn recover_pending(
 
 async fn list_open_ops(
     conn: &Arc<Connection>,
-) -> Result<Vec<(OperationId, WalKind, OpState)>, RecoveryError> {
+) -> Result<Vec<(OperationId, String, OpState)>, RecoveryError> {
     let rows: Vec<(String, String, String)> = conn
         .call(|c| {
             let mut stmt = c.prepare(
@@ -172,7 +186,8 @@ async fn list_open_ops(
         let op_id = OperationId::parse(op).map_err(|e| {
             RecoveryError::Invariant(format!("wal_ops.operation_id parse: {e}"))
         })?;
-        let kind = parse_kind(&kind)?;
+        // Defer kind parsing to the per-op loop so unhandled kinds can be
+        // skipped with a warn instead of aborting recovery for everyone.
         let state = parse_op_state(&state)?;
         out.push((op_id, kind, state));
     }
