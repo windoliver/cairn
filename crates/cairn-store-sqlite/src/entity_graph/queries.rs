@@ -204,7 +204,20 @@ impl GraphQueries {
     #[must_use]
     pub fn cte_prefix(tuples: &[ScopeTuple]) -> (String, CtePrefixBinds) {
         let (scope_clause, scope_per_block) = Self::scope_match_clause(tuples);
-        // visible_edges_raw — temporal + scope + orphan exclusion
+        // visible_edges_raw — temporal + scope + orphan exclusion.
+        //
+        // **Stable-lineage authorization (spec §3.0a-bis).** The scope match
+        // is performed against `r_src.scope` — the *immutable* provenance
+        // record the edge was authored against — NOT the active head of the
+        // lineage. This is intentional: when a target_id chain is rescoped
+        // from S_a → S_b, the original S_a authors retain the right to read
+        // their own historical contributions, while S_b is not retroactively
+        // granted access to S_a's prior writes. `r_active` participates only
+        // to prove that *some* active row still exists on the lineage (so
+        // tombstoned/abandoned chains do not leak); current ownership of the
+        // chain is deliberately excluded from the scope check. The
+        // `lineage_rescope_keys_off_immutable_provenance` test in
+        // `tests/graph_queries.rs` pins this contract.
         let raw = format!(
             "visible_edges_raw AS (
                SELECT e.*

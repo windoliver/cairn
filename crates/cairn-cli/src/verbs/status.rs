@@ -277,6 +277,21 @@ fn probe_mcp_graph_tools(
     Option<(ResolvedAvailability, StatusResponseMcpGraphTools)>,
     ProbeBasis,
 ) {
+    // Validate `[mcp.*]` config first so a misconfigured deployment
+    // surfaces a distinct `ConfigError` state in `status` rather than
+    // collapsing into a generic `no scope resolver wired` line. `cairn
+    // mcp` exits with EX_CONFIG on the same error; `cairn status`
+    // mirrors that diagnosis without requiring the operator to start the
+    // server to find out.
+    if let Err(err) = cfg.validate_mcp() {
+        let avail = ResolvedAvailability::ConfigError {
+            error: err.to_string(),
+        };
+        let mgt = McpGraphToolsStatus::from_resolved(&avail, ProbeBasis::ConfigOnly);
+        let wire = mgt.to_wire();
+        return (Some((avail, wire)), ProbeBasis::ConfigOnly);
+    }
+
     let scope_components: Option<crate::mcp::ResolvedMcpScope> =
         crate::mcp::resolve_scope_components(cfg);
     let scope_for_predicate: Option<&dyn cairn_core::mcp_auth::McpSessionScope> = scope_components
@@ -521,6 +536,13 @@ pub(crate) enum ResolvedAvailability {
     ResolverEmpty {
         error: Option<String>,
     },
+    /// `[mcp.*]` config did not pass `validate_mcp` — surfaced as a
+    /// distinct state so misconfiguration is not silently masked as
+    /// "no resolver wired" (`cairn mcp` exits with EX_CONFIG on the
+    /// same error).
+    ConfigError {
+        error: String,
+    },
 }
 
 /// Render a single human-readable status line for the `mcp.graph_tools` state.
@@ -554,6 +576,9 @@ pub(crate) fn render_mcp_graph_line(avail: &ResolvedAvailability) -> String {
         }
         ResolvedAvailability::ResolverEmpty { error: None } => {
             "mcp.graph_tools: unavailable (resolver returned no allowed scopes)".to_owned()
+        }
+        ResolvedAvailability::ConfigError { error } => {
+            format!("mcp.graph_tools: config-error ({error})")
         }
     }
 }
@@ -649,6 +674,17 @@ impl McpGraphToolsStatus {
                 tool_count: None,
                 probe_basis: basis,
                 error: error.clone(),
+            },
+            ResolvedAvailability::ConfigError { error } => Self {
+                // The IDL state enum does not have a dedicated config-error
+                // discriminant; surface as `unavailable` with the underlying
+                // ConfigError text in the optional `error` field. The human
+                // renderer prints a distinct `config-error (...)` line.
+                state: "unavailable",
+                reason: None,
+                tool_count: None,
+                probe_basis: basis,
+                error: Some(error.clone()),
             },
         }
     }

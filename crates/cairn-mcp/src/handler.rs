@@ -229,6 +229,19 @@ impl CairnMcpHandler {
             Ok(v) if !v.is_empty() => v,
             _ => return Err(GraphUnavailable::Resolver),
         };
+        // Validate every tuple the resolver returned. The graph SQL only
+        // binds the six dimensions exposed by `dimension_iter`; a resolver
+        // that returns a tuple with `project` set or otherwise malformed
+        // would have that restriction silently dropped, broadening the
+        // caller's authorization. Fail closed on any non-validating tuple
+        // — config-time validation only catches `ConfigBackedScope`; the
+        // `McpSessionScope` trait is public and supports alternate
+        // resolvers that may produce dynamic tuples.
+        for tup in &allowed {
+            if tup.validate().is_err() {
+                return Err(GraphUnavailable::Resolver);
+            }
+        }
         Ok(GraphRequest {
             store: sqlite_store.clone(),
             allowed,
