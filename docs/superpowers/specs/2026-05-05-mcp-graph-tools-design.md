@@ -124,24 +124,76 @@ No new migration required.
 
 ## 3. Query semantics
 
-All queries default to a single shared **active-at-now** predicate
-applied uniformly:
+### 3.0 Single shared `visible_edges` primitive
+
+Every graph read in this spec must derive from one shared
+**`visible_edges`** primitive that bakes in *both* the active-at-now
+temporal filter *and* the per-session scope filter from §2.1.1.
+There is no public method that reads `entity_edges` without going
+through this primitive — defense in depth against any future SQL
+sketch forgetting one of the two clauses.
+
+In SQL the primitive is a session-local view installed at connection
+open (or, equivalently, a CTE prefix injected by `GraphQueries`):
 
 ```sql
-e.expired_at IS NULL
-  AND e.valid_at  <= :now
-  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+-- visible_edges — the only edge source ANY graph tool reads from.
+-- (a) temporal: only edges currently active
+-- (b) provenance: only edges whose source record is in the
+--     caller's allowed scope set; orphan edges (NULL
+--     source_record_id) are excluded unless the tool sets
+--     :include_unattributed = 1.
+WITH visible_edges AS (
+  SELECT e.*
+  FROM entity_edges e
+  WHERE e.expired_at IS NULL
+    AND e.valid_at  <= :now
+    AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+    AND (
+      EXISTS (
+        SELECT 1 FROM records r
+        WHERE r.record_id = e.source_record_id
+          AND r.scope IN rarray(:allowed_scopes)
+      )
+      OR (:include_unattributed = 1
+          AND e.source_record_id IS NULL)
+    )
+)
 ```
 
-Defined once as `fn active_edge_predicate(alias: &str) -> &str` (or a
-SQL view `entity_edges_active`) and reused by `get_entity` edge count,
-`get_neighbors`, `graph.query` traversal, and `surprising_connections`.
-The only query that intentionally bypasses temporal slicing is
-`graph.timeline`, which is the audit view by definition.
+Likewise a derived **`visible_nodes`** primitive — a node is
+"visible" iff at least one `visible_edges` row touches it
+(source_id or target_id). Direct reads of `entity_nodes` are
+forbidden in tool SQL; nodes only surface through joins against
+`visible_edges` or `visible_nodes`. This closes node-probe leaks
+where a caller could enumerate out-of-scope `id`/`name`/`summary`
+without ever traversing an edge.
 
-Future-dated edges (`valid_at > now`) are therefore invisible to all
-present-time reads — closing the leak that an earlier draft of this
-spec allowed.
+```sql
+visible_nodes AS (
+  SELECT n.*
+  FROM entity_nodes n
+  WHERE n.expired_at IS NULL
+    AND EXISTS (
+      SELECT 1 FROM visible_edges e
+      WHERE e.source_id = n.id OR e.target_id = n.id
+    )
+)
+```
+
+The implementation enforces this by making `GraphQueries` only
+expose methods that internally compose these CTEs into every query;
+there is no `read_node_by_id_unscoped` escape hatch. A test must
+attempt to probe an out-of-scope id by every tool surface and
+confirm all five return `NotFound` — never the row payload.
+
+`graph.timeline` does not exempt itself from the scope filter —
+even the audit view shows only edges the caller is authorized to
+see. It does relax temporal slicing (returns expired edges when
+`include_expired = true`), but the scope predicate is unconditional.
+
+Future-dated edges (`valid_at > now`) and out-of-scope edges are
+therefore invisible to all five tools through every code path.
 
 ### 3.1 `graph.get_entity`
 
@@ -187,54 +239,60 @@ this helper as part of the same PR (small change, currently scattered
 across resolver and ingest paths).
 
 **Two SQL queries** — one per arm — instead of one overloaded
-`OR`-predicate. This gives unambiguous semantics and lets each form
-use its own index path:
+`OR`-predicate. Each query reads from `visible_nodes` (the §3.0
+primitive), never from `entity_nodes` directly, so an out-of-scope
+id or name returns `NotFound` instead of leaking the payload:
 
 ```sql
--- ById
-SELECT id, name, summary, created_at FROM entity_nodes
-WHERE id = ?1 AND expired_at IS NULL;
+-- ById  (allowed_scopes, include_unattributed bound by caller)
+WITH visible_edges AS (...), visible_nodes AS (...)   -- §3.0
+SELECT id, name, summary, created_at FROM visible_nodes
+WHERE id = ?1;
 
 -- ByName
-SELECT id, name, summary, created_at FROM entity_nodes
-WHERE name_norm = ?1   -- ?1 = normalize_entity_name(input)
-  AND expired_at IS NULL;
+WITH visible_edges AS (...), visible_nodes AS (...)
+SELECT id, name, summary, created_at FROM visible_nodes
+WHERE name_norm = ?1;   -- ?1 = normalize_entity_name(input)
 ```
 
-A regression test asserts that an entity inserted with a name like
-`"Auth Service (v2)"` is round-trippable: `ByName { name: "Auth
-Service (v2)" }` returns the row, while a naive `lower()` lookup
-would not. A second test populates one row with `id = "X"` and a
-*different* row with `name = "X"` and confirms `ById { id: "X" }`
-returns the first while `ByName { name: "X" }` returns the second
-— never the wrong one.
+Tests:
 
-Live edge count via secondary query (uses the shared active-at-now
-predicate from §3):
+1. Round-trip: an entity inserted with a name like `"Auth Service
+   (v2)"` is found by `ByName { name: "Auth Service (v2)" }`; a
+   naive `lower()` lookup would not.
+2. Id-vs-name collision: row A with `id = "X"`, row B with `name =
+   "X"`. `ById { id: "X" }` returns A; `ByName { name: "X" }`
+   returns B; never the wrong one.
+3. **Scope leak probe (negative test):** an entity whose only
+   provenance is a record outside `allowed_scopes` is *not*
+   returned by either arm — the response is `NotFound`. Even a
+   caller who knows the exact id sees nothing.
+
+Live edge count reads from the §3.0 `visible_edges` primitive (which
+already bakes in temporal AND scope filtering — never from
+`entity_edges` directly):
 
 ```sql
-SELECT COUNT(*) FROM entity_edges e
-WHERE (e.source_id = ?1 OR e.target_id = ?1)
-  AND e.expired_at IS NULL
-  AND e.valid_at <= :now
-  AND (e.invalid_at IS NULL OR e.invalid_at > :now);
+WITH visible_edges AS (...)   -- §3.0
+SELECT COUNT(*) FROM visible_edges e
+WHERE e.source_id = ?1 OR e.target_id = ?1;
 ```
 
 ### 3.2 `graph.get_neighbors`
 
 ```sql
+WITH visible_edges AS (...), visible_nodes AS (...)   -- §3.0
 SELECT e.id, e.source_id, e.target_id, e.relation,
        e.confidence_score, e.valid_at
-FROM entity_edges e
+FROM visible_edges e
 WHERE (e.source_id = ?1 OR e.target_id = ?1)
-  AND e.expired_at IS NULL
-  AND e.valid_at <= :now
-  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
   AND (?2 IS NULL OR e.relation = ?2)
   AND (?3 IS NULL OR e.confidence_score >= ?3);
 ```
 
-Returned edges include the *other* node's id + name (joined).
+Returned edges include the *other* node's id + name, joined against
+`visible_nodes` (so the joined node also passes the scope check —
+no name leak through the neighbor field).
 
 ### 3.3 `graph.query` (BFS/DFS)
 
@@ -285,7 +343,8 @@ appear later in the ordered set. The query must instead bound by
 per neighbor up front via a window function.
 
 ```sql
-WITH candidate AS (
+WITH visible_edges AS (...),     -- §3.0 — temporal + scope baked in
+candidate AS (
   SELECT
     CASE WHEN e.source_id IN rarray(:frontier)
          THEN e.target_id ELSE e.source_id END  AS other_id,
@@ -296,17 +355,9 @@ WITH candidate AS (
              THEN e.target_id ELSE e.source_id END
       ORDER BY e.confidence_score DESC, e.id ASC   -- deterministic
     ) AS rn
-  FROM entity_edges e
+  FROM visible_edges e
   WHERE (e.source_id IN rarray(:frontier)
       OR e.target_id IN rarray(:frontier))
-    AND e.expired_at IS NULL
-    AND e.valid_at <= :now
-    AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-    AND EXISTS (
-      SELECT 1 FROM records r
-      WHERE r.record_id = e.source_record_id
-        AND r.scope IN rarray(:allowed_scopes)
-    )
     AND other_id NOT IN rarray(:visited)
 )
 SELECT id, source_id, target_id, relation, confidence_score, other_id
@@ -315,6 +366,12 @@ WHERE rn = 1
 ORDER BY confidence_score DESC, id ASC
 LIMIT :wave_cap;
 ```
+
+Seed loading also goes through the §3.0 primitives: BFS calls
+`get_entity` (which reads from `visible_nodes`) for the seed, so a
+caller who supplies an out-of-scope seed id receives `NotFound`
+before any traversal begins. There is no path that returns the seed
+node payload before scope is checked.
 
 `wave_cap = node_budget - visited.len()` now bounds *distinct unseen
 neighbors* directly, because the inner CTE collapses each candidate
@@ -361,11 +418,29 @@ the Rust side to allocate the full wave before truncating.
 
 ### 3.4 `graph.timeline`
 
+Timeline is the audit view, so it relaxes the temporal filter (it
+intentionally returns expired and outside-of-now-window edges when
+the caller asks). The **scope filter is unconditional** — even the
+audit view shows only edges the caller is authorized to see.
+Implemented as a sibling of `visible_edges` that applies *only* the
+scope predicate (not the temporal one):
+
 ```sql
+WITH scope_visible_edges AS (
+  SELECT e.* FROM entity_edges e
+  WHERE (
+    EXISTS (
+      SELECT 1 FROM records r
+      WHERE r.record_id = e.source_record_id
+        AND r.scope IN rarray(:allowed_scopes)
+    )
+    OR (:include_unattributed = 1 AND e.source_record_id IS NULL)
+  )
+)
 SELECT id, source_id, target_id, relation, confidence_score,
        valid_at, invalid_at, created_at, expired_at,
        tombstone_reason, source_record_id
-FROM entity_edges
+FROM scope_visible_edges
 WHERE (source_id = ?1 OR target_id = ?1)
   AND (?2 = 1 OR expired_at IS NULL)
 ORDER BY valid_at ASC, created_at ASC;
@@ -373,7 +448,9 @@ ORDER BY valid_at ASC, created_at ASC;
 
 `?2 = include_expired` (bool → 0/1). Stable secondary sort by
 `created_at` for deterministic output when multiple edges share
-`valid_at`.
+`valid_at`. Negative test: an edge with `source_record_id` outside
+`allowed_scopes` is absent from the timeline regardless of
+`include_expired`.
 
 ### 3.5 `graph.surprising_connections`
 
@@ -397,20 +474,14 @@ and silently drop currently-active edges that carry a future
 `invalid_at`, which the rest of the API does not.
 
 ```sql
-WITH input(id) AS (VALUES (?1), (?2) /* … */),
-     active_edges AS (
-       SELECT e.*
-       FROM entity_edges e
-       WHERE e.expired_at IS NULL
-         AND e.valid_at <= :now
-         AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-     ),
+WITH visible_edges AS (...),         -- §3.0: temporal + scope
+     input(id) AS (VALUES (?1), (?2) /* … */),
      modal_record AS (
        SELECT i.id AS entity_id,
               e.source_record_id AS rec,
               COUNT(*) AS n
        FROM input i
-       JOIN active_edges e
+       JOIN visible_edges e
          ON (e.source_id = i.id OR e.target_id = i.id)
        GROUP BY i.id, e.source_record_id
      ),
@@ -419,17 +490,17 @@ WITH input(id) AS (VALUES (?1), (?2) /* … */),
               e.confidence_score *
               (1.0 + CASE WHEN /* modal mismatch */ THEN 1.0 ELSE 0.0 END)
                 AS score
-       FROM active_edges e
+       FROM visible_edges e
        WHERE e.source_id IN input
          AND e.target_id IN input
      )
 SELECT * FROM scored ORDER BY score DESC, id ASC LIMIT ?n;
 ```
 
-The `active_edges` CTE is the single source of truth for "currently
-real" edges in this query — modal computation, scoring, and the final
-projection all read from it, so future-dated and future-invalidated
-edges cannot enter ranking through any path.
+`visible_edges` is the single source of truth for "real, in-scope"
+edges — modal computation, scoring, and the final projection all
+read from it, so future-dated, future-invalidated, *and*
+out-of-scope edges cannot enter ranking through any path.
 
 Final SQL refines the modal join — sketch above; the implementation
 may use `Vec<RecordId>` accumulation in Rust if the SQL gets unwieldy,
@@ -442,6 +513,10 @@ Adversarial test cases (mandatory):
 - An active edge with `invalid_at = now + 1h` MUST be **included**
   (currently real, future-invalidated) — this is the case a naive
   `invalid_at IS NULL` filter incorrectly drops.
+- An active, in-window edge whose `source_record_id` is outside
+  `allowed_scopes` MUST be excluded from both the modal-record
+  computation and the final projection — out-of-scope edges cannot
+  surface as a "surprise" hit through any path.
 
 ## 4. MCP wiring
 
@@ -543,12 +618,38 @@ issue.
 
 ## 6. Status / capability advertisement
 
-`graph_tools::is_available(store: Option<&dyn MemoryStore>) -> bool`
-returns `true` iff a store is wired. `CairnMcpServer::capabilities()`
-gets a new field — or, if the contract enum is closed, we stash this in
-the existing `extensions` slot. Spec defers wiring into `cairn status`
-output to a follow-up if it requires touching the IDL contract; the
-manifest snapshot test is the in-PR signal.
+Capability discovery is **the same predicate everywhere** — there is
+no separate "is the store wired" path. The single source of truth is
+the `StoreCapabilities { graph_traversal: bool }` bit introduced in
+§2.1: `cairn-store-sqlite` sets it `true` once migrations
+0042/0043/0044 are applied; every other `MemoryStore` impl (and the
+default trait method) returns `false`.
+
+```rust
+// One predicate, used at both list_tools and call_tool sites.
+fn graph_tools_available(store: Option<&dyn MemoryStore>) -> bool {
+    store
+        .map(|s| s.capabilities().graph_traversal)
+        .unwrap_or(false)
+}
+```
+
+`CairnMcpServer::capabilities()` gains a derived `graph_traversal`
+flag mirrored from the wired store; if the contract enum is closed
+we surface it via the existing `extensions` slot. Wiring this into
+`cairn status` output is deferred only if it requires an IDL bump —
+the in-PR signal is the manifest snapshot test, which must cover
+**three** states:
+
+1. No store wired → no `graph.*` tools advertised.
+2. Store wired but `graph_traversal = false` (e.g. an in-memory
+   stub) → no `graph.*` tools advertised.
+3. Store wired with `graph_traversal = true` → all five `graph.*`
+   tools advertised, byte-identical across rebuilds.
+
+Negative test: in case (2), invoking `graph.get_entity` returns
+`CapabilityUnavailable` rather than executing — defense in depth at
+the dispatch site mirrors the discovery gate.
 
 ## 7. Tests
 
