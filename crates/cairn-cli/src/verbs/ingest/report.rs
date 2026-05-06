@@ -6,25 +6,25 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FolderIngestSummary {
     /// Files discovered during scanning.
-    pub scanned: usize,
+    pub scanned: u64,
     /// Files skipped because cached content was unchanged.
-    pub cached: usize,
+    pub cached: u64,
     /// Files processed by the ingest pipeline.
-    pub processed: usize,
+    pub processed: u64,
     /// Files skipped by filters or unsupported handling.
-    pub skipped: usize,
+    pub skipped: u64,
     /// Non-fatal warnings observed during the run.
-    pub warnings: usize,
+    pub warnings: u64,
     /// New entities extracted from processed files.
-    pub entities_new: usize,
+    pub entities_new: u64,
     /// Extracted entities merged into existing records.
-    pub entities_merged: usize,
+    pub entities_merged: u64,
     /// New edges extracted from processed files.
-    pub edges_new: usize,
+    pub edges_new: u64,
     /// Existing contradictions resolved during ingestion.
-    pub contradictions_resolved: usize,
+    pub contradictions_resolved: u64,
     /// Records written to the store.
-    pub records_written: usize,
+    pub records_written: u64,
     /// Wall-clock runtime in milliseconds.
     pub elapsed_ms: u64,
     /// Whether the run avoided writing changes.
@@ -39,7 +39,7 @@ pub fn render_human(folder: &str, summary: &FolderIngestSummary) -> String {
     let elapsed_seconds = summary.elapsed_ms as f64 / 1000.0;
 
     format!(
-        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\nElapsed: {:.1}s",
+        "Scanning {folder} ({} files)...\n  Cached  {} (no changes detected)\n  Processed {} files\n    Entities: {} new · {} merged\n    Edges:    {} new · {} contradictions resolved\n    Records:  {} written to store{}\nElapsed: {:.1}s\n",
         summary.scanned,
         summary.cached,
         summary.processed,
@@ -84,5 +84,6 @@ mod tests {
         assert!(output.contains("    Edges:    1 new"));
         assert!(output.contains("    Records:  0 written to store (dry-run)"));
         assert!(output.contains("Elapsed: 2.3s"));
+        assert!(output.ends_with("Elapsed: 2.3s\n"));
     }
 }
