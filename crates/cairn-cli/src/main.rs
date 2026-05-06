@@ -197,7 +197,7 @@ fn main() -> ExitCode {
         },
         Some(("retrieve", sub)) => verbs::retrieve::run(sub),
         Some(("summarize", sub)) => verbs::summarize::run(sub),
-        Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
+        Some(("assemble_hot", sub)) => run_assemble_hot(sub, explicit_vault.as_deref()),
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
         Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
             Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
@@ -319,6 +319,32 @@ fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
     // capability list (round-8 review #3).
     let require_bound = source != VaultResolutionSource::CwdFallback;
     verbs::status::run_with_context(json, Some(&vault_root), Some(&config), require_bound)
+}
+
+/// `cairn assemble_hot` dispatch.
+///
+/// Resolves the vault path and loads config so `assemble_hot` can apply
+/// the `hot_memory.recipe` and `max_bytes` budget from the active vault.
+/// Falls back to default config when no vault is found (no `.cairn/`
+/// in the walk-up path and no registry default), so an unconfigured CWD
+/// still returns a valid stub response instead of failing closed.
+fn run_assemble_hot(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let vault_root = match resolve_vault_or_cwd(explicit_vault) {
+        Ok((path, _source)) => path,
+        Err(e) => {
+            eprintln!("cairn assemble_hot: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn assemble_hot: config error — {e:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
+    verbs::assemble_hot::run(sub, &config)
 }
 
 fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
