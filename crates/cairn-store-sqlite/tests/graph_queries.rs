@@ -104,6 +104,23 @@ async fn get_neighbors_filters_by_relation_and_confidence() {
     assert!(edges.iter().all(|e| e.confidence_score >= 0.7));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn timeline_default_excludes_future_and_expired() {
+    let f = cairn_test_fixtures::graph::timeline_fixture().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let entries = q.timeline(f.node_a.clone(), false, false).await.unwrap();
+    assert!(entries.iter().all(|e| e.expired_at.is_none()));
+    assert!(entries.iter().all(|e| e.valid_at <= f.now));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timeline_include_history_surfaces_future_dated() {
+    let f = cairn_test_fixtures::graph::timeline_fixture().await;
+    let q = GraphQueries::new(f.store.clone(), vec![f.scope_a.clone()], f.now);
+    let entries = q.timeline(f.node_a.clone(), true, false).await.unwrap();
+    assert!(entries.iter().any(|e| e.valid_at > f.now));
+}
+
 #[test]
 fn token_budget_truncates_at_byte_threshold() {
     let edges: Vec<GraphEdge> = (0..100)

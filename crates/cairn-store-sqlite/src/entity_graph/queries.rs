@@ -64,6 +64,32 @@ pub struct EntityHit {
     pub edge_count: i64,
 }
 
+/// A single edge entry in the timeline view for a given seed entity (§3.4).
+pub struct TimelineEntry {
+    /// The edge's canonical id.
+    pub id: String,
+    /// The source entity id.
+    pub source_id: String,
+    /// The target entity id.
+    pub target_id: String,
+    /// The relation label.
+    pub relation: String,
+    /// Confidence score in `[0.0, 1.0]`.
+    pub confidence_score: f64,
+    /// Epoch-millisecond timestamp when the edge became valid.
+    pub valid_at: i64,
+    /// Epoch-millisecond timestamp when the edge became invalid, if any.
+    pub invalid_at: Option<i64>,
+    /// Epoch-millisecond timestamp when the edge was created.
+    pub created_at: i64,
+    /// Epoch-millisecond timestamp when the edge was expired (tombstoned), if any.
+    pub expired_at: Option<i64>,
+    /// Human-readable reason the edge was tombstoned, if any.
+    pub tombstone_reason: Option<String>,
+    /// The record that authored this edge, if any.
+    pub source_record_id: Option<String>,
+}
+
 /// Bind-slot accounting for the CTE prefix. Callers bind in this
 /// order: `now` (×`now_count`), then scope tuple dimensions
 /// (×`scope_count`, in tuple-major / dimension-minor order matching
@@ -675,6 +701,103 @@ impl GraphQueries {
             })
             .await?;
         Ok(hit)
+    }
+
+    /// Timeline of edges incident to `seed`, with optional history and expired
+    /// inclusion flags (§3.4).
+    ///
+    /// Default (`include_history = false, include_expired = false`) returns only
+    /// edges whose temporal window contains `now` and that have not been expired.
+    /// Setting `include_history = true` lifts the temporal predicate so
+    /// future-dated edges are also returned. Setting `include_expired = true`
+    /// lifts the `expired_at IS NULL` predicate.
+    ///
+    /// Scope filter and endpoint liveness (`visible_nodes`) are always applied.
+    pub async fn timeline(
+        &self,
+        seed: String,
+        include_history: bool,
+        include_expired: bool,
+    ) -> Result<Vec<TimelineEntry>, StoreError> {
+        // Note: we re-emit the scope_filtered CTE here rather than reusing
+        // visible_edges_raw, because timeline relaxes temporal predicates
+        // independently. visible_nodes is reused for endpoint liveness.
+        let (scope_clause, _) = Self::scope_match_clause(&self.allowed_scopes);
+        let (prefix, _binds) = Self::cte_prefix(&self.allowed_scopes);
+        let sql = format!(
+            "{prefix}
+             scope_filtered AS (
+               SELECT e.* FROM entity_edges e
+               WHERE e.source_record_id IS NOT NULL
+                 AND EXISTS (
+                   SELECT 1 FROM records r_src
+                   JOIN records r_active
+                     ON r_active.target_id = r_src.target_id
+                   WHERE r_src.record_id = e.source_record_id
+                     AND ({scope_clause})
+                     AND r_active.active     = 1
+                     AND r_active.tombstoned = 0
+                 )
+             )
+             SELECT id, source_id, target_id, relation, confidence_score,
+                    valid_at, invalid_at, created_at, expired_at,
+                    tombstone_reason, source_record_id
+             FROM scope_filtered
+             WHERE (source_id = ? OR target_id = ?)
+               AND source_id IN (SELECT id FROM visible_nodes)
+               AND target_id IN (SELECT id FROM visible_nodes)
+               AND (? = 1 OR expired_at IS NULL)
+               AND (
+                 ? = 1
+                 OR (valid_at <= ?
+                     AND (invalid_at IS NULL OR invalid_at > ?))
+               )
+             ORDER BY valid_at ASC, created_at ASC"
+        );
+        let mut binds: Vec<SqlValue> = Vec::new();
+        self.push_prefix_binds(&mut binds);
+        // scope_filtered CTE uses one extra block of scope params.
+        for tup in &self.allowed_scopes {
+            for (_, v) in tup.dimension_iter() {
+                binds.push(match v {
+                    Some(s) => SqlValue::Text(s.to_string()),
+                    None    => SqlValue::Null,
+                });
+            }
+        }
+        binds.push(SqlValue::Text(seed.clone()));
+        binds.push(SqlValue::Text(seed));
+        binds.push(SqlValue::Integer(i64::from(include_expired)));
+        binds.push(SqlValue::Integer(i64::from(include_history)));
+        binds.push(SqlValue::Integer(self.now));
+        binds.push(SqlValue::Integer(self.now));
+
+        let conn = self.store.read_conn()?;
+        // Async wrap (Task 3 canonical pattern).
+        let out = conn
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(params_from_iter(binds))?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(TimelineEntry {
+                        id: row.get(0)?,
+                        source_id: row.get(1)?,
+                        target_id: row.get(2)?,
+                        relation: row.get(3)?,
+                        confidence_score: row.get(4)?,
+                        valid_at: row.get(5)?,
+                        invalid_at: row.get(6)?,
+                        created_at: row.get(7)?,
+                        expired_at: row.get(8)?,
+                        tombstone_reason: row.get(9)?,
+                        source_record_id: row.get(10)?,
+                    });
+                }
+                Ok::<_, tokio_rusqlite::Error>(out)
+            })
+            .await?;
+        Ok(out)
     }
 
     /// Truncate a slice of serializable rows to fit within `byte_budget`

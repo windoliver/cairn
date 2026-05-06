@@ -19,6 +19,118 @@ use serde_json;
 /// are `NULL` so they are live at this instant.
 pub const FIXTURE_NOW: i64 = 1_700_000_000_000;
 
+/// Result of [`timeline_fixture`]. All fields are `pub` so tests can reference
+/// them directly without cloning.
+pub struct TimelineGraphFixture {
+    /// Connected in-memory store with all fixture rows inserted.
+    pub store: Arc<SqliteMemoryStore>,
+    /// The `now` timestamp to pass to [`cairn_store_sqlite::entity_graph::queries::GraphQueries::new`].
+    pub now: i64,
+    /// Scope that owns `node_a` and all three edges.
+    pub scope_a: ScopeTuple,
+    /// `EntityId` of the anchor node.
+    pub node_a: String,
+}
+
+/// Build a timeline-focused in-memory entity graph.
+///
+/// Three edges are anchored on `node_a`:
+/// - `edge-tl-active`:  `valid_at` < `now`, `invalid_at` NULL, `expired_at` NULL → active.
+/// - `edge-tl-future`:  `valid_at` > `now` → future-dated.
+/// - `edge-tl-expired`: `expired_at` NOT NULL, `tombstone_reason` set → expired.
+///
+/// # Panics
+///
+/// Panics on any database error — intended for use in tests only.
+#[allow(clippy::expect_used)]
+pub async fn timeline_fixture() -> TimelineGraphFixture {
+    use cairn_core::contract::memory_store::MemoryStore as _;
+
+    let store = cairn_store_sqlite::open_in_memory()
+        .await
+        .expect("timeline_fixture: open_in_memory");
+    let store = Arc::new(store);
+
+    let scope_a = ScopeTuple {
+        tenant: Some("tl-acme".to_owned()),
+        ..ScopeTuple::default()
+    };
+
+    let scope_json = serde_json::to_string(&scope_a).expect("scope_a json");
+
+    // Distinct stable IDs for nodes and edges.
+    let id_node_a  = "01HZE7TL0000000000000000A1";
+    let id_node_b  = "01HZE7TL0000000000000000B1";
+
+    let now = FIXTURE_NOW;
+    let past = now - 10_000;
+    let future = now + 10_000;
+
+    // Insert entity nodes.
+    let nodes: &[(&str, &str)] = &[
+        (id_node_a, "tl-alpha"),
+        (id_node_b, "tl-beta"),
+    ];
+    for (id, name) in nodes {
+        let node = EntityNode {
+            id: EntityId::from(*id),
+            name: (*name).to_owned(),
+            name_norm: normalize_entity_name(name),
+            summary: None,
+            created_at: now,
+            embedding_id: None,
+        };
+        store.upsert_entity(&node).await.expect("upsert_entity");
+    }
+
+    {
+        let conn = Arc::clone(store.raw_conn().expect("raw_conn present"));
+
+        let records_sql = format!(
+            "INSERT INTO records \
+             (record_id, target_id, version, path, kind, class, visibility, \
+              scope, actor_chain, body, body_hash, created_at, updated_at, \
+              active, tombstoned) \
+             VALUES \
+             ('rec-tl-scope-a', 'tgt-tl-scope-a', 1, 'p', 'fact', 'episodic', 'private', \
+              '{scope_json}', '[]', '', 'h', {now}, {now}, 1, 0);"
+        );
+
+        // active: valid_at=past, invalid_at NULL, expired_at NULL
+        // future: valid_at=future connecting the same two visible nodes (both
+        //         reachable via the active edge, so visible_nodes includes them)
+        // expired: valid_at=past, invalid_at NULL, expired_at=past, tombstone_reason set
+        let edges_sql = format!(
+            "INSERT INTO entity_edges \
+             (id, source_id, target_id, relation, confidence, confidence_score, \
+              valid_at, created_at, body_hash, source_record_id, \
+              invalid_at, expired_at, tombstone_reason) \
+             VALUES \
+             ('edge-tl-active',  '{id_node_a}', '{id_node_b}', 'relates', 'EXTRACTED', 0.8, \
+              {past}, {past}, X'A1', 'rec-tl-scope-a', NULL, NULL, NULL), \
+             ('edge-tl-future',  '{id_node_b}', '{id_node_a}', 'relates', 'EXTRACTED', 0.7, \
+              {future}, {past}, X'A2', 'rec-tl-scope-a', NULL, NULL, NULL), \
+             ('edge-tl-expired', '{id_node_a}', '{id_node_b}', 'relates', 'EXTRACTED', 0.5, \
+              {past}, {past}, X'A3', 'rec-tl-scope-a', NULL, {past}, 'test-tombstone');"
+        );
+
+        conn.call(move |c| {
+            c.execute_batch(&records_sql)?;
+            c.execute_batch(&edges_sql)?;
+            Ok(())
+        })
+        .await
+        .expect("timeline_fixture: seed SQL");
+    }
+
+    TimelineGraphFixture {
+        store,
+        now,
+        scope_a,
+        node_a: id_node_a.to_owned(),
+    }
+}
+
 /// Result of [`tiny_graph`]. All fields are `pub` so tests can reference them
 /// directly without cloning.
 pub struct TinyGraphFixture {
