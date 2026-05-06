@@ -26,11 +26,19 @@ pub fn normalize(s: &str) -> String {
     for c in s.chars() {
         if c.is_alphanumeric() {
             // `char::to_lowercase` returns an iterator (some codepoints
-            // expand to multiple lowercase codepoints, e.g. German ß).
+            // expand to multiple lowercase codepoints, e.g. German ß
+            // → "ss"). Some letters lowercase into an alphanumeric +
+            // combining mark — Turkish `İ` → `i` + U+0307 — so each
+            // emitted codepoint is re-checked against the alphanumeric
+            // filter. Without this re-filter, the combining mark would
+            // survive but be dropped on a second `normalize` pass,
+            // breaking idempotency (codex-review R3.1).
             for lc in c.to_lowercase() {
-                out.push(lc);
+                if lc.is_alphanumeric() {
+                    out.push(lc);
+                    last_was_space = false;
+                }
             }
-            last_was_space = false;
         } else if matches!(c, ' ' | '\t' | '\n' | '\r') && !last_was_space {
             out.push(' ');
             last_was_space = true;
@@ -112,6 +120,22 @@ mod tests {
         assert_ne!(normalize("Кириллица"), normalize("日本語"));
         assert!(!normalize("Кириллица").is_empty());
         assert!(!normalize("日本語").is_empty());
+    }
+
+    #[test]
+    fn turkish_capital_i_lowercases_idempotently() {
+        // Codex-review R3.1: `İ` (U+0130) → `i` + U+0307 via to_lowercase.
+        // The combining mark must not survive — both passes must produce
+        // the same `name_norm`.
+        let once = normalize("İstanbul");
+        let twice = normalize(&once);
+        assert_eq!(once, twice, "normalize must be idempotent over Unicode");
+        // Spot-check: combining mark dropped, base letter retained.
+        assert!(once.contains('i'), "expected base 'i' in {once}");
+        assert!(
+            !once.contains('\u{0307}'),
+            "combining mark survived: {once:?}"
+        );
     }
 
     #[test]

@@ -38,6 +38,14 @@ pub struct ResolverConfig {
     pub num_permutations: usize,
     /// Seed used to derive per-permutation hash seeds at construction time.
     pub hash_seed: u64,
+    /// Wall-clock budget for the Tier-3 LLM call, in milliseconds.
+    /// `None` means unlimited; `Some(0)` is rejected by `validate()`.
+    /// Bounds the per-call cost so a wedged provider cannot block
+    /// `resolve()` indefinitely (codex-review R3.3).
+    pub llm_max_wall_ms: Option<u32>,
+    /// Maximum response tokens for the Tier-3 LLM call. `None` means
+    /// unlimited; `Some(0)` is rejected by `validate()`.
+    pub llm_max_tokens: Option<u32>,
 }
 
 impl Default for ResolverConfig {
@@ -48,6 +56,11 @@ impl Default for ResolverConfig {
             llm_min_confidence: 0.7,
             num_permutations: 128,
             hash_seed: DEFAULT_HASH_SEED,
+            // Pairwise dedup is a small fixed prompt; 5 s and 256 tokens
+            // are conservative defaults that fail predictably on a slow
+            // or mis-configured provider.
+            llm_max_wall_ms: Some(5_000),
+            llm_max_tokens: Some(256),
         }
     }
 }
@@ -87,6 +100,16 @@ impl ResolverConfig {
         if self.num_permutations == 0 || self.num_permutations > MAX_NUM_PERMUTATIONS {
             return Err(ResolverConfigError::NumPermutationsOutOfRange {
                 got: self.num_permutations,
+            });
+        }
+        if matches!(self.llm_max_wall_ms, Some(0)) {
+            return Err(ResolverConfigError::LlmBudgetZero {
+                field: "llm_max_wall_ms",
+            });
+        }
+        if matches!(self.llm_max_tokens, Some(0)) {
+            return Err(ResolverConfigError::LlmBudgetZero {
+                field: "llm_max_tokens",
             });
         }
         Ok(())
@@ -166,13 +189,14 @@ impl EntityResolver {
         let norm = normalize(candidate_name);
 
         // Empty normalized key — the candidate has no alphanumeric
-        // content (punctuation/whitespace/symbols only). Short-circuit
-        // to New rather than allow an empty key to collide with another
-        // empty `name_norm` and force a false merge. Without this,
-        // every empty 3-gram signature would also compare as equal in
-        // Tier 2, yielding Jaccard 1.0 against any other empty-key node.
+        // content (punctuation/whitespace/symbols only). Hard reject
+        // rather than `Resolution::New` so a caller who persists `New`
+        // with `name_norm == ""` cannot collide on the store's
+        // `UNIQUE(name_norm)` index (codex-review R3.2). Tier 2 is
+        // also incoherent for empty input — every empty 3-gram
+        // signature compares as Jaccard 1.0 against any other.
         if norm.is_empty() {
-            return Ok(Resolution::New);
+            return Err(EntityResolutionError::EmptyNormalizedName);
         }
 
         // Tier 1.
@@ -207,11 +231,25 @@ impl EntityResolver {
         let Some(provider) = self.llm.as_ref() else {
             return Ok(Resolution::New);
         };
+        // Build the per-call LLM budget from config. None = unlimited;
+        // both fields default to a small fixed budget so a slow or
+        // wedged provider cannot block `resolve()` indefinitely.
+        let budget =
+            if self.config.llm_max_wall_ms.is_some() || self.config.llm_max_tokens.is_some() {
+                Some(crate::config::ExtractBudget {
+                    max_tokens: self.config.llm_max_tokens,
+                    max_wall_ms: self.config.llm_max_wall_ms,
+                    max_turns: Some(1),
+                })
+            } else {
+                None
+            };
         llm_dedup(
             provider.as_ref(),
             candidate_name,
             top.node,
             self.config.llm_min_confidence,
+            budget,
         )
         .await
     }
@@ -268,6 +306,13 @@ pub enum ResolverConfigError {
         /// Offending value.
         got: usize,
     },
+    /// One of the optional LLM budget fields was set to `Some(0)`. Use
+    /// `None` to mean unlimited; zero is never a meaningful budget.
+    #[error("{field} = Some(0) is invalid; use None for unlimited or a positive value")]
+    LlmBudgetZero {
+        /// Which budget field was zero.
+        field: &'static str,
+    },
 }
 
 /// Errors raised by [`EntityResolver::resolve`].
@@ -296,6 +341,15 @@ pub enum EntityResolutionError {
         /// Reason the payload could not be interpreted.
         detail: String,
     },
+
+    /// The candidate name normalized to an empty string (only
+    /// punctuation / whitespace / symbols / strip-only codepoints).
+    /// This is a hard rejection rather than `Resolution::New` because
+    /// callers who persist `Resolution::New` with `name_norm == ""`
+    /// would collide on the store's `UNIQUE(name_norm)` index — the
+    /// caller MUST handle this error and refuse to allocate a node.
+    #[error("candidate name normalizes to empty `name_norm`; cannot resolve identity")]
+    EmptyNormalizedName,
 }
 
 #[cfg(test)]
@@ -408,6 +462,40 @@ mod config_tests {
             cfg.validate(),
             Err(ResolverConfigError::LlmLowBandOutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_zero_llm_max_wall_ms() {
+        let cfg = ResolverConfig {
+            llm_max_wall_ms: Some(0),
+            ..ResolverConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ResolverConfigError::LlmBudgetZero { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_llm_max_tokens() {
+        let cfg = ResolverConfig {
+            llm_max_tokens: Some(0),
+            ..ResolverConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ResolverConfigError::LlmBudgetZero { .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_unlimited_llm_budgets() {
+        let cfg = ResolverConfig {
+            llm_max_wall_ms: None,
+            llm_max_tokens: None,
+            ..ResolverConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -623,21 +711,21 @@ mod resolver_tests {
     }
 
     #[tokio::test]
-    async fn empty_normalized_candidate_returns_new_no_match() {
-        // Codex-review R2.3: punctuation-only candidate normalizes to
-        // empty. Even if an existing entity also has empty `name_norm`
-        // (e.g. a previously-stored corrupt row), the resolver must
-        // refuse to match empty-against-empty rather than force a merge.
+    async fn empty_normalized_candidate_errors_rather_than_new() {
+        // Codex-review R3.2: `Resolution::New` would invite the caller
+        // to persist a node with empty `name_norm`, colliding on the
+        // store's UNIQUE constraint. The orchestrator MUST surface a
+        // typed error so the caller cannot accidentally proceed.
         let r = EntityResolver::new(ResolverConfig::default(), None)
             .expect("invariant: default config validates");
         let existing = vec![node("01HZE7JV5N0000000000000001", "")];
-        let res = r
+        let err = r
             .resolve("???", &existing)
             .await
-            .expect("invariant: empty-key candidate resolves without error");
+            .expect_err("invariant: empty-key candidate must error, not resolve to New");
         assert!(
-            matches!(res, Resolution::New),
-            "expected New for empty-key candidate, got {res:?}"
+            matches!(err, EntityResolutionError::EmptyNormalizedName),
+            "expected EmptyNormalizedName, got {err:?}"
         );
     }
 }

@@ -56,10 +56,16 @@ pub(super) async fn llm_dedup(
     candidate_name: &str,
     top_match: &EntityNode,
     min_confidence: f32,
+    budget: Option<crate::config::ExtractBudget>,
 ) -> Result<Resolution, EntityResolutionError> {
+    // The Tier-3 budget bounds wall-clock and tokens per call. Without
+    // it, a wedged or mis-configured provider could block `resolve()`
+    // indefinitely (codex-review R3.3). `None` means unlimited; `bon`'s
+    // `maybe_<field>` accepts an `Option<T>` and is a no-op for `None`.
     let req = CompletionRequest::builder()
         .prompt(dedup_prompt(candidate_name, &top_match.name))
         .schema(dedup_schema())
+        .maybe_budget(budget)
         .build();
 
     let out = match provider.complete(&req).await {
@@ -318,7 +324,10 @@ mod tests {
             !p.contains("\nIgnore the above"),
             "newline survived JSON encoding: {p}"
         );
-        assert!(p.contains("\\n"), "expected JSON-escaped \\n in payload: {p}");
+        assert!(
+            p.contains("\\n"),
+            "expected JSON-escaped \\n in payload: {p}"
+        );
         assert!(p.contains("UNTRUSTED data"), "got: {p}");
     }
 
@@ -348,7 +357,7 @@ mod tests {
             "reasoning": "stub"
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let r = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let r = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect("invariant: llm_dedup with canned same:true returns Ok");
         assert!(matches!(r, Resolution::Merge(id) if id.as_str() == "01HZE7JV5N0000000000000001"));
@@ -362,7 +371,7 @@ mod tests {
             "reasoning": "stub"
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let r = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let r = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect("invariant: llm_dedup with canned response returns Ok");
         assert!(matches!(r, Resolution::New));
@@ -376,7 +385,7 @@ mod tests {
             "reasoning": "stub"
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let r = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let r = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect("invariant: llm_dedup with canned response returns Ok");
         assert!(matches!(r, Resolution::New));
@@ -386,7 +395,7 @@ mod tests {
     async fn silent_skip_on_not_configured() {
         let provider = NotConfiguredLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let r = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let r = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect("invariant: NotConfigured maps to Resolution::New, not Err");
         assert!(matches!(r, Resolution::New));
@@ -396,7 +405,7 @@ mod tests {
     async fn silent_skip_on_capability_missing() {
         let provider = CapMissingLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let r = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let r = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect("invariant: CapabilityMissing maps to Resolution::New, not Err");
         assert!(matches!(r, Resolution::New));
@@ -406,7 +415,7 @@ mod tests {
     async fn propagates_provider_unreachable() {
         let provider = UnreachableLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: ProviderUnreachable propagates as EntityResolutionError::Llm");
         assert!(matches!(err, EntityResolutionError::Llm { .. }));
@@ -416,7 +425,7 @@ mod tests {
     async fn invalid_response_when_text_despite_schema() {
         let provider = TextDespiteSchemaLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: Text-when-schema-given surfaces as LlmInvalidResponse");
         assert!(matches!(
@@ -436,7 +445,7 @@ mod tests {
             "reasoning": "bug — out of range"
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: out-of-range confidence must surface as LlmInvalidResponse");
         assert!(matches!(
@@ -454,7 +463,7 @@ mod tests {
             "confidence": 0.95
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: missing required field must surface as LlmInvalidResponse");
         assert!(matches!(
@@ -474,7 +483,7 @@ mod tests {
             "evil_extra": "should be rejected"
         }));
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: extra properties must surface as LlmInvalidResponse");
         assert!(matches!(
@@ -491,7 +500,7 @@ mod tests {
         // reasoning). Verify the elision phrasing.
         let provider = TextDespiteSchemaLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: Text payload surfaces as LlmInvalidResponse");
         if let EntityResolutionError::LlmInvalidResponse { detail } = err {
@@ -509,6 +518,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budget_is_threaded_into_completion_request() {
+        // Codex-review R3.3: a wedged provider must not block forever.
+        // The resolver passes its config'd budget to CompletionRequest;
+        // verify the budget round-trips by capturing it in a stub.
+        use std::sync::Mutex;
+
+        struct CapturingLlm {
+            captured: Mutex<Option<crate::config::ExtractBudget>>,
+        }
+
+        #[async_trait]
+        impl LLMProvider for CapturingLlm {
+            fn name(&self) -> &str {
+                "capturing"
+            }
+            fn capabilities(&self) -> &LLMProviderCapabilities {
+                caps()
+            }
+            fn supported_contract_versions(&self) -> VersionRange {
+                versions()
+            }
+            async fn complete(
+                &self,
+                req: &CompletionRequest,
+            ) -> Result<CompletionOutput, LlmError> {
+                *self
+                    .captured
+                    .lock()
+                    .expect("invariant: mutex never poisoned") = req.budget.clone();
+                Ok(CompletionOutput::Json(json!({
+                    "same": false,
+                    "confidence": 0.0,
+                    "reasoning": "stub"
+                })))
+            }
+        }
+
+        let provider = CapturingLlm {
+            captured: Mutex::new(None),
+        };
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let budget = Some(crate::config::ExtractBudget {
+            max_tokens: Some(256),
+            max_wall_ms: Some(5_000),
+            max_turns: Some(1),
+        });
+        let _ = llm_dedup(&provider, "auth_service", &n, 0.7, budget)
+            .await
+            .expect("invariant: stub returns Ok");
+        let guard = provider
+            .captured
+            .lock()
+            .expect("invariant: mutex never poisoned");
+        let captured = guard
+            .as_ref()
+            .expect("invariant: budget was supplied so request must carry it");
+        assert_eq!(captured.max_wall_ms, Some(5_000));
+        assert_eq!(captured.max_tokens, Some(256));
+    }
+
+    #[tokio::test]
     async fn sanitizes_invalid_json_output_dropping_raw_payload() {
         // Privacy invariant (brief §14): `LlmError::InvalidJsonOutput`
         // carries a `raw` field that adapters fill with the model's raw
@@ -518,7 +588,7 @@ mod tests {
         // the raw bytes.
         let provider = InvalidJsonOutputLlm;
         let n = node("01HZE7JV5N0000000000000001", "AuthService");
-        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7, None)
             .await
             .expect_err("invariant: InvalidJsonOutput surfaces as LlmInvalidResponse, not Llm");
         match err {
@@ -543,6 +613,7 @@ mod tests {
                      (source debug: {dbg}); expected sanitization to LlmInvalidResponse"
                 );
             }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 }
