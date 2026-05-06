@@ -294,6 +294,7 @@
       "additionalProperties": false,
       "properties": {
         "error": {
+          "minLength": 1,
           "type": "string"
         },
         "probe_basis": {
