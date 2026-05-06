@@ -68,7 +68,16 @@ fn build_query(n_seeds: usize, n_ranked: usize, n_visibilities: usize) -> String
     }
     let seed_in = placeholders(n_seeds);
     let ranked_in = placeholders(n_ranked);
-    let vis_in = placeholders(n_visibilities);
+    // Empty visibility allowlist means "no visibility filter" — match the
+    // keyword/semantic SQL builders. Without this guard, an empty allowlist
+    // would translate to `r.visibility IN (SELECT NULL WHERE 0)` (always
+    // false) and silently drop every graph candidate.
+    let visibility_clause = if n_visibilities == 0 {
+        String::new()
+    } else {
+        let vis_in = placeholders(n_visibilities);
+        format!(" AND r.visibility IN ({vis_in})")
+    };
     format!(
         "WITH seeds AS ( \
             SELECT DISTINCT entity_node_id \
@@ -93,8 +102,7 @@ fn build_query(n_seeds: usize, n_ranked: usize, n_visibilities: usize) -> String
            JOIN records r ON r.record_id = ep.episode_id \
           WHERE n.neighbor_id NOT IN (SELECT entity_node_id FROM seeds) \
             AND r.tombstoned = 0 AND r.active = 1 \
-            AND r.record_id NOT IN ({ranked_in}) \
-            AND r.visibility IN ({vis_in}) \
+            AND r.record_id NOT IN ({ranked_in}){visibility_clause} \
           GROUP BY r.record_id \
           ORDER BY conf DESC, r.updated_at DESC \
           LIMIT ?"
