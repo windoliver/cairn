@@ -8,14 +8,14 @@
 
 Extend the IDL-generated `AssembleHotData` to carry recipe-step segments alongside the assembled `prefix`, so harness wrappers can attach provider-specific prompt-cache breakpoints (Anthropic `cache_control`, OpenAI cache primitive, etc.) without Cairn knowing anything about provider cache APIs.
 
-This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a real `HotMemoryAssembler` is out of scope (separate issue, the missing-half of #193).
+This PR delivers the segment-marker contract end-to-end: types + pure helper + validation in `Deserialize` + a wired-but-stub-body `HotMemoryAssembler` so `cairn assemble_hot --json` actually emits segments. Real source-loading (read `purpose.md`, query SQLite for pinned/salient/playbook/signal records, evidence gates) is deliberately out of scope and stays as the missing-half of #193 — when that lands, it replaces a single function (`load_step_body`) and every other contract here is unchanged.
 
 ## 2. Non-goals
 
 - Mutating the `prefix` format or adding separators between segments.
 - Any provider-specific cache type (`cache_control`, `ttl: "5m"`) leaking into Cairn surfaces.
-- Wiring the CLI verb. `cairn assemble_hot` keeps returning `unimplemented_response` until a real `HotMemoryAssembler` lands (separate issue, missing-half of #193). **This is a deliberate, declared partial fulfilment of issue #288**: the wire-shape acceptance criterion ("`--json` output of `cairn assemble_hot` includes segments; insta snapshot covers shape") is satisfied at the type/JSON level (snapshot of `AssembleHotData` JSON), not at the CLI-binary level. The PR description for #288 must call this out so reviewers and the assembler PR author both know the CLI snapshot is owed by the next PR.
-- Unifying the IDL-generated `HotRecipeStep` with `cairn-core::config::HotMemoryRecipeStep`. A `From` conversion lands with the assembler PR that needs it.
+- **Real source loading.** `load_step_body` is a stub returning `""` for every step in this PR. Reading `purpose.md`/`index.md`, querying SQLite for pinned feedback / top salience / active playbook / recent user signals, evidence gates, and `DreamWorkflow` regeneration are all deferred to the missing-half of #193. The verb still returns a real, validated `AssembleHotData` end-to-end; segments mirror the configured recipe with zero-length entries until the real loader lands.
+- Unifying the IDL-generated `HotRecipeStep` with `cairn-core::config::HotMemoryRecipeStep`. A `From<config::HotMemoryRecipeStep> for generated::HotRecipeStep` conversion is added in this PR (the assembler needs it to walk `HotMemoryConfig.recipe` and pass IDL-side enum values into `build_segments`); structural unification stays out of scope.
 
 ## 3. IDL schema change
 
@@ -278,7 +278,54 @@ pub enum AssembleHotValidationError {
 
 **Dependency.** `sha2 = "0.10"` added to `cairn-core` workspace deps. No transitive bloat — `sha2` is already in the dep tree via other crates; verify with `cargo tree -e normal -p cairn-core --depth 1`.
 
-**No CLI / store changes.** `cairn-cli/src/verbs/assemble_hot.rs` stays returning `unimplemented_response`. When the real assembler lands (separate issue) it calls `build_segments(...)` to populate the response. Capability advertisement (§8.0.a) is unchanged.
+## 5a. Stub-body `HotMemoryAssembler` and CLI wiring
+
+The verb is wired end-to-end so `cairn assemble_hot --json` returns real `AssembleHotData`. The data plumbing for actual record content is deliberately a stub; the segment-marker contract is fully exercised regardless.
+
+```rust
+// cairn-core/src/verbs/assemble_hot/assembler.rs
+
+use crate::config::HotMemoryConfig;
+use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
+use super::segments::build_segments;
+
+/// Run the hot-memory recipe and produce a validated `AssembleHotData`.
+///
+/// Walks `config.hot_memory.recipe` in declaration order, calls
+/// `load_step_body(step)` for each (stub returning `""` in this PR; the
+/// missing-half of #193 replaces this single function with the real
+/// SQLite + markdown loader), then defers to `build_segments` for the
+/// canonical wire shape. The returned `AssembleHotData` round-trips
+/// through `Deserialize` validation cleanly by construction.
+pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, AssembleHotError>;
+
+/// Load the body for one recipe step. Stub for this PR: always `""`.
+/// The signature is the integration point for the future loader.
+fn load_step_body(_step: HotRecipeStep) -> String { String::new() }
+```
+
+**`From<config::HotMemoryRecipeStep> for HotRecipeStep`** is added in `cairn-core/src/verbs/assemble_hot/mod.rs`. One match arm per variant; trivial.
+
+**CLI wiring** in `cairn-cli/src/verbs/assemble_hot.rs`:
+
+```rust
+pub fn run(sub: &ArgMatches, ctx: &CliContext) -> ExitCode {
+    let json = sub.get_flag("json");
+    let data = match cairn_core::verbs::assemble_hot::assemble_hot(&ctx.config.vault.hot_memory) {
+        Ok(data) => data,
+        Err(e) => return human_error("assemble_hot", "Internal", &e.to_string(), ...),
+    };
+    let resp = ResponseEnvelope::ok(ResponseVerb::AssembleHot, ResponseData::AssembleHot(data));
+    if json { emit_json(&resp); } else { emit_human(&resp, ...); }
+    ExitCode::SUCCESS
+}
+```
+
+**SDK wiring** in `cairn-sdk/src/transport.rs`: identical shape — call `cairn_core::verbs::assemble_hot::assemble_hot`, wrap in the SDK's typed result.
+
+**Capability advertisement (§8.0.a) is unchanged.** The verb was already advertised; we are now actually answering it.
+
+**Why a stub instead of real loading.** The issue is about segment-marker shape, not vault loading. Stubbing the body source keeps this PR scoped to the marker contract; every segment-shape invariant (length matches recipe, contiguity, hash, stability authentication, validation in `Deserialize`) is exercised by the same test fixtures whether bodies are empty or populated. The follow-up PR (missing-half of #193) replaces `load_step_body` with the real loader; nothing in this spec changes when that lands.
 
 ## 6. Tests
 
@@ -316,6 +363,21 @@ pub enum AssembleHotValidationError {
 **Trust-boundary integration tests** (in `cairn-core/tests/`):
 
 These specifically exercise `serde_json::from_str::<Response>` (the call shape used by the existing test suite and SDK) to prove validation cannot be bypassed. Tests that deserialize `AssembleHotData` directly are equally covered because the `try_from` annotation makes the path identical.
+
+**Assembler unit tests** (in `cairn-core/src/verbs/assemble_hot/assembler.rs` `mod tests`):
+
+- `assemble_hot_default_config_returns_six_zero_length_segments` — default `HotMemoryConfig` has the six-step recipe; with the stub `load_step_body` returning `""`, output is `prefix == ""`, `bytes == 0`, `segments == Some(vec![<6 zero-length entries with default_stability values>])`.
+- `assemble_hot_empty_recipe` — config with `recipe == []` → `prefix == ""`, `segments == Some(vec![])`. Canonical empty-recipe shape; passes envelope validation including `EmptySegmentsRequiresEmptyPrefix`.
+- `assemble_hot_output_round_trips_through_deserialize` — serialize the result to JSON, deserialize through `serde_json::from_str::<AssembleHotData>`, assert equality. Pins that the assembler's output passes its own `try_from` validator.
+- `from_config_recipe_step_round_trips` — table test for `From<config::HotMemoryRecipeStep> for HotRecipeStep` over all six variants.
+
+**CLI end-to-end snapshot test** (in `cairn-cli/tests/cli.rs` or a new `cli_assemble_hot.rs`):
+
+- `cairn_assemble_hot_json_emits_segments` — invoke the CLI binary in a `tempfile::tempdir` vault with default config, capture `--json` stdout, parse it, assert the response envelope contains `data.segments == Some(vec![<6 entries>])`. `insta` snapshot of the deterministic JSON pins the wire shape against future drift. **This is the acceptance criterion the issue text asked for, fully satisfied here, not deferred.**
+
+**SDK end-to-end test** (in `cairn-sdk/tests/surface.rs`):
+
+- `sdk_assemble_hot_returns_typed_segments` — call `cairn::assemble_hot(args)` and assert the returned struct has `segments == Some(vec![<6 entries>])`. Confirms the SDK wrapper passes the data through unchanged.
 
 
 - `envelope_decode_rejects_malformed_assemble_hot` — craft an envelope JSON with a bad `byte_end`; assert `ResponseEnvelope::try_decode_data` returns the validation error, not `Ok`.
@@ -366,7 +428,7 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 | `segments` populated in declaration order | **Producer side, by construction:** `build_segments(recipe, bodies)` accepts recipe + bodies as parallel slices and emits `segments[i].step == recipe[i]` for all i — the helper signature makes reorder/dup/omit unrepresentable. **Consumer side, opt-in:** `validate_with_recipe(data, expected)` enforces the same invariant when the consumer knows which recipe to expect. The generic envelope hook does **not** enforce step order, because `cairn-core` envelope decoding has no access to `HotMemoryConfig` (config is loaded by `cairn-cli`/SDK callers, not the wire layer). This is a deliberate trust-model choice: in P0, the only producer is `cairn-core::build_segments`, and the type system enforces alignment there. External producers that bypass the helper are out of the P0 trust model; consumers facing such producers MUST call `validate_with_recipe` themselves. Tests: unit `build_segments_aligns_steps_to_recipe`; `validate_with_recipe_rejects_step_mismatch`. |
 | `byte_range` covers `[0, bytes)` with no gaps / no overlaps | property `coverage_invariant`; `validate()` rejects malformed payloads at runtime (§5) |
 | `content_hash` byte-stable across runs when inputs unchanged | property `hash_stability`; insta snapshot |
-| `--json` output of `cairn assemble_hot` includes segments; insta snapshot covers shape | **Partial.** The wire shape is locked by an insta snapshot of `AssembleHotData` JSON serialized from a hand-built fixture. The CLI binary itself still returns `unimplemented_response` because the verb is not yet wired to a `HotMemoryAssembler`; the end-to-end CLI snapshot ships with that wiring PR (missing-half of #193). Called out in §2 and the PR description. |
+| `--json` output of `cairn assemble_hot` includes segments; insta snapshot covers shape | **Met end-to-end.** The CLI verb is wired to `cairn_core::verbs::assemble_hot::assemble_hot` (§5a) which walks `HotMemoryConfig.recipe` and emits a real `AssembleHotData`. CLI snapshot test `cairn_assemble_hot_json_emits_segments` invokes the binary in a tempdir vault and pins the JSON. Stub-body source loading (real `purpose.md`/SQLite plumbing) is the only remaining piece, and is carved off as missing-half-of-#193. |
 | No provider-specific terms in Cairn types — only stability hints | review |
 | Doctest demonstrates wrapper translating segments to fictional `Cache::breakpoint()` | doctest on `build_segments` |
 
@@ -379,6 +441,7 @@ CLI snapshot of `cairn assemble_hot --json` — the verb is unwired. That snapsh
 - **New direct dep.** `sha2` becomes a direct `cairn-core` dep. Justify in PR; verify with `cargo tree`.
 - **`#[non_exhaustive]` enums** force downstream `match` arms. Acceptable per CLAUDE.md §6.10.
 - **Wire-compat invariant.** `segments` is optional (§3). A future PR that wants to make it required must bump the contract version (e.g., `cairn.mcp.v2`); not allowed under `cairn.mcp.v1`.
+- **Stub `load_step_body`.** Bodies are `""` until the missing-half of #193 lands the real loader. The CLI verb will return `prefix == ""` with N zero-length segments. Documented behavior, not a bug. The body source is the only piece that changes when #193 lands; every other contract here (segments, validation, snapshot, SDK pass-through) is final.
 
 ## 9. Verification (CLAUDE.md §8)
 
