@@ -69,6 +69,15 @@ impl ResolverConfig {
                 got: self.llm_min_confidence,
             });
         }
+        // Reject NaN / negative / >1 — `(0.0..=1.0).contains(&NaN)` is false,
+        // so this also covers the NaN case. Without this, NaN passes both
+        // bounds and the inversion check (because all NaN comparisons are
+        // false), letting Tier 3 fire for arbitrarily low Jaccard scores.
+        if !(0.0..=1.0).contains(&self.llm_low_band) {
+            return Err(ResolverConfigError::LlmLowBandOutOfRange {
+                got: self.llm_low_band,
+            });
+        }
         if self.llm_low_band >= self.fuzzy_threshold {
             return Err(ResolverConfigError::LlmBandInverted {
                 low: self.llm_low_band,
@@ -237,6 +246,12 @@ pub enum ResolverConfigError {
         /// Offending value.
         got: f32,
     },
+    /// `llm_low_band` was outside `[0.0, 1.0]` or non-finite.
+    #[error("llm_low_band must be in [0.0, 1.0] and finite, got {got}")]
+    LlmLowBandOutOfRange {
+        /// Offending value.
+        got: f32,
+    },
     /// `num_permutations` was 0 or above [`MAX_NUM_PERMUTATIONS`].
     #[error("num_permutations must be in 1..={max}, got {got}", max = MAX_NUM_PERMUTATIONS)]
     NumPermutationsOutOfRange {
@@ -358,6 +373,45 @@ mod config_tests {
         assert!(matches!(
             cfg.validate(),
             Err(ResolverConfigError::NumPermutationsOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_llm_low_band() {
+        let cfg = ResolverConfig {
+            llm_low_band: -0.1,
+            ..ResolverConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ResolverConfigError::LlmLowBandOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_nan_llm_low_band() {
+        let cfg = ResolverConfig {
+            llm_low_band: f32::NAN,
+            ..ResolverConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ResolverConfigError::LlmLowBandOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_above_one_llm_low_band() {
+        // Exceeds [0, 1] outright; the band-inversion check would also
+        // catch this (low > fuzzy_threshold = 0.85), but the range check
+        // fires first and surfaces the clearer error.
+        let cfg = ResolverConfig {
+            llm_low_band: 1.5,
+            ..ResolverConfig::default()
+        };
+        assert!(matches!(
+            cfg.validate(),
+            Err(ResolverConfigError::LlmLowBandOutOfRange { .. })
         ));
     }
 }

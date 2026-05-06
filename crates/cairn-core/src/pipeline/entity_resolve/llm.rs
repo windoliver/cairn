@@ -61,25 +61,48 @@ pub(super) async fn llm_dedup(
     let value = match out {
         CompletionOutput::Json(v) => v,
         CompletionOutput::Text(raw) => {
+            // Defence-in-depth: do not include raw payload in the error
+            // detail — callers may log this at warn/error and the body
+            // can echo `reasoning` / entity names, breaching brief §14.
             return Err(EntityResolutionError::LlmInvalidResponse {
-                detail: format!("expected JSON response (schema was provided), got Text: {raw}"),
+                detail: format!(
+                    "expected JSON response (schema was provided); got Text ({} bytes); raw payload elided to preserve §14 privacy invariant",
+                    raw.len()
+                ),
             });
         }
     };
 
+    // Resolver-side schema enforcement. The provider is supposed to honour
+    // `req.schema`, but a non-conforming adapter could return well-typed
+    // JSON with out-of-range `confidence` or extra properties; an unchecked
+    // payload would otherwise authorise a hard-to-undo entity merge.
+    let validator = jsonschema::validator_for(&dedup_schema()).map_err(|e| {
+        EntityResolutionError::LlmInvalidResponse {
+            detail: format!("internal: dedup_schema is invalid JSON Schema: {e}"),
+        }
+    })?;
+    if validator.validate(&value).is_err() {
+        return Err(EntityResolutionError::LlmInvalidResponse {
+            detail: "tier-3 response failed schema validation; payload elided to preserve §14 privacy invariant".to_owned(),
+        });
+    }
+
+    // Schema-validated above; field reads here are belt-and-braces but
+    // surface a useful error rather than panic if validator is mis-cached.
     let same = value.get("same").and_then(Value::as_bool).ok_or_else(|| {
         EntityResolutionError::LlmInvalidResponse {
-            detail: "missing or non-boolean `same`".into(),
+            detail: "post-validation: missing or non-boolean `same`".into(),
         }
     })?;
     #[allow(clippy::cast_possible_truncation)]
-    // Schema guarantees confidence is in [0, 1]; precision loss on f64→f32 is bounded.
+    // Schema enforced confidence ∈ [0, 1]; f64→f32 precision loss is bounded.
     let confidence = value
         .get("confidence")
         .and_then(Value::as_f64)
         .map(|f| f as f32)
         .ok_or_else(|| EntityResolutionError::LlmInvalidResponse {
-            detail: "missing or non-numeric `confidence`".into(),
+            detail: "post-validation: missing or non-numeric `confidence`".into(),
         })?;
 
     if same && confidence >= min_confidence {
@@ -331,5 +354,88 @@ mod tests {
             err,
             EntityResolutionError::LlmInvalidResponse { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn rejects_confidence_above_one_even_if_provider_skipped_schema() {
+        // Defence-in-depth: a non-conforming provider returns a payload
+        // that bypasses the schema (e.g. `confidence: 100`). The
+        // resolver must NOT merge — schema is re-validated locally.
+        let provider = CannedJsonLlm(json!({
+            "same": true,
+            "confidence": 100.0,
+            "reasoning": "bug — out of range"
+        }));
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+            .await
+            .expect_err("invariant: out-of-range confidence must surface as LlmInvalidResponse");
+        assert!(matches!(
+            err,
+            EntityResolutionError::LlmInvalidResponse { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_reasoning_field() {
+        // Schema requires `reasoning`; a payload without it must not
+        // authorise a merge even if `same` and `confidence` are valid.
+        let provider = CannedJsonLlm(json!({
+            "same": true,
+            "confidence": 0.95
+        }));
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+            .await
+            .expect_err("invariant: missing required field must surface as LlmInvalidResponse");
+        assert!(matches!(
+            err,
+            EntityResolutionError::LlmInvalidResponse { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_extra_properties() {
+        // Schema sets additionalProperties: false; extra keys must
+        // be rejected by the validator before reaching field reads.
+        let provider = CannedJsonLlm(json!({
+            "same": true,
+            "confidence": 0.95,
+            "reasoning": "ok",
+            "evil_extra": "should be rejected"
+        }));
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+            .await
+            .expect_err("invariant: extra properties must surface as LlmInvalidResponse");
+        assert!(matches!(
+            err,
+            EntityResolutionError::LlmInvalidResponse { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_response_detail_does_not_leak_raw_text() {
+        // Privacy invariant (brief §14): when the provider returns Text
+        // despite a schema, the LlmInvalidResponse detail must NOT
+        // contain the raw payload (which can echo entity names or
+        // reasoning). Verify the elision phrasing.
+        let provider = TextDespiteSchemaLlm;
+        let n = node("01HZE7JV5N0000000000000001", "AuthService");
+        let err = llm_dedup(&provider, "auth_service", &n, 0.7)
+            .await
+            .expect_err("invariant: Text payload surfaces as LlmInvalidResponse");
+        if let EntityResolutionError::LlmInvalidResponse { detail } = err {
+            assert!(
+                !detail.contains("not json"),
+                "raw payload leaked into error detail: {detail}"
+            );
+            assert!(
+                detail.contains("elided") || detail.contains("omitted"),
+                "expected elision marker in detail: {detail}"
+            );
+        } else {
+            panic!("expected LlmInvalidResponse");
+        }
     }
 }
