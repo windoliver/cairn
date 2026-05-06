@@ -79,12 +79,18 @@ impl Default for ResolverConfig {
             // or mis-configured provider.
             llm_max_wall_ms: Some(5_000),
             llm_max_tokens: Some(256),
-            // Conservative defaults bound Tier-2 work before the
-            // Tier-3 timeout can help. 1024 chars covers any realistic
-            // entity name; 10k candidates is more than the per-scope
-            // count P0 vaults will see.
-            max_candidate_chars: Some(1024),
-            max_existing_candidates: Some(10_000),
+            // Tier-2 work envelope: the synchronous shingle+hash
+            // pass for every existing entity runs BEFORE the Tier-3
+            // wall-clock timeout helps. With 256 chars × 1024
+            // candidates × 128 permutations the worst-case is
+            // ~30M shingle hashes (~100 ms CPU on modern hardware).
+            // R10.2 lowered these from 1024/10000 — the old envelope
+            // could spend seconds blocking ingest on a malicious or
+            // legacy scope. Callers with larger vaults should
+            // pre-filter by scope before invoking the resolver
+            // (the contract assumes pre-filtered input anyway).
+            max_candidate_chars: Some(256),
+            max_existing_candidates: Some(1024),
             // 8 KB raw is more than any realistic entity name and
             // bounds prompt size from below the LLM token budget.
             max_raw_name_bytes: Some(8 * 1024),

@@ -43,7 +43,8 @@ pub fn normalize(s: &str) -> String {
     // NFKC ensures canonical AND compatibility forms compare equal;
     // e.g. `Café` (U+00E9) ≡ `Cafe\u{0301}`, full-width `Ａ` ≡ `A`,
     // ligature `ﬁ` ≡ `fi`. R6.2 hardening.
-    for c in s.nfkc() {
+    let mut chars = s.nfkc().peekable();
+    while let Some(c) = chars.next() {
         if c.is_alphanumeric() {
             // `char::to_lowercase` returns an iterator (some codepoints
             // expand to multiple lowercase codepoints, e.g. German ß
@@ -59,15 +60,26 @@ pub fn normalize(s: &str) -> String {
                     last_was_space = false;
                 }
             }
-        } else if matches!(c, '+' | '#' | '&' | '.' | '*' | '\'') && !last_was_space {
+        } else if matches!(c, '+' | '#' | '&' | '.' | '*' | '\'') {
             // R8.1: preserve identity-bearing ASCII symbols when
-            // adjacent to an already-emitted alphanumeric. Keeps
-            // `C++`/`C#`/`AT&T`/`.NET`/`O'Brien` distinct from `C`/
-            // `AT`/`NET`/`OBrien`. Leading or post-space symbols are
-            // still dropped (no `&foo`).
-            out.push(c);
-            // `last_was_space` stays false — these symbols don't
-            // separate words; they decorate the previous one.
+            // adjacent to an emitted alphanumeric. Keeps `C++`,
+            // `C#`, `AT&T`, `O'Brien` distinct from their
+            // alphanumeric-only forms.
+            //
+            // R10.1 + R10.2 refinement: leading-position admittance
+            // is restricted to `.` only and only when the NEXT char
+            // is alphanumeric. `.NET` must normalize to `.net` —
+            // distinct from `NET`. Other symbols (`+ # & * '`) at
+            // leading position are markdown / formatting noise
+            // (`*foo*`, `#tag`, `&link`) and must drop. This avoids
+            // re-introducing the wrapper-leak that R9.2 closed
+            // for trailing position.
+            let admit_leading_dot =
+                last_was_space && c == '.' && chars.peek().is_some_and(|nc| nc.is_alphanumeric());
+            if !last_was_space || admit_leading_dot {
+                out.push(c);
+                last_was_space = false;
+            }
         } else if matches!(c, ' ' | '\t' | '\n' | '\r') && !last_was_space {
             out.push(' ');
             last_was_space = true;
@@ -172,16 +184,29 @@ mod tests {
         assert_eq!(normalize("C#"), "c#");
         assert_eq!(normalize("F#"), "f#");
         assert_eq!(normalize("AT&T"), "at&t");
-        // `.NET` — leading `.` is a "post-space" symbol so dropped;
-        // we keep "net" distinct from "net foundation". An exact
-        // match against another `.NET` still works because both
-        // sides apply the same rule.
-        assert_eq!(normalize(".NET"), "net");
+        // R10.1: leading identity symbols preserved when followed
+        // by alphanumeric. `.NET` must stay distinct from `NET`.
+        assert_eq!(normalize(".NET"), ".net");
+        assert_ne!(normalize(".NET"), normalize("NET"));
         assert_eq!(normalize("O'Brien"), "o'brien");
         // Distinctness checks that close the false-merge loophole.
         assert_ne!(normalize("C"), normalize("C++"));
         assert_ne!(normalize("C++"), normalize("C#"));
         assert_ne!(normalize("AT&T"), normalize("AT"));
+    }
+
+    #[test]
+    fn leading_dot_followed_by_letters_is_preserved() {
+        // R10.1 regression: `.NET` and `NET` are different entities.
+        let dotnet = normalize(".NET");
+        let net = normalize("NET");
+        assert_eq!(dotnet, ".net");
+        assert_eq!(net, "net");
+        assert_ne!(dotnet, net);
+        // Conversely, leading `.` with no following alphanumeric
+        // still drops (avoids leading-decoration noise).
+        assert_eq!(normalize("."), "");
+        assert_eq!(normalize(". hello"), "hello");
     }
 
     #[test]
