@@ -19,8 +19,39 @@ use rmcp::{
 use cairn_core::config::CairnConfig;
 use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::domain::ScopeTuple;
+use cairn_core::mcp_auth::{McpAuthContext, McpGraphAvailability, McpTransport};
+
+use cairn_store_sqlite::SqliteMemoryStore;
+use cairn_store_sqlite::entity_graph::queries::GraphQueries;
 
 use crate::generated::TOOLS;
+
+/// Materialized graph-request bundle. Resolved once; carried into dispatch.
+/// Holds the **concrete** sqlite store handle — `GraphQueries` is sqlite-
+/// specific and there is no graph-capable trait on `dyn MemoryStore` yet.
+struct GraphRequest {
+    store: Arc<SqliteMemoryStore>,
+    allowed: Vec<ScopeTuple>,
+    now_ms: i64,
+}
+
+/// Reason why a graph request could not be materialized.
+enum GraphUnavailable {
+    /// Transport/config/capability gate from Plan A returned non-Available.
+    /// The inner value carries the specific availability variant for
+    /// diagnostics; currently not read by callers that match only on `Err(_)`.
+    #[allow(dead_code)]
+    Gate(McpGraphAvailability),
+    /// Resolver returned Err or empty Vec at request time.
+    Resolver,
+}
+
+/// Build a `CallToolResult` indicating a capability is unavailable.
+fn capability_unavailable_result(name: &str) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(format!(
+        "capability unavailable: {name}"
+    ))])
+}
 
 /// MCP server handler for the Cairn verb layer.
 ///
@@ -30,9 +61,11 @@ use crate::generated::TOOLS;
 /// [`dispatch_stub`] until their real dispatch lands in a follow-up PR.
 pub struct CairnMcpHandler {
     store: Option<Arc<dyn MemoryStore>>,
+    sqlite_store: Option<Arc<SqliteMemoryStore>>,
     scope: Option<Arc<dyn cairn_core::mcp_auth::McpSessionScope>>,
     config: CairnConfig,
     principal: ScopeTuple,
+    transport: McpTransport,
 }
 
 impl Default for CairnMcpHandler {
@@ -45,6 +78,7 @@ impl std::fmt::Debug for CairnMcpHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CairnMcpHandler")
             .field("store_wired", &self.store.is_some())
+            .field("sqlite_store_wired", &self.sqlite_store.is_some())
             .field("scope_wired", &self.scope.is_some())
             // config omitted: may contain sensitive keys (embedding model paths,
             // provider credentials). Use finish_non_exhaustive to signal the
@@ -59,9 +93,11 @@ impl CairnMcpHandler {
     pub fn new() -> Self {
         Self {
             store: None,
+            sqlite_store: None,
             scope: None,
             config: CairnConfig::default(),
             principal: ScopeTuple::default(),
+            transport: McpTransport::Stdio,
         }
     }
 
@@ -73,9 +109,11 @@ impl CairnMcpHandler {
     pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
         Self {
             store: Some(store),
+            sqlite_store: None,
             scope: None,
             config,
             principal: ScopeTuple::default(),
+            transport: McpTransport::Stdio,
         }
     }
 
@@ -91,9 +129,33 @@ impl CairnMcpHandler {
     ) -> Self {
         Self {
             store: Some(store),
+            sqlite_store: None,
             scope: Some(scope),
             config,
             principal,
+            transport: McpTransport::Stdio,
+        }
+    }
+
+    /// Create a handler wired to both the trait-object store (verb path) and
+    /// the concrete sqlite store (graph path), plus a scope resolver and
+    /// principal. Plan C entry point — enables graph tool advertisement and
+    /// dispatch.
+    #[must_use]
+    pub fn with_store_scope_and_sqlite(
+        store: Arc<dyn MemoryStore>,
+        sqlite_store: Arc<SqliteMemoryStore>,
+        scope: Arc<dyn cairn_core::mcp_auth::McpSessionScope>,
+        config: CairnConfig,
+        principal: ScopeTuple,
+    ) -> Self {
+        Self {
+            store: Some(store),
+            sqlite_store: Some(sqlite_store),
+            scope: Some(scope),
+            config,
+            principal,
+            transport: McpTransport::Stdio,
         }
     }
 
@@ -122,6 +184,51 @@ impl CairnMcpHandler {
     pub fn listed_tool_names(&self) -> Vec<String> {
         TOOLS.iter().map(|t| t.name.to_string()).collect()
     }
+
+    /// Build an auth context for the current request.
+    ///
+    /// On stdio the principal is fixed at construction time; the `request_id`
+    /// sentinel `"cairn-mcp-call"` is used when no per-request id is
+    /// available from rmcp's [`rmcp::service::RequestContext`].
+    fn auth_context(&self) -> McpAuthContext<'_> {
+        McpAuthContext::new(&self.principal, "cairn-mcp-call")
+    }
+
+    /// Single source of truth for "is the graph surface usable for this
+    /// request, and if so with what scope set?" Called by both `list_tools`
+    /// and `call_tool`. Never called twice per request.
+    fn materialize_graph_request(
+        &self,
+        ctx: &McpAuthContext<'_>,
+    ) -> Result<GraphRequest, GraphUnavailable> {
+        let (Some(store), Some(sqlite_store), Some(scope)) = (
+            self.store.as_ref(),
+            self.sqlite_store.as_ref(),
+            self.scope.as_ref(),
+        ) else {
+            return Err(GraphUnavailable::Gate(
+                McpGraphAvailability::UnavailableNoStoreCapability,
+            ));
+        };
+        let avail = self.config.mcp_graph_tools_available(
+            Some(scope.as_ref()),
+            self.transport,
+            store.capabilities(),
+        );
+        if !matches!(avail, McpGraphAvailability::Available { .. }) {
+            return Err(GraphUnavailable::Gate(avail));
+        }
+        // Single resolver call — Err or empty -> Resolver-unavailable, never panic.
+        let allowed = match scope.allowed_scopes(ctx) {
+            Ok(v) if !v.is_empty() => v,
+            _ => return Err(GraphUnavailable::Resolver),
+        };
+        Ok(GraphRequest {
+            store: sqlite_store.clone(),
+            allowed,
+            now_ms: chrono::Utc::now().timestamp_millis(),
+        })
+    }
 }
 
 impl ServerHandler for CairnMcpHandler {
@@ -131,18 +238,19 @@ impl ServerHandler for CairnMcpHandler {
             .with_server_info(Implementation::new("cairn", env!("CARGO_PKG_VERSION")))
     }
 
-    /// Return all Cairn verbs as MCP tools.
+    /// Return all Cairn verbs as MCP tools, plus any graph tools when available.
     ///
     /// Converts each [`crate::generated::ToolDecl`] entry in [`TOOLS`] into
     /// an rmcp [`Tool`], parsing the embedded JSON-schema bytes with
-    /// `serde_json`.
+    /// `serde_json`. If `materialize_graph_request` succeeds, the five
+    /// `graph.*` tools are appended.
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
-        let tools: Vec<Tool> = TOOLS
+        let mut tools: Vec<Tool> = TOOLS
             .iter()
             .map(|decl| {
                 // `input_schema` is `&'static [u8]` containing a valid JSON object.
@@ -158,13 +266,32 @@ impl ServerHandler for CairnMcpHandler {
             })
             .collect();
 
+        let ctx = self.auth_context();
+        if self.materialize_graph_request(&ctx).is_ok() {
+            for decl in crate::graph_tools::GRAPH_TOOLS {
+                let schema_value: serde_json::Value =
+                    serde_json::from_slice(crate::graph_tools::schema_of(decl))
+                        .unwrap_or_else(|_| {
+                            serde_json::json!({"type": "object", "properties": {}})
+                        });
+                let schema_obj = match schema_value {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                tools.push(Tool::new(decl.name, decl.description, Arc::new(schema_obj)));
+            }
+        }
+
         std::future::ready(Ok(ListToolsResult::with_all_items(tools)))
     }
 
     /// Dispatch a tool call.
     ///
-    /// Validates that the requested verb exists in [`TOOLS`]. When the verb is
-    /// `"search"` and a store is wired, dispatches through
+    /// For `graph.*` tools: uses `materialize_graph_request` to resolve the
+    /// store and scope in a single pass, then routes to
+    /// [`crate::graph_tools::dispatch`]. Validates that the requested verb
+    /// exists in [`TOOLS`] for non-graph tools. When the verb is `"search"`
+    /// and a store is wired, dispatches through
     /// [`cairn_core::verbs::search::run`]. All other verbs (or `"search"` with
     /// no store wired) fall back to [`dispatch_stub`].
     fn call_tool(
@@ -174,12 +301,28 @@ impl ServerHandler for CairnMcpHandler {
     ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_
     {
         let name = request.name.clone();
-        let known = TOOLS.iter().any(|d| d.name == name.as_ref());
-        let store = self.store.clone();
-        let config = self.config.clone();
         let arguments = request.arguments.clone();
 
         async move {
+            // Graph tool routing — single-pass resolution, no TOCTOU.
+            if crate::graph_tools::GRAPH_TOOLS
+                .iter()
+                .any(|d| d.name == name.as_ref())
+            {
+                let ctx = self.auth_context();
+                let Ok(req) = self.materialize_graph_request(&ctx) else {
+                    return Ok(capability_unavailable_result(&name));
+                };
+                let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
+                return Ok(
+                    crate::graph_tools::dispatch(&queries, &name, arguments).await
+                );
+            }
+
+            let known = TOOLS.iter().any(|d| d.name == name.as_ref());
+            let store = self.store.clone();
+            let config = self.config.clone();
+
             if !known {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "cairn: unknown verb '{name}'. Available verbs: {}",
