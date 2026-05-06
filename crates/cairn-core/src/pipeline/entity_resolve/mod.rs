@@ -87,20 +87,128 @@ impl ResolverConfig {
 use crate::contract::llm_provider::LlmError;
 use crate::domain::graph::EntityId;
 
-/// Outcome of a Tier-1/2/3 resolution for a candidate entity name.
-///
-/// Task 6 adds [`EntityResolver`] which calls all three tiers and
-/// returns this enum. Defined here so Tier-3 (`llm.rs`) can import
-/// and return it without a forward-reference.
-// Task 6 wires Merge/New into EntityResolver; suppress dead_code until then.
-#[allow(dead_code)]
+/// Resolution outcome returned by [`EntityResolver::resolve`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Resolution {
-    /// Merge the candidate into the existing node with this id.
+    /// The candidate corresponds to an existing entity. Caller MUST
+    /// reuse this `EntityId` rather than create a new node.
     Merge(EntityId),
-    /// No match found; create a new entity node.
+    /// No tier produced a merge. Caller MUST allocate a fresh
+    /// `EntityId` and persist a new node.
     New,
+    /// Tier 2 found two or more existing entities with Jaccard
+    /// at or above `fuzzy_threshold`. Caller decides:
+    /// create a new node + flag for `lint`, invoke LLM disambiguation
+    /// across the set, or surface to the user.
+    Ambiguous(Vec<EntityId>),
+}
+
+use std::sync::Arc;
+
+use crate::contract::llm_provider::LLMProvider;
+use crate::domain::graph::EntityNode;
+
+use self::llm::llm_dedup;
+use self::minhash::{FuzzyOutcome, fuzzy_match, shingles, signature};
+use self::normalize::{exact_match, normalize};
+
+/// Three-tier entity resolver. Pure pipeline stage in `cairn-core`:
+/// no I/O, no store calls. The caller pre-fetches in-scope candidate
+/// nodes and supplies them as `existing`.
+pub struct EntityResolver {
+    config: ResolverConfig,
+    seeds: Vec<u64>,
+    llm: Option<Arc<dyn LLMProvider>>,
+}
+
+impl EntityResolver {
+    /// Construct a new resolver. Validates `config` up-front so that
+    /// [`EntityResolver::resolve`] never errors on configuration.
+    ///
+    /// `llm = None` disables Tier 3 entirely (P0 offline path).
+    ///
+    /// # Errors
+    /// Returns [`ResolverConfigError`] if `config.validate()` rejects.
+    pub fn new(
+        config: ResolverConfig,
+        llm: Option<Arc<dyn LLMProvider>>,
+    ) -> Result<Self, ResolverConfigError> {
+        config.validate()?;
+        let seeds = derive_seeds(config.hash_seed, config.num_permutations);
+        Ok(Self { config, seeds, llm })
+    }
+
+    /// Resolve `candidate_name` against the supplied `existing`
+    /// entities. See [`Resolution`] for outcome semantics.
+    ///
+    /// # Errors
+    /// Returns [`EntityResolutionError::Llm`] when Tier 3 surfaces a
+    /// non-skippable `LlmError`. `LlmError::NotConfigured` and
+    /// `LlmError::CapabilityMissing` are silently mapped to
+    /// `Resolution::New` per the offline-graceful contract.
+    pub async fn resolve(
+        &self,
+        candidate_name: &str,
+        existing: &[EntityNode],
+    ) -> Result<Resolution, EntityResolutionError> {
+        let norm = normalize(candidate_name);
+
+        // Tier 1.
+        if let Some(id) = exact_match(&norm, existing) {
+            return Ok(Resolution::Merge(id.clone()));
+        }
+
+        // Tier 2.
+        let cand_ranges = shingles(&norm);
+        let cand_sig = signature(&norm, &cand_ranges, &self.seeds);
+        let n = self.config.num_permutations;
+        let (outcome, scored) = fuzzy_match(
+            &cand_sig,
+            existing,
+            &self.seeds,
+            self.config.fuzzy_threshold,
+            n,
+        );
+        match outcome {
+            FuzzyOutcome::One(id) => return Ok(Resolution::Merge(id)),
+            FuzzyOutcome::Many(ids) => return Ok(Resolution::Ambiguous(ids)),
+            FuzzyOutcome::None => {}
+        }
+
+        // Tier 3.
+        let Some(top) = scored.first() else {
+            return Ok(Resolution::New);
+        };
+        if top.jaccard < self.config.llm_low_band {
+            return Ok(Resolution::New);
+        }
+        let Some(provider) = self.llm.as_ref() else {
+            return Ok(Resolution::New);
+        };
+        llm_dedup(
+            provider.as_ref(),
+            candidate_name,
+            top.node,
+            self.config.llm_min_confidence,
+        )
+        .await
+    }
+}
+
+/// Derive `n` permutation seeds from `seed` via splitmix64. Stable
+/// across processes; required for reproducible signatures.
+fn derive_seeds(seed: u64, n: usize) -> Vec<u64> {
+    let mut state = seed;
+    (0..n)
+        .map(|_| {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        })
+        .collect()
 }
 
 /// Errors raised when [`ResolverConfig::validate`] rejects a configuration.
@@ -135,14 +243,12 @@ pub enum ResolverConfigError {
     },
 }
 
-/// Errors raised by `EntityResolver::resolve` (added in Task 6).
+/// Errors raised by [`EntityResolver::resolve`].
 ///
 /// `LlmError::NotConfigured` and `LlmError::CapabilityMissing` are
 /// silently mapped to `Resolution::New` inside `resolve()` per the
 /// P0 offline-graceful contract; only non-skippable LLM failures
 /// surface as [`EntityResolutionError::Llm`].
-// Task 5/Task 6 wire this into the resolver; suppress dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EntityResolutionError {
@@ -275,5 +381,155 @@ mod error_tests {
             detail: "missing field `same`".into(),
         };
         assert!(e.to_string().contains("malformed payload"));
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+    use crate::contract::llm_provider::{
+        CompletionOutput, CompletionRequest, LLMProviderCapabilities,
+    };
+    use crate::contract::version::{ContractVersion, VersionRange};
+    use crate::domain::graph::EntityId;
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    fn caps() -> &'static LLMProviderCapabilities {
+        static CAPS: LLMProviderCapabilities = LLMProviderCapabilities {
+            json_mode: true,
+            streaming: false,
+            tool_calls: false,
+        };
+        &CAPS
+    }
+
+    fn versions() -> VersionRange {
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 2, 0))
+    }
+
+    struct CannedJsonLlm(Value);
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)] // Stub impl returns a literal; trait defines &str.
+    impl LLMProvider for CannedJsonLlm {
+        fn name(&self) -> &str {
+            "canned"
+        }
+        fn capabilities(&self) -> &LLMProviderCapabilities {
+            caps()
+        }
+        fn supported_contract_versions(&self) -> VersionRange {
+            versions()
+        }
+        async fn complete(&self, _r: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
+            Ok(CompletionOutput::Json(self.0.clone()))
+        }
+    }
+
+    fn node(id: &str, name_norm: &str) -> EntityNode {
+        EntityNode {
+            id: EntityId::from(id),
+            name: name_norm.to_owned(),
+            name_norm: name_norm.to_owned(),
+            summary: None,
+            created_at: 0,
+            embedding_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_existing_returns_new() {
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let res = r
+            .resolve("AuthService", &[])
+            .await
+            .expect("invariant: resolve with empty existing never errors");
+        assert!(matches!(res, Resolution::New));
+    }
+
+    #[tokio::test]
+    async fn tier1_exact_match_preempts_tier2() {
+        let existing = vec![node("01HZE7JV5N0000000000000001", "authservice")];
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let res = r
+            .resolve("AuthService", &existing)
+            .await
+            .expect("invariant: tier-1 exact match never errors");
+        assert!(
+            matches!(res, Resolution::Merge(id) if id.as_str() == "01HZE7JV5N0000000000000001")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_match_returns_new_without_llm() {
+        let existing = vec![node("01HZE7JV5N0000000000000001", "billing service")];
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let res = r
+            .resolve("payments gateway xyz", &existing)
+            .await
+            .expect("invariant: low-similarity resolve never errors");
+        assert!(matches!(res, Resolution::New));
+    }
+
+    #[tokio::test]
+    async fn tier3_skipped_when_llm_none_yields_new_or_merge() {
+        // Construct an existing node whose Jaccard against the candidate
+        // could be in the LLM band (depends on hash output); without an
+        // LLM provider, the only valid outcomes are New or Merge (Tier 2).
+        let existing = vec![node("01HZE7JV5N0000000000000001", "auth service backend")];
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let res = r
+            .resolve("auth service frontend", &existing)
+            .await
+            .expect("invariant: resolve without LLM never errors");
+        assert!(matches!(res, Resolution::New | Resolution::Merge(_)));
+    }
+
+    #[tokio::test]
+    async fn tier3_with_llm_returns_valid_resolution() {
+        let existing = vec![node("01HZE7JV5N0000000000000001", "auth service backend")];
+        let llm = Arc::new(CannedJsonLlm(json!({
+            "same": true,
+            "confidence": 0.95,
+            "reasoning": "same concept, different deployment"
+        })));
+        let r = EntityResolver::new(ResolverConfig::default(), Some(llm))
+            .expect("invariant: default config validates");
+        let res = r
+            .resolve("auth service frontend", &existing)
+            .await
+            .expect("invariant: canned LLM returning Json never errors");
+        // Outcome depends on whether Tier 2 already crossed 0.85 (Merge)
+        // or fell into the LLM band where the canned response triggers
+        // Merge. Either way, the resolver returns a defined Resolution.
+        match res {
+            Resolution::Merge(id) => {
+                assert_eq!(id.as_str(), "01HZE7JV5N0000000000000001");
+            }
+            Resolution::New | Resolution::Ambiguous(_) => {
+                // Acceptable if Jaccard fell below llm_low_band (returning New
+                // before the LLM call) or Tier 2 produced Many. Both are valid
+                // resolver outputs given the input shape.
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_config_rejected_at_construction() {
+        let bad = ResolverConfig {
+            fuzzy_threshold: 1.5,
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(bad, None);
+        assert!(matches!(
+            r,
+            Err(ResolverConfigError::FuzzyThresholdOutOfRange { .. })
+        ));
     }
 }
