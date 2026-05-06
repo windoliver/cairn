@@ -20,5 +20,5 @@ pub mod step_graph;
 // Re-exports populated as Tasks 2–5 land.
 pub use fsm::{OpState, StepState, is_terminal_op, is_terminal_step, legal_op_transition, legal_step_transition};
 pub use idempotency::{OperationId, OperationIdError, StepKey, StepLog, StepLogError};
-// pub use recover::{MAX_STEP_ATTEMPTS, OpSnapshot, RecoveryDecision, StepRow, decide_recovery};
+pub use recover::{MAX_STEP_ATTEMPTS, OpSnapshot, RecoveryDecision, StepRow, decide_recovery};
 pub use step_graph::{EXPIRE_STEPS, FORGET_RECORD_STEPS, StepDef, StepGraph, UPSERT_STEPS, WalKind, graph_for};
