@@ -299,10 +299,21 @@ impl EntityResolver {
 
         // R7.2: cap normalized-input length. Counted in chars (not
         // bytes) since shingling iterates by char.
+        // R9.1 also caps existing[i].name_norm — the store schema
+        // does not constrain `name_norm` length, so a legacy or
+        // caller-corrupt row could carry a tiny `name` and a
+        // megabyte `name_norm`, forcing Tier-2 shingling work that
+        // the candidate-side cap alone doesn't bound.
         if let Some(max) = self.config.max_candidate_chars {
             let got = norm.chars().count();
             if got > max {
                 return Err(EntityResolutionError::CandidateTooLong { got, max });
+            }
+            for n in existing {
+                let n_got = n.name_norm.chars().count();
+                if n_got > max {
+                    return Err(EntityResolutionError::CandidateTooLong { got: n_got, max });
+                }
             }
         }
 
@@ -989,6 +1000,35 @@ mod resolver_tests {
             .await
             .expect_err("invariant: oversized existing.name must error");
         assert!(matches!(err, EntityResolutionError::RawNameTooLong { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_existing_name_norm() {
+        // Codex-review R9.1: store schema does not constrain
+        // `name_norm` length; resolver must defend against a tiny
+        // `name` paired with a megabyte `name_norm` that would
+        // dominate Tier-2 shingling.
+        let cfg = ResolverConfig {
+            max_candidate_chars: Some(8),
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        let existing = vec![EntityNode {
+            id: EntityId::from("01HZE7JV5N0000000000000001"),
+            name: "x".to_owned(),
+            name_norm: "x".repeat(100),
+            summary: None,
+            created_at: 0,
+            embedding_id: None,
+        }];
+        let err = r
+            .resolve("query", &existing)
+            .await
+            .expect_err("invariant: oversized existing.name_norm must error");
+        assert!(matches!(
+            err,
+            EntityResolutionError::CandidateTooLong { .. }
+        ));
     }
 
     #[tokio::test]

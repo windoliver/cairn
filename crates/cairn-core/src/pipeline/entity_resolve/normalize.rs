@@ -77,6 +77,16 @@ pub fn normalize(s: &str) -> String {
     if out.ends_with(' ') {
         out.pop();
     }
+    // R9.2: strip trailing sentence/wrapper punctuation that the
+    // symbol-preservation rule may have admitted. `AuthService.` and
+    // `*C#*` are formatting noise around the real identity, not
+    // identity suffixes themselves. `+`, `#`, `&`, `'` stay (`C++`,
+    // `C#`, `AT&T`, `O'`-style abbreviations are real identity
+    // tokens). Conservative: only `.` and `*` strip — extending the
+    // set risks false-positive identity collisions.
+    while out.ends_with('.') || out.ends_with('*') {
+        out.pop();
+    }
     out
 }
 
@@ -172,6 +182,26 @@ mod tests {
         assert_ne!(normalize("C"), normalize("C++"));
         assert_ne!(normalize("C++"), normalize("C#"));
         assert_ne!(normalize("AT&T"), normalize("AT"));
+    }
+
+    #[test]
+    fn strips_trailing_formatting_punctuation() {
+        // Codex-review R9.2: extracted text often has trailing
+        // sentence punctuation or markdown wrappers around real
+        // identity tokens. These must NOT survive normalization or
+        // they'd force duplicate entities.
+        assert_eq!(normalize("AuthService."), normalize("AuthService"));
+        assert_eq!(normalize("AuthService..."), normalize("AuthService"));
+        assert_eq!(normalize("*C#*"), normalize("C#"));
+        assert_eq!(normalize("*AuthService*"), normalize("AuthService"));
+        // Mixed trailing wrappers strip.
+        assert_eq!(normalize("AuthService.*"), normalize("AuthService"));
+        // Identity-bearing suffixes that LOOK like wrappers are
+        // preserved when not in the strip set: `C++` keeps both `+`,
+        // `C#` keeps `#`, `AT&T` keeps `&t`.
+        assert_eq!(normalize("C++"), "c++");
+        assert_eq!(normalize("C#"), "c#");
+        assert_eq!(normalize("AT&T"), "at&t");
     }
 
     #[test]
