@@ -18,7 +18,7 @@ Five tools:
 | `graph.query` | BFS/DFS from a seed entity within hop + token budget |
 | `graph.get_entity` | Exact entity lookup by id or name; live edge count |
 | `graph.get_neighbors` | 1-hop neighborhood with optional relation/confidence filter |
-| `graph.timeline` | All edges for an entity ordered by `valid_at` |
+| `graph.timeline` | All currently-visible edges for an entity ordered by `valid_at`. Two explicit flags (`include_history`, `include_expired`) opt into broader temporal windows; defaults match the active-at-now predicate. |
 | `graph.surprising_connections` | Cross-scope, high-confidence edges between a set of entities |
 
 ## 2. Architecture
@@ -36,18 +36,29 @@ Five tools:
   `TOOLS`. A dispatch function maps tool name → `GraphQueries` method →
   serialized `CallToolResult`.
 - **`crates/cairn-mcp/src/handler.rs`** (edit). Extend `list_tools` to
-  concat `TOOLS` + `GRAPH_TOOLS` **only when the wired store advertises
-  graph capability** — `store.is_some()` is not sufficient because
-  `MemoryStore`'s graph methods can return `CapabilityUnavailable`.
-  **No new capability fields are added.** The existing
-  `MemoryStoreCapabilities::graph_edges: bool` (already public,
-  `crates/cairn-core/src/contract/memory_store.rs:48`) is the single
-  source of truth: `cairn-store-sqlite` already sets it `true` once
-  migrations 0042/0043 are applied; every other adapter leaves it at
-  the `Default` value of `false`. Reusing this avoids a public
-  contract bump. The MCP handler reads `graph_edges` at `list_tools`
-  time and at `call_tool` time (defense in depth — same predicate,
-  both sites).
+  concat `TOOLS` + `GRAPH_TOOLS` **only when the conjunction of two
+  conditions holds**:
+
+  1. The wired store advertises graph capability via the existing
+     `MemoryStoreCapabilities::graph_edges: bool` field
+     (`crates/cairn-core/src/contract/memory_store.rs:48`). No new
+     capability struct fields are added — `cairn-store-sqlite`
+     already sets `graph_edges = true` post-migration.
+  2. A non-deny-all `McpSessionScope` resolver is wired into the
+     handler (see §2.1.1). A deployment that has graph storage but
+     no scope resolver does **not** advertise the tools.
+
+  Both conditions are evaluated at `list_tools` time *and* at
+  `call_tool` time (defense in depth — same predicate, both sites).
+  The conjunction matters because reusing `graph_edges` alone would
+  let a graph-capable store advertise tools without the scope
+  prerequisite, which the timeline/leak invariants forbid.
+
+  Concretely, the handler holds an `Option<Arc<dyn
+  McpSessionScope>>`; the predicate is `store.graph_edges &&
+  scope.is_some()`. The manifest snapshot test covers four states
+  (graph-capable × scope-present matrix), with the only
+  tools-advertised state being the both-true cell.
 
   This gates discovery on the *actual* graph capability, not on
   whether a store handle is present. Clients that cache `tools/list`
@@ -247,9 +258,12 @@ visible_nodes AS (
         WHERE e.source_id = n.id OR e.target_id = n.id
       )
       OR EXISTS (
+        -- entity_episodes columns per migration 0044:
+        --   episode_id     TEXT REFERENCES records(record_id)
+        --   entity_node_id TEXT REFERENCES entity_nodes(id)
         SELECT 1 FROM entity_episodes ep
-        JOIN records r ON r.record_id = ep.source_record_id
-        WHERE ep.entity_id = n.id
+        JOIN records r ON r.record_id = ep.episode_id
+        WHERE ep.entity_node_id = n.id
           AND r.scope IN rarray(:allowed_scopes)
       )
       OR EXISTS (
@@ -519,15 +533,25 @@ the Rust side to allocate the full wave before truncating.
 
 ### 3.4 `graph.timeline`
 
-Timeline is the audit view, so it relaxes the temporal filter (it
-intentionally returns expired and outside-of-now-window edges when
-the caller asks). The **scope filter is unconditional** — even the
-audit view shows only edges the caller is authorized to see.
-Implemented as a sibling of `visible_edges` that applies *only* the
-scope predicate (not the temporal one):
+Timeline is the audit-friendly view, but it does **not** silently
+broaden temporal visibility. By default it returns the same set as
+`visible_edges` (active-at-now AND in-scope), just sorted by
+`valid_at` for the historical-narrative read pattern. Two
+**explicit** flags relax temporal filtering, each independently:
+
+- `include_history: bool` — also return edges that *were* current
+  at some point but are no longer (`invalid_at IS NOT NULL` OR
+  `valid_at > now`). Without this flag, future-dated and
+  already-invalidated edges are excluded — same as every other
+  tool.
+- `include_expired: bool` — also return tombstoned edges
+  (`expired_at IS NOT NULL`). Independent of `include_history`.
+
+The scope predicate is **always** applied. There is no flag that
+relaxes it.
 
 ```sql
-WITH scope_visible_edges AS (
+WITH scope_filtered AS (
   SELECT e.* FROM entity_edges e
   WHERE (
     EXISTS (
@@ -541,17 +565,35 @@ WITH scope_visible_edges AS (
 SELECT id, source_id, target_id, relation, confidence_score,
        valid_at, invalid_at, created_at, expired_at,
        tombstone_reason, source_record_id
-FROM scope_visible_edges
-WHERE (source_id = ?1 OR target_id = ?1)
-  AND (?2 = 1 OR expired_at IS NULL)
+FROM scope_filtered
+WHERE (source_id = ?seed OR target_id = ?seed)
+  -- Tombstone gate
+  AND (:include_expired = 1 OR expired_at IS NULL)
+  -- Temporal gate: drop unless include_history opts in.
+  -- Defaults match the active-at-now predicate from §3.0 so
+  -- the default timeline cannot leak future-dated or already-
+  -- invalidated edges.
+  AND (
+    :include_history = 1
+    OR (
+      valid_at <= :now
+      AND (invalid_at IS NULL OR invalid_at > :now)
+    )
+  )
 ORDER BY valid_at ASC, created_at ASC;
 ```
 
-`?2 = include_expired` (bool → 0/1). Stable secondary sort by
-`created_at` for deterministic output when multiple edges share
-`valid_at`. Negative test: an edge with `source_record_id` outside
-`allowed_scopes` is absent from the timeline regardless of
-`include_expired`.
+Negative tests:
+
+1. Out-of-scope `source_record_id` → absent from the timeline
+   regardless of either flag.
+2. `valid_at = now + 1h` with `include_history = false` → absent.
+   With `include_history = true` → present.
+3. `invalid_at = now - 1h` with `include_history = false` →
+   absent (already invalidated). With `include_history = true` →
+   present.
+4. `expired_at IS NOT NULL` with `include_expired = false` →
+   absent regardless of `include_history`.
 
 ### 3.5 `graph.surprising_connections`
 
@@ -719,38 +761,53 @@ issue.
 
 ## 6. Status / capability advertisement
 
-Capability discovery is **the same predicate everywhere** — there is
-no separate "is the store wired" path. The single source of truth is
-the `StoreCapabilities { graph_edges: bool }` bit introduced in
-§2.1: `cairn-store-sqlite` sets it `true` once migrations
-0042/0043/0044 are applied; every other `MemoryStore` impl (and the
-default trait method) returns `false`.
+Capability discovery is **the same predicate everywhere** — and it
+is a *conjunction*, not a single bit.
+
+Reusing the existing `MemoryStoreCapabilities::graph_edges` alone is
+not enough: a deployment may have graph storage but lack the
+session-scope resolver from §2.1.1, in which case the tools must
+not be advertised even though the store can serve them. The
+predicate is therefore:
 
 ```rust
 // One predicate, used at both list_tools and call_tool sites.
-fn graph_tools_available(store: Option<&dyn MemoryStore>) -> bool {
-    store
+fn graph_tools_available(
+    store: Option<&dyn MemoryStore>,
+    scope: Option<&dyn McpSessionScope>,
+) -> bool {
+    let store_ok = store
         .map(|s| s.capabilities().graph_edges)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    let scope_ok = scope.is_some();    // deny-all impls are still
+                                       // "present" — they just
+                                       // return empty Vec
+    store_ok && scope_ok
 }
 ```
 
-`CairnMcpServer::capabilities()` gains a derived `graph_edges`
-flag mirrored from the wired store; if the contract enum is closed
-we surface it via the existing `extensions` slot. Wiring this into
-`cairn status` output is deferred only if it requires an IDL bump —
-the in-PR signal is the manifest snapshot test, which must cover
-**three** states:
+A deny-all `McpSessionScope` impl (returns `Some(vec![])`) counts
+as "present" and lets tools advertise; calls then return
+empty/`NotFound` correctly. A *missing* scope resolver
+(`None`) means the deployment is unconfigured — tools stay hidden
+from `tools/list` rather than appearing-then-failing.
 
-1. No store wired → no `graph.*` tools advertised.
-2. Store wired but `graph_edges = false` (e.g. an in-memory
-   stub) → no `graph.*` tools advertised.
-3. Store wired with `graph_edges = true` → all five `graph.*`
-   tools advertised, byte-identical across rebuilds.
+`CairnMcpServer::capabilities()` derives its `graph_edges` flag
+from the same conjunction. Wiring into `cairn status` is deferred
+only if it requires an IDL bump — the in-PR signal is the manifest
+snapshot test, which must cover the **four** states of the matrix:
 
-Negative test: in case (2), invoking `graph.get_entity` returns
-`CapabilityUnavailable` rather than executing — defense in depth at
-the dispatch site mirrors the discovery gate.
+| store.graph_edges | scope present | `graph.*` tools listed? |
+|---|---|---|
+| false             | false         | no                      |
+| false             | true          | no                      |
+| true              | false         | no                      |
+| true              | true          | yes (5 tools)           |
+
+Negative tests cover each "no" cell: invoking `graph.get_entity`
+in any of those states returns `CapabilityUnavailable` rather than
+executing — defense in depth at dispatch mirrors the discovery
+gate.
 
 ## 7. Tests
 
