@@ -525,6 +525,7 @@ async fn seed_two_entities(
 
 #[tokio::test]
 async fn upsert_entity_round_trip_punctuation_and_unicode() {
+    use cairn_core::contract::memory_store::MemoryStore;
     use cairn_core::domain::graph::{EntityId, EntityNode, normalize_entity_name};
 
     let store = cairn_store_sqlite::open_in_memory().await.expect("open");
@@ -539,7 +540,6 @@ async fn upsert_entity_round_trip_punctuation_and_unicode() {
         embedding_id: None,
     };
 
-    use cairn_core::contract::memory_store::MemoryStore;
     let inserted_id = store.upsert_entity(&node).await.expect("insert");
 
     // The §3.1 ByName arm computes `name_norm` from the user-provided

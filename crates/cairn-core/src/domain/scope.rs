@@ -110,6 +110,25 @@ impl ScopeTuple {
             .join(",")
     }
 
+    /// Iterate the six bind dimensions in the canonical order used by
+    /// `GraphQueries::scope_match_clause`. Yields `(name, Option<&str>)`
+    /// so each call site can bind exactly six placeholders per tuple.
+    ///
+    /// `project` is intentionally omitted — it has no IDL filter
+    /// predicate (see field doc) and is not part of the scope-by-
+    /// provenance match clause.
+    pub fn dimension_iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)> + '_ {
+        [
+            ("tenant", self.tenant.as_deref()),
+            ("workspace", self.workspace.as_deref()),
+            ("session_id", self.session_id.as_deref()),
+            ("entity", self.entity.as_deref()),
+            ("user", self.user.as_deref()),
+            ("agent", self.agent.as_deref()),
+        ]
+        .into_iter()
+    }
+
     /// Validate that at least one IDL-addressable dimension is present, no
     /// present component is empty, no component carries reserved
     /// characters, and `project` is not set.
@@ -211,6 +230,33 @@ fn is_scope_component_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dimension_iter() {
+        let scope = ScopeTuple {
+            tenant: Some("acme".to_owned()),
+            workspace: Some("ws".to_owned()),
+            session_id: Some("01HQZ".to_owned()),
+            entity: Some("ent".to_owned()),
+            user: Some("alice".to_owned()),
+            agent: Some("agt".to_owned()),
+            ..ScopeTuple::default()
+        };
+        let dims: Vec<(&'static str, Option<&str>)> = scope.dimension_iter().collect();
+        assert_eq!(dims.len(), 6, "must yield exactly six dimensions");
+        let names: Vec<&str> = dims.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            names,
+            ["tenant", "workspace", "session_id", "entity", "user", "agent"],
+            "canonical order must match scope_match_clause"
+        );
+        assert_eq!(dims[0].1, Some("acme"));
+        assert_eq!(dims[1].1, Some("ws"));
+        assert_eq!(dims[2].1, Some("01HQZ"));
+        assert_eq!(dims[3].1, Some("ent"));
+        assert_eq!(dims[4].1, Some("alice"));
+        assert_eq!(dims[5].1, Some("agt"));
+    }
 
     #[test]
     fn empty_scope_rejected() {
