@@ -340,7 +340,7 @@ the same per-existing signatures — no extra hashing.
 |---|---|
 | `EntityResolver` as a pure struct in `cairn-core` (no I/O, no storage) | §3, §4 — module under `pipeline/`, no store deps; LLM is contract-level not adapter |
 | Tier 1 + Tier 2 fully functional with zero `LLMProvider` | §5.4 step 5 — `llm: None` short-circuits to `Resolution::New` |
-| Tier 3 skips gracefully on `CapabilityUnavailable` | §5.4 step 5 — `NotConfigured` and `CapabilityMissing` mapped to `New` |
+| Tier 3 skips gracefully on `NotConfigured` / `CapabilityMissing` (issue's `CapabilityUnavailable`) | §5.4 step 5 — both variants mapped to `New` |
 | `proptest` normalization idempotency | §7 — `normalize_idempotent` |
 | Jaccard boundary 0.84 → new, 0.85 → merge | §7 — boundary property test using `107/128` and `109/128` |
 | No `unwrap()` / `expect()` in `cairn-core`; typed `EntityResolutionError` | §4 — typed enum; lint enforced workspace-level |
