@@ -33,6 +33,7 @@ This PR is the **types + pure helper** slice. Wiring `cairn assemble_hot` to a r
     "segments": {
       "type": "array",
       "items": { "$ref": "#/$defs/HotSegment" },
+      "maxItems": 64,
       "description": "Recipe-step segments covering [0, bytes) contiguously, in declaration order. Three-state contract: (1) FIELD ABSENT ON THE WIRE — legacy `cairn.mcp.v1` producer that predates this feature; consumers MUST treat `prefix` as opaque. (2) `\"segments\": []` — new producer ran with NO recipe configured; the producer explicitly opts into the new contract but had nothing to emit. REQUIRED INVARIANT: `prefix == \"\"` AND `bytes == 0`. (3) `\"segments\": [...]` — new producer with a configured recipe; `len()` mirrors `HotMemoryConfig.recipe.len()` 1:1, including N zero-length entries when the recipe ran with no content. The Rust binding distinguishes (1) from (2) via `Option<Vec<HotSegment>>` (None vs Some(vec![])); JSON-only consumers distinguish them by field presence. NOTE: there is intentionally NO `default: []` here — schema-aware tooling that materialized defaults would rewrite legacy-absent into canonical-empty and then trip the EmptySegmentsRequiresEmptyPrefix invariant on legacy payloads with non-empty prefix. Forward-compat depends on absence staying absence."
     }
   }
@@ -133,7 +134,9 @@ pub enum HotRecipeStep {
 pub enum SegmentStability { Stable1h, Stable5m, Volatile }
 ```
 
-`#[non_exhaustive]` on both enums per CLAUDE.md §6.10 (public enums that may grow).
+`#[non_exhaustive]` on both enums per CLAUDE.md §6.10 (public enums that may grow in future Rust API revisions).
+
+**Wire-compat note on enum variants.** `#[non_exhaustive]` is a Rust-only pattern-matching aid; serde will still reject unknown wire values. **`HotRecipeStep` and `SegmentStability` are frozen for the lifetime of `cairn.mcp.v1`**: the six recipe steps and three stability classes listed above are all the values a `cairn.mcp.v1` payload may legally carry. Adding a variant requires bumping the contract to `cairn.mcp.v2`, the same posture as making `segments` required (§3, §8). The schema `enum` arrays in §3 are exhaustive for v1, and the schema description for each enum will say so explicitly so harness authors do not assume forward variant compat.
 
 The IDL-generated `HotRecipeStep` is structurally identical to the hand-written `cairn-core::config::HotMemoryRecipeStep`. They are kept separate by the workspace's IDL/config split (IDL = wire types from JSON Schema; config = parsed YAML). A `From` conversion will land with the assembler PR that needs it.
 
@@ -150,6 +153,11 @@ New module `crates/cairn-core/src/verbs/assemble_hot/segments.rs` (no I/O, no ad
 use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentStability};
 
 /// Default stability hint per recipe step. Constants, not config.
+/// Hard upper bound on `segments.len()` at the wire boundary. Mirrors
+/// the schema's `maxItems: 64`. `validate_segments` rejects payloads
+/// above this, defending generic decoders against amplification.
+pub const MAX_SEGMENTS: usize = 64;
+
 pub const fn default_stability(step: HotRecipeStep) -> SegmentStability {
     match step {
         HotRecipeStep::Purpose | HotRecipeStep::Index => SegmentStability::Stable1h,
@@ -196,13 +204,19 @@ pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidation
 /// - On `Some(vec![])` (canonical empty-recipe), enforces the
 ///   "empty-segments-implies-empty-prefix" invariant: `data.prefix`
 ///   MUST be empty and `data.bytes` MUST be 0, otherwise returns
-///   `EmptySegmentsRequiresEmptyPrefix`. Without this, a malformed
-///   producer could emit `{prefix:"abc", bytes:3, segments:[]}` and
-///   slip a non-canonical payload past the trust boundary under the
-///   "no recipe configured" state.
-/// - On `Some(vec![...])`, runs the per-segment checks: `byte_start <=
-///   byte_end`, contiguous in declaration order, first start 0, last
-///   end `prefix.len()`, every `content_hash` matches its slice.
+///   `EmptySegmentsRequiresEmptyPrefix`.
+/// - On `Some(vec![...])`, runs the per-segment checks:
+///     - `len() <= MAX_SEGMENTS` (`= 64`); else `TooManySegments`.
+///       Defends generic decode against amplification attacks.
+///     - `byte_start <= byte_end`, contiguous, first 0, last
+///       `prefix.len()`, hash matches slice.
+///     - **`stability == default_stability(step)`** for every
+///       segment; else `StabilityMismatch`. The wire field is
+///       redundant with `step` (the spec defines a deterministic
+///       mapping, §5 `default_stability`); validating consistency
+///       authenticates the cache-lifetime hint that wrappers
+///       consume. A producer cannot label volatile content as
+///       `stable_1h` and slip mislabeled bytes past the boundary.
 ///
 /// Does NOT check recipe alignment (the payload alone does not know
 /// what recipe was configured); use `validate_with_recipe` for that.
@@ -243,6 +257,10 @@ pub enum AssembleHotValidationError {
     HashMismatch { index: usize },
     #[error("segment {index}: byte_end {end} > prefix.len() {prefix_len}")]
     OutOfBounds { index: usize, end: u64, prefix_len: u64 },
+    #[error("segment {index}: stability {got:?} does not match default for step {step:?} ({expected:?})")]
+    StabilityMismatch { index: usize, step: HotRecipeStep, got: SegmentStability, expected: SegmentStability },
+    #[error("segments.len() {got} exceeds maximum {max}")]
+    TooManySegments { got: usize, max: usize },
     #[error("segment {index}: expected step {expected:?}, got {got:?}")]
     StepMismatch { index: usize, expected: HotRecipeStep, got: HotRecipeStep },
     #[error("segments.len() {got} != expected recipe.len() {expected}")]
@@ -289,6 +307,8 @@ pub enum AssembleHotValidationError {
 - `validate_segments_rejects_does_not_cover_prefix` — last segment ends before `prefix.len()`.
 - `validate_segments_rejects_hash_mismatch` — flip a content_hash byte.
 - `validate_segments_rejects_out_of_bounds` — last segment ends past `prefix.len()`.
+- `validate_segments_rejects_stability_mismatch` — hand-craft a segment with `step: RecentUserSignal, stability: Stable1h`. Returns `StabilityMismatch`. Pins that wrappers cannot be misled into caching volatile content under a stable lifetime.
+- `validate_segments_rejects_too_many` — craft a payload with 65 segments. Returns `TooManySegments { got: 65, max: 64 }`. Defends generic decode against amplification.
 - `validate_with_recipe_rejects_step_mismatch` — payload's step does not match expected recipe at index i.
 - `validate_with_recipe_rejects_recipe_len_mismatch` — `segments.len() != expected.len()`.
 - `build_segments_output_validates` — round-trip: `validate(&build(...).unwrap()) == Ok(())` for any `(recipe, bodies)`.
