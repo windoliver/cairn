@@ -28,6 +28,7 @@ pub mod consent_timeline;
 pub mod error;
 pub mod evidence;
 pub mod filter;
+pub mod flush_plan;
 pub mod folder;
 pub mod graph;
 pub mod identity;
@@ -39,6 +40,7 @@ pub mod scope;
 pub mod session;
 pub mod target_id;
 pub mod taxonomy;
+pub mod time;
 pub mod timestamp;
 pub mod trace;
 
@@ -57,6 +59,10 @@ pub use consent_timeline::{
 };
 pub use error::DomainError;
 pub use evidence::{ConfidenceBand, EvidenceVector};
+pub use flush_plan::{
+    ApplyKind, ExpirationReason, FlushMode, FlushPlan, PersistedPlan, PlanReason, PlanStatus,
+    PlannedMutation,
+};
 pub use identity::{Identity, IdentityKind};
 pub use intent::VerifiedSignedIntent;
 pub use projection::{
@@ -71,5 +77,6 @@ pub use session::{
 };
 pub use target_id::TargetId;
 pub use taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
+pub use time::{Clock, SystemClock};
 pub use timestamp::Rfc3339Timestamp;
 pub use trace::{TraceEvent, TraceLink, TraceLinkError};

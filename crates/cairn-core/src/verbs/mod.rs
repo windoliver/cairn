@@ -5,3 +5,4 @@
 //! adapters → verb inputs is the job of `cairn-cli`.
 
 pub mod lint;
+pub mod search;

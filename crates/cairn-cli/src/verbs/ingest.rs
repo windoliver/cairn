@@ -295,6 +295,22 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // --dry-run / --human-review: build a stub FlushPlan and either print
+    // or persist it. Returns before the source-count validation so these
+    // flags can be combined with a normal --kind/--body without tripping the
+    // guard; the validation still runs for the non-flush path below.
+    let dry_run = sub.get_flag("dry-run");
+    let human_review = sub.get_flag("human-review");
+    let no_diff = sub.get_flag("no-diff");
+    if dry_run || human_review {
+        let mode = if dry_run {
+            cairn_core::domain::flush_plan::FlushMode::DryRun
+        } else {
+            cairn_core::domain::flush_plan::FlushMode::HumanReview
+        };
+        return crate::verbs::ingest_plan_stub(sub, mode, no_diff, json);
+    }
+
     // Enforce IDL exactly-one-of: body/file/url (positional `source` counts as one).
     let has_source = sub.get_one::<String>("source").is_some();
     let has_body = sub.get_one::<String>("body").is_some();

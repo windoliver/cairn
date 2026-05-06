@@ -239,7 +239,10 @@ const EXPECTED_OBJECTS: &[(&str, &str)] = &[
     // filtered by the `sqlite_%` clause — do NOT add it here.
     ("table", "entity_episodes"),
     ("index", "entity_episodes_entity_idx"),
-    // 0046_consent_journal_repair_audit (issue #267): operator-driven
+    // 0046_records_schema_version — per-row schema-version stamp for the
+    // §6.4 stale_schema lint (#258).
+    ("index", "records_schema_version_idx"),
+    // 0048_consent_journal_repair_audit (issue #267): operator-driven
     // recovery audit table for legacy consent_journal rows blocking 0021.
     ("table", "consent_journal_repair_audit"),
     ("trigger", "consent_journal_repair_audit_immutable"),

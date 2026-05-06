@@ -2026,13 +2026,17 @@ pub(crate) fn variant_required_specs(verb_def: &VerbDef, cmds: &[&CliCommand]) -
         .collect()
 }
 
-/// Pick the schema variant whose non-const property names are a **subset**
-/// of the `CliCommand`'s flag/positional name set. The CLI may carry extra
-/// discriminator-only flags (e.g., `--profile` for `ArgsProfile`) that don't
-/// appear as JSON properties, so strict equality is too tight. **Fails
-/// closed** when zero or more than one variant qualifies — that surfaces a
-/// schema/CLI drift as a missing spec → 0-variant match → `AmbiguousVariant`
-/// rather than letting the validator silently bind the wrong variant.
+/// Pick the schema variant whose **required** non-const property names are a
+/// **subset** of the `CliCommand`'s flag/positional name set. Using required
+/// fields only (rather than all properties) lets optional boolean flags like
+/// `dry_run` / `human_review` live in the schema without a CLI flag entry —
+/// they are wired by the CLI layer rather than declared in the IDL. The CLI
+/// may also carry extra discriminator-only flags (e.g., `--profile` for
+/// `ArgsProfile`) that don't appear as JSON properties, so strict equality is
+/// too tight. **Fails closed** when zero or more than one variant qualifies —
+/// that surfaces a schema/CLI drift as a missing spec → 0-variant match →
+/// `AmbiguousVariant` rather than letting the validator silently bind the
+/// wrong variant.
 fn pair_cmd_to_variant<'a>(
     cmd: &CliCommand,
     variants: &[&'a serde_json::Value],
@@ -2045,33 +2049,23 @@ fn pair_cmd_to_variant<'a>(
         .collect();
     let mut candidates: Vec<&'a serde_json::Value> = Vec::new();
     for &v in variants {
-        let Some(props) = v.get("properties").and_then(serde_json::Value::as_object) else {
-            continue;
-        };
-        let variant_fields: BTreeSet<String> = props
-            .iter()
-            .filter(|(_, ps)| ps.get("const").is_none())
-            .map(|(k, _)| k.clone())
-            .collect();
-        if variant_fields.is_subset(&cmd_fields) {
+        // Only check the *required* non-const fields for subset membership.
+        // Optional properties (those with a `default`) may not have a CLI
+        // flag entry and must not disqualify a valid pairing.
+        let required_fields = required_excluding_const(v);
+        if required_fields.is_subset(&cmd_fields) {
             candidates.push(v);
         }
     }
-    // Pick the most-specific (largest) variant among candidates so a CLI
-    // surface like {session_id, limit, order, rehydrate, include, cursor}
-    // pairs to ArgsSession (5 fields) instead of an unrelated subset.
-    candidates.sort_by_key(|v| {
-        std::cmp::Reverse(
-            v.get("properties")
-                .and_then(serde_json::Value::as_object)
-                .map_or(0, |p| {
-                    p.iter().filter(|(_, ps)| ps.get("const").is_none()).count()
-                }),
-        )
-    });
+    // Pick the most-specific (largest required non-const field count) variant
+    // among candidates so a CLI surface like
+    // {session_id, limit, order, rehydrate, include, cursor} pairs to
+    // ArgsSession (required: {session_id}) instead of an empty-required
+    // variant like ArgsProfile.
+    candidates.sort_by_key(|v| std::cmp::Reverse(required_excluding_const(v).len()));
     let mut iter = candidates.into_iter();
     let best = iter.next()?;
-    // If a second candidate exists at the same field-count, ambiguous → fail.
+    // If a second candidate exists at the same required-field-count, ambiguous → fail.
     if let Some(next) = iter.next()
         && variant_field_count(best) == variant_field_count(next)
     {
@@ -2081,11 +2075,7 @@ fn pair_cmd_to_variant<'a>(
 }
 
 fn variant_field_count(v: &serde_json::Value) -> usize {
-    v.get("properties")
-        .and_then(serde_json::Value::as_object)
-        .map_or(0, |p| {
-            p.iter().filter(|(_, ps)| ps.get("const").is_none()).count()
-        })
+    required_excluding_const(v).len()
 }
 
 /// Walk `markdown`, returning each code block paired with the verb id from the

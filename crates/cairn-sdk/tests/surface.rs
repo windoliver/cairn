@@ -74,6 +74,7 @@ fn verb_response_serializes_as_canonical_envelope() {
         data: IngestData {
             record_id: ulid(),
             session_id: "sess-1".to_owned(),
+            plan_ref: None,
         },
     };
     let value = serde_json::to_value(&resp).expect("serializes");
@@ -119,6 +120,7 @@ fn verb_response_rejects_envelope_invalid_target_combinations() {
         data: IngestData {
             record_id: ulid(),
             session_id: "s".to_owned(),
+            plan_ref: None,
         },
     };
     assert!(serde_json::to_value(&stray).is_err());
@@ -159,16 +161,18 @@ fn verb_response_emits_target_for_retrieve_envelope() {
 }
 
 #[test]
-fn status_advertises_no_capabilities_in_p0() {
+fn sdk_new_advertises_no_capabilities() {
     let resp = sdk().status();
-    // Mirrors `cairn status` — P0 advertises no capabilities until verb
-    // runtime can honor them (#9 / #61 / #62). The IDL declares
-    // `cairn.mcp.v1.policy_trace` (#95) and the store-driven mode
-    // capabilities; advertising them before they are honored would
-    // mislead negotiating clients.
+    // `Sdk::new` has no store wired: every verb returns
+    // SdkError::Unimplemented, so advertising any capability would
+    // mislead clients negotiating from `status`. The shared
+    // `advertised_capabilities` helper enforces fail-closed gating —
+    // `Sdk::with_store` is the surface that opts capabilities back in
+    // (see `sdk_with_store_advertises_caps_from_store_and_config`).
     assert!(
         resp.capabilities.is_empty(),
-        "P0 SDK status must advertise an empty capabilities list; got {:?}",
+        "Sdk::new must advertise an empty capabilities list (no backing \
+         store → every verb returns Unimplemented); got {:?}",
         resp.capabilities
     );
     assert!(resp.extensions.is_empty());
@@ -208,9 +212,12 @@ fn ingest_invalid_args_returns_typed_error() {
     // Violate exactly-one-of: pass body AND file.
     let args = IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: Some("/tmp/x".to_owned()),
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -228,9 +235,12 @@ fn ingest_invalid_args_returns_typed_error() {
 fn ingest_valid_args_returns_internal_stub() {
     let args = IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -247,9 +257,12 @@ fn ingest_rejects_schema_minlength_violations() {
     // floor.
     let bases = || IngestArgs {
         body: Some("note".to_owned()),
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: None,
@@ -407,9 +420,12 @@ fn ingest_accepts_well_formed_uri_schemes() {
     ] {
         let args = IngestArgs {
             body: None,
+            dry_run: None,
             file: None,
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: Some(url.to_owned()),
@@ -418,8 +434,8 @@ fn ingest_accepts_well_formed_uri_schemes() {
     }
 }
 
-#[test]
-fn search_rejects_empty_query_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_query_with_invalid_args() {
     // Wire format requires non-empty query; SDK must surface it as
     // InvalidArgs instead of capability-checking an unvalidated request.
     let args = SearchArgs {
@@ -432,7 +448,7 @@ fn search_rejects_empty_query_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("query"), "reason: {reason}");
         }
@@ -440,8 +456,8 @@ fn search_rejects_empty_query_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_out_of_range_limit_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_out_of_range_limit_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -452,7 +468,7 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("limit"), "reason: {reason}");
         }
@@ -460,13 +476,15 @@ fn search_rejects_out_of_range_limit_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
-    // P0 advertises no capabilities. `args.explain == Some(true)` is
-    // gated on `cairn.mcp.v1.policy_trace` per the
+#[tokio::test]
+async fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
+    // `Sdk::new` advertises no capabilities (see
+    // `sdk_new_advertises_no_capabilities`). `args.explain == Some(true)`
+    // is gated on `cairn.mcp.v1.policy_trace` per the
     // `x-cairn-capability-when-true` annotation in
-    // `crates/cairn-idl/schema/verbs/search.json`. Mirrors the CLI
-    // fail-closed path; together they enforce the gate end-to-end.
+    // `crates/cairn-idl/schema/verbs/search.json`; the dispatcher
+    // additionally requires the search-mode capability. Either missing
+    // capability is a valid fail-closed signal.
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -477,29 +495,28 @@ fn search_explain_rejects_when_policy_trace_capability_unadvertised() {
         scope: None,
         explain: Some(true),
     };
-    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    let err = sdk()
+        .search(&args)
+        .await
+        .expect_err("no store wired → must fail closed");
     match err {
-        SdkError::CapabilityUnavailable {
-            capability,
-            operation_id,
-            ..
-        } => {
+        SdkError::CapabilityUnavailable { capability, .. } => {
             assert!(
                 capability == "cairn.mcp.v1.search.keyword"
                     || capability == "cairn.mcp.v1.policy_trace",
                 "expected mode or policy_trace capability error; got {capability}"
             );
-            assert_eq!(operation_id.0.len(), 26);
         }
         other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }
 }
 
-#[test]
-fn search_explain_false_does_not_require_policy_trace() {
-    // The default `explain: None` (and explicit `Some(false)`) must NOT
-    // require the policy_trace capability. Only `Some(true)` triggers
-    // the gate.
+#[tokio::test]
+async fn search_explain_false_rejects_unadvertised_keyword_mode() {
+    // `explain: Some(false)` must NOT trigger the policy_trace gate
+    // (only `Some(true)` does). With no store wired, the keyword mode
+    // is also unadvertised, so the call still fails closed — but the
+    // failing capability must be the search mode, not policy_trace.
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -510,21 +527,28 @@ fn search_explain_false_does_not_require_policy_trace() {
         scope: None,
         explain: Some(false),
     };
-    let err = sdk().search(&args).expect_err("must fail closed in P0");
+    let err = sdk()
+        .search(&args)
+        .await
+        .expect_err("no store wired → must fail closed");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {
-            // Should be the search mode capability, not policy_trace —
-            // explain=false must not trigger the policy_trace gate.
-            assert_eq!(capability, "cairn.mcp.v1.search.keyword");
+            assert_eq!(
+                capability, "cairn.mcp.v1.search.keyword",
+                "explain=false must surface the mode capability, not policy_trace"
+            );
         }
-        other => panic!("expected CapabilityUnavailable for keyword mode, got {other:?}"),
+        other => panic!("expected CapabilityUnavailable, got {other:?}"),
     }
 }
 
-#[test]
-fn search_rejects_unadvertised_modes_with_capability_unavailable() {
-    // P0 advertises no capabilities, so every search mode must fail closed
-    // with CapabilityUnavailable rather than the generic Internal stub.
+#[tokio::test]
+async fn search_rejects_unadvertised_modes_with_capability_unavailable() {
+    // `Sdk::new` advertises no capabilities (no store wired). Every
+    // search mode must therefore fail closed with CapabilityUnavailable
+    // rather than the generic Internal/Unimplemented stub. Mirrors the
+    // original P0 contract restored after the round-1 review found that
+    // `Sdk::new` was over-advertising defaults.
     for (mode, expected) in [
         (SearchArgsMode::Keyword, "cairn.mcp.v1.search.keyword"),
         (SearchArgsMode::Semantic, "cairn.mcp.v1.search.semantic"),
@@ -540,7 +564,10 @@ fn search_rejects_unadvertised_modes_with_capability_unavailable() {
             scope: None,
             explain: None,
         };
-        let err = sdk().search(&args).expect_err("must fail closed in P0");
+        let err = sdk()
+            .search(&args)
+            .await
+            .expect_err("no store wired → must fail closed");
         match err {
             SdkError::CapabilityUnavailable {
                 capability,
@@ -593,8 +620,8 @@ fn retrieve_profile_requires_user_or_agent() {
     }
 }
 
-#[test]
-fn search_rejects_empty_and_filter_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_and_filter_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -605,7 +632,7 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("filter.and"), "reason: {reason}");
         }
@@ -613,8 +640,8 @@ fn search_rejects_empty_and_filter_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_excessive_filter_depth_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_excessive_filter_depth_with_invalid_args() {
     // Build a 9-level Not chain — exceeds max depth of 8.
     let mut node = SearchArgsFilters::Leaf(serde_json::json!({
         "field": "kind", "op": "eq", "value": "note"
@@ -634,7 +661,7 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("max boolean depth"), "reason: {reason}");
         }
@@ -642,8 +669,8 @@ fn search_rejects_excessive_filter_depth_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_rejects_malformed_filter_leaf_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_filter_leaf_with_invalid_args() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -658,7 +685,7 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("field"), "reason: {reason}");
         }
@@ -666,12 +693,13 @@ fn search_rejects_malformed_filter_leaf_with_invalid_args() {
     }
 }
 
-#[test]
-fn search_accepts_extended_filter_operators() {
+#[tokio::test]
+async fn search_accepts_extended_filter_operators() {
     // Mirrors the generated grammar: between, array_contains,
     // array_contains_any/all, and array_size_eq must validate cleanly.
-    // With no capability advertised in P0 the call lands on
-    // CapabilityUnavailable — the point is leaf validation passed.
+    // `Sdk::new` advertises no capabilities, so the call lands on
+    // CapabilityUnavailable — the point is that leaf validation passed
+    // before the fail-closed gate triggered.
     let valid_leaves = [
         serde_json::json!({"field": "score", "op": "between", "value": [0, 10]}),
         serde_json::json!({"field": "tags", "op": "array_contains", "value": "rust"}),
@@ -691,15 +719,19 @@ fn search_accepts_extended_filter_operators() {
             scope: None,
             explain: None,
         };
-        match sdk().search(&args).expect_err("P0 has no capability") {
+        match sdk()
+            .search(&args)
+            .await
+            .expect_err("no store wired → CapabilityUnavailable")
+        {
             SdkError::CapabilityUnavailable { .. } => {}
             other => panic!("expected CapabilityUnavailable for {leaf:?}, got {other:?}"),
         }
     }
 }
 
-#[test]
-fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
     let bad_leaves = [
         // between: wrong arity / non-numeric
         serde_json::json!({"field": "x", "op": "between", "value": [1]}),
@@ -727,15 +759,15 @@ fn search_rejects_malformed_extended_filter_operators_with_invalid_args() {
             scope: None,
             explain: None,
         };
-        match sdk().search(&args).expect_err("must reject") {
+        match sdk().search(&args).await.expect_err("must reject") {
             SdkError::InvalidArgs { .. } => {}
             other => panic!("expected InvalidArgs for {leaf:?}, got {other:?}"),
         }
     }
 }
 
-#[test]
-fn search_rejects_malformed_cursor_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_malformed_cursor_with_invalid_args() {
     // Cursor newtype is publicly constructible; the SDK must re-apply the
     // generated Cursor::Deserialize rules (non-empty, ≤ 512 chars).
     let args = SearchArgs {
@@ -748,14 +780,14 @@ fn search_rejects_malformed_cursor_with_invalid_args() {
         scope: None,
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("Cursor"), "reason: {reason}"),
         other => panic!("expected InvalidArgs, got {other:?}"),
     }
 }
 
-#[test]
-fn search_rejects_empty_scope_filter_with_invalid_args() {
+#[tokio::test]
+async fn search_rejects_empty_scope_filter_with_invalid_args() {
     // Empty ScopeFilter: every field None — must mirror RawScopeFilter
     // TryFrom's "at least one of [...]" check.
     let args = SearchArgs {
@@ -768,7 +800,7 @@ fn search_rejects_empty_scope_filter_with_invalid_args() {
         scope: Some(empty_scope_filter()),
         explain: None,
     };
-    match sdk().search(&args).expect_err("must reject") {
+    match sdk().search(&args).await.expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
             assert!(reason.contains("at least one of"), "reason: {reason}");
         }
@@ -780,6 +812,9 @@ fn search_rejects_empty_scope_filter_with_invalid_args() {
 fn forget_record_rejects_malformed_ulid_with_invalid_args() {
     let args = ForgetArgs::Record {
         record_id: Ulid("not-a-ulid".to_owned()),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => assert!(reason.contains("ULID"), "reason: {reason}"),
@@ -846,6 +881,9 @@ fn capture_trace_rejects_empty_from_with_invalid_args() {
 fn forget_session_rejects_empty_session_id_with_invalid_args() {
     let args = ForgetArgs::Session {
         session_id: String::new(),
+        dry_run: None,
+        human_review: None,
+        no_diff: None,
     };
     match sdk().forget(&args).expect_err("must reject") {
         SdkError::InvalidArgs { reason } => {
@@ -917,9 +955,12 @@ fn sdk_error_code_helper_returns_typed_code() {
     let unimpl = sdk()
         .ingest(&IngestArgs {
             body: Some("note".to_owned()),
+            dry_run: None,
             file: None,
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: None,
@@ -931,9 +972,12 @@ fn sdk_error_code_helper_returns_typed_code() {
     let invalid = sdk()
         .ingest(&IngestArgs {
             body: Some("a".to_owned()),
+            dry_run: None,
             file: Some("b".to_owned()),
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: None,
@@ -946,7 +990,12 @@ fn sdk_error_code_helper_returns_typed_code() {
 #[test]
 fn forget_rejects_unadvertised_target_with_capability_unavailable() {
     let err = sdk()
-        .forget(&ForgetArgs::Record { record_id: ulid() })
+        .forget(&ForgetArgs::Record {
+            record_id: ulid(),
+            dry_run: None,
+            human_review: None,
+            no_diff: None,
+        })
         .expect_err("must fail closed in P0");
     match err {
         SdkError::CapabilityUnavailable { capability, .. } => {

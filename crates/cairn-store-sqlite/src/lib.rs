@@ -14,12 +14,14 @@ pub mod consent_timeline;
 pub mod entity_graph;
 pub mod error;
 mod identity;
+pub mod locks;
 pub mod migrations;
 pub mod open;
 pub mod repair;
 pub mod store;
 pub mod vec_ext;
 mod verify;
+pub mod wal;
 
 pub use error::StoreError;
 pub use identity::SqliteIdentityRegistry;
@@ -31,6 +33,7 @@ pub use open::{
 pub use open::{open_in_memory_sync, open_sync};
 pub use store::SqliteMemoryStore;
 pub use store::reindex::{DrainStats, drain_once};
+pub use store::reindex_from_db::{RebuildStats, rebuild_from_db};
 pub use store::sessions::{NewSessionMetadata, ResolveOutcome};
 pub use store::tx::StoreTx;
 
@@ -44,14 +47,15 @@ pub const PLUGIN_NAME: &str = "cairn-store-sqlite";
 /// Plugin capability manifest TOML (parsed at registration time).
 pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 
-/// Contract-version range this crate accepts (`[0.3.0, 0.4.0)`). Shared
+/// Contract-version range this crate accepts (`[0.4.0, 0.5.0)`). Shared
 /// by the trait impl and the compile-time guard below so the manifest
 /// range and the trait surface derive from one binding. Lower bound
-/// raised to 0.3.0 in #253: 0.2 callers cannot advertise
-/// `MemoryStoreCapabilities::per_record_consent_model`, so the §6.5
-/// gate would silently fail-open against a 0.2 host.
+/// raised to 0.3.0 in #253 (`per_record_consent_model`), and to 0.4.0
+/// in #258 (per-row `schema_version` stamp on `StoredRecord` and
+/// `RecordVersion` — adding required public fields is a struct-
+/// construction break).
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
+    VersionRange::new(ContractVersion::new(0, 4, 0), ContractVersion::new(0, 5, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

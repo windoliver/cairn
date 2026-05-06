@@ -42,9 +42,12 @@ fn search_with_filter(filter: serde_json::Value) -> SearchArgs {
 fn ingest_with_url(url: String) -> IngestArgs {
     IngestArgs {
         body: None,
+        dry_run: None,
         file: None,
         frontmatter: None,
+        human_review: None,
         kind: "note".to_owned(),
+        no_diff: None,
         session_id: None,
         tags: None,
         url: Some(url),
@@ -124,6 +127,15 @@ const CANONICAL_OPS: &[&str] = &[
     "array_size_eq",
 ];
 
+fn search_sync(
+    args: &SearchArgs,
+) -> Result<cairn_sdk::VerbResponse<cairn_sdk::generated::verbs::search::SearchData>, SdkError> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("tokio rt")
+        .block_on(sdk().search(args))
+}
+
 proptest! {
     #[test]
     fn unknown_filter_ops_reject(
@@ -135,7 +147,7 @@ proptest! {
             "op": op,
             "value": "v"
         }));
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 
     #[test]
@@ -146,7 +158,7 @@ proptest! {
         let mut leaf = serde_json::json!({"field": "x", "op": "eq", "value": "v"});
         leaf.as_object_mut().unwrap().insert(extra, serde_json::json!(1));
         let args = search_with_filter(leaf);
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 
     #[test]
@@ -158,7 +170,7 @@ proptest! {
             "op": CANONICAL_OPS[op_idx],
             "value": "v"
         }));
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 }
 
@@ -210,9 +222,12 @@ proptest! {
         prop_assume!(count != 1);
         let args = IngestArgs {
             body: has_body.then(|| "b".to_owned()),
+            dry_run: None,
             file: has_file.then(|| "/f".to_owned()),
             frontmatter: None,
+            human_review: None,
             kind: "note".to_owned(),
+            no_diff: None,
             session_id: None,
             tags: None,
             url: has_url.then(|| "http://example.com/x".to_owned()),
@@ -223,11 +238,53 @@ proptest! {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// FlushPlan modes — dry_run and human_review are mutually exclusive
+// at the wire layer (review-loop round 1, brief §5.5).
+// ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ingest_dry_run_and_human_review_both_true_rejects() {
+    let args = IngestArgs {
+        body: Some("hello".to_owned()),
+        dry_run: Some(true),
+        file: None,
+        frontmatter: None,
+        human_review: Some(true),
+        kind: "note".to_owned(),
+        no_diff: None,
+        session_id: None,
+        tags: None,
+        url: None,
+    };
+    let err = sdk().ingest(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn forget_record_dry_run_and_human_review_both_true_rejects() {
+    use cairn_sdk::generated::verbs::forget::ForgetArgs;
+    let args = ForgetArgs::Record {
+        record_id: Ulid("01HQZX9F5N0000000000000000".to_owned()),
+        dry_run: Some(true),
+        human_review: Some(true),
+        no_diff: None,
+    };
+    let err = sdk().forget(&args).expect_err("must reject double-mode");
+    assert!(
+        is_invalid_args(&err),
+        "expected InvalidArgs for dry_run+human_review on forget, got {err:?}"
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
 // ScopeFilter — at least one field must be set.
 // ────────────────────────────────────────────────────────────────────
 
-#[test]
-fn empty_scope_filter_rejects() {
+#[tokio::test]
+async fn empty_scope_filter_rejects() {
     let args = SearchArgs {
         citations: None,
         cursor: None,
@@ -250,7 +307,7 @@ fn empty_scope_filter_rejects() {
         explain: None,
     };
     assert!(matches!(
-        sdk().search(&args).expect_err("must reject"),
+        sdk().search(&args).await.expect_err("must reject"),
         SdkError::InvalidArgs { .. }
     ));
 }
@@ -272,7 +329,7 @@ proptest! {
             scope: None,
             explain: None,
         };
-        prop_assert!(is_invalid_args(&sdk().search(&args).expect_err("must reject")));
+        prop_assert!(is_invalid_args(&search_sync(&args).expect_err("must reject")));
     }
 }
 

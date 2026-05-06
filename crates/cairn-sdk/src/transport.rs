@@ -9,6 +9,10 @@
 //! When verb handlers move into `cairn-core::verbs::*`, replace each `Err(...)`
 //! arm with the dispatch into the shared handler.
 
+use std::sync::Arc;
+
+use cairn_core::config::CairnConfig;
+use cairn_core::contract::memory_store::MemoryStore;
 use cairn_core::generated::common::Capabilities;
 use cairn_core::generated::handshake::{HandshakeResponse, HandshakeResponseChallenge};
 use cairn_core::generated::status::{StatusResponse, StatusResponseServerInfo};
@@ -19,9 +23,10 @@ use cairn_core::generated::verbs::{
     ingest::{IngestArgs, IngestData},
     lint::{LintArgs, LintData},
     retrieve::{RetrieveArgs, RetrieveData},
-    search::{SearchArgs, SearchData},
+    search::{SearchArgs, SearchArgsMode, SearchData},
     summarize::{SummarizeArgs, SummarizeData},
 };
+use cairn_core::pipeline::dispatch::{DefaultRegistry, pipeline_dispatch_advertisement};
 
 use crate::stub::{new_nonce, now_ms, now_rfc3339_seconds, store_not_wired};
 use crate::{CONTRACT, SdkError, VerbResponse};
@@ -48,26 +53,75 @@ impl Transport for InProcess {}
 
 /// SDK client.
 ///
-/// Construct with [`Sdk::new`] for the default in-process transport. Every
-/// verb fn returns either a typed [`VerbResponse`] or an [`SdkError`]; no
-/// CLI parsing required.
+/// Construct with [`Sdk::new`] for the default in-process transport, or
+/// [`Sdk::with_store`] to wire a [`MemoryStore`] so that verbs like
+/// [`Sdk::search`] actually dispatch instead of returning
+/// [`SdkError::Unimplemented`].
 ///
 /// `status.server_info.incarnation` and `started_at` are minted **fresh on
 /// every call**, matching the P0 CLI ground-truth (`cairn status` —
 /// `crates/cairn-cli/src/verbs/status.rs`). Once the store adapter lands
 /// (issue #9), both surfaces will read the canonical values from the
 /// daemon table; until then SDK and CLI behave identically.
-#[derive(Debug, Clone, Copy)]
 pub struct Sdk<T: Transport = InProcess> {
     _transport: T,
+    /// Optional wired store. `None` → verbs return [`SdkError::Unimplemented`].
+    store: Option<Arc<dyn MemoryStore>>,
+    /// Active config, used for capability derivation and dispatch knobs.
+    config: CairnConfig,
+}
+
+impl std::fmt::Debug for Sdk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sdk")
+            .field(
+                "store",
+                &if self.store.is_some() {
+                    "wired"
+                } else {
+                    "none"
+                },
+            )
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl Clone for Sdk {
+    fn clone(&self) -> Self {
+        Self {
+            _transport: InProcess,
+            store: self.store.clone(),
+            config: self.config.clone(),
+        }
+    }
 }
 
 impl Sdk<InProcess> {
     /// Construct an in-process SDK client.
+    ///
+    /// Verbs that require a store return [`SdkError::Unimplemented`] until
+    /// the store is wired. Use [`Sdk::with_store`] to wire one.
     #[must_use]
     pub fn new() -> Self {
         Self {
             _transport: InProcess,
+            store: None,
+            config: CairnConfig::default(),
+        }
+    }
+
+    /// Construct an in-process SDK client wired to a real store.
+    ///
+    /// Verbs that previously returned [`SdkError::Unimplemented`] now
+    /// dispatch against the supplied store. The store is shared via [`Arc`]
+    /// so callers can keep their own handle.
+    #[must_use]
+    pub fn with_store(store: Arc<dyn MemoryStore>, config: CairnConfig) -> Self {
+        Self {
+            _transport: InProcess,
+            store: Some(store),
+            config,
         }
     }
 }
@@ -90,6 +144,17 @@ impl<T: Transport> Sdk<T> {
     /// Returns the contract version, advertised capabilities, and server
     /// info. `incarnation` and `started_at` are minted per-call to match
     /// the CLI's P0 behavior (no daemon table yet — see issue #9).
+    ///
+    /// Capabilities reflect what the SDK can execute end-to-end:
+    /// - [`Sdk::new`] (no store wired) advertises an empty list — every
+    ///   verb returns [`SdkError::Unimplemented`], so promising any
+    ///   capability would mislead negotiating clients.
+    /// - [`Sdk::with_store`] gates each capability on the store's own
+    ///   advertisement (`MemoryStore::capabilities`), the wired config,
+    ///   and the embedding-model presence implied by store FTS+vector
+    ///   support. Search modes rely on FTS / vector indexes; advertising
+    ///   them when the store cannot back them would allow the dispatcher
+    ///   to surface `Internal` instead of fail-closed `CapabilityUnavailable`.
     #[must_use]
     pub fn status(&self) -> StatusResponse {
         StatusResponse {
@@ -100,9 +165,52 @@ impl<T: Transport> Sdk<T> {
                 started_at: now_rfc3339_seconds(),
                 incarnation: crate::stub::new_operation_id(),
             },
-            capabilities: p0_capabilities(),
+            capabilities: self.advertised_capabilities(),
             extensions: vec![],
+            // Advertise the live routing policy. Mirrors the CLI
+            // status producer: both surfaces emit the same
+            // family-granular `pipeline_dispatch` derived from
+            // `DefaultRegistry`, which is the registry the
+            // `capture_trace` verb actually dispatches through. See
+            // `crates/cairn-cli/src/verbs/status.rs` for the
+            // long-form note.
+            pipeline_dispatch: Some(pipeline_dispatch_advertisement(&DefaultRegistry)),
         }
+    }
+
+    /// Project the SDK's executable state into a wire-format capability list.
+    ///
+    /// The single source of truth for capability advertisement; both
+    /// [`Self::status`] and [`Self::require_capability`] read from here
+    /// so they cannot drift.
+    fn advertised_capabilities(&self) -> Vec<Capabilities> {
+        let Some(store) = self.store.as_ref() else {
+            // No store wired → every verb returns Unimplemented. Advertising
+            // any capability here would invite clients to negotiate against
+            // a dead surface. Empty list matches the original P0 contract.
+            return vec![];
+        };
+        let store_caps = store.capabilities();
+        // Search modes require the store's FTS / vector indexes. Treat
+        // `model_present` as `store_caps.vector` — a store that exposes a
+        // vector index has the embedder + model wired (sqlite-vec only
+        // populates `record_vectors` after the embedding pipeline drains).
+        let model_present = store_caps.vector;
+        let cap_set = self.config.capabilities(model_present);
+        let mut out = Vec::new();
+        if cap_set.keyword_search && store_caps.fts {
+            out.push(Capabilities::CairnMcpV1SearchKeyword);
+        }
+        if cap_set.semantic_search && store_caps.vector {
+            out.push(Capabilities::CairnMcpV1SearchSemantic);
+        }
+        if cap_set.hybrid_search && store_caps.fts && store_caps.vector {
+            out.push(Capabilities::CairnMcpV1SearchHybrid);
+        }
+        if cap_set.policy_trace {
+            out.push(Capabilities::CairnMcpV1PolicyTrace);
+        }
+        out
     }
 
     /// `handshake` — challenge mint (brief §8.0.a point d).
@@ -137,13 +245,82 @@ impl<T: Transport> Sdk<T> {
     /// `cairn.mcp.v1.policy_trace` (per the
     /// `x-cairn-capability-when-true` annotation in
     /// `crates/cairn-idl/schema/verbs/search.json`).
-    pub fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
+    ///
+    /// When the SDK was constructed with [`Sdk::with_store`], this dispatches
+    /// into the shared [`cairn_core::verbs::search::run`] handler (the same
+    /// one the CLI uses). Otherwise it returns [`SdkError::Unimplemented`].
+    pub async fn search(&self, args: &SearchArgs) -> Result<VerbResponse<SearchData>, SdkError> {
         validate_search(args)?;
         self.require_capability(args.mode.capability())?;
         if args.explain == Some(true) {
             self.require_capability(Some("cairn.mcp.v1.policy_trace"))?;
         }
-        Err(unimplemented("search"))
+
+        let Some(store) = self.store.as_ref() else {
+            return Err(unimplemented("search"));
+        };
+
+        // Map from the IDL SearchArgsMode to the core dispatcher SearchMode.
+        // SearchArgsMode is imported at the top of the fn's enclosing module
+        // via the type already in scope (used in validate_search above).
+        let mode = match args.mode {
+            SearchArgsMode::Keyword => cairn_core::verbs::search::SearchMode::Keyword,
+            SearchArgsMode::Semantic => cairn_core::verbs::search::SearchMode::Semantic,
+            SearchArgsMode::Hybrid => cairn_core::verbs::search::SearchMode::Hybrid,
+            // Forward-compat: SearchArgsMode is #[non_exhaustive]; reject unknown variants
+            // rather than silently accepting them.
+            _ => return Err(unimplemented("search")),
+        };
+
+        // Derive the capability set the dispatcher will fail-closed
+        // against, masked by the same store-capability signals
+        // `advertised_capabilities` uses. Dispatcher gate ⊆ advertised
+        // gate ⊆ status capabilities — three views, one truth.
+        let store_caps = store.capabilities();
+        let mut caps = self.config.capabilities(store_caps.vector);
+        caps.keyword_search = caps.keyword_search && store_caps.fts;
+        caps.semantic_search = caps.semantic_search && store_caps.vector;
+        caps.hybrid_search = caps.hybrid_search && store_caps.fts && store_caps.vector;
+
+        // `args.limit` is validated in range [1, 1000] by `validate_search`,
+        // so the `try_from` should not fail. Fall back to 10 on error.
+        let limit = args.limit.map_or(10, |l| usize::try_from(l).unwrap_or(10));
+        let request = cairn_core::verbs::search::SearchRequest {
+            query: args.query.clone(),
+            mode,
+            limit,
+            visibility_allowlist: vec![],
+            model_label: self.config.search.embedding_model.as_str().to_owned(),
+            explain: args.explain.unwrap_or(false),
+        };
+
+        match cairn_core::verbs::search::run(store.as_ref(), &self.config, &caps, request).await {
+            Ok(outcome) => Ok(envelope_from_outcome(outcome)),
+            Err(cairn_core::verbs::search::SearchError::CapabilityUnavailable { capability }) => {
+                Err(SdkError::CapabilityUnavailable {
+                    capability: capability.to_owned(),
+                    reason: "rejected by dispatcher".to_owned(),
+                    operation_id: crate::stub::new_operation_id(),
+                })
+            }
+            Err(cairn_core::verbs::search::SearchError::InvalidArgs { reason }) => {
+                Err(SdkError::InvalidArgs { reason })
+            }
+            Err(cairn_core::verbs::search::SearchError::Store(e)) => Err(SdkError::Protocol {
+                code: crate::error::ErrorCode::Internal,
+                message: format!("store error: {e}"),
+                data: None,
+                operation_id: crate::stub::new_operation_id(),
+            }),
+            // Forward-compat: SearchError is #[non_exhaustive]; surface unknown
+            // variants as Internal rather than panicking.
+            Err(e) => Err(SdkError::Protocol {
+                code: crate::error::ErrorCode::Internal,
+                message: format!("search dispatcher error: {e}"),
+                data: None,
+                operation_id: crate::stub::new_operation_id(),
+            }),
+        }
     }
 
     /// `retrieve` — by-target fetch (record/session/turn/folder/scope/profile).
@@ -201,18 +378,20 @@ impl<T: Transport> Sdk<T> {
     /// Reject with [`SdkError::CapabilityUnavailable`] when `required` is
     /// not advertised by `status()`. Verbs whose IDL declares no
     /// capability (`None`) are unconditionally allowed.
-    #[allow(clippy::unused_self)] // method form for future per-instance capability state
+    ///
+    /// When a store is wired (via [`Sdk::with_store`]), capability gating
+    /// gating reads from the single `advertised_capabilities()` source so
+    /// the gate cannot disagree with what `status` published. A capability
+    /// missing from the advertised list is rejected with
+    /// `CapabilityUnavailable` regardless of whether a store is wired —
+    /// this prevents the previous drift where the store-wired branch
+    /// consulted only config booleans and let modes through that
+    /// `status` did not advertise (e.g. on a store with `vector=false`).
     fn require_capability(&self, required: Option<&'static str>) -> Result<(), SdkError> {
         let Some(cap) = required else {
             return Ok(());
         };
-        // Read capabilities directly instead of routing through `status()`,
-        // which would mint a fresh `incarnation`/`started_at` per call.
-        // Capabilities are the only field needed for the gating decision,
-        // and they are stable for the lifetime of the process — no
-        // TOCTOU window between an inspection `status()` and the verb
-        // call that follows it.
-        let advertised = p0_capabilities();
+        let advertised = self.advertised_capabilities();
         let is_advertised = advertised.iter().any(|c| {
             serde_json::to_value(c)
                 .ok()
@@ -229,6 +408,61 @@ impl<T: Transport> Sdk<T> {
                 operation_id: crate::stub::new_operation_id(),
             })
         }
+    }
+}
+
+/// Convert a [`cairn_core::verbs::search::SearchOutcome`] into the SDK's
+/// [`VerbResponse<SearchData>`] envelope.
+fn envelope_from_outcome(
+    outcome: cairn_core::verbs::search::SearchOutcome,
+) -> VerbResponse<SearchData> {
+    use cairn_core::generated::common::Ulid;
+    use cairn_core::generated::envelope::ResponseVerb;
+    use cairn_core::generated::verbs::search::{Hit, HitTrust, ScoreExplain, SearchData};
+
+    let hits: Vec<Hit> = outcome
+        .candidates
+        .iter()
+        .map(|c| Hit {
+            record_id: Ulid(c.record_id.as_str().to_owned()),
+            score: c.bm25,
+            snippet: Some(c.snippet.clone()),
+            citation: None,
+            trust: HitTrust::Unknown,
+        })
+        .collect();
+
+    let score_explain = outcome.explain.map(|exps| {
+        exps.into_iter()
+            .map(|e| ScoreExplain {
+                record_id: Ulid(e.record_id.as_str().to_owned()),
+                // Rank values are 1-based positions (usually < 10_000).
+                // `i64::try_from` is infallible on 64-bit; saturate to
+                // `i64::MAX` on the unlikely 32-bit overflow edge.
+                bm25_rank: e.bm25_rank.map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                semantic_rank: e
+                    .semantic_rank
+                    .map(|r| i64::try_from(r).unwrap_or(i64::MAX)),
+                rrf_score: e.rrf_score,
+                cosine: e.cosine,
+                final_score: e.final_score,
+            })
+            .collect()
+    });
+
+    let data = SearchData {
+        hits,
+        next_cursor: None,
+        excluded: None,
+        score_explain,
+    };
+
+    VerbResponse {
+        operation_id: crate::stub::new_operation_id(),
+        policy_trace: vec![],
+        verb: ResponseVerb::Search,
+        target: None,
+        data,
     }
 }
 
@@ -381,6 +615,15 @@ fn validate_uri(s: &str) -> Result<(), SdkError> {
 /// so direct Rust construction would otherwise sail past these constraints.
 fn validate_ingest(args: &IngestArgs) -> Result<(), SdkError> {
     args.validate().map_err(invalid)?;
+    // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive.
+    // The CLI clap layer rejects `--dry-run --human-review` together; the
+    // SDK / MCP wire path bypasses clap, so re-enforce here so a direct
+    // construction or deserialize cannot drive both modes at once.
+    if args.dry_run.unwrap_or(false) && args.human_review.unwrap_or(false) {
+        return Err(invalid(
+            "dry_run and human_review are mutually exclusive (brief §5.5)",
+        ));
+    }
     if let Some(body) = &args.body
         && body.is_empty()
     {
@@ -814,15 +1057,41 @@ fn validate_capture_trace(args: &CaptureTraceArgs) -> Result<(), SdkError> {
 /// `TryFrom<RawForgetArgs>` plus nested type validators (`Ulid`, `ScopeFilter`).
 fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
     use cairn_core::generated::verbs::forget::ForgetArgs as F;
+    // Brief §5.5 — `dry_run` and `human_review` are mutually exclusive on
+    // every variant. SDK / MCP callers can construct either bool field
+    // directly, so re-enforce here.
+    let (dry_run, human_review) = match args {
+        F::Record {
+            dry_run,
+            human_review,
+            ..
+        }
+        | F::Session {
+            dry_run,
+            human_review,
+            ..
+        }
+        | F::Scope {
+            dry_run,
+            human_review,
+            ..
+        } => (dry_run.unwrap_or(false), human_review.unwrap_or(false)),
+        _ => (false, false),
+    };
+    if dry_run && human_review {
+        return Err(invalid(
+            "dry_run and human_review are mutually exclusive (brief §5.5)",
+        ));
+    }
     match args {
-        F::Record { record_id } => validate_ulid(record_id),
-        F::Session { session_id } => {
+        F::Record { record_id, .. } => validate_ulid(record_id),
+        F::Session { session_id, .. } => {
             if session_id.is_empty() {
                 return Err(invalid("session_id: must not be empty"));
             }
             Ok(())
         }
-        F::Scope { scope } => validate_scope_filter(scope),
+        F::Scope { scope, .. } => validate_scope_filter(scope),
         // Forward-compat for #[non_exhaustive].
         _ => Err(invalid("unsupported forget target variant")),
     }
@@ -833,15 +1102,6 @@ fn validate_forget(args: &ForgetArgs) -> Result<(), SdkError> {
 /// can fail fast instead of retrying.
 fn unimplemented(verb: &'static str) -> SdkError {
     store_not_wired(verb)
-}
-
-fn p0_capabilities() -> Vec<Capabilities> {
-    // Mirrors `cairn-cli::verbs::status::p0_capabilities`. Empty in P0:
-    // capabilities are advertised only when the runtime can honor them
-    // end-to-end. `cairn.mcp.v1.policy_trace` (#95) and the store-driven
-    // search / retrieve / forget mode capabilities arrive as their
-    // respective verb-runtime issues close (#9 / #61 / #62).
-    vec![]
 }
 
 fn build_profile() -> String {

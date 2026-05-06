@@ -40,6 +40,7 @@ use cairn_core::contract::memory_store::{
 use cairn_core::domain::filter::compile_filter;
 use cairn_core::domain::taxonomy::{MemoryClass, MemoryKind, MemoryVisibility};
 use cairn_core::domain::{RecordId, ScopeTuple};
+use cairn_core::search::ScoreExplain;
 use rusqlite::types::Value as SqlVal;
 use tracing::instrument;
 
@@ -142,6 +143,7 @@ impl SqliteMemoryStore {
         let cursor = args.cursor.clone();
         let compiled = args.filter.map(compile_filter);
         let now_ms = current_unix_ms();
+        let with_explain = args.with_explain;
 
         let page = conn
             .call(move |c| {
@@ -185,7 +187,7 @@ impl SqliteMemoryStore {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| classify_fts_error(e, FtsErrorStage::Runtime).into_tokio())?;
 
-                project_page(rows, limit, now_ms)
+                project_page(rows, limit, now_ms, with_explain)
                     .map_err(|e| tokio_rusqlite::Error::Other(Box::new(e)))
             })
             .await
@@ -232,10 +234,15 @@ struct RawRow {
 /// Convert raw rows into the typed [`KeywordSearchPage`], computing the
 /// `recency`/`staleness` deltas against `now_ms` and surfacing the
 /// cursor for the next page if the over-fetch detected more rows.
+///
+/// When `with_explain` is true the page's `explain` block is populated with
+/// one [`ScoreExplain`] per candidate, using 1-based `bm25_rank` and the
+/// candidate's raw BM25 score as `final_score`.
 fn project_page(
     rows: Vec<RawRow>,
     limit: usize,
     now_ms: i64,
+    with_explain: bool,
 ) -> Result<KeywordSearchPage, StoreError> {
     let has_more = rows.len() > limit;
     let mut candidates = Vec::with_capacity(rows.len().min(limit));
@@ -253,9 +260,28 @@ fn project_page(
     } else {
         None
     };
+    let explain = if with_explain {
+        Some(
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ScoreExplain {
+                    record_id: c.record_id.clone(),
+                    bm25_rank: Some(i + 1),
+                    semantic_rank: None,
+                    rrf_score: 0.0,
+                    cosine: None,
+                    final_score: c.bm25,
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
     Ok(KeywordSearchPage {
         candidates,
         next_cursor,
+        explain,
     })
 }
 
@@ -569,13 +595,14 @@ impl SqliteMemoryStore {
 
         // Model filter applied in Rust — see `run_ann_query` doc for rationale.
         let model_label = args.model_label.as_str();
+        let with_explain = args.with_explain;
         let rows: Vec<_> = rows
             .into_iter()
             .filter(|r| r.vec_model == model_label)
             .take(limit)
             .collect();
 
-        project_semantic_page(rows, now_ms)
+        project_semantic_page(rows, now_ms, with_explain)
     }
 }
 
@@ -699,15 +726,41 @@ async fn run_ann_query(
 }
 
 /// Project a set of [`SemanticRawRow`]s into a [`SemanticSearchPage`].
+///
+/// When `with_explain` is true the page's `explain` block is populated with
+/// one [`ScoreExplain`] per candidate, using 1-based `semantic_rank` and the
+/// negated L2 distance as `final_score` (smaller distance = higher score).
 fn project_semantic_page(
     rows: Vec<SemanticRawRow>,
     _now_ms: i64,
+    with_explain: bool,
 ) -> Result<SemanticSearchPage, StoreError> {
     let mut candidates = Vec::with_capacity(rows.len());
     for row in rows {
         candidates.push(project_semantic_row(&row)?);
     }
-    Ok(SemanticSearchPage { candidates })
+    let explain = if with_explain {
+        Some(
+            candidates
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ScoreExplain {
+                    record_id: c.record_id.clone(),
+                    bm25_rank: None,
+                    semantic_rank: Some(i + 1),
+                    rrf_score: 0.0,
+                    cosine: None,
+                    final_score: f64::from(-c.semantic_distance.unwrap_or(0.0)),
+                })
+                .collect(),
+        )
+    } else {
+        None
+    };
+    Ok(SemanticSearchPage {
+        candidates,
+        explain,
+    })
 }
 
 /// Project a single [`SemanticRawRow`] into a [`SearchCandidate`].
@@ -989,6 +1042,7 @@ mod tests {
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 5,
             cursor: None,
+            with_explain: false,
         };
         let page = store.search_keyword(&args).await.expect("search");
         assert!(

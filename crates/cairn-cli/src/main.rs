@@ -19,6 +19,101 @@ fn registry_store() -> anyhow::Result<cairn_cli::vault::VaultRegistryStore> {
     };
     Ok(cairn_cli::vault::VaultRegistryStore::new(path))
 }
+
+/// Origin of the vault path returned by [`resolve_vault_or_cwd`].
+///
+/// Only [`VaultResolutionSource::CwdFallback`] should bypass the
+/// vault-binding gate — every other source resolved a real vault path
+/// and must therefore agree with `status`/`search`/`admin` on what
+/// counts as a Cairn vault. Promoting the bare CWD fallback to bound
+/// status would make `cairn status` advertise capabilities for any
+/// directory; gating the other three sources keeps a stale registry
+/// default or a half-bootstrapped CWD walk from advertising backed
+/// capabilities (round-7 review #2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VaultResolutionSource {
+    /// `--vault NAME_OR_PATH` flag or `CAIRN_VAULT` env var.
+    Explicit,
+    /// Walk-up from CWD found a `.cairn/` directory.
+    CwdWalk,
+    /// Registry `default` entry.
+    RegistryDefault,
+    /// No source resolved; degraded to bare CWD as a status-only
+    /// safety net so an implicit-no-vault `cairn status` still emits a
+    /// well-formed empty envelope.
+    CwdFallback,
+}
+
+/// Resolve the active vault path through `vault::resolve_vault` (the
+/// same resolver the top-level vault guard uses).
+///
+/// Returns:
+/// - `Ok((path, source))` on success, where `source` records which
+///   precedence rung produced `path` so callers can decide whether the
+///   binding gate should fire.
+/// - `Ok((cwd, CwdFallback))` only when the resolver reports
+///   `NoneResolved` *and* the caller did not supply an explicit
+///   selector — `cairn status` then advertises an empty capability
+///   list rather than failing closed.
+/// - `Err(...)` on any other resolver error: a missing named vault
+///   (`NotFound`), a malformed registry, or a registry I/O failure.
+///   Hiding these as a CWD fallback would let `cairn --vault NAME`
+///   silently report capabilities for the current directory instead of
+///   the named vault, breaking the advertised precedence (round-4
+///   review #3).
+///
+/// `explicit` mirrors the merged `--vault` flag + `CAIRN_VAULT` env
+/// stored in `main`'s `explicit_vault`.
+fn resolve_vault_or_cwd(
+    explicit: Option<&str>,
+) -> anyhow::Result<(std::path::PathBuf, VaultResolutionSource)> {
+    let cwd = std::env::current_dir().ok();
+    let store = registry_store()?;
+    let opts = cairn_cli::vault::ResolveOpts {
+        explicit: explicit.map(str::to_owned),
+        cwd: cwd.clone(),
+        store: &store,
+    };
+    match cairn_cli::vault::resolve_vault(opts) {
+        Ok(p) => {
+            let source = if explicit.is_some() {
+                VaultResolutionSource::Explicit
+            } else if cwd
+                .as_deref()
+                .and_then(cairn_cli::vault::walk_up_to_vault)
+                .as_deref()
+                == Some(p.as_path())
+            {
+                VaultResolutionSource::CwdWalk
+            } else {
+                // Implicit request, no walk-up match — only the
+                // registry default branch in `resolve_vault` could have
+                // produced this path (`NoneResolved` is the alternative
+                // and fell into the `Err` arm below).
+                VaultResolutionSource::RegistryDefault
+            };
+            Ok((p, source))
+        }
+        Err(e) => {
+            // Only `NoneResolved` for an *implicit* request degrades to
+            // CWD. Any other error, or `NoneResolved` after an explicit
+            // selector was given, surfaces upstream so the caller can
+            // exit `EX_CONFIG` rather than report capabilities for the
+            // wrong directory.
+            let is_none_resolved = e
+                .downcast_ref::<cairn_cli::vault::VaultError>()
+                .is_some_and(|ve| matches!(ve, cairn_cli::vault::VaultError::NoneResolved));
+            if is_none_resolved && explicit.is_none() {
+                Ok((
+                    cwd.unwrap_or_else(|| std::path::PathBuf::from(".")),
+                    VaultResolutionSource::CwdFallback,
+                ))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
 fn main() -> ExitCode {
     let matches = match command::build_command().try_get_matches() {
         Ok(m) => m,
@@ -49,7 +144,15 @@ fn main() -> ExitCode {
     // from the top-level vault registry guard (which requires a named vault).
     let needs_vault_guard = !matches!(
         active_subcommand,
-        "vault" | "bootstrap" | "plugins" | "mcp" | "admin" | "llm" | "identity" | "repair"
+        "vault"
+            | "bootstrap"
+            | "plugins"
+            | "mcp"
+            | "admin"
+            | "llm"
+            | "identity"
+            | "flush"
+            | "repair"
     );
 
     if needs_vault_guard {
@@ -90,22 +193,53 @@ fn main() -> ExitCode {
 
     match matches.subcommand() {
         Some(("ingest", sub)) => verbs::ingest::run(sub),
-        Some(("search", sub)) => verbs::search::run(sub),
+        Some(("search", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            // search has its own internal vault-binding gate, so the
+            // resolution source doesn't change behaviour here — it only
+            // needs the resolved path.
+            Ok((vault_root, _source)) => verbs::search::run(sub, vault_root),
+            Err(e) => {
+                eprintln!("cairn search: vault resolution error — {e:#}");
+                ExitCode::from(78) // EX_CONFIG
+            }
+        },
         Some(("retrieve", sub)) => verbs::retrieve::run(sub),
         Some(("summarize", sub)) => verbs::summarize::run(sub),
         Some(("assemble_hot", sub)) => verbs::assemble_hot::run(sub),
         Some(("capture_trace", sub)) => verbs::capture_trace::run(sub),
-        Some(("lint", sub)) => verbs::lint::run(sub),
+        Some(("lint", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::lint::run(sub, Some(vault_root.as_path())),
+            Err(_) => verbs::lint::run(sub, None),
+        },
         Some(("forget", sub)) => verbs::forget::run(sub),
-        Some(("status", sub)) => verbs::status::run(sub.get_flag("json")),
+        Some(("status", sub)) => run_status(sub, explicit_vault.as_deref()),
         Some(("handshake", sub)) => verbs::handshake::run(sub.get_flag("json")),
         Some(("plugins", sub)) => run_plugins(sub),
         Some(("bootstrap", sub)) => run_bootstrap(sub),
         Some(("mcp", _sub)) => cairn_cli::mcp::run(),
         Some(("vault", sub)) => run_vault(sub),
         Some(("skill", sub)) => run_skill(sub),
-        Some(("admin", sub)) => run_admin(sub),
+        Some(("admin", sub)) => run_admin(sub, explicit_vault.as_deref()),
         Some(("llm", sub)) => run_llm(sub),
+        Some(("flush", sub)) => match resolve_vault_or_cwd(explicit_vault.as_deref()) {
+            Ok((vault_root, _source)) => verbs::flush::run(sub, Some(vault_root)),
+            Err(e) => {
+                // Fall back to env-only resolution ONLY for `flush list`
+                // (read-only, useful for inspecting a vault outside the
+                // registry path). For `apply` and `reject` — the
+                // lifecycle-mutating commands — fail closed: an
+                // explicit `--vault` that didn't resolve must NOT
+                // silently re-route the mutation to whatever
+                // `CAIRN_VAULT` points at.
+                let mutating = matches!(sub.subcommand_name(), Some("apply" | "reject"));
+                if mutating {
+                    eprintln!("cairn flush: vault resolution failed — {e:#}");
+                    return ExitCode::from(78); // EX_CONFIG
+                }
+                eprintln!("cairn flush: vault resolution warning — {e:#}");
+                verbs::flush::run(sub, None)
+            }
+        },
         Some(("repair", sub)) => repair::run(sub, explicit_vault.clone()),
         Some(("identity", sub)) => identity::cli::run_identity(sub, explicit_vault.clone()),
         None => unreachable!("subcommand_required(true) ensures a subcommand is always present"),
@@ -117,14 +251,113 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_admin(matches: &ArgMatches) -> ExitCode {
-    // Admin verbs need the vault root and config. Resolve from CAIRN_VAULT
-    // env or current directory (same fallback as the search verb).
-    let vault_root = if let Ok(p) = std::env::var("CAIRN_VAULT") {
-        std::path::PathBuf::from(p)
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+/// `cairn status` dispatch.
+///
+/// Resolve vault + config so the search capabilities (keyword,
+/// semantic, hybrid) and `policy_trace` are advertised when honored
+/// end-to-end. Vault precedence (`CLAUDE.md` §6.5):
+/// `--vault NAME_OR_PATH` flag → `CAIRN_VAULT` env → CWD walk →
+/// registry default — handled centrally in `vault::resolve_vault`.
+///
+/// When the operator named a vault explicitly (`explicit_vault` is
+/// `Some`) but the resolved path is not a valid bound vault, fail
+/// closed with `EX_CONFIG` instead of silently reporting an empty
+/// capability list — operators read `capabilities: []` as "vault has no
+/// capabilities" rather than "this isn't a vault" (round-5 review #2).
+///
+/// Config load returns defaults when no config files exist (handled
+/// inside `config::load`); a propagated error here means genuine
+/// breakage — malformed YAML, unresolved env placeholders, or failed
+/// validation. Fail closed with `EX_CONFIG` so clients do not
+/// negotiate capabilities derived from a config the runtime would
+/// also reject.
+fn run_status(sub: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    let json = sub.get_flag("json");
+    let (vault_root, source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn status: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
     };
+    // Fire the vault-binding gate whenever the path came from a real
+    // resolution source. Only the bare `CwdFallback` (implicit request
+    // with no walk-up hit and no registry default) bypasses the gate so
+    // an unconfigured CWD reports an empty capability list rather than
+    // EX_CONFIG. A stale registry default or a half-bootstrapped CWD
+    // walk must fail closed — they would otherwise advertise zero
+    // capabilities while `cairn search`/`cairn admin` reject the same
+    // path, and operators read `capabilities: []` as "vault has no
+    // capabilities" rather than "this isn't a vault" (round-7 review #2).
+    if source != VaultResolutionSource::CwdFallback {
+        match verbs::status::probe_vault_binding(&vault_root) {
+            verbs::status::VaultBinding::Bound => {}
+            verbs::status::VaultBinding::Unbound => {
+                let origin = match source {
+                    VaultResolutionSource::Explicit => "--vault target",
+                    VaultResolutionSource::CwdWalk => "vault discovered via cwd",
+                    VaultResolutionSource::RegistryDefault => "registry default vault",
+                    VaultResolutionSource::CwdFallback => unreachable!(),
+                };
+                eprintln!(
+                    "cairn status: {origin} {} is not a Cairn vault \
+                     (no .cairn/vault.id) — run `cairn bootstrap` first",
+                    vault_root.display()
+                );
+                return ExitCode::from(78); // EX_CONFIG
+            }
+            verbs::status::VaultBinding::Invalid(reason) => {
+                eprintln!("cairn status: vault binding error — {reason}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        }
+    }
+    let config =
+        match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("cairn status: config error — {e:#}");
+                return ExitCode::from(78); // EX_CONFIG
+            }
+        };
+    // require_bound mirrors the binding gate above: every real
+    // resolution source already proved the vault is bound, so a
+    // non-`Bound` recheck inside `run_with_context` means the binding
+    // disappeared (TOCTOU, race with `cairn forget --vault`) and must
+    // fail closed instead of silently downgrading to an empty
+    // capability list (round-8 review #3).
+    let require_bound = source != VaultResolutionSource::CwdFallback;
+    verbs::status::run_with_context(json, Some(&vault_root), Some(&config), require_bound)
+}
+
+fn run_admin(matches: &ArgMatches, explicit_vault: Option<&str>) -> ExitCode {
+    // Admin verbs mutate the vault store (e.g. `admin reindex` rebuilds
+    // FTS / vector indexes). The selected vault must therefore honor
+    // the same `--vault NAME_OR_PATH > CAIRN_VAULT > CWD` precedence
+    // status uses; otherwise `CAIRN_VAULT=dev cairn --vault prod admin
+    // reindex` would mutate `dev` despite the operator naming `prod`
+    // (round-4 review #1).
+    // admin gates every subcommand below via `enforce_vault_binding`,
+    // so the resolution source isn't load-bearing here — discard it.
+    let (vault_root, _source) = match resolve_vault_or_cwd(explicit_vault) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cairn admin: vault resolution error — {e:#}");
+            return ExitCode::from(78); // EX_CONFIG
+        }
+    };
+
+    // Vault-binding gate: every admin subcommand mutates files under
+    // `<vault_root>/.cairn` (`.cairn/cairn.db` for reindex,
+    // `.cairn/models/...` for model fetch). Probe the sentinel BEFORE
+    // loading config so an unbound or explicit non-vault path classifies
+    // identically to status / search ("not a vault") instead of
+    // bubbling a malformed `.cairn/config.yaml` as the primary
+    // diagnostic — a non-vault config has no business shaping the
+    // operator-facing error here (round-8 review #2).
+    if let Some(rc) = enforce_vault_binding("admin", &vault_root) {
+        return rc;
+    }
 
     let config =
         match cairn_cli::config::load(&vault_root, &cairn_cli::config::CliOverrides::default()) {
@@ -148,6 +381,31 @@ fn run_admin(matches: &ArgMatches) -> ExitCode {
         _ => unreachable!(
             "clap subcommand_required(true) on admin ensures a subcommand is always present"
         ),
+    }
+}
+
+/// Apply the file-only vault-binding gate (`probe_vault_binding`) and
+/// translate a non-`Bound` outcome into an `EX_CONFIG` exit with a
+/// human-readable diagnostic on stderr. Returns `Some(exit_code)` on
+/// failure, `None` when the vault is bound.
+///
+/// Use for surfaces (admin / search) that mutate or open the store —
+/// they must agree with `status` on what counts as a vault, otherwise
+/// `cairn status` and the verbs would diverge on the same directory.
+fn enforce_vault_binding(verb: &str, vault_root: &std::path::Path) -> Option<ExitCode> {
+    match verbs::status::probe_vault_binding(vault_root) {
+        verbs::status::VaultBinding::Bound => None,
+        verbs::status::VaultBinding::Unbound => {
+            eprintln!(
+                "cairn {verb}: no Cairn vault at {} — run `cairn bootstrap` first",
+                vault_root.display()
+            );
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
+        verbs::status::VaultBinding::Invalid(reason) => {
+            eprintln!("cairn {verb}: vault binding error — {reason}");
+            Some(ExitCode::from(78)) // EX_CONFIG
+        }
     }
 }
 

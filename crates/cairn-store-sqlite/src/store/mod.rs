@@ -5,6 +5,7 @@ pub(crate) mod hybrid;
 pub(crate) mod projection;
 pub(crate) mod read;
 pub(crate) mod reindex;
+pub(crate) mod reindex_from_db;
 pub(crate) mod search;
 pub mod sessions;
 pub(crate) mod tombstone;

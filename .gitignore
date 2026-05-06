@@ -13,5 +13,17 @@ Cargo.lock.bak
 # insta snapshot review artifacts (pending approval).
 *.snap.new
 
-# Repo-local Cairn runtime state (model cache, vault scratch).
-/.cairn/
+# Repo-local Cairn runtime state (model cache, vault scratch). Both the
+# repo root and any nested working directory may accumulate `.cairn/`
+# trees from running the CLI / tests inside the workspace; ignore them
+# all to keep DB/WAL/SHM artifacts out of commits.
+.cairn/
+
+# Vault scaffold artifacts that the CLI drops into CWD when run outside
+# a real vault (e.g. test runs that resolve CWD as the vault root).
+/index.md
+/log.md
+/purpose.md
+crates/**/index.md
+crates/**/log.md
+crates/**/purpose.md

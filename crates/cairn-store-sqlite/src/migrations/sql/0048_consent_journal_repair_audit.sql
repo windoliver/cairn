@@ -1,4 +1,4 @@
--- Migration 0046: append-only audit table for consent_journal repair.
+-- Migration 0048: append-only audit table for consent_journal repair.
 -- Brief §3 / §5.6 / §14. Issue #267.
 
 CREATE TABLE IF NOT EXISTS consent_journal_repair_audit (
@@ -27,4 +27,4 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_hash, applied_at)
-  VALUES (46, '0046_consent_journal_repair_audit', '', strftime('%s','now') * 1000);
+  VALUES (48, '0048_consent_journal_repair_audit', '', strftime('%s','now') * 1000);

@@ -770,6 +770,7 @@ pub mod tests_export {
         StoredRecord {
             record: sample_record(),
             version,
+            schema_version: Some(crate::contract::version::SchemaVersion::current()),
         }
     }
 

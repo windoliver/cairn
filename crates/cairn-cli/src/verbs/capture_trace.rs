@@ -30,6 +30,7 @@ use cairn_core::domain::trace::{TraceEvent, TraceLink};
 use cairn_core::domain::{CaptureEventId, SessionId};
 use cairn_core::generated::envelope::ResponseVerb;
 use cairn_core::pipeline::capture_trace::{classify, project};
+use cairn_core::pipeline::dispatch::{BypassReason, DefaultRegistry, DispatchDecision, dispatch};
 use cairn_core::pipeline::extract::body::ResolvedBody;
 use cairn_core::pipeline::turn::summarize_turn;
 use cairn_store_sqlite::SqliteMemoryStore;
@@ -239,6 +240,45 @@ pub async fn run_handler(
             };
             if classified == TraceEvent::Stop {
                 had_stop = true;
+            }
+
+            // Capture → Extract dispatch (issue #217). Every event reaching
+            // this driver passes through the routing decision before we
+            // resolve the body bytes from sources/. P0 trace replay only
+            // accepts hook payloads (classify() rejects everything else),
+            // so the decision is always `Bypass(NonTerminalFamily)` —
+            // raw bytes flow to Extract unchanged. Calling dispatch here
+            // anyway makes the routing path live in production: a future
+            // PR that admits a Terminal payload here cannot bypass the
+            // squash gate, and a malformed envelope is rejected with
+            // `MalformedEnvelope` before we open `sources/`.
+            match dispatch(event, &DefaultRegistry) {
+                DispatchDecision::Bypass(BypassReason::NonTerminalFamily) => {}
+                DispatchDecision::Bypass(BypassReason::MalformedEnvelope) => {
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!("dispatch {}: malformed envelope", event.event_id),
+                    ));
+                    group_failed = true;
+                    break;
+                }
+                other => {
+                    // classify() already rejected non-hook payloads; reaching
+                    // any other dispatch decision means the classifier and
+                    // dispatch driver disagree about routing. Surface as a
+                    // turn-level failure rather than silently proceeding.
+                    failed_turns.push((
+                        session_str.clone(),
+                        turn_str.clone(),
+                        format!(
+                            "dispatch {}: unexpected decision {other:?} for hook payload",
+                            event.event_id
+                        ),
+                    ));
+                    group_failed = true;
+                    break;
+                }
             }
 
             // Resolve body from sources/, then run the standard pre-persist

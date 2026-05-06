@@ -98,6 +98,14 @@ pub(crate) struct ProjectedRow {
     /// shape would silently revert any `'receipt_timeline'` row to
     /// `'legacy_event'` on the next rewrite.
     pub consent_model: &'static str,
+    /// Major component of the schema-version stamp (Issue #258, lint
+    /// spec §6.4). Set from `SchemaVersion::current()` at write time so
+    /// the per-row stamp matches the host's contract version when the
+    /// row was created. Older rows surface as warnings/errors via the
+    /// `stale_schema` lint.
+    pub schema_version_major: i64,
+    /// Minor component of the schema-version stamp (Issue #258).
+    pub schema_version_minor: i64,
 }
 
 impl ProjectedRow {
@@ -150,6 +158,12 @@ impl ProjectedRow {
             // Phase-A: every row is legacy_event. Phase-B (#255) flips
             // this based on whether ingest stamped a consent_timeline.
             consent_model: "legacy_event",
+            schema_version_major: i64::from(
+                cairn_core::contract::version::SchemaVersion::current().major,
+            ),
+            schema_version_minor: i64::from(
+                cairn_core::contract::version::SchemaVersion::current().minor,
+            ),
         })
     }
 }

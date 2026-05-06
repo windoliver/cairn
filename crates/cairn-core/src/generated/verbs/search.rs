@@ -26,6 +26,20 @@ pub struct Hit {
     pub trust: HitTrust,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreExplain {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bm25_rank: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cosine: Option<f64>,
+    pub final_score: f64,
+    pub record_id: crate::generated::common::Ulid,
+    pub rrf_score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_rank: Option<i64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -299,6 +313,9 @@ pub struct SearchData {
     pub hits: Vec<Hit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<crate::generated::common::Cursor>,
+    /// Optional per-candidate score-component explanations. Present only when args.explain is true (which itself requires the cairn.mcp.v1.policy_trace capability).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_explain: Option<Vec<ScoreExplain>>,
 }
 
 pub const ARGS_SCHEMA: &[u8] = include_bytes!("../../../../cairn-mcp/src/generated/schemas/verbs/search.json");

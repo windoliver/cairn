@@ -8,13 +8,40 @@
 //! types, capability sets, and `contract`/`build`/`version` strings
 //! the moment one surface diverges from the other.
 
+use std::path::Path;
 use std::process::Command;
 
 use cairn_sdk::Sdk;
 use serde_json::Value;
 
 fn cairn_bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_cairn"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cairn"));
+    // Force CWD into the OS tempdir to avoid CWD-pollution: the parity
+    // test must compare CLI and SDK in equivalent "no vault, no store"
+    // states. The workspace root acquires a `.cairn/vault.id` from
+    // other test runs (`cli::bootstrap_*`, identity tests), and that
+    // sentinel makes `cairn status` emit a populated capability list
+    // while `Sdk::new` still emits an empty one. Run from a path that
+    // has no `.cairn/` so both surfaces see the no-vault P0 path.
+    cmd.current_dir(std::env::temp_dir());
+    // Equivalent precaution for any stray env: parity assumes no
+    // pre-bound vault.
+    cmd.env_remove("CAIRN_VAULT");
+    cmd
+}
+
+/// Sanity-check that the chosen tempdir is genuinely vault-less. If any
+/// outer process has dropped a `.cairn/vault.id` into the OS tempdir,
+/// the parity assumption breaks; surface that as a clear test failure
+/// rather than a confusing capability-array mismatch.
+fn assert_tempdir_unbound() {
+    let candidate: &Path = &std::env::temp_dir();
+    assert!(
+        !candidate.join(".cairn").join("vault.id").exists(),
+        "test precondition: {} unexpectedly contains .cairn/vault.id; \
+         the parity test assumes a vault-less CWD",
+        candidate.display()
+    );
 }
 
 fn run_json(args: &[&str]) -> Value {
@@ -46,6 +73,7 @@ fn mask_one(value: &mut Value, path: &[&str]) {
 
 #[test]
 fn status_parity_cli_vs_sdk() {
+    assert_tempdir_unbound();
     let mut cli = run_json(&["status", "--json"]);
     let mut sdk = serde_json::to_value(Sdk::new().status()).expect("sdk status serializes");
 

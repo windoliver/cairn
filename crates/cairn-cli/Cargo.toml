@@ -58,6 +58,7 @@ fs2 = { workspace = true }
 rand_core = { workspace = true }
 whoami = { workspace = true }
 chrono = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 cairn-sdk = { workspace = true }

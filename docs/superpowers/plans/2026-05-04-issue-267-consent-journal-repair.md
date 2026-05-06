@@ -14,8 +14,8 @@
 
 - Create `crates/cairn-store-sqlite/src/repair/mod.rs`: store repair module namespace.
 - Create `crates/cairn-store-sqlite/src/repair/consent_journal.rs`: blocker classifier, audit schema bootstrap, deletion transaction, receipt types.
-- Create `crates/cairn-store-sqlite/src/migrations/sql/0046_consent_journal_repair_audit.sql`: append-only audit table for healthy vaults.
-- Modify `crates/cairn-store-sqlite/src/migrations/mod.rs`: register migration 0046.
+- Create `crates/cairn-store-sqlite/src/migrations/sql/0048_consent_journal_repair_audit.sql`: append-only audit table for healthy vaults.
+- Modify `crates/cairn-store-sqlite/src/migrations/mod.rs`: register migration 0048.
 - Modify `crates/cairn-store-sqlite/src/verify.rs`: add audit table and triggers to expected schema fingerprint.
 - Modify `crates/cairn-store-sqlite/src/error.rs`: add a repair-not-eligible error.
 - Modify `crates/cairn-store-sqlite/src/lib.rs`: export `repair`.
@@ -30,7 +30,7 @@
 ### Task 1: Audit Schema Migration
 
 **Files:**
-- Create: `crates/cairn-store-sqlite/src/migrations/sql/0046_consent_journal_repair_audit.sql`
+- Create: `crates/cairn-store-sqlite/src/migrations/sql/0048_consent_journal_repair_audit.sql`
 - Modify: `crates/cairn-store-sqlite/src/migrations/mod.rs`
 - Modify: `crates/cairn-store-sqlite/src/verify.rs`
 - Test: `crates/cairn-store-sqlite/tests/migrations.rs`
@@ -40,7 +40,7 @@
 Change the two head assertions in `crates/cairn-store-sqlite/tests/migrations.rs`:
 
 ```rust
-assert_eq!(head, 46);
+assert_eq!(head, 48);
 ```
 
 Add this test near the other schema drift tests:
@@ -88,10 +88,10 @@ Expected: FAIL because `consent_journal_repair_audit` does not exist.
 
 - [ ] **Step 3: Add migration and verification entries**
 
-Create `0046_consent_journal_repair_audit.sql`:
+Create `0048_consent_journal_repair_audit.sql`:
 
 ```sql
--- Migration 0046: append-only audit table for consent_journal repair tool.
+-- Migration 0048: append-only audit table for consent_journal repair tool.
 -- Brief §3 / §5.6 / §14. Issue #267.
 
 CREATE TABLE IF NOT EXISTS consent_journal_repair_audit (
@@ -120,10 +120,10 @@ BEGIN
 END;
 
 INSERT INTO schema_migrations (migration_id, name, sql_blake3, applied_at)
-  VALUES (46, '0046_consent_journal_repair_audit', '', strftime('%s','now') * 1000);
+  VALUES (48, '0048_consent_journal_repair_audit', '', strftime('%s','now') * 1000);
 ```
 
-Register `M0046_CONSENT_JOURNAL_REPAIR_AUDIT` in `migrations/mod.rs`, append `(46, "0046_consent_journal_repair_audit", M0046_CONSENT_JOURNAL_REPAIR_AUDIT)` to `MIGRATION_SOURCES`, and append `M::up(M0046_CONSENT_JOURNAL_REPAIR_AUDIT)` to `migrations()`.
+Register `M0048_CONSENT_JOURNAL_REPAIR_AUDIT` in `migrations/mod.rs`, append `(48, "0048_consent_journal_repair_audit", M0048_CONSENT_JOURNAL_REPAIR_AUDIT)` to `MIGRATION_SOURCES`, and append `M::up(M0048_CONSENT_JOURNAL_REPAIR_AUDIT)` to `migrations()`.
 
 Add to `EXPECTED_OBJECTS` in `verify.rs`:
 
@@ -146,7 +146,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/cairn-store-sqlite/src/migrations/sql/0046_consent_journal_repair_audit.sql \
+git add crates/cairn-store-sqlite/src/migrations/sql/0048_consent_journal_repair_audit.sql \
         crates/cairn-store-sqlite/src/migrations/mod.rs \
         crates/cairn-store-sqlite/src/verify.rs \
         crates/cairn-store-sqlite/tests/migrations.rs

@@ -159,6 +159,28 @@ impl SquashConfig {
     /// as terminal-faithful `bbaa`), or arbitrary captures whose CR
     /// usage you have not classified.
     ///
+    /// **CSI K erase semantics are honored** when this flag is on
+    /// (issue #249). Stage 2 leaves a one-byte sentinel where it
+    /// stripped a recognised `K` form, varying the sentinel by mode:
+    /// - `\x1b[K` / `\x1b[0K` (cursor-to-EOL) → `ERASE_LINE_SENTINEL`.
+    ///   Models the line as empty only when the cursor was at col 0
+    ///   (e.g. immediately after `\r`). Stage 2b realises that as
+    ///   `text\r\x1b[K\n` → empty final frame.
+    /// - `\x1b[2K` (whole-line) → `ERASE_WHOLE_LINE_SENTINEL`. Erases
+    ///   the line regardless of cursor position, so even
+    ///   `secret\x1b[2K\n` (no `\r`) renders empty.
+    /// - Numeric leading zeros are accepted: `\x1b[00K` ≡ `\x1b[0K`,
+    ///   `\x1b[02K` ≡ `\x1b[2K`.
+    ///
+    /// `\x1b[1K` (erase-from-start-to-cursor), `\x1b[3K`, compound
+    /// parameter forms (`\x1b[1;2K`), private-prefix forms
+    /// (`\x1b[?K`), and intermediate-bearing forms are all
+    /// silent-stripped on the legacy pre-#249 path: their effect does
+    /// not match either sentinel cleanly, and synthesizing one would
+    /// drop visible bytes or guess at unspecified behaviour. The
+    /// sentinels are never visible to stage 3+; they are consumed
+    /// inside stage 2b.
+    ///
     /// Do NOT enable this for "generic interactive terminal text" — the
     /// happy path is narrow on purpose. Callers must classify the input
     /// as full-frame-rewrite progress output and accept the lossy
@@ -290,10 +312,19 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// decision (issue #218).
     ///
     /// # Stability
-    /// `pub(crate)` until the dispatch driver (#217) is the sole entry
-    /// point. The signature derives the context from the event alone —
-    /// a misbehaving caller can no longer reclassify a stored structured
-    /// payload as interactive.
+    /// `pub(crate)`. Issue #217 considered promoting this entry point
+    /// to `pub` once `SquashAdmission` gated minting, but
+    /// `try_from_terminal_event` only proves *internal*
+    /// self-consistency (event validates, payload is `Terminal`,
+    /// context is `InteractiveTty`, hash matches the supplied bytes).
+    /// It cannot prove the bytes came from a trusted capture path, so
+    /// exposing the API publicly would let an external caller
+    /// fabricate a `Terminal + InteractiveTty` envelope around
+    /// arbitrary CLI/MCP/hook bytes and drive lossy compaction. The
+    /// next issue's pipeline driver composes dispatch + squash inside
+    /// `cairn-core` so the trust chain stays owned by this crate; the
+    /// admission token still exists to make replay determinism
+    /// auditable inside that boundary.
     ///
     /// # Errors
     /// `NotTerminalPayload`, `HashMismatch`, `StructuredContextRejected`
@@ -303,13 +334,10 @@ impl<'a> UnstructuredTextBytes<'a> {
     /// `StructuredContextRejected` so callers can distinguish "needs
     /// migration" from "deliberately structured / squash-bypass" —
     /// see [`UnstructuredBindError::LegacyMissingContext`].
-    // Only reachable from #[cfg(test)] modules until #217 wires the
-    // dispatch driver; default-feature non-test builds legitimately
-    // leave it dead.
-    #[allow(dead_code)]
     pub(crate) fn try_from_terminal_event(
         event: &CaptureEvent,
         raw: &'a [u8],
+        _admission: super::dispatch::SquashAdmission,
     ) -> Result<Self, UnstructuredBindError> {
         // Reject malformed envelopes outright — we never want to lossily
         // compact bytes whose source_family / sensor / payload disagree.
@@ -520,7 +548,12 @@ mod wrapper_tests {
     fn rejects_non_terminal_variant() {
         let bytes = b"hello\n";
         let evt = hook_event(bytes);
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::NotTerminalPayload));
     }
 
@@ -529,7 +562,12 @@ mod wrapper_tests {
         let bytes = b"hello\n";
         let mut evt = terminal_event(bytes);
         evt.payload_hash = payload_hash_of(b"different bytes");
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::HashMismatch));
     }
 
@@ -540,7 +578,12 @@ mod wrapper_tests {
         if let CapturePayload::Terminal { context, .. } = &mut evt.payload {
             *context = Some(TerminalContext::NonInteractiveOrStructured);
         }
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             UnstructuredBindError::StructuredContextRejected
@@ -564,7 +607,12 @@ mod wrapper_tests {
         // `validate()` accepts legacy events so deserialize / replay
         // stays unbroken across upgrade.
         evt.payload.validate().expect("legacy event must validate");
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(matches!(err, UnstructuredBindError::LegacyMissingContext));
     }
 
@@ -572,8 +620,12 @@ mod wrapper_tests {
     fn accepts_terminal_interactive_tty_with_matching_hash() {
         let bytes = b"hello\n";
         let evt = terminal_event(bytes);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes)
-            .expect("valid construction");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid construction");
         assert_eq!(wrapped.as_bytes(), bytes);
         assert_eq!(wrapped.raw_hash(), &evt.payload_hash);
     }
@@ -1134,7 +1186,12 @@ mod wrapper_tests {
         let n = MAX_INPUT_BYTES / 3 + 1;
         let raw = vec![0xFFu8; n];
         let evt = terminal_event(&raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         let body = String::from_utf8_lossy(&out.compacted_bytes);
@@ -1159,7 +1216,12 @@ mod wrapper_tests {
         // fire and stage 1 actually runs. No ANSI, no dedup, no cap.
         let raw = b"\xFF\xFF\xFFhello\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(
@@ -1182,7 +1244,12 @@ mod wrapper_tests {
         // stripped. No stage 5 or stage 6 loss.
         let raw = b"\x1b[31mred\x1b[0m\nplain\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.ansi_stripped, "ansi was stripped");
@@ -1199,7 +1266,12 @@ mod wrapper_tests {
         // Repeated line, no ANSI. Default dedup_min_run = 2.
         let raw = b"same\nsame\nsame\n";
         let evt = terminal_event(raw);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.dedup_runs_collapsed > 0, "dedup acted");
@@ -1684,8 +1756,12 @@ mod wrapper_tests {
         raw.extend(std::iter::repeat_n(b'\n', n));
         raw.extend_from_slice(b"FINAL\n");
         let evt = terminal_event(&raw);
-        let wrapped =
-            UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("under byte ceiling");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("under byte ceiling");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated, "must take bypass path");
@@ -1798,8 +1874,12 @@ mod wrapper_tests {
         // payload becomes U+FFFD on lossy decode (1B → 3B expansion).
         let oversized = vec![0xFFu8; MAX_INPUT_BYTES + 1];
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
-            .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1829,8 +1909,12 @@ mod wrapper_tests {
         let n = oversized.len();
         oversized[n - 6..].copy_from_slice(b"\nYTAIL");
         let evt = terminal_event(&oversized);
-        let wrapped = UnstructuredTextBytes::try_from_terminal_event(&evt, &oversized)
-            .expect("oversize is no longer rejected");
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize is no longer rejected");
         let cfg = SquashConfig::default();
         let out = super::squash(wrapped, &cfg);
         assert!(out.stats.truncated);
@@ -1855,10 +1939,343 @@ mod wrapper_tests {
         let mut evt = terminal_event(bytes);
         // Force source_family / payload-variant disagreement.
         evt.source_family = SourceFamily::Hook;
-        let err = UnstructuredTextBytes::try_from_terminal_event(&evt, bytes).unwrap_err();
+        let err = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            bytes,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_err();
         assert!(
             matches!(err, UnstructuredBindError::EventValidationFailed(_)),
             "got: {err:?}"
+        );
+    }
+
+    /// Helper for issue #250 parity tests: run `payload` through both the
+    /// staged path (`squash` on a small input) and the bypass path
+    /// (`oversize_bypass` invoked directly) with the same default config,
+    /// and return the two `cr_bearing_lines` values. Centralised so each
+    /// per-shape test stays focused on the input it constructs.
+    fn cr_bearing_lines_both_paths(payload: &[u8]) -> (usize, usize) {
+        let evt = terminal_event(payload);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            payload,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid construction");
+        let cfg = SquashConfig::default();
+        let staged = super::squash(wrapped, &cfg);
+
+        let raw_hash = super::sha256_payload_hash(payload);
+        let bypass = super::oversize_bypass(
+            payload,
+            raw_hash,
+            payload.len(),
+            &cfg,
+            SquashStats::default(),
+            super::BypassReason::ByteCeiling,
+        );
+        (staged.stats.cr_bearing_lines, bypass.stats.cr_bearing_lines)
+    }
+
+    /// Issue #250: a terminated OSC body containing `\r` must be excluded
+    /// from `cr_bearing_lines` on BOTH the staged and the bypass path.
+    /// Pre-fix the bypass walked raw bytes without parsing escapes, so the
+    /// embedded `\r` registered as a hazard only on the bypass side —
+    /// flipping the audit signal at the size gate.
+    #[test]
+    fn cr_bearing_lines_parity_osc_body_with_embedded_cr() {
+        // OSC: ESC ] ... BEL. Body contains `\r` between `with` and `cr`.
+        let payload = b"prefix\n\x1b]0;title-with\rcr\x07\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "OSC body \\r is stripped by stage 2; staged count must be 0"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: DCS / APC / PM / SOS bodies with embedded `\r` must
+    /// match the staged-path count (zero — stage 2 quarantines all four
+    /// string-control families just like OSC).
+    #[test]
+    fn cr_bearing_lines_parity_dcs_family_bodies_with_embedded_cr() {
+        for &(intro, name) in &[(b'P', "DCS"), (b'_', "APC"), (b'^', "PM"), (b'X', "SOS")] {
+            let mut payload: Vec<u8> = Vec::new();
+            payload.extend_from_slice(b"prefix\n");
+            payload.push(0x1B);
+            payload.push(intro);
+            payload.extend_from_slice(b"body-with\rcr");
+            // Strict-ST terminator: ESC \\ (no BEL accepted for DCS-family).
+            payload.push(0x1B);
+            payload.push(0x5C);
+            payload.extend_from_slice(b"\nsuffix\n");
+
+            let (staged, bypass) = cr_bearing_lines_both_paths(&payload);
+            assert_eq!(staged, 0, "{name}: staged count must be 0");
+            assert_eq!(
+                bypass, staged,
+                "{name}: bypass parity: staged={staged} bypass={bypass}"
+            );
+        }
+    }
+
+    /// Issue #250: an UN-terminated control string drops its body up to
+    /// the next `\n` on the staged path. The bypass-side count must drop
+    /// the same bytes — a `\r` inside an unterminated OSC body must not
+    /// be counted on either path.
+    #[test]
+    fn cr_bearing_lines_parity_unterminated_osc_body_with_cr() {
+        // OSC introducer + body containing \r, no terminator before \n.
+        let payload = b"prefix\n\x1b]0;dangling-with\rcr-no-term\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "unterminated OSC body dropped to LF; staged count must be 0"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: a real bare-CR hazard (interior `\r` in a progress-bar
+    /// line) coexisting with a CR inside an OSC body must register exactly
+    /// once on both paths — the OSC-body \r excluded, the progress-line \r
+    /// counted. Pins that the parity fix did not over-strip.
+    #[test]
+    fn cr_bearing_lines_parity_mixed_real_hazard_and_osc_body_cr() {
+        let payload = b"prefix\n\x1b]0;title-with\rcr\x07\nprog 50%\rprog 100%\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 1,
+            "exactly one CR-bearing line on staged: the prog 50%... line"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity at the staged-vs-bypass gate: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: when a payload's invalid UTF-8
+    /// byte sits immediately after an unrecognized ESC, the bypass walker
+    /// previously inferred a UTF-8 codepoint length naively from the raw
+    /// byte and could swallow a following bare `\r`. Stage 1's lossy
+    /// decode would have replaced the bad byte with `U+FFFD` first, so
+    /// the staged path counts the surviving CR-bearing line — the bypass
+    /// must match by validating UTF-8 continuations (or consuming only
+    /// the bad byte when the lead is invalid).
+    #[test]
+    fn cr_bearing_lines_parity_invalid_utf8_lead_after_esc() {
+        // ESC + 0xFF (invalid lead) + bare \r + content + \n.
+        let payload: &[u8] = b"prefix\n\x1b\xff\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 1,
+            "staged path: stage 1 lossy → ESC+U+FFFD consumed by stage 2; \\r survives"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on invalid lead after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a continuation byte (`0x80..=0xBF`)
+    /// in lead position after ESC is invalid; the walker must consume only
+    /// the bad byte so a following `\r` survives.
+    #[test]
+    fn cr_bearing_lines_parity_continuation_byte_as_esc_lead() {
+        // ESC + 0xA0 (continuation byte in lead position) + \r + content.
+        let payload: &[u8] = b"prefix\n\x1b\xa0\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: surviving \\r counted");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on continuation-byte ESC lead: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a truncated multibyte after ESC
+    /// (e.g., ESC + 0xC2 followed by a non-continuation byte) must consume
+    /// only the lead so the following byte stays visible.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_multibyte_after_esc() {
+        // ESC + 0xC2 (claims a 2-byte scalar) + \r (NOT a valid continuation
+        // byte) + content. Stage 1 lossy replaces 0xC2 alone with U+FFFD;
+        // stage 2 consumes ESC + U+FFFD, leaving \r intact.
+        let payload: &[u8] = b"prefix\n\x1b\xc2\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "staged: \\r survives the lossy-decoded scalar");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated multibyte: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a well-formed multibyte scalar
+    /// after ESC must still be fully consumed on both paths (no
+    /// over-conservative under-skip from the new validation logic).
+    #[test]
+    fn cr_bearing_lines_parity_valid_multibyte_after_esc_unchanged() {
+        // ESC + é (0xC3 0xA9) + \r + content. Stage 2 consumes the entire
+        // ESC + 2-byte scalar; the bypass walker must do the same so the
+        // surviving \r is still counted exactly once.
+        let payload: &[u8] = b"prefix\n\x1b\xc3\xa9\rprogress\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(staged, 1, "valid 2-byte scalar consumed; \\r survives");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on valid multibyte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: a UTF-16 surrogate-range encoding
+    /// (`ED A0..=BF ...`) is RFC 3629-invalid. Stage 1 lossy decode rejects
+    /// it; the bypass walker's continuation-byte check would have accepted
+    /// it. Delegating to `std::str::from_utf8` catches it.
+    #[test]
+    fn cr_bearing_lines_parity_surrogate_after_esc() {
+        // ESC + ED A0 80 (encodes U+D800, a high surrogate — invalid). The
+        // surrounding `\r ... \n` shape lets the line be CR-bearing only
+        // when stage 2 / the bypass walker do NOT swallow the bad bytes
+        // wholesale. Pre-fix, the walker consumed all three and treated
+        // the LF as a CRLF; staged kept the lossy replacement bytes after
+        // the \r and counted the line.
+        let payload: &[u8] = b"prefix\r\x1b\xed\xa0\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(
+            staged >= 1,
+            "staged must register the prefix-with-\\r line as CR-bearing"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on surrogate after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: overlong 3-byte forms
+    /// (`E0 80..=9F ...`) are RFC 3629-invalid. Same parity hazard as
+    /// surrogates — `from_utf8` validation catches both.
+    #[test]
+    fn cr_bearing_lines_parity_overlong_three_byte_after_esc() {
+        // ESC + E0 80 80 (overlong encoding of U+0000 in 3 bytes).
+        let payload: &[u8] = b"prefix\r\x1b\xe0\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on overlong 3-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-2 review finding: scalars beyond `U+10FFFF`
+    /// (`F4 90..=BF ...`) are RFC 3629-invalid. Confirms the F4-bound
+    /// branch of validation catches out-of-range 4-byte forms.
+    #[test]
+    fn cr_bearing_lines_parity_out_of_range_four_byte_after_esc() {
+        // ESC + F4 90 80 80 (encodes U+110000, beyond U+10FFFF).
+        let payload: &[u8] = b"prefix\r\x1b\xf4\x90\x80\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert!(staged >= 1, "staged must count the prefix line");
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on out-of-range 4-byte after ESC: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: when `from_utf8` rejects a
+    /// truncated *valid prefix* (e.g., `E2 82` followed by a non-
+    /// continuation), `from_utf8_lossy` collapses the whole prefix into
+    /// one `U+FFFD`. The bypass walker must advance by the same maximal
+    /// invalid subsequence length, not unconditionally one byte —
+    /// otherwise a stray `0x82` leaks past ESC, resets the trailing-CR
+    /// run, and a CRLF that the staged path collapses gets reported as
+    /// CR-bearing on the bypass.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_three_byte_prefix_after_esc() {
+        // Prefix `\r` then ESC + E2 82 + LF: maximal invalid subsequence
+        // is `E2 82` (2 bytes), replaced with one U+FFFD on the staged
+        // path. Stage 2 then drops ESC + U+FFFD, leaving CRLF — which
+        // the second pass collapses to LF, so the line is NOT CR-bearing.
+        let payload: &[u8] = b"prefix\r\x1b\xe2\x82\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses E2 82 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 3-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250 round-3 review finding: same shape for a 4-byte prefix
+    /// (`F0 90 80` followed by LF). `from_utf8_lossy` replaces the 3-byte
+    /// incomplete-but-valid prefix with one `U+FFFD`.
+    #[test]
+    fn cr_bearing_lines_parity_truncated_four_byte_prefix_after_esc() {
+        let payload: &[u8] = b"prefix\r\x1b\xf0\x90\x80\nsuffix\n";
+        let (staged, bypass) = cr_bearing_lines_both_paths(payload);
+        assert_eq!(
+            staged, 0,
+            "staged: lossy collapses F0 90 80 to U+FFFD, stage 2 strips ESC+U+FFFD, CRLF→LF"
+        );
+        assert_eq!(
+            bypass, staged,
+            "bypass parity on truncated 4-byte prefix: staged={staged} bypass={bypass}"
+        );
+    }
+
+    /// Issue #250: full integration via the actual `MAX_INPUT_BYTES` gate.
+    /// Builds an oversize payload (`>= MAX_INPUT_BYTES`) where both the
+    /// head and the tail carry the same OSC-body-with-embedded-CR +
+    /// progress-bar pattern, with CR-free filler in between. `squash`
+    /// routes through the real bypass path; the staged baseline runs on
+    /// the head bytes alone. Heavy (64 MiB allocation) — gated behind
+    /// `--ignored` like the other gate-crossing test in this module.
+    #[test]
+    #[ignore = "allocates MAX_INPUT_BYTES + 1 bytes; run with --ignored"]
+    fn cr_bearing_lines_parity_at_max_input_bytes_gate() {
+        let head_pattern = b"head\n\x1b]0;title-with\rcr\x07\nprog 50%\rprog 100%\n";
+        let tail_pattern = b"prog 25%\rprog 100%\n\x1b]0;t-with\rcr\x07\ntail\n";
+
+        // Staged baseline: same pattern, small payload — takes the staged
+        // path and yields the per-pattern count (one CR-bearing prog line).
+        let (staged_head, _) = cr_bearing_lines_both_paths(head_pattern);
+        let (staged_tail, _) = cr_bearing_lines_both_paths(tail_pattern);
+
+        // Build an oversize payload that crosses MAX_INPUT_BYTES naturally.
+        let filler_len = MAX_INPUT_BYTES + 1 - head_pattern.len() - tail_pattern.len();
+        let mut oversized: Vec<u8> = Vec::with_capacity(MAX_INPUT_BYTES + 1);
+        oversized.extend_from_slice(head_pattern);
+        oversized.extend(std::iter::repeat_n(b'F', filler_len));
+        oversized.extend_from_slice(tail_pattern);
+        assert!(oversized.len() >= MAX_INPUT_BYTES);
+
+        let evt = terminal_event(&oversized);
+        let wrapped = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &oversized,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("oversize accepted");
+        let cfg = SquashConfig::default();
+        let out = super::squash(wrapped, &cfg);
+
+        // The bypass walks the FULL raw input for `cr_bearing_lines`, so the
+        // count is the sum of CR-bearing lines across head + filler + tail.
+        // Filler is CR-free; only the two prog-bar lines (head + tail) count.
+        // OSC-body \rs in head and tail are excluded by the shared parser.
+        assert_eq!(staged_head, 1, "staged head pattern → 1 CR-bearing line");
+        assert_eq!(staged_tail, 1, "staged tail pattern → 1 CR-bearing line");
+        assert_eq!(
+            out.stats.cr_bearing_lines,
+            staged_head + staged_tail,
+            "bypass full-payload count must equal sum of staged per-pattern counts"
         );
     }
 }
@@ -1888,11 +2305,12 @@ pub struct SquashStats {
     pub ansi_stripped: bool,
     /// Number of `\n`-delimited lines containing at least one bare `\r`
     /// after CRLF normalize. Source-capture audit signal: counted on the
-    /// FULL input (post-stage-2 ANSI strip on the staged path; directly
-    /// from raw bytes on the oversize-bypass path, which is equivalent
-    /// since CR survives stage 1 and stage 2). Stable across the
-    /// staged-vs-bypass gate so audit/warning logic sees the same hazard
-    /// count regardless of which path the input took.
+    /// FULL input — post-stage-2 ANSI strip on the staged path, and via
+    /// `count_bare_cr_lines_after_stage2` (a raw-byte walker that mirrors
+    /// stage 2's escape-state parser and CRLF / CRCRLF rule) on the
+    /// oversize-bypass path. Stable across the staged-vs-bypass gate so
+    /// audit/warning logic sees the same hazard count regardless of
+    /// which path the input took.
     pub cr_bearing_lines: usize,
     /// Number of dedup runs collapsed in stage 4.
     pub dedup_runs_collapsed: usize,
@@ -2233,6 +2651,124 @@ fn first_safe_line_start_at_or_after(raw: &[u8], threshold: usize) -> Option<usi
     None
 }
 
+/// Sentinels emitted by stage 2 when it strips a `CSI K` (erase-in-
+/// line) sequence and the caller asked for erase semantics to survive
+/// into stage 2b (`emit_erase_sentinel = true`). Stage 2b consumes the
+/// sentinels to model the "this frame was visually cleared" signal
+/// that would otherwise be lost when the CSI bytes are stripped before
+/// stage 2b's `\r`-segment collapse runs (issue #249).
+///
+/// Two distinct sentinels are needed because the `K` parameter changes
+/// the visual effect when the cursor is NOT at column 0:
+/// - `ERASE_LINE_SENTINEL` (`0x01`) — cursor-to-EOL erase (default
+///   param or `0`). Only a leading-segment-after-`\r` placement
+///   reliably models "line cleared"; mid-segment placement leaves the
+///   pre-cursor content visible.
+/// - `ERASE_WHOLE_LINE_SENTINEL` (`0x02`) — whole-line erase (`2`).
+///   Position is irrelevant: anything written before the sentinel on
+///   the same line is gone regardless of `\r` presence or cursor
+///   column.
+///
+/// Both are control bytes in `0x01..=0x06` that stage 2's outer-loop
+/// control filter already strips from raw input (`\n`, `\t`, `\r` are
+/// the only `< 0x20` survivors), so user content cannot smuggle either
+/// sentinel into stage 2's output. Both are single-byte UTF-8, so
+/// emission/removal stays byte-aligned. Both are stripped from stage
+/// 2b's output before it returns — stages 3+ never see them.
+const ERASE_LINE_SENTINEL: char = '\u{0001}';
+const ERASE_LINE_SENTINEL_BYTE: u8 = 0x01;
+const ERASE_WHOLE_LINE_SENTINEL: char = '\u{0002}';
+const ERASE_WHOLE_LINE_SENTINEL_BYTE: u8 = 0x02;
+/// Whole-line erase emitted when cursor column is NOT known (a
+/// cursor-moving CSI / control was stripped between the last cursor
+/// reset and this `\x1b[2K`). The line is still cleared — `2K` erases
+/// regardless of cursor position — but stage 2b must NOT pad the
+/// post-erase tail with cursor-column whitespace because that count
+/// would be wrong (the stripped move advanced the cursor invisibly).
+/// Issue #249 / review round 5.
+const ERASE_WHOLE_LINE_NOPAD_SENTINEL: char = '\u{0003}';
+const ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE: u8 = 0x03;
+
+/// Classify the parameter slice of a `CSI K` (erase-in-line) sequence
+/// for sentinel emission. Returns `None` for forms whose semantics we
+/// do not model (the legacy silent-strip path). Issue #249 / round 2.
+///
+/// Accepts leading-zero numeric forms: `[K` ≡ `[0K` ≡ `[00K`, and
+/// `[2K` ≡ `[02K` ≡ `[002K`. Rejects any compound (`;`, `:`),
+/// private-prefix (`<`, `=`, `>`, `?`), or non-numeric parameter —
+/// those have unspecified or non-standard semantics and are safer to
+/// silent-strip than to guess.
+fn classify_csi_k_params(params: &[u8]) -> Option<CsiKErase> {
+    // `\x1b[K` with no parameter == default == 0 (cursor-to-EOL).
+    if params.is_empty() {
+        return Some(CsiKErase::ToEol);
+    }
+    // Single non-private numeric parameter only — reject everything
+    // else (compound, private, intermediate-bearing already filtered
+    // upstream by the caller).
+    if !params.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    // Saturating parse: any value outside {0, 2} is silent-stripped,
+    // so we don't need precise large-integer semantics. The saturating
+    // arithmetic prevents pathological-input panic risk under the
+    // workspace `clippy::arithmetic_side_effects` posture.
+    let value = params.iter().fold(0u64, |acc, b| {
+        acc.saturating_mul(10).saturating_add(u64::from(b - b'0'))
+    });
+    match value {
+        0 => Some(CsiKErase::ToEol),
+        1 => Some(CsiKErase::ToCursor),
+        2 => Some(CsiKErase::WholeLine),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CsiKErase {
+    /// `CSI K` / `CSI 0 K`: erase from cursor to end of line. Stage 2
+    /// emits `ERASE_LINE_SENTINEL` when the cursor is at col 0.
+    ToEol,
+    /// `CSI 2 K`: erase the entire line. Stage 2 emits
+    /// `ERASE_WHOLE_LINE_SENTINEL` when cursor col is known, else
+    /// `ERASE_WHOLE_LINE_NOPAD_SENTINEL`.
+    WholeLine,
+    /// `CSI 1 K`: erase from start of line to cursor (inclusive). For
+    /// our render purposes this is identical to `WholeLine` whenever
+    /// the cursor is past col 0: pre-cursor content is dropped, and
+    /// post-K writes appear at the cursor column. At col 0, `1K`
+    /// erases only that single column — silent-strip (no visible
+    /// effect from stream perspective). Issue #249 / review round 10.
+    ToCursor,
+}
+
+/// CSI final bytes whose semantics are known to leave the cursor
+/// position unchanged. Any other CSI final, when stripped, leaves the
+/// cursor at an unknown column — and stage 2 must NOT synthesize a
+/// `CSI K` erase sentinel until the next `\r` or `\n` resets the
+/// assumption (otherwise the sentinel-leading-segment rule in stage 2b
+/// can falsely model the line as cleared, dropping visible content).
+/// Issue #249 / review round 4.
+///
+/// Conservatively narrow: only includes finals we are confident do not
+/// move the cursor. Anything outside this set (cursor moves `A`-`H`,
+/// `f`, `I`, `Z`, save/restore `s`/`u`, scroll regions, etc.) flips the
+/// `intact_cursor_col` to `None`.
+fn is_cursor_neutral_csi_final(fb: u8) -> bool {
+    matches!(
+        fb,
+        b'm'    // SGR (color / style)
+        | b'K'  // Erase in line
+        | b'J'  // Erase in display
+        | b'X'  // Erase characters (in place)
+        | b'n'  // Device status report
+        | b'h'  // Set mode
+        | b'l'  // Reset mode
+        | b't'  // Window manipulation
+        | b'p' // Soft reset / private
+    )
+}
+
 // Stage 2 only emits whole UTF-8 codepoints from a valid `&str` input
 // (escape sequences and partial codepoints are never partially
 // surfaced). The closing `from_utf8` therefore cannot fail; allowing
@@ -2240,16 +2776,316 @@ fn first_safe_line_start_at_or_after(raw: &[u8], threshold: usize) -> Option<usi
 // lib-wide deny.
 #[allow(clippy::expect_used)]
 #[allow(clippy::too_many_lines)] // single coherent escape parser
-fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mut usize) -> String {
+/// Stage 2 escape-state parser, exposed as a pure byte-level skip helper so
+/// the same state table can drive both `stage2_ansi_strip` (which strips
+/// escapes from a UTF-8 string) and `count_bare_cr_lines_after_stage2`
+/// (which audits CR-bearing lines on raw oversize-bypass bytes without
+/// allocating). Caller must pass `start` such that `bytes[start] == 0x1B`.
+///
+/// Returns `(consume, recovery_drop)`:
+/// - `consume`: bytes from `start` that stage 2 would drop. The next outer
+///   position is `start + consume`. For unterminated string controls
+///   (OSC / DCS / APC / PM / SOS with no terminator before the next `\n`
+///   or EOF) the consumed range stops *before* the recovery LF so the
+///   outer loop still sees it as a line separator.
+/// - `recovery_drop`: the number of bytes dropped to the OSC-recovery
+///   boundary (zero when the escape was properly terminated, equal to
+///   `consume` when it wasn't — the introducer + body are sanitization
+///   loss, not framing).
+fn stage2_skip_escape(bytes: &[u8], start: usize) -> (usize, usize) {
+    debug_assert!(
+        start < bytes.len() && bytes[start] == 0x1B,
+        "invariant: caller verified ESC at start"
+    );
+    if start + 1 >= bytes.len() {
+        // ESC at EOF: drop the introducer.
+        return (1, 0);
+    }
+    match bytes[start + 1] {
+        // CSI: ESC [ params intermediates final.
+        //
+        // Any byte in `0x40..=0x7E` is a valid CSI final per spec — covers
+        // SGR (`m`), erase (`J`/`K`), cursor moves (`A`–`H`, `f`), and the
+        // TUI/progress finals (`G`/`E`/`F`/`P`/`L`/`M`/`S`/`T`/`X`/...).
+        // Truncated sequences (no final byte before EOF) drop only the lone
+        // ESC so the outer loop can still recover surviving payload bytes.
+        0x5B => {
+            let mut j = start + 2;
+            while j < bytes.len() && (0x30..=0x3F).contains(&bytes[j]) {
+                j += 1;
+            }
+            while j < bytes.len() && (0x20..=0x2F).contains(&bytes[j]) {
+                j += 1;
+            }
+            let final_byte_present = matches!(
+                bytes.get(j).copied(),
+                Some(b) if (0x40..=0x7E).contains(&b)
+            );
+            if final_byte_present {
+                (j + 1 - start, 0)
+            } else {
+                (1, 0)
+            }
+        }
+        // OSC: ESC ] ... terminated by BEL (0x07) or ESC \ (ST).
+        //
+        // If terminated, consume the entire OSC. If not (degraded capture
+        // truncated mid-escape), the body may carry hidden control-plane
+        // content (titles, OSC-8 hyperlink URLs) that must not be promoted
+        // to extractable text — drop introducer + body up to the next LF
+        // (or to EOF). The dropped byte count is returned as `recovery_drop`
+        // so callers that track `osc_recovery_bytes_dropped` see the loss.
+        0x5D => {
+            let mut j = start + 2;
+            let term = loop {
+                if j >= bytes.len() {
+                    break None;
+                }
+                if bytes[j] == 0x07 {
+                    break Some(j + 1);
+                }
+                if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                    break Some(j + 2);
+                }
+                j += 1;
+            };
+            if let Some(end) = term {
+                (end - start, 0)
+            } else {
+                let mut k = start + 2;
+                while k < bytes.len() && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                let consume = k - start;
+                (consume, consume)
+            }
+        }
+        // DCS / APC / PM / SOS: ESC P / _ / ^ / X ... ESC \ (strict-ST;
+        // BEL is not accepted here, deliberately stricter than OSC).
+        // Same scan-or-quarantine logic as OSC: attacker-controlled bytes
+        // inside the body must never reach extractable output.
+        0x50 | 0x5F | 0x5E | 0x58 => {
+            let mut j = start + 2;
+            let term = loop {
+                if j >= bytes.len() {
+                    break None;
+                }
+                if bytes[j] == 0x1B && j + 1 < bytes.len() && bytes[j + 1] == 0x5C {
+                    break Some(j + 2);
+                }
+                j += 1;
+            };
+            if let Some(end) = term {
+                (end - start, 0)
+            } else {
+                let mut k = start + 2;
+                while k < bytes.len() && bytes[k] != b'\n' {
+                    k += 1;
+                }
+                let consume = k - start;
+                (consume, consume)
+            }
+        }
+        // Two-byte ESC controls (ESC 7/8 save/restore, ESC = / >, ESC c
+        // reset, ESC D index, ESC E NEL, ESC M reverse-index, ...): consume
+        // ESC + one whole UTF-8 codepoint. The classifier mirrors RFC 3629
+        // leading-byte ranges and validates continuation bytes so a broken
+        // multibyte (or an invalid lead like `0xFF`) consumes only the bad
+        // byte. That keeps the bypass walker — which sees pre-stage-1 raw
+        // bytes — byte-stable with the staged path: stage 1 replaces each
+        // invalid scalar with `U+FFFD`, then stage 2 consumes ESC + that
+        // 3-byte replacement, advancing exactly one source byte beyond ESC.
+        // For valid UTF-8 input (the contract on the staged-path call site)
+        // every well-formed scalar consumes its full encoded length.
+        _ => {
+            let lead = bytes[start + 1];
+            // Codepoint length per RFC 3629 leading-byte ranges.
+            // 0x80..=0xC1 are never valid UTF-8 leads (continuation bytes
+            // or overlong-2 starts); 0xF5..=0xFF encode code points beyond
+            // U+10FFFF. Both fall into the 1-byte branch so we consume
+            // just the bad byte and a following `\r`/`\n` stays visible.
+            let cp_len: usize = if lead < 0xC2 {
+                1
+            } else if lead < 0xE0 {
+                2
+            } else if lead < 0xF0 {
+                3
+            } else if lead < 0xF5 {
+                4
+            } else {
+                1
+            };
+            let after = start + 1;
+            let available = bytes.len() - after;
+            // For multi-byte scalars, delegate full RFC 3629 validation to
+            // `std::str::from_utf8` — that catches surrogates (D800..DFFF
+            // via ED A0..BF), overlong forms (E0 80..9F, F0 80..8F), and
+            // out-of-range scalars (F4 90..BF) that a naive continuation-
+            // byte check would let through. On validation failure, advance
+            // by the same maximal invalid subsequence length that
+            // `from_utf8_lossy` collapses into one `U+FFFD`, using
+            // `Utf8Error::{valid_up_to, error_len}`. Consuming a fixed 1
+            // byte would leave a trailing continuation byte (e.g., `0x82`
+            // in `ESC E2 82 LF`) visible to the walker as text, breaking
+            // parity with the staged path where stage 2 over the lossy
+            // decode has already absorbed the entire malformed prefix
+            // alongside the ESC.
+            let final_consume = if cp_len > 1 {
+                let end = after + cp_len.min(available);
+                let slice = &bytes[after..end];
+                match std::str::from_utf8(slice) {
+                    Ok(_) if slice.len() == cp_len => cp_len,
+                    Ok(_) => slice.len(),
+                    Err(e) => match e.error_len() {
+                        Some(n) => e.valid_up_to() + n,
+                        // `None` means the slice ends in a valid-but-
+                        // incomplete prefix; lossy decode replaces the
+                        // whole prefix with one `U+FFFD`, so advance by
+                        // the entire slice length here too.
+                        None => slice.len(),
+                    },
+                }
+            } else {
+                // 1-byte scalar (valid ASCII or invalid lead): consume the
+                // single lead byte. `available` is always >= 1 here — the
+                // `start + 1 >= bytes.len()` early-return at the top of
+                // `stage2_skip_escape` rules out the EOF case.
+                1
+            };
+            (1 + final_consume, 0)
+        }
+    }
+}
+
+/// Source-capture audit signal: counts `\n`-delimited lines that contain at
+/// least one bare `\r` *as stage 2 would see them*, walking raw bytes with
+/// `stage2_skip_escape` so CRs inside ESC-introduced control strings (OSC,
+/// DCS, APC, PM, SOS — terminated or not) are excluded the same way the
+/// staged path excludes them. Mirrors stage 2's CRLF / CRCRLF rule: an LF
+/// pops at most one preceding bare `\r` from the line, so `\r\n` and
+/// `\r\r\n` end CR-clean while `\r\r\r\n` retains one residual `\r`.
+///
+/// Keeps the bypass-side count byte-stable with the staged path's
+/// `stage2.split('\n').filter(|l| l.contains('\r')).count()` so the
+/// `cr_bearing_lines` audit signal does not flip when an input crosses
+/// `MAX_INPUT_BYTES` / `MAX_INPUT_LINES`. O(n) in `raw.len()`.
+fn count_bare_cr_lines_after_stage2(raw: &[u8]) -> usize {
+    let mut count = 0usize;
+    let mut cr_count: usize = 0;
+    let mut current_cr_run: usize = 0;
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
+        if b == 0x1B {
+            // Skip the escape with stage 2's parser. Bytes inside a
+            // terminated control are stripped wholesale; for an unterminated
+            // string control, the body is dropped up to — but not including
+            // — the next `\n`, so the LF is still seen by the outer loop as
+            // a line separator on the next iteration.
+            let (consume, _recovery) = stage2_skip_escape(raw, i);
+            // Helper always returns >= 1 by construction; `.max(1)` keeps
+            // the loop bounded if that ever changes.
+            i += consume.max(1);
+            continue;
+        }
+        if b == b'\n' {
+            // Stage 2 collapses CRLF and CRCRLF to LF (popping at most one
+            // preceding bare `\r` in addition to the LF). Mirror by
+            // ignoring up to two trailing `\r`s. Earlier interior CRs, or a
+            // third trailing `\r` in `\r\r\r\n`, leave the line CR-bearing.
+            let trailing_strip = current_cr_run.min(2);
+            if cr_count > trailing_strip {
+                count += 1;
+            }
+            cr_count = 0;
+            current_cr_run = 0;
+            i += 1;
+            continue;
+        }
+        match b {
+            b'\r' => {
+                cr_count += 1;
+                current_cr_run += 1;
+            }
+            // Stripped control bytes (b < 0x20 || b == 0x7F, excluding the
+            // \n / \t / \r stage 2 preserves) vanish in stage 2 output, so
+            // they do not interrupt the trailing-CR run; a `\r\x07\n` line
+            // collapses to `\r\n` then `\n`, the same as a clean `\r\n`.
+            b'\t' => current_cr_run = 0,
+            b if b < 0x20 || b == 0x7F => { /* stripped — run unchanged */ }
+            _ => current_cr_run = 0,
+        }
+        i += 1;
+    }
+    // Trailing partial line (no terminating LF): stage 2 preserves any
+    // surviving \r bytes there as bare CR.
+    if cr_count > 0 {
+        count += 1;
+    }
+    count
+}
+
+// `expect()` here is sound: stage 2 only ever pushes bytes from a valid
+// `&str` (input) plus `\n`, so the resulting `Vec<u8>` is valid UTF-8 by
+// construction. Surfacing this as a typed error would propagate through
+// every pipeline stage for a panic that is unreachable from the contract.
+// The lib-wide deny lives at `lib.rs`; allow it at the function granularity.
+#[allow(clippy::expect_used)]
+#[allow(clippy::too_many_lines)] // single coherent CSI/OSC/DCS dispatcher with
+// inline cursor-state tracking for issue #249's K-handling — splitting it would
+// either fragment the cursor-state invariants or duplicate the parser shared
+// with `stage2_skip_escape`.
+fn stage2_ansi_strip(
+    input: &str,
+    stripped: &mut bool,
+    osc_recovery_dropped: &mut usize,
+    emit_erase_sentinel: bool,
+) -> String {
     let bytes = input.as_bytes();
     let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
+    // Tracks the cursor column when it can be derived purely from the
+    // preserved stream since the last `\r` / `\n` / start of input —
+    // i.e., no stripped cursor-moving operation, no preserved `\t` or
+    // non-ASCII char (whose display width cannot be assumed). Issue
+    // #249 / review rounds 4, 7, 8, 9.
+    //
+    // - `Some(n)` — cursor at col `n`, count is reliable. `n` is the
+    //   number of preserved ASCII-printable chars since the last
+    //   `\r`/`\n` (and never a `\t` or non-ASCII byte in between).
+    // - `None` — "not intact": cursor col cannot be trusted.
+    let mut intact_cursor_col: Option<u32> = Some(0);
+    // True iff the cursor became "not intact" via a STRIPPED cursor-
+    // affecting operation (CSI cursor move, ESC fallback, stripped
+    // control, unterminated OSC/DCS recovery). Distinct from "not
+    // intact via preserved tab/non-ASCII char": the latter still has
+    // cursor at the end of the preserved stream content, so a 0K at
+    // that point is a terminal no-op (preserve content). The former
+    // genuinely jumped the cursor to an unknown column, so a 0K may
+    // erase visible bytes — emit the no-pad whole-line sentinel
+    // (over-erase) rather than preserve. Issue #249 / review round 9.
+    let mut cursor_jumped_via_stripped = false;
+    // True iff a preserved printable byte landed AFTER a stripped
+    // cursor jump (and before the next `\r` / `\n` reset). Such bytes
+    // are visible terminal output written at the post-jump cursor
+    // position; a subsequent 0K erases only past that position, so
+    // the visible content must NOT be over-erased. Round 10.
+    let mut printable_written_after_jump = false;
 
     while i < bytes.len() {
         let b = bytes[i];
 
         if b == 0x1B {
-            // ESC: look ahead for CSI or OSC
+            // ESC: inline handler retained here (instead of delegating
+            // to `stage2_skip_escape`) because issue #249 requires
+            // sentinel emission for `CSI K` plus per-segment cursor-
+            // position tracking. The shared helper exposes only the
+            // byte-skip; encoding the rich state in its return type
+            // would couple it to call-sites that don't need it. The
+            // bypass-side `count_bare_cr_lines_after_stage2` walker
+            // continues to use `stage2_skip_escape` for byte-stable
+            // parity (the two parsers are semantically equivalent
+            // over valid UTF-8 input — stage 2's contract).
             *stripped = true;
             if i + 1 < bytes.len() {
                 match bytes[i + 1] {
@@ -2265,23 +3101,172 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                     // only the lone ESC and re-enter the outer loop
                     // so the surviving payload bytes are not eaten.
                     0x5B => {
-                        let mut j = i + 2;
+                        let params_start = i + 2;
+                        let mut j = params_start;
                         while j < bytes.len() && (0x30..=0x3F).contains(&bytes[j]) {
                             j += 1;
                         }
+                        let params_end = j;
                         while j < bytes.len() && (0x20..=0x2F).contains(&bytes[j]) {
                             j += 1;
                         }
-                        let final_byte_present = matches!(
-                            bytes.get(j).copied(),
-                            Some(b) if (0x40..=0x7E).contains(&b)
-                        );
-                        if final_byte_present {
+                        let intermediates_end = j;
+                        let final_byte = bytes.get(j).copied();
+                        if let Some(fb) = final_byte
+                            && (0x40..=0x7E).contains(&fb)
+                        {
+                            // CSI K (erase-in-line). Issue #249 / review
+                            // rounds 1–2. Two distinct sentinels track
+                            // the parameter's visual effect:
+                            //   `K` / `0K`        → cursor-to-EOL erase
+                            //                       (`ERASE_LINE_SENTINEL`)
+                            //   `2K`              → whole-line erase
+                            //                       (`ERASE_WHOLE_LINE_SENTINEL`)
+                            //   `1K`, `3K`, …     → silent-strip; their
+                            //   compound / private  effect after `\r` does
+                            //   intermediate-bearing not clear past-cursor
+                            //                       content, and emitting
+                            //                       a leading-erase
+                            //                       sentinel would drop
+                            //                       visible bytes.
+                            // `classify_csi_k_params` parses leading-zero
+                            // forms (`00K` ≡ `0K`, `02K` ≡ `2K`) so byte-
+                            // exact param matching cannot bypass the
+                            // classifier.
+                            // Update cursor-position knowledge BEFORE
+                            // the K decision: the K itself is cursor-
+                            // neutral, but anything that came before
+                            // it on this line / segment may have
+                            // shifted the cursor invisibly. Issue
+                            // #249 / review rounds 4, 8.
+                            if !is_cursor_neutral_csi_final(fb) {
+                                intact_cursor_col = None;
+                                cursor_jumped_via_stripped = true;
+                                // Round 11: each new stripped cursor
+                                // move invalidates any post-jump-
+                                // visible-write tracking from a prior
+                                // jump — the new jump may have placed
+                                // the cursor before those writes.
+                                printable_written_after_jump = false;
+                            }
+                            if emit_erase_sentinel && fb == b'K' {
+                                let params = &bytes[params_start..params_end];
+                                let no_intermediates = params_end == intermediates_end;
+                                if no_intermediates {
+                                    // Decision matrix per (params, intact
+                                    // cursor) — issue #249 / review rounds
+                                    // 1–8:
+                                    //   0K + col 0 (intact)  → ToEol
+                                    //                          sentinel.
+                                    //                          Stage 2b's
+                                    //                          leading-
+                                    //                          erase rule
+                                    //                          clears.
+                                    //   0K + col >0 (intact) → silent-
+                                    //                          strip; K
+                                    //                          erases
+                                    //                          cursor-to-
+                                    //                          EOL but
+                                    //                          stream
+                                    //                          cursor is
+                                    //                          at end of
+                                    //                          line, so
+                                    //                          nothing to
+                                    //                          erase.
+                                    //   0K + None            → no-pad WL
+                                    //                          (over-
+                                    //                          erase, so
+                                    //                          erased
+                                    //                          content
+                                    //                          cannot
+                                    //                          survive).
+                                    //   2K + intact (any col)→ pad WL,
+                                    //                          stage 2b
+                                    //                          pads with
+                                    //                          pre-segment
+                                    //                          char count.
+                                    //   2K + None            → no-pad WL.
+                                    //   1K / unknown params  → silent-
+                                    //                          strip.
+                                    // Silent-strip when:
+                                    //  - params unrecognised (1K, 3K,
+                                    //    compound, private), OR
+                                    //  - 0K with cursor at known col
+                                    //    >0 (cursor sits at end of
+                                    //    stream segment, so 0K erases
+                                    //    nothing visible).
+                                    match (classify_csi_k_params(params), intact_cursor_col) {
+                                        (Some(CsiKErase::ToEol), Some(0)) => {
+                                            normalized.push(ERASE_LINE_SENTINEL_BYTE);
+                                        }
+                                        (Some(CsiKErase::WholeLine), Some(_)) => {
+                                            normalized.push(ERASE_WHOLE_LINE_SENTINEL_BYTE);
+                                        }
+                                        (Some(CsiKErase::ToCursor), Some(c)) if c > 0 => {
+                                            // 1K with cursor at col >0:
+                                            // pre-cursor content is
+                                            // dropped, post-K writes
+                                            // appear at cursor col.
+                                            // Identical render to 2K.
+                                            // Round 10.
+                                            normalized.push(ERASE_WHOLE_LINE_SENTINEL_BYTE);
+                                        }
+                                        (
+                                            Some(CsiKErase::WholeLine | CsiKErase::ToCursor),
+                                            None,
+                                        ) => {
+                                            // 2K / 1K under intact=None:
+                                            // line is cleared, but
+                                            // cursor col unreliable for
+                                            // padding — emit no-pad.
+                                            normalized.push(ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE);
+                                        }
+                                        (Some(CsiKErase::ToEol), None)
+                                            if cursor_jumped_via_stripped
+                                                && !printable_written_after_jump =>
+                                        {
+                                            // 0K after a stripped cursor
+                                            // jump with no subsequent
+                                            // visible writes: cursor sits
+                                            // at unknown col, the
+                                            // producer likely intended
+                                            // to clear suffix content.
+                                            // Conservative over-erase
+                                            // (rounds 8 & 10).
+                                            normalized.push(ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE);
+                                        }
+                                        // Silent-strip:
+                                        // - 0K with cursor at known col
+                                        //   >0 (terminal no-op: cursor
+                                        //   sits at end of stream).
+                                        // - 0K with intact=None due to
+                                        //   preserved tab / non-ASCII
+                                        //   (round 9).
+                                        // - 0K after a stripped jump
+                                        //   that was followed by
+                                        //   preserved printable bytes
+                                        //   (round 10): post-jump
+                                        //   visible content survives.
+                                        // - 1K with cursor at col 0
+                                        //   (single-col erase, no
+                                        //   visible effect — round 1).
+                                        // - Unrecognised params (3K,
+                                        //   compound, private).
+                                        (
+                                            Some(CsiKErase::ToEol | CsiKErase::ToCursor) | None,
+                                            _,
+                                        ) => {}
+                                    }
+                                }
+                            }
                             i = j + 1;
                         } else {
                             // Truncated CSI (no final byte before EOF):
                             // drop ESC only so outer loop processes
                             // `[`, params, and surviving payload.
+                            // The lone `[` plus any params surviving
+                            // as text don't move the cursor — leave
+                            // intact_cursor_col alone.
                             i += 1;
                         }
                     }
@@ -2328,6 +3313,14 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                             // Stop before the LF so it gets preserved by
                             // the outer loop as a normal line separator.
                             i = k;
+                            // Unterminated OSC body could have moved
+                            // the cursor before being truncated; the
+                            // following LF will reset, but defensively
+                            // mark cursor as unknown so any K within
+                            // the recovery window (none, since we
+                            // dropped to LF) is treated conservatively.
+                            intact_cursor_col = None;
+                            cursor_jumped_via_stripped = true;
                         }
                     }
                     // Round-4 (newer loop) hardening: ESC P (DCS),
@@ -2371,6 +3364,11 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                             }
                             *osc_recovery_dropped = osc_recovery_dropped.saturating_add(k - i);
                             i = k;
+                            // Same conservative posture as OSC: an
+                            // unterminated DCS/APC/PM/SOS body cannot
+                            // be assumed cursor-neutral.
+                            intact_cursor_col = None;
+                            cursor_jumped_via_stripped = true;
                         }
                     }
                     // Round-8 (newer loop) hardening: real terminals
@@ -2402,6 +3400,12 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
                             };
                             i += cp_len.min(bytes.len() - i);
                         }
+                        // Two-byte ESC controls include cursor moves
+                        // (ESC 7/8 save/restore, ESC D index, ESC E
+                        // NEL, ESC M reverse-index). Treat the strip
+                        // as cursor-affecting until the next reset.
+                        intact_cursor_col = None;
+                        cursor_jumped_via_stripped = true;
                     }
                 }
             } else {
@@ -2412,12 +3416,63 @@ fn stage2_ansi_strip(input: &str, stripped: &mut bool, osc_recovery_dropped: &mu
             // Control character: preserve \n (0x0A), \t (0x09), \r (0x0D)
             if b == b'\n' || b == b'\t' || b == b'\r' {
                 normalized.push(b);
+                // `\r` and `\n` are cursor-reset points (`\r` to col
+                // 0, `\n` to col 0 of next line). After either, the
+                // cursor col is once again knowable from the stream.
+                // `\t` advances to the next tab stop, not by 1 — its
+                // display width depends on tab settings, so mark
+                // cursor as "not intact" until the next reset.
+                // Issue #249 / review rounds 7 & 8.
+                if b == b'\r' || b == b'\n' {
+                    intact_cursor_col = Some(0);
+                    cursor_jumped_via_stripped = false;
+                    printable_written_after_jump = false;
+                } else {
+                    // b == b'\t' — preserved tab. Cursor cols are
+                    // unknown but the cursor is still at the end of
+                    // the preserved stream content; no jump occurred.
+                    // Round 9: leave `cursor_jumped_via_stripped`
+                    // alone so 0K following a tab silent-strips
+                    // (preserve content) rather than over-erases.
+                    intact_cursor_col = None;
+                }
             } else {
                 *stripped = true;
+                // Stripped controls include cursor-moving ones (BS
+                // 0x08, VT 0x0B, FF 0x0C). Conservative: any stripped
+                // control is treated as cursor-affecting until the
+                // next reset. Issue #249 / review round 4.
+                intact_cursor_col = None;
+                cursor_jumped_via_stripped = true;
             }
             i += 1;
         } else {
             normalized.push(b);
+            // Preserved printable byte. ASCII (0x20-0x7E) advances
+            // the cursor by exactly one display column — track it.
+            // Non-ASCII bytes are part of multi-byte UTF-8 codepoints
+            // whose display width can be 0 (combining marks), 1, or
+            // 2+ (CJK / emoji). Mark cursor as "not intact" so stage
+            // 2's K-emission falls back to the no-pad path rather
+            // than synthesize a wrong-width prefix. Cursor still sits
+            // at the end of the preserved stream (no jump), so leave
+            // `cursor_jumped_via_stripped` alone — 0K after a non-
+            // ASCII prefix silent-strips (preserve content) per round
+            // 9. Issue #249 / review rounds 7, 8, 9.
+            if (0x20..=0x7E).contains(&b) {
+                intact_cursor_col = intact_cursor_col.map(|n| n.saturating_add(1));
+            } else {
+                // Non-ASCII byte: cursor width unknown — but the byte
+                // is still preserved as visible terminal output.
+                intact_cursor_col = None;
+            }
+            // Round 11: any preserved byte after a stripped cursor
+            // jump is visible content, regardless of ASCII / non-ASCII.
+            // Mark the flag so a following 0K does not over-erase
+            // visible Unicode output (`secret\r[1C✓[K\n` must keep ✓).
+            if cursor_jumped_via_stripped {
+                printable_written_after_jump = true;
+            }
             i += 1;
         }
     }
@@ -2538,7 +3593,16 @@ mod stage2_tests {
     fn s2(input: &str) -> (String, bool) {
         let mut stripped = false;
         let mut osc_dropped = 0usize;
-        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped);
+        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped, false);
+        (out, stripped)
+    }
+
+    /// Helper that emits the erase-line sentinel for CSI K, mirroring
+    /// `progress_frame_collapse_enabled = true` at the call sites.
+    fn s2_with_sentinel(input: &str) -> (String, bool) {
+        let mut stripped = false;
+        let mut osc_dropped = 0usize;
+        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped, true);
         (out, stripped)
     }
 
@@ -2546,7 +3610,7 @@ mod stage2_tests {
     fn s2_with_osc(input: &str) -> (String, bool, usize) {
         let mut stripped = false;
         let mut osc_dropped = 0usize;
-        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped);
+        let out = stage2_ansi_strip(input, &mut stripped, &mut osc_dropped, false);
         (out, stripped, osc_dropped)
     }
 
@@ -2721,6 +3785,124 @@ mod stage2_tests {
         assert!(out.starts_with("prefix\n"), "got: {out:?}");
         assert!(!out.contains("dangling"), "got: {out:?}");
     }
+
+    /// Issue #249: cursor-to-EOL forms (`\x1b[K`, `\x1b[0K`, leading-
+    /// zero `\x1b[00K`) emit `ERASE_LINE_SENTINEL`.
+    #[test]
+    fn csi_to_eol_forms_emit_to_eol_sentinel() {
+        for esc in ["\x1b[K", "\x1b[0K", "\x1b[00K", "\x1b[000K"] {
+            let input = format!("status\r{esc}\n");
+            let (out, stripped) = s2_with_sentinel(&input);
+            assert!(stripped, "{esc:?}: stripped flag must fire");
+            assert_eq!(
+                out,
+                format!("status\r{ERASE_LINE_SENTINEL}\n"),
+                "{esc:?}: cursor-to-EOL sentinel must replace CSI bytes"
+            );
+        }
+    }
+
+    /// Issue #249 / review round 2: whole-line forms (`\x1b[2K`,
+    /// leading-zero `\x1b[02K`, `\x1b[002K`) emit
+    /// `ERASE_WHOLE_LINE_SENTINEL` — distinct from cursor-to-EOL so
+    /// stage 2b can clear the line regardless of `\r` presence.
+    #[test]
+    fn csi_whole_line_forms_emit_whole_line_sentinel() {
+        for esc in ["\x1b[2K", "\x1b[02K", "\x1b[002K"] {
+            let input = format!("secret{esc}\n");
+            let (out, stripped) = s2_with_sentinel(&input);
+            assert!(stripped, "{esc:?}: stripped flag must fire");
+            assert_eq!(
+                out,
+                format!("secret{ERASE_WHOLE_LINE_SENTINEL}\n"),
+                "{esc:?}: whole-line sentinel must replace CSI bytes"
+            );
+            assert!(
+                !out.contains(ERASE_LINE_SENTINEL),
+                "{esc:?}: must not emit cursor-to-EOL sentinel"
+            );
+        }
+    }
+
+    /// Issue #249 / review round 1: `\x1b[1K` is erase-from-start-to-
+    /// cursor. After a preceding `\r` the cursor is at column 0, so
+    /// `[1K` only clears col 0 — content past the cursor survives.
+    /// Emitting a leading-erase sentinel would falsely drop the
+    /// remainder of the frame, so stage 2 must fall back to the
+    /// silent-strip path for `[1K`. Compound, intermediate-bearing,
+    /// or private-prefix parameter forms are likewise silent-stripped
+    /// (semantics unspecified — be conservative).
+    #[test]
+    fn csi_1k_and_unsupported_forms_dont_emit_sentinel() {
+        // `\x1b[1K`: visible "status" content survives col 0 erase.
+        // `\x1b[01K` / `\x1b[001K`: leading-zero variants of 1K.
+        // `\x1b[3K`: non-standard parameter (xterm "erase saved lines"
+        //   refers to scrollback, not the active line) — don't model.
+        // `\x1b[1;2K`: compound parameters — semantics unspecified.
+        // `\x1b[?K`: private prefix — semantics unspecified.
+        // `\x1b[ K` (intermediate `space` then K): malformed for our
+        //   purposes; don't synthesize erase.
+        for esc in [
+            "\x1b[1K",
+            "\x1b[01K",
+            "\x1b[001K",
+            "\x1b[3K",
+            "\x1b[1;2K",
+            "\x1b[?K",
+            "\x1b[ K",
+        ] {
+            let input = format!("status\r{esc}\n");
+            let (out, stripped) = s2_with_sentinel(&input);
+            assert!(stripped, "{esc:?}: stripped flag must fire");
+            assert!(
+                !out.contains(ERASE_LINE_SENTINEL),
+                "{esc:?}: cursor-to-EOL sentinel must NOT be emitted; got {out:?}"
+            );
+            assert!(
+                !out.contains(ERASE_WHOLE_LINE_SENTINEL),
+                "{esc:?}: whole-line sentinel must NOT be emitted; got {out:?}"
+            );
+        }
+    }
+
+    /// Issue #249: with the sentinel flag off, CSI K is stripped
+    /// silently — the existing default behavior. Guards against an
+    /// accidental flip that would leak sentinels into stage 3+ on
+    /// the legacy code path.
+    #[test]
+    fn csi_k_silently_stripped_when_sentinel_disabled() {
+        let (out, stripped) = s2("status\r\x1b[K\n");
+        assert!(stripped);
+        // `\r\n` after CSI K strip becomes CRLF → LF normalization.
+        assert_eq!(out, "status\n");
+        assert!(!out.contains(ERASE_LINE_SENTINEL));
+    }
+
+    /// Issue #249: only `K` final byte triggers the sentinel — other
+    /// CSI finals (SGR `m`, cursor `H`, scroll `T`, etc.) stay silent.
+    #[test]
+    fn non_k_csi_finals_dont_emit_sentinel() {
+        let (out, stripped) = s2_with_sentinel("\x1b[31mred\x1b[0m\x1b[2J\x1b[Htail\n");
+        assert!(stripped);
+        assert_eq!(out, "redtail\n");
+        assert!(!out.contains(ERASE_LINE_SENTINEL));
+    }
+
+    /// Raw 0x01 bytes in input must still be stripped — the sentinel
+    /// is a stage-2-internal signal, not a passthrough character. If
+    /// the outer-loop control filter ever stopped stripping 0x01,
+    /// callers could smuggle a sentinel and forge erase semantics.
+    #[test]
+    fn raw_sentinel_byte_in_input_is_stripped() {
+        let input = "before-\u{0001}-after\n";
+        let (out_off, _) = s2(input);
+        let (out_on, _) = s2_with_sentinel(input);
+        assert_eq!(out_off, "before--after\n");
+        assert_eq!(
+            out_on, "before--after\n",
+            "user 0x01 must be stripped regardless of sentinel mode"
+        );
+    }
 }
 
 /// Stage 2b: optional progress-frame-collapse pre-stage.
@@ -2732,25 +3914,44 @@ mod stage2_tests {
 /// `Downloading 1%\rDownloading 2%\rDownloading 3%` collapses to
 /// `Downloading 3%`).
 ///
-/// **Why last-segment-wins instead of overlay-with-overwrite.** Stage 2
-/// has already stripped every CSI sequence by the time stage 2b runs, so
-/// CSI-K (erase-in-line) — the canonical signal that a shorter replacement
-/// frame supersedes its predecessor — is gone. Naive byte-level overlay
-/// would corrupt that common pattern (e.g. `very long status\r\x1b[Kdone`
-/// would render as `done long status` with stale tail bytes from the prior
-/// frame). Treating each `\r` as a frame boundary and keeping the final
-/// non-empty frame is correct for full-line rewrites (the dominant
-/// progress-output pattern) and degrades predictably for partial rewrites:
-/// `aaaa\rbb` collapses to `bb` rather than the terminal-faithful `bbaa`.
-/// This is the documented trade-off of running after stage 2.
+/// **Why a last-non-empty rule instead of overlay-with-overwrite.** Stage
+/// 2 strips every CSI sequence except `CSI K` (erase-in-line), which it
+/// replaces with one of two single-byte sentinels (`ERASE_LINE_SENTINEL`
+/// for `[K`/`[0K`, `ERASE_WHOLE_LINE_SENTINEL` for `[2K`) when the caller
+/// asked for erase semantics — see issue #249. Without that signal, naive
+/// byte-level overlay would corrupt the common pattern (e.g.
+/// `very long status\r\x1b[Kdone` would render as `done long status` with
+/// stale tail bytes from the prior frame). Treating each `\r` as a frame
+/// boundary and keeping the final non-empty frame is correct for full-line
+/// rewrites (the dominant progress-output pattern) and degrades predictably
+/// for partial rewrites: `aaaa\rbb` collapses to `bb` rather than the
+/// terminal-faithful `bbaa`. This is the documented trade-off of running
+/// after stage 2.
 ///
-/// If only empty frames follow the last `\r` (e.g. `foo\r`), the rendered
-/// line is the last non-empty frame in *original* order — i.e., `foo` —
-/// so trailing-CR no-ops remain idempotent.
+/// **CSI K erase semantics.** When stage 2 emitted an erase sentinel:
+/// - `ERASE_WHOLE_LINE_SENTINEL` (from `\x1b[2K`) erases the entire line
+///   regardless of position. The visible tail of any segment containing
+///   it is whatever follows the *last* whole-line sentinel; everything
+///   prior is gone. This applies whether or not the line has a `\r`.
+/// - `ERASE_LINE_SENTINEL` (from `\x1b[K` / `\x1b[0K`) erases from cursor
+///   to EOL. A leading-of-segment placement after `\r` models "cursor at
+///   col 0, erase to EOL" — that segment wins immediately even if its
+///   sentinel-stripped content is empty (`text\r\x1b[K\n` → empty final
+///   frame). Mid-segment placement (cursor already advanced) degrades to
+///   a no-op strip: the pre-cursor content is preserved.
+///
+/// Sentinels are stripped from every render path so stages 3+ never see
+/// them.
+///
+/// If only empty, non-erase frames follow the last `\r` (e.g. `foo\r`),
+/// the rendered line is the last non-empty frame in *original* order —
+/// i.e., `foo` — so trailing-CR no-ops remain idempotent.
 ///
 /// Counters:
 /// - `frames_coalesced`: number of `\n`-delimited lines that contained at
 ///   least one `\r` and were rewritten (one per source line, not per `\r`).
+///   Non-CR lines that only carried sentinels do NOT increment this — the
+///   sentinel-only loss is already audited via `ansi_stripped`.
 /// - `bytes_saved`: original line bytes minus rendered line bytes, summed.
 ///   Saturating-clamped at zero so an equal-length rewrite contributes
 ///   nothing and a (theoretical) longer rewrite cannot underflow.
@@ -2767,7 +3968,12 @@ fn stage2b_progress_collapse(
     frames_coalesced: &mut usize,
     bytes_saved: &mut usize,
 ) -> String {
-    if !input.contains('\r') {
+    // Fast path: nothing for stage 2b to do. Sentinel-only inputs (CSI K
+    // stripped from a line with no `\r`) still need a pass so the sentinel
+    // does not leak past stage 2b — delegate to the centralized predicate
+    // so new sentinel additions can't slip past this guard. Issue #249 /
+    // review round 6.
+    if !input.contains('\r') && !contains_erase_sentinel(input) {
         return input.to_string();
     }
     let trailing = input.ends_with('\n');
@@ -2790,6 +3996,26 @@ fn stage2b_progress_collapse(
             *frames_coalesced += 1;
             *bytes_saved = bytes_saved.saturating_add(original_len.saturating_sub(rendered.len()));
             out.push_str(&rendered);
+        } else if line.contains(ERASE_WHOLE_LINE_SENTINEL)
+            || line.contains(ERASE_WHOLE_LINE_NOPAD_SENTINEL)
+        {
+            // CSI 2K with no `\r`: the whole line is erased but the
+            // cursor stays put. Anything written after the last 2K
+            // appears at the cursor column, so render padding +
+            // post-tail (`render_after_whole_line_erase` handles the
+            // empty-tail and no-pad cases). Multiple 2Ks compose:
+            // only the cursor column at the LAST 2K matters because
+            // each erase wipes prior writes again.
+            // Issue #249 / review rounds 2–3 / 5.
+            out.push_str(&render_after_whole_line_erase(line));
+        } else if line.contains(ERASE_LINE_SENTINEL) {
+            // CSI K / 0K with no `\r` and no 2K: cursor was wherever
+            // it had advanced to; partial cursor-to-EOL erase has no
+            // recoverable visual effect we can model from post-strip
+            // text. Conservative: strip the sentinel and pass the
+            // rest through. The CSI byte cost is already booked under
+            // `ansi_stripped`; not a frame-coalesce event.
+            out.push_str(&strip_erase_sentinels(line));
         } else {
             out.push_str(line);
         }
@@ -2800,17 +4026,144 @@ fn stage2b_progress_collapse(
     out
 }
 
-/// Render a single line under last-non-empty-`\r`-segment-wins semantics.
-/// See `stage2b_progress_collapse` for the rationale. Caller guarantees the line
-/// contains at least one `\r`.
+/// True iff `s` contains any stage-2-emitted erase sentinel. Used by
+/// the outer callers to decide whether stage 2b needs to run on a
+/// CR-free input (e.g. `secret\x1b[2K\n` → stage 2 emits a whole-line
+/// sentinel that must be consumed before stage 3 sees it).
+fn contains_erase_sentinel(s: &str) -> bool {
+    s.contains(ERASE_LINE_SENTINEL)
+        || s.contains(ERASE_WHOLE_LINE_SENTINEL)
+        || s.contains(ERASE_WHOLE_LINE_NOPAD_SENTINEL)
+}
+
+/// True iff `c` is any stage-2-emitted erase sentinel. Centralized so
+/// new sentinel additions can't slip past `strip_erase_sentinels`.
+fn is_erase_sentinel(c: char) -> bool {
+    c == ERASE_LINE_SENTINEL
+        || c == ERASE_WHOLE_LINE_SENTINEL
+        || c == ERASE_WHOLE_LINE_NOPAD_SENTINEL
+}
+
+/// Remove every erase sentinel byte from `s`. Cheap fast-path when no
+/// sentinel is present (avoids the allocation in the common case).
+fn strip_erase_sentinels(s: &str) -> String {
+    if contains_erase_sentinel(s) {
+        s.chars().filter(|c| !is_erase_sentinel(*c)).collect()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Render a span that runs from the most recent cursor reset point
+/// (start of a `\r`-segment, or start of the line) and contains at
+/// least one whole-line erase sentinel (`ERASE_WHOLE_LINE_SENTINEL` or
+/// `ERASE_WHOLE_LINE_NOPAD_SENTINEL`). Issue #249 / review rounds 3 & 5.
+///
+/// CSI 2K erases the entire line but does NOT move the cursor. Pre-2K
+/// content advances the cursor; the post-2K tail must therefore be
+/// rendered at that cursor column, not at column 0 — UNLESS something
+/// in the pre-span was a stripped cursor-affecting operation, in which
+/// case stage 2 emitted the no-pad variant of the sentinel and we
+/// render the post-tail at column 0 (no whitespace prefix we cannot
+/// justify).
+///
+/// "Display column" is approximated with `chars().count()` of the
+/// sentinel-stripped pre-2K span — exact for ASCII, imperfect but
+/// non-dropping for multi-byte UTF-8 / wide chars / combining marks.
+/// The trade-off is documented in `with_progress_frame_collapse_enabled`:
+/// callers must classify input as full-frame-rewrite progress output
+/// to enable this stage at all.
+///
+/// When the post-erase tail is empty (e.g. `secret\x1b[2K\n`), no
+/// padding is emitted: the visible result is a blank line. Padding is
+/// only meaningful when there is content to anchor at the cursor.
+fn render_after_whole_line_erase(span: &str) -> String {
+    let last_2k_pad = span.rfind(ERASE_WHOLE_LINE_SENTINEL);
+    let last_2k_nopad = span.rfind(ERASE_WHOLE_LINE_NOPAD_SENTINEL);
+    // Pick the rightmost whole-line sentinel; the tail of the span
+    // after that point is what survived the most-recent erase. The
+    // *kind* of sentinel (pad / nopad) determines whether to prepend
+    // cursor-column whitespace.
+    let (last_idx, sentinel_len, allow_padding) = match (last_2k_pad, last_2k_nopad) {
+        (Some(p), Some(n)) => {
+            if p >= n {
+                (p, ERASE_WHOLE_LINE_SENTINEL.len_utf8(), true)
+            } else {
+                (n, ERASE_WHOLE_LINE_NOPAD_SENTINEL.len_utf8(), false)
+            }
+        }
+        (Some(p), None) => (p, ERASE_WHOLE_LINE_SENTINEL.len_utf8(), true),
+        (None, Some(n)) => (n, ERASE_WHOLE_LINE_NOPAD_SENTINEL.len_utf8(), false),
+        (None, None) => {
+            // Caller invariant: span contains at least one whole-line
+            // sentinel. Fall back to plain sentinel-strip if violated
+            // — never panic over input shape inside cairn-core.
+            return strip_erase_sentinels(span);
+        }
+    };
+    let pre = &span[..last_idx];
+    let post = &span[last_idx + sentinel_len..];
+    let post_stripped = strip_erase_sentinels(post);
+    if post_stripped.is_empty() {
+        // Line erased; nothing was written after the erase. Visible:
+        // blank line. Trailing-whitespace-only output is noise — drop.
+        return String::new();
+    }
+    let pre_stripped = strip_erase_sentinels(pre);
+    // Only emit cursor-column whitespace when the pre-span is pure
+    // ASCII printable. Tabs (`\t`) advance to the next tab stop, not
+    // by one column; non-ASCII chars (wide CJK, emoji, combining
+    // marks) have ambiguous display width. In either case the
+    // `chars().count()` approximation would silently corrupt the
+    // visual column. Fall back to col-0 rendering — lossy on the
+    // gap but never inventing wrong-width padding. Issue #249 /
+    // review round 7.
+    let pad_safe = allow_padding && pre_stripped.bytes().all(|b| (0x20..=0x7E).contains(&b));
+    if !pad_safe {
+        return post_stripped;
+    }
+    let cursor_col = pre_stripped.chars().count();
+    let mut out = String::with_capacity(cursor_col + post_stripped.len());
+    for _ in 0..cursor_col {
+        out.push(' ');
+    }
+    out.push_str(&post_stripped);
+    out
+}
+
+/// Render a single line under the `\r`-segment collapse rule, including
+/// CSI K erase semantics. See `stage2b_progress_collapse` for the
+/// rationale. Caller guarantees the line contains at least one `\r`.
 fn render_cr_line(line: &str) -> String {
-    // Last-non-empty wins: walking from the right, the first non-empty
-    // segment is the final visible frame. If every segment is empty
-    // (e.g. `\r\r\r`), the rendered line is itself empty.
-    line.rsplit('\r')
-        .find(|seg| !seg.is_empty())
-        .unwrap_or("")
-        .to_string()
+    // Walk segments right-to-left. Per segment:
+    //   1. If the segment contains `ERASE_WHOLE_LINE_SENTINEL`, the
+    //      segment renders via `render_after_whole_line_erase` (whole-
+    //      line erase wins regardless of cursor column; it overrides
+    //      both the legacy non-empty rule and the cursor-to-EOL rule).
+    //      Issue #249 / review rounds 2–3.
+    //   2. Otherwise, if the segment starts with `ERASE_LINE_SENTINEL`,
+    //      it models "cursor reset by `\r`, then CSI K erased to EOL"
+    //      — that segment wins even when its sentinel-stripped content
+    //      is empty (`text\r\x1b[K\n` → empty final frame).
+    //   3. Otherwise, sentinel-stripped content wins if non-empty
+    //      (legacy last-non-empty rule).
+    //   4. If neither, fall through and try the next segment.
+    // If no segment wins, the line renders empty (`\r\r\r` → ``).
+    //
+    // Sentinels are stripped from the rendered string in every branch so
+    // they never leak past stage 2b.
+    for seg in line.rsplit('\r') {
+        if seg.contains(ERASE_WHOLE_LINE_SENTINEL) || seg.contains(ERASE_WHOLE_LINE_NOPAD_SENTINEL)
+        {
+            return render_after_whole_line_erase(seg);
+        }
+        let leading_erase = seg.starts_with(ERASE_LINE_SENTINEL);
+        let rendered = strip_erase_sentinels(seg);
+        if leading_erase || !rendered.is_empty() {
+            return rendered;
+        }
+    }
+    String::new()
 }
 
 #[cfg(test)]
@@ -2957,6 +4310,152 @@ mod stage2b_tests {
         let (out, frames, _) = render("foo\n\r\r\r\nbar");
         assert_eq!(out, "foo\n\nbar");
         assert_eq!(frames, 1);
+    }
+
+    /// Issue #249: a segment whose first char is the erase-line
+    /// sentinel models "cursor at column 0, CSI K cleared the line."
+    /// That segment wins over earlier segments even when its
+    /// sentinel-stripped content is empty — the load-bearing case
+    /// (`text\r\x1b[K\n` → empty final frame) hinges on this.
+    #[test]
+    fn sentinel_only_segment_after_cr_renders_empty() {
+        let line = format!("status\r{ERASE_LINE_SENTINEL}");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "");
+        assert_eq!(frames, 1);
+    }
+
+    /// Issue #249: erase followed by replacement text in the same
+    /// segment renders as the post-erase content (cursor was at col 0
+    /// from `\r`; CSI K cleared the line; subsequent bytes write fresh
+    /// content). Equivalent end-to-end behavior to the legacy
+    /// "shorter replacement" case but reached via the sentinel path.
+    #[test]
+    fn sentinel_followed_by_text_renders_post_erase_content() {
+        let line = format!("very long status\r{ERASE_LINE_SENTINEL}done");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "done");
+        assert_eq!(frames, 1);
+    }
+
+    /// Issue #249 acceptance test 2 in stage-2b form: erase followed
+    /// by another `\r` with replacement content → the final segment
+    /// wins under the legacy non-empty rule (no sentinel needed).
+    #[test]
+    fn sentinel_then_cr_then_more_renders_more() {
+        let line = format!("text\r{ERASE_LINE_SENTINEL}\rmore");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "more");
+        assert_eq!(frames, 1);
+    }
+
+    /// Issue #249: a sentinel that does NOT lead its segment models
+    /// "cursor advanced past `<pre>`, then CSI K erased to EOL." The
+    /// erase is a no-op for our purposes (we cannot model column-
+    /// based partial erase from post-strip text). Render `<pre>` —
+    /// the legacy non-empty rule applies after sentinels are stripped.
+    #[test]
+    fn sentinel_mid_segment_strips_without_erasing() {
+        let line = format!("aaaa\rxx{ERASE_LINE_SENTINEL}");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "xx");
+        assert_eq!(frames, 1);
+    }
+
+    /// Issue #249: a CSI K with no `\r` in the line is a no-op for
+    /// stage 2b (cursor was wherever it had advanced to). Strip the
+    /// sentinel and pass the rest through. Frame counter stays at
+    /// zero — sentinel-only-no-CR is not a frame coalesce event.
+    #[test]
+    fn sentinel_without_cr_strips_silently() {
+        let line = format!("prefix{ERASE_LINE_SENTINEL}suffix");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "prefixsuffix");
+        assert_eq!(frames, 0);
+    }
+
+    /// Idempotency: running stage 2b twice on a sentinel-bearing line
+    /// must be a no-op the second pass. Sentinels never leak past
+    /// stage 2b, so the second invocation sees no `\r` and no
+    /// sentinel and returns its input unchanged.
+    #[test]
+    fn sentinel_handling_is_idempotent() {
+        let line = format!("status\r{ERASE_LINE_SENTINEL}");
+        let mut f1 = 0;
+        let mut s1 = 0;
+        let pass1 = stage2b_progress_collapse(&line, &mut f1, &mut s1);
+        let mut f2 = 0;
+        let mut s2 = 0;
+        let pass2 = stage2b_progress_collapse(&pass1, &mut f2, &mut s2);
+        assert_eq!(pass1, pass2);
+        assert_eq!(f2, 0);
+        assert_eq!(s2, 0);
+        assert!(!pass1.contains(ERASE_LINE_SENTINEL));
+    }
+
+    /// Issue #249 / review round 2: whole-line erase (CSI 2K) wipes
+    /// the line regardless of `\r` presence. A line with no `\r` but
+    /// with the whole-line sentinel must collapse to whatever follows
+    /// the LAST sentinel.
+    #[test]
+    fn whole_line_sentinel_without_cr_clears_prior_content() {
+        let line = format!("secret{ERASE_WHOLE_LINE_SENTINEL}");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "");
+        assert_eq!(frames, 0, "no CR → not a frame coalesce");
+    }
+
+    /// Issue #249 / review round 3: whole-line erase followed by
+    /// fresh content keeps the post-erase tail at the cursor column
+    /// where the erase fired (cursor doesn't move with 2K). Pre-fix
+    /// the post-erase tail was rendered at column 0, silently
+    /// dropping the cursor-column whitespace gap.
+    #[test]
+    fn whole_line_sentinel_then_text_pads_to_cursor_column() {
+        let line = format!("secret{ERASE_WHOLE_LINE_SENTINEL}new");
+        let (out, _, _) = render(&line);
+        // "secret" is 6 chars, cursor at col 6 when 2K fired; post-
+        // erase "new" renders at cols 6-8.
+        assert_eq!(out, "      new");
+    }
+
+    /// Issue #249 / review round 3: in a CR-bearing line the cursor
+    /// resets to col 0 on each `\r`. Pre-2K content within the
+    /// rightmost 2K-bearing segment determines the column; post-2K
+    /// content renders padded to that column.
+    #[test]
+    fn whole_line_sentinel_in_cr_segment_pads_to_segment_cursor() {
+        let line = format!("aaaa\rxx{ERASE_WHOLE_LINE_SENTINEL}bb");
+        let (out, frames, _) = render(&line);
+        // Cursor reset by `\r`, "xx" advances to col 2, 2K erases
+        // (cursor stays col 2), "bb" renders at cols 2-3.
+        assert_eq!(out, "  bb");
+        assert_eq!(frames, 1);
+    }
+
+    /// Issue #249 / review round 2: rightmost segment is non-empty
+    /// without a sentinel; an earlier 2K is moot under right-to-left
+    /// walk because the post-`\r` write overlays the cleared line.
+    #[test]
+    fn whole_line_sentinel_earlier_segment_yields_to_later_text() {
+        let line = format!("text{ERASE_WHOLE_LINE_SENTINEL}\rmore");
+        let (out, frames, _) = render(&line);
+        assert_eq!(out, "more");
+        assert_eq!(frames, 1);
+    }
+
+    /// Multiple whole-line sentinels compose under cursor tracking:
+    /// each erase wipes prior writes but leaves the cursor advanced.
+    /// Only the cursor column at the LAST 2K matters.
+    #[test]
+    fn multiple_whole_line_sentinels_pad_to_last_cursor() {
+        let line =
+            format!("first{ERASE_WHOLE_LINE_SENTINEL}second{ERASE_WHOLE_LINE_SENTINEL}third");
+        let (out, _, _) = render(&line);
+        // "first" (5) + "second" (6) = 11 chars before the last 2K
+        // (sentinels stripped from pre-erase span). "third" renders
+        // at col 11.
+        assert_eq!(out, "           third");
     }
 }
 
@@ -3728,6 +5227,7 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
         &decoded,
         &mut stats.ansi_stripped,
         &mut stats.osc_recovery_bytes_dropped,
+        cfg.progress_frame_collapse_enabled(),
     );
     // Stage 2b: opt-in progress-frame-collapse pre-stage (issue #219).
     // Collapses bare-`\r` lines to their last non-empty `\r`-segment so
@@ -3746,7 +5246,9 @@ pub fn squash(raw: UnstructuredTextBytes<'_>, cfg: &SquashConfig) -> SquashOutpu
     // that had a CR but stage 2b resolved to a clean rendered line) must
     // not look identical to a CR-free capture.
     stats.cr_bearing_lines = stage2.split('\n').filter(|l| l.contains('\r')).count();
-    let stage2b: Cow<'_, str> = if cfg.progress_frame_collapse_enabled() && stage2.contains('\r') {
+    let stage2b: Cow<'_, str> = if cfg.progress_frame_collapse_enabled()
+        && (stage2.contains('\r') || contains_erase_sentinel(&stage2))
+    {
         Cow::Owned(stage2b_progress_collapse(
             &stage2,
             &mut stats.progress_frames_coalesced,
@@ -3893,56 +5395,17 @@ fn oversize_bypass(
     // only sanitizes head/tail/suffix slices, so a huge payload with
     // CR-bearing progress lines concentrated in the dropped middle
     // would otherwise report cr_bearing_lines == 0 and hide a source-
-    // capture hazard exactly on the captures most likely to hit it
-    // (round-8 finding).
+    // capture hazard exactly on the captures most likely to hit it.
     //
-    // CRLF normalization parity (round-9 + round-10 findings): the
-    // staged path's stage 2 collapses `\r\n` to `\n` and also pops ONE
-    // preceding `\r` from its output (so `\r\r\n` → `\n`). Any further
-    // CRs before that pair are PRESERVED on the staged path: e.g.
-    // `\r\r\r\n` → stage 2 → `\r\n` (line "\r" → 1 CR-bearing) and
-    // `\r\r\r\r\n` → `\r\r\n` (line "\r\r" → 1 CR-bearing). Mirror that
-    // rule here by stripping up to two — never more — trailing `\r`s
-    // from each `\n`-terminated line before checking for residual `\r`.
-    // Stripping the entire trailing run (round 9's first attempt) would
-    // hide real bare-CR hazards on `\r\r\r\n`-style endings exactly at
-    // the bypass gate (round-10 [high] finding). An unterminated final
-    // line keeps its trailing `\r`s (stage 2 preserves them as bare CR
-    // there).
-    //
-    // Persistent gap (rounds 8/9/10): `\r` bytes appearing INSIDE an
-    // ESC-introduced control string (OSC, DCS, APC, PM, SOS — both
-    // terminated and unterminated) that stage 2 would strip remain
-    // counted here, because the bypass scan cannot affordably re-run
-    // stage 2's escape-state parser over the full input. This produces
-    // a size-dependent false positive on captures whose dropped middle
-    // contains a control-string body with embedded `\r`. Mitigating it
-    // would require porting stage 2's escape parser to operate on raw
-    // bytes — out of scope for this PR; tracked separately. The signal
-    // remains conservative-by-over-counting, which is the safer side
-    // for an audit/warning gate.
-    stats.cr_bearing_lines = {
-        let mut count = 0usize;
-        let mut start = 0usize;
-        for (i, &b) in raw_bytes.iter().enumerate() {
-            if b == b'\n' {
-                let mut end = i;
-                let mut stripped = 0usize;
-                while stripped < 2 && end > start && raw_bytes[end - 1] == b'\r' {
-                    end -= 1;
-                    stripped += 1;
-                }
-                if raw_bytes[start..end].contains(&b'\r') {
-                    count += 1;
-                }
-                start = i + 1;
-            }
-        }
-        if start < raw_bytes.len() && raw_bytes[start..].contains(&b'\r') {
-            count += 1;
-        }
-        count
-    };
+    // `count_bare_cr_lines_after_stage2` walks raw bytes with the same
+    // escape-state parser that stage 2 uses on the staged path
+    // (`stage2_skip_escape`), so `\r` bytes inside ESC-introduced control
+    // strings (OSC, DCS, APC, PM, SOS — terminated or not) are excluded
+    // here exactly the way stage 2 excludes them. CRLF / CRCRLF rule
+    // parity (`\r\n` → `\n`, `\r\r\n` → `\n`, `\r\r\r\n` keeps one
+    // residual `\r`) is mirrored line-by-line, and trailing partial
+    // lines preserve any surviving `\r` as stage 2 does.
+    stats.cr_bearing_lines = count_bare_cr_lines_after_stage2(raw_bytes);
     let marker = reason.marker(raw_byte_len, line_count);
     let marker_bytes = marker.as_bytes();
     let budget = max_body.saturating_sub(marker_bytes.len() + 2 /* two LFs */);
@@ -3966,6 +5429,7 @@ fn oversize_bypass(
         &head_decoded,
         &mut head_stripped,
         &mut stats.osc_recovery_bytes_dropped,
+        cfg.progress_frame_collapse_enabled(),
     );
     stats.ansi_stripped |= head_stripped;
     // Stage 2b also runs on the bypass path so `progress_frame_collapse_enabled`
@@ -3982,16 +5446,17 @@ fn oversize_bypass(
     // so per-window accumulation is unnecessary.
     let mut head_progress_frames_local: usize = 0;
     let mut head_progress_bytes_local: usize = 0;
-    let head_rendered: Cow<'_, str> =
-        if cfg.progress_frame_collapse_enabled() && head_sanitized.contains('\r') {
-            Cow::Owned(stage2b_progress_collapse(
-                &head_sanitized,
-                &mut head_progress_frames_local,
-                &mut head_progress_bytes_local,
-            ))
-        } else {
-            Cow::Borrowed(head_sanitized.as_ref())
-        };
+    let head_rendered: Cow<'_, str> = if cfg.progress_frame_collapse_enabled()
+        && (head_sanitized.contains('\r') || contains_erase_sentinel(&head_sanitized))
+    {
+        Cow::Owned(stage2b_progress_collapse(
+            &head_sanitized,
+            &mut head_progress_frames_local,
+            &mut head_progress_bytes_local,
+        ))
+    } else {
+        Cow::Borrowed(head_sanitized.as_ref())
+    };
     let head_trimmed = trim_to_byte_budget_at_boundary(&head_rendered, half);
     // Drop any trailing partial line from head. If `head_trimmed`
     // contains NO `\n` at all, the entire window is a prefix of one
@@ -4046,20 +5511,22 @@ fn oversize_bypass(
             &tail_decoded,
             &mut tail_stripped,
             &mut stats.osc_recovery_bytes_dropped,
+            cfg.progress_frame_collapse_enabled(),
         );
         stats.ansi_stripped |= tail_stripped;
         // Stage 2b on the tail window for the same reason as the head:
         // honor `progress_frame_collapse_enabled` even on the bypass path.
-        let tail_rendered: Cow<'_, str> =
-            if cfg.progress_frame_collapse_enabled() && tail_sanitized.contains('\r') {
-                Cow::Owned(stage2b_progress_collapse(
-                    &tail_sanitized,
-                    &mut stats.progress_frames_coalesced,
-                    &mut stats.progress_bytes_saved,
-                ))
-            } else {
-                Cow::Borrowed(tail_sanitized.as_ref())
-            };
+        let tail_rendered: Cow<'_, str> = if cfg.progress_frame_collapse_enabled()
+            && (tail_sanitized.contains('\r') || contains_erase_sentinel(&tail_sanitized))
+        {
+            Cow::Owned(stage2b_progress_collapse(
+                &tail_sanitized,
+                &mut stats.progress_frames_coalesced,
+                &mut stats.progress_bytes_saved,
+            ))
+        } else {
+            Cow::Borrowed(tail_sanitized.as_ref())
+        };
         let tail_trimmed = trim_to_byte_budget_at_boundary_from_end(&tail_rendered, half);
         // The raw slice was line-aligned (begins after a `\n`), so an
         // UN-trimmed tail starts on a line boundary. Only realign if
@@ -4216,6 +5683,7 @@ fn oversize_bypass(
                 &suffix_decoded,
                 &mut suf_stripped,
                 &mut stats.osc_recovery_bytes_dropped,
+                cfg.progress_frame_collapse_enabled(),
             );
             stats.ansi_stripped |= suf_stripped;
             // Stage 2b on the giant-final-line suffix: render the full
@@ -4223,16 +5691,17 @@ fn oversize_bypass(
             // visible frame, not stale `\r`-separated progress text. If
             // we trimmed first and rendered after, the trim could chop
             // mid-frame and leave a partial CR run that survives stage 2b.
-            let suffix_rendered: Cow<'_, str> =
-                if cfg.progress_frame_collapse_enabled() && suffix_sanitized.contains('\r') {
-                    Cow::Owned(stage2b_progress_collapse(
-                        &suffix_sanitized,
-                        &mut stats.progress_frames_coalesced,
-                        &mut stats.progress_bytes_saved,
-                    ))
-                } else {
-                    Cow::Borrowed(suffix_sanitized.as_ref())
-                };
+            let suffix_rendered: Cow<'_, str> = if cfg.progress_frame_collapse_enabled()
+                && (suffix_sanitized.contains('\r') || contains_erase_sentinel(&suffix_sanitized))
+            {
+                Cow::Owned(stage2b_progress_collapse(
+                    &suffix_sanitized,
+                    &mut stats.progress_frames_coalesced,
+                    &mut stats.progress_bytes_saved,
+                ))
+            } else {
+                Cow::Borrowed(suffix_sanitized.as_ref())
+            };
             // Reserve room for the final-line marker before trimming.
             let final_marker = b"[\xe2\x80\xa6final-line truncated\xe2\x80\xa6]\n";
             let used = compacted_bytes.len();
@@ -4366,7 +5835,19 @@ pub fn fuzz_entrypoint(raw: &[u8], cfg: &SquashConfig) -> Option<SquashOutput> {
         },
         source_family: SourceFamily::Terminal,
     };
-    let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw).ok()?;
+    // Drive the fuzz harness through the real dispatch decision so
+    // production routing is on the fuzzed path; the synthetic event
+    // is `Terminal { context: InteractiveTty }`, so dispatch returns
+    // `Squash` and yields the admission token without any test-only
+    // shortcut.
+    let admission = match crate::pipeline::dispatch::dispatch(
+        &event,
+        &crate::pipeline::dispatch::DefaultRegistry,
+    ) {
+        crate::pipeline::dispatch::DispatchDecision::Squash(t) => t,
+        crate::pipeline::dispatch::DispatchDecision::Bypass(_) => return None,
+    };
+    let wrapper = UnstructuredTextBytes::try_from_terminal_event(&event, raw, admission).ok()?;
     Some(squash(wrapper, cfg))
 }
 
@@ -4453,8 +5934,12 @@ mod squash_integration_tests {
 
     fn run_squash(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper =
-            UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid wrapper");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid wrapper");
         squash(wrapper, cfg)
     }
 
@@ -4681,8 +6166,12 @@ mod squash_fixtures_tests {
     fn run_fixture(name: &str, cfg: &SquashConfig) -> String {
         let raw = fixture(name);
         let evt = terminal_event(&raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, &raw)
-            .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            &raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .unwrap_or_else(|e| panic!("bind {name}: {e:?}"));
         let out = squash(wrapper, cfg);
         String::from_utf8_lossy(&out.compacted_bytes).into_owned()
     }
@@ -4772,16 +6261,24 @@ mod squash_perf {
 
         // Warm-up.
         for _ in 0..3 {
-            let w =
-                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                crate::pipeline::dispatch::SquashAdmission::for_test(),
+            )
+            .expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
 
         let iters: u32 = 50;
         let start = Instant::now();
         for _ in 0..iters {
-            let w =
-                UnstructuredTextBytes::try_from_terminal_event(&evt, &raw).expect("valid wrapper");
+            let w = UnstructuredTextBytes::try_from_terminal_event(
+                &evt,
+                &raw,
+                crate::pipeline::dispatch::SquashAdmission::for_test(),
+            )
+            .expect("valid wrapper");
             let _ = squash(w, &cfg);
         }
         let avg = start.elapsed() / iters;
@@ -4800,7 +6297,12 @@ mod proptest_squash {
 
     fn run_squash_for_proptest(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         squash(wrapper, cfg)
     }
 
@@ -5038,7 +6540,12 @@ mod corner_case_tests {
 
     fn squash_raw(raw: &[u8], cfg: &SquashConfig) -> SquashOutput {
         let evt = terminal_event(raw);
-        let wrapper = UnstructuredTextBytes::try_from_terminal_event(&evt, raw).expect("valid");
+        let wrapper = UnstructuredTextBytes::try_from_terminal_event(
+            &evt,
+            raw,
+            crate::pipeline::dispatch::SquashAdmission::for_test(),
+        )
+        .expect("valid");
         squash(wrapper, cfg)
     }
 
@@ -5178,6 +6685,445 @@ mod corner_case_tests {
         assert!(
             out.stats.truncated,
             "CR-only rewrite must set truncated bit"
+        );
+    }
+
+    /// Issue #249 acceptance test 1: `text\r\x1b[K\n` with collapse
+    /// enabled emits an empty final frame. Pre-fix, stage 2 stripped
+    /// the `\x1b[K` before stage 2b ran, so the last-non-empty rule
+    /// resurrected `text` even though the terminal would render the
+    /// line as empty.
+    #[test]
+    fn csi_k_after_cr_emits_empty_final_frame() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"status\r\x1b[K\n", &cfg);
+        assert_eq!(
+            out.compacted_bytes, b"\n",
+            "CSI K after \\r must clear the final frame"
+        );
+        assert!(out.stats.ansi_stripped, "CSI bytes were removed");
+        assert_eq!(
+            out.stats.progress_frames_coalesced, 1,
+            "the CR-bearing line is still a frame coalesce event"
+        );
+        assert!(out.stats.truncated);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_LINE_SENTINEL_BYTE),
+            "sentinel must not leak past stage 2b"
+        );
+    }
+
+    /// Issue #249 acceptance test 2: `text\r\x1b[K\rmore\n` (clear
+    /// then write) emits `more`. The erase wins for the empty
+    /// segment but the subsequent `\r`+content is the visible frame.
+    #[test]
+    fn csi_k_then_cr_then_text_emits_replacement() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"text\r\x1b[K\rmore\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"more\n");
+        assert_eq!(out.stats.progress_frames_coalesced, 1);
+        assert!(out.stats.ansi_stripped);
+        assert!(out.stats.truncated);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_LINE_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 2: `secret\x1b[2K\n` (no `\r`)
+    /// must render as an empty line. CSI 2K erases the whole line
+    /// independent of cursor position; pre-fix the no-CR branch
+    /// stripped the sentinel and kept `secret`. End-to-end guard.
+    #[test]
+    fn csi_2k_no_cr_clears_visible_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\x1b[2K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(out.stats.ansi_stripped);
+        assert!(out.stats.truncated);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_SENTINEL_BYTE),
+            "whole-line sentinel must not leak past stage 2b"
+        );
+    }
+
+    /// Issue #249 / review round 2: `secret\x1b[2K\r\n` — same
+    /// erase, with a trailing CRLF. CRLF-normalize handles `\r\n`
+    /// after the sentinel emit.
+    #[test]
+    fn csi_2k_then_crlf_clears_visible_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\x1b[2K\r\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 3: 2K erases the whole line but
+    /// does NOT move the cursor. After "secret" (cursor col 6), 2K
+    /// clears the line; "new" then renders at cols 6-8. Pre-fix, the
+    /// post-2K tail was emitted at col 0, silently dropping six
+    /// columns of meaningful whitespace.
+    #[test]
+    fn csi_2k_then_text_pads_to_cursor_column() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\x1b[2Knew\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"      new\n");
+    }
+
+    /// Issue #249 / review round 3: in a CR-bearing line, the cursor
+    /// resets to col 0 on each `\r`. `aaaa\rxx\x1b[2Kbb\n` advances
+    /// to col 2 within the second segment before 2K fires; "bb"
+    /// renders at cols 2-3.
+    #[test]
+    fn csi_2k_in_cr_bearing_line_pads_to_segment_cursor() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"aaaa\rxx\x1b[2Kbb\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"  bb\n");
+    }
+
+    /// Issue #249 / review round 2: leading-zero numeric forms are
+    /// equivalent to their canonical counterparts (`\x1b[02K` ≡
+    /// `\x1b[2K`, `\x1b[00K` ≡ `\x1b[K`). Pre-fix the byte-exact
+    /// param check let `00K` slip past the classifier and stale
+    /// `status` survived even with the flag on.
+    #[test]
+    fn csi_k_leading_zero_param_forms_match_canonical() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        // `\x1b[00K` after `\r` should empty the line, just like `\x1b[K`.
+        assert_eq!(
+            squash_raw(b"status\r\x1b[00K\n", &cfg).compacted_bytes,
+            b"\n",
+            "[00K should clear the line at cursor col 0"
+        );
+        // `\x1b[02K` without `\r` should empty the line, just like `\x1b[2K`.
+        assert_eq!(
+            squash_raw(b"secret\x1b[02K\n", &cfg).compacted_bytes,
+            b"\n",
+            "[02K should clear the whole line"
+        );
+    }
+
+    /// Issue #249 / review rounds 4 & 8: `secret\r\x1b[1C\x1b[K\n`
+    /// — terminal: `\r` cursor 0, `[1C` cursor 1, `[K` erase col 1
+    /// to EOL. "s" survives at col 0; cols 1+ are cleared. Without
+    /// precise per-column tracking we approximate "erased content
+    /// must not survive" by emitting the no-pad whole-line sentinel
+    /// — over-erases (loses "s") but never preserves the cleared
+    /// suffix. Round 8 explicitly preferred over-drop to "preserves
+    /// erased content".
+    #[test]
+    fn csi_k_after_stripped_cursor_move_clears_line_conservatively() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\r\x1b[1C\x1b[K\n", &cfg);
+        // 0K under cursor-unknown → no-pad whole-line over-erase;
+        // `secret` does not survive into `compacted_bytes`.
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(out.stats.ansi_stripped);
+        // Sentinels must not leak past stage 2b.
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_LINE_SENTINEL_BYTE)
+        );
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_SENTINEL_BYTE)
+        );
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 10: standard `CSI 1K` erases from
+    /// start-of-line to cursor. With cursor at col >0 (e.g., after
+    /// `secret`), the entire pre-cursor content is gone — must NOT
+    /// silently preserve `secret`. Pre-fix, 1K classified as
+    /// `unsupported` and silent-stripped, leaking erased content.
+    #[test]
+    fn csi_1k_at_known_col_clears_pre_cursor_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\x1b[1K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(out.stats.ansi_stripped);
+    }
+
+    /// Issue #249 / review round 10: `prefix\rreplacement\x1b[1K\n`
+    /// — cursor advances through `replacement` to col 11, 1K erases
+    /// `replacement` (cols 0-10). Result is empty line (terminal-
+    /// faithful: also empty since `prefix` was overwritten before
+    /// being erased).
+    #[test]
+    fn csi_1k_after_cr_replacement_clears_segment() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"prefix\rreplacement\x1b[1K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+    }
+
+    /// Issue #249 / review round 1 + 10: `text\r\x1b[1K\n` — cursor
+    /// at col 0 after `\r`. 1K erases just col 0 (a single column).
+    /// Stage 2 silent-strips this; CRLF normalize collapses `\r\n`;
+    /// `text` survives. Round 1 explicitly required this not over-
+    /// erase. Guards against the round-10 fix accidentally clearing
+    /// the col-0 1K case.
+    #[test]
+    fn csi_1k_at_col_zero_silent_strips_per_round_1() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"text\r\x1b[1K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"text\n");
+    }
+
+    /// Issue #249 / review round 10: `secret\r\x1b[1Cok\x1b[K\n` —
+    /// cursor jumps via `[1C`, then "ok" is preserved at the post-
+    /// jump position. 0K must NOT over-erase the visible content
+    /// the producer wrote after the jump. Pre-fix the line cleared
+    /// to `\n`; post-fix the rsplit-non-empty rule renders `ok\n`
+    /// (lossy on the column gap but does not drop visible bytes).
+    #[test]
+    fn csi_k_after_jump_then_text_preserves_post_jump_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\r\x1b[1Cok\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"ok\n");
+    }
+
+    /// Issue #249 / review round 11: a SECOND stripped cursor move
+    /// after preserved bytes invalidates the "post-jump write"
+    /// tracking — the new jump may have moved the cursor back before
+    /// those writes. Pre-fix the stale flag let `0K` silent-strip
+    /// and preserve the `a` that the second jump + erase removed.
+    #[test]
+    fn csi_k_after_two_jumps_with_intervening_write_clears_line() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\r\x1b[1Ca\x1b[1D\x1b[K\n", &cfg);
+        // Second jump resets `printable_written_after_jump`; 0K under
+        // jumped + !printable triggers over-erase.
+        assert_eq!(out.compacted_bytes, b"\n");
+    }
+
+    /// Issue #249 / review round 11: non-ASCII bytes written after a
+    /// stripped cursor move are visible terminal output — must NOT
+    /// be over-erased by a following `0K`. Pre-fix, only ASCII bytes
+    /// flipped the post-jump-write flag, so `✓` was dropped.
+    #[test]
+    fn csi_k_after_jump_then_unicode_preserves_unicode() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw("secret\r\x1b[1C✓\x1b[K\n".as_bytes(), &cfg);
+        // Stage 2b's CR-bearing rsplit picks up "✓" as the rightmost
+        // non-empty segment after `\r`. Lossy on the column gap and
+        // on `secret`, but does NOT drop the visible Unicode glyph.
+        assert_eq!(out.compacted_bytes, "✓\n".as_bytes());
+    }
+
+    /// Issue #249 / review round 9: a preserved `\t` ahead of `\x1b[K`
+    /// makes `intact_cursor_col` unreliable (tab width depends on tab
+    /// stops), but the cursor is still at the end of the preserved
+    /// stream — so 0K erases nothing visible. Stage 2 must silent-strip
+    /// the K rather than over-erase the line. Pre-fix the round-8
+    /// over-erase rule dropped `status\t` entirely.
+    #[test]
+    fn csi_k_after_preserved_tab_preserves_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"status\t\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"status\t\n");
+        assert!(out.stats.ansi_stripped);
+    }
+
+    /// Issue #249 / review round 9: same logic for non-ASCII (UTF-8
+    /// multi-byte) prefix. `✓ done\x1b[K\n` — the leading non-ASCII
+    /// byte makes `intact_cursor_col=None`, but the cursor is at end
+    /// of preserved stream, so 0K erases nothing visible. Pre-fix
+    /// the line over-erased to `\n`, dropping `✓ done`.
+    #[test]
+    fn csi_k_after_non_ascii_preserves_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw("✓ done\x1b[K\n".as_bytes(), &cfg);
+        assert_eq!(out.compacted_bytes, "✓ done\n".as_bytes());
+        assert!(out.stats.ansi_stripped);
+    }
+
+    /// Issue #249 / review round 8: `secret\x1b[1G\x1b[K\n` —
+    /// `[1G` is absolute cursor-to-column-1 (0-indexed col 0). Stage
+    /// 2 doesn't model the move precisely, but the resulting K under
+    /// `intact_cursor_col=None` emits the no-pad whole-line sentinel
+    /// and clears the line. Pre-fix preserved `secret` (round 8's
+    /// "no-ship" finding case A).
+    #[test]
+    fn csi_k_after_absolute_col_zero_move_clears_line() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\x1b[1G\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+    }
+
+    /// Issue #249 / review rounds 4 & 5: cursor-moving CSI before 2K
+    /// poisons the column-pad approximation but does NOT change the
+    /// fact that 2K erases the whole line. Stage 2 emits the no-pad
+    /// whole-line sentinel (`ERASE_WHOLE_LINE_NOPAD_SENTINEL`); stage
+    /// 2b clears the pre-erase content and renders the post-tail at
+    /// column 0 (lossy on the column gap, but never preserves erased
+    /// content).
+    #[test]
+    fn csi_2k_after_stripped_cursor_move_clears_with_nopad_render() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"\r\x1b[5C\x1b[2Kx\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"x\n");
+        // Sentinels never leak past stage 2b.
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_SENTINEL_BYTE)
+        );
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 7: tabs in the pre-2K span have a
+    /// terminal-defined display width (next tab stop, typically every
+    /// 8 cols). `chars().count()` would invent a single space, which
+    /// silently corrupts aligned terminal output. Pre-fix the
+    /// renderer emitted `b" x\n"`; post-fix it falls back to col-0
+    /// rendering and emits `b"x\n"` — lossy on the column gap but
+    /// never wrong-width.
+    #[test]
+    fn csi_2k_after_preserved_tab_renders_at_col_zero() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"\t\x1b[2Kx\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"x\n");
+    }
+
+    /// Issue #249 / review round 7: same fallback for non-ASCII
+    /// pre-span content (wide CJK, emoji, combining marks). Without
+    /// the pad-safety gate, the pad-variant sentinel would prepend
+    /// `chars().count()` spaces, which is wrong for any wide char.
+    #[test]
+    fn csi_2k_after_non_ascii_renders_at_col_zero() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        // CJK chars in pre-span: each is `chars().count() == 1` but
+        // display width ≥ 2 in most monospace terminals.
+        let out = squash_raw("中文\x1b[2Kx\n".as_bytes(), &cfg);
+        assert_eq!(out.compacted_bytes, b"x\n");
+    }
+
+    /// Issue #249 / review round 6: no-CR input that produces ONLY
+    /// the no-pad whole-line sentinel must not leak the sentinel
+    /// byte. Pre-fix, stage 2b's fast-path early-returned because it
+    /// only tested for the pad-variant sentinel, leaking `0x03`.
+    #[test]
+    fn no_cr_nopad_whole_line_sentinel_consumed_by_stage2b() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        // `\x1b[5C` flips cursor_unknown; `\x1b[2K` emits no-pad
+        // sentinel; "x" follows. No `\r` anywhere.
+        let out = squash_raw(b"\x1b[5C\x1b[2Kx\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"x\n");
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE),
+            "no-pad sentinel must not leak past stage 2b"
+        );
+    }
+
+    /// Issue #249 / review round 6: same fast-path bug, empty-tail
+    /// variant. `\x1b[5C\x1b[2K\n` should render as a blank line and
+    /// must not leak the no-pad sentinel byte.
+    #[test]
+    fn no_cr_nopad_whole_line_sentinel_empty_tail_renders_blank() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"\x1b[5C\x1b[2K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 5 ("no ship"): 2K fires after a
+    /// stripped cursor move with no replacement text, so the line
+    /// MUST render blank. Pre-fix the cursor-unknown gate suppressed
+    /// the 2K sentinel and CRLF-normalize left the erased content
+    /// (`secret`) in the output.
+    #[test]
+    fn csi_2k_after_stripped_cursor_move_no_replacement_renders_blank() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"secret\r\x1b[5C\x1b[2K\n", &cfg);
+        assert_eq!(
+            out.compacted_bytes, b"\n",
+            "2K must clear `secret` even when a cursor-moving CSI was stripped"
+        );
+        assert!(out.stats.ansi_stripped);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_WHOLE_LINE_NOPAD_SENTINEL_BYTE)
+        );
+    }
+
+    /// Issue #249 / review round 4: `\r` resets the cursor-unknown
+    /// flag, so a cursor-moving CSI before a `\r` does NOT poison a
+    /// later K. The classic `\r\x1b[1C\rstatus\r\x1b[K\n` pattern
+    /// (cursor move on a previous frame, fresh `\r` for the next)
+    /// still produces an empty final frame.
+    #[test]
+    fn csi_k_emits_sentinel_after_cr_resets_cursor_unknown() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"\r\x1b[1C\rstatus\r\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+    }
+
+    /// Issue #249 / review round 4: SGR (`m`) is cursor-neutral, so
+    /// the very common `\x1b[31m...\rDownloading\x1b[0m\r\x1b[K\n`
+    /// pattern still emits a sentinel and renders the empty final
+    /// frame. Guards against an over-aggressive cursor-unknown
+    /// trigger that would defeat the feature on coloured progress.
+    #[test]
+    fn csi_k_after_sgr_still_emits_sentinel() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"\x1b[31mfoo\rDownloading\x1b[0m\r\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"\n");
+    }
+
+    /// Issue #249 / review round 1: `text\r\x1b[1K\n` must NOT
+    /// produce an empty final frame. CSI 1K only erases col 0 after
+    /// `\r` resets the cursor, so the prior frame survives. Stage 2
+    /// silent-strips the CSI bytes; CRLF normalization collapses
+    /// `\r\n` to `\n`; the rendered output keeps `status`. End-to-end
+    /// guard against the round-1 high-severity finding.
+    #[test]
+    fn csi_1k_after_cr_preserves_visible_content() {
+        let cfg = SquashConfig::default().with_progress_frame_collapse_enabled(true);
+        let out = squash_raw(b"status\r\x1b[1K\n", &cfg);
+        // `\r\n` (after [1K silent-strip) collapses to `\n`; no
+        // sentinel emitted, no stage 2b rewrite needed.
+        assert_eq!(out.compacted_bytes, b"status\n");
+        assert!(out.stats.ansi_stripped);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_LINE_SENTINEL_BYTE),
+            "[1K must not surface a sentinel"
+        );
+        assert_eq!(
+            out.stats.progress_frames_coalesced, 0,
+            "no CR-bearing line survives in the rendered text"
+        );
+    }
+
+    /// Issue #249: when the flag is off, CSI K is stripped silently
+    /// just like before (no behavior change on the legacy path). The
+    /// last-non-empty rule resurrects `status` — the documented
+    /// pre-fix behavior. Guards against accidental sentinel leakage
+    /// onto callers that didn't opt in.
+    #[test]
+    fn csi_k_after_cr_default_path_still_strips_silently() {
+        let cfg = SquashConfig::default();
+        let out = squash_raw(b"status\r\x1b[K\n", &cfg);
+        assert_eq!(out.compacted_bytes, b"status\n");
+        assert!(out.stats.ansi_stripped);
+        assert!(
+            !out.compacted_bytes
+                .contains(&super::ERASE_LINE_SENTINEL_BYTE),
+            "sentinel must never leak when the flag is off"
         );
     }
 

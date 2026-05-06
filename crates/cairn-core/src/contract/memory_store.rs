@@ -1,7 +1,8 @@
 //! `MemoryStore` contract (brief §4 row 1).
 
-use crate::contract::version::{ContractVersion, VersionRange};
+use crate::contract::version::{ContractVersion, SchemaVersion, VersionRange};
 use crate::domain::record::MemoryRecord;
+use crate::search::ScoreExplain;
 
 /// Contract version for `MemoryStore`. Bumps when the trait surface changes.
 /// Bumped 0.1 → 0.2 in #46 when CRUD/edge/search/tx methods landed.
@@ -9,14 +10,19 @@ use crate::domain::record::MemoryRecord;
 /// landed. Co-evolved within 0.3 in #253 when
 /// `MemoryStoreCapabilities::per_record_consent_model` and
 /// `MemoryStore::list_consent_models` were added for the §6.5
-/// receipt-timeline gate; both extensions ship under the same 0.3
-/// surface so the handshake range stays `[0.3.0, 0.4.0)`. Co-evolved
-/// again within 0.3 in #186 when the bitemporal knowledge-graph methods
-/// (`upsert_entity`, `upsert_entity_edge`, `graph_edges`,
-/// `resolve_contradiction`, `link_entity_episode`) landed with
-/// default-error implementations — same handshake range, same opt-in
-/// model.
-pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 3, 0);
+/// receipt-timeline gate. Co-evolved again within 0.3 in #186 when
+/// the bitemporal knowledge-graph methods (`upsert_entity`,
+/// `upsert_entity_edge`, `graph_edges`, `resolve_contradiction`,
+/// `link_entity_episode`) landed with default-error implementations.
+/// Co-evolved again within 0.3 in #49 when search args/pages gained
+/// explain plumbing (`with_explain` bool on `*SearchArgs`,
+/// `Option<Vec<ScoreExplain>>` on each matching page struct) — all
+/// new fields default-initialize.
+/// Bumped 0.3 → 0.4 in #258 when `StoredRecord.schema_version` and
+/// `RecordVersion.schema_version` landed for the §6.4 stale-schema
+/// lint — adding required public fields is a struct-construction
+/// break, so the handshake range shifts to `[0.4.0, 0.5.0)`.
+pub const CONTRACT_VERSION: ContractVersion = ContractVersion::new(0, 4, 0);
 
 /// Errors raised by `MemoryStore` implementations. Adapters define their
 /// own concrete type (e.g. `cairn_store_sqlite::StoreError`); this is the
@@ -63,6 +69,13 @@ pub struct StoredRecord {
     pub record: MemoryRecord,
     /// Monotonic version counter. `1` for a record's first write.
     pub version: u32,
+    /// Schema-version stamp set by the store at write time
+    /// (`SchemaVersion::current()` for fresh writes, the historical
+    /// stamp for older rows). `None` for unstamped legacy rows
+    /// (pre-Issue #258 migration); the §6.4 `stale_schema` lint
+    /// surfaces those as `Warning` so operators can rewrite them.
+    /// Not part of the canonical record bytes.
+    pub schema_version: Option<SchemaVersion>,
 }
 
 /// Counts of derived-index rows vs canonical records, for the lint
@@ -148,6 +161,7 @@ pub trait MemoryStore: Send + Sync {
         Ok(Some(StoredRecord {
             record,
             version: v.version,
+            schema_version: v.schema_version,
         }))
     }
 
@@ -178,12 +192,14 @@ pub trait MemoryStore: Send + Sync {
         let mut out = Vec::with_capacity(records.len());
         for record in records {
             let history = self.versions(&record.target_id).await?;
-            let version = history
-                .iter()
-                .rev()
-                .find(|v| v.active)
-                .map_or(1, |v| v.version);
-            out.push(StoredRecord { record, version });
+            let active = history.iter().rev().find(|v| v.active);
+            let version = active.map_or(1, |v| v.version);
+            let schema_version = active.and_then(|v| v.schema_version);
+            out.push(StoredRecord {
+                record,
+                version,
+                schema_version,
+            });
         }
         Ok(out)
     }
@@ -551,6 +567,11 @@ pub struct RecordVersion {
     pub tombstone_reason: Option<TombstoneReason>,
     /// blake3 body hash of the persisted payload.
     pub body_hash: BodyHash,
+    /// Schema version stamped by the store at write time, or `None`
+    /// for unstamped legacy rows (pre-Issue #258 migration). Drives
+    /// the §6.4 `stale_schema` lint; not part of the canonical record
+    /// bytes.
+    pub schema_version: Option<SchemaVersion>,
 }
 
 /// Edge kinds supported at P0. Exhaustive — adding a new kind is a
@@ -658,6 +679,11 @@ pub struct KeywordSearchArgs<'a> {
     pub limit: usize,
     /// Optional resume cursor from the previous page.
     pub cursor: Option<KeywordCursor>,
+    /// When true, the store populates the page's `explain` block.
+    /// Callers are expected to set this only when `--explain` was requested
+    /// (and the `policy_trace` capability is advertised — gating happens
+    /// in the verb dispatcher, not the store).
+    pub with_explain: bool,
 }
 
 /// Opaque keyset cursor for keyword search. Encoded base64-json on the wire.
@@ -676,6 +702,10 @@ pub struct KeywordSearchPage {
     pub candidates: Vec<SearchCandidate>,
     /// Cursor to fetch the next page, or `None` when exhausted.
     pub next_cursor: Option<KeywordCursor>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the keyword
+    /// page, only `bm25_rank` is populated.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// Args for the semantic (ANN) branch of `search`.
@@ -697,6 +727,9 @@ pub struct SemanticSearchArgs<'a> {
     /// The store skips rows whose `record_vectors.model` column differs —
     /// they were produced by a stale model and will be rebuilt by the reindex drain.
     pub model_label: String,
+    /// When true, the store populates the page's `explain` block. See
+    /// [`KeywordSearchArgs::with_explain`].
+    pub with_explain: bool,
 }
 
 /// One page of candidates returned by the semantic branch of `search`.
@@ -704,6 +737,10 @@ pub struct SemanticSearchArgs<'a> {
 pub struct SemanticSearchPage {
     /// Candidates ordered by ascending L2 distance (smaller = more similar).
     pub candidates: Vec<SearchCandidate>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the semantic
+    /// page, only `semantic_rank` is populated.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// Args for the hybrid (RRF + cosine re-rank) branch of `search`.
@@ -733,6 +770,9 @@ pub struct HybridSearchArgs<'a> {
     pub rrf_k: usize,
     /// Top-K from RRF to second-pass re-rank with cosine. Canonical default `20`.
     pub rerank_topk: usize,
+    /// When true, the store populates the page's `explain` block. See
+    /// [`KeywordSearchArgs::with_explain`].
+    pub with_explain: bool,
 }
 
 /// One page of hybrid candidates.
@@ -740,6 +780,10 @@ pub struct HybridSearchArgs<'a> {
 pub struct HybridSearchPage {
     /// Candidates, sorted descending by blended `final_score`.
     pub candidates: Vec<SearchCandidate>,
+    /// Optional per-candidate score-component explanations. Present only
+    /// when the matching args' `with_explain` was true. For the hybrid
+    /// page, all fields are populated where applicable.
+    pub explain: Option<Vec<ScoreExplain>>,
 }
 
 /// A single candidate row from a search query, with the signal columns the
@@ -840,7 +884,7 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 3, 0), ContractVersion::new(0, 4, 0));
+            VersionRange::new(ContractVersion::new(0, 4, 0), ContractVersion::new(0, 5, 0));
     }
 
     #[tokio::test]
@@ -865,6 +909,7 @@ mod tests {
                 visibility_allowlist: vec![],
                 limit: 10,
                 model_label: "bge-small-en-v1.5".into(),
+                with_explain: false,
             })
             .await;
         assert!(
@@ -881,6 +926,7 @@ mod tests {
                 blend: 0.7,
                 rrf_k: 60,
                 rerank_topk: 20,
+                with_explain: false,
             })
             .await;
         assert!(
@@ -967,15 +1013,15 @@ mod tests {
         assert!(err.to_string().contains("bitemporal_graph"));
     }
 
-    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.3.0
-    /// after the issue #186 merge: bitemporal-KG methods were originally
-    /// proposed as a 0.3 → 0.4 bump, but main shipped issue #253
-    /// (consent timeline) as additive co-evolution within 0.3 first.
-    /// Following that precedent, #186's additions also ship under 0.3
-    /// with default-error implementations so the handshake range
-    /// `[0.3.0, 0.4.0)` stays compatible across both extensions.
+    /// `CONTRACT_VERSION` for the `MemoryStore` trait is locked to 0.4.0.
+    /// 0.3 hosted the additive-co-evolution chain (#253 consent-model
+    /// gate, #186 bitemporal-KG methods, #49 search explain plumbing,
+    /// all default-initializable). #258 bumped to 0.4 because adding
+    /// the required `schema_version: Option<SchemaVersion>` fields to
+    /// public `StoredRecord` / `RecordVersion` is a struct-construction
+    /// break — handshake range shifted to `[0.4.0, 0.5.0)`.
     #[test]
-    fn issue_186_contract_version_locked_to_0_3_0_co_evolution() {
-        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 3, 0));
+    fn contract_version_locked_to_0_4_0() {
+        assert_eq!(CONTRACT_VERSION, ContractVersion::new(0, 4, 0));
     }
 }
