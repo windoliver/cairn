@@ -7,10 +7,17 @@ use crate::domain::graph::{EntityId, EntityNode};
 /// Normalize an entity name for exact comparison.
 ///
 /// Pipeline (Unicode-aware):
-/// 1. NFC normalization — collapse canonically-equivalent compositions.
-///    Without this, precomposed `é` (U+00E9) and decomposed `e` + U+0301
-///    yield different `name_norm` keys for visually identical names
-///    (codex-review R4.2).
+/// 1. NFKC normalization — collapse canonical AND compatibility
+///    equivalents. NFC alone leaves visually-identical lookalikes
+///    distinct: full-width Latin `ＡｕｔｈＳｅｒｖｉｃｅ`, ligatures `ﬁ`,
+///    superscripts, presentation forms, etc. NFKC folds them to
+///    ASCII / standard form so a lookalike attack cannot create
+///    a duplicate entity under a different `name_norm`
+///    (codex-review R4.2 + R6.2). Known limitation: German `ß` is
+///    NOT folded to `ss` because Rust's `char::to_lowercase` is
+///    locale-independent and Unicode case-folding (a separate
+///    operation) is not in `unicode-normalization`. Acceptable for
+///    P0; tracked for a follow-up if it becomes load-bearing.
 /// 2. Lowercase via `char::to_lowercase` (Unicode, multi-codepoint).
 /// 3. Retain only Unicode alphanumerics (`char::is_alphanumeric`) plus
 ///    ASCII whitespace (folded to a single `' '`).
@@ -28,9 +35,10 @@ use crate::domain::graph::{EntityId, EntityNode};
 pub fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_was_space = true; // suppresses leading whitespace
-    // NFC ensures canonical-equivalent forms compare equal; e.g.
-    // `Café` (U+00E9) and `Cafe\u{0301}` collapse to the same key.
-    for c in s.nfc() {
+    // NFKC ensures canonical AND compatibility forms compare equal;
+    // e.g. `Café` (U+00E9) ≡ `Cafe\u{0301}`, full-width `Ａ` ≡ `A`,
+    // ligature `ﬁ` ≡ `fi`. R6.2 hardening.
+    for c in s.nfkc() {
         if c.is_alphanumeric() {
             // `char::to_lowercase` returns an iterator (some codepoints
             // expand to multiple lowercase codepoints, e.g. German ß
@@ -127,6 +135,21 @@ mod tests {
         assert_ne!(normalize("Кириллица"), normalize("日本語"));
         assert!(!normalize("Кириллица").is_empty());
         assert!(!normalize("日本語").is_empty());
+    }
+
+    #[test]
+    fn nfkc_collapses_compatibility_equivalents() {
+        // Codex-review R6.2: NFC-only left lookalikes distinct.
+        // Full-width Latin must fold to ASCII Latin.
+        assert_eq!(
+            normalize("ＡｕｔｈＳｅｒｖｉｃｅ"),
+            normalize("AuthService")
+        );
+        // Ligatures fold to their component letters.
+        assert_eq!(normalize("ﬁsh"), normalize("fish"));
+        // Superscripts / presentation forms collapse via NFKC's
+        // compatibility map.
+        assert_eq!(normalize("H²O"), normalize("H2O"));
     }
 
     #[test]

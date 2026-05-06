@@ -112,11 +112,17 @@ pub(super) async fn llm_dedup(
         // caller's debug-log surface raw LLM text (entity names,
         // reasoning). Convert it to a sanitized `LlmInvalidResponse`
         // that carries only the parse `detail`.
-        Err(LlmError::InvalidJsonOutput { detail, .. }) => {
+        Err(LlmError::InvalidJsonOutput { .. }) => {
+            // Codex-review R6.1: even the `detail` field of
+            // `InvalidJsonOutput` is provider-controlled and may echo
+            // the raw payload (some adapters embed offending fragments
+            // in their parse error). Discard it entirely and surface a
+            // fixed sanitized message so the resolver never widens the
+            // §14 privacy boundary via the error chain.
             return Err(EntityResolutionError::LlmInvalidResponse {
-                detail: format!(
-                    "provider returned invalid JSON ({detail}); raw payload elided to preserve §14 privacy invariant"
-                ),
+                detail:
+                    "provider returned invalid JSON; payload + parse detail elided to preserve §14 privacy invariant"
+                        .to_owned(),
             });
         }
         Err(other) => return Err(EntityResolutionError::Llm { source: other }),
@@ -311,7 +317,10 @@ mod tests {
         }
         async fn complete(&self, _req: &CompletionRequest) -> Result<CompletionOutput, LlmError> {
             Err(LlmError::InvalidJsonOutput {
-                detail: "missing field `same`".into(),
+                // R6.1 sentinel: provider-supplied `detail` may itself
+                // echo the raw payload. The resolver must NOT propagate
+                // this string into its own error display.
+                detail: "PROVIDER_DETAIL_THAT_MUST_NOT_LEAK_field_same".into(),
                 raw: "PRIVATE_REASONING_THAT_MUST_NOT_LEAK".into(),
             })
         }
@@ -789,6 +798,10 @@ mod tests {
                 assert!(
                     !detail.contains("PRIVATE_REASONING_THAT_MUST_NOT_LEAK"),
                     "raw payload leaked through error chain: {detail}"
+                );
+                assert!(
+                    !detail.contains("PROVIDER_DETAIL_THAT_MUST_NOT_LEAK"),
+                    "provider-controlled detail leaked through error chain (R6.1): {detail}"
                 );
                 assert!(
                     detail.contains("elided"),
