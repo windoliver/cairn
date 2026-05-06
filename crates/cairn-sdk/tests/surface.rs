@@ -918,12 +918,40 @@ fn summarize_returns_internal_stub() {
 }
 
 #[test]
-fn assemble_hot_returns_internal_stub() {
+fn assemble_hot_dispatches_to_core_verb() {
+    // assemble_hot is now wired to cairn_core::verbs::assemble_hot::assemble_hot
+    // and should succeed without a store. The default config has 6 recipe steps,
+    // all of which produce empty stub bodies, yielding 6 zero-length segments.
     let args = AssembleHotArgs {
         budget: None,
         session_id: None,
     };
-    assert_unimplemented("assemble_hot", sdk().assemble_hot(&args));
+    let resp = sdk().assemble_hot(&args).expect("assemble_hot ok");
+    let segments = resp.data.segments.expect("segments emitted");
+    assert_eq!(segments.len(), 6);
+    for s in &segments {
+        assert_eq!(s.byte_start, 0);
+        assert_eq!(s.byte_end, 0);
+    }
+}
+
+#[test]
+fn sdk_assemble_hot_returns_typed_segments() {
+    let sdk = Sdk::new();
+    let resp = sdk
+        .assemble_hot(&AssembleHotArgs {
+            budget: None,
+            session_id: None,
+        })
+        .expect("assemble_hot ok");
+
+    let data = resp.data;
+    let segments = data.segments.expect("segments emitted");
+    assert_eq!(segments.len(), 6);
+    for s in &segments {
+        assert_eq!(s.byte_start, 0);
+        assert_eq!(s.byte_end, 0);
+    }
 }
 
 #[test]

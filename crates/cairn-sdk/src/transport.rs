@@ -340,12 +340,34 @@ impl<T: Transport> Sdk<T> {
     }
 
     /// `assemble_hot` — hot-memory prefix assembly (brief §8.5, §11).
+    ///
+    /// Dispatches into [`cairn_core::verbs::assemble_hot::assemble_hot`] using
+    /// the vault's [`HotMemoryConfig`]. No store is required — the assembler
+    /// reads recipe steps from config and emits stub bodies (real source loading
+    /// is tracked under #193). Validates `args` before dispatch.
     pub fn assemble_hot(
         &self,
         args: &AssembleHotArgs,
     ) -> Result<VerbResponse<AssembleHotData>, SdkError> {
+        use cairn_core::generated::envelope::ResponseVerb;
+
         validate_assemble_hot(args)?;
-        Err(unimplemented("assemble_hot"))
+
+        match cairn_core::verbs::assemble_hot::assemble_hot(&self.config.vault.hot_memory) {
+            Ok(data) => Ok(VerbResponse {
+                operation_id: crate::stub::new_operation_id(),
+                policy_trace: vec![],
+                verb: ResponseVerb::AssembleHot,
+                target: None,
+                data,
+            }),
+            Err(e) => Err(SdkError::Protocol {
+                code: crate::error::ErrorCode::Internal,
+                message: format!("assemble_hot dispatcher error: {e}"),
+                data: None,
+                operation_id: crate::stub::new_operation_id(),
+            }),
+        }
     }
 
     /// `capture_trace` — accept signed trace events (brief §8.6).
