@@ -63,11 +63,6 @@ fn capture_trace_returns_aborted_internal() {
 }
 
 #[test]
-fn lint_returns_aborted_internal() {
-    assert_aborted_internal(&["lint", "--json"]);
-}
-
-#[test]
 fn forget_record_returns_aborted_internal() {
     assert_aborted_internal(&["forget", "--record", "01JXXXXXXXXXXXXXXXXXXXXXXX", "--json"]);
 }

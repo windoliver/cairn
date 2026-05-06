@@ -75,13 +75,7 @@ fn simple_verb_human_mode_exits_one_with_internal() {
     // and print "Internal" to stderr in human mode.
     // `ingest` is excluded: bare `cairn ingest` has no source → exit 64 (usage error).
     // `retrieve` and `forget` are excluded: required ArgGroup → exit 64 (usage error).
-    for verb in [
-        "search",
-        "summarize",
-        "assemble_hot",
-        "capture_trace",
-        "lint",
-    ] {
+    for verb in ["search", "summarize", "assemble_hot", "capture_trace"] {
         let out = cli().arg(verb).output().expect("cairn <verb>");
         assert!(
             !out.status.success(),
@@ -120,6 +114,20 @@ fn ingest_with_no_source_exits_64() {
     // Bare `cairn ingest` (no body/file/url/source) must fail with usage error, not Internal.
     let out = cli().arg("ingest").output().expect("cairn ingest");
     assert_eq!(out.status.code(), Some(64), "exit: {:?}", out.status);
+}
+
+#[test]
+fn lint_accepts_fix_flag() {
+    let out = cli()
+        .args(["lint", "--fix", "--json"])
+        .output()
+        .expect("cairn lint --fix --json");
+    assert_ne!(
+        out.status.code(),
+        Some(64),
+        "lint --fix should parse as a verb flag; stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
