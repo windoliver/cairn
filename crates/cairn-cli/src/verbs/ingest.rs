@@ -15,7 +15,7 @@ mod cache;
 mod extract;
 mod folder;
 mod patterns;
-mod report;
+pub mod report;
 mod scanner;
 
 /// Run `cairn ingest`.

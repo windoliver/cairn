@@ -1,0 +1,11 @@
+---
+source: crates/cairn-cli/tests/folder_ingest_snapshot.rs
+expression: "render_human(\"./docs\", &summary)"
+---
+Scanning ./docs (3 files)...
+  Cached  1 (no changes detected)
+  Processed 2 files
+    Entities: 5 new · 0 merged
+    Edges:    1 new · 0 contradictions resolved
+    Records:  0 written to store (dry-run)
+Elapsed: 2.3s
