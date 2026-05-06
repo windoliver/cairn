@@ -50,15 +50,45 @@ Five tools:
 
   Both conditions are evaluated at `list_tools` time *and* at
   `call_tool` time (defense in depth — same predicate, both sites).
-  The conjunction matters because reusing `graph_edges` alone would
-  let a graph-capable store advertise tools without the scope
-  prerequisite, which the timeline/leak invariants forbid.
+  Crucially, the second condition is **not** "a resolver is
+  configured" but "the resolver returns a usable scope set for
+  *this* request." `list_tools` invokes
+  `scope.allowed_scopes(&ctx)` against the current
+  `McpAuthContext`; the tools are advertised only if the call
+  succeeds and returns a non-empty `Vec<ScopeId>`. A request with
+  no bound caller, an `Err` resolution, or an empty scope set sees
+  *no* `graph.*` tools — capability discovery is per-request, not
+  a server-global property.
 
-  Concretely, the handler holds an `Option<Arc<dyn
-  McpSessionScope>>`; the predicate is `store.graph_edges &&
-  scope.is_some()`. The manifest snapshot test covers four states
-  (graph-capable × scope-present matrix), with the only
-  tools-advertised state being the both-true cell.
+  Concretely:
+
+  ```rust
+  fn graph_tools_listed_for(
+      &self,
+      ctx: &McpAuthContext<'_>,
+  ) -> bool {
+      let store_ok = self.store
+          .as_ref()
+          .map(|s| s.capabilities().graph_edges)
+          .unwrap_or(false);
+      if !store_ok { return false; }
+      match self.scope.as_ref() {
+          None => false,
+          Some(s) => matches!(
+              s.allowed_scopes(ctx),
+              Ok(v) if !v.is_empty()
+          ),
+      }
+  }
+  ```
+
+  Cached `tools/list` manifests therefore cannot expose graph
+  tools to a caller who could not invoke them — each `tools/list`
+  response is bound to a specific `McpAuthContext`.
+
+  The manifest snapshot test covers six states (graph-capable ×
+  resolver-state matrix: none / err / empty-vec / non-empty-vec).
+  Only the (graph-capable, non-empty-vec) cell lists graph tools.
 
   This gates discovery on the *actual* graph capability, not on
   whether a store handle is present. Clients that cache `tools/list`
@@ -272,10 +302,15 @@ historical entities):
    record in `allowed_scopes`. Covers entities created or
    referenced via ingest sources whose edges have all been
    tombstoned or expired-out.
-3. **Historical edges** — at least one *non-active*
-   `entity_edges` row (expired or out-of-window) touches the node
+3. **Historical edges** — at least one *non-active but
+   non-tombstoned* `entity_edges` row (out-of-window:
+   `valid_at > now` or `invalid_at <= now`) touches the node
    *and* its `source_record_id` is in `allowed_scopes`. Covers
    the "all my edges aged out but I still exist" case.
+   **Tombstoned edges (`expired_at IS NOT NULL`) do not count**
+   — using them as provenance would resurrect entities that
+   operators have explicitly deleted, defeating
+   rollback/deletion expectations.
 
 Direct reads of `entity_nodes` without composing one of the three
 provenance branches are forbidden in tool SQL.
@@ -300,9 +335,13 @@ visible_nodes AS (
           AND r.scope IN rarray(:allowed_scopes)
       )
       OR EXISTS (
+        -- Historical (out-of-window) but NOT tombstoned. We
+        -- explicitly require expired_at IS NULL so deleted
+        -- provenance cannot keep an entity visible.
         SELECT 1 FROM entity_edges he
         JOIN records r ON r.record_id = he.source_record_id
         WHERE (he.source_id = n.id OR he.target_id = n.id)
+          AND he.expired_at IS NULL
           AND r.scope IN rarray(:allowed_scopes)
       )
     )
@@ -630,14 +669,19 @@ Negative tests:
 
 Score: `confidence_score * (1 + cross_scope_bonus)`.
 
-Cross-scope bonus = 1.0 if the edge's `source_record_id` belongs to a
-different ingestion provenance chain than the seed entities' typical
-edges; 0.0 otherwise.
+The bonus is keyed on **actual scope id**, not `source_record_id`,
+so the ranking is genuinely cross-scope rather than just
+cross-record. A dataset with many records inside one scope must
+not award the bonus to same-scope edges that merely come from a
+non-modal record — that would make "surprise" hits semantically
+unreliable.
 
-P0 simplification: cross-scope = "edge's `source_record_id` is distinct
-from the modal `source_record_id` across the input set's other edges."
-Implemented as a CTE that computes the modal record per entity, then
-flags edges whose `source_record_id` differs.
+cross_scope_bonus = 1.0 iff `records.scope` for the edge's
+`source_record_id` is **outside** the modal `records.scope`
+computed across all in-scope edges that touch the input entities.
+0.0 otherwise. The modal-scope computation joins through
+`records`, the same way the §3.0 scope filter does, so the
+ranking is consistent with the visibility model.
 
 Every CTE that reads `entity_edges` reuses the **shared active-at-now
 predicate** from §3 — same `expired_at IS NULL AND valid_at <= :now AND
@@ -648,33 +692,46 @@ and silently drop currently-active edges that carry a future
 `invalid_at`, which the rest of the API does not.
 
 ```sql
-WITH visible_edges AS (...),         -- §3.0: temporal + scope
+WITH visible_edges AS (...),                -- §3.0: temporal + scope
      input(id) AS (VALUES (?1), (?2) /* … */),
-     modal_record AS (
-       SELECT i.id AS entity_id,
-              e.source_record_id AS rec,
-              COUNT(*) AS n
-       FROM input i
-       JOIN visible_edges e
-         ON (e.source_id = i.id OR e.target_id = i.id)
-       GROUP BY i.id, e.source_record_id
+     edge_scope AS (
+       SELECT e.id AS edge_id, r.scope AS scope_id, e.*
+       FROM visible_edges e
+       JOIN records r ON r.record_id = e.source_record_id
+     ),
+     modal_scope AS (
+       -- Most common scope across all in-scope edges that touch
+       -- any input entity. Ties broken deterministically by
+       -- scope id ASC.
+       SELECT scope_id
+       FROM edge_scope es
+       JOIN input i
+         ON (es.source_id = i.id OR es.target_id = i.id)
+       GROUP BY scope_id
+       ORDER BY COUNT(*) DESC, scope_id ASC
+       LIMIT 1
      ),
      scored AS (
-       SELECT e.*,
-              e.confidence_score *
-              (1.0 + CASE WHEN /* modal mismatch */ THEN 1.0 ELSE 0.0 END)
-                AS score
-       FROM visible_edges e
-       WHERE e.source_id IN input
-         AND e.target_id IN input
+       SELECT es.*,
+              es.confidence_score *
+              (1.0 + CASE
+                       WHEN es.scope_id <> (SELECT scope_id FROM modal_scope)
+                       THEN 1.0
+                       ELSE 0.0
+                     END) AS score
+       FROM edge_scope es
+       WHERE es.source_id IN input
+         AND es.target_id IN input
      )
-SELECT * FROM scored ORDER BY score DESC, id ASC LIMIT ?n;
+SELECT * FROM scored ORDER BY score DESC, edge_id ASC LIMIT ?n;
 ```
 
 `visible_edges` is the single source of truth for "real, in-scope"
-edges — modal computation, scoring, and the final projection all
-read from it, so future-dated, future-invalidated, *and*
-out-of-scope edges cannot enter ranking through any path.
+edges; `edge_scope` annotates each with its actual scope id;
+`modal_scope` derives the dominant scope to compare against.
+Future-dated, future-invalidated, out-of-scope edges, *and*
+edges that look cross-record but are same-scope cannot enter
+ranking through any path.
 
 Final SQL refines the modal join — sketch above; the implementation
 may use `Vec<RecordId>` accumulation in Rust if the SQL gets unwieldy,
@@ -682,15 +739,22 @@ but the temporal predicate is non-negotiable.
 
 Adversarial test cases (mandatory):
 
-- An edge with `valid_at = now + 1h` MUST be excluded from the result
-  set and from the modal-record computation.
+- An edge with `valid_at = now + 1h` MUST be excluded from the
+  result set and from the modal-scope computation.
 - An active edge with `invalid_at = now + 1h` MUST be **included**
   (currently real, future-invalidated) — this is the case a naive
   `invalid_at IS NULL` filter incorrectly drops.
 - An active, in-window edge whose `source_record_id` is outside
-  `allowed_scopes` MUST be excluded from both the modal-record
-  computation and the final projection — out-of-scope edges cannot
-  surface as a "surprise" hit through any path.
+  `allowed_scopes` MUST be excluded from both the modal-scope
+  computation and the final projection — out-of-scope edges
+  cannot surface as a "surprise" hit through any path.
+- A dataset with **many in-scope records all in scope `S`** must
+  award `cross_scope_bonus = 0` to every edge — non-modal record
+  ids inside the same scope must not falsely score as cross-scope.
+- A dataset with edges in scopes `{S_a, S_a, S_a, S_b}` must score
+  the `S_b` edge with `bonus = 1.0` and the `S_a` edges with
+  `bonus = 0.0` — confirming the comparison is on scope ids, not
+  on `source_record_id`.
 
 ## 4. MCP wiring
 
@@ -792,36 +856,38 @@ issue.
 
 ## 6. Status / capability advertisement
 
-Capability discovery is **the same predicate everywhere** — and it
-is a *conjunction*, not a single bit.
-
-Reusing the existing `MemoryStoreCapabilities::graph_edges` alone is
-not enough: a deployment may have graph storage but lack the
-session-scope resolver from §2.1.1, in which case the tools must
-not be advertised even though the store can serve them. The
-predicate is therefore:
+Capability discovery is **the same predicate everywhere** and is
+**evaluated per-request**, not once at construction. The predicate
+is the conjunction of (a) store advertises `graph_edges` and (b)
+scope resolution returns a usable set for the *current* caller.
+"Resolver configured" alone is not sufficient — see §2.1 for why.
 
 ```rust
 // One predicate, used at both list_tools and call_tool sites.
 fn graph_tools_available(
     store: Option<&dyn MemoryStore>,
     scope: Option<&dyn McpSessionScope>,
+    ctx: &McpAuthContext<'_>,
 ) -> bool {
     let store_ok = store
         .map(|s| s.capabilities().graph_edges)
         .unwrap_or(false);
-    let scope_ok = scope.is_some();    // deny-all impls are still
-                                       // "present" — they just
-                                       // return empty Vec
-    store_ok && scope_ok
+    if !store_ok { return false; }
+    match scope {
+        None => false,
+        Some(s) => matches!(
+            s.allowed_scopes(ctx),
+            Ok(v) if !v.is_empty()
+        ),
+    }
 }
 ```
 
-A deny-all `McpSessionScope` impl (returns `Some(vec![])`) counts
-as "present" and lets tools advertise; calls then return
-empty/`NotFound` correctly. A *missing* scope resolver
-(`None`) means the deployment is unconfigured — tools stay hidden
-from `tools/list` rather than appearing-then-failing.
+A resolver that returns `Ok(vec![])` (deny-all for this caller)
+correctly hides tools from that caller's `tools/list`; the same
+resolver may return `Ok(vec!["scope-a"])` for a different caller
+in the same server, listing tools for them. Per-request
+isolation, not a server-global toggle.
 
 **Out of scope for this PR:** changing `MCPServerCapabilities` or
 `CairnMcpServer::capabilities()` to surface a derived
