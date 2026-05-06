@@ -1378,7 +1378,7 @@ mod mcp_graph_tests {
         let avail =
             cfg.mcp_graph_tools_available(Some(dyn_s), McpTransport::Stdio, &caps);
         assert_eq!(
-            render_mcp_graph_line(&avail),
+            render_mcp_graph_line(&avail, ProbeBasis::FullProbe),
             "mcp.graph_tools: unavailable (single-tenant mode off)",
         );
     }
@@ -1395,7 +1395,7 @@ mod mcp_graph_tests {
         let avail =
             cfg.mcp_graph_tools_available(None, McpTransport::Stdio, &caps);
         assert_eq!(
-            render_mcp_graph_line(&avail),
+            render_mcp_graph_line(&avail, ProbeBasis::FullProbe),
             "mcp.graph_tools: unavailable (no scope resolver wired)",
         );
     }
@@ -1414,7 +1414,7 @@ mod mcp_graph_tests {
         let avail =
             cfg.mcp_graph_tools_available(Some(dyn_s), McpTransport::Stdio, &caps);
         assert_eq!(
-            render_mcp_graph_line(&avail),
+            render_mcp_graph_line(&avail, ProbeBasis::FullProbe),
             "mcp.graph_tools: unavailable (store does not advertise graph_edges)",
         );
     }
@@ -1425,7 +1425,7 @@ mod mcp_graph_tests {
         // formatter must still handle it for Plan C forward-compat.
         let avail = McpGraphAvailability::Available { tool_count: 5 };
         assert_eq!(
-            render_mcp_graph_line(&avail),
+            render_mcp_graph_line(&avail, ProbeBasis::FullProbe),
             "mcp.graph_tools: available (5 tools)",
         );
     }
@@ -1476,54 +1476,209 @@ In `run_with_context` (around line 109 of the same file), after the existing cap
 
 ```rust
     // ── MCP graph-tools availability (issue #190 Plan A) ─────────────
-    // Read the same predicate the (future) MCP handler consults. Plan A
-    // always reports an Unavailable state — Plan C flips the predicate's
-    // fall-through and operators will start seeing `available (5 tools)`
-    // here without any change to status.rs.
+    // Read the same predicate the MCP handler consults — using the
+    // same inputs (real store capabilities, real scope resolver) so
+    // `status` and `cairn mcp` cannot disagree about whether graph
+    // tools are advertised. If we cannot open the store from this
+    // call site (no vault, opening would fail, etc.) we report the
+    // *config-only* portion of the predicate and label the result
+    // explicitly as a config-only probe so operators are not misled.
     if let Some(cfg) = config {
-        let caps_for_predicate = match vault_root {
-            Some(root) => probe_store_caps(root)
-                .unwrap_or(cairn_core::contract::memory_store::MemoryStoreCapabilities::default()),
-            None => cairn_core::contract::memory_store::MemoryStoreCapabilities::default(),
+        // Build the same scope-resolver components the MCP handler
+        // would build from this config. Reuses the helper from
+        // Task 5 so there is exactly one path that derives them.
+        let scope_components =
+            crate::mcp::resolve_scope_components(cfg).ok().flatten();
+        let scope_for_predicate: Option<&dyn cairn_core::mcp_auth::McpSessionScope> =
+            scope_components.as_ref().map(|(s, _principal)| {
+                std::sync::Arc::as_ref(s) as &dyn cairn_core::mcp_auth::McpSessionScope
+            });
+
+        // Open the real store to read its capabilities. If the open
+        // path fails (no vault, migrations not run, locked DB, …) we
+        // fall back to the config-only probe and tag the JSON/human
+        // output so operators see "config-only" rather than a false
+        // "store does not advertise graph_edges" report.
+        let (caps_for_predicate, probe_basis) = match vault_root {
+            Some(root) => match try_open_store_capabilities(root) {
+                Ok(caps) => (caps, ProbeBasis::FullProbe),
+                Err(err) => {
+                    tracing::debug!(
+                        ?err,
+                        "status: store-cap probe failed; falling back to config-only"
+                    );
+                    (
+                        cairn_core::contract::memory_store::MemoryStoreCapabilities::default(),
+                        ProbeBasis::ConfigOnly,
+                    )
+                }
+            },
+            None => (
+                cairn_core::contract::memory_store::MemoryStoreCapabilities::default(),
+                ProbeBasis::ConfigOnly,
+            ),
         };
-        // Plan A: no scope resolver is constructed inside `cairn status`
-        // (we don't open the store from here). Pass `None` and the
-        // predicate returns `UnavailableSingleTenantOff` or
-        // `UnavailableNoScopeResolver` deterministically based on
-        // config alone — that is the operator-facing signal we want.
+
         let avail = cfg.mcp_graph_tools_available(
-            None,
+            scope_for_predicate,
             cairn_core::mcp_auth::McpTransport::Stdio,
             &caps_for_predicate,
         );
-        if json {
-            // Already serialized via `emit_json` above; re-emit a
-            // single-line addendum on the next stdout flush so machine
-            // consumers can grep `mcp.graph_tools` deterministically.
-            println!(
-                "{{\"mcp.graph_tools\":\"{}\"}}",
-                avail.label()
-            );
-        } else {
-            println!("{}", render_mcp_graph_line(&avail));
+
+        if !json {
+            // Human output: append one line, with a "(config-only)"
+            // suffix when the store probe could not run, so a
+            // misleading `unavailable (store does not advertise
+            // graph_edges)` cannot stand in for a real verdict.
+            println!("{}", render_mcp_graph_line(&avail, probe_basis));
         }
+        // JSON output is handled below by extending the existing
+        // status payload — NOT by emitting a second JSON document.
     }
 ```
 
-If `probe_store_caps` does not exist in this file, define it as a stub that returns the default `MemoryStoreCapabilities` for Plan A — Plan C can replace it with a real probe. Add this near the bottom of `status.rs`:
+**JSON integration: single-document, no addendum.** The previous
+sketch emitted a second `{"mcp.graph_tools":"…"}` JSON object
+after the primary status payload, which breaks `--json` parsers.
+The correct shape is to extend the status response struct itself.
+
+In `crates/cairn-cli/src/verbs/status.rs`, locate the response
+struct serialized by `emit_json` (it is already `serde::Serialize`).
+Add a new field:
 
 ```rust
-/// Cheap proxy: read store capability advertisement WITHOUT opening the
-/// store. Plan A returns defaults — `cairn status` reports the
-/// config-driven part of `mcp_graph_tools_available` only. Plan C can
-/// replace this with a real `SqliteMemoryStore::open(&db).capabilities()`
-/// probe; until then the predicate sees `graph_edges = false` and
-/// returns `UnavailableNoStoreCapability` for opted-in deployments,
-/// which is the honest report.
-fn probe_store_caps(
-    _vault_root: &std::path::Path,
-) -> Option<cairn_core::contract::memory_store::MemoryStoreCapabilities> {
-    None
+#[derive(serde::Serialize)]
+pub struct StatusResponse {
+    // … existing fields stay unchanged …
+
+    /// MCP graph-tools availability state. Always present in JSON
+    /// output. Field shape:
+    ///   { "state": "available" | "unavailable",
+    ///     "reason": Option<&'static str>,
+    ///     "tool_count": Option<u32>,
+    ///     "probe_basis": "full" | "config_only" }
+    pub mcp_graph_tools: McpGraphToolsStatus,
+}
+
+#[derive(serde::Serialize)]
+pub struct McpGraphToolsStatus {
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_count: Option<u32>,
+    pub probe_basis: &'static str, // "full" | "config_only"
+}
+
+impl McpGraphToolsStatus {
+    pub fn from_predicate(
+        avail: &cairn_core::mcp_auth::McpGraphAvailability,
+        probe_basis: ProbeBasis,
+    ) -> Self {
+        use cairn_core::mcp_auth::McpGraphAvailability;
+        let basis = match probe_basis {
+            ProbeBasis::FullProbe => "full",
+            ProbeBasis::ConfigOnly => "config_only",
+        };
+        match avail {
+            McpGraphAvailability::Available { tool_count } => Self {
+                state: "available",
+                reason: None,
+                tool_count: Some(u32::try_from(*tool_count).unwrap_or(0)),
+                probe_basis: basis,
+            },
+            McpGraphAvailability::UnavailableSingleTenantOff => Self {
+                state: "unavailable",
+                reason: Some("single_tenant_off"),
+                tool_count: None,
+                probe_basis: basis,
+            },
+            McpGraphAvailability::UnavailableNoStoreCapability => Self {
+                state: "unavailable",
+                reason: Some("no_store_capability"),
+                tool_count: None,
+                probe_basis: basis,
+            },
+            McpGraphAvailability::UnavailableNoScopeResolver => Self {
+                state: "unavailable",
+                reason: Some("no_scope_resolver"),
+                tool_count: None,
+                probe_basis: basis,
+            },
+        }
+    }
+}
+```
+
+The existing `emit_json` call serializes the (now extended)
+`StatusResponse` once. There is **no second `println!`** for the
+JSON path — strict parsers see exactly one document.
+
+```rust
+/// Result of the store-capability probe — full open succeeded vs.
+/// fell back to config-only. Surfaced in `status` output so an
+/// "unavailable" verdict is never mistaken for an authoritative
+/// negative when the store could not actually be inspected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeBasis {
+    FullProbe,
+    ConfigOnly,
+}
+
+/// Open the SQLite store at `vault_root` read-only and read its
+/// `MemoryStoreCapabilities`. Mirrors what `cairn mcp` does at
+/// startup — using the exact same code path keeps `status` and
+/// `cairn mcp` from disagreeing about whether graph_edges is
+/// advertised. Errors are returned to the caller so the `status`
+/// path can degrade to a config-only probe with a tagged label.
+fn try_open_store_capabilities(
+    vault_root: &std::path::Path,
+) -> Result<
+    cairn_core::contract::memory_store::MemoryStoreCapabilities,
+    Box<dyn std::error::Error>,
+> {
+    let db_path = vault_root.join(".cairn").join("memory.db");
+    let store = cairn_store_sqlite::SqliteMemoryStore::open_read_only(&db_path)?;
+    Ok(*store.capabilities())
+}
+```
+
+If `SqliteMemoryStore::open_read_only` does not yet exist, this
+task adds it as a thin wrapper over the existing `open()`
+constructor with a `read_only = true` flag — small, mechanical,
+and the same code is what `cairn mcp` will eventually share.
+
+`render_mcp_graph_line` gains the `probe_basis` parameter so the
+human-readable line can carry a `(config-only)` suffix when the
+store could not be opened:
+
+```rust
+#[must_use]
+pub fn render_mcp_graph_line(
+    avail: &cairn_core::mcp_auth::McpGraphAvailability,
+    probe_basis: ProbeBasis,
+) -> String {
+    use cairn_core::mcp_auth::McpGraphAvailability;
+    let suffix = match probe_basis {
+        ProbeBasis::FullProbe => "",
+        ProbeBasis::ConfigOnly => " (config-only)",
+    };
+    match avail {
+        McpGraphAvailability::Available { tool_count } => {
+            format!("mcp.graph_tools: available ({tool_count} tools){suffix}")
+        }
+        McpGraphAvailability::UnavailableSingleTenantOff => {
+            format!("mcp.graph_tools: unavailable (single-tenant mode off){suffix}")
+        }
+        McpGraphAvailability::UnavailableNoStoreCapability => {
+            format!(
+                "mcp.graph_tools: unavailable (store does not advertise graph_edges){suffix}"
+            )
+        }
+        McpGraphAvailability::UnavailableNoScopeResolver => {
+            format!("mcp.graph_tools: unavailable (no scope resolver wired){suffix}")
+        }
+    }
 }
 ```
 
