@@ -112,6 +112,12 @@ const FORGET_RECORD_GRAPH: StepGraph = StepGraph {
 };
 
 /// Step graph for `expire` — brief §5.6 fan-out table row 5.
+///
+/// Brief §5.6 lists `consent_journal.append(expire)` as step 6, but the
+/// brief also specifies it commits "atomic with step 2 in one `SQLite`
+/// transaction" — i.e. fused into the `primary.mark_expired` step body.
+/// It is therefore not a separate WAL step; the same fusion treatment is
+/// applied to `upsert`'s consent journal append (see `UPSERT_STEPS` doc).
 pub const EXPIRE_STEPS: &[StepDef] = &[
     StepDef { ord: 0, name: "snapshot.stage",        idempotent: false },
     StepDef { ord: 1, name: "primary.mark_expired",  idempotent: true  },
