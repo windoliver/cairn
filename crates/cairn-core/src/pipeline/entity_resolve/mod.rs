@@ -57,6 +57,13 @@ pub struct ResolverConfig {
     /// per-call CPU + allocation (R7.2). `Some(0)` rejected;
     /// `None` means unlimited.
     pub max_existing_candidates: Option<usize>,
+    /// Maximum byte length of raw entity-name strings (the candidate
+    /// passed to `resolve()` and any `existing[i].name` consulted in
+    /// Tier 3). Enforced BEFORE normalization so an oversized input
+    /// cannot pre-allocate megabytes for shingling or land verbatim
+    /// in the LLM prompt (codex-review R8.2). `None` means unlimited;
+    /// `Some(0)` rejected.
+    pub max_raw_name_bytes: Option<usize>,
 }
 
 impl Default for ResolverConfig {
@@ -78,6 +85,9 @@ impl Default for ResolverConfig {
             // count P0 vaults will see.
             max_candidate_chars: Some(1024),
             max_existing_candidates: Some(10_000),
+            // 8 KB raw is more than any realistic entity name and
+            // bounds prompt size from below the LLM token budget.
+            max_raw_name_bytes: Some(8 * 1024),
         }
     }
 }
@@ -137,6 +147,11 @@ impl ResolverConfig {
         if matches!(self.max_existing_candidates, Some(0)) {
             return Err(ResolverConfigError::LlmBudgetZero {
                 field: "max_existing_candidates",
+            });
+        }
+        if matches!(self.max_raw_name_bytes, Some(0)) {
+            return Err(ResolverConfigError::LlmBudgetZero {
+                field: "max_raw_name_bytes",
             });
         }
         Ok(())
@@ -231,6 +246,31 @@ impl EntityResolver {
         candidate_name: &str,
         existing: &[EntityNode],
     ) -> Result<Resolution, EntityResolutionError> {
+        // R8.2: cap raw byte length BEFORE any work — including
+        // normalization, which would otherwise allocate a buffer
+        // sized to the input. Also covers the Tier-3 prompt path
+        // since the raw `candidate_name` is what gets serialized.
+        if let Some(max) = self.config.max_raw_name_bytes
+            && candidate_name.len() > max
+        {
+            return Err(EntityResolutionError::RawNameTooLong {
+                got: candidate_name.len(),
+                max,
+            });
+        }
+        // Also reject any oversized existing.name up-front. Tier-3
+        // would otherwise serialize that into the prompt.
+        if let Some(max) = self.config.max_raw_name_bytes {
+            for n in existing {
+                if n.name.len() > max {
+                    return Err(EntityResolutionError::RawNameTooLong {
+                        got: n.name.len(),
+                        max,
+                    });
+                }
+            }
+        }
+
         // R7.2: cap per-call work BEFORE normalize/shingle to bound
         // CPU on a degraded-input path. The Tier-3 timeout doesn't
         // help here — Tier 1+2 happen synchronously before any LLM
@@ -452,6 +492,18 @@ pub enum EntityResolutionError {
     #[error("existing candidate count ({got}) exceeds limit ({max})")]
     TooManyCandidates {
         /// Slice length actually observed.
+        got: usize,
+        /// Configured cap.
+        max: usize,
+    },
+
+    /// A raw entity-name string (candidate or existing) exceeded
+    /// `ResolverConfig::max_raw_name_bytes`. Enforced before
+    /// normalization to bound pre-call allocation and LLM prompt
+    /// size (codex-review R8.2).
+    #[error("raw entity name length ({got} bytes) exceeds limit ({max} bytes)")]
+    RawNameTooLong {
+        /// Raw byte length actually observed.
         got: usize,
         /// Configured cap.
         max: usize,
@@ -899,6 +951,44 @@ mod resolver_tests {
             }
             other => panic!("expected Ambiguous for multi-band, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_raw_candidate_before_normalize() {
+        // Codex-review R8.2: a punctuation-heavy candidate that
+        // shrinks short under normalize must still be rejected by
+        // the raw-byte cap so it cannot reach Tier 3 prompt
+        // construction or pre-allocate huge buffers.
+        let cfg = ResolverConfig {
+            max_raw_name_bytes: Some(64),
+            max_candidate_chars: Some(8), // post-normalize cap
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        // 200 punctuation chars + a short alphanumeric → normalizes
+        // short, but raw is 200+ bytes.
+        let huge = format!("{}{}", "!".repeat(200), "auth");
+        let err = r
+            .resolve(&huge, &[])
+            .await
+            .expect_err("invariant: oversized raw candidate must error");
+        assert!(matches!(err, EntityResolutionError::RawNameTooLong { .. }));
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_existing_name() {
+        let cfg = ResolverConfig {
+            max_raw_name_bytes: Some(64),
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        let mut huge_node = node("01HZE7JV5N0000000000000001", "auth service");
+        huge_node.name = "x".repeat(1000);
+        let err = r
+            .resolve("auth service", &[huge_node])
+            .await
+            .expect_err("invariant: oversized existing.name must error");
+        assert!(matches!(err, EntityResolutionError::RawNameTooLong { .. }));
     }
 
     #[tokio::test]

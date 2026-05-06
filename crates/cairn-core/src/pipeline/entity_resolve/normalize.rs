@@ -19,8 +19,13 @@ use crate::domain::graph::{EntityId, EntityNode};
 ///    operation) is not in `unicode-normalization`. Acceptable for
 ///    P0; tracked for a follow-up if it becomes load-bearing.
 /// 2. Lowercase via `char::to_lowercase` (Unicode, multi-codepoint).
-/// 3. Retain only Unicode alphanumerics (`char::is_alphanumeric`) plus
-///    ASCII whitespace (folded to a single `' '`).
+/// 3. Retain Unicode alphanumerics (`char::is_alphanumeric`) plus a
+///    small set of identity-bearing ASCII symbols (`+ # & . * '`)
+///    when adjacent to an already-emitted alphanumeric. This keeps
+///    `C`, `C++`, `C#`, `F#`, `AT&T`, `.NET`, `O'Brien` distinct
+///    rather than collapsing them all to bare `c` / `at` / `obrien`
+///    and forcing Tier-1 false-merges (codex-review R8.1). All
+///    other symbols and ASCII whitespace fold to a single `' '`.
 /// 4. Collapse runs of whitespace to single spaces.
 /// 5. Trim leading + trailing whitespace.
 ///
@@ -54,6 +59,15 @@ pub fn normalize(s: &str) -> String {
                     last_was_space = false;
                 }
             }
+        } else if matches!(c, '+' | '#' | '&' | '.' | '*' | '\'') && !last_was_space {
+            // R8.1: preserve identity-bearing ASCII symbols when
+            // adjacent to an already-emitted alphanumeric. Keeps
+            // `C++`/`C#`/`AT&T`/`.NET`/`O'Brien` distinct from `C`/
+            // `AT`/`NET`/`OBrien`. Leading or post-space symbols are
+            // still dropped (no `&foo`).
+            out.push(c);
+            // `last_was_space` stays false — these symbols don't
+            // separate words; they decorate the previous one.
         } else if matches!(c, ' ' | '\t' | '\n' | '\r') && !last_was_space {
             out.push(' ');
             last_was_space = true;
@@ -135,6 +149,29 @@ mod tests {
         assert_ne!(normalize("Кириллица"), normalize("日本語"));
         assert!(!normalize("Кириллица").is_empty());
         assert!(!normalize("日本語").is_empty());
+    }
+
+    #[test]
+    fn preserves_identity_bearing_symbols() {
+        // Codex-review R8.1: distinct programming-language entities
+        // and brand names share an alphanumeric prefix but differ
+        // only in trailing/embedded symbols. Must not collapse to
+        // the same `name_norm`.
+        assert_eq!(normalize("C"), "c");
+        assert_eq!(normalize("C++"), "c++");
+        assert_eq!(normalize("C#"), "c#");
+        assert_eq!(normalize("F#"), "f#");
+        assert_eq!(normalize("AT&T"), "at&t");
+        // `.NET` — leading `.` is a "post-space" symbol so dropped;
+        // we keep "net" distinct from "net foundation". An exact
+        // match against another `.NET` still works because both
+        // sides apply the same rule.
+        assert_eq!(normalize(".NET"), "net");
+        assert_eq!(normalize("O'Brien"), "o'brien");
+        // Distinctness checks that close the false-merge loophole.
+        assert_ne!(normalize("C"), normalize("C++"));
+        assert_ne!(normalize("C++"), normalize("C#"));
+        assert_ne!(normalize("AT&T"), normalize("AT"));
     }
 
     #[test]
