@@ -138,34 +138,58 @@ visible cannot tell whose summary it is reading.
 Returning `summary` (or any node-level free-text payload) from an
 MCP tool would be a cross-scope metadata leak — the same
 mechanism the edge-level scope filter is designed to prevent
-would be defeated at the node level. Until `entity_nodes`
-acquires per-scope versioning or scope-bearing summaries, **the
-MCP graph tools never expose `summary`** and treat node identity
-as the only safely-shareable node attribute. Concretely:
+would be defeated at the node level.
 
-- **`graph.get_entity` returns** `{ id, edge_count }` — id is a
-  ULID, edge_count is computed against `visible_edges` so it
-  reflects only in-scope structure. The caller already knows the
-  name they queried by (it is in their input); we do not echo
-  `entity_nodes.name` back, and we never return `summary`.
+`name` carries a softer but real leak risk too: a sensitive
+canonical name written by one tenant becomes the dedup key for
+the same name extracted (or fuzzy-matched into) any other
+tenant's data. We therefore distinguish two cases:
+
+1. **Caller-known names round-trip safely.** When a caller
+   invokes `graph.get_entity { ByName: "AuthService" }`, the
+   caller already knows the name they passed in. Echoing it
+   back in the response is not a disclosure. In addition, the
+   caller's own `allowed_scopes` ingestion may have produced
+   the entity independently — in that case the caller already
+   has the name on their side of the trust boundary.
+
+2. **Names of *discovered* nodes (BFS hops, neighbor edges,
+   timeline endpoints) are NOT echoed.** Those are nodes the
+   caller did not ask for by name; returning the canonical
+   name there is the leak path Codex flagged. Until per-scope
+   node provenance lands, traversal output stays id-only on
+   the discovered-node axis.
+
+Concrete contracts:
+
+- **`graph.get_entity { ById: id }`** returns `{ id, edge_count }` —
+  id-only because the caller-asked-by-id case has no name to
+  echo back safely.
+- **`graph.get_entity { ByName: name }`** returns `{ id,
+  echoed_name, edge_count }` where `echoed_name` is the input
+  string verbatim (NOT a read of `entity_nodes.name`). Lets the
+  caller correlate the id with the name they searched. Never
+  surfaces a *different* canonical name.
 - **`graph.get_neighbors`** returns edges with `(source_id,
   target_id, relation, confidence_score, valid_at)` — id-only;
   no joined node payload.
 - **`graph.query`** returns the BFS subgraph as ids and edges
-  only; no node names or summaries.
+  only.
 - **`graph.timeline`** returns edge fields exactly as defined in
   §3.4; no node-level columns.
 - **`graph.surprising_connections`** returns edges plus `score`
-  and the modal-vs-non-modal `scope_id` from `records.scope`
-  (already in-scope); no node payload.
+  and the modal-vs-non-modal `scope_id`; no node payload.
+
+`summary` is **never** returned by any tool. Restoring full
+`name` / `summary` exposure for discovered nodes is a follow-up
+issue, gated on per-scope node provenance.
 
 This is a meaningful narrowing of the original issue's
-`graph.get_entity` contract ("Returns node attributes"), but it
-is the only model-safe shape until node provenance lands. The
-implementation plan documents this in the user-facing tool
-description so callers know what they get. Restoring `name` /
-`summary` exposure is a follow-up issue, gated on per-scope node
-provenance.
+`graph.get_entity` contract. The implementation plan documents
+this in the user-facing tool descriptions, including the
+rationale for echoed-name vs discovered-name asymmetry, so
+callers understand the limitation without having to read the
+spec.
 
 ### 2.1.1 Authorization & scope (CRITICAL)
 
@@ -507,6 +531,13 @@ Tests:
    **not** see edges sourced from the older `S_a` version. A
    caller authorized for `S_a` (only) does see them as long as
    any active row still exists on the lineage.
+6. **Tombstoned endpoint adversarial test:** an active,
+   in-scope edge between live node `A` and tombstoned node `B`
+   (`entity_nodes.expired_at IS NOT NULL` on `B`). The edge
+   does NOT appear in `visible_edges`, `get_neighbors(A)`,
+   `query` (BFS from `A` cannot hop to `B`), `timeline(A)`,
+   or `surprising_connections({A, B})`. Asserts node-liveness
+   filtering at the shared edge primitive.
 
 ### 3.0b Set-valued parameter binding
 
@@ -543,7 +574,14 @@ open (or, equivalently, a CTE prefix injected by `GraphQueries`):
 --     (source_record_id IS NULL) are unconditionally excluded —
 --     no flag opts into them, because they carry no scope-bearing
 --     provenance and exposing them would bypass authorization.
-WITH visible_edges AS (
+-- (c) node liveness: BOTH endpoints must be in visible_nodes,
+--     so a tombstoned-but-not-yet-cleaned-up node id cannot
+--     appear in any edge result. Without this, a deleted
+--     entity would still leak through get_neighbors / timeline
+--     / surprising_connections, and the BFS loop's
+--     fetch_node(other_id) would fail to hydrate hops that the
+--     edge query had already approved.
+WITH visible_edges_raw AS (
   SELECT e.*
   FROM entity_edges e
   WHERE e.expired_at IS NULL
@@ -560,8 +598,25 @@ WITH visible_edges AS (
         AND r_active.active     = 1
         AND r_active.tombstoned = 0
     )
+),
+visible_nodes AS (...),                           -- §3.0 (defined below)
+visible_edges AS (
+  SELECT e.*
+  FROM visible_edges_raw e
+  WHERE e.source_id IN (SELECT id FROM visible_nodes)
+    AND e.target_id IN (SELECT id FROM visible_nodes)
 )
 ```
+
+This makes `visible_edges` reflect a self-consistent subgraph:
+every edge it returns has two live, in-scope endpoints. The BFS
+loop's `fetch_node` cannot hand back an `other_id` that
+visible_nodes rejects, and `get_neighbors` / `timeline` /
+`surprising_connections` cannot return an edge whose endpoint
+has been tombstoned out from under it. The `visible_nodes` CTE
+must therefore reference `visible_edges_raw` (the
+provenance-filtered raw form) for its "active edges" provenance
+branch — otherwise we'd have a circular CTE.
 
 The stable-lineage predicate from §3.0a is part of the scope
 check by definition — a tombstoned target chain cannot continue
@@ -612,7 +667,11 @@ visible_nodes AS (
   WHERE n.expired_at IS NULL
     AND (
       EXISTS (
-        SELECT 1 FROM visible_edges e
+        -- visible_edges_raw, not visible_edges: the latter
+        -- requires both endpoints in visible_nodes, which is
+        -- this CTE — circular. Use the provenance-filtered
+        -- raw form here.
+        SELECT 1 FROM visible_edges_raw e
         WHERE e.source_id = n.id OR e.target_id = n.id
       )
       OR EXISTS (
