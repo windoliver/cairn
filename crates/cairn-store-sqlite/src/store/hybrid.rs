@@ -152,51 +152,50 @@ impl SqliteMemoryStore {
             },
         );
 
-        // Hydrate output rows from the underlying legs so callers see
-        // snippets / bm25 / staleness exactly as those legs produced them.
+        // Hydrate from lexical legs + graph-only `records` rows; apply
+        // `limit` AFTER drop-out so a row tombstoned between the leg
+        // query and now cannot shrink the page below `limit`.
         let mut by_id = hydrate_candidates(keyword.candidates, semantic.candidates);
+        self.hydrate_graph_only_into(&reranked, &mut by_id).await?;
         let candidates: Vec<SearchCandidate> = reranked
             .iter()
-            .take(args.limit)
             .filter_map(|r| by_id.remove(&r.record_id))
+            .take(args.limit)
             .collect();
 
-        // Build the explain block aligned with `candidates`. We iterate the
-        // surviving candidates (after filter_map + take) and look up each
-        // record's reranker output — this guarantees `explain[i].record_id ==
-        // candidates[i].record_id` even when hydration defensively drops a row.
-        let explain = if args.with_explain {
-            let reranked_map: HashMap<&RecordId, &RerankedCandidate> =
-                reranked.iter().map(|r| (&r.record_id, r)).collect();
-            Some(
-                candidates
-                    .iter()
-                    .filter_map(|c| {
-                        // A candidate that survived hydration must be in
-                        // `reranked`; filter_map here is defensive — if somehow
-                        // the invariant breaks we emit no explain row rather
-                        // than panicking at runtime.
-                        let r = reranked_map.get(&c.record_id)?;
-                        Some(ScoreExplain {
-                            record_id: c.record_id.clone(),
-                            bm25_rank: kw_ranks.get(&c.record_id).copied(),
-                            semantic_rank: sem_ranks.get(&c.record_id).copied(),
-                            rrf_score: r.rrf_score,
-                            cosine: r.cosine,
-                            final_score: r.final_score,
-                        })
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
+        let explain = args
+            .with_explain
+            .then(|| build_explain(&candidates, &reranked, &kw_ranks, &sem_ranks));
 
         Ok(HybridSearchPage {
             candidates,
             explain,
             degraded_legs,
         })
+    }
+
+    /// Hydrate `SearchCandidate` rows for any reranked id that the lexical
+    /// legs did not surface (graph-only hits). Pulled out to keep the
+    /// caller under `clippy::too_many_lines`.
+    async fn hydrate_graph_only_into(
+        &self,
+        reranked: &[RerankedCandidate],
+        by_id: &mut HashMap<RecordId, SearchCandidate>,
+    ) -> Result<(), StoreError> {
+        let missing_ids: Vec<RecordId> = reranked
+            .iter()
+            .filter(|r| !by_id.contains_key(&r.record_id))
+            .map(|r| r.record_id.clone())
+            .collect();
+        if missing_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.require_conn("search_hybrid")?.clone();
+        let extra = hydrate_graph_only(conn, missing_ids).await?;
+        for c in extra {
+            by_id.entry(c.record_id.clone()).or_insert(c);
+        }
+        Ok(())
     }
 
     /// Run the graph leg for [`Self::do_search_hybrid`]. Returns
@@ -377,6 +376,149 @@ fn hydrate_candidates(
             .or_insert(c);
     }
     by_id
+}
+
+/// Build the explain block aligned with the surviving candidate page.
+/// Iterates candidates (post hydrate + `filter_map` + take) and looks up each
+/// row in the rerank output so `explain[i].record_id == candidates[i].record_id`
+/// even when hydration drops a row.
+fn build_explain(
+    candidates: &[SearchCandidate],
+    reranked: &[RerankedCandidate],
+    kw_ranks: &HashMap<RecordId, usize>,
+    sem_ranks: &HashMap<RecordId, usize>,
+) -> Vec<ScoreExplain> {
+    let reranked_map: HashMap<&RecordId, &RerankedCandidate> =
+        reranked.iter().map(|r| (&r.record_id, r)).collect();
+    candidates
+        .iter()
+        .filter_map(|c| {
+            let r = reranked_map.get(&c.record_id)?;
+            Some(ScoreExplain {
+                record_id: c.record_id.clone(),
+                bm25_rank: kw_ranks.get(&c.record_id).copied(),
+                semantic_rank: sem_ranks.get(&c.record_id).copied(),
+                rrf_score: r.rrf_score,
+                cosine: r.cosine,
+                final_score: r.final_score,
+            })
+        })
+        .collect()
+}
+
+/// Hydrate `SearchCandidate` rows for graph-only ids that did not surface
+/// in either lexical leg. Reads the same `records` columns the keyword
+/// query projects, but with `bm25 = 0.0`, empty `snippet`, and
+/// `semantic_distance = None` — those signals are unavailable on the
+/// graph-only path. Tombstoned / inactive rows are filtered out so a
+/// record retired between the leg query and now cannot resurface as a
+/// graph hit.
+async fn hydrate_graph_only(
+    conn: Arc<tokio_rusqlite::Connection>,
+    ids: Vec<RecordId>,
+) -> Result<Vec<SearchCandidate>, StoreError> {
+    use cairn_core::domain::{MemoryClass, MemoryKind, MemoryVisibility, ScopeTuple};
+
+    use crate::store::current_unix_ms;
+    use crate::store::projection::record_id_from_str;
+
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let now_ms = current_unix_ms();
+    let id_strings: Vec<String> = ids.iter().map(|r| r.as_str().to_owned()).collect();
+
+    let out = conn
+        .call(
+            move |c| -> Result<Vec<SearchCandidate>, tokio_rusqlite::Error> {
+                let placeholders: String = std::iter::repeat_n("?", id_strings.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT r.record_id, r.target_id, r.scope, r.kind, r.class, r.visibility, \
+                        r.updated_at, r.confidence, r.salience, r.created_at, r.body \
+                   FROM records r \
+                  WHERE r.record_id IN ({placeholders}) \
+                    AND r.active = 1 AND r.tombstoned = 0"
+                );
+                let params: Vec<SqlVal> = id_strings.into_iter().map(SqlVal::Text).collect();
+
+                let mut stmt = c.prepare(&sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(params.iter()))?;
+                let mut out: Vec<SearchCandidate> = Vec::new();
+                while let Some(row) = rows.next()? {
+                    let rec_str: String = row.get(0)?;
+                    let target_str: String = row.get(1)?;
+                    let scope_json: String = row.get(2)?;
+                    let kind_str: String = row.get(3)?;
+                    let class_str: String = row.get(4)?;
+                    let visibility_str: String = row.get(5)?;
+                    let updated_at: i64 = row.get(6)?;
+                    let confidence: f64 = row.get(7)?;
+                    let salience: f64 = row.get(8)?;
+                    let created_at: i64 = row.get(9)?;
+                    let body: String = row.get(10)?;
+
+                    let record_id = record_id_from_str(&rec_str).map_err(|e| {
+                        tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                            what: format!("hydrate_graph_only: bad record_id `{rec_str}`: {e}"),
+                        }))
+                    })?;
+                    let target_id =
+                        cairn_core::domain::TargetId::parse(&target_str).map_err(|e| {
+                            tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                                what: format!(
+                                    "hydrate_graph_only: bad target_id `{target_str}`: {e}"
+                                ),
+                            }))
+                        })?;
+                    let scope: ScopeTuple = serde_json::from_str(&scope_json).map_err(|e| {
+                        tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                            what: format!("hydrate_graph_only: bad scope `{scope_json}`: {e}"),
+                        }))
+                    })?;
+                    let kind = MemoryKind::parse(&kind_str).map_err(|e| {
+                        tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                            what: format!("hydrate_graph_only: bad kind `{kind_str}`: {e}"),
+                        }))
+                    })?;
+                    let class = MemoryClass::parse(&class_str).map_err(|e| {
+                        tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                            what: format!("hydrate_graph_only: bad class `{class_str}`: {e}"),
+                        }))
+                    })?;
+                    let visibility = MemoryVisibility::parse(&visibility_str).map_err(|e| {
+                        tokio_rusqlite::Error::Other(Box::new(StoreError::Invariant {
+                            what: format!(
+                                "hydrate_graph_only: bad visibility `{visibility_str}`: {e}"
+                            ),
+                        }))
+                    })?;
+
+                    #[allow(clippy::cast_possible_truncation, reason = "REAL→f32 narrow")]
+                    out.push(SearchCandidate {
+                        record_id,
+                        target_id,
+                        scope,
+                        kind,
+                        class,
+                        visibility,
+                        bm25: 0.0,
+                        recency_seconds: (now_ms - updated_at) / 1000,
+                        confidence: confidence as f32,
+                        salience: salience as f32,
+                        staleness_seconds: (now_ms - created_at) / 1000,
+                        snippet: String::new(),
+                        record_json: body,
+                        semantic_distance: None,
+                    });
+                }
+                Ok(out)
+            },
+        )
+        .await
+        .map_err(StoreError::from)?;
+    Ok(out)
 }
 
 /// Decode a sqlite-vec blob (LE f32 sequence) into a `Vec<f32>`. Tail bytes
