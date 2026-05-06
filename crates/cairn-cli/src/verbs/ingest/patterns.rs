@@ -30,13 +30,11 @@ pub fn parse_pattern_list(
         .into_iter()
         .flat_map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
         .map(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
+            let normalized = normalize_pattern(&value);
+            if normalized.is_empty() {
                 Err(PatternError::Empty)
             } else {
-                Ok(GlobPattern {
-                    raw: trimmed.to_owned(),
-                })
+                Ok(GlobPattern { raw: normalized })
             }
         })
         .collect()
@@ -54,6 +52,14 @@ fn normalize_relative(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn normalize_pattern(value: &str) -> String {
+    let mut normalized = value.trim().replace('\\', "/");
+    while normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
 }
 
 impl GlobPattern {
@@ -125,5 +131,36 @@ mod tests {
             true
         ));
         assert!(!matches_any(&patterns, Path::new("targets/file.rs"), false));
+    }
+
+    #[test]
+    fn slash_pattern_matches_exact_path() {
+        let patterns = parse_pattern_list(Some(vec!["docs/file.md".to_owned()]), &[]).unwrap();
+
+        assert!(matches_any(&patterns, Path::new("docs/file.md"), false));
+        assert!(!matches_any(&patterns, Path::new("docs/other.md"), false));
+    }
+
+    #[test]
+    fn trailing_slash_pattern_matches_directory_prefix() {
+        let patterns = parse_pattern_list(Some(vec!["target/".to_owned()]), &[]).unwrap();
+
+        assert!(matches_any(
+            &patterns,
+            Path::new("target/generated.rs"),
+            false
+        ));
+        assert!(!matches_any(
+            &patterns,
+            Path::new("targets/generated.rs"),
+            false
+        ));
+    }
+
+    #[test]
+    fn windows_style_pattern_matches_normalized_path() {
+        let patterns = parse_pattern_list(Some(vec!["foo\\bar".to_owned()]), &[]).unwrap();
+
+        assert!(matches_any(&patterns, Path::new("foo/bar"), false));
     }
 }
