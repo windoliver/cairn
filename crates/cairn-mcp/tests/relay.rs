@@ -50,3 +50,35 @@ async fn relay_passes_8mib_frame_intact() {
     out_rx.read_to_end(&mut got).await.unwrap();
     assert_eq!(got.len(), frame.len());
 }
+
+// ── Task 18: decode_eof tail handling ────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_eof_with_valid_trailing_frame_appends_newline() {
+    let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+    let (mut tx, rx) = tokio::io::duplex(8192);
+    let (out_tx, mut out_rx) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        run_relay(rx, out_tx).await.ok();
+    });
+    tx.write_all(input).await.unwrap();
+    drop(tx);
+    let mut got = Vec::new();
+    out_rx.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, [input.as_slice(), b"\n"].concat());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn relay_eof_with_malformed_trailing_bytes_drops_them() {
+    let input = b"{\"jsonrpc\":\"2.0\",";
+    let (mut tx, rx) = tokio::io::duplex(8192);
+    let (out_tx, mut out_rx) = tokio::io::duplex(8192);
+    tokio::spawn(async move {
+        run_relay(rx, out_tx).await.ok();
+    });
+    tx.write_all(input).await.unwrap();
+    drop(tx);
+    let mut got = Vec::new();
+    out_rx.read_to_end(&mut got).await.unwrap();
+    assert!(got.is_empty());
+}
