@@ -259,6 +259,7 @@ dependencies = [
  "async-trait",
  "cairn-core",
  "cairn-test-fixtures",
+ "rusqlite",
  "thiserror",
 ]
 
