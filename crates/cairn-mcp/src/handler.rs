@@ -187,11 +187,17 @@ impl CairnMcpHandler {
 
     /// Build an auth context for the current request.
     ///
-    /// On stdio the principal is fixed at construction time; the `request_id`
-    /// sentinel `"cairn-mcp-call"` is used when no per-request id is
-    /// available from rmcp's [`rmcp::service::RequestContext`].
-    fn auth_context(&self) -> McpAuthContext<'_> {
-        McpAuthContext::new(&self.principal, "cairn-mcp-call")
+    /// On stdio the principal is fixed at construction time (single-tenant
+    /// invariant from spec §2.1.1: `ConfigBackedScope` keys exclusively on
+    /// the configured principal). The `request_id` is taken from the rmcp
+    /// [`rmcp::service::RequestContext::id`] passed by the caller so a
+    /// future context-sensitive resolver sees a real per-request token
+    /// rather than a constant sentinel.
+    fn auth_context_for<'r>(
+        &'r self,
+        request_id: &'r str,
+    ) -> McpAuthContext<'r> {
+        McpAuthContext::new(&self.principal, request_id)
     }
 
     /// Single source of truth for "is the graph surface usable for this
@@ -247,9 +253,10 @@ impl ServerHandler for CairnMcpHandler {
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
+        let request_id = context.id.to_string();
         let mut tools: Vec<Tool> = TOOLS
             .iter()
             .map(|decl| {
@@ -266,7 +273,7 @@ impl ServerHandler for CairnMcpHandler {
             })
             .collect();
 
-        let ctx = self.auth_context();
+        let ctx = self.auth_context_for(&request_id);
         if self.materialize_graph_request(&ctx).is_ok() {
             for decl in crate::graph_tools::GRAPH_TOOLS {
                 let schema_value: serde_json::Value = serde_json::from_slice(
@@ -296,11 +303,12 @@ impl ServerHandler for CairnMcpHandler {
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_
     {
         let name = request.name.clone();
         let arguments = request.arguments.clone();
+        let request_id = context.id.to_string();
 
         async move {
             // Graph tool routing — single-pass resolution, no TOCTOU.
@@ -308,7 +316,7 @@ impl ServerHandler for CairnMcpHandler {
                 .iter()
                 .any(|d| d.name == name.as_ref())
             {
-                let ctx = self.auth_context();
+                let ctx = self.auth_context_for(&request_id);
                 let Ok(req) = self.materialize_graph_request(&ctx) else {
                     return Ok(capability_unavailable_result(&name));
                 };

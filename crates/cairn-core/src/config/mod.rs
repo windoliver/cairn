@@ -6,11 +6,24 @@ pub use mcp::{McpConfig, McpStdioConfig};
 /// Validate `[mcp.*]` invariants beyond what serde alone enforces.
 ///
 /// # Errors
-/// Returns [`ConfigError::McpStdioMissingPrincipal`] when
-/// `[mcp.stdio] single_tenant = true` is set without a `principal`.
+/// - [`ConfigError::McpStdioMissingPrincipal`] when
+///   `[mcp.stdio] single_tenant = true` is set without a `principal`.
+/// - [`ConfigError::McpStdioInvalidPrincipal`] when the configured principal
+///   fails [`ScopeTuple::validate`] — empty components, reserved characters,
+///   or the unsupported `project` dimension. The graph-tools matcher binds
+///   only the six IDL-addressable dimensions, so a `project`-bearing
+///   principal would be silently broadened at read time; we fail closed at
+///   config-load instead.
 pub fn validate_mcp_config(cfg: &McpConfig) -> Result<(), ConfigError> {
     if cfg.stdio.single_tenant && cfg.stdio.principal.is_none() {
         return Err(ConfigError::McpStdioMissingPrincipal);
+    }
+    if let Some(principal) = cfg.stdio.principal.as_ref() {
+        principal
+            .validate()
+            .map_err(|err| ConfigError::McpStdioInvalidPrincipal {
+                message: err.to_string(),
+            })?;
     }
     Ok(())
 }
@@ -60,6 +73,14 @@ pub enum ConfigError {
     /// provided.
     #[error("[mcp.stdio] single_tenant = true requires a `principal` scope tuple")]
     McpStdioMissingPrincipal,
+    /// `[mcp.stdio].principal` failed `ScopeTuple::validate` (malformed
+    /// components or unsupported dimension). The error text from the
+    /// underlying domain check is carried in `message`.
+    #[error("[mcp.stdio].principal is malformed: {message}")]
+    McpStdioInvalidPrincipal {
+        /// Stringified `DomainError::MalformedScope` body.
+        message: String,
+    },
 }
 
 /// Vault storage tier (§3.1).
