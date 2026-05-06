@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-idl/tests/codegen_snapshot.rs
-assertion_line: 51
 expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
 ---
 {
@@ -22,6 +21,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "required": [
             "url"
           ]
+        },
+        {
+          "required": [
+            "folder"
+          ]
         }
       ],
       "properties": {
@@ -29,8 +33,25 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "minLength": 1,
           "type": "string"
         },
+        "dry_run": {
+          "description": "Plan folder ingest without writing cache entries or store/WAL state.",
+          "type": "boolean"
+        },
+        "exclude": {
+          "description": "Folder ingest exclude patterns. CLI default: .git,node_modules,target.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
         "file": {
           "description": "Path on the local filesystem.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "folder": {
+          "description": "Folder to scan for offline folder ingest.",
           "minLength": 1,
           "type": "string"
         },
@@ -38,10 +59,36 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
         },
+        "include": {
+          "description": "Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
         "kind": {
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
+        },
+        "mode": {
+          "description": "Folder ingest extraction mode. keyword is the P0 offline default.",
+          "oneOf": [
+            {
+              "const": "keyword"
+            },
+            {
+              "const": "semantic"
+            },
+            {
+              "const": "full"
+            }
+          ]
+        },
+        "recursive": {
+          "description": "Whether folder ingest recurses into child directories. CLI default: true.",
+          "type": "boolean"
         },
         "session_id": {
           "minLength": 1,
@@ -113,6 +160,36 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "long": "url",
         "name": "url",
         "value_source": "string"
+      },
+      {
+        "long": "folder",
+        "name": "folder",
+        "value_source": "path"
+      },
+      {
+        "long": "recursive",
+        "name": "recursive",
+        "value_source": "bool"
+      },
+      {
+        "long": "include",
+        "name": "include",
+        "value_source": "list<string>"
+      },
+      {
+        "long": "exclude",
+        "name": "exclude",
+        "value_source": "list<string>"
+      },
+      {
+        "long": "mode",
+        "name": "mode",
+        "value_source": "enum(keyword,semantic,full)"
+      },
+      {
+        "long": "dry-run",
+        "name": "dry_run",
+        "value_source": "bool"
       },
       {
         "long": "session",

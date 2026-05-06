@@ -9,18 +9,45 @@ expression: "read(&files, \"crates/cairn-core/src/generated/verbs/ingest.rs\")"
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IngestArgsMode {
+    Keyword,
+    Semantic,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IngestArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// Plan folder ingest without writing cache entries or store/WAL state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    /// Folder ingest exclude patterns. CLI default: .git,node_modules,target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
+    /// Folder to scan for offline folder ingest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<serde_json::Value>,
+    /// Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     pub kind: String,
+    /// Folder ingest extraction mode. keyword is the P0 offline default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<IngestArgsMode>,
+    /// Whether folder ingest recurses into child directories. CLI default: true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recursive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,7 +59,7 @@ pub struct IngestArgs {
 impl IngestArgs {
     /// Enforce exactly-one-of presence across each XOR group declared in the IDL `oneOf`.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (self.body.is_some() as u8 + self.file.is_some() as u8 + self.folder.is_some() as u8 + self.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(())
     }
 }
@@ -42,14 +69,32 @@ impl IngestArgs {
 struct RawIngestArgs {
     #[serde(default)]
     body: Option<String>,
+    /// Plan folder ingest without writing cache entries or store/WAL state.
+    #[serde(default)]
+    dry_run: Option<bool>,
+    /// Folder ingest exclude patterns. CLI default: .git,node_modules,target.
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
     /// Path on the local filesystem.
     #[serde(default)]
     file: Option<String>,
+    /// Folder to scan for offline folder ingest.
+    #[serde(default)]
+    folder: Option<String>,
     /// Extra YAML frontmatter fields to store alongside the body.
     #[serde(default)]
     frontmatter: Option<serde_json::Value>,
+    /// Folder ingest include patterns. CLI default: *.md,*.txt,*.rs,*.py,*.ts,*.js,*.go.
+    #[serde(default)]
+    include: Option<Vec<String>>,
     /// Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.
     kind: String,
+    /// Folder ingest extraction mode. keyword is the P0 offline default.
+    #[serde(default)]
+    mode: Option<IngestArgsMode>,
+    /// Whether folder ingest recurses into child directories. CLI default: true.
+    #[serde(default)]
+    recursive: Option<bool>,
     #[serde(default)]
     session_id: Option<String>,
     #[serde(default)]
@@ -61,12 +106,18 @@ struct RawIngestArgs {
 impl ::core::convert::TryFrom<RawIngestArgs> for IngestArgs {
     type Error = &'static str;
     fn try_from(raw: RawIngestArgs) -> Result<Self, Self::Error> {
-        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, url] is required"); }
+        if (raw.body.is_some() as u8 + raw.file.is_some() as u8 + raw.folder.is_some() as u8 + raw.url.is_some() as u8) != 1 { return Err("exactly one of [body, file, folder, url] is required"); }
         Ok(Self {
             body: raw.body,
+            dry_run: raw.dry_run,
+            exclude: raw.exclude,
             file: raw.file,
+            folder: raw.folder,
             frontmatter: raw.frontmatter,
+            include: raw.include,
             kind: raw.kind,
+            mode: raw.mode,
+            recursive: raw.recursive,
             session_id: raw.session_id,
             tags: raw.tags,
             url: raw.url,
