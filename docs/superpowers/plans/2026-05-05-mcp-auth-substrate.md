@@ -1201,35 +1201,46 @@ pub fn run(vault_root: &Path, config: CairnConfig) -> ExitCode {
         }
     };
 
-    // The store-open API in `cairn-store-sqlite` is the free async fn
-    // `cairn_store_sqlite::open(path).await -> Result<SqliteMemoryStore,
-    // StoreError>`. There is no inherent `SqliteMemoryStore::open`. We
-    // run the open inside the runtime we just built. We keep TWO Arc
-    // clones: the trait object for verb dispatch (Plan A handler field)
-    // and the concrete sqlite Arc for graph dispatch (Plan C handler
-    // field). Both alias the same underlying store.
-    let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
-        match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                eprintln!("cairn mcp: failed to open SQLite store: {e}");
-                return ExitCode::from(69); // EX_UNAVAILABLE
-            }
-        };
-    let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
-        sqlite_store.clone();
-
+    // **Compatibility invariant.** Existing `cairn mcp` deployments
+    // that have NOT opted into single-tenant mode must remain
+    // byte-identical to the legacy unwired path: no vault scan, no
+    // SQLite open, no migration run. Resolve the opt-in branch
+    // FIRST and only open the store when we will actually use it.
     let result = match resolve_scope_components(&config) {
-        Some(ResolvedMcpScope {
-            resolver,
-            principal,
-        }) => rt.block_on(cairn_mcp::serve_stdio_with_store(
-            store, resolver, config, principal,
-        )),
+        Some(ResolvedMcpScope { resolver, principal }) => {
+            // Opted-in branch: now (and only now) open the writable
+            // store. `cairn_store_sqlite::open(path).await` creates
+            // and migrates the SQLite file if needed; that is the
+            // documented behavior on the opted-in path. We keep two
+            // Arc clones — the trait object for verb dispatch and
+            // the concrete sqlite handle for graph dispatch (Plan C).
+            let sqlite_store: Arc<cairn_store_sqlite::SqliteMemoryStore> =
+                match rt.block_on(cairn_store_sqlite::open(&store_db_path(vault_root))) {
+                    Ok(s) => Arc::new(s),
+                    Err(e) => {
+                        eprintln!("cairn mcp: failed to open SQLite store: {e}");
+                        return ExitCode::from(69); // EX_UNAVAILABLE
+                    }
+                };
+            let store: Arc<dyn cairn_core::contract::memory_store::MemoryStore> =
+                sqlite_store.clone();
+            // **Plan A signature (4 params).** Plan C Task 19 extends
+            // this call site to include `sqlite_store` as a separate
+            // parameter; Plan A lands without that argument because
+            // graph dispatch does not exist yet. The unused
+            // `sqlite_store` binding above is kept (and `_`-prefixed
+            // when Plan A lands solo) to make the Plan C diff additive.
+            #[allow(unused_variables)]
+            let _sqlite_store = sqlite_store; // dropped on Plan C
+            rt.block_on(cairn_mcp::serve_stdio_with_store(
+                store, resolver, config, principal,
+            ))
+        }
         None => {
             // No `[mcp.stdio] single_tenant = true` opt-in: serve the
             // 8-verb manifest only via the deprecated unwired path.
-            // This is intentional — see Plan A scope.
+            // **No SQLite open. No vault touch.** This branch must
+            // stay behavior-equivalent to pre-Plan-A `cairn mcp`.
             #[allow(deprecated)]
             {
                 rt.block_on(cairn_mcp::serve_stdio())

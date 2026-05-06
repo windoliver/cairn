@@ -1329,42 +1329,34 @@ In `handler.rs::call_tool`:
 if let Some(_decl) = GRAPH_TOOLS.iter().find(|d| d.name == name.as_ref()) {
     let ctx = self.auth_context_from(&request_context)?;
 
-    // SINGLE shared predicate — same one list_tools uses (§2.1).
-    // Covers store presence, store.capabilities().graph_edges,
-    // transport+single_tenant precondition, AND a successful
-    // non-empty scope resolution. Fail-closed for any miss.
-    if !graph_tools_available(
-        self.store.as_deref(),
-        self.scope.as_deref(),
-        &self.config,
-        self.transport,
-        &ctx,
-    ) {
-        return Ok(capability_unavailable_result(&name));
-    }
+    // SINGLE-PASS materialization — `materialize_graph_request`
+    // resolves store + scope + `allowed_scopes` exactly once and
+    // returns the materialized request bundle. There is no
+    // separate boolean predicate that re-resolves later, so a
+    // transient resolver Err or Ok(empty) cannot succeed in a
+    // preflight check and then panic on a second call. The
+    // helper is shared with `list_tools` (§2.1).
+    let req = match self.materialize_graph_request(&ctx) {
+        Ok(r) => r,
+        Err(_) => return Ok(capability_unavailable_result(&name)),
+    };
 
-    // Now safe to materialize: every condition above held.
-    // Re-resolve scopes for the actual query (the predicate
-    // confirmed Ok(non-empty) but did not capture the value).
-    let store   = self.store.as_ref().expect("checked above");
-    let allowed = self
-        .scope
-        .as_ref()
-        .expect("checked above")
-        .allowed_scopes(&ctx)
-        .expect("checked above");
-
-    let queries = GraphQueries::new(store.clone(), allowed, now);
+    let queries = GraphQueries::new(req.store, req.allowed, req.now_ms);
     return Ok(graph_tools::dispatch(&queries, &name, arguments).await);
 }
 ```
 
-Both `list_tools` and `call_tool` go through `graph_tools_available`
-— there is no second predicate that could drift. The dispatch
+`mcp_graph_tools_available` (Plan A `CairnConfig` predicate) stays
+a **pure precondition** over `(scope, transport, store_caps)` — it
+does not call the resolver. The single resolver call lives inside
+`materialize_graph_request`, which both `list_tools` and `call_tool`
+go through. There is exactly one `allowed_scopes(ctx)` evaluation
+per request, so no within-request TOCTOU is possible. The dispatch
 helper's signature still carries the resolved scopes via
 `GraphQueries`, so even an internal bug that bypassed the gate
 could not produce an unscoped read (no method on `GraphQueries`
-omits the scope predicate — it is baked into every CTE).
+omits the scope predicate — it is baked into every CTE). No
+`.expect()` calls appear on the request-time authorization path.
 
 ```rust
 pub struct GraphQueries<'a> {
