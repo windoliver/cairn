@@ -123,64 +123,89 @@ Returned edges include the *other* node's id + name (joined).
 
 ### 3.3 `graph.query` (BFS/DFS)
 
-Cycle prevention is enforced **inside the recursive CTE**, not after
-materialization. Each frontier row carries a `path` string of
-slash-joined visited node ids; we refuse to enqueue a neighbor whose id
-already appears in `path`. We also cap the materialized row count at a
-hard SQL-side `node_budget` (passed in alongside the input args, default
-1024) so a wide branching graph can never explode the intermediate set
-even with cycles excluded.
+**Traversal is driven from Rust, not by a single recursive CTE.** A
+recursive `WITH RECURSIVE` cannot enforce a global node/edge budget
+(per-path counters do not bound the total materialized set in a
+fan-out graph) and cannot deterministically pick a parent edge per
+node when multiple paths reach it. We therefore expand level-by-level
+in Rust, with one SQL query per frontier wave, and decide budgets,
+cycle exclusion, and parent edges in the same place.
 
-```sql
-WITH RECURSIVE frontier(node_id, depth, parent_edge, path, n) AS (
-  SELECT id, 0, NULL, '/' || id || '/', 1 FROM entity_nodes
-  WHERE (id = ?seed OR name_norm = lower(?seed))
-    AND expired_at IS NULL
-  UNION ALL
-  SELECT
-    CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END
-      AS next_id,
-    f.depth + 1,
-    e.id,
-    f.path
-      || (CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END)
-      || '/',
-    f.n + 1
-  FROM frontier f
-  JOIN entity_edges e
-    ON (e.source_id = f.node_id OR e.target_id = f.node_id)
-   AND e.expired_at IS NULL
-   AND e.valid_at <= :now
-   AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-  WHERE f.depth < ?max_hops
-    AND f.n     < ?node_budget
-    AND instr(
-          f.path,
-          '/' ||
-          (CASE WHEN e.source_id = f.node_id THEN e.target_id ELSE e.source_id END)
-          || '/'
-        ) = 0
-)
-SELECT node_id, MIN(depth) AS depth, parent_edge
-FROM frontier
-GROUP BY node_id
-ORDER BY depth ASC, node_id;
+#### Algorithm
+
+```text
+fn bfs(seed, max_hops, node_budget, token_budget):
+    visited:   IndexMap<NodeId, NodeRecord>      // insertion-ordered
+    parent_of: HashMap<NodeId, EdgeId>           // first-discoverer wins
+    depth_of:  HashMap<NodeId, u32>
+    frontier:  Vec<NodeId> = [seed_id]
+    visited.insert(seed_id, seed_record)
+    depth_of[seed_id] = 0
+
+    for depth in 1..=max_hops:
+        if frontier.is_empty(): break
+        next_edges = SELECT_NEIGHBOR_EDGES(frontier_ids)   // see SQL below
+        next_frontier = []
+        for edge in next_edges (deterministic order):
+            other_id = edge.other_endpoint
+            if other_id in visited: continue              // cycle / re-discovery
+            if visited.len() >= node_budget: break_outer  // hard global cap
+            visited.insert(other_id, fetch_node(other_id))
+            parent_of[other_id] = edge.id
+            depth_of[other_id]  = depth
+            next_frontier.push(other_id)
+        frontier = next_frontier
+
+    return visited (BFS order = insertion order)
+           with parent_of[] for DFS reconstruction
+           truncated by token_budget during serialization
 ```
 
-- **Cycle guard:** `instr(path, ...)` rejects any neighbor already on
-  the current branch's visited path before it enters the union — no
-  re-enqueue, no exponential expansion on cycles.
-- **Hard SQL budget:** `f.n < ?node_budget` halts intermediate growth
-  even on dense acyclic graphs, before any Rust-side serialization runs.
-- **BFS / DFS:** ordering is BFS by construction (`depth ASC`). DFS is
-  produced by reordering the materialized BFS rowset client-side via
-  the recorded `parent_edge` chain — SQLite's `WITH RECURSIVE` does not
-  guarantee DFS order on its own.
-- **`max_hops`:** capped at 5 in the input schema (clap / schemars).
-- **Token budget (secondary):** serialize each row with
-  `serde_json::to_string`, accumulate `s.len()`, stop when accumulator
-  exceeds `token_budget` (default 4000). This is an emission cap
-  layered on top of the SQL `node_budget`, not the only defense.
+**Per-wave neighbor SQL** (one parameter binding for the current
+frontier id list — at most `node_budget` ids, so finite):
+
+```sql
+SELECT e.id, e.source_id, e.target_id, e.relation,
+       e.confidence_score
+FROM entity_edges e
+WHERE (e.source_id IN rarray(:frontier)
+    OR e.target_id IN rarray(:frontier))
+  AND e.expired_at IS NULL
+  AND e.valid_at <= :now
+  AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+ORDER BY e.confidence_score DESC, e.id ASC;   -- deterministic
+```
+
+#### Properties this gives us
+
+1. **Hard global node bound.** `visited.len() >= node_budget` halts
+   the loop in Rust regardless of fan-out — no intermediate set can
+   exceed `node_budget` rows.
+2. **Hard depth bound.** Outer `for` loop is bounded by `max_hops`
+   (≤5 from the schema), so worst-case wave count is deterministic.
+3. **Cycle exclusion.** `if other_id in visited: continue` catches
+   every cycle and every re-discovery edge, with no path-string
+   tricks.
+4. **Deterministic parent edge.** The `ORDER BY confidence_score DESC,
+   id ASC` clause + first-writer-wins on `parent_of` makes parent
+   assignment a pure function of the edge set, so DFS reconstruction
+   is reproducible run-to-run.
+5. **DFS** is a post-order walk over `parent_of` starting from the
+   seed; same edge set, just visited in stack order.
+6. **Token budget (secondary)** still applies during serialization:
+   accumulate `serde_json::to_string(&row).len()` and stop emitting
+   when over budget. Layered defense, not primary.
+
+#### Trade-offs we accept
+
+- One SQL round-trip per BFS depth instead of a single recursive CTE.
+  At `max_hops=5` and `node_budget=1024` this is ≤5 queries, each
+  parameter-bound on the previous wave's ids. SQLite handles this in
+  microseconds; the simplicity and budget correctness are worth it.
+- `rarray` (carray module) needs to be enabled in the SQLite
+  connection. If unavailable, fall back to `IN (?,?,?,...)` with a
+  re-prepared statement per wave — same semantics, slightly more
+  prepare overhead.
 
 ### 3.4 `graph.timeline`
 
@@ -211,28 +236,60 @@ from the modal `source_record_id` across the input set's other edges."
 Implemented as a CTE that computes the modal record per entity, then
 flags edges whose `source_record_id` differs.
 
+Every CTE that reads `entity_edges` reuses the **shared active-at-now
+predicate** from §3 — same `expired_at IS NULL AND valid_at <= :now AND
+(invalid_at IS NULL OR invalid_at > :now)` clause that `get_neighbors`,
+`get_entity` edge count, and `graph.query` apply. This is required:
+without it, `surprising_connections` would re-leak future-dated edges
+and silently drop currently-active edges that carry a future
+`invalid_at`, which the rest of the API does not.
+
 ```sql
-WITH input(id) AS (VALUES (?1), (?2), ...),
+WITH input(id) AS (VALUES (?1), (?2) /* … */),
+     active_edges AS (
+       SELECT e.*
+       FROM entity_edges e
+       WHERE e.expired_at IS NULL
+         AND e.valid_at <= :now
+         AND (e.invalid_at IS NULL OR e.invalid_at > :now)
+     ),
      modal_record AS (
-       SELECT i.id AS entity_id, e.source_record_id AS rec, COUNT(*) AS n
-       FROM input i JOIN entity_edges e
+       SELECT i.id AS entity_id,
+              e.source_record_id AS rec,
+              COUNT(*) AS n
+       FROM input i
+       JOIN active_edges e
          ON (e.source_id = i.id OR e.target_id = i.id)
-        AND e.expired_at IS NULL
        GROUP BY i.id, e.source_record_id
      ),
      scored AS (
        SELECT e.*,
               e.confidence_score *
-              (1.0 + CASE WHEN /* modal mismatch */ THEN 1.0 ELSE 0.0 END) AS score
-       FROM entity_edges e
-       WHERE e.source_id IN input AND e.target_id IN input
-         AND e.expired_at IS NULL AND e.invalid_at IS NULL
+              (1.0 + CASE WHEN /* modal mismatch */ THEN 1.0 ELSE 0.0 END)
+                AS score
+       FROM active_edges e
+       WHERE e.source_id IN input
+         AND e.target_id IN input
      )
-SELECT * FROM scored ORDER BY score DESC LIMIT ?n;
+SELECT * FROM scored ORDER BY score DESC, id ASC LIMIT ?n;
 ```
 
-(Final SQL refines modal join — sketch above; the implementation may use
-`Vec<RecordId>` accumulation in Rust if the SQL gets unwieldy.)
+The `active_edges` CTE is the single source of truth for "currently
+real" edges in this query — modal computation, scoring, and the final
+projection all read from it, so future-dated and future-invalidated
+edges cannot enter ranking through any path.
+
+Final SQL refines the modal join — sketch above; the implementation
+may use `Vec<RecordId>` accumulation in Rust if the SQL gets unwieldy,
+but the temporal predicate is non-negotiable.
+
+Adversarial test cases (mandatory):
+
+- An edge with `valid_at = now + 1h` MUST be excluded from the result
+  set and from the modal-record computation.
+- An active edge with `invalid_at = now + 1h` MUST be **included**
+  (currently real, future-invalidated) — this is the case a naive
+  `invalid_at IS NULL` filter incorrectly drops.
 
 ## 4. MCP wiring
 
