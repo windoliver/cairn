@@ -80,6 +80,14 @@ fn status_parity_cli_vs_sdk() {
     let volatile: &[&[&str]] = &[
         &["server_info", "incarnation"],
         &["server_info", "started_at"],
+        // mcp_graph_tools is a live-probe surface on the CLI side
+        // (Plan A Task 6, issue #190): CLI runs `peek_capabilities`
+        // against the on-disk store, while the SDK has no MCP server
+        // and emits a static `unavailable / single_tenant_off`. The
+        // two surfaces are intentionally not byte-equal here; the
+        // shape is pinned by the IDL schema and exercised by the
+        // dedicated `verbs::status::mcp_graph_tests` unit suite.
+        &["mcp_graph_tools"],
     ];
     mask(&mut cli, volatile);
     mask(&mut sdk, volatile);
