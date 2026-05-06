@@ -52,9 +52,11 @@ pub const MANIFEST_TOML: &str = include_str!("../plugin.toml");
 /// raised to 0.3.0 in #253 (`per_record_consent_model`), and to 0.4.0
 /// in #258 (per-row `schema_version` stamp on `StoredRecord` and
 /// `RecordVersion` — adding required public fields is a struct-
-/// construction break).
+/// construction break). Raised to 0.5.0 in #191 (`auth_scope` on
+/// `*SearchArgs`, `MemoryStoreCapabilities::graph_search`,
+/// `search_graph_neighbors` trait method).
 pub const ACCEPTED_RANGE: VersionRange =
-    VersionRange::new(ContractVersion::new(0, 4, 0), ContractVersion::new(0, 5, 0));
+    VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 6, 0));
 
 // Compile-time guard: this crate's accepted range must include the host
 // CONTRACT_VERSION. If we ever bump CONTRACT_VERSION without bumping the

@@ -56,6 +56,7 @@ fn args(query: &str, limit: usize) -> KeywordSearchArgs<'static> {
     KeywordSearchArgs {
         query: query.to_owned(),
         filter: None,
+        auth_scope: cairn_core::domain::ScopeTuple::default(),
         visibility_allowlist: vec![MemoryVisibility::Private],
         limit,
         cursor: None,

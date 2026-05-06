@@ -366,6 +366,7 @@ async fn run_queries(
             let args = KeywordSearchArgs {
                 query: rewritten,
                 filter: None,
+                auth_scope: cairn_core::domain::ScopeTuple::default(),
                 visibility_allowlist: vec![MemoryVisibility::Private],
                 limit: 10,
                 cursor: None,
@@ -399,6 +400,7 @@ async fn run_semantic(
         let args = SemanticSearchArgs {
             query: q.query.clone(),
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             model_label: model_label.to_owned(),

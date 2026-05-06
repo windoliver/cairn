@@ -81,6 +81,7 @@ impl SqliteMemoryStore {
         let kw_args = KeywordSearchArgs {
             query: args.query.clone(),
             filter: args.filter,
+            auth_scope: args.auth_scope.clone(),
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             cursor: None,
@@ -89,6 +90,7 @@ impl SqliteMemoryStore {
         let sem_args = SemanticSearchArgs {
             query: args.query.clone(),
             filter: args.filter,
+            auth_scope: args.auth_scope.clone(),
             visibility_allowlist: args.visibility_allowlist.clone(),
             limit: HYBRID_LEG_LIMIT,
             model_label: args.model_label.clone(),

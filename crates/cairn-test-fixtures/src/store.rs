@@ -99,6 +99,8 @@ impl MemoryStore for FixtureStore {
             graph_edges: false,
             transactions: false,
             per_record_consent_model: true,
+
+            graph_search: false,
         };
         static CAPS_LEGACY_ONLY: MemoryStoreCapabilities = MemoryStoreCapabilities {
             fts: false,
@@ -106,6 +108,8 @@ impl MemoryStore for FixtureStore {
             graph_edges: false,
             transactions: false,
             per_record_consent_model: false,
+
+            graph_search: false,
         };
         if self.legacy_only_override.load(Ordering::SeqCst) {
             &CAPS_LEGACY_ONLY

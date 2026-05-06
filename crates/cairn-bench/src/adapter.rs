@@ -87,6 +87,7 @@ impl Adapter for Bm25Adapter<'_> {
         let args = KeywordSearchArgs {
             query: rewritten,
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             cursor: None,
@@ -127,6 +128,7 @@ impl Adapter for VectorAdapter<'_> {
         let args = SemanticSearchArgs {
             query: q.query.clone(),
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             model_label: self.model_label.clone(),
@@ -235,6 +237,7 @@ impl Adapter for GraphHybridAdapter<'_> {
             let args = HybridSearchArgs {
                 query: cleaned,
                 filter: None,
+                auth_scope: cairn_core::domain::ScopeTuple::default(),
                 visibility_allowlist: vec![MemoryVisibility::Private],
                 limit: 10,
                 model_label: self.model_label.clone(),
@@ -242,6 +245,7 @@ impl Adapter for GraphHybridAdapter<'_> {
                 rrf_k: self.rrf_k,
                 rerank_topk: self.rerank_topk,
                 with_explain: false,
+                confidence_floor: 1e-3,
             };
             let page = self
                 .store
@@ -457,6 +461,7 @@ impl Adapter for HybridAdapter<'_> {
         let args = HybridSearchArgs {
             query: cleaned,
             filter: None,
+            auth_scope: cairn_core::domain::ScopeTuple::default(),
             visibility_allowlist: vec![MemoryVisibility::Private],
             limit: 10,
             model_label: self.model_label.clone(),
@@ -464,6 +469,7 @@ impl Adapter for HybridAdapter<'_> {
             rrf_k: self.rrf_k,
             rerank_topk: self.rerank_topk,
             with_explain: false,
+            confidence_floor: 1e-3,
         };
         let page = self
             .store

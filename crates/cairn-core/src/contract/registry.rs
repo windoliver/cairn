@@ -610,6 +610,7 @@ mod tests {
                 graph_edges: false,
                 transactions: true,
                 per_record_consent_model: false,
+                graph_search: false,
             };
             &CAPS
         }
@@ -654,15 +655,15 @@ mod tests {
     impl MemoryStorePlugin for StubStore {
         const NAME: &'static str = "stub-store";
         const SUPPORTED_VERSIONS: VersionRange =
-            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 5, 0));
+            VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0));
     }
 
     fn compatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 5, 0))
+        VersionRange::new(ContractVersion::new(0, 1, 0), ContractVersion::new(0, 6, 0))
     }
 
     fn incompatible() -> VersionRange {
-        VersionRange::new(ContractVersion::new(0, 5, 0), ContractVersion::new(0, 6, 0))
+        VersionRange::new(ContractVersion::new(0, 6, 0), ContractVersion::new(0, 7, 0))
     }
 
     #[test]
@@ -759,12 +760,12 @@ contract = "MemoryStore"
 
 [contract_version_range.min]
 major = 0
-minor = 4
+minor = 5
 patch = 0
 
 [contract_version_range.max_exclusive]
 major = 0
-minor = 5
+minor = 6
 patch = 0
 "#
     }
