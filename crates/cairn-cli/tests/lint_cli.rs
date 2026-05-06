@@ -73,6 +73,14 @@ fn live_edge_ids(vault: &TempDir) -> Vec<String> {
         .expect("collect live edges")
 }
 
+fn empty_db_without_lint_schema() -> TempDir {
+    let vault = tempfile::tempdir().expect("temp vault");
+    let cairn_dir = vault.path().join(".cairn");
+    std::fs::create_dir_all(&cairn_dir).expect("create .cairn dir");
+    let _conn = Connection::open(cairn_dir.join("cairn.db")).expect("open empty cairn db");
+    vault
+}
+
 #[test]
 fn lint_json_reports_contradiction_without_mutating_live_edges() {
     let vault = vault_with_contradictory_edges();
@@ -91,6 +99,14 @@ fn lint_json_reports_contradiction_without_mutating_live_edges() {
     assert!(json.get("error").is_none(), "error: {:?}", json["error"]);
     assert_eq!(json["data"]["summary"]["contradictions"], 1);
     assert_eq!(json["data"]["summary"]["auto_resolved"], 0);
+    assert!(
+        json["data"]["summary"].get("orphans").is_none(),
+        "orphans is not implemented and should be omitted"
+    );
+    assert!(
+        json["data"]["summary"].get("stale").is_none(),
+        "stale is not implemented and should be omitted"
+    );
     assert_eq!(json["data"]["summary"]["total"], 1);
     assert_eq!(json["data"]["findings"][0]["kind"], "contradictory_edge");
     assert_eq!(json["data"]["findings"][0]["severity"], "warning");
@@ -121,4 +137,56 @@ fn lint_fix_json_resolves_lower_confidence_duplicate_edge() {
     assert_eq!(json["data"]["summary"]["auto_resolved"], 1);
     assert_eq!(json["data"]["summary"]["total"], 0);
     assert_eq!(live_edge_ids(&vault), ["edge-b"]);
+}
+
+#[test]
+fn lint_write_report_json_fails_closed() {
+    let vault = vault_with_contradictory_edges();
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["lint", "--write-report", "--json"])
+        .output()
+        .expect("cairn lint --write-report --json");
+
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let json = parse_stdout_json(&out);
+    assert_eq!(json["contract"], "cairn.mcp.v1");
+    assert_eq!(json["status"], "aborted");
+    assert_eq!(json["verb"], "lint");
+    assert!(json.get("data").is_none(), "data: {:?}", json["data"]);
+    assert_eq!(json["error"]["code"], "Internal");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("lint --write-report is not wired")),
+        "message: {:?}",
+        json["error"]["message"]
+    );
+}
+
+#[test]
+fn lint_fix_json_aborts_when_lint_schema_is_missing() {
+    let vault = empty_db_without_lint_schema();
+
+    let out = cli()
+        .current_dir(vault.path())
+        .args(["lint", "--fix", "--json"])
+        .output()
+        .expect("cairn lint --fix --json");
+
+    assert_eq!(out.status.code(), Some(1), "exit: {:?}", out.status);
+    let json = parse_stdout_json(&out);
+    assert_eq!(json["contract"], "cairn.mcp.v1");
+    assert_eq!(json["status"], "aborted");
+    assert_eq!(json["verb"], "lint");
+    assert!(json.get("data").is_none(), "data: {:?}", json["data"]);
+    assert_eq!(json["error"]["code"], "Internal");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("entity_edges")),
+        "message: {:?}",
+        json["error"]["message"]
+    );
 }

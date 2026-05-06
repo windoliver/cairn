@@ -25,7 +25,17 @@ use super::envelope::{emit_json, human_error, new_operation_id};
 pub fn run(sub: &ArgMatches) -> ExitCode {
     let json = sub.get_flag("json");
     let fix = sub.get_flag("fix");
+    let write_report = sub.get_flag("write_report");
     let operation_id = new_operation_id();
+
+    if write_report {
+        emit_aborted(
+            json,
+            operation_id,
+            "lint --write-report is not wired in this build",
+        );
+        return ExitCode::FAILURE;
+    }
 
     match run_lint(fix, &operation_id) {
         Ok(report) => {
@@ -45,13 +55,7 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
             }
         }
         Err(err) => {
-            let message = err.to_string();
-            let response = aborted_response(operation_id, &message);
-            if json {
-                emit_json(&response);
-            } else {
-                human_error("lint", "Internal", &message, &response.operation_id);
-            }
+            emit_aborted(json, operation_id, &err.to_string());
             ExitCode::FAILURE
         }
     }
@@ -62,6 +66,7 @@ fn run_lint(fix: bool, operation_id: &Ulid) -> Result<EdgeLintReport, StoreError
 
     if fix {
         let mut conn = Connection::open(db_path)?;
+        lint_edges(&conn)?;
         migrate(&conn)?;
         resolve_edge_contradictions(&mut conn, unix_now_seconds(), &operation_id.0)
     } else {
@@ -108,8 +113,8 @@ fn lint_data(report: EdgeLintReport) -> LintData {
             ambiguous_edges: Some(report.ambiguous_edges),
             auto_resolved: Some(report.auto_resolved),
             contradictions: Some(report.contradictions),
-            orphans: Some(0),
-            stale: Some(0),
+            orphans: None,
+            stale: None,
             total,
         },
     }
@@ -122,7 +127,7 @@ fn lint_finding(finding: LintFinding) -> LintDataFindings {
         confidence: None,
         confidence_score: None,
         conflict_group_id: None,
-        entities: Some(finding.entities),
+        entities: non_empty_entities(finding.entities),
         entity_id: None,
         fix_applied: None,
         kind: lint_kind(finding.kind),
@@ -132,6 +137,23 @@ fn lint_finding(finding: LintFinding) -> LintDataFindings {
         resolution_reason: None,
         severity: Some(lint_severity(finding.severity)),
         suggestion: finding.suggestion,
+    }
+}
+
+fn emit_aborted(json: bool, operation_id: Ulid, message: &str) {
+    let response = aborted_response(operation_id, message);
+    if json {
+        emit_json(&response);
+    } else {
+        human_error("lint", "Internal", message, &response.operation_id);
+    }
+}
+
+fn non_empty_entities(entities: Vec<String>) -> Option<Vec<String>> {
+    if entities.is_empty() {
+        None
+    } else {
+        Some(entities)
     }
 }
 
