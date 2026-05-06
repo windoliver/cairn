@@ -206,39 +206,36 @@ impl<T: Transport> Sdk<T> {
         }
     }
 
+    /// Collect the SDK's runtime state into `CapabilityGates` for `advertise()`.
+    ///
+    /// Centralises the mapping from SDK fields to the gate inputs so that both
+    /// `advertised_capabilities` and any future caller share an identical view.
+    fn gates(&self) -> cairn_core::status::CapabilityGates {
+        let store_caps = self.store.as_ref().map(|s| {
+            let c = s.capabilities();
+            cairn_core::status::StoreCaps {
+                fts: c.fts,
+                vector: c.vector,
+            }
+        });
+        let model_present = store_caps.as_ref().is_some_and(|c| c.vector);
+        cairn_core::status::CapabilityGates {
+            config: self.config.capabilities(model_present),
+            store: store_caps,
+            vault_bound: self.store.is_some(),
+            model_present,
+            llm_configured: false,
+            contract_phase: cairn_core::status::Phase::V0_1,
+        }
+    }
+
     /// Project the SDK's executable state into a wire-format capability list.
     ///
-    /// The single source of truth for capability advertisement; both
-    /// [`Self::status`] and [`Self::require_capability`] read from here
-    /// so they cannot drift.
+    /// Delegates to [`cairn_core::status::advertise`] — the single source of
+    /// truth for capability advertisement. Both [`Self::status`] and
+    /// [`Self::require_capability`] read from here so they cannot drift.
     fn advertised_capabilities(&self) -> Vec<Capabilities> {
-        let Some(store) = self.store.as_ref() else {
-            // No store wired → every verb returns Unimplemented. Advertising
-            // any capability here would invite clients to negotiate against
-            // a dead surface. Empty list matches the original P0 contract.
-            return vec![];
-        };
-        let store_caps = store.capabilities();
-        // Search modes require the store's FTS / vector indexes. Treat
-        // `model_present` as `store_caps.vector` — a store that exposes a
-        // vector index has the embedder + model wired (sqlite-vec only
-        // populates `record_vectors` after the embedding pipeline drains).
-        let model_present = store_caps.vector;
-        let cap_set = self.config.capabilities(model_present);
-        let mut out = Vec::new();
-        if cap_set.keyword_search && store_caps.fts {
-            out.push(Capabilities::CairnMcpV1SearchKeyword);
-        }
-        if cap_set.semantic_search && store_caps.vector {
-            out.push(Capabilities::CairnMcpV1SearchSemantic);
-        }
-        if cap_set.hybrid_search && store_caps.fts && store_caps.vector {
-            out.push(Capabilities::CairnMcpV1SearchHybrid);
-        }
-        if cap_set.policy_trace {
-            out.push(Capabilities::CairnMcpV1PolicyTrace);
-        }
-        out
+        cairn_core::status::advertise(&self.gates())
     }
 
     /// `handshake` — challenge mint (brief §8.0.a point d).
