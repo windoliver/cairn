@@ -38,13 +38,16 @@ Five tools:
 - **`crates/cairn-mcp/src/handler.rs`** (edit). Extend `list_tools` to
   concat `TOOLS` + `GRAPH_TOOLS` **only when the wired store advertises
   graph capability** — `store.is_some()` is not sufficient because
-  `MemoryStore`'s graph methods are allowed to return
-  `CapabilityUnavailable` by default. Add a `MemoryStore::capabilities()
-  -> StoreCapabilities` accessor (or extend the existing capability
-  set) with a `graph_traversal: bool` bit, set `true` only by
-  `cairn-store-sqlite` once migrations 0042/0043 are applied. The MCP
-  handler reads that bit at `list_tools` time and at `call_tool` time
-  (defense in depth — same predicate, both sites).
+  `MemoryStore`'s graph methods can return `CapabilityUnavailable`.
+  **No new capability fields are added.** The existing
+  `MemoryStoreCapabilities::graph_edges: bool` (already public,
+  `crates/cairn-core/src/contract/memory_store.rs:48`) is the single
+  source of truth: `cairn-store-sqlite` already sets it `true` once
+  migrations 0042/0043 are applied; every other adapter leaves it at
+  the `Default` value of `false`. Reusing this avoids a public
+  contract bump. The MCP handler reads `graph_edges` at `list_tools`
+  time and at `call_tool` time (defense in depth — same predicate,
+  both sites).
 
   This gates discovery on the *actual* graph capability, not on
   whether a store handle is present. Clients that cache `tools/list`
@@ -78,11 +81,57 @@ The spec therefore mandates **scope-by-provenance**: every graph
 read derives its allowed scope set from the active session, then
 filters edges by joining `entity_edges.source_record_id` →
 `records.scope` and keeping only edges whose source record is in the
-allowed set. A node is reachable iff at least one in-scope edge
-touches it. Edges with `source_record_id IS NULL` (orphan provenance)
-are **excluded by default** — they can be opted into via an explicit
-`include_unattributed: bool` argument that the caller must set
-deliberately.
+allowed set. Edges with `source_record_id IS NULL` (orphan
+provenance) are **excluded by default** — they can be opted into via
+an explicit `include_unattributed: bool` argument that the caller
+must set deliberately.
+
+#### Scope resolution on the MCP path (prerequisite)
+
+Today the MCP `search` handler hard-codes `visibility_allowlist =
+vec![]` (see `crates/cairn-mcp/src/handler.rs::handle_search`),
+which the search verb interprets as "no narrowing." That is the
+existing fail-open we are explicitly *not* inheriting here. Graph
+tools are stricter: an empty resolved scope set means **deny all**,
+not "allow all."
+
+This work depends on a concrete scope-resolution API on the MCP
+path. The contract:
+
+```rust
+// In cairn-core or cairn-mcp — exact location to be decided in the
+// implementation plan.
+pub trait McpSessionScope {
+    /// Resolve the active session's allowed record scope ids.
+    /// An empty Vec means "no scopes authorized" → tools fail closed.
+    /// `None` means scope resolution is unconfigured for this
+    /// deployment → tools advertise as unavailable.
+    fn allowed_scopes(&self) -> Option<Vec<ScopeId>>;
+}
+```
+
+The MCP handler accepts an `Arc<dyn McpSessionScope>` at
+construction time. `serve_stdio_with_store` takes one explicitly;
+deployments without a scope source must supply a deny-all impl
+(or accept that graph tools advertise `unavailable`).
+
+**This trait does not exist yet in the repo.** Landing it is
+in-scope for this issue and gates the rest of the work. Two
+acceptable shapes:
+
+1. **In-scope, this PR:** add `McpSessionScope` and a default impl
+   that reads scope ids from a config field (e.g.
+   `cairn.toml::[mcp.scope] = ["..."]`) — explicit, file-based,
+   matches Cairn's "no hidden global state" invariant.
+2. **Out of scope, blocked-on prerequisite:** if (1) is too large
+   for one PR, this issue blocks on a separate prerequisite issue
+   that lands `McpSessionScope`. Until that lands, graph tools must
+   stay disabled (capability bit returns `false` even on
+   graph-capable stores).
+
+The implementation plan picks one of these paths explicitly.
+Shipping the graph tools without a scope source is **not**
+permitted by this spec.
 
 The shared active-at-now predicate composes with this scope filter:
 
@@ -162,24 +211,63 @@ WITH visible_edges AS (
 ```
 
 Likewise a derived **`visible_nodes`** primitive — a node is
-"visible" iff at least one `visible_edges` row touches it
-(source_id or target_id). Direct reads of `entity_nodes` are
-forbidden in tool SQL; nodes only surface through joins against
-`visible_edges` or `visible_nodes`. This closes node-probe leaks
-where a caller could enumerate out-of-scope `id`/`name`/`summary`
-without ever traversing an edge.
+"visible" iff its provenance can be established through any
+in-scope record, **not just through a currently-active edge**. A
+zero-edge or all-edges-aged-out entity that is otherwise
+authorized must remain readable; collapsing those to `NotFound`
+would be a correctness regression, not a security feature.
+
+Node provenance comes from three independent sources, any of which
+suffices for visibility (the OR is required to handle isolated and
+historical entities):
+
+1. **Active edges** — at least one `visible_edges` row touches
+   the node. Covers the common case.
+2. **Episodic provenance** — at least one row in
+   `entity_episodes` (migration 0044) for this entity points at a
+   record in `allowed_scopes`. Covers entities created or
+   referenced via ingest sources whose edges have all been
+   tombstoned or expired-out.
+3. **Historical edges** — at least one *non-active*
+   `entity_edges` row (expired or out-of-window) touches the node
+   *and* its `source_record_id` is in `allowed_scopes`. Covers
+   the "all my edges aged out but I still exist" case.
+
+Direct reads of `entity_nodes` without composing one of the three
+provenance branches are forbidden in tool SQL.
 
 ```sql
 visible_nodes AS (
   SELECT n.*
   FROM entity_nodes n
   WHERE n.expired_at IS NULL
-    AND EXISTS (
-      SELECT 1 FROM visible_edges e
-      WHERE e.source_id = n.id OR e.target_id = n.id
+    AND (
+      EXISTS (
+        SELECT 1 FROM visible_edges e
+        WHERE e.source_id = n.id OR e.target_id = n.id
+      )
+      OR EXISTS (
+        SELECT 1 FROM entity_episodes ep
+        JOIN records r ON r.record_id = ep.source_record_id
+        WHERE ep.entity_id = n.id
+          AND r.scope IN rarray(:allowed_scopes)
+      )
+      OR EXISTS (
+        SELECT 1 FROM entity_edges he
+        JOIN records r ON r.record_id = he.source_record_id
+        WHERE (he.source_id = n.id OR he.target_id = n.id)
+          AND r.scope IN rarray(:allowed_scopes)
+      )
     )
 )
 ```
+
+This closes node-probe leaks (out-of-scope ids/names still return
+`NotFound`) **and** preserves authorized lookup of isolated or
+historical entities. A test must cover all three provenance
+branches: zero-edge entity with an in-scope episode, entity whose
+only edges are expired but in-scope, and the standard active-edge
+case.
 
 The implementation enforces this by making `GraphQueries` only
 expose methods that internally compose these CTEs into every query;
@@ -342,23 +430,36 @@ appear later in the ordered set. The query must instead bound by
 **distinct unseen neighbor**, picking exactly one canonical edge
 per neighbor up front via a window function.
 
+SQLite does not expose SELECT-list aliases to the same SELECT's
+`WHERE` clause, so the alias `other_id` is computed in an inner
+CTE and the `visited` filter + `ROW_NUMBER` partitioning happen one
+level out. The query is written so it is executable verbatim — a
+test runs the exact text against an in-memory SQLite to guarantee
+the spec stays in sync with the implementation.
+
 ```sql
 WITH visible_edges AS (...),     -- §3.0 — temporal + scope baked in
+edge_with_other AS (
+  -- Compute other_id once, in an inner CTE, so the outer SELECT
+  -- can name it in WHERE / PARTITION BY without alias-scoping
+  -- issues.
+  SELECT
+    e.id, e.source_id, e.target_id, e.relation, e.confidence_score,
+    CASE WHEN e.source_id IN rarray(:frontier)
+         THEN e.target_id ELSE e.source_id END AS other_id
+  FROM visible_edges e
+  WHERE e.source_id IN rarray(:frontier)
+     OR e.target_id IN rarray(:frontier)
+),
 candidate AS (
   SELECT
-    CASE WHEN e.source_id IN rarray(:frontier)
-         THEN e.target_id ELSE e.source_id END  AS other_id,
-    e.id, e.source_id, e.target_id, e.relation, e.confidence_score,
+    id, source_id, target_id, relation, confidence_score, other_id,
     ROW_NUMBER() OVER (
-      PARTITION BY
-        CASE WHEN e.source_id IN rarray(:frontier)
-             THEN e.target_id ELSE e.source_id END
-      ORDER BY e.confidence_score DESC, e.id ASC   -- deterministic
+      PARTITION BY other_id
+      ORDER BY confidence_score DESC, id ASC      -- deterministic
     ) AS rn
-  FROM visible_edges e
-  WHERE (e.source_id IN rarray(:frontier)
-      OR e.target_id IN rarray(:frontier))
-    AND other_id NOT IN rarray(:visited)
+  FROM edge_with_other
+  WHERE other_id NOT IN rarray(:visited)
 )
 SELECT id, source_id, target_id, relation, confidence_score, other_id
 FROM candidate
@@ -620,7 +721,7 @@ issue.
 
 Capability discovery is **the same predicate everywhere** — there is
 no separate "is the store wired" path. The single source of truth is
-the `StoreCapabilities { graph_traversal: bool }` bit introduced in
+the `StoreCapabilities { graph_edges: bool }` bit introduced in
 §2.1: `cairn-store-sqlite` sets it `true` once migrations
 0042/0043/0044 are applied; every other `MemoryStore` impl (and the
 default trait method) returns `false`.
@@ -629,12 +730,12 @@ default trait method) returns `false`.
 // One predicate, used at both list_tools and call_tool sites.
 fn graph_tools_available(store: Option<&dyn MemoryStore>) -> bool {
     store
-        .map(|s| s.capabilities().graph_traversal)
+        .map(|s| s.capabilities().graph_edges)
         .unwrap_or(false)
 }
 ```
 
-`CairnMcpServer::capabilities()` gains a derived `graph_traversal`
+`CairnMcpServer::capabilities()` gains a derived `graph_edges`
 flag mirrored from the wired store; if the contract enum is closed
 we surface it via the existing `extensions` slot. Wiring this into
 `cairn status` output is deferred only if it requires an IDL bump —
@@ -642,9 +743,9 @@ the in-PR signal is the manifest snapshot test, which must cover
 **three** states:
 
 1. No store wired → no `graph.*` tools advertised.
-2. Store wired but `graph_traversal = false` (e.g. an in-memory
+2. Store wired but `graph_edges = false` (e.g. an in-memory
    stub) → no `graph.*` tools advertised.
-3. Store wired with `graph_traversal = true` → all five `graph.*`
+3. Store wired with `graph_edges = true` → all five `graph.*`
    tools advertised, byte-identical across rebuilds.
 
 Negative test: in case (2), invoking `graph.get_entity` returns
