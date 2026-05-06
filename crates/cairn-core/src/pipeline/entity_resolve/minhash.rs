@@ -11,6 +11,7 @@ use crate::pipeline::entity_resolve::MAX_NUM_PERMUTATIONS;
 /// slots are populated; the remainder are filled with `u64::MAX` and
 /// must be ignored by [`jaccard`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 #[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub struct MinHashSignature(pub [u64; MAX_NUM_PERMUTATIONS]);
 
@@ -89,14 +90,17 @@ pub fn jaccard(a: &MinHashSignature, b: &MinHashSignature, n: usize) -> f32 {
             hits += 1;
         }
     }
-    #[allow(clippy::cast_precision_loss)] // hits ≤ MAX_NUM_PERMUTATIONS = 128 fits exactly in f32 mantissa.
-    let f = hits as f32 / n as f32;
-    f
+    // hits ≤ MAX_NUM_PERMUTATIONS = 128 fits exactly in f32 mantissa.
+    #[allow(clippy::cast_precision_loss)]
+    {
+        hits as f32 / n as f32
+    }
 }
 
 /// Per-existing scored entry returned by [`fuzzy_match`].
 /// Sorted descending by `jaccard`; ties broken by `EntityId` lex order.
 #[derive(Debug)]
+#[must_use]
 #[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub struct Scored<'a> {
     /// Existing entity that was scored.
@@ -107,6 +111,7 @@ pub struct Scored<'a> {
 
 /// Outcome of the Tier-2 pass over the supplied existing entities.
 #[derive(Debug)]
+#[must_use]
 #[allow(dead_code)] // Task 6 wires this into EntityResolver; suppress dead_code until then.
 pub enum FuzzyOutcome {
     /// No existing entity scored at or above `threshold`.
@@ -279,5 +284,29 @@ mod tests {
         let (outcome, scored) = fuzzy_match(&cand_sig, &[], &s, 0.85, 128);
         assert!(matches!(outcome, FuzzyOutcome::None));
         assert!(scored.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_match_returns_many_when_multiple_above_threshold() {
+        let s = seeds(128);
+        // Two existing entities with name_norm identical to the candidate
+        // → both score Jaccard 1.0 → FuzzyOutcome::Many.
+        let existing = vec![
+            node("01HZE7JV5N0000000000000001", "auth service"),
+            node("01HZE7JV5N0000000000000002", "auth service"),
+        ];
+        let cand = "auth service";
+        let cand_sig = signature(cand, &shingles(cand), &s);
+        let (outcome, scored) = fuzzy_match(&cand_sig, &existing, &s, 0.85, 128);
+        match outcome {
+            FuzzyOutcome::Many(ids) => {
+                assert_eq!(ids.len(), 2);
+                // Sorted desc by jaccard (tied) then asc by EntityId lex.
+                assert_eq!(ids[0].as_str(), "01HZE7JV5N0000000000000001");
+                assert_eq!(ids[1].as_str(), "01HZE7JV5N0000000000000002");
+            }
+            other => panic!("expected Many, got {other:?}"),
+        }
+        assert_eq!(scored.len(), 2);
     }
 }
