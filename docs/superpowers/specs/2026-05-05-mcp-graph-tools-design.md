@@ -44,13 +44,22 @@ Five tools:
      (`crates/cairn-core/src/contract/memory_store.rs:48`). No new
      capability struct fields are added.
 
+     **`CairnConfig::capabilities().graph_edges` does NOT
+     change.** That flag promises end-to-end runtime support
+     surfaced via `cairn status`, but graph tools depend on
+     per-transport (`single_tenant`) and per-request (resolver
+     outcome) conditions that a global capability set cannot
+     represent. Flipping it would over-advertise: deployments
+     where `tools/list` must hide every `graph.*` tool would
+     still claim graph support to status and config-driven
+     negotiation. Discovery gating therefore stays inside the
+     MCP handler at `tools/list` and `tools/call`. A separate
+     MCP tool-level capability surface that can encode
+     transport + auth prerequisites is a follow-up issue if it
+     ever becomes necessary; this PR does not need it.
+
      **Rollout prerequisites (in-scope for this PR, must land
      atomically):**
-     - `crates/cairn-core/src/config/mod.rs:830` —
-       `CairnConfig::capabilities()` currently hard-codes
-       `graph_edges: false` for the SQLite path. Flip it to
-       `true`. Without this, status/config-driven gates report
-       graph unavailable even though the store can serve it.
      - `crates/cairn-cli/src/mcp.rs:22` and
        `crates/cairn-mcp/src/lib.rs::serve_stdio` — currently
        launch an unwired handler. Replace `serve_stdio()` with
@@ -59,10 +68,11 @@ Five tools:
        unwired entry point either disappears or is gated to
        returning the 8-verb manifest only.
 
-     All three capability sources (store flag, config flag, CLI
-     wiring) must move in the same PR — leaving any of them in
-     the old state is the split-brain failure mode where one
-     surface advertises graph and another denies it.
+     The `MemoryStore::capabilities().graph_edges` flag (the
+     one surfaced by `cairn-store-sqlite` after migrations
+     0042/0043) is already correct — no flag flip needed there
+     either. Only the CLI wiring and the MCP handler's
+     gating logic move in this PR.
   2. A non-deny-all `McpSessionScope` resolver is wired into the
      handler (see §2.1.1). A deployment that has graph storage but
      no scope resolver does **not** advertise the tools.
@@ -762,23 +772,37 @@ therefore invisible to all five tools through every code path.
 
 ### 3.1 `graph.get_entity`
 
-**Disambiguated input.** The MCP tool exposes two mutually exclusive
-arguments: `id: Option<String>` and `name: Option<String>`. Exactly
-one must be set; the schemars schema enforces this with an `oneOf`
-constraint. The earlier `id_or_name` overload is dropped — passing a
-single string into a single column is correct only when ids and
-names cannot collide, and we cannot guarantee that for arbitrary
-content.
+**Disambiguated input.** The MCP tool wire shape is two mutually
+exclusive **top-level** arguments: `{"id": "<ulid>"}` xor
+`{"name": "<canonical name>"}`. Exactly one must be set; the
+schemars schema enforces this with `oneOf` over two
+single-property objects. The earlier `id_or_name` overload is
+dropped — passing a single string into a single column is
+correct only when ids and names cannot collide, and we cannot
+guarantee that for arbitrary content.
+
+The Rust binding uses `#[serde(untagged, deny_unknown_fields)]`
+so the wire payload stays at the top level (no externally-tagged
+`{"by_id": {...}}` wrapper, which the prose does not match):
 
 ```rust
 #[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(deny_unknown_fields)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum GetEntityArgs {
     ById  { id: String },
     ByName { name: String },
 }
 ```
+
+`untagged` makes serde dispatch on field presence: a payload
+with `id` deserializes into `ById`, a payload with `name`
+deserializes into `ByName`, and a payload with both, neither,
+or any other field is rejected. The generated JSON schema is
+`oneOf` two single-property objects with `additionalProperties:
+false`, matching the prose. A wire-format test asserts that
+`{"id": "..."}`, `{"name": "..."}` round-trip and that `{}`,
+`{"id": "...", "name": "..."}`, and `{"foo": "bar"}` are all
+rejected.
 
 **Normalization.** `name_norm` is the dedup key chosen at upsert
 time (see `cairn-store-sqlite::entity_graph::node::upsert_entity`),
