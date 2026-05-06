@@ -60,8 +60,7 @@ fn cairn_assemble_hot_json_emits_segments() {
     let segments = value.pointer("/data/segments").expect("segments present");
     assert!(
         segments.is_array(),
-        "segments should be array, got {}",
-        segments
+        "segments should be array, got {segments}"
     );
     assert_eq!(
         segments.as_array().unwrap().len(),

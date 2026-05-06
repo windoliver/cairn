@@ -8,9 +8,11 @@ use super::segments::{AssembleHotValidationError, build_segments};
 use crate::config::HotMemoryConfig;
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
 
+/// Errors returned by [`assemble_hot`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AssembleHotError {
+    /// Segment construction or validation failed.
     #[error("segment construction: {0}")]
     Segments(#[from] AssembleHotValidationError),
 }
@@ -34,8 +36,8 @@ pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, Assembl
 }
 
 /// Load the body for one recipe step. Stub: always `""`. The
-/// missing-half of #193 replaces this single function with the real
-/// SQLite + markdown loader; nothing else here changes.
+/// missing-half of issue #193 replaces this single function with the real
+/// `SQLite` + markdown loader; nothing else here changes.
 fn load_step_body(_step: HotRecipeStep) -> String {
     String::new()
 }

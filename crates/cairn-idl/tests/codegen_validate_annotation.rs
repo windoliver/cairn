@@ -22,7 +22,7 @@ fn assemble_hot_body() -> String {
         .to_owned()
 }
 
-/// The `Data` struct in assemble_hot.json carries `x-cairn-validate: true`.
+/// The `Data` struct in `assemble_hot.json` carries `x-cairn-validate: true`.
 /// Codegen must emit `#[serde(try_from = "AssembleHotDataRaw", into = "AssembleHotDataRaw")]`
 /// on the main struct and NOT include `Deserialize` in its derive.
 #[test]
@@ -51,8 +51,7 @@ fn validate_struct_does_not_derive_deserialize_directly() {
         .expect("derive must precede struct");
     let derive_line_end = before[derive_line_start..]
         .find('\n')
-        .map(|n| derive_line_start + n)
-        .unwrap_or(before.len());
+        .map_or(before.len(), |n| derive_line_start + n);
     let derive_line = &before[derive_line_start..derive_line_end];
     assert!(
         !derive_line.contains("Deserialize"),
@@ -83,8 +82,7 @@ fn validate_raw_mirror_derives_serialize_and_deserialize() {
         .expect("derive must precede AssembleHotDataRaw");
     let derive_end = before[derive_start..]
         .find('\n')
-        .map(|n| derive_start + n)
-        .unwrap_or(before.len());
+        .map_or(before.len(), |n| derive_start + n);
     let derive_line = &before[derive_start..derive_end];
     assert!(
         derive_line.contains("Serialize"),
@@ -109,7 +107,7 @@ fn validate_raw_mirror_has_deny_unknown_fields() {
     let window_start = before.len().saturating_sub(200);
     let window = &before[window_start..];
     assert!(
-        window.contains(r#"#[serde(deny_unknown_fields)]"#),
+        window.contains(r"#[serde(deny_unknown_fields)]"),
         "AssembleHotDataRaw must carry #[serde(deny_unknown_fields)]\n\nWindow before struct:\n{window}"
     );
 }

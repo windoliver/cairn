@@ -1,5 +1,7 @@
 //! Pure helper functions for `assemble_hot` segments. Brief §5, §7.
 
+use sha2::{Digest, Sha256};
+
 use crate::generated::verbs::assemble_hot::AssembleHotData;
 use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentStability};
 
@@ -9,6 +11,7 @@ use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentSt
 pub const MAX_SEGMENTS: usize = 64;
 
 /// Default stability hint per recipe step. Constants, not config.
+#[must_use]
 pub const fn default_stability(step: HotRecipeStep) -> SegmentStability {
     match step {
         HotRecipeStep::Purpose | HotRecipeStep::Index => SegmentStability::Stable1h,
@@ -19,59 +22,132 @@ pub const fn default_stability(step: HotRecipeStep) -> SegmentStability {
     }
 }
 
-/// Errors returned by `build_segments` and the validators in this module.
+/// Errors returned by [`build_segments`] and the validators in this module.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AssembleHotValidationError {
+    /// `recipe.len()` and `bodies.len()` disagree.
     #[error("recipe.len() {recipe} != bodies.len() {bodies}")]
-    RecipeBodiesLenMismatch { recipe: usize, bodies: usize },
+    RecipeBodiesLenMismatch {
+        /// Number of steps in the recipe slice.
+        recipe: usize,
+        /// Number of body strings supplied.
+        bodies: usize,
+    },
+    /// A segment's `byte_start` is greater than its `byte_end`.
     #[error("segment {index}: byte_start {start} > byte_end {end}")]
-    DescendingRange { index: usize, start: u64, end: u64 },
+    DescendingRange {
+        /// Zero-based segment index.
+        index: usize,
+        /// The offending `byte_start`.
+        start: u64,
+        /// The offending `byte_end`.
+        end: u64,
+    },
+    /// A segment's `byte_start` does not equal the previous segment's `byte_end`.
     #[error("segment {index}: byte_start {start} != previous byte_end {prev_end}")]
     NonContiguous {
+        /// Zero-based segment index.
         index: usize,
+        /// The offending `byte_start`.
         start: u64,
+        /// The `byte_end` of the preceding segment.
         prev_end: u64,
     },
+    /// The first segment's `byte_start` is not zero.
     #[error("segments[0].byte_start {start} != 0")]
-    DoesNotStartAtZero { start: u64 },
+    DoesNotStartAtZero {
+        /// The actual `byte_start` of segment 0.
+        start: u64,
+    },
+    /// The last segment's `byte_end` does not equal `prefix.len()`.
     #[error("segments.last().byte_end {end} != prefix.len() {prefix_len}")]
-    DoesNotCoverPrefix { end: u64, prefix_len: u64 },
-    #[error("data.bytes {bytes} != prefix.len() {prefix_len}")]
-    BytesMismatch { bytes: u64, prefix_len: u64 },
-    #[error("segment {index}: content_hash mismatch")]
-    HashMismatch { index: usize },
-    #[error("segment {index}: byte_end {end} > prefix.len() {prefix_len}")]
-    OutOfBounds {
-        index: usize,
+    DoesNotCoverPrefix {
+        /// The actual `byte_end` of the last segment.
         end: u64,
+        /// `prefix.len()` as a `u64`.
         prefix_len: u64,
     },
+    /// `data.bytes` disagrees with `prefix.len()`.
+    #[error("data.bytes {bytes} != prefix.len() {prefix_len}")]
+    BytesMismatch {
+        /// The value of `data.bytes`.
+        bytes: u64,
+        /// `prefix.len()` as a `u64`.
+        prefix_len: u64,
+    },
+    /// A segment's SHA-256 `content_hash` does not match the corresponding
+    /// byte range of `prefix`.
+    #[error("segment {index}: content_hash mismatch")]
+    HashMismatch {
+        /// Zero-based segment index.
+        index: usize,
+    },
+    /// A segment's `byte_end` exceeds the length of `prefix`.
+    #[error("segment {index}: byte_end {end} > prefix.len() {prefix_len}")]
+    OutOfBounds {
+        /// Zero-based segment index.
+        index: usize,
+        /// The offending `byte_end`.
+        end: u64,
+        /// `prefix.len()` as a `u64`.
+        prefix_len: u64,
+    },
+    /// The `step` field of a segment does not match the recipe at that
+    /// position (checked by [`validate_with_recipe`]).
     #[error("segment {index}: expected step {expected:?}, got {got:?}")]
     StepMismatch {
+        /// Zero-based segment index.
         index: usize,
+        /// The step the recipe prescribed.
         expected: HotRecipeStep,
+        /// The step that was actually present.
         got: HotRecipeStep,
     },
+    /// The number of segments does not equal the number of expected recipe
+    /// steps (checked by [`validate_with_recipe`]).
     #[error("segments.len() {got} != expected recipe.len() {expected}")]
-    RecipeLenMismatch { expected: usize, got: usize },
+    RecipeLenMismatch {
+        /// Number of steps in the expected recipe.
+        expected: usize,
+        /// Number of segments in the data.
+        got: usize,
+    },
+    /// `segments` is `None`; recipe-alignment validation requires segments.
     #[error("legacy producer did not emit segments; cannot validate against recipe")]
     LegacyProducerSegmentsAbsent,
+    /// `segments` is `Some(vec![])` but `prefix` or `bytes` is non-empty.
     #[error(
         "Some(vec![]) requires prefix == \"\" and bytes == 0, got bytes {bytes}, prefix.len() {prefix_len}"
     )]
-    EmptySegmentsRequiresEmptyPrefix { bytes: u64, prefix_len: u64 },
+    EmptySegmentsRequiresEmptyPrefix {
+        /// The value of `data.bytes`.
+        bytes: u64,
+        /// `prefix.len()` as a `u64`.
+        prefix_len: u64,
+    },
+    /// A segment's stability hint does not match the default for its step.
     #[error(
         "segment {index}: stability {got:?} does not match default for step {step:?} ({expected:?})"
     )]
     StabilityMismatch {
+        /// Zero-based segment index.
         index: usize,
+        /// The recipe step that owns this segment.
         step: HotRecipeStep,
+        /// The stability that was present in the segment.
         got: SegmentStability,
+        /// The stability that [`default_stability`] prescribes for this step.
         expected: SegmentStability,
     },
+    /// `segments.len()` exceeds [`MAX_SEGMENTS`].
     #[error("segments.len() {got} exceeds maximum {max}")]
-    TooManySegments { got: usize, max: usize },
+    TooManySegments {
+        /// Actual segment count.
+        got: usize,
+        /// Hard upper bound ([`MAX_SEGMENTS`]).
+        max: usize,
+    },
 }
 
 /// Build (`prefix`, `segments`) from a configured recipe and parallel
@@ -101,7 +177,6 @@ pub fn build_segments(
             bodies: bodies.len(),
         });
     }
-    use sha2::{Digest, Sha256};
 
     let prefix: String = bodies.iter().copied().collect();
     let mut segments = Vec::with_capacity(recipe.len());
@@ -138,9 +213,8 @@ pub fn validate_base(data: &AssembleHotData) -> Result<(), AssembleHotValidation
 
 /// Segment-layer invariants. See §5 of the design spec for the full table.
 pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValidationError> {
-    let segments = match &data.segments {
-        None => return Ok(()),
-        Some(v) => v,
+    let Some(segments) = &data.segments else {
+        return Ok(());
     };
     let prefix_len = data.prefix.len() as u64;
 
@@ -215,8 +289,10 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
     }
 
     // Second pass: hash verification (only after structural checks pass).
-    use sha2::{Digest, Sha256};
     for (i, s) in segments.iter().enumerate() {
+        // SAFETY on the usize cast: byte_end <= prefix.len() (checked in the
+        // structural pass above), so the value always fits in usize.
+        #[allow(clippy::cast_possible_truncation)]
         let slice = &data.prefix[s.byte_start as usize..s.byte_end as usize];
         let mut h = Sha256::new();
         h.update(slice.as_bytes());
@@ -265,6 +341,9 @@ pub fn validate_with_recipe(
 }
 
 #[cfg(test)]
+// Truncation casts are safe in tests: byte offsets come from `build_segments`
+// which is bounded by the length of in-test strings (always fits in usize).
+#[allow(clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
     use crate::generated::verbs::assemble_hot::HotRecipeStep::*;
@@ -508,8 +587,8 @@ mod tests {
 
     #[test]
     fn validate_segments_rejects_too_many() {
-        let recipe: Vec<HotRecipeStep> = std::iter::repeat(Purpose).take(65).collect();
-        let bodies: Vec<&str> = std::iter::repeat("").take(65).collect();
+        let recipe: Vec<HotRecipeStep> = vec![Purpose; 65];
+        let bodies: Vec<&str> = vec![""; 65];
         let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
         let d = AssembleHotData {
             bytes: prefix.len() as u64,

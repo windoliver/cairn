@@ -13,8 +13,7 @@ fn envelope_decode_rejects_malformed_bytes() {
     let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("bytes") || msg.contains("mismatch"),
-        "got: {}",
-        err
+        "got: {err}"
     );
 }
 
@@ -31,7 +30,7 @@ fn envelope_decode_round_trips_canonical_empty() {
     let data: AssembleHotData = serde_json::from_str(json).unwrap();
     assert_eq!(data.segments, Some(vec![]));
     let re = serde_json::to_string(&data).unwrap();
-    assert!(re.contains("\"segments\":[]"), "got: {}", re);
+    assert!(re.contains("\"segments\":[]"), "got: {re}");
 }
 
 #[test]
@@ -41,8 +40,7 @@ fn envelope_decode_rejects_empty_segments_with_non_empty_prefix() {
     let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("empty") || msg.contains("prefix"),
-        "got: {}",
-        err
+        "got: {err}"
     );
 }
 
@@ -57,13 +55,12 @@ fn envelope_decode_rejects_too_many_segments() {
         segments.push_str(r#"{"step":"purpose","byte_start":0,"byte_end":0,"stability":"stable_1h","content_hash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}"#);
     }
     segments.push(']');
-    let json = format!(r#"{{"bytes": 0, "prefix": "", "segments": {}}}"#, segments);
+    let json = format!(r#"{{"bytes": 0, "prefix": "", "segments": {segments}}}"#);
     let err = serde_json::from_str::<AssembleHotData>(&json).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("64") || msg.to_lowercase().contains("too many"),
-        "got: {}",
-        err
+        "got: {err}"
     );
 }
 
@@ -83,5 +80,5 @@ fn envelope_decode_rejects_stability_mismatch() {
     }"#;
     let err = serde_json::from_str::<AssembleHotData>(json).unwrap_err();
     let msg = err.to_string().to_lowercase();
-    assert!(msg.contains("stability"), "got: {}", err);
+    assert!(msg.contains("stability"), "got: {err}");
 }
