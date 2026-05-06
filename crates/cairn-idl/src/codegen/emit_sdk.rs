@@ -1627,6 +1627,30 @@ fn write_struct(
     if let Some(doc) = &s.doc {
         write_doc(w, doc);
     }
+    // `x-cairn-validate: true` — the consuming crate provides hand-written
+    // `TryFrom<<Name>Raw>` and `From<<Name>> for <Name>Raw` impls. Codegen
+    // emits a public `<Name>Raw` mirror struct (Serialize + Deserialize) and
+    // wires the main struct to it via `#[serde(try_from / into)]`.
+    if s.validate {
+        let raw_name = format!("{}Raw", s.name.0);
+        w.line(&format!(
+            "#[serde(try_from = \"{raw_name}\", into = \"{raw_name}\")]"
+        ));
+        w.line("#[derive(Debug, Clone, PartialEq, Serialize)]");
+        if s.deny_unknown_fields {
+            w.line("#[serde(deny_unknown_fields)]");
+        }
+        w.line(&format!("pub struct {} {{", s.name.0));
+        w.indent();
+        for field in &s.fields {
+            write_field(w, field, &s.name.0, common, true);
+        }
+        w.dedent();
+        w.line("}");
+        w.blank();
+        write_validate_raw_mirror(w, s, common);
+        return Ok(());
+    }
     // When the struct carries a presence-of-anyOf constraint OR is on the
     // bespoke-validators allow-list, derive only Serialize on the public type
     // and hand-roll Deserialize via a private Raw companion so the constraint
@@ -1762,6 +1786,28 @@ fn write_struct_raw_companion(w: &mut RustWriter, s: &StructDef, common: &BTreeS
     w.line("Self::try_from(raw).map_err(::serde::de::Error::custom)");
     w.dedent();
     w.line("}");
+    w.dedent();
+    w.line("}");
+}
+
+/// Emit the public `<Name>Raw` mirror struct for a struct marked with
+/// `x-cairn-validate: true`. The mirror has the same public fields and per-field
+/// serde attrs as the main struct but derives both `Serialize` and `Deserialize`.
+/// The consuming crate must provide `TryFrom<<Name>Raw> for <Name>` and
+/// `From<<Name>> for <Name>Raw` — codegen does NOT emit those impls here.
+fn write_validate_raw_mirror(w: &mut RustWriter, s: &StructDef, common: &BTreeSet<String>) {
+    let raw_name = format!("{}Raw", s.name.0);
+    w.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]");
+    if s.deny_unknown_fields {
+        w.line("#[serde(deny_unknown_fields)]");
+    }
+    w.line(&format!("pub struct {raw_name} {{"));
+    w.indent();
+    for field in &s.fields {
+        // Emit with public qualifier and full serde attrs (serializing = true)
+        // so the Raw mirror is symmetric with the main struct's field layout.
+        write_field(w, field, &s.name.0, common, true);
+    }
     w.dedent();
     w.line("}");
 }

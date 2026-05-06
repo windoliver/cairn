@@ -251,6 +251,12 @@ pub struct StructDef {
     /// must surface "at least one of these fields present" at deserialise
     /// time. None when no such anyOf was attached.
     pub any_of_required: Option<Vec<String>>,
+    /// When `true`, the struct carries `x-cairn-validate: true` in the IDL.
+    /// Codegen emits `#[serde(try_from = "<Name>Raw", into = "<Name>Raw")]` on
+    /// the main struct (Serialize-only derive) and a public `<Name>Raw` mirror
+    /// struct with full Serialize+Deserialize. The hand-written `TryFrom` and
+    /// `From` impls live in the consuming crate, not here.
+    pub validate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -518,6 +524,11 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
         .and_then(Value::as_array)
         .and_then(|arr| extract_required_only_anyof(arr));
 
+    let validate = value
+        .get("x-cairn-validate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     Ok(RustType::Struct(StructDef {
         name: target_name,
         fields,
@@ -527,6 +538,7 @@ fn lower_object(value: &Value, ctx: &mut Ctx) -> Result<RustType, CodegenError> 
             .and_then(Value::as_str)
             .map(String::from),
         any_of_required,
+        validate,
     }))
 }
 
