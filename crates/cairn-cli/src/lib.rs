@@ -14,6 +14,7 @@ pub mod llm;
 pub mod mcp;
 pub mod plugins;
 pub mod render;
+pub mod repair;
 pub mod session_source;
 pub mod skill;
 pub mod vault;

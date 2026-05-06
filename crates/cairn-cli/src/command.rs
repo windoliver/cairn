@@ -47,8 +47,50 @@ pub fn build_command() -> clap::Command {
         .subcommand(skill_subcommand())
         .subcommand(admin_subcommand())
         .subcommand(llm_subcommand())
+        .subcommand(repair_subcommand())
         .subcommand(identity::cli::identity_subcommand())
         .subcommand(verbs::flush::command())
+}
+
+fn repair_subcommand() -> clap::Command {
+    clap::Command::new("repair")
+        .about("Operator repair commands for blocked vault state")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(
+            clap::Command::new("consent-journal")
+                .about("List or delete legacy consent_journal rows that block migration 0021")
+                .arg(
+                    clap::Arg::new("json")
+                        .long("json")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Emit JSON output"),
+                )
+                .arg(
+                    clap::Arg::new("delete-rowid")
+                        .long("delete-rowid")
+                        .value_name("ROWID")
+                        .value_parser(clap::value_parser!(i64))
+                        .requires("reason")
+                        .requires("yes")
+                        .help("Delete one repair-eligible consent_journal rowid"),
+                )
+                .arg(
+                    clap::Arg::new("reason")
+                        .long("reason")
+                        .value_name("TEXT")
+                        .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                        .requires("delete-rowid")
+                        .help("Operator reason for a delete repair"),
+                )
+                .arg(
+                    clap::Arg::new("yes")
+                        .long("yes")
+                        .action(clap::ArgAction::SetTrue)
+                        .requires("delete-rowid")
+                        .help("Confirm the requested delete repair"),
+                ),
+        )
 }
 
 fn llm_subcommand() -> clap::Command {
