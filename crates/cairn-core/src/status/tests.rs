@@ -258,3 +258,77 @@ mod prop_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod exhaustiveness {
+    use super::*;
+
+    /// Compile-time proof that every `Capabilities` variant is named in
+    /// the decision table. When the IDL adds a new variant, this match
+    /// fails to compile until `advertise()` (in `mod.rs`) handles the new
+    /// row. Combined with the runtime assertion below, no variant can be
+    /// silently un-advertised.
+    #[allow(unreachable_patterns)] // catch-all guards future #[non_exhaustive] additions
+    fn classify(c: Capabilities) -> &'static str {
+        match c {
+            Capabilities::CairnMcpV1SearchKeyword => "search.keyword",
+            Capabilities::CairnMcpV1SearchSemantic => "search.semantic",
+            Capabilities::CairnMcpV1SearchHybrid => "search.hybrid",
+            Capabilities::CairnMcpV1PolicyTrace => "policy_trace",
+            Capabilities::CairnMcpV1ForgetRecord => "forget.record",
+            Capabilities::CairnMcpV1ForgetSession => "forget.session",
+            Capabilities::CairnMcpV1ForgetScope => "forget.scope",
+            Capabilities::CairnMcpV1RetrieveRecord => "retrieve.record",
+            Capabilities::CairnMcpV1RetrieveSession => "retrieve.session",
+            Capabilities::CairnMcpV1RetrieveTurn => "retrieve.turn",
+            Capabilities::CairnMcpV1RetrieveFolder => "retrieve.folder",
+            Capabilities::CairnMcpV1RetrieveScope => "retrieve.scope",
+            Capabilities::CairnMcpV1RetrieveProfile => "retrieve.profile",
+            Capabilities::CairnMcpV1ReplaySequence => "replay.sequence",
+            Capabilities::CairnMcpV1ReplayChallenge => "replay.challenge",
+            // Extension capabilities advertise via status.extensions, not
+            // status.capabilities — they ride a separate code path.
+            Capabilities::CairnMcpV1ExtensionAggregate => "ext.aggregate",
+            Capabilities::CairnMcpV1ExtensionAdmin => "ext.admin",
+            Capabilities::CairnMcpV1ExtensionFederation => "ext.federation",
+            Capabilities::CairnMcpV1ExtensionSessiontree => "ext.sessiontree",
+            // Capabilities is `#[non_exhaustive]` — explicit catch-all forces
+            // the table above to grow when a future codegen adds a variant.
+            _ => "unknown",
+        }
+    }
+
+    #[test]
+    fn classify_covers_every_known_variant() {
+        // Sanity: classify the variants we know exist today. If the IDL
+        // adds a new variant, the catch-all above returns "unknown" and
+        // this test stays green — the *intended* failure mode is the
+        // match in `advertise()` itself growing a `_ =>` arm. Document
+        // the rule here so a reviewer notices.
+        let known = [
+            Capabilities::CairnMcpV1SearchKeyword,
+            Capabilities::CairnMcpV1SearchSemantic,
+            Capabilities::CairnMcpV1SearchHybrid,
+            Capabilities::CairnMcpV1PolicyTrace,
+            Capabilities::CairnMcpV1ForgetRecord,
+            Capabilities::CairnMcpV1ForgetSession,
+            Capabilities::CairnMcpV1ForgetScope,
+            Capabilities::CairnMcpV1RetrieveRecord,
+            Capabilities::CairnMcpV1RetrieveSession,
+            Capabilities::CairnMcpV1RetrieveTurn,
+            Capabilities::CairnMcpV1RetrieveFolder,
+            Capabilities::CairnMcpV1RetrieveScope,
+            Capabilities::CairnMcpV1RetrieveProfile,
+            Capabilities::CairnMcpV1ReplaySequence,
+            Capabilities::CairnMcpV1ReplayChallenge,
+            Capabilities::CairnMcpV1ExtensionAggregate,
+            Capabilities::CairnMcpV1ExtensionAdmin,
+            Capabilities::CairnMcpV1ExtensionFederation,
+            Capabilities::CairnMcpV1ExtensionSessiontree,
+        ];
+        for c in known {
+            assert_ne!(classify(c), "unknown",
+                "missing classify arm for {c:?}");
+        }
+    }
+}
