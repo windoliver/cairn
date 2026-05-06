@@ -40,6 +40,9 @@ pub fn run(sub: &ArgMatches) -> ExitCode {
         );
         return ExitCode::from(64);
     }
+    if has_folder {
+        return folder::run(sub, json);
+    }
 
     // Resolve body: positional `source` wins if set; --body/--file/--url otherwise.
     let _body_resolved: Option<String> = if let Some(src) = sub.get_one::<String>("source") {
