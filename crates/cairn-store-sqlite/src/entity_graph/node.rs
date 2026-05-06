@@ -38,29 +38,33 @@ impl SqliteMemoryStore {
         ),
     )]
     pub(crate) async fn do_upsert_entity(&self, node: &EntityNode) -> Result<EntityId, StoreError> {
-        // Reject an empty `name_norm` at the storage boundary. The shared
-        // `normalize_entity_name` helper returns `None` on
-        // punctuation/whitespace-only inputs precisely so distinct entities
-        // do not collapse onto a single empty dedup key, but `EntityNode` is
-        // a public struct with a raw `String` field — any caller that
-        // bypasses the helper could otherwise corrupt the name_norm UNIQUE
-        // index. Enforce here so the invariant lives at the write path,
-        // not call-site discipline.
-        if node.name_norm.is_empty() {
-            return Err(StoreError::SchemaDrift(
-                "entity_nodes.name_norm must not be empty — use \
-                 cairn_core::domain::graph::normalize_entity_name and \
-                 reject the None result before calling upsert_entity"
-                    .to_owned(),
-            ));
-        }
+        // The storage boundary owns the canonical `name_norm` invariant:
+        // `name_norm` is ALWAYS derived here from `node.name` via the
+        // shared `normalize_entity_name` helper, regardless of what the
+        // caller supplied. This keeps write-time dedup and read-time
+        // ByName lookup (`get_entity_by_name`, which uses the same helper)
+        // on a single canonical contract — a caller that bypassed the
+        // helper and constructed a non-canonical `name_norm` cannot break
+        // dedup or hide an existing row from later lookups.
+        //
+        // Punctuation/whitespace-only `node.name` collapses to `None` and
+        // is rejected — distinct entities must not share the empty key.
+        let Some(canonical_name_norm) =
+            cairn_core::domain::graph::normalize_entity_name(&node.name)
+        else {
+            return Err(StoreError::SchemaDrift(format!(
+                "entity_nodes.name {:?} normalizes to an empty key — \
+                 entity name must contain at least one alphanumeric character",
+                node.name,
+            )));
+        };
 
         let conn = self.require_conn("upsert_entity")?.clone();
 
         // Clone the small payload into the move closure.
         let id_str = node.id.as_str().to_owned();
         let name = node.name.clone();
-        let name_norm = node.name_norm.clone();
+        let name_norm = canonical_name_norm;
         let summary = node.summary.clone();
         let created_at = node.created_at;
         let embedding_id = node.embedding_id.clone();
