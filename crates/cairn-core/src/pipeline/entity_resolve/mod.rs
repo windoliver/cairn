@@ -84,6 +84,8 @@ impl ResolverConfig {
     }
 }
 
+use crate::contract::llm_provider::LlmError;
+
 /// Errors raised when [`ResolverConfig::validate`] rejects a configuration.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -113,6 +115,36 @@ pub enum ResolverConfigError {
     NumPermutationsOutOfRange {
         /// Offending value.
         got: usize,
+    },
+}
+
+/// Errors raised by `EntityResolver::resolve` (added in Task 6).
+///
+/// `LlmError::NotConfigured` and `LlmError::CapabilityMissing` are
+/// silently mapped to `Resolution::New` inside `resolve()` per the
+/// P0 offline-graceful contract; only non-skippable LLM failures
+/// surface as [`EntityResolutionError::Llm`].
+// Task 5/Task 6 wire this into the resolver; suppress dead_code until then.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum EntityResolutionError {
+    /// Tier 3 LLM call returned a non-skippable error
+    /// (transport / auth / parse / budget).
+    #[error("llm tier-3 failed: {source}")]
+    Llm {
+        /// Underlying LLM error.
+        #[source]
+        source: LlmError,
+    },
+
+    /// Tier 3 returned a payload the resolver could not interpret
+    /// even though no `LlmError` was raised. Defence-in-depth — when
+    /// `LLMProvider::complete` honours the schema arg, this is unreachable.
+    #[error("llm tier-3 returned malformed payload: {detail}")]
+    LlmInvalidResponse {
+        /// Reason the payload could not be interpreted.
+        detail: String,
     },
 }
 
@@ -202,5 +234,29 @@ mod config_tests {
             cfg.validate(),
             Err(ResolverConfigError::NumPermutationsOutOfRange { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use crate::contract::llm_provider::LlmError;
+
+    #[test]
+    fn llm_error_display_includes_source() {
+        let inner = LlmError::ProviderUnreachable {
+            detail: "connect refused".into(),
+        };
+        let e = EntityResolutionError::Llm { source: inner };
+        let s = e.to_string();
+        assert!(s.contains("llm tier-3 failed"), "got: {s}");
+    }
+
+    #[test]
+    fn invalid_response_display() {
+        let e = EntityResolutionError::LlmInvalidResponse {
+            detail: "missing field `same`".into(),
+        };
+        assert!(e.to_string().contains("malformed payload"));
     }
 }
