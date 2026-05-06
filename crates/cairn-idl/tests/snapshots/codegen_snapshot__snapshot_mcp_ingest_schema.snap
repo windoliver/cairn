@@ -203,7 +203,7 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
       }
     ],
     "positional": {
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder.",
       "name": "source"
     }
   },

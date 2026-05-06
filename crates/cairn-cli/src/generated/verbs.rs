@@ -20,7 +20,7 @@ pub fn ingest_subcommand() -> clap::Command {
         .arg(clap::Arg::new("dry_run").long("dry-run").action(clap::ArgAction::SetTrue))
         .arg(clap::Arg::new("session_id").long("session").value_name("STRING"))
         .arg(clap::Arg::new("tags").long("tags").value_name("STRING").action(clap::ArgAction::Append))
-        .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.").required(false))
+        .arg(clap::Arg::new("source").help("File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url/--folder.").required(false))
 }
 
 /// `cairn search` subcommand builder.
