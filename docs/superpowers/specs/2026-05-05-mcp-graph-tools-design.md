@@ -36,9 +36,16 @@ Five tools:
   `TOOLS`. A dispatch function maps tool name → `GraphQueries` method →
   serialized `CallToolResult`.
 - **`crates/cairn-mcp/src/handler.rs`** (edit). Extend `list_tools` to
-  concat `TOOLS` + `GRAPH_TOOLS`. Extend `call_tool` to route graph names
-  before the existing search/stub paths. Reuses the existing
-  `Option<Arc<dyn MemoryStore>>` field.
+  concat `TOOLS` + `GRAPH_TOOLS` **only when a store is wired**
+  (`self.store.is_some()`); when the handler is unwired the manifest
+  must not advertise these tools at all. Extend `call_tool` to route
+  graph names before the existing search/stub paths. Reuses the
+  existing `Option<Arc<dyn MemoryStore>>` field.
+
+  This gates discovery on capability — clients that cache `tools/list`
+  responses never see a graph tool they cannot invoke. The manifest
+  snapshot test must cover both wired and unwired cases (two snapshot
+  files) so this gating is byte-verifiable.
 - **`crates/cairn-cli/src/...mcp dispatch`** (edit). Pass the open store
   into `CairnMcpServer` so graph tools have a backend. Today
   `serve_stdio` always builds an unwired handler; introduce
@@ -86,13 +93,42 @@ spec allowed.
 
 ### 3.1 `graph.get_entity`
 
+`name_norm` is the dedup key chosen at upsert time (see
+`cairn-store-sqlite::entity_graph::node::upsert_entity`), and the
+graph's normalization is **not** plain `lower()` — it strips
+punctuation, normalizes whitespace, and may apply Unicode folding.
+A naive `lower(?1)` lookup would silently miss any entity whose
+canonical form requires more than ASCII case folding.
+
+The lookup must therefore call the **same** normalization function
+that populated the row. Land a shared helper before the queries crate
+uses it:
+
+```rust
+// crates/cairn-core/src/domain/graph/normalize.rs (new)
+/// Canonical form used as the `name_norm` dedup key for entity nodes.
+/// Single source of truth — every insertion site and every read-side
+/// lookup MUST go through this function.
+pub fn normalize_entity_name(input: &str) -> String { /* … */ }
+```
+
+Existing upsert sites that build `name_norm` inline are migrated to
+this helper as part of the same PR (small change, currently scattered
+across resolver and ingest paths).
+
+The SQL then becomes:
+
 ```sql
 SELECT id, name, summary, created_at
 FROM entity_nodes
-WHERE (id = ?1 OR name_norm = lower(?1))
+WHERE (id = ?1 OR name_norm = ?2)   -- ?2 = normalize_entity_name(input)
   AND expired_at IS NULL
 LIMIT 1;
 ```
+
+A regression test asserts that an entity inserted with a name like
+`"Auth Service (v2)"` is round-trippable: `get_entity("Auth Service
+(v2)")` returns the row, while a naive `lower()` lookup would not.
 
 Live edge count via secondary query (uses the shared active-at-now
 predicate from §3):
@@ -161,8 +197,14 @@ fn bfs(seed, max_hops, node_budget, token_budget):
            truncated by token_budget during serialization
 ```
 
-**Per-wave neighbor SQL** (one parameter binding for the current
-frontier id list — at most `node_budget` ids, so finite):
+**Per-wave neighbor SQL.** The frontier id list is bounded by
+`node_budget` (so finite), and the query itself carries a hard
+`LIMIT :wave_cap` so a single hub node cannot return millions of
+edges before Rust gets to truncate. `wave_cap` is computed as
+`node_budget - visited.len()` — i.e. the maximum number of *new*
+nodes this wave can possibly add. Pulling more rows than that is
+guaranteed waste, and keeping the limit at the SQL boundary stops
+SQLite from materializing them in the first place.
 
 ```sql
 SELECT e.id, e.source_id, e.target_id, e.relation,
@@ -173,8 +215,15 @@ WHERE (e.source_id IN rarray(:frontier)
   AND e.expired_at IS NULL
   AND e.valid_at <= :now
   AND (e.invalid_at IS NULL OR e.invalid_at > :now)
-ORDER BY e.confidence_score DESC, e.id ASC;   -- deterministic
+ORDER BY e.confidence_score DESC, e.id ASC   -- deterministic
+LIMIT :wave_cap;
 ```
+
+The implementation must additionally **stream** rows
+(`Rows::next()` loop, not `query_map().collect()`) and break out of
+the read loop the moment `visited.len() >= node_budget`, so an
+adversarial graph that just-fits the SQL `LIMIT` cannot still cause
+the Rust side to allocate the full wave before truncating.
 
 #### Properties this gives us
 
