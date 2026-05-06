@@ -758,11 +758,15 @@ impl GraphQueries {
         // - Default (include_history = false): both endpoints must appear in
         //   `visible_nodes` (active-now provenance — keeps the audit view honest
         //   about what is reachable today).
-        // - include_history = true: relax to `live_nodes` (entity_nodes that are
-        //   not tombstoned). Authorization still comes from `scope_filtered` on
-        //   the edge's own provenance record; this prevents a future-dated edge
-        //   between otherwise-isolated nodes from being silently dropped, while
-        //   still hiding tombstoned endpoints.
+        // - include_history = true: switch to `history_visible_nodes` — the
+        //   same shape as `visible_nodes` but built from `scope_filtered`
+        //   (any scope-authorized edge regardless of temporal envelope) plus
+        //   the scope-authorized episode arm. Drops the active-now temporal
+        //   gate so future-dated edges can surface, but **keeps**
+        //   provenance-based authorization on the counterpart so a caller
+        //   cannot learn about an entity whose only provenance lies outside
+        //   their allowed scopes by asking for timeline history on an
+        //   adjacent seed.
         let sql = format!(
             "{prefix}
              scope_filtered AS (
@@ -778,8 +782,25 @@ impl GraphQueries {
                      AND r_active.tombstoned = 0
                  )
              ),
-             live_nodes AS (
-               SELECT id FROM entity_nodes WHERE expired_at IS NULL
+             history_visible_nodes AS (
+               SELECT n.id FROM entity_nodes n
+               WHERE n.expired_at IS NULL
+                 AND (
+                   EXISTS (
+                     SELECT 1 FROM scope_filtered se
+                     WHERE se.source_id = n.id OR se.target_id = n.id
+                   )
+                   OR EXISTS (
+                     SELECT 1 FROM entity_episodes ep
+                     JOIN records r_src ON r_src.record_id = ep.episode_id
+                     JOIN records r_active
+                       ON r_active.target_id = r_src.target_id
+                     WHERE ep.entity_node_id = n.id
+                       AND r_active.active     = 1
+                       AND r_active.tombstoned = 0
+                       AND ({scope_clause})
+                   )
+                 )
              )
              SELECT id, source_id, target_id, relation, confidence_score,
                     valid_at, invalid_at, created_at, expired_at,
@@ -788,8 +809,8 @@ impl GraphQueries {
              WHERE (source_id = ? OR target_id = ?)
                AND (
                  (? = 1
-                   AND source_id IN (SELECT id FROM live_nodes)
-                   AND target_id IN (SELECT id FROM live_nodes))
+                   AND source_id IN (SELECT id FROM history_visible_nodes)
+                   AND target_id IN (SELECT id FROM history_visible_nodes))
                  OR (? = 0
                    AND source_id IN (SELECT id FROM visible_nodes)
                    AND target_id IN (SELECT id FROM visible_nodes))
@@ -804,19 +825,22 @@ impl GraphQueries {
         );
         let mut binds: Vec<SqlValue> = Vec::new();
         self.push_prefix_binds(&mut binds);
-        // scope_filtered CTE uses one extra block of scope params.
-        for tup in &self.allowed_scopes {
-            for (_, v) in tup.dimension_iter() {
-                binds.push(match v {
-                    Some(s) => SqlValue::Text(s.to_string()),
-                    None => SqlValue::Null,
-                });
+        // scope_filtered + history_visible_nodes-episode-arm: each references
+        // {scope_clause} once → two extra scope blocks of binds.
+        for _ in 0..2 {
+            for tup in &self.allowed_scopes {
+                for (_, v) in tup.dimension_iter() {
+                    binds.push(match v {
+                        Some(s) => SqlValue::Text(s.to_string()),
+                        None => SqlValue::Null,
+                    });
+                }
             }
         }
         binds.push(SqlValue::Text(seed.clone()));
         binds.push(SqlValue::Text(seed));
         // include_history appears three times:
-        //   1. Selects the `live_nodes` endpoint arm (history view)
+        //   1. Selects the `history_visible_nodes` endpoint arm (history view)
         //   2. Negated to select the `visible_nodes` arm (`? = 0`)
         //   3. Lifts the active-now temporal envelope on the edge itself
         binds.push(SqlValue::Integer(i64::from(include_history)));

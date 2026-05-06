@@ -394,18 +394,33 @@ pub fn peek_capabilities(path: &Path) -> Result<MemoryStoreCapabilities, StoreEr
         return Err(StoreError::SchemaNotInitialized);
     }
 
-    // Derive the `vector` flag from whether `record_vectors` exists.
-    // All other fields mirror `base_caps(false)` — see the comment there:
-    // `graph_edges` and `fts` are always true once migration 0001 runs,
-    // and `transactions`/`per_record_consent_model` are always true.
-    let has_record_vectors: bool = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema \
-         WHERE type = 'table' AND name = 'record_vectors'",
-        [],
-        |r| r.get::<_, i64>(0),
-    )? > 0;
+    // Derive each capability from the *actual* schema tables that back it,
+    // rather than inheriting the unconditional `base_caps(...)` defaults: an
+    // older vault with `schema_migrations` present but pre-graph migrations
+    // would otherwise advertise `graph_edges: true` even though
+    // `entity_nodes`/`entity_edges` do not exist yet. That would break the
+    // fail-closed capability contract `cairn status` reports against.
+    let table_exists = |name: &str| -> Result<bool, StoreError> {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'table' AND name = ?1",
+            [name],
+            |r| r.get::<_, i64>(0),
+        )? > 0)
+    };
 
-    Ok(base_caps(has_record_vectors))
+    let has_record_vectors = table_exists("record_vectors")?;
+    let has_records_fts = table_exists("records_fts")?;
+    let has_entity_graph = table_exists("entity_nodes")? && table_exists("entity_edges")?;
+    let has_consent_timeline = table_exists("consent_timeline")?;
+
+    Ok(MemoryStoreCapabilities {
+        fts: has_records_fts,
+        vector: has_record_vectors,
+        graph_edges: has_entity_graph,
+        transactions: true,
+        per_record_consent_model: has_consent_timeline,
+    })
 }
 
 /// Sync open at `path`, returning a raw `rusqlite::Connection`. For tests

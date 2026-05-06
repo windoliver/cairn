@@ -91,6 +91,17 @@ fn default_token_budget() -> u32 {
     8192
 }
 
+// Hard caps applied at dispatch (not just defaults). A caller can request a
+// smaller value but cannot exceed these, so an oversized request cannot turn
+// into an oversized response or an over-allocating traversal — closes the
+// `graph.query` amplification path the round-3 review flagged.
+/// Maximum traversal depth a `graph.query` request can ask for.
+pub const MAX_HOPS_CAP: u32 = 5;
+/// Maximum number of nodes the BFS/DFS driver is allowed to materialize.
+pub const NODE_BUDGET_CAP: usize = 256;
+/// Maximum serialized response budget enforced across the full payload.
+pub const TOKEN_BUDGET_CAP: usize = 64 * 1024;
+
 /// Traversal strategy for `graph.query`.
 #[derive(Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -233,18 +244,48 @@ pub async fn dispatch(
         }
         "graph.query" => match serde_json::from_value::<QueryGraphArgs>(Value::Object(args)) {
             Ok(a) => {
-                let max_hops = a.max_hops.min(5);
-                let node_budget = usize::try_from(a.node_budget).unwrap_or(usize::MAX);
-                let token_budget = usize::try_from(a.token_budget).unwrap_or(usize::MAX);
+                let max_hops = a.max_hops.min(MAX_HOPS_CAP);
+                // Hard cap node_budget at the dispatch boundary so a caller
+                // cannot drive the server to allocate an arbitrarily large
+                // traversal: the graph driver itself trusts its `node_budget`
+                // input to be already-clamped, so the cap belongs here.
+                let node_budget =
+                    usize::try_from(a.node_budget).unwrap_or(usize::MAX).min(NODE_BUDGET_CAP);
+                let token_budget = usize::try_from(a.token_budget)
+                    .unwrap_or(usize::MAX)
+                    .min(TOKEN_BUDGET_CAP);
                 let res = match a.mode {
                     TraversalMode::Bfs => queries.query_bfs(a.seed, max_hops, node_budget).await,
                     TraversalMode::Dfs => queries.query_dfs(a.seed, max_hops, node_budget).await,
                 };
                 res.map_err(|e| e.to_string()).and_then(|sg| {
-                    let trimmed = GraphQueries::truncate_to_token_budget(&sg.edges, token_budget);
+                    // Apply the byte budget across the **full payload**, not
+                    // edges alone — otherwise a caller can DoS by requesting a
+                    // small token_budget but a large node_budget. We trim
+                    // nodes first (they are id-only and cheap), then split the
+                    // remaining budget for edges.
+                    let nodes_serialized: usize = sg
+                        .nodes
+                        .iter()
+                        .filter_map(|n| serde_json::to_string(n).ok())
+                        .map(|s| s.len() + 1)
+                        .sum::<usize>()
+                        .saturating_add(2); // "[]"
+                    let trimmed_nodes =
+                        GraphQueries::truncate_to_token_budget(&sg.nodes, token_budget);
+                    let nodes_used = trimmed_nodes
+                        .iter()
+                        .filter_map(|n| serde_json::to_string(n).ok())
+                        .map(|s| s.len() + 1)
+                        .sum::<usize>()
+                        .saturating_add(2);
+                    let remaining = token_budget.saturating_sub(nodes_used);
+                    let trimmed_edges =
+                        GraphQueries::truncate_to_token_budget(&sg.edges, remaining);
+                    let _ = nodes_serialized; // kept for future telemetry
                     serde_json::to_value(serde_json::json!({
-                        "nodes": sg.nodes,
-                        "edges": trimmed,
+                        "nodes": trimmed_nodes,
+                        "edges": trimmed_edges,
                     }))
                     .map_err(|e| e.to_string())
                 })
