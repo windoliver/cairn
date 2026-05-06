@@ -492,4 +492,54 @@ mod tests {
         validate(&d).unwrap();
         validate_with_recipe(&d, &recipe).unwrap();
     }
+
+    use proptest::prelude::*;
+
+    fn step_strategy() -> impl Strategy<Value = HotRecipeStep> {
+        prop_oneof![
+            Just(Purpose),
+            Just(Index),
+            Just(PinnedFeedback),
+            Just(TopSalienceProject),
+            Just(ActivePlaybook),
+            Just(RecentUserSignal),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn coverage_invariant(chunks in proptest::collection::vec((step_strategy(), ".{0,32}"), 0..16)) {
+            let recipe: Vec<HotRecipeStep> = chunks.iter().map(|(s, _)| *s).collect();
+            let bodies: Vec<&str> = chunks.iter().map(|(_, b)| b.as_str()).collect();
+            let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+            if segments.is_empty() {
+                prop_assert_eq!(prefix.len(), 0);
+            } else {
+                prop_assert_eq!(segments[0].byte_start, 0);
+                prop_assert_eq!(segments.last().unwrap().byte_end, prefix.len() as u64);
+                for w in segments.windows(2) {
+                    prop_assert_eq!(w[0].byte_end, w[1].byte_start);
+                }
+            }
+        }
+
+        #[test]
+        fn hash_stability(chunks in proptest::collection::vec((step_strategy(), ".{0,32}"), 0..16)) {
+            let recipe: Vec<HotRecipeStep> = chunks.iter().map(|(s, _)| *s).collect();
+            let bodies: Vec<&str> = chunks.iter().map(|(_, b)| b.as_str()).collect();
+            let a = build_segments(&recipe, &bodies).unwrap();
+            let b = build_segments(&recipe, &bodies).unwrap();
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn utf8_boundary_safety(chunks in proptest::collection::vec((step_strategy(), ".{0,32}"), 0..16)) {
+            let recipe: Vec<HotRecipeStep> = chunks.iter().map(|(s, _)| *s).collect();
+            let bodies: Vec<&str> = chunks.iter().map(|(_, b)| b.as_str()).collect();
+            let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
+            for s in &segments {
+                let _ = &prefix[s.byte_start as usize..s.byte_end as usize];
+            }
+        }
+    }
 }
