@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintArgs {
+    /// When true, resolves edge contradictions by invalidating lower-confidence live edges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
     /// When true, writes .cairn/lint-report.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_report: Option<bool>,
@@ -22,20 +25,41 @@ pub enum LintDataFindingsKind {
     Stale,
     MissingConcept,
     DataGap,
+    ContradictoryEdge,
+    AmbiguousEdge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LintDataFindingsSeverity {
+    Info,
+    Warning,
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintDataFindings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entities: Option<Vec<String>>,
     pub kind: LintDataFindingsKind,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_id: Option<crate::generated::common::Ulid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<LintDataFindingsSeverity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LintDataSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguous_edges: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_resolved: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contradictions: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

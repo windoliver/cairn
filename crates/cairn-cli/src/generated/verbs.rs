@@ -87,6 +87,7 @@ pub fn lint_subcommand() -> clap::Command {
     clap::Command::new("lint")
         .about("cairn.mcp.v1 verb: lint")
         .arg(clap::Arg::new("write_report").long("write-report").action(clap::ArgAction::SetTrue))
+        .arg(clap::Arg::new("fix").long("fix").action(clap::ArgAction::SetTrue))
 }
 
 /// `cairn forget` subcommand builder.

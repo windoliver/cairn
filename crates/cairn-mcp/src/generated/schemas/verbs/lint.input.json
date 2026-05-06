@@ -3,6 +3,11 @@
     "Args": {
       "additionalProperties": false,
       "properties": {
+        "fix": {
+          "description": "When true, resolves edge contradictions by invalidating lower-confidence live edges.",
+          "type": "boolean",
+          "x-cairn-auth": "write_capability"
+        },
         "write_report": {
           "description": "When true, writes .cairn/lint-report.md.",
           "type": "boolean",
@@ -18,13 +23,22 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "entities": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "kind": {
                 "enum": [
                   "contradiction",
                   "orphan",
                   "stale",
                   "missing_concept",
-                  "data_gap"
+                  "data_gap",
+                  "contradictory_edge",
+                  "ambiguous_edge"
                 ],
                 "type": "string"
               },
@@ -34,6 +48,18 @@
               },
               "record_id": {
                 "$ref": "../common/primitives.json#/$defs/Ulid"
+              },
+              "severity": {
+                "enum": [
+                  "info",
+                  "warning",
+                  "error"
+                ],
+                "type": "string"
+              },
+              "suggestion": {
+                "minLength": 1,
+                "type": "string"
               }
             },
             "required": [
@@ -51,6 +77,14 @@
         "summary": {
           "additionalProperties": false,
           "properties": {
+            "ambiguous_edges": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "auto_resolved": {
+              "minimum": 0,
+              "type": "integer"
+            },
             "contradictions": {
               "minimum": 0,
               "type": "integer"

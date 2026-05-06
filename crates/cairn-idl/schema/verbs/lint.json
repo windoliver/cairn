@@ -9,7 +9,8 @@
   "x-cairn-cli": {
     "command": "lint",
     "flags": [
-      { "name": "write_report", "long": "write-report", "value_source": "bool" }
+      { "name": "write_report", "long": "write-report", "value_source": "bool" },
+      { "name": "fix", "long": "fix", "value_source": "bool" }
     ]
   },
   "x-cairn-skill-triggers": {
@@ -31,6 +32,11 @@
           "type": "boolean",
           "x-cairn-auth": "write_capability",
           "description": "When true, writes .cairn/lint-report.md."
+        },
+        "fix": {
+          "type": "boolean",
+          "x-cairn-auth": "write_capability",
+          "description": "When true, resolves edge contradictions by invalidating lower-confidence live edges."
         }
       }
     },
@@ -47,7 +53,9 @@
             "total":          { "type": "integer", "minimum": 0 },
             "contradictions": { "type": "integer", "minimum": 0 },
             "orphans":        { "type": "integer", "minimum": 0 },
-            "stale":          { "type": "integer", "minimum": 0 }
+            "stale":          { "type": "integer", "minimum": 0 },
+            "ambiguous_edges": { "type": "integer", "minimum": 0 },
+            "auto_resolved":   { "type": "integer", "minimum": 0 }
           }
         },
         "findings": {
@@ -57,9 +65,18 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap"] },
+              "kind":      { "type": "string", "enum": ["contradiction", "orphan", "stale", "missing_concept", "data_gap", "contradictory_edge", "ambiguous_edge"] },
               "message":   { "type": "string", "minLength": 1 },
-              "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" }
+              "record_id": { "$ref": "../common/primitives.json#/$defs/Ulid" },
+              "severity": {
+                "type": "string",
+                "enum": ["info", "warning", "error"]
+              },
+              "entities": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "suggestion": { "type": "string", "minLength": 1 }
             }
           }
         },
