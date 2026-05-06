@@ -6,8 +6,8 @@
 //! which calls [`validate_base`] and [`validate_segments`]. Bypass is
 //! impossible — see §5/§8 of the design spec.
 
+use super::segments::{AssembleHotValidationError, validate_base, validate_segments};
 use crate::generated::verbs::assemble_hot::{AssembleHotData, AssembleHotDataRaw};
-use super::segments::{validate_base, validate_segments, AssembleHotValidationError};
 
 impl TryFrom<AssembleHotDataRaw> for AssembleHotData {
     type Error = AssembleHotValidationError;

@@ -128,7 +128,10 @@ fn assemble_hot_returns_committed_envelope() {
     assert_eq!(v["contract"], "cairn.mcp.v1");
     assert_eq!(v["status"], "committed");
     assert_eq!(v["verb"], "assemble_hot");
-    assert!(v["error"].is_null(), "committed envelope must not have error");
+    assert!(
+        v["error"].is_null(),
+        "committed envelope must not have error"
+    );
     assert!(v["data"]["segments"].is_array(), "segments must be present");
     assert!(v["operation_id"].is_string());
     assert!(v["policy_trace"].is_array());

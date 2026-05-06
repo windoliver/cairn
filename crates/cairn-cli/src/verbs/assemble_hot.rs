@@ -31,9 +31,7 @@ pub fn run(sub: &ArgMatches, config: &CairnConfig) -> ExitCode {
                 emit_json(&resp);
             } else {
                 let segments = match resp.data.as_ref() {
-                    Some(ResponseData::AssembleHot(d)) => {
-                        d.segments.as_ref().map_or(0, Vec::len)
-                    }
+                    Some(ResponseData::AssembleHot(d)) => d.segments.as_ref().map_or(0, Vec::len),
                     _ => 0,
                 };
                 println!(

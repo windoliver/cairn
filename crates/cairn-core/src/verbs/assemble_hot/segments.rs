@@ -1,7 +1,7 @@
 //! Pure helper functions for `assemble_hot` segments. Brief §5, §7.
 
-use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentStability};
 use crate::generated::verbs::assemble_hot::AssembleHotData;
+use crate::generated::verbs::assemble_hot::{HotRecipeStep, HotSegment, SegmentStability};
 
 /// Hard upper bound on `segments.len()` at the wire boundary. Mirrors
 /// the schema's `maxItems: 64`. Defends generic decoders against
@@ -28,7 +28,11 @@ pub enum AssembleHotValidationError {
     #[error("segment {index}: byte_start {start} > byte_end {end}")]
     DescendingRange { index: usize, start: u64, end: u64 },
     #[error("segment {index}: byte_start {start} != previous byte_end {prev_end}")]
-    NonContiguous { index: usize, start: u64, prev_end: u64 },
+    NonContiguous {
+        index: usize,
+        start: u64,
+        prev_end: u64,
+    },
     #[error("segments[0].byte_start {start} != 0")]
     DoesNotStartAtZero { start: u64 },
     #[error("segments.last().byte_end {end} != prefix.len() {prefix_len}")]
@@ -38,17 +42,34 @@ pub enum AssembleHotValidationError {
     #[error("segment {index}: content_hash mismatch")]
     HashMismatch { index: usize },
     #[error("segment {index}: byte_end {end} > prefix.len() {prefix_len}")]
-    OutOfBounds { index: usize, end: u64, prefix_len: u64 },
+    OutOfBounds {
+        index: usize,
+        end: u64,
+        prefix_len: u64,
+    },
     #[error("segment {index}: expected step {expected:?}, got {got:?}")]
-    StepMismatch { index: usize, expected: HotRecipeStep, got: HotRecipeStep },
+    StepMismatch {
+        index: usize,
+        expected: HotRecipeStep,
+        got: HotRecipeStep,
+    },
     #[error("segments.len() {got} != expected recipe.len() {expected}")]
     RecipeLenMismatch { expected: usize, got: usize },
     #[error("legacy producer did not emit segments; cannot validate against recipe")]
     LegacyProducerSegmentsAbsent,
-    #[error("Some(vec![]) requires prefix == \"\" and bytes == 0, got bytes {bytes}, prefix.len() {prefix_len}")]
+    #[error(
+        "Some(vec![]) requires prefix == \"\" and bytes == 0, got bytes {bytes}, prefix.len() {prefix_len}"
+    )]
     EmptySegmentsRequiresEmptyPrefix { bytes: u64, prefix_len: u64 },
-    #[error("segment {index}: stability {got:?} does not match default for step {step:?} ({expected:?})")]
-    StabilityMismatch { index: usize, step: HotRecipeStep, got: SegmentStability, expected: SegmentStability },
+    #[error(
+        "segment {index}: stability {got:?} does not match default for step {step:?} ({expected:?})"
+    )]
+    StabilityMismatch {
+        index: usize,
+        step: HotRecipeStep,
+        got: SegmentStability,
+        expected: SegmentStability,
+    },
     #[error("segments.len() {got} exceeds maximum {max}")]
     TooManySegments { got: usize, max: usize },
 }
@@ -125,10 +146,12 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
 
     if segments.is_empty() {
         if !data.prefix.is_empty() || data.bytes != 0 {
-            return Err(AssembleHotValidationError::EmptySegmentsRequiresEmptyPrefix {
-                bytes: data.bytes,
-                prefix_len,
-            });
+            return Err(
+                AssembleHotValidationError::EmptySegmentsRequiresEmptyPrefix {
+                    bytes: data.bytes,
+                    prefix_len,
+                },
+            );
         }
         return Ok(());
     }
@@ -154,7 +177,9 @@ pub fn validate_segments(data: &AssembleHotData) -> Result<(), AssembleHotValida
             });
         }
         if i == 0 && s.byte_start != 0 {
-            return Err(AssembleHotValidationError::DoesNotStartAtZero { start: s.byte_start });
+            return Err(AssembleHotValidationError::DoesNotStartAtZero {
+                start: s.byte_start,
+            });
         }
         if i > 0 && s.byte_start != prev_end {
             return Err(AssembleHotValidationError::NonContiguous {
@@ -265,7 +290,14 @@ mod tests {
 
     #[test]
     fn build_segments_all_empty_bodies() {
-        let recipe = [Purpose, Index, PinnedFeedback, TopSalienceProject, ActivePlaybook, RecentUserSignal];
+        let recipe = [
+            Purpose,
+            Index,
+            PinnedFeedback,
+            TopSalienceProject,
+            ActivePlaybook,
+            RecentUserSignal,
+        ];
         let bodies = ["", "", "", "", "", ""];
         let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
         assert_eq!(prefix, "");
@@ -279,7 +311,13 @@ mod tests {
     #[test]
     fn build_segments_rejects_len_mismatch() {
         let err = build_segments(&[Purpose, Index], &["a"]).unwrap_err();
-        assert_eq!(err, AssembleHotValidationError::RecipeBodiesLenMismatch { recipe: 2, bodies: 1 });
+        assert_eq!(
+            err,
+            AssembleHotValidationError::RecipeBodiesLenMismatch {
+                recipe: 2,
+                bodies: 1
+            }
+        );
     }
 
     #[test]
@@ -354,22 +392,39 @@ mod tests {
 
     #[test]
     fn validate_segments_accepts_canonical_empty() {
-        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: Some(vec![]) };
+        let d = AssembleHotData {
+            bytes: 0,
+            prefix: String::new(),
+            segments: Some(vec![]),
+        };
         assert!(validate_segments(&d).is_ok());
     }
 
     #[test]
     fn validate_segments_rejects_empty_with_non_empty_prefix() {
-        let d = AssembleHotData { bytes: 3, prefix: "abc".into(), segments: Some(vec![]) };
+        let d = AssembleHotData {
+            bytes: 3,
+            prefix: "abc".into(),
+            segments: Some(vec![]),
+        };
         assert!(matches!(
             validate_segments(&d),
-            Err(AssembleHotValidationError::EmptySegmentsRequiresEmptyPrefix { bytes: 3, prefix_len: 3 })
+            Err(
+                AssembleHotValidationError::EmptySegmentsRequiresEmptyPrefix {
+                    bytes: 3,
+                    prefix_len: 3
+                }
+            )
         ));
     }
 
     #[test]
     fn validate_segments_accepts_none() {
-        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: None };
+        let d = AssembleHotData {
+            bytes: 0,
+            prefix: String::new(),
+            segments: None,
+        };
         assert!(validate_segments(&d).is_ok());
     }
 
@@ -456,7 +511,11 @@ mod tests {
         let recipe: Vec<HotRecipeStep> = std::iter::repeat(Purpose).take(65).collect();
         let bodies: Vec<&str> = std::iter::repeat("").take(65).collect();
         let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
-        let d = AssembleHotData { bytes: prefix.len() as u64, prefix, segments: Some(segments) };
+        let d = AssembleHotData {
+            bytes: prefix.len() as u64,
+            prefix,
+            segments: Some(segments),
+        };
         assert!(matches!(
             validate_segments(&d),
             Err(AssembleHotValidationError::TooManySegments { got: 65, max: 64 })
@@ -478,13 +537,20 @@ mod tests {
         let d = well_formed_data();
         assert!(matches!(
             validate_with_recipe(&d, &[Purpose]),
-            Err(AssembleHotValidationError::RecipeLenMismatch { expected: 1, got: 2 })
+            Err(AssembleHotValidationError::RecipeLenMismatch {
+                expected: 1,
+                got: 2
+            })
         ));
     }
 
     #[test]
     fn validate_with_recipe_rejects_legacy_absent() {
-        let d = AssembleHotData { bytes: 0, prefix: String::new(), segments: None };
+        let d = AssembleHotData {
+            bytes: 0,
+            prefix: String::new(),
+            segments: None,
+        };
         assert!(matches!(
             validate_with_recipe(&d, &[]),
             Err(AssembleHotValidationError::LegacyProducerSegmentsAbsent)
@@ -496,7 +562,11 @@ mod tests {
         let recipe = [Purpose, Index, RecentUserSignal];
         let bodies = ["a", "bb", "ccc"];
         let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
-        let d = AssembleHotData { bytes: prefix.len() as u64, prefix, segments: Some(segments) };
+        let d = AssembleHotData {
+            bytes: prefix.len() as u64,
+            prefix,
+            segments: Some(segments),
+        };
         validate(&d).unwrap();
         validate_with_recipe(&d, &recipe).unwrap();
     }

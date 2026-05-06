@@ -46,7 +46,9 @@ fn validate_struct_does_not_derive_deserialize_directly() {
         .expect("pub struct AssembleHotData must exist in generated output");
     // Look at the two lines before the struct declaration.
     let before = &body[..struct_pos];
-    let derive_line_start = before.rfind("#[derive(").expect("derive must precede struct");
+    let derive_line_start = before
+        .rfind("#[derive(")
+        .expect("derive must precede struct");
     let derive_line_end = before[derive_line_start..]
         .find('\n')
         .map(|n| derive_line_start + n)
@@ -76,7 +78,9 @@ fn validate_raw_mirror_derives_serialize_and_deserialize() {
         .find("pub struct AssembleHotDataRaw")
         .expect("pub struct AssembleHotDataRaw must exist");
     let before = &body[..raw_struct_pos];
-    let derive_start = before.rfind("#[derive(").expect("derive must precede AssembleHotDataRaw");
+    let derive_start = before
+        .rfind("#[derive(")
+        .expect("derive must precede AssembleHotDataRaw");
     let derive_end = before[derive_start..]
         .find('\n')
         .map(|n| derive_start + n)

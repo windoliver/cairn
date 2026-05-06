@@ -7,10 +7,28 @@ use cairn_core::verbs::assemble_hot::build_segments;
 
 #[test]
 fn assemble_hot_data_canonical_json() {
-    let recipe = [Purpose, Index, PinnedFeedback, TopSalienceProject, ActivePlaybook, RecentUserSignal];
-    let bodies = ["purpose body\n", "index body\n", "pinned\n", "salience\n", "playbook\n", "signal\n"];
+    let recipe = [
+        Purpose,
+        Index,
+        PinnedFeedback,
+        TopSalienceProject,
+        ActivePlaybook,
+        RecentUserSignal,
+    ];
+    let bodies = [
+        "purpose body\n",
+        "index body\n",
+        "pinned\n",
+        "salience\n",
+        "playbook\n",
+        "signal\n",
+    ];
     let (prefix, segments) = build_segments(&recipe, &bodies).unwrap();
-    let data = AssembleHotData { bytes: prefix.len() as u64, prefix, segments: Some(segments) };
+    let data = AssembleHotData {
+        bytes: prefix.len() as u64,
+        prefix,
+        segments: Some(segments),
+    };
     let json = serde_json::to_string_pretty(&data).unwrap();
     insta::assert_snapshot!(json);
 }

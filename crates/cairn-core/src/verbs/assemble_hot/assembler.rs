@@ -4,9 +4,9 @@
 //! the missing-half of issue #193 — that PR replaces `load_step_body`
 //! and changes nothing else.
 
+use super::segments::{AssembleHotValidationError, build_segments};
 use crate::config::HotMemoryConfig;
 use crate::generated::verbs::assemble_hot::{AssembleHotData, HotRecipeStep};
-use super::segments::{build_segments, AssembleHotValidationError};
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -17,7 +17,12 @@ pub enum AssembleHotError {
 
 /// Run the hot-memory recipe and return a validated `AssembleHotData`.
 pub fn assemble_hot(config: &HotMemoryConfig) -> Result<AssembleHotData, AssembleHotError> {
-    let recipe: Vec<HotRecipeStep> = config.recipe.iter().copied().map(HotRecipeStep::from).collect();
+    let recipe: Vec<HotRecipeStep> = config
+        .recipe
+        .iter()
+        .copied()
+        .map(HotRecipeStep::from)
+        .collect();
     let bodies: Vec<String> = recipe.iter().copied().map(load_step_body).collect();
     let bodies_refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
     let (prefix, segments) = build_segments(&recipe, &bodies_refs)?;
@@ -68,7 +73,8 @@ mod tests {
         let cfg = HotMemoryConfig::default();
         let data = assemble_hot(&cfg).unwrap();
         let json = serde_json::to_string(&data).unwrap();
-        let back: crate::generated::verbs::assemble_hot::AssembleHotData = serde_json::from_str(&json).unwrap();
+        let back: crate::generated::verbs::assemble_hot::AssembleHotData =
+            serde_json::from_str(&json).unwrap();
         assert_eq!(back, data);
     }
 }
