@@ -193,6 +193,7 @@ fn emit_human(data: &LintData, operation_id: &Ulid) {
                 LintDataFindingsSeverity::Info => "info",
                 LintDataFindingsSeverity::Warning => "warning",
                 LintDataFindingsSeverity::Error => "error",
+                _ => "unknown",
             });
         println!("{severity}: {}", finding.message);
     }

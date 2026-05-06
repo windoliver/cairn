@@ -13,7 +13,14 @@ pub enum McpTransportError {
     #[error("MCP stdio server failed to initialize: {0}")]
     Initialize(String),
 
+    /// MCP service failed after transport startup.
+    #[error("MCP stdio service failed: {0}")]
+    Service(String),
+
     /// IO error on the underlying stdio transport.
     #[error("stdio IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Backwards-compatible transport error name used by the MCP entry point.
+pub type TransportError = McpTransportError;
