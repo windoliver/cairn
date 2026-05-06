@@ -13,9 +13,10 @@ pub fn extract_keyword_counts(relative_path: &Path, body: &str) -> ExtractionCou
         Some("rs") => code_counts(
             body,
             &[
-                r"(?m)^(?:pub(?:\([^)]*\))?[ \t]+)?(?:async[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*",
-                r"(?m)^(?:pub(?:\([^)]*\))?[ \t]+)?(?:struct|enum|trait|mod)[ \t]+[A-Za-z_][A-Za-z0-9_]*",
-                r"(?m)^impl(?:[ \t]*<[^>]+>)?[ \t]+(?:[A-Za-z_][A-Za-z0-9_:<>]*(?:[ \t]+for[ \t]+)?)+",
+                r"(?m)^(?:async[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*",
+                r"(?m)^[ \t]*pub(?:\([^)]*\))?[ \t]+(?:async[ \t]+)?fn[ \t]+[A-Za-z_][A-Za-z0-9_]*",
+                r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?(?:struct|enum|trait|mod)[ \t]+[A-Za-z_][A-Za-z0-9_]*",
+                r"(?m)^[ \t]*impl(?:[ \t]*<[^>]+>)?[ \t]+(?:[A-Za-z_][A-Za-z0-9_:<>]*(?:[ \t]+for[ \t]+)?)+",
             ],
         ),
         Some("py") => code_counts(
@@ -116,6 +117,22 @@ impl Folder {
     }
 
     #[test]
+    fn rust_extracts_indented_structural_declarations() {
+        let body = r#"
+mod outer {
+    pub struct Nested;
+    pub fn build_nested() {}
+    impl Nested {}
+}
+"#;
+
+        let counts = extract_keyword_counts(Path::new("src/nested.rs"), body);
+
+        assert_eq!(counts.entities_new, 4);
+        assert_eq!(counts.edges_new, 0);
+    }
+
+    #[test]
     fn python_extracts_functions_and_classes() {
         let body = r#"
 class Ingestor:
@@ -127,5 +144,64 @@ class Ingestor:
 
         assert_eq!(counts.entities_new, 2);
         assert_eq!(counts.edges_new, 0);
+    }
+
+    #[test]
+    fn typescript_and_javascript_extract_declarations() {
+        let ts_body = r#"
+export function route() {}
+interface RouteConfig {}
+type RouteId = string;
+const activeRoute = route();
+"#;
+        let js_body = r#"
+function route() {}
+class Router {}
+const activeRoute = route();
+"#;
+
+        assert_eq!(
+            extract_keyword_counts(Path::new("route.ts"), ts_body).entities_new,
+            4
+        );
+        assert_eq!(
+            extract_keyword_counts(Path::new("route.js"), js_body).entities_new,
+            3
+        );
+    }
+
+    #[test]
+    fn go_extracts_package_types_and_functions() {
+        let body = r#"
+package ingest
+
+type Scanner struct {}
+
+func NewScanner() {}
+"#;
+
+        let counts = extract_keyword_counts(Path::new("scanner.go"), body);
+
+        assert_eq!(counts.entities_new, 3);
+        assert_eq!(counts.edges_new, 0);
+    }
+
+    #[test]
+    fn txt_extracts_text_signals() {
+        let body = "See [[Memory Store]] for San Francisco context.\nFIXME: wire this.\n";
+
+        let counts = extract_keyword_counts(Path::new("notes.txt"), body);
+
+        assert!(counts.entities_new >= 3);
+        assert_eq!(counts.edges_new, 1);
+    }
+
+    #[test]
+    fn unknown_extensions_return_zero_counts() {
+        let body = "TODO: [[Memory Store]]\npub struct Folder;\n";
+
+        let counts = extract_keyword_counts(Path::new("archive.bin"), body);
+
+        assert_eq!(counts, ExtractionCounts::default());
     }
 }
