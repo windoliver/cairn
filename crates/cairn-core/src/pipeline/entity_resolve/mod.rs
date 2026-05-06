@@ -46,6 +46,17 @@ pub struct ResolverConfig {
     /// Maximum response tokens for the Tier-3 LLM call. `None` means
     /// unlimited; `Some(0)` is rejected by `validate()`.
     pub llm_max_tokens: Option<u32>,
+    /// Maximum length (in chars, post-`normalize`) of `candidate_name`.
+    /// Caps Tier-2 shingling work before it begins so a large input
+    /// cannot monopolize CPU before the Tier-3 wall-clock timeout
+    /// fires (codex-review R7.2). `Some(0)` rejected by `validate()`;
+    /// `None` means unlimited.
+    pub max_candidate_chars: Option<usize>,
+    /// Maximum number of `existing` candidates the resolver will
+    /// score in Tier 2. Above this, `resolve()` errors. Bounds
+    /// per-call CPU + allocation (R7.2). `Some(0)` rejected;
+    /// `None` means unlimited.
+    pub max_existing_candidates: Option<usize>,
 }
 
 impl Default for ResolverConfig {
@@ -61,6 +72,12 @@ impl Default for ResolverConfig {
             // or mis-configured provider.
             llm_max_wall_ms: Some(5_000),
             llm_max_tokens: Some(256),
+            // Conservative defaults bound Tier-2 work before the
+            // Tier-3 timeout can help. 1024 chars covers any realistic
+            // entity name; 10k candidates is more than the per-scope
+            // count P0 vaults will see.
+            max_candidate_chars: Some(1024),
+            max_existing_candidates: Some(10_000),
         }
     }
 }
@@ -110,6 +127,16 @@ impl ResolverConfig {
         if matches!(self.llm_max_tokens, Some(0)) {
             return Err(ResolverConfigError::LlmBudgetZero {
                 field: "llm_max_tokens",
+            });
+        }
+        if matches!(self.max_candidate_chars, Some(0)) {
+            return Err(ResolverConfigError::LlmBudgetZero {
+                field: "max_candidate_chars",
+            });
+        }
+        if matches!(self.max_existing_candidates, Some(0)) {
+            return Err(ResolverConfigError::LlmBudgetZero {
+                field: "max_existing_candidates",
             });
         }
         Ok(())
@@ -162,7 +189,7 @@ pub use self::minhash::MinHashSignature;
 pub use self::normalize::normalize;
 
 use self::llm::llm_dedup;
-use self::minhash::{FuzzyOutcome, fuzzy_match, shingles, signature};
+use self::minhash::{FuzzyOutcome, Scored, fuzzy_match, shingles, signature};
 use self::normalize::exact_match;
 
 /// Three-tier entity resolver. Pure pipeline stage in `cairn-core`:
@@ -204,6 +231,19 @@ impl EntityResolver {
         candidate_name: &str,
         existing: &[EntityNode],
     ) -> Result<Resolution, EntityResolutionError> {
+        // R7.2: cap per-call work BEFORE normalize/shingle to bound
+        // CPU on a degraded-input path. The Tier-3 timeout doesn't
+        // help here — Tier 1+2 happen synchronously before any LLM
+        // call.
+        if let Some(max) = self.config.max_existing_candidates
+            && existing.len() > max
+        {
+            return Err(EntityResolutionError::TooManyCandidates {
+                got: existing.len(),
+                max,
+            });
+        }
+
         let norm = normalize(candidate_name);
 
         // Empty normalized key — the candidate has no alphanumeric
@@ -215,6 +255,15 @@ impl EntityResolver {
         // signature compares as Jaccard 1.0 against any other.
         if norm.is_empty() {
             return Err(EntityResolutionError::EmptyNormalizedName);
+        }
+
+        // R7.2: cap normalized-input length. Counted in chars (not
+        // bytes) since shingling iterates by char.
+        if let Some(max) = self.config.max_candidate_chars {
+            let got = norm.chars().count();
+            if got > max {
+                return Err(EntityResolutionError::CandidateTooLong { got, max });
+            }
         }
 
         // Tier 1.
@@ -240,12 +289,25 @@ impl EntityResolver {
         }
 
         // Tier 3.
-        let Some(top) = scored.first() else {
-            return Ok(Resolution::New { name_norm: norm });
+        // R7.1: collect ALL in-band candidates (Jaccard ∈
+        // [llm_low_band, fuzzy_threshold)). If more than one is in
+        // band the resolver MUST surface Ambiguous rather than auto-
+        // pick top-1 — the top MinHash score is not authoritative
+        // ground truth and a false positive could merge into the
+        // wrong existing entity. Single-candidate Tier 3 still runs.
+        let in_band: Vec<&Scored<'_>> = scored
+            .iter()
+            .filter(|s| s.jaccard >= self.config.llm_low_band)
+            .collect();
+        let top = match in_band.as_slice() {
+            [] => return Ok(Resolution::New { name_norm: norm }),
+            [only] => *only,
+            many => {
+                // Multiple plausible candidates — surface to caller.
+                let ids = many.iter().map(|s| s.node.id.clone()).collect();
+                return Ok(Resolution::Ambiguous(ids));
+            }
         };
-        if top.jaccard < self.config.llm_low_band {
-            return Ok(Resolution::New { name_norm: norm });
-        }
         let Some(provider) = self.llm.as_ref() else {
             return Ok(Resolution::New { name_norm: norm });
         };
@@ -369,6 +431,31 @@ pub enum EntityResolutionError {
     /// caller MUST handle this error and refuse to allocate a node.
     #[error("candidate name normalizes to empty `name_norm`; cannot resolve identity")]
     EmptyNormalizedName,
+
+    /// The candidate name (after `normalize`) exceeds
+    /// `ResolverConfig::max_candidate_chars`. Bounds Tier-2 shingling
+    /// CPU before it starts; otherwise a long input would monopolize
+    /// CPU before the Tier-3 wall-clock timeout could fire
+    /// (codex-review R7.2).
+    #[error("candidate name length ({got} chars) exceeds limit ({max} chars)")]
+    CandidateTooLong {
+        /// Normalized length actually observed.
+        got: usize,
+        /// Configured cap.
+        max: usize,
+    },
+
+    /// The `existing` slice exceeds
+    /// `ResolverConfig::max_existing_candidates`. Bounds Tier-2
+    /// per-call work; the caller is expected to pre-filter by scope
+    /// before invoking the resolver (codex-review R7.2).
+    #[error("existing candidate count ({got}) exceeds limit ({max})")]
+    TooManyCandidates {
+        /// Slice length actually observed.
+        got: usize,
+        /// Configured cap.
+        max: usize,
+    },
 }
 
 #[cfg(test)]
@@ -776,6 +863,84 @@ mod resolver_tests {
         // the re-export targets the same fn.
         assert!(!public_norm.is_empty());
         assert_eq!(public_norm, "authenticationservice");
+    }
+
+    #[tokio::test]
+    async fn tier3_multi_band_returns_ambiguous_not_auto_merge() {
+        // Codex-review R7.1: when more than one candidate has Jaccard
+        // in the LLM band, the resolver MUST NOT auto-pick top-1 — the
+        // MinHash score is not authoritative and a false-positive top
+        // would silently merge into the wrong entity. Surface Ambiguous
+        // so the caller decides.
+        let cfg = ResolverConfig {
+            // Wide band so any near match qualifies; threshold high
+            // enough that Tier 2 won't claim a single One.
+            fuzzy_threshold: 0.999,
+            llm_low_band: 0.0,
+            ..ResolverConfig::default()
+        };
+        let existing = vec![
+            node("01HZE7JV5N0000000000000001", "auth service backend"),
+            node("01HZE7JV5N0000000000000002", "auth service frontend"),
+        ];
+        // Use llm: None so Tier 3 LLM is never reached — the multi-
+        // band detection happens before the provider gate.
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        let res = r
+            .resolve("auth service", &existing)
+            .await
+            .expect("invariant: multi-band resolves without error");
+        match res {
+            Resolution::Ambiguous(ids) => {
+                assert!(
+                    ids.len() >= 2,
+                    "expected ≥2 candidates in Ambiguous, got {ids:?}"
+                );
+            }
+            other => panic!("expected Ambiguous for multi-band, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_overlong_candidate_name() {
+        // Codex-review R7.2: cap candidate length to bound Tier-2
+        // shingling work before it begins.
+        let cfg = ResolverConfig {
+            max_candidate_chars: Some(8),
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        let err = r
+            .resolve("authentication service backend platform", &[])
+            .await
+            .expect_err("invariant: overlong candidate must error");
+        assert!(matches!(
+            err,
+            EntityResolutionError::CandidateTooLong { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_too_many_existing_candidates() {
+        // Codex-review R7.2: cap existing slice length.
+        let cfg = ResolverConfig {
+            max_existing_candidates: Some(2),
+            ..ResolverConfig::default()
+        };
+        let r = EntityResolver::new(cfg, None).expect("invariant: config validates");
+        let existing = vec![
+            node("01HZE7JV5N0000000000000001", "a"),
+            node("01HZE7JV5N0000000000000002", "b"),
+            node("01HZE7JV5N0000000000000003", "c"),
+        ];
+        let err = r
+            .resolve("query", &existing)
+            .await
+            .expect_err("invariant: oversized existing must error");
+        assert!(matches!(
+            err,
+            EntityResolutionError::TooManyCandidates { got: 3, max: 2 }
+        ));
     }
 
     #[tokio::test]
