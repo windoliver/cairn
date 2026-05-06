@@ -548,8 +548,7 @@ async fn upsert_entity_round_trip_punctuation_and_unicode() {
     // intact) and asserting the row is found.
     let probe_norm = normalize_entity_name("Auth Service (v2)");
     assert_eq!(
-        probe_norm,
-        node.name_norm,
+        probe_norm, node.name_norm,
         "helper must be deterministic across call sites"
     );
 

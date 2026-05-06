@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for the dedup key used by every
 //! `MemoryStore::upsert_entity` insertion site and every read-side
-//! lookup (e.g. the `graph.get_entity` ByName arm, spec §3.1).
+//! lookup (e.g. the `graph.get_entity` `ByName` arm, spec §3.1).
 //!
 //! Behaviour:
 //! - NFC unicode normalization
