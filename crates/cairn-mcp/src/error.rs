@@ -19,4 +19,8 @@ pub enum TransportError {
     /// rmcp service failed to start or was shut down abnormally.
     #[error("MCP service error: {0}")]
     Service(String),
+
+    /// A single newline-delimited frame exceeded the 16 MiB relay cap.
+    #[error("frame exceeded 16 MiB relay cap without newline")]
+    FrameTooLarge,
 }

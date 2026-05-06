@@ -87,6 +87,7 @@ indexmap = "2"
 fs2 = "0.4"
 whoami = "1.5"
 schemars = "1.0"
+memchr = "2"
 
 # Path + version on intra-workspace deps so `cargo publish` can rewrite the
 # path to a registry version without losing the constraint. The version

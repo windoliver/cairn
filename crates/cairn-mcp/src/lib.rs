@@ -14,6 +14,7 @@ pub mod error;
 pub mod generated;
 pub mod graph_tools;
 pub mod handler;
+pub mod relay;
 
 pub use error::TransportError;
 pub use handler::CairnMcpHandler;

@@ -21,6 +21,8 @@ schemars = { workspace = true }
 rmcp = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+memchr = { workspace = true }
 
 [dev-dependencies]
 cairn-test-fixtures = { workspace = true }
