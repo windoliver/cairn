@@ -1,0 +1,90 @@
+//! Tests for `cairn ingest --folder` extraction cache behaviour.
+
+use std::fs;
+use std::process::Command;
+
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_cairn"))
+}
+
+fn write_note(vault: &std::path::Path, body: &str) {
+    let docs = vault.join("docs");
+    fs::create_dir_all(&docs).expect("create docs dir");
+    fs::write(docs.join("note.md"), body).expect("write markdown note");
+}
+
+fn run_folder_ingest(vault: &std::path::Path, no_cache: bool) -> serde_json::Value {
+    let mut cmd = cli();
+    cmd.current_dir(vault).args([
+        "ingest",
+        "--kind",
+        "reference",
+        "--folder",
+        "docs",
+        "--json",
+    ]);
+    if no_cache {
+        cmd.arg("--no-cache");
+    }
+    let out = cmd.output().expect("run cairn ingest --folder");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("stdout is JSON response")
+}
+
+#[test]
+fn folder_ingest_writes_and_reuses_extraction_cache_entry() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    write_note(vault.path(), "---\ntitle: First\n---\nbody");
+
+    let first = run_folder_ingest(vault.path(), false);
+    assert_eq!(first["status"], "committed");
+    assert_eq!(first["data"]["files_processed"], 1);
+    assert_eq!(first["data"]["cache_hits"], 0);
+    assert_eq!(first["data"]["cache_misses"], 1);
+    assert_eq!(first["data"]["cache_writes"], 1);
+
+    let cache_files = fs::read_dir(vault.path().join(".cairn/cache"))
+        .expect("cache dir exists")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read cache dir");
+    assert_eq!(cache_files.len(), 1);
+
+    let second = run_folder_ingest(vault.path(), false);
+    assert_eq!(second["status"], "committed");
+    assert_eq!(second["data"]["files_processed"], 1);
+    assert_eq!(second["data"]["cache_hits"], 1);
+    assert_eq!(second["data"]["cache_misses"], 0);
+    assert_eq!(second["data"]["cache_writes"], 0);
+}
+
+#[test]
+fn folder_ingest_no_cache_bypasses_lookup_but_writes_entry() {
+    let vault = tempfile::tempdir().expect("temp vault");
+    write_note(vault.path(), "---\ntitle: First\n---\nbody");
+
+    let first = run_folder_ingest(vault.path(), false);
+    assert_eq!(first["data"]["cache_writes"], 1);
+
+    write_note(vault.path(), "---\ntitle: Second\n---\nbody");
+    let second = run_folder_ingest(vault.path(), true);
+    assert_eq!(second["status"], "committed");
+    assert_eq!(second["data"]["files_processed"], 1);
+    assert_eq!(second["data"]["cache_hits"], 0);
+    assert_eq!(second["data"]["cache_misses"], 1);
+    assert_eq!(second["data"]["cache_writes"], 1);
+
+    let cache_files = fs::read_dir(vault.path().join(".cairn/cache"))
+        .expect("cache dir exists")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read cache dir");
+    assert_eq!(
+        cache_files.len(),
+        1,
+        "frontmatter-only edits must keep the same cache key"
+    );
+}

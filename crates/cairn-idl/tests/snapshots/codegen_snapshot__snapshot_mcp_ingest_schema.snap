@@ -1,6 +1,5 @@
 ---
 source: crates/cairn-idl/tests/codegen_snapshot.rs
-assertion_line: 51
 expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.json\")"
 ---
 {
@@ -20,6 +19,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         },
         {
           "required": [
+            "folder"
+          ]
+        },
+        {
+          "required": [
             "url"
           ]
         }
@@ -34,6 +38,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "minLength": 1,
           "type": "string"
         },
+        "folder": {
+          "description": "Folder path to ingest recursively with the extraction cache.",
+          "minLength": 1,
+          "type": "string"
+        },
         "frontmatter": {
           "description": "Extra YAML frontmatter fields to store alongside the body.",
           "type": "object"
@@ -42,6 +51,10 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
           "description": "Memory taxonomy kind (19 possible values — see §3 taxonomy). Validated beyond JSON Schema by the classifier.",
           "minLength": 1,
           "type": "string"
+        },
+        "no_cache": {
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries.",
+          "type": "boolean"
         },
         "session_id": {
           "minLength": 1,
@@ -68,6 +81,26 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
     "Data": {
       "additionalProperties": false,
       "properties": {
+        "cache_hits": {
+          "description": "Folder ingest cache hits.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_misses": {
+          "description": "Folder ingest cache misses or forced re-extractions.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_writes": {
+          "description": "Folder ingest cache entries written.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_processed": {
+          "description": "Folder ingest file count when source is --folder.",
+          "minimum": 0,
+          "type": "integer"
+        },
         "record_id": {
           "$ref": "../common/primitives.json#/$defs/Ulid",
           "description": "ULID of the newly stored record."
@@ -110,6 +143,11 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "value_source": "path"
       },
       {
+        "long": "folder",
+        "name": "folder",
+        "value_source": "path"
+      },
+      {
         "long": "url",
         "name": "url",
         "value_source": "string"
@@ -123,10 +161,15 @@ expression: "read(&files, \"crates/cairn-mcp/src/generated/schemas/verbs/ingest.
         "long": "tags",
         "name": "tags",
         "value_source": "list<string>"
+      },
+      {
+        "long": "no-cache",
+        "name": "no_cache",
+        "value_source": "bool"
       }
     ],
     "positional": {
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url.",
+      "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url.",
       "name": "source"
     }
   },

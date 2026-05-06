@@ -10,13 +10,15 @@
       { "name": "kind",        "long": "kind",        "value_source": "string" },
       { "name": "body",        "long": "body",        "value_source": "string" },
       { "name": "file",        "long": "file",        "value_source": "path" },
+      { "name": "folder",      "long": "folder",      "value_source": "path" },
       { "name": "url",         "long": "url",         "value_source": "string" },
       { "name": "session_id",  "long": "session",     "value_source": "string" },
-      { "name": "tags",        "long": "tags",        "value_source": "list<string>" }
+      { "name": "tags",        "long": "tags",        "value_source": "list<string>" },
+      { "name": "no_cache",    "long": "no-cache",    "value_source": "bool" }
     ],
     "positional": {
       "name": "source",
-      "description": "File, URL, or '-' for stdin. Mutually exclusive with --body/--file/--url."
+      "description": "File, URL, folder, or '-' for stdin. Mutually exclusive with --body/--file/--folder/--url."
     }
   },
   "x-cairn-capability": null,
@@ -47,11 +49,16 @@
         },
         "body":  { "type": "string", "minLength": 1 },
         "file":  { "type": "string", "minLength": 1, "description": "Path on the local filesystem." },
+        "folder": { "type": "string", "minLength": 1, "description": "Folder path to ingest recursively with the extraction cache." },
         "url":   { "type": "string", "format": "uri", "minLength": 1 },
         "session_id": { "type": "string", "minLength": 1 },
         "tags": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "no_cache": {
+          "type": "boolean",
+          "description": "Bypass extraction cache lookup for folder ingest, but still write refreshed cache entries."
         },
         "frontmatter": {
           "type": "object",
@@ -61,6 +68,7 @@
       "oneOf": [
         { "required": ["body"] },
         { "required": ["file"] },
+        { "required": ["folder"] },
         { "required": ["url"] }
       ]
     },
@@ -70,7 +78,11 @@
       "required": ["record_id", "session_id"],
       "properties": {
         "record_id":  { "$ref": "../common/primitives.json#/$defs/Ulid", "description": "ULID of the newly stored record." },
-        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." }
+        "session_id": { "type": "string", "minLength": 1, "description": "Resolved session (created if absent — see §8.1)." },
+        "files_processed": { "type": "integer", "minimum": 0, "description": "Folder ingest file count when source is --folder." },
+        "cache_hits": { "type": "integer", "minimum": 0, "description": "Folder ingest cache hits." },
+        "cache_misses": { "type": "integer", "minimum": 0, "description": "Folder ingest cache misses or forced re-extractions." },
+        "cache_writes": { "type": "integer", "minimum": 0, "description": "Folder ingest cache entries written." }
       }
     }
   }
