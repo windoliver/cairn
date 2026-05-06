@@ -1,5 +1,20 @@
 //! Typed config structs for `.cairn/config.yaml` (brief §3.1, §4.1, §5.2.a).
 
+pub mod mcp;
+pub use mcp::{McpConfig, McpStdioConfig};
+
+/// Validate `[mcp.*]` invariants beyond what serde alone enforces.
+///
+/// # Errors
+/// Returns [`ConfigError::McpStdioMissingPrincipal`] when
+/// `[mcp.stdio] single_tenant = true` is set without a `principal`.
+pub fn validate_mcp_config(cfg: &McpConfig) -> Result<(), ConfigError> {
+    if cfg.stdio.single_tenant && cfg.stdio.principal.is_none() {
+        return Err(ConfigError::McpStdioMissingPrincipal);
+    }
+    Ok(())
+}
+
 pub mod vault_registry;
 pub use vault_registry::{VaultEntry, VaultRegistry};
 
@@ -41,6 +56,12 @@ pub enum ConfigError {
     /// A `${VAR}` placeholder in the YAML file references an unset env var.
     #[error("unresolved env var in config: ${{{0}}}")]
     UnresolvedEnvVar(String),
+    /// `[mcp.stdio] single_tenant = true` was set but no `principal` was
+    /// provided.
+    #[error(
+        "[mcp.stdio] single_tenant = true requires a `principal` scope tuple"
+    )]
+    McpStdioMissingPrincipal,
 }
 
 /// Vault storage tier (§3.1).
@@ -403,6 +424,8 @@ pub struct CairnConfig {
     pub workflows: WorkflowsConfig,
     /// Pipeline stage configuration.
     pub pipeline: PipelineConfig,
+    /// MCP transport configuration (issue #190).
+    pub mcp: McpConfig,
 }
 
 // ── Vault ─────────────────────────────────────────────────────────────────
@@ -862,6 +885,22 @@ impl CairnConfig {
     #[must_use]
     pub fn capabilities_no_model(&self) -> CapabilitySet {
         self.capabilities(false)
+    }
+
+    /// Run cross-section invariants that serde alone cannot express.
+    ///
+    /// Currently checks:
+    /// - `[mcp.stdio] single_tenant + principal` consistency
+    ///   ([`validate_mcp_config`]).
+    ///
+    /// Existing validators (pipeline, retention, etc.) keep their own
+    /// entry points; this method composes the new MCP check without
+    /// disturbing them.
+    ///
+    /// # Errors
+    /// Returns the first [`ConfigError`] encountered.
+    pub fn validate_mcp(&self) -> Result<(), ConfigError> {
+        validate_mcp_config(&self.mcp)
     }
 }
 
@@ -1340,6 +1379,36 @@ rerank_topk: 20
         let back = yaml_serde::to_string(&c).unwrap();
         let again: SearchConfig = yaml_serde::from_str(&back).unwrap();
         assert_eq!(c, again);
+    }
+
+    #[test]
+    fn validate_mcp_rejects_single_tenant_without_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = None;
+        let err = cfg.validate_mcp().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::McpStdioMissingPrincipal),
+            "got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_mcp_accepts_single_tenant_with_principal() {
+        let mut cfg = CairnConfig::default();
+        cfg.mcp.stdio.single_tenant = true;
+        cfg.mcp.stdio.principal = Some(crate::domain::ScopeTuple {
+            tenant: Some("acme".into()),
+            ..crate::domain::ScopeTuple::default()
+        });
+        cfg.validate_mcp().expect("valid config");
+    }
+
+    #[test]
+    fn validate_mcp_accepts_default_config() {
+        // Default: single_tenant = false, principal = None — cleanly valid.
+        let cfg = CairnConfig::default();
+        cfg.validate_mcp().expect("default config is valid");
     }
 
     proptest! {
