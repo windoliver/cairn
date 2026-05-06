@@ -132,6 +132,7 @@ impl SqliteMemoryStore {
             &HybridSearchInputs {
                 keyword: kw_list,
                 semantic: sem_list,
+                graph: Vec::new(),
                 query_vector,
                 doc_vectors,
             },
@@ -140,6 +141,7 @@ impl SqliteMemoryStore {
                 rerank_topk: args.rerank_topk,
                 blend: args.blend,
                 skip_rerank: false,
+                confidence_floor: HybridSearchParams::default().confidence_floor,
             },
         );
 
