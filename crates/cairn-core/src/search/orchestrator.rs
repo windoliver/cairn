@@ -6,11 +6,12 @@ use std::collections::HashSet;
 use crate::domain::RecordId;
 
 use super::cosine::{
-    CandidateOrigin, OriginTaggedCandidate, RerankedCandidate, cosine_rerank,
-    cosine_rerank_tagged,
+    CandidateOrigin, OriginTaggedCandidate, RerankedCandidate, cosine_rerank, cosine_rerank_tagged,
 };
 use super::graph::GraphCandidate;
-use super::rrf::{Leg, RankedCandidate, RrfCandidate, ScoredCandidate, rrf_fusion, rrf_fusion_weighted};
+use super::rrf::{
+    Leg, RankedCandidate, RrfCandidate, ScoredCandidate, rrf_fusion, rrf_fusion_weighted,
+};
 
 /// Inputs to [`hybrid_search`]. The store fetches keyword + semantic
 /// candidate lists and the per-record vectors; this function does the math.
@@ -271,7 +272,10 @@ mod tests {
         };
         let out = hybrid_search(&inputs, HybridSearchParams::default());
         let ids: Vec<_> = out.iter().map(|c| c.record_id.clone()).collect();
-        assert!(ids.contains(&rid("0C")), "graph-only candidate must surface");
+        assert!(
+            ids.contains(&rid("0C")),
+            "graph-only candidate must surface"
+        );
         // GraphOnly origin → cosine field is None.
         let c0c = out.iter().find(|c| c.record_id == rid("0C")).unwrap();
         assert!(c0c.cosine.is_none());
