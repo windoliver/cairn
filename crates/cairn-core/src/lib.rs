@@ -18,3 +18,4 @@ pub mod policy_trace;
 pub mod search;
 pub mod verbs;
 pub mod verifier;
+pub mod wal;
