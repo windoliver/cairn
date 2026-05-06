@@ -16,5 +16,5 @@ pub use degraded::{DegradationReason, DegradedLeg, GraphSource};
 pub use explain::ScoreExplain;
 pub use graph::GraphCandidate;
 pub use orchestrator::{HybridSearchInputs, HybridSearchParams, hybrid_search};
-pub use rrf::{RrfCandidate, ScoredCandidate, rrf_fusion};
+pub use rrf::{Leg, RankedCandidate, RrfCandidate, ScoredCandidate, rrf_fusion, rrf_fusion_weighted};
 pub use trim::token_budget_trim;
