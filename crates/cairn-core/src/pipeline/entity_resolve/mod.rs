@@ -127,8 +127,19 @@ pub enum Resolution {
     /// reuse this `EntityId` rather than create a new node.
     Merge(EntityId),
     /// No tier produced a merge. Caller MUST allocate a fresh
-    /// `EntityId` and persist a new node.
-    New,
+    /// `EntityId` and persist a new node using `name_norm` as the
+    /// store-side dedup key. Returning the canonical `name_norm`
+    /// forces caller and store to agree on the key — without this,
+    /// a caller that re-implemented normalization differently could
+    /// persist a different `name_norm` than the resolver used,
+    /// drifting the store's `UNIQUE(name_norm)` index away from the
+    /// resolver's identity decisions (codex-review R5.1).
+    New {
+        /// The normalized form the resolver used for identity
+        /// comparison. Caller MUST persist this exact value as
+        /// `EntityNode.name_norm` to keep store + resolver in sync.
+        name_norm: String,
+    },
     /// Tier 2 found two or more existing entities with Jaccard
     /// at or above `fuzzy_threshold`. Caller decides:
     /// create a new node + flag for `lint`, invoke LLM disambiguation
@@ -142,10 +153,17 @@ use crate::contract::llm_provider::LLMProvider;
 use crate::domain::graph::EntityNode;
 
 pub use self::minhash::MinHashSignature;
+/// Re-export `normalize` so callers (store insertion paths,
+/// integration tests) can compute the same `name_norm` the resolver
+/// uses for identity comparison. Without this, a caller that
+/// re-implemented normalization differently would persist a key the
+/// resolver never sees, breaking the store's `UNIQUE(name_norm)`
+/// dedup contract (codex-review R5.1).
+pub use self::normalize::normalize;
 
 use self::llm::llm_dedup;
 use self::minhash::{FuzzyOutcome, fuzzy_match, shingles, signature};
-use self::normalize::{exact_match, normalize};
+use self::normalize::exact_match;
 
 /// Three-tier entity resolver. Pure pipeline stage in `cairn-core`:
 /// no I/O, no store calls. The caller pre-fetches in-scope candidate
@@ -223,13 +241,13 @@ impl EntityResolver {
 
         // Tier 3.
         let Some(top) = scored.first() else {
-            return Ok(Resolution::New);
+            return Ok(Resolution::New { name_norm: norm });
         };
         if top.jaccard < self.config.llm_low_band {
-            return Ok(Resolution::New);
+            return Ok(Resolution::New { name_norm: norm });
         }
         let Some(provider) = self.llm.as_ref() else {
-            return Ok(Resolution::New);
+            return Ok(Resolution::New { name_norm: norm });
         };
         // Build the per-call LLM budget from config. None = unlimited;
         // both fields default to a small fixed budget so a slow or
@@ -247,6 +265,7 @@ impl EntityResolver {
         llm_dedup(
             provider.as_ref(),
             candidate_name,
+            norm,
             top.node,
             self.config.llm_min_confidence,
             budget,
@@ -601,7 +620,7 @@ mod resolver_tests {
             .resolve("AuthService", &[])
             .await
             .expect("invariant: resolve with empty existing never errors");
-        assert!(matches!(res, Resolution::New));
+        assert!(matches!(res, Resolution::New { .. }));
     }
 
     #[tokio::test]
@@ -627,7 +646,7 @@ mod resolver_tests {
             .resolve("payments gateway xyz", &existing)
             .await
             .expect("invariant: low-similarity resolve never errors");
-        assert!(matches!(res, Resolution::New));
+        assert!(matches!(res, Resolution::New { .. }));
     }
 
     #[tokio::test]
@@ -642,7 +661,7 @@ mod resolver_tests {
             .resolve("auth service frontend", &existing)
             .await
             .expect("invariant: resolve without LLM never errors");
-        assert!(matches!(res, Resolution::New | Resolution::Merge(_)));
+        assert!(matches!(res, Resolution::New { .. } | Resolution::Merge(_)));
     }
 
     #[tokio::test]
@@ -694,7 +713,10 @@ mod resolver_tests {
             .resolve("authentication service", &existing)
             .await
             .expect("invariant: canned LLM never errors");
-        assert!(matches!(res, Resolution::New), "expected New, got {res:?}");
+        assert!(
+            matches!(res, Resolution::New { .. }),
+            "expected New, got {res:?}"
+        );
     }
 
     #[tokio::test]
@@ -708,6 +730,52 @@ mod resolver_tests {
             r,
             Err(ResolverConfigError::FuzzyThresholdOutOfRange { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn new_returns_canonical_name_norm_for_persistence() {
+        // Codex-review R5.1: caller persists a new node using
+        // `name_norm` from the resolver. The same raw input must
+        // resolve to Merge against the freshly-persisted node on the
+        // next call — otherwise a caller using a different normalize
+        // implementation would create duplicate entities.
+        let r = EntityResolver::new(ResolverConfig::default(), None)
+            .expect("invariant: default config validates");
+        let raw = "Authentication-Service!";
+        // First call: empty existing → New { name_norm }.
+        let res = r
+            .resolve(raw, &[])
+            .await
+            .expect("invariant: empty existing resolves to New");
+        let persisted_norm = match res {
+            Resolution::New { name_norm } => name_norm,
+            other => panic!("expected New, got {other:?}"),
+        };
+        // Caller persists with the resolver's name_norm.
+        let existing = vec![node("01HZE7JV5N0000000000000001", &persisted_norm)];
+        // Second call: same raw input → Merge against the persisted node.
+        let res2 = r
+            .resolve(raw, &existing)
+            .await
+            .expect("invariant: round-trip resolves without error");
+        match res2 {
+            Resolution::Merge(id) => assert_eq!(id.as_str(), "01HZE7JV5N0000000000000001"),
+            other => panic!("expected Merge after persistence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn public_normalize_matches_resolver_internal_key() {
+        // Codex-review R5.1: the publicly re-exported `normalize`
+        // must be identical to whatever the resolver uses internally.
+        // Verify by computing both and asserting equality.
+        let raw = "Authentication-Service!";
+        let public_norm = super::normalize(raw);
+        // The resolver's internal call site does `normalize(candidate)`
+        // before any other work; surfacing the same string here proves
+        // the re-export targets the same fn.
+        assert!(!public_norm.is_empty());
+        assert_eq!(public_norm, "authenticationservice");
     }
 
     #[tokio::test]

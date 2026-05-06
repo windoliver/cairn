@@ -40,7 +40,7 @@ async fn tier2_fuzzy_offline() {
         .resolve("auth-service", &existing)
         .await
         .expect("invariant: tier-2 resolve never errors");
-    assert!(matches!(res, Resolution::Merge(_) | Resolution::New));
+    assert!(matches!(res, Resolution::Merge(_) | Resolution::New { .. }));
 }
 
 #[tokio::test]
@@ -52,5 +52,5 @@ async fn no_match_offline_returns_new() {
         .resolve("payments gateway", &existing)
         .await
         .expect("invariant: low-similarity resolve never errors");
-    assert!(matches!(res, Resolution::New));
+    assert!(matches!(res, Resolution::New { .. }));
 }

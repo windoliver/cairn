@@ -97,7 +97,10 @@ async fn graceful_skip_on_not_configured() {
         .resolve("auth service frontend", &existing)
         .await
         .expect("invariant: NotConfigured maps to Resolution::New, not Err");
-    assert!(matches!(res, Resolution::New), "expected New, got {res:?}");
+    assert!(
+        matches!(res, Resolution::New { .. }),
+        "expected New, got {res:?}"
+    );
 }
 
 #[tokio::test]
@@ -110,5 +113,8 @@ async fn graceful_skip_on_capability_missing() {
         .resolve("auth service frontend", &existing)
         .await
         .expect("invariant: CapabilityMissing maps to Resolution::New, not Err");
-    assert!(matches!(res, Resolution::New), "expected New, got {res:?}");
+    assert!(
+        matches!(res, Resolution::New { .. }),
+        "expected New, got {res:?}"
+    );
 }
